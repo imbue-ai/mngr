@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
+const crypto = require('crypto');
 const Sentry = require('@sentry/electron/main');
 const { parse: parseToml } = require('smol-toml');
 const paths = require('./paths');
@@ -69,6 +70,51 @@ function isLogInclusionEnabled() {
   return readUserConfig().include_error_logs === true;
 }
 
+// This install's stable anonymous user id is persisted at `<dataDir>/anonymous_user_id` as a 32-char
+// lowercase hex string, matching the Python backend's `uuid4().hex` format so both surfaces read the
+// same value (see imbue/imbue_common/sentry/core.py get_or_create_anonymous_user_id).
+const ANONYMOUS_USER_ID_FILENAME = 'anonymous_user_id';
+const ANONYMOUS_USER_ID_PATTERN = /^[0-9a-f]{32}$/;
+
+/**
+ * Read (or create-and-persist) this install's stable anonymous user id, or return null on failure.
+ *
+ * The id is a random, opaque value (no PII) attached to every event via `Sentry.setUser` so Sentry
+ * can count the distinct installs affected by each issue. It is shared with the Python backend (which
+ * writes/reads the same `<dataDir>/anonymous_user_id` file) so an install is counted once regardless
+ * of which surface reported the event. The file is created atomically with the `wx` (O_EXCL) flag so
+ * the Electron main process and the Python backend racing on first launch converge on a single id:
+ * the loser sees `EEXIST` and reads the winner's value. A missing/blank/malformed file is regenerated.
+ * Returns null (rather than throwing) if the id cannot be read or written, so Sentry setup never fails.
+ */
+function getOrCreateAnonymousUserId() {
+  const idFilePath = path.join(paths.getDataDir(), ANONYMOUS_USER_ID_FILENAME);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let existing = '';
+    try {
+      existing = fs.readFileSync(idFilePath, 'utf8').trim();
+    } catch {
+      existing = '';
+    }
+    if (ANONYMOUS_USER_ID_PATTERN.test(existing)) {
+      return existing;
+    }
+    const newId = crypto.randomUUID().replace(/-/g, '');
+    try {
+      fs.mkdirSync(path.dirname(idFilePath), { recursive: true });
+      fs.writeFileSync(idFilePath, newId, { flag: 'wx' });
+      return newId;
+    } catch (err) {
+      // Another process created it first (EEXIST) -- loop to read its value. Any other error means we
+      // cannot persist an id; give up so Sentry setup proceeds without a user rather than crashing.
+      if (err && err.code === 'EEXIST') continue;
+      console.warn(`[sentry] could not persist anonymous user id: ${err && err.message}`);
+      return null;
+    }
+  }
+  return null;
+}
+
 /**
  * Select the Sentry environment from the resolved minds root name, mirroring
  * imbue.minds.utils.sentry.core.resolve_sentry_environment: only the exact
@@ -115,7 +161,7 @@ function fixupReleaseId(releaseId) {
  * account settings) takes effect without restarting the app. Call this as early
  * as possible in main.js so startup errors are captured once reporting is on.
  */
-function initSentry() {
+function initSentry(options = {}) {
   const environment = resolveEnvironment();
   const dsn = dsnForEnvironment(environment);
   const { releaseId, gitSha } = getBuildMetadata();
@@ -123,6 +169,10 @@ function initSentry() {
     dsn,
     environment,
     release: fixupReleaseId(releaseId),
+    // Label renderer-death events by which window view died (chrome/content/modal).
+    // The caller (main.js) supplies the mapping since it owns the window registry;
+    // undefined is fine (the childProcess integration falls back to "renderer").
+    getRendererName: options.getRendererName,
     // Drop the native-crash (Crashpad) integration when the dev launcher asks
     // us to (it sets MINDS_DISABLE_CRASHPAD; see the `start` script in
     // package.json). Crashpad's `crashReporter.start()` spawns a
@@ -134,10 +184,32 @@ function initSentry() {
     // quit. Keying off the launcher's flag (not packaged-ness) keeps native-crash
     // minidump reporting on for every other run -- packaged builds and a plain
     // `electron .` alike.
-    integrations: (defaults) =>
-      process.env.MINDS_DISABLE_CRASHPAD === '1'
-        ? defaults.filter((integration) => integration.name !== 'SentryMinidump')
-        : defaults,
+    integrations: (defaults) => {
+      const kept =
+        process.env.MINDS_DISABLE_CRASHPAD === '1'
+          ? defaults.filter((integration) => integration.name !== 'SentryMinidump')
+          : defaults;
+      // Replace the default ChildProcess integration so an out-of-memory renderer
+      // death is captured as a Sentry EVENT, not just a breadcrumb. Its default
+      // ``events`` list is ['abnormal-exit', 'launch-failed', 'integrity-failure']
+      // -- none of which produce a Crashpad minidump -- so an OOM'd renderer (e.g. a
+      // workspace view dying under memory pressure) is otherwise never reported. We
+      // add only 'oom': it does not produce a minidump either, so it's a unique
+      // signal. We deliberately do NOT add:
+      //   * 'crashed' -- a native renderer crash already produces a minidump event
+      //     via the SentryMinidump integration above (that's why the SDK default
+      //     omits it); adding it here would double-report every crash in prod.
+      //   * 'killed'  -- dominated by OS/sleep reaping and external kills we can't
+      //     act on, so it stays breadcrumb-only (still on disk in electron.log and
+      //     attached to manual reports).
+      return kept.map((integration) =>
+        integration.name === 'ChildProcess'
+          ? Sentry.childProcessIntegration({
+              events: ['abnormal-exit', 'launch-failed', 'integrity-failure', 'oom'],
+            })
+          : integration
+      );
+    },
     // Error reporting only -- no performance tracing (matches the backend).
     tracesSampleRate: 0,
     // Keep PII out of reports, matching the backend's send_default_pii=False.
@@ -155,6 +227,12 @@ function initSentry() {
     },
   });
   Sentry.setTag('git_sha', gitSha);
+  // Attach the install's stable anonymous id (no PII) so Sentry counts distinct installs per issue,
+  // matching the Python backend's sentry_sdk.set_user (see imbue/minds/utils/sentry/core.py).
+  const anonymousUserId = getOrCreateAnonymousUserId();
+  if (anonymousUserId) {
+    Sentry.setUser({ id: anonymousUserId });
+  }
   console.log(
     `[sentry] Initialized (environment=${environment}, release=${fixupReleaseId(releaseId)}); ` +
       'automatic reporting gated live by the report_unexpected_errors user setting.'
@@ -233,20 +311,40 @@ function newestFileMatching(dir, predicate) {
 }
 
 /**
+ * The named log file ``name`` in ``dir`` as a candidate, or null when it is
+ * absent / not a regular file. Used to attach specific logs by exact name
+ * (rather than newest-by-suffix) so a backend-down report always carries both
+ * the backend's minds.log AND the Electron main-process electron.log.
+ */
+function namedFile(dir, name) {
+  const filePath = path.join(dir, name);
+  try {
+    if (!fs.statSync(filePath).isFile()) return null;
+    return { filePath, name };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Gzip the tails of the most relevant log files into Sentry attachments: the
- * live Python backend log (``*.jsonl``, written by the now-dead backend but
- * still on disk) and the Electron main-process log (``*.log``). Returns [] when
- * the logs directory is unreadable. Best-effort per file -- a file that can't be
- * read (or that would breach the compressed-attachment budget) is skipped rather
- * than aborting the whole report.
+ * backend log (``minds.log``, the backend's stdout/stderr, written by the shell
+ * even when the backend has died), the Electron main-process log
+ * (``electron.log``), and the live Python backend jsonl log. Returns [] when the
+ * logs directory is unreadable. Best-effort per file -- a file that can't be read
+ * (or that would breach the compressed-attachment budget) is skipped rather than
+ * aborting the whole report.
  */
 function collectLogAttachments() {
   const logDir = paths.getLogDir();
-  // The live backend log is exactly ``*.jsonl``; rotated logs are ``*.jsonl.<ts>``.
-  // Matching the bare suffix keeps us on the live file rather than a rotated one.
+  // minds.log and electron.log are attached by exact name (a backend-down report
+  // wants BOTH -- why the backend died and what the shell did about it). The live
+  // backend jsonl log is exactly ``*.jsonl``; rotated logs are ``*.jsonl.<ts>``,
+  // so matching the bare suffix keeps us on the live file rather than a rotated one.
   const candidates = [
+    namedFile(logDir, 'minds.log'),
+    namedFile(logDir, 'electron.log'),
     newestFileMatching(logDir, (name) => name.endsWith('.jsonl')),
-    newestFileMatching(logDir, (name) => name.endsWith('.log')),
   ];
   const attachments = [];
   let totalCompressedBytes = 0;
@@ -354,5 +452,6 @@ module.exports = {
   isLogInclusionEnabled,
   resolveEnvironment,
   fixupReleaseId,
+  getOrCreateAnonymousUserId,
   captureManualReport,
 };

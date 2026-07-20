@@ -550,6 +550,22 @@ When calling external commands or making network requests, always use a two-thre
 
 This pattern allows us to notice degradation and diagnose slowdowns before they become outright failures.
 
+# Portable shell in host commands
+
+Commands passed to a host's `execute_*` methods run under that host's own shell. Under the `local` provider the host is the developer's machine, which on macOS ships a BSD userland with no GNU coreutils; remote hosts are Linux/GNU. A command that works under only one userland fails silently on the other -- a GNU-only flag makes the tool exit non-zero, and a downstream `| cut` or `|| true` often masks the failure as an empty or default result. Write for both:
+
+- Prefer a POSIX form over a GNU one: `du -sk` (kibibytes), not `du -sb` (bytes, GNU-only).
+- Where GNU and BSD spell the same operation differently, provide both with a fallback: `stat -c %y … || stat -f %Fm …`.
+- Do not assume a GNU-only binary exists: `tac` (GNU) and `tail -r` (BSD) are mutually exclusive by platform and neither is POSIX, so a forward scan that keeps the last match needs neither.
+
+Bounding a single sub-command's runtime *inside* a composite remote script is the one case with no clean POSIX form, since `timeout(1)` is GNU and macOS lacks it. Prefer bounding the whole command from Python via the `timeout_seconds` argument. If a sub-part must be bounded in-shell, this perl form is equivalent, and perl ships on both macOS and Linux:
+
+```sh
+perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV or exit 127' <seconds> <command...>
+```
+
+`exec` replaces perl with the command, so the command keeps perl's pid and reports its own exit status, and the alarm kills it outright on expiry. Two non-obvious traps: the builtin `alarm` takes whole seconds and `alarm(0)` cancels the timer, so a sub-second deadline silently means no deadline -- import `Time::HiRes`'s float `alarm`; and a failed `exec` falls through to the rest of the perl program, which exits 0 by default, so terminate it explicitly with `or exit 127`.
+
 # Docstrings
 
 We want our code to be self-documenting as much as possible

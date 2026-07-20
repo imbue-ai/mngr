@@ -27,14 +27,18 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import CreationErrorKind
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
+from imbue.minds.desktop_client.agent_creator import _is_github_https_url
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
 from imbue.minds.desktop_client.agent_creator import checkout_branch
+from imbue.minds.desktop_client.agent_creator import checkout_existing_branch
+from imbue.minds.desktop_client.agent_creator import classify_creation_error
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -49,10 +53,12 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
+from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -124,6 +130,72 @@ def test_is_local_path_recognises_relative_and_absolute_paths() -> None:
     assert _is_local_path("~/foo")
     assert not _is_local_path("https://example.com/foo")
     assert not _is_local_path("git@github.com:user/repo.git")
+
+
+def test_is_github_https_url_matches_only_github_http_urls() -> None:
+    assert _is_github_https_url("https://github.com/acme/private-repo.git")
+    assert _is_github_https_url("http://www.github.com/acme/private-repo")
+    assert not _is_github_https_url("https://gitlab.example.com/acme/repo.git")
+    assert not _is_github_https_url("git@github.com:acme/repo.git")
+    assert not _is_github_https_url("ssh://git@github.com/acme/repo.git")
+    assert not _is_github_https_url("/local/path/to/repo")
+    # A github.com path segment on another host must not match.
+    assert not _is_github_https_url("https://evil.example.com/github.com/acme/repo")
+
+
+def test_classify_creation_error_flags_any_failed_github_clone() -> None:
+    """ANY failed clone of a github.com source classifies -- no matching of
+    git's error text (deliberately: substring matching is brittle, and a
+    failed github clone is overwhelmingly an access problem the guidance
+    covers, while the raw error stays visible alongside it)."""
+    url = "https://github.com/acme/private-repo.git"
+    failures = (
+        "git clone failed:\nfatal: could not read Username for 'https://github.com': terminal prompts disabled",
+        "git clone failed:\nfatal: Authentication failed for 'https://github.com/acme/private-repo.git/'",
+        "git fetch failed:\nremote: Repository not found.\n"
+        "fatal: repository 'https://github.com/acme/private-repo.git/' not found",
+        "git clone failed:\nfatal: unable to access 'https://github.com/acme/repo.git/': "
+        "Could not resolve host: github.com",
+    )
+    for message in failures:
+        assert classify_creation_error(url, GitCloneError(message)) is CreationErrorKind.GITHUB_AUTH_REQUIRED, message
+
+
+def test_classify_creation_error_flags_non_github_remotes_generically() -> None:
+    """A failed clone of a non-github REMOTE git source classifies as the
+    generic GIT_AUTH_REQUIRED (same access guidance, without the GitHub-CLI
+    advice) -- covering another host over https and scp-style ssh remotes."""
+    error = GitCloneError(
+        "git clone failed:\nfatal: Authentication failed for 'https://gitlab.example.com/acme/repo.git/'"
+    )
+    assert (
+        classify_creation_error("https://gitlab.example.com/acme/repo.git", error)
+        is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
+    assert (
+        classify_creation_error("git@gitlab.example.com:acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
+    assert (
+        classify_creation_error("ssh://git@gitlab.example.com/acme/repo.git", error)
+        is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
+
+
+def test_classify_creation_error_ignores_local_paths_and_bare_input() -> None:
+    """A clone failure on a local path is not an access problem, and a bare
+    non-remote string is not a recognizable remote -- neither classifies."""
+    error = GitCloneError("git clone failed:\nfatal: repository not found")
+    assert classify_creation_error("/local/path/to/repo", error) is None
+    assert classify_creation_error("./relative/repo", error) is None
+    assert classify_creation_error("~/repo", error) is None
+    assert classify_creation_error("just-a-name", error) is None
+
+
+def test_classify_creation_error_ignores_non_clone_errors() -> None:
+    """Only clone failures classify; a downstream mngr failure that happens to
+    echo an auth-shaped string must not trigger the clone guidance."""
+    error = MngrCommandError("mngr create failed:\nfatal: could not read Username for 'https://github.com'")
+    assert classify_creation_error("https://github.com/acme/repo.git", error) is None
 
 
 def test_redact_url_credentials_strips_userinfo_for_schemed_urls() -> None:
@@ -494,6 +566,51 @@ def test_build_mngr_create_command_ignores_region_for_docker() -> None:
     assert "region=" not in joined and "vultr-region" not in joined
 
 
+def test_build_mngr_create_command_docker_runsc_stacks_gvisor_overlay() -> None:
+    """``DockerRuntime.RUNSC`` stacks the ``docker_runsc`` overlay on the docker template.
+
+    The overlay reuses the docker template body and only flips the provider's
+    container runtime to runsc, so the host runs under gVisor.
+    """
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        docker_runtime=DockerRuntime.RUNSC,
+    )
+    # The base docker template is always present; the runsc overlay is stacked
+    # immediately after it.
+    assert command.count("--template") >= 3
+    docker_idx = command.index("docker")
+    assert command[docker_idx - 1] == "--template"
+    runsc_idx = command.index("docker_runsc")
+    assert command[runsc_idx - 1] == "--template"
+    # Order matters: the overlay must come AFTER the base so its provider
+    # setting wins the stack.
+    assert runsc_idx > docker_idx
+
+
+def test_build_mngr_create_command_docker_runc_omits_gvisor_overlay() -> None:
+    """``DockerRuntime.RUNC`` (the docker template's default) adds no extra template."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        docker_runtime=DockerRuntime.RUNC,
+    )
+    assert "docker" in command
+    assert "docker_runsc" not in command
+
+
+@pytest.mark.parametrize("docker_runtime", [DockerRuntime.RUNC, DockerRuntime.RUNSC])
+def test_build_mngr_create_command_runtime_ignored_for_non_docker(docker_runtime: DockerRuntime) -> None:
+    """The runsc overlay is docker-only -- other launch modes never receive it."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        host_name=HostName("hello"),
+        docker_runtime=docker_runtime,
+    )
+    assert "docker_runsc" not in command
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
@@ -805,6 +922,44 @@ def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
     dest = tmp_path / "clone"
     with pytest.raises(GitCloneError):
         clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
+
+
+class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
+    """Answers every request with 401 + a Basic challenge, like a private remote."""
+
+    def do_GET(self) -> None:
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="test"')
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_auth(tmp_path: Path) -> None:
+    """A remote that answers with an auth challenge fails the clone quickly and
+    with an authentication-shaped error, instead of hanging on a credential
+    prompt: ``clone_git_repo`` runs git with terminal prompting disabled.
+
+    The exact message varies with the machine's credential setup (no helper:
+    "could not read Username ... terminal prompts disabled"; a helper that
+    supplies rejected credentials: "Authentication failed"), so the assertion
+    accepts either shape.
+    """
+    server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = GitUrl("http://127.0.0.1:{}/acme/private-repo.git".format(server.server_address[1]))
+        dest = tmp_path / "clone"
+        with pytest.raises(GitCloneError) as exc_info:
+            clone_git_repo(url, dest)
+        message = str(exc_info.value)
+        assert "terminal prompts disabled" in message or "Authentication failed" in message, message
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> None:
@@ -1373,3 +1528,71 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     assert info is not None
     assert info.status is AgentCreationStatus.FAILED
     assert info.error is not None and "API_KEY" in info.error
+
+
+def test_checkout_existing_branch_is_noop_when_already_on_branch_without_fetch_head(tmp_path: Path) -> None:
+    """A plain local-directory source is often a fresh clone with NO FETCH_HEAD.
+
+    Regression: the create flow used to run ``git checkout -B <branch>
+    FETCH_HEAD`` on plain local directories, which fails on a fresh clone
+    ("'FETCH_HEAD' is not a commit") and, with a stale FETCH_HEAD, silently
+    resets the user's branch. Already-on-branch must be a no-op.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "other-31875")
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, capture_output=True)
+    assert not (dest / ".git" / "FETCH_HEAD").exists()
+    tip_before = _git(dest, "rev-parse", "HEAD")
+
+    checkout_existing_branch(dest, GitBranch("main"))
+
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert _git(dest, "rev-parse", "HEAD") == tip_before
+
+
+def test_checkout_existing_branch_does_not_reset_branch_to_stale_fetch_head(tmp_path: Path) -> None:
+    """A stale FETCH_HEAD (from some earlier unrelated fetch) must never move the
+    user's branch tip -- the old ``checkout -B ... FETCH_HEAD`` behavior did."""
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "other-59313")
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, capture_output=True)
+    # Manufacture a stale FETCH_HEAD pointing at a different commit than main's tip.
+    stale_sha = _git(dest, "rev-parse", "origin/other-59313")
+    (dest / ".git" / "FETCH_HEAD").write_text("{}\t\t'other-59313' of {}\n".format(stale_sha, origin))
+    tip_before = _git(dest, "rev-parse", "main")
+    assert stale_sha != tip_before
+
+    checkout_existing_branch(dest, GitBranch("main"))
+
+    assert _git(dest, "rev-parse", "main") == tip_before
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
+def test_checkout_existing_branch_checks_out_remote_branch_via_dwim(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "feature-74102")
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, capture_output=True)
+
+    checkout_existing_branch(dest, GitBranch("feature-74102"))
+
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "feature-74102"
+    assert (dest / "f").read_text() == "on branch\n"
+
+
+def test_checkout_existing_branch_raises_for_missing_branch(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "other-90211")
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, capture_output=True)
+
+    with pytest.raises(GitOperationError) as excinfo:
+        checkout_existing_branch(dest, GitBranch("no-such-branch-55307"))
+
+    assert "no-such-branch-55307" in str(excinfo.value)

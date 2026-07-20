@@ -7,6 +7,7 @@ imports of optional plugins, etc.
 """
 
 import json
+import re
 
 import pytest
 
@@ -47,7 +48,11 @@ def test_create_help(minimal_install_env: MinimalInstallEnv) -> None:
 def test_list(minimal_install_env: MinimalInstallEnv) -> None:
     """In a fresh install with no agents, `mngr list` exits 0 and reports "No agents found",
     proving the command runs end-to-end against an empty state rather than crashing."""
-    result = minimal_install_env.run_mngr(["list"])
+    # Scope to the local provider so the empty-state path is exercised
+    # deterministically without depending on a reachable Docker daemon (which the
+    # deliberately-minimal install env lacks). This matches how the e2e suite
+    # scopes `mngr list --provider local` to avoid querying unavailable providers.
+    result = minimal_install_env.run_mngr(["list", "--provider", "local"])
 
     assert result.returncode == 0, (
         f"mngr list failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -130,6 +135,9 @@ def test_config_get_in_fresh_install(minimal_install_env: MinimalInstallEnv) -> 
     assert result.returncode == 0, (
         f"mngr config get failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
+    # With no settings file, the lookup must fall back to headless's default of
+    # False, so the reported value is "false" rather than empty or an error.
+    assert result.stdout.strip().lower() == "false"
 
 
 @pytest.mark.release
@@ -164,3 +172,5 @@ def test_version_output(minimal_install_env: MinimalInstallEnv) -> None:
         f"mngr --version failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "mngr" in result.stdout
+    # The scope requires an actual version string, not merely the program name.
+    assert re.search(r"\d+\.\d+", result.stdout), f"expected a version string in output, got: {result.stdout!r}"

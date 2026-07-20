@@ -99,6 +99,18 @@ class BackupProvisioningError(MindError):
     ...
 
 
+class SyncCryptoError(MindError):
+    """Raised when a workspace-sync DEK / key-bundle file operation fails."""
+
+    ...
+
+
+class WorkspaceSyncError(MindError):
+    """Raised when a workspace-record sync (push/pull/reconcile) operation fails."""
+
+    ...
+
+
 class LimaImageError(MindError):
     """Base exception for the pre-baked Lima image cache."""
 

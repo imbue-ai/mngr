@@ -8,6 +8,7 @@ from sentry_sdk.integrations.flask import FlaskIntegration
 from imbue.imbue_common.sentry.core import MANUALLY_SUBMITTED_TAG as MANUALLY_SUBMITTED_TAG
 from imbue.imbue_common.sentry.core import MAX_SENTRY_LIST_SIZE
 from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown as flush_sentry_on_shutdown
+from imbue.imbue_common.sentry.core import get_or_create_anonymous_user_id
 from imbue.imbue_common.sentry.core import setup_sentry as _setup_sentry
 from imbue.imbue_common.sentry.core import submit_manual_bug_report as submit_manual_bug_report
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
@@ -24,6 +25,7 @@ from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR
 
 # The ``service`` tag / ``server_name`` distinguishing minds-backend events from
 # the other Imbue Python processes that report to the same Sentry projects (e.g.
@@ -74,12 +76,16 @@ _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str | Non
 
 
 # Minds writes all of its logs flat into a single logs directory (``~/.minds/logs``):
-#   * ``minds-events.jsonl``       -- the live Python backend log (the loguru JSONL sink)
-#   * ``minds-events.jsonl.<ts>``  -- rotated Python backend logs (timestamp-suffixed by make_jsonl_file_sink)
-#   * ``minds.log``                -- the Electron main-process log
-# None of these are gzip-compressed on disk, so every file is compressed on upload.
+#   * ``minds-events.jsonl``      -- the live Python backend log (the loguru JSONL sink)
+#   * ``minds-events.jsonl.<ts>`` -- rotated Python backend logs (timestamp-suffixed, uncompressed)
+#   * ``minds.log``               -- the backend subprocess's stdout/stderr, written by the Electron shell
+#   * ``minds.log.<ts>.gz``       -- rotated (gzipped) backend logs, written by the Electron shell
+#   * ``electron.log``            -- the Electron main-process log
+#   * ``electron.log.<ts>.gz``    -- rotated (gzipped) Electron main-process logs
+# The live/current files are uncompressed on disk (compressed on upload); the rotated ``*.gz``
+# files are already gzipped by the Electron rotation helper, so they are uploaded as-is.
 _MINDS_LOG_ATTACHMENT_GROUPS = (
-    # The live Python backend log (mutable -- re-upload on every report).
+    # The live Python backend jsonl log (mutable -- re-upload on every report).
     LogAttachmentGroup(
         group_name="live_logs",
         glob="*.jsonl",
@@ -87,7 +93,7 @@ _MINDS_LOG_ATTACHMENT_GROUPS = (
         is_compressed=True,
         is_immutable=False,
     ),
-    # Rotated Python backend logs (immutable -- upload once and reuse the cached key).
+    # Rotated Python backend jsonl logs (immutable -- upload once and reuse the cached key).
     LogAttachmentGroup(
         group_name="rotated_logs",
         glob="*.jsonl.*",
@@ -95,13 +101,37 @@ _MINDS_LOG_ATTACHMENT_GROUPS = (
         is_compressed=True,
         is_immutable=True,
     ),
-    # The Electron main-process log.
+    # The current backend stdout/stderr log (minds.log).
     LogAttachmentGroup(
-        group_name="electron_logs",
-        glob="*.log",
+        group_name="backend_logs",
+        glob="minds.log",
         max_file_count=MAX_SENTRY_LIST_SIZE,
         is_compressed=True,
         is_immutable=False,
+    ),
+    # The most recent rotated backend log (already gzipped on disk, so not re-compressed).
+    LogAttachmentGroup(
+        group_name="backend_rotated_logs",
+        glob="minds.log.*.gz",
+        max_file_count=1,
+        is_compressed=False,
+        is_immutable=True,
+    ),
+    # The current Electron main-process log (electron.log).
+    LogAttachmentGroup(
+        group_name="electron_logs",
+        glob="electron.log",
+        max_file_count=MAX_SENTRY_LIST_SIZE,
+        is_compressed=True,
+        is_immutable=False,
+    ),
+    # The most recent rotated Electron log (already gzipped on disk, so not re-compressed).
+    LogAttachmentGroup(
+        group_name="electron_rotated_logs",
+        glob="electron.log.*.gz",
+        max_file_count=1,
+        is_compressed=False,
+        is_immutable=True,
     ),
 )
 
@@ -137,6 +167,25 @@ def _s3_attachment_bucket_for_environment(environment: SentryDeployEnvironment) 
     return _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT[environment]
 
 
+# Filename (under the minds data dir) holding this install's stable anonymous user id. Kept next to
+# the other per-install state (config.toml, the latchkey consent file) so it persists across sessions.
+_ANONYMOUS_USER_ID_FILENAME = "anonymous_user_id"
+
+
+def resolve_anonymous_user_id(data_dir: Path) -> str:
+    """Return this install's stable anonymous user id, creating and persisting it on first use.
+
+    The id is a random, opaque value (no PII) stored in ``<data_dir>/anonymous_user_id``. It is
+    attached to every Sentry event so Sentry can count the distinct installs affected by each issue,
+    letting us tell a rare bug hitting many users apart from a noisy one hitting a single user. The
+    same value is shared with the detached ``mngr latchkey forward`` daemon and the JS frontends so an
+    install is counted once regardless of which process reported the event. The read-or-create is
+    atomic, so the Python backend and the Electron main process racing on first launch converge on one
+    id (see ``get_or_create_anonymous_user_id``).
+    """
+    return get_or_create_anonymous_user_id(data_dir / _ANONYMOUS_USER_ID_FILENAME)
+
+
 def latchkey_forward_sentry_consent_path(data_dir: Path) -> Path:
     """Path of the JSON consent file minds maintains for the detached ``mngr latchkey forward`` daemon.
 
@@ -167,7 +216,7 @@ def write_latchkey_forward_sentry_consent(
     tmp_path.rename(consent_file_path)
 
 
-def resolve_latchkey_forward_sentry_env(consent_file_path: Path) -> dict[str, str]:
+def resolve_latchkey_forward_sentry_env(consent_file_path: Path, anonymous_user_id: str) -> dict[str, str]:
     """Env vars to publish into the detached ``mngr latchkey forward`` supervisor.
 
     The daemon receives concrete Sentry *infrastructure* config (the DSN, environment name, and S3
@@ -186,8 +235,53 @@ def resolve_latchkey_forward_sentry_env(consent_file_path: Path) -> dict[str, st
         MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR: bucket or "",
         MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR: resolve_release_id(),
         MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR: resolve_git_sha(),
+        # Share the same anonymous user id minds uses, so the daemon's events count as the same
+        # install (not a second user) in Sentry's per-issue user counts.
+        MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR: anonymous_user_id,
         MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR: str(consent_file_path),
     }
+
+
+def _external_log_attachment_groups(
+    latchkey_plugin_data_dir: Path, discovery_events_dir: Path
+) -> tuple[LogAttachmentGroup, ...]:
+    """Attachment groups for logs that live outside ``~/.minds/logs``.
+
+    The detached ``mngr latchkey forward`` daemon (which runs discovery and the
+    reverse tunnels) logs into the latchkey plugin data dir, and the shared
+    discovery event stream persists under the mngr host dir -- both essential
+    for diagnosing discovery/replay problems, and both outside the flat minds
+    log folder that the default sweep covers.
+    """
+    return (
+        # The daemon's structured loguru log (mutable -- re-upload on every report).
+        LogAttachmentGroup(
+            group_name="latchkey_live_logs",
+            glob="*.jsonl",
+            max_file_count=MAX_SENTRY_LIST_SIZE,
+            is_compressed=True,
+            is_immutable=False,
+            base_dir=latchkey_plugin_data_dir,
+        ),
+        # The daemon's raw stdout/stderr capture (latchkey_forward.log).
+        LogAttachmentGroup(
+            group_name="latchkey_raw_logs",
+            glob="*.log",
+            max_file_count=MAX_SENTRY_LIST_SIZE,
+            is_compressed=True,
+            is_immutable=False,
+            base_dir=latchkey_plugin_data_dir,
+        ),
+        # The shared discovery event stream that startup replay reads from.
+        LogAttachmentGroup(
+            group_name="discovery_events",
+            glob="events.jsonl",
+            max_file_count=1,
+            is_compressed=True,
+            is_immutable=False,
+            base_dir=discovery_events_dir,
+        ),
+    )
 
 
 def setup_sentry(
@@ -195,8 +289,11 @@ def setup_sentry(
     release_id: str,
     git_commit_sha: str,
     log_folder: Path,
+    anonymous_user_id: str,
     is_error_reporting_enabled: Callable[[], bool],
     is_log_inclusion_enabled: Callable[[], bool],
+    latchkey_plugin_data_dir: Path,
+    discovery_events_dir: Path,
 ) -> None:
     """Set up Sentry for the minds backend process (Flask integration + flat-log layout)."""
     _setup_sentry(
@@ -206,7 +303,9 @@ def setup_sentry(
         git_commit_sha=git_commit_sha,
         log_folder=log_folder,
         service_name=_MINDS_SENTRY_SERVICE_NAME,
-        log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS,
+        user_id=anonymous_user_id,
+        log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS
+        + _external_log_attachment_groups(latchkey_plugin_data_dir, discovery_events_dir),
         integrations=[FlaskIntegration()],
         is_error_reporting_enabled=is_error_reporting_enabled,
         is_log_inclusion_enabled=is_log_inclusion_enabled,

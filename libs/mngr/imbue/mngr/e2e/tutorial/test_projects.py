@@ -1,5 +1,7 @@
 """Tests for the PROJECTS tutorial section."""
 
+import json
+
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
@@ -55,10 +57,9 @@ def test_list_current_project_only(e2e: E2eSession) -> None:
     expect(other.stdout).not_to_contain("project-filter-agent")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_explicit_project(e2e: E2eSession) -> None:
     """Tutorial block:
         # create an agent explicitly tagged with a different project
@@ -74,8 +75,28 @@ def test_create_with_explicit_project(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
+    # The scope's core claim: the agent is tagged with the explicitly given
+    # project rather than the current directory's. The e2e working directory is
+    # a git repo named something other than "other-project", so the default
+    # would be that repo/folder name; observing labels.project == "other-project"
+    # confirms --project overrode the directory-derived default.
+    # Scope the listing to the local provider: the created agent is local, and
+    # this avoids reaching unavailable remote providers (which would exit non-zero
+    # in this environment for reasons unrelated to the project label).
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="verify the explicit project label was applied"
+    )
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    matching = [agent for agent in agents if agent["name"] == "my-task"]
+    assert len(matching) == 1, f"expected exactly one 'my-task' agent, got {matching}"
+    assert matching[0]["labels"]["project"] == "other-project", (
+        f"expected project label 'other-project', got {matching[0]['labels'].get('project')!r}"
+    )
+
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_list_filter_project_cel(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter agents by project using CEL expressions
@@ -96,6 +117,7 @@ def test_list_filter_project_cel(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_list_filter_invalid_cel(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter agents by project using CEL expressions
@@ -115,6 +137,7 @@ def test_list_filter_invalid_cel(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(180)
 def test_list_project_dot(e2e: E2eSession) -> None:
     """Tutorial block:
         # the literal "." is expanded to the current project (derived from your git worktree
@@ -132,13 +155,12 @@ def test_list_project_dot(e2e: E2eSession) -> None:
     # rejected or treated as a literal project named "."), yielding a clean
     # listing. The fresh e2e environment has no agents, so the expanded
     # current-project filter resolves to an empty result.
-    result = e2e.run("mngr list --project .", comment="list agents for the current project")
+    result = e2e.run("mngr list --project .", comment="list agents for the current project", timeout=60.0)
     expect(result).to_succeed()
     expect(result.stdout).to_contain("No agents found")
 
 
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_project_field(e2e: E2eSession) -> None:

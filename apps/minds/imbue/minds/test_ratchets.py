@@ -361,12 +361,11 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    # All of the remaining inline functions are closures under ``desktop_client/``
-    # that capture the local state they were defined next to: the SSE generator and
-    # its watch callbacks plus the unhandled-exception hook in app.py, a thread
-    # target in api_v1.py, the signal handler in server.py, and the WSGI app in
-    # webdav.py.
-    rc.check_inline_functions(_DIR, snapshot(9))
+    # The remaining inline functions are closures that capture the local state they were
+    # defined next to: the SSE generator and its watch callbacks plus the unhandled-exception
+    # hook in app.py, a thread target in api_v1.py, the signal handler in server.py, the WSGI
+    # app in webdav.py, and the ``record_loss`` helper in the ported Sentry HTTP transport.
+    rc.check_inline_functions(_DIR, snapshot(7))
 
 
 def test_prevent_underscore_imports() -> None:

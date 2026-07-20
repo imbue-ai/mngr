@@ -33,7 +33,9 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 # No @pytest.mark.modal: connecting to a freshly-created *local* agent by name
 # resolves via the discovery event-stream optimization to the local provider
 # only, so modal is never queried (the resource guard enforces this).
-@pytest.mark.rsync
+# No @pytest.mark.rsync either: a *local* connect execs `tmux attach` directly
+# (see connect_to_agent) and never syncs files, so rsync is never invoked. The
+# mark was a leftover from when this test connected to a remote modal agent.
 @pytest.mark.release
 @pytest.mark.tmux
 # Creating the agent, attaching a real tmux client, and detaching it takes
@@ -63,7 +65,9 @@ def test_connect_by_name(e2e: E2eSession) -> None:
 
 
 # No @pytest.mark.modal: see test_connect_by_name (local-only resolution).
-@pytest.mark.rsync
+# No @pytest.mark.rsync: connecting to a *local* agent only execs `tmux attach`
+# (rsync is used solely on the remote SSH path), so the resource guard would fail
+# the test for carrying a mark it never satisfies.
 @pytest.mark.release
 @pytest.mark.tmux
 # See test_connect_by_name: the interactive attach/detach flow exceeds the
@@ -84,6 +88,12 @@ def test_connect_short_form(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# An agent id carries no host hint, so it cannot use the discovery event-stream
+# optimization: resolution falls back to a full scan across every configured
+# provider (Modal app-context setup, the imbue_cloud VPS provider, etc.), which
+# takes longer than the default 10s per-test timeout even though the lookup
+# ultimately fails fast with "not found".
+@pytest.mark.timeout(120)
 def test_connect_by_agent_id_fictional(e2e: E2eSession) -> None:
     """Tutorial block:
         # sometimes names can be ambiguous (e.g. if you made two agents with the same name on different hosts), so you can always
@@ -118,6 +128,10 @@ def test_connect_by_agent_id_fictional(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The full-scan discovery this command triggers (no provider in the spec) plus
+# mngr's subprocess startup cost exceed the default 10s per-test timeout, so give
+# the command room -- matching the other connect tests in this file.
+@pytest.mark.timeout(120)
 def test_connect_explicit_host(e2e: E2eSession) -> None:
     """Tutorial block:
         # or you can use the explicit host and agent:
@@ -180,7 +194,9 @@ def test_connect_explicit_host_and_provider(e2e: E2eSession) -> None:
 
 
 # No @pytest.mark.modal: see test_connect_by_name (local-only resolution).
-@pytest.mark.rsync
+# No @pytest.mark.rsync: connecting to a *local* agent execs `tmux attach`
+# directly (see connect_to_agent) and never syncs files, so rsync is not
+# invoked -- and the resource guard fails a declared-but-unused rsync mark.
 @pytest.mark.release
 @pytest.mark.tmux
 # See test_connect_by_name: the interactive attach/detach flow exceeds the
@@ -207,7 +223,10 @@ def test_connect_with_start(e2e: E2eSession) -> None:
 
 
 # No @pytest.mark.modal: see test_connect_by_name (local-only resolution).
-@pytest.mark.rsync
+# No @pytest.mark.rsync: the flow here is create a local `--type command` agent,
+# stop it, then connect with --start (which restarts it and execs tmux attach).
+# None of those steps invokes the rsync binary for a local agent, so the resource
+# guard would flag an rsync mark as superfluous ("marked but never invoked").
 @pytest.mark.release
 @pytest.mark.tmux
 # See test_connect_by_name: the interactive attach/detach flow exceeds the
@@ -250,7 +269,9 @@ def test_connect_with_start_restarts_stopped_agent(e2e: E2eSession) -> None:
 
 
 # No @pytest.mark.modal: see test_connect_by_name (local-only resolution).
-@pytest.mark.rsync
+# No @pytest.mark.rsync: connecting to a *local* agent is a pure tmux attach and
+# creating the local target never syncs files, so rsync is never invoked. The
+# resource guard rejects a carried-but-unused mark, so it must not be declared.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -275,8 +296,9 @@ def test_connect_no_start(e2e: E2eSession) -> None:
 
 
 # Connecting with --no-start fails before any tmux attach, so the plain
-# pipe-based e2e.run is sufficient (no PTY needed).
-@pytest.mark.rsync
+# pipe-based e2e.run is sufficient (no PTY needed). No @pytest.mark.rsync: this
+# unhappy path refuses before the attach step that would sync the workspace, so
+# rsync is never invoked and the resource guard would fail a stale mark.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)

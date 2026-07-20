@@ -233,6 +233,27 @@ def test_format_event_human_assistant_message_with_tool_calls() -> None:
     assert "-> Read(" in result
 
 
+def test_format_event_human_assistant_message_without_parts_uses_flat_text() -> None:
+    # Claude's common_transcript fills the flat text/tool_calls and omits parts[];
+    # the text must still render rather than collapsing to "(no content)".
+    event = {
+        "type": "assistant_message",
+        "timestamp": "2026-01-01T00:00:01Z",
+        "text": "Merge cleanup complete.",
+        "tool_calls": [{"tool_call_id": "c1", "tool_name": "Bash", "input_preview": '{"command":"git push"}'}],
+    }
+    result = _format_event_human(event)
+    assert "Merge cleanup complete." in result
+    assert "-> Bash(" in result
+    assert "(no content)" not in result
+
+
+def test_format_event_human_assistant_message_empty_is_no_content() -> None:
+    event = {"type": "assistant_message", "timestamp": "2026-01-01T00:00:01Z", "text": "", "tool_calls": []}
+    result = _format_event_human(event)
+    assert "(no content)" in result
+
+
 def test_format_event_human_tool_result() -> None:
     event = {
         "type": "tool_result",

@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-15
+
+Added workspace-sync storage and endpoints (migration 013): `workspace_records` (per-account plaintext workspace metadata plus an opaque client-encrypted secrets blob, compare-and-swap on a per-row revision, at most one ACTIVE row per agent id) and `account_key_bundles` (the password-wrapped per-account data key).
+
+New admin-authenticated (not paid-gated) routes: `GET /sync/records`, `PUT /sync/records/{host_id}`, `DELETE /sync/records/{host_id}`, `POST /sync/scrub-secrets`, and `GET`/`PUT`/`DELETE /sync/bundle`.
+
+The sync payload size caps are 10x more generous than the current payload needs (encrypted secrets 2.5 MiB, key-bundle fields 40 KiB, metadata text 5 KiB). They exist to bound a row, not to police its shape: the secrets blob is an opaque client-versioned envelope, so adding another secret to it later must not require a connector deploy to raise a limit.
+
+Paid users no longer get stuck behind email verification:
+
+- A paid user who signs up with email/password is now auto-verified at signup (no verification email, and their first session is already verified) instead of being asked to verify their email.
+
+- Adding an email to the paid list (`mngr imbue_cloud admin paid email add` / `minds paid add`) now also marks any pre-existing account for that email as verified, so a user who signed up before being made paid isn't left locked out. This is best-effort: it never fails the paid-list write.
+
+- The admin auth guard now determines email-verification from a live SuperTokens lookup rather than trusting the (possibly stale) claim baked into the access token. Verification now takes effect on the user's very next request instead of only after their token refreshes.
+
 ## 2026-07-11
 
 The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).

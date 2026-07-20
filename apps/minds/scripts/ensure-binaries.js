@@ -24,6 +24,7 @@ const REQUIRED = [
   path.join(RESOURCES, 'uv', 'uv'),
   path.join(RESOURCES, 'git', 'bin', 'git'),
   path.join(RESOURCES, 'lima', 'bin', 'limactl'),
+  path.join(RESOURCES, 'desync', 'desync'),
 ];
 
 // Requiring a path the downloader deliberately skips would leave it missing forever

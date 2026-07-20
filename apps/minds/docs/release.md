@@ -60,7 +60,31 @@ Three things must hold; only two need *new* CI:
 
 **So don't run the steps strictly in series.** Once `main` is green and the bump commit exists, the release SHA (`GREEN_MNGR_SHA` = mngr release-branch HEAD) is fixed: cut the DEFAULT_WORKSPACE_TEMPLATE branch (step 3) and fire launch-to-msg (step 4) right away, and let both branches' traditional CI finish in parallel. The numbering below is dependency order, not "wait for each."
 
-## Procedure
+## Fast-forward path (low-risk releases)
+
+When the release carries **no functional mngr/minds code** and **no `system_interface`-facing vendor change** — a version bump paired with a vendor refresh that only moves code the binary and in-VM agent already agree on — you have high confidence launch-to-msg will pass, so you can collapse the double verification into a single run. This is the common case for a routine patch bump, and it's fast *because* the change is low-risk, not because it skips the check that matters.
+
+The fast path drops the two pre-merge safety nets and keeps the one real gate:
+
+- **Skip** the CI-surface PRs (step 2). The dwt PR's `test` job is fully covered by launch-to-msg end-to-end, and traditional CI on an inert bump is redundant with a green `main`.
+- **Skip** the pre-merge launch-to-msg (step 4). The tag run (step 8) becomes the single end-to-end verification.
+- **Keep** the vendor-match check (step 6) — a local `git ls-tree` blob-hash comparison, not CI. It's the one thing that catches a bad archive before you tag, and it costs nothing.
+
+Sequence:
+
+1. **Bump** version + `FALLBACK_BRANCH` (step 1) on a short mngr branch; `GREEN_MNGR_SHA` = its HEAD.
+2. **Sync** dwt `vendor/mngr` from `GREEN_MNGR_SHA` (step 3) on a short dwt branch.
+3. **Land both on `main` by fast-forward** — `git push origin <branch>:main` in each repo. When `main` hasn't moved since you cut the branch (the usual case for a quick release), this is a clean FF and `main` HEAD *becomes* the exact SHA you tag: mngr `main` = `GREEN_MNGR_SHA`, dwt `main` = the vendor-sync commit. No merge commit; the branches' commits landing on `main` auto-close any PR you happened to open. *If `main` did advance, the FF is rejected — fall back to a `--no-ff` merge commit and still tag `GREEN_MNGR_SHA` (the merge parent), never `main` HEAD (see steps 6-7).*
+4. **Verify vendor-match** against the post-merge `origin/main` (step 6). This is the gate — do not tag on a mismatch.
+5. **Tag** both at the frozen SHAs (step 7): mngr at `GREEN_MNGR_SHA`, dwt at its post-merge `origin/main`.
+6. **launch-to-msg once, on the tags** (step 8): `commit_sha=minds-v<version>`, `template_ref=minds-v<version>`.
+7. **Green concludes the release** — verify the Slack round-trip message.
+
+**Tradeoff.** You merge and tag *before* the single verification, so the tag run is the first time the pair runs end-to-end. If it fails, the blast radius is small and recoverable: `main` carries only an inert version bump (no test asserts the version literal, so `main` stays green) plus a vendor refresh no consumer reads, and the tag is re-cuttable (`git tag -d` + force-push) once you fix and re-verify. That recoverability is why the fast path is for **low-risk releases only.** If the branch carries real mngr/minds code, a `system_interface` consumer change, or a large vendor jump, use the thorough Procedure below so the pre-merge launch-to-msg catches a break *before* anything lands on `main`.
+
+## Procedure (thorough path)
+
+Use this when the fast-forward path above doesn't apply. Each numbered step is also referenced by the fast path, so the step numbers are shared.
 
 ### 1. Bump version + FALLBACK_BRANCH (mngr branch)
 

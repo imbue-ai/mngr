@@ -42,7 +42,7 @@ See [the desktop client design doc](../imbue/minds/desktop_client/README.md) for
 When a user visits the desktop client and no agents exist, they are shown a creation form where they can provide a git repository URL or local path. The desktop client:
 
 1. Clones the repository to a temp directory (if a URL) or uses the local path directly
-2. Runs `mngr create <name> --no-connect --label workspace=<name> --template main --template <mode>` to create the agent (the agent id is read back from the `created` JSONL event; minds does not pre-generate one)
+2. Runs `mngr create system-services@<host> --new-host --no-connect --label workspace_display_name=<name> --label is_primary=true --template main --template <mode>` to create the workspace host and its primary agent (the agent id is read back from the `created` JSONL event; minds does not pre-generate one)
 3. Creates a Cloudflare tunnel (if configured) and injects the tunnel token into the agent via `mngr exec`
 4. Redirects the user to the newly created agent (the user is already authenticated via the global session)
 

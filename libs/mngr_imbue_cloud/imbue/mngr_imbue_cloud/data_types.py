@@ -383,6 +383,46 @@ class R2BucketCreateResult(FrozenModel):
     key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
 
 
+class SyncWorkspaceRecord(FrozenModel):
+    """Wire form of one synced workspace record (transport-only; the plugin never decrypts).
+
+    Mirrors the connector's ``WorkspaceRecordModel``: plaintext metadata plus
+    the base64 of the client-side-encrypted secrets blob. ``state`` is passed
+    through as its lowercase wire string -- the producing (minds) and
+    validating (connector) ends own the vocabulary.
+    """
+
+    host_id: str = Field(description="Host the workspace is on (PK with the account)")
+    agent_id: str = Field(description="Logical workspace id (one ACTIVE record per agent_id)")
+    display_name: str = Field(default="", description="Workspace display name")
+    color: str | None = Field(default=None, description="Workspace accent color (#rrggbb)")
+    provider_kind: str = Field(description="mngr provider backend kind (e.g. 'lima', 'imbue_cloud')")
+    hosting_device_id: str | None = Field(
+        default=None, description="Install that hosts a local workspace (None for cloud rows)"
+    )
+    device_label: str = Field(default="", description="Human-readable device name")
+    state: str = Field(description="Lifecycle state: 'active' or 'destroyed' (tombstone)")
+    restored_from_host_id: str | None = Field(default=None, description="Lineage link for restored workspaces")
+    encrypted_secrets: str | None = Field(
+        default=None, description="Base64 of the client-encrypted secrets blob (opaque here)"
+    )
+    revision: int = Field(description="Per-row monotonic revision; pushes are CAS on this")
+    created_at: str = Field(default="", description="Server timestamp (response only)")
+    updated_at: str = Field(default="", description="Server timestamp (response only)")
+
+
+class SyncKeyBundle(FrozenModel):
+    """Wire form of the per-account password-wrapped data key (transport-only)."""
+
+    kdf_salt: str = Field(description="Base64 argon2id salt")
+    kdf_time_cost: int = Field(description="argon2id iteration count")
+    kdf_memory_kib: int = Field(description="argon2id memory (KiB)")
+    kdf_parallelism: int = Field(description="argon2id lane count")
+    wrapped_dek: str = Field(description="Base64 password-wrapped DEK (opaque here)")
+    key_epoch: int = Field(description="Bumped only on compromise recovery")
+    updated_at: str = Field(default="", description="Server timestamp (response only)")
+
+
 class BareMetalServer(FrozenModel):
     """A rented OVH bare-metal server that we carve into lima-VM slices.
 
