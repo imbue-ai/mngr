@@ -18,6 +18,7 @@ live in ``imbue.mngr_mapreduce.data_types``.
 
 import html
 import json
+from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
 from importlib.resources import files
@@ -172,7 +173,7 @@ class TestMapReduceResult(FrozenModel):
     test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="Test runs performed by the agent, in order")
 
 
-_EXTRACTED_TEST_OUTPUT_DIR = "test_output"
+EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 
 # Outcome JSON for a given agent is immutable once present. Cache keyed by
 # agent_name so generate_html_report can be called many times during polling
@@ -180,7 +181,7 @@ _EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 _TESTING_OUTCOME_CACHE: dict[AgentName, TestResult] = {}
 _INTEGRATOR_OUTCOME_CACHE: dict[AgentName, IntegratorResult] = {}
 
-_SECTION_ORDER: list[ReportSection] = [
+SECTION_ORDER: list[ReportSection] = [
     ReportSection.NON_IMPL_FIXES,
     ReportSection.IMPL_FIXES,
     ReportSection.BLOCKED,
@@ -189,7 +190,7 @@ _SECTION_ORDER: list[ReportSection] = [
     ReportSection.RUNNING,
 ]
 
-_SECTION_LABELS: dict[ReportSection, str] = {
+SECTION_LABELS: dict[ReportSection, str] = {
     ReportSection.NON_IMPL_FIXES: "Non-implementation fixes",
     ReportSection.IMPL_FIXES: "Implementation fixes",
     ReportSection.BLOCKED: "Blocked",
@@ -198,7 +199,7 @@ _SECTION_LABELS: dict[ReportSection, str] = {
     ReportSection.RUNNING: "Running",
 }
 
-_SECTION_COLORS: dict[ReportSection, str] = {
+SECTION_COLORS: dict[ReportSection, str] = {
     ReportSection.NON_IMPL_FIXES: "rgb(33, 150, 243)",
     ReportSection.IMPL_FIXES: "rgb(76, 175, 80)",
     ReportSection.BLOCKED: "rgb(244, 67, 54)",
@@ -229,7 +230,7 @@ _jinja_env = Environment(
 )
 
 
-def _read_static(filename: str) -> str:
+def read_static(filename: str) -> str:
     """Read a static (non-jinja) asset shipped under report_assets/."""
     return (files("imbue.mngr_tmr.report_assets") / filename).read_text()
 
@@ -267,11 +268,11 @@ def _parse_outcome_json(raw: str) -> TestResult:
 
 
 def _outcome_path_for_testing_agent(output_dir: Path, agent_name: AgentName) -> Path:
-    return output_dir / str(agent_name) / _EXTRACTED_TEST_OUTPUT_DIR / TESTING_AGENT_OUTCOME_FILENAME
+    return output_dir / str(agent_name) / EXTRACTED_TEST_OUTPUT_DIR / TESTING_AGENT_OUTCOME_FILENAME
 
 
 def _outcome_path_for_integrator(output_dir: Path, agent_name: AgentName) -> Path:
-    return output_dir / str(agent_name) / _EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
+    return output_dir / str(agent_name) / EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
 
 
 def _load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> TestResult | None:
@@ -293,7 +294,7 @@ def _load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> Test
     return outcome
 
 
-def _load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> IntegratorResult:
+def load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> IntegratorResult:
     """Read and cache the integrator's outcome, returning an empty result on miss."""
     empty = IntegratorResult(agent_name=meta.agent_name, branch_name=meta.branch_name)
     cached = _INTEGRATOR_OUTCOME_CACHE.get(meta.agent_name)
@@ -398,8 +399,8 @@ def _format_test_id(test_node_id: str) -> str:
     return html.escape(test_node_id).replace("::", "::<wbr>")
 
 
-def _format_changes(changes: dict[ChangeKind, Change]) -> str:
-    """Format changes as concise kind + icon pairs."""
+def format_changes(changes: Mapping[UpperCaseStrEnum, Change]) -> str:
+    """Format changes as concise kind + icon pairs (any recipe's change-kind enum)."""
     parts: list[str] = []
     for kind, change in changes.items():
         icon = _CHANGE_STATUS_ICONS.get(change.status, "?")
@@ -407,24 +408,23 @@ def _format_changes(changes: dict[ChangeKind, Change]) -> str:
     return ", ".join(parts)
 
 
-def _merged_status_html(result: TestMapReduceResult, integrator: IntegratorResult | None) -> str:
+def merged_status_html(branch_name: str | None, integrator: IntegratorResult | None) -> str:
     """Return merged-status HTML: commit hash for impl, checkmark for squashed, X for failed."""
-    if integrator is None or result.branch_name is None:
+    if integrator is None or branch_name is None:
         return ""
-    branch = result.branch_name
-    if branch in integrator.impl_commit_hashes:
-        commit_hash = html.escape(integrator.impl_commit_hashes[branch][:10])
+    if branch_name in integrator.impl_commit_hashes:
+        commit_hash = html.escape(integrator.impl_commit_hashes[branch_name][:10])
         return f"<code>{commit_hash}</code>"
-    if branch in set(integrator.squashed_branches):
+    if branch_name in set(integrator.squashed_branches):
         return "&#10003;"
-    if branch in set(integrator.impl_priority) and branch not in integrator.impl_commit_hashes:
+    if branch_name in set(integrator.impl_priority) and branch_name not in integrator.impl_commit_hashes:
         return "&#10003;"
-    if branch in set(integrator.failed):
+    if branch_name in set(integrator.failed):
         return "&#10007;"
     return ""
 
 
-def _render_markdown(text: str) -> str:
+def render_markdown(text: str) -> str:
     """Render markdown text to HTML."""
     return _md.render(text)
 
@@ -473,9 +473,9 @@ def _build_row_view(
         "test_id_html": _format_test_id(row.test_node_id),
         "agent_name": str(row.agent_name),
         "branch_name": row.branch_name,
-        "changes_html": _format_changes(row.changes) if row.changes else "-",
-        "merged_html": _merged_status_html(row, integrator),
-        "summary_html": _render_markdown(row.summary_markdown) if row.summary_markdown else "",
+        "changes_html": format_changes(row.changes) if row.changes else "-",
+        "merged_html": merged_status_html(row.branch_name, integrator),
+        "summary_html": render_markdown(row.summary_markdown) if row.summary_markdown else "",
         "has_artifacts": has_artifacts_for_agent,
     }
 
@@ -492,7 +492,7 @@ def _build_section_views(
         grouped.setdefault(_report_section_of(r), []).append(r)
 
     sections: list[dict[str, object]] = []
-    for sec in _SECTION_ORDER:
+    for sec in SECTION_ORDER:
         group = grouped.get(sec)
         if not group:
             continue
@@ -509,8 +509,8 @@ def _build_section_views(
         sections.append(
             {
                 "kind": sec.value,
-                "label": _SECTION_LABELS[sec],
-                "color": _SECTION_COLORS[sec],
+                "label": SECTION_LABELS[sec],
+                "color": SECTION_COLORS[sec],
                 "anchor": f"sec-{sec.value}",
                 "rows": section_rows,
                 "count": len(section_rows),
@@ -546,7 +546,7 @@ def _build_artifact_panels(
             run_views.append(
                 {
                     "index": i,
-                    "description_html": _render_markdown(description) if description else "",
+                    "description_html": render_markdown(description) if description else "",
                     "detail_html": render_test_detail(test_dir, detail_id_prefix=prefix),
                 }
             )
@@ -578,7 +578,7 @@ def generate_html_report(
     report to s3 is the recipe's responsibility (see ``recipe.render_report``).
     """
     rows = _build_rows(agents, output_dir)
-    integrator = _load_integrator_outcome(integrator_metadata, output_dir) if integrator_metadata is not None else None
+    integrator = load_integrator_outcome(integrator_metadata, output_dir) if integrator_metadata is not None else None
 
     agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] = {}
     for r in rows:
@@ -599,12 +599,12 @@ def generate_html_report(
     # Title is autoescaped by the template; detail/summary are markdown rendered
     # to HTML here and passed through with |safe, like the per-row summary cells.
     escalation_views = (
-        [{"title": e.title, "detail_html": _render_markdown(e.detail_markdown)} for e in integrator.escalations]
+        [{"title": e.title, "detail_html": render_markdown(e.detail_markdown)} for e in integrator.escalations]
         if integrator is not None
         else []
     )
     normalization_views = (
-        [{"summary_html": _render_markdown(n.summary_markdown)} for n in integrator.normalizations]
+        [{"summary_html": render_markdown(n.summary_markdown)} for n in integrator.normalizations]
         if integrator is not None
         else []
     )
@@ -630,9 +630,9 @@ def generate_html_report(
         reintegrate_cmd=reintegrate_cmd,
         asciinema_css_url=ASCIINEMA_PLAYER_CSS,
         asciinema_js_url=ASCIINEMA_PLAYER_JS,
-        css=_read_static("report.css"),
+        css=read_static("report.css"),
         detail_css=DETAIL_CSS,
-        js=_read_static("artifacts.js"),
+        js=read_static("artifacts.js"),
     )
     output_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
