@@ -60,6 +60,9 @@ _COMMAND_ARGS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.DOT
 # The captured stdout of a local slash command (e.g. ``/login`` ->
 # "Login interrupted"). Claude Code wraps it in this tag inside a user message.
 _LOCAL_STDOUT_PATTERN = re.compile(r"<local-command-stdout>(.*?)</local-command-stdout>", re.DOTALL)
+# The boilerplate caveat Claude Code injects (isMeta) ahead of local-command
+# output. Pure noise; we strip the wrapper so the collapsed label is readable.
+_LOCAL_CAVEAT_PATTERN = re.compile(r"<local-command-caveat>(.*?)</local-command-caveat>", re.DOTALL)
 
 # Longest a framework one-liner label may be before we clip it.
 _MAX_FRAMEWORK_LABEL_LENGTH = 120
@@ -155,6 +158,11 @@ def _framework_label_and_detail(raw: dict[str, Any], text: str) -> tuple[str, st
     if stdout_match is not None:
         out = stdout_match.group(1).strip()
         return (_first_line(out) or "(no output)"), (out or "(no output)")
+    # The injected local-command caveat: strip the wrapper for a readable label.
+    caveat_match = _LOCAL_CAVEAT_PATTERN.search(text)
+    if caveat_match is not None:
+        inner = caveat_match.group(1).strip()
+        return (_first_line(inner) or "(caveat)"), (inner or "(caveat)")
     # Any other injected/bookkeeping message Claude Code marks meta.
     if raw.get("isMeta"):
         return (_first_line(text) or "(meta)"), (text.strip() or "(meta)")
