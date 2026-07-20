@@ -234,9 +234,11 @@ from the repo root):
 - `validate` - parses every spec file and enforces the rules in this
   document.
 - `list` - emits the corpus as JSONL, one record per unit (scenario,
-  scenario outline, or rule), carrying coordinate, unit kind, and location.
-- `query` - the same records, filtered structurally (by tag, name, or step
-  text).
+  scenario outline, or rule), carrying coordinate, unit kind, location,
+  and the coordinates of the Rules in scope for the unit; structural
+  filters select by folder area, unit kind, tag, name, or step text.
+- `matrix` - joins the corpus against the `witnesses` markers in the test
+  tree, reporting per-unit coverage.
 
 `uv run minds specs --help` is authoritative for invocation detail. For
 AST-level needs beyond the CLI, `gherkin-official` (a dependency of

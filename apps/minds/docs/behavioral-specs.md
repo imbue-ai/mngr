@@ -25,21 +25,36 @@ uv run minds specs validate
 ```
 
 Emit the corpus as JSONL, one record per unit (scenario, scenario outline, or
-rule):
+rule). Each record carries the unit's coordinate, kind, name, location, tags,
+steps, parent Rule, and the coordinates of every Rule in scope for it (the
+`invariants` field):
 
 ```bash
 uv run minds specs list
 ```
 
-Emit the same records, structurally filtered -- by tag or coordinate, by name
-substring, or by step-text substring:
+The same command takes structural filters, AND-composed: `--area` keeps a
+folder subtree, `--unit` a kind, `--tag` an exact raw tag or coordinate, and
+`--name`/`--step` case-insensitive substrings:
 
 ```bash
-uv run minds specs query --tag authentication.fresh-code
+uv run minds specs list --area authentication
+uv run minds specs list --tag authentication.fresh-code
+```
+
+Join the corpus against the `witnesses` markers in the test tree (default
+root `apps/minds`; repeat `--tests` to add roots), emitting one record per
+unit with its coverage (`full`, `partial`, or `none`) and witnessing tests.
+Coverage gaps are data (exit 0); broken links -- a marker naming no unit, or
+invalid marker usage -- are errors reported on stderr with a nonzero exit:
+
+```bash
+uv run minds specs matrix
 ```
 
 ## Linking tests to specs
 
 A test that verifies a spec unit declares it with the
 `witnesses(coordinate, partial=...)` pytest marker; see
-[testing-overview.md](./testing-overview.md).
+[testing-overview.md](./testing-overview.md). `minds specs matrix` reports
+how completely the corpus is witnessed by those markers.

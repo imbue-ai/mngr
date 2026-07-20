@@ -6,9 +6,9 @@ Added the `minds specs` CLI group (`uv run minds specs ...` from the repo root) 
 
 - `validate` parses every `.feature` with `gherkin-official` and enforces the behavioral-spec language rules (English keywords only, kebab-case folders/basenames/tags, an identity tag on every unit, unique coordinate claims including Feature/Examples block tags, reserved `overview`/`invariants` filenames, no dangling `.md` sidecars or foreign files), printing every violation with file and line and exiting nonzero on any.
 
-- `list` emits one JSONL record per authored unit (scenario, scenario-outline, or rule) carrying coordinate, kind, name, file, line, tags, steps, and the parent Rule's coordinate for nested units; `--unit` filters by kind. Stdout is pure JSONL; problems that omit units from the listing go to stderr with a nonzero exit.
+- `list` emits one JSONL record per authored unit (scenario, scenario-outline, or rule) carrying coordinate, kind, name, file, line, tags, steps, the parent Rule's coordinate for nested units, and `invariants` -- the coordinates of every Rule in scope for the unit (same-file Rules plus `invariants.feature` Rules at or above its folder). Selection filters AND-compose: `--unit` (kind), `--area` (folder subtree named as a dot-joined folder path), `--tag` (exact raw tag or coordinate), and `--name`/`--step` (case-insensitive substrings). Stdout is pure JSONL; problems that omit units from the listing go to stderr with a nonzero exit.
 
-- `query` emits the same records filtered by `--tag` (exact raw tag or coordinate), `--name`, and `--step` (case-insensitive substrings), combined as AND.
+- `matrix` joins the corpus against the `witnesses(coordinate, partial=...)` markers in the test tree (harvested by an inner `pytest --collect-only` over the `--tests` roots, default `apps/minds`), emitting one record per unit with its coverage (`full`, `partial`, or `none`) and witnessing tests. Coverage gaps are data (exit 0); broken links -- a marker naming no unit, or invalid marker usage -- are errors reported per marker on stderr with a nonzero exit.
 
 The scanning/validation engine lives in `imbue.minds.core.behavioral_specs` and takes the corpus root as a parameter for testability. Adds the `gherkin-official` dependency (the Cucumber reference parser, the arbiter of spec syntax).
 
