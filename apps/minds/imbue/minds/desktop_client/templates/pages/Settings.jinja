@@ -374,8 +374,9 @@
         <div class="mt-auto"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
       </div>
 
-      {# Right column: normal flow, so the whole window scrolls and the scrollbar
-         sits at the window edge, away from the content. #}
+      {# Right column: normal flow, so ChromeShell's #local-page-card (the
+         scroll container) scrolls it and the scrollbar sits at the card's
+         edge, away from the content. #}
       <div class="flex-1 min-w-0 py-12">
                 {# -- Connectors panel (predefined / catalog services the agent connects to) -- #}
         <section data-settings-panel="connectors">
