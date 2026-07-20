@@ -3272,6 +3272,11 @@ ipcMain.on('focus-window', (event) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || bundle.window.isDestroyed()) return;
   if (bundle.window.isFocused()) return;
+  // On macOS, window.focus() alone can't pull a backgrounded app in front of
+  // the frontmost app (the OAuth browser) -- the OS blocks focus-stealing.
+  // app.focus({steal:true}) activates Minds over the browser; focusBundle then
+  // raises and focuses the specific window within the app.
+  if (isMac) app.focus({ steal: true });
   focusBundle(bundle);
 });
 
