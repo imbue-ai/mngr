@@ -621,6 +621,18 @@ function createBundle() {
     // lost-swap fallback timer (see loadLocalIntoChrome / onChromeNavigate).
     pendingSwapUrl: null,
     pendingSwapTimer: null,
+    // True once the chrome view's current document has registered its
+    // swap-local-page listener (the renderer's 'shell-ready' handshake).
+    // Cleared on every full chrome-view load start; required by
+    // chromeViewHasShell so a swap is never dispatched into a document that
+    // cannot hear it (which would burn the watchdog grace period).
+    chromeShellReady: false,
+    // Diagnostics + failsafe for the overlay modal (see openModal): when the
+    // 'show-modal' command was issued, and the timer that force-closes a modal
+    // whose iframe never reports loaded (the full-window overlay view eats
+    // every click while invisible -- a stall must not freeze the app).
+    modalOpenedAt: null,
+    modalStallTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
     // Whether the content view is currently displaying a REACHABLE workspace
@@ -675,6 +687,14 @@ function createBundle() {
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
     primeViewWithCachedChromeState(bundle, chromeView.webContents);
+  });
+
+  // Every full load replaces the document, so the previous document's
+  // 'shell-ready' handshake no longer holds; the incoming page's chrome.js
+  // re-sends it once its swap listener is registered. (In-place swaps and
+  // pushState don't fire this.)
+  chromeView.webContents.on('did-start-loading', () => {
+    bundle.chromeShellReady = false;
   });
 
   // A trusted local page renders in the chrome view itself, so the chrome view's
@@ -1223,10 +1243,14 @@ function contentViewHoldsWorkspace(bundle, agentId) {
 }
 
 // Whether the chrome view currently hosts a live backend-served shell document
-// (able to receive swap-local-page IPC). A full load in flight means no
-// reliable listener, so callers fall back to a real navigation.
+// (able to receive swap-local-page IPC). Requires the renderer's 'shell-ready'
+// handshake -- sent by chrome.js right after it registers the swap listener --
+// so a swap is never dispatched into a document that cannot hear it. A full
+// load in flight means no reliable listener, so callers fall back to a real
+// navigation.
 function chromeViewHasShell(bundle) {
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed() || !backendBaseUrl) return false;
+  if (!bundle.chromeShellReady) return false;
   const wc = bundle.chromeView.webContents;
   if (wc.isLoading()) return false;
   try {
@@ -1730,11 +1754,31 @@ function openModal(bundle, url) {
   }
   sendOverlayCommand(bundle, { type: 'show-modal', id, url });
   updateBundleBounds(bundle);
+  // Diagnostics + stall failsafe. From this moment the overlay view is
+  // full-window and captures every pointer event while showing NOTHING until
+  // the hosted iframe paints -- if that load stalls, the app reads as frozen.
+  // overlay-modal-loaded cancels the timer; if it never arrives, force-close
+  // so input is never eaten indefinitely.
+  console.log(`[modal] open ${id} (${url})`);
+  bundle.modalOpenedAt = Date.now();
+  if (bundle.modalStallTimer) clearTimeout(bundle.modalStallTimer);
+  bundle.modalStallTimer = setTimeout(() => {
+    bundle.modalStallTimer = null;
+    if (bundle.window.isDestroyed() || !bundle.modalVisible || bundle.modalUrl !== url) return;
+    console.warn(`[modal] STALL: ${id} never reported loaded after 10s; closing overlay to unblock input`);
+    closeModal(bundle);
+  }, 10000);
 }
 
 function closeModal(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (!bundle.modalView || !bundle.modalVisible) return;
+  console.log('[modal] close');
+  if (bundle.modalStallTimer) {
+    clearTimeout(bundle.modalStallTimer);
+    bundle.modalStallTimer = null;
+  }
+  bundle.modalOpenedAt = null;
   bundle.modalView.setVisible(false);
   bundle.modalVisible = false;
   bundle.modalUrl = null;
@@ -3977,7 +4021,31 @@ ipcMain.on('close-modal', (event) => {
 // own did-finish-load; now each hosted iframe signals when it's ready.)
 ipcMain.on('overlay-modal-loaded', (event) => {
   const bundle = getBundleFromEvent(event);
-  if (bundle) primeOverlayFrames(bundle);
+  if (!bundle) return;
+  // Modal diagnostics + stall failsafe: the iframe reported loaded, so the
+  // overlay is painting -- cancel the force-close timer and record how long
+  // the open-to-painted window was (the interval during which the invisible
+  // full-window overlay view was eating every click).
+  if (bundle.modalStallTimer) {
+    clearTimeout(bundle.modalStallTimer);
+    bundle.modalStallTimer = null;
+  }
+  if (bundle.modalOpenedAt !== null) {
+    console.log(`[modal] loaded after ${Date.now() - bundle.modalOpenedAt}ms`);
+    bundle.modalOpenedAt = null;
+  }
+  primeOverlayFrames(bundle);
+});
+
+// The chrome view's document signals that its swap-local-page listener is
+// registered (see chromeViewHasShell). Only honored from the chrome view: the
+// same preload runs in the overlay host and its hosted iframes, which must not
+// vouch for the chrome document.
+ipcMain.on('shell-ready', (event) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
+  if (event.sender !== bundle.chromeView.webContents) return;
+  bundle.chromeShellReady = true;
 });
 
 // Custom tooltip: a trigger (a titlebar button in the chrome view, or an element

@@ -92,8 +92,17 @@
     var seq = ++swapSeq;
     return fetch(url, { credentials: 'same-origin' }).then(function (resp) {
       if (!resp.ok) throw new Error('swap fetch HTTP ' + resp.status);
+      if (resp.redirected) {
+        // The hub page redirected (e.g. / -> /welcome after auth expiry).
+        // Swapping would install the target's content under the wrong URL
+        // without a document lifecycle; hand the redirect TARGET to a real
+        // navigation instead.
+        if (seq === swapSeq) window.location.href = resp.url;
+        return null;
+      }
       return resp.text();
     }).then(function (htmlText) {
+      if (htmlText === null) return;
       if (seq !== swapSeq) return; // superseded by a newer swap
       var doc = new DOMParser().parseFromString(htmlText, 'text/html');
       var newRoot = doc.getElementById('local-page-root');
@@ -167,6 +176,22 @@
       swapLocalPage(target, { fromHistory: true }).catch(function () {
         window.location.reload();
       });
+    }
+  });
+  // In-place refresh: re-fetch and swap the CURRENT page (no history entry)
+  // instead of location.reload(). Pages whose content is server-rendered from
+  // live state (the Home workspace list) dispatch this to pick up changes
+  // without tearing down the persistent shell -- a full reload rebuilds the
+  // titlebar, which reads as the navbar blinking out. Falls back to a real
+  // reload when the current page isn't swappable.
+  window.addEventListener('minds:refresh-local-page', function () {
+    var here = window.location.pathname + window.location.search;
+    if (canSwapTo(here)) {
+      swapLocalPage(here, { fromHistory: true }).catch(function () {
+        window.location.reload();
+      });
+    } else {
+      window.location.reload();
     }
   });
 

@@ -837,7 +837,10 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     css = _TOKENS_CSS_PATH.read_text()
     assert "html.no-scrollbar-gutter" in css
     opted_out = '<html lang="en" class="no-scrollbar-gutter">'
-    assert opted_out in render_chrome_page()
+    # The agent-content wrapper additionally carries the ``agent-surface`` mode
+    # class (its viewport-lock CSS is keyed off the html class so the swap
+    # engine's html-class adoption toggles it correctly across in-place swaps).
+    assert '<html lang="en" class="no-scrollbar-gutter agent-surface">' in render_chrome_page()
     assert opted_out in render_overlay_host_page()
     assert opted_out in render_sidebar_page()
     assert opted_out in render_help_page(include_logs_setting=False, workspace_agent_id="")

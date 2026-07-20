@@ -68,13 +68,17 @@
 {# The agent content surface (pages.Chrome) is edge-to-edge, so it opts out of
    the global stable scrollbar gutter; scrolling local pages keep the gutter to
    avoid a sideways layout shift when a classic scrollbar appears. #}
-{% set _html_class = "no-scrollbar-gutter" if is_agent_content_surface else "" %}
+{% set _html_class = "no-scrollbar-gutter agent-surface" if is_agent_content_surface else "" %}
 {% set _head %}
 <style>
   /* Things that can't easily be expressed as Tailwind utilities. */
-{%- if is_agent_content_surface %}
-  html, body { height: 100%; overflow: hidden; }
-{%- endif %}
+  /* Viewport lock for the agent content surface. Keyed off the html class
+     (rather than emitted conditionally) because the swap engine replaces the
+     html/body classes on every in-place hub swap but never touches the head:
+     a conditional rule would leak the previous page's mode across swaps
+     (e.g. leaving a workspace wrapper's overflow:hidden on the Home page,
+     making it unscrollable). */
+  html.agent-surface, html.agent-surface body { height: 100%; overflow: hidden; }
   #minds-titlebar { -webkit-app-region: drag; }
   #minds-titlebar button { -webkit-app-region: no-drag; }
   /* When the inbox modal (or any modal hosted in the main process's

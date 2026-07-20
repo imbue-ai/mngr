@@ -668,7 +668,11 @@
           || renderedIds.some(function (id) { return !liveSet.has(id); });
         if (differs) {
           es.close();
-          location.reload();
+          // In-place refresh through the shell's swap engine (falls back to a
+          // real reload): a location.reload() would rebuild the persistent
+          // shell -- the titlebar visibly blinks out on every workspace-set
+          // change, constantly when workspaces flap between healthy and stuck.
+          window.dispatchEvent(new Event('minds:refresh-local-page'));
           return;
         }
         if (data.remote_workspace_states) {
@@ -680,7 +684,7 @@
           });
           if (remoteDiffers) {
             es.close();
-            location.reload();
+            window.dispatchEvent(new Event('minds:refresh-local-page'));
             return;
           }
         }
@@ -719,7 +723,9 @@
       }).then(function (res) {
         if (btn) btn.disabled = false;
         if (res.status === 200 && res.data.ok) {
-          window.location.reload();
+          // Guarded: the unlock fetch can resolve after this landing page was
+          // swapped out, and the refresh event targets the CURRENT page.
+          if (!pageTornDown) window.dispatchEvent(new Event('minds:refresh-local-page'));
           return;
         }
         if (errorEl) {
@@ -924,7 +930,8 @@
         </div>
         <script>
           (function () {
-            var t = setTimeout(function () { location.reload(); }, 2000);
+            // In-place refresh (no titlebar rebuild) while discovery finishes.
+            var t = setTimeout(function () { window.dispatchEvent(new Event('minds:refresh-local-page')); }, 2000);
             // Cancelled if the chrome shell swaps this page out in place first.
             window.addEventListener('minds:page-teardown', function () { clearTimeout(t); }, { once: true });
           })();
