@@ -154,6 +154,6 @@ Every PR must include one changelog entry file **per project it touches**. CI wi
 
 If you get a failure in `test_no_type_errors` that seems spurious, try running `uv sync --all-packages` and then re-running the tests. If that doesn't work, the error is probably real, and should be fixed.
 
-If you get a "ModuleNotFoundError" error for a 3rd-party dependency when running a command that is defined in this repo (like `mngr`), then run "uv tool uninstall imbue-mngr && uv tool install -e libs/mngr" (for the relevant tool) to refresh the dependencies for that tool, and then try running the command again.
+If you get a "ModuleNotFoundError" for a workspace package (e.g. `imbue.mngr_*`) when running a command from inside a worktree, run `uv sync --all-packages` from the worktree root. This rebuilds the worktree's venv so editable workspace packages resolve. **Do NOT** rebuild the host `imbue-mngr` tool install via `uv tool uninstall` / `uv tool install` against `imbue-mngr` (or the plugin packages: `apps/system_interface`, `libs/mngr_*`) — the Dockerfile sets up the host install with a specific plugin recipe; a partial reinstall silently drops the plugin set from mngr's venv and breaks downstream agent operations (e.g. `mngr stop` fails schema validation on `agent_types.claude`). If you genuinely need to rebuild the host install (Dockerfile change), do it from a shell outside any agent harness.
 
 If you get a failure when trying to commit the first time, just try committing again (the pre-commit hook returns a non-zero exit code when ruff reformats files).

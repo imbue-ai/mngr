@@ -1,0 +1,1 @@
+Rewrite the CLAUDE.md "ModuleNotFoundError" workaround to point at `uv sync --all-packages` (the safe worktree-local refresh) and to explicitly warn against running `uv tool uninstall imbue-mngr && uv tool install -e libs/mngr`. The old wording told agents to do exactly the operation that wedged the loop on 2026-05-11 by dropping the plugin set from mngr's venv.
