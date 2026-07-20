@@ -2590,6 +2590,13 @@ def handle_endpoint_errors() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
+# What counts as one "remote workspace": a pool-host row leased to the user
+# (running or stopped -- stopped workspaces still hold their lease and slice).
+# Shared by the lease-time quota check and the /account usage display so the
+# two can never drift.
+_COUNT_LEASED_HOSTS_SQL: Final = "SELECT COUNT(*) FROM pool_hosts WHERE leased_to_user = %s AND status = 'leased'"
+
+
 def _get_pool_db_connection() -> Any:
     """Open a psycopg2 connection to the Neon pool database."""
     database_url = os.environ["DATABASE_URL"]
@@ -3218,10 +3225,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                     # transaction, then enforce the workspace quota. The
                     # advisory lock releases automatically at commit/rollback.
                     cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (admin.username,))
-                    cur.execute(
-                        "SELECT COUNT(*) FROM pool_hosts WHERE leased_to_user = %s AND status = 'leased'",
-                        (admin.username,),
-                    )
+                    cur.execute(_COUNT_LEASED_HOSTS_SQL, (admin.username,))
                     count_row = cur.fetchone()
                     leased_count = int(count_row[0]) if count_row is not None else 0
                     if leased_count >= entitlements.max_remote_workspaces:
@@ -4949,10 +4953,7 @@ def _count_leased_hosts(username_prefix: str) -> int:
     conn = _get_pool_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM pool_hosts WHERE leased_to_user = %s AND status = 'leased'",
-                (username_prefix,),
-            )
+            cur.execute(_COUNT_LEASED_HOSTS_SQL, (username_prefix,))
             row = cur.fetchone()
     finally:
         conn.close()
