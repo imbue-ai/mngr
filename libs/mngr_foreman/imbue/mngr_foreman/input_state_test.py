@@ -16,6 +16,7 @@ def _agent_with_plugin(plugin: object) -> AgentDetails:
     """A stand-in exposing just ``.plugin`` (all the state helpers touch)."""
     return cast(AgentDetails, SimpleNamespace(plugin=plugin))
 
+
 # A normal, ready claude prompt (not blocked). Mirrors a real capture: a finished
 # assistant turn, then an empty input row and the status bar.
 _READY_PANE = """\

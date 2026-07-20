@@ -71,7 +71,9 @@ def _pool(host: _FakeHost, **kwargs: Any) -> ConnectionPool:
 
 
 def test_sanitize_accepts_uuid_ext() -> None:
-    assert sanitize_stored_name("a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab.png") == "a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab.png"
+    assert (
+        sanitize_stored_name("a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab.png") == "a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab.png"
+    )
     assert sanitize_stored_name("photo123.jpeg") == "photo123.jpeg"
 
 

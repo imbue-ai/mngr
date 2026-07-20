@@ -30,6 +30,9 @@ TRANSCRIPT_SUBPATH = "logs/claude_transcript/events.jsonl"
 
 # Sentinel a reader raises/returns for "file not there yet" -- treated as empty.
 ReaderFn = Callable[[], bytes]
+# Returns the transcript file's current byte size (or None if unavailable). A
+# cheap stat used to skip the (potentially multi-MB) read when nothing changed.
+SizeFn = Callable[[], "int | None"]
 
 
 class TranscriptTailer:
@@ -40,9 +43,11 @@ class TranscriptTailer:
     partial line is never returned until its newline arrives on a later poll.
     """
 
-    def __init__(self, reader: ReaderFn) -> None:
+    def __init__(self, reader: ReaderFn, size_fn: SizeFn | None = None) -> None:
         self._reader = reader
+        self._size_fn = size_fn
         self._byte_offset = 0
+        self._last_size: int | None = None
 
     @property
     def byte_offset(self) -> int:
@@ -55,6 +60,16 @@ class TranscriptTailer:
         next poll retries from the same position (matching mngr's follower,
         which tolerates a transiently-unreadable remote file).
         """
+        # Cheap stat-before-read: if a size probe is available and the file's
+        # byte size is unchanged since the last poll, skip the (potentially
+        # multi-MB) read entirely. Size is byte-exact and monotonic-on-append, so
+        # unlike an mtime check it can't miss a same-second write; a shrink still
+        # differs from the last size, so rotation is never skipped.
+        if self._size_fn is not None:
+            size = self._size_fn()
+            if size is not None and size == self._last_size:
+                return []
+            self._last_size = size
         try:
             content_bytes = self._reader()
         except (FileNotFoundError, OSError) as e:

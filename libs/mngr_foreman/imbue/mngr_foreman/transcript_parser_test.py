@@ -29,7 +29,9 @@ def _tool_result(uuid: str, ts: str, call_id: str, output: str, is_error: bool =
         type="user",
         uuid=uuid,
         timestamp=ts,
-        message={"content": [{"type": "tool_result", "tool_use_id": call_id, "content": output, "is_error": is_error}]},
+        message={
+            "content": [{"type": "tool_result", "tool_use_id": call_id, "content": output, "is_error": is_error}]
+        },
     )
 
 
@@ -69,7 +71,10 @@ def test_write_and_multiedit_full_inputs() -> None:
         "a2",
         "t2",
         "MultiEdit",
-        {"file_path": "/b", "edits": [{"old_string": "o1", "new_string": "n1"}, {"old_string": "o2", "new_string": "n2"}]},
+        {
+            "file_path": "/b",
+            "edits": [{"old_string": "o1", "new_string": "n1"}, {"old_string": "o2", "new_string": "n2"}],
+        },
     )
     events = parse_claude_session_lines([write_line, multi_line])
     assert events[0]["tool_calls"][0]["input_full"]["content"] == "line1\nline2"
@@ -259,10 +264,12 @@ def test_tool_result_non_base64_image_dropped() -> None:
 
 
 def test_tool_result_image_count_capped() -> None:
-    imgs = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": str(i)}} for i in range(10)]
-    tr = [e for e in parse_claude_session_lines([_image_result("u4", "t4", "c4", imgs)]) if e["type"] == "tool_result"][
-        0
+    imgs = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": str(i)}} for i in range(10)
     ]
+    tr = [
+        e for e in parse_claude_session_lines([_image_result("u4", "t4", "c4", imgs)]) if e["type"] == "tool_result"
+    ][0]
     assert len(tr["images"]) == 6  # _MAX_TOOL_RESULT_IMAGES
 
 
@@ -290,7 +297,9 @@ def test_user_image_only_message_still_emitted() -> None:
         type="user",
         uuid="up2",
         timestamp="t2",
-        message={"content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "IO"}}]},
+        message={
+            "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "IO"}}]
+        },
     )
     events = [e for e in parse_claude_session_lines([line]) if e["type"] == "user_message"]
     assert len(events) == 1

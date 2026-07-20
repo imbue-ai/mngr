@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import shlex
 import time
 from collections.abc import Iterator
 from importlib import resources
@@ -27,7 +28,9 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import refresh_events_target
 from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_foreman.agent_registry import AgentRegistry
 from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.input_state import detect_blocking_dialog
@@ -44,6 +47,7 @@ from imbue.mngr_foreman.transcript_images import externalize_event_images
 from imbue.mngr_foreman.transcript_images import get_cached_image
 from imbue.mngr_foreman.transcript_parser import parse_claude_session_lines
 from imbue.mngr_foreman.transcript_tail import ReaderFn
+from imbue.mngr_foreman.transcript_tail import SizeFn
 from imbue.mngr_foreman.transcript_tail import TRANSCRIPT_SUBPATH
 from imbue.mngr_foreman.transcript_tail import TranscriptTailer
 from imbue.mngr_foreman.uploads import MAX_UPLOAD_BYTES
@@ -200,14 +204,20 @@ def create_app(
     def api_transcript(name: str) -> Response:
         agent = registry.get_agent(name)
         if agent is None:
-            return Response(_sse({"type": "error", "message": f"No agent named {name!r}"}),
-                            mimetype="text/event-stream", headers=_sse_headers())
+            return Response(
+                _sse({"type": "error", "message": f"No agent named {name!r}"}),
+                mimetype="text/event-stream",
+                headers=_sse_headers(),
+            )
         if agent.type != "claude":
-            return Response(_sse({"type": "unsupported", "agent_type": agent.type}),
-                            mimetype="text/event-stream", headers=_sse_headers())
+            return Response(
+                _sse({"type": "unsupported", "agent_type": agent.type}),
+                mimetype="text/event-stream",
+                headers=_sse_headers(),
+            )
 
         return Response(
-            _transcript_stream(mngr_ctx, agent, max_tool_output_chars),
+            _transcript_stream(mngr_ctx, agent, max_tool_output_chars, pool),
             mimetype="text/event-stream",
             headers=_sse_headers(),
         )
@@ -222,8 +232,9 @@ def create_app(
         if cached is None:
             return Response("Not found", status=404, mimetype="text/plain")
         media_type, raw = cached
-        return Response(raw, mimetype=media_type.split(";")[0], content_type=media_type,
-                        headers={"Cache-Control": "no-cache"})
+        return Response(
+            raw, mimetype=media_type.split(";")[0], content_type=media_type, headers={"Cache-Control": "no-cache"}
+        )
 
     # ---- send message -----------------------------------------------------
 
@@ -361,12 +372,16 @@ def _sse_headers() -> dict[str, str]:
     }
 
 
-def _build_transcript_reader(mngr_ctx: MngrContext, agent: AgentDetails) -> ReaderFn | None:
-    """Build a ``reader() -> bytes`` over the agent's mirrored transcript file.
+def _build_transcript_reader(
+    mngr_ctx: MngrContext, agent: AgentDetails, pool: ConnectionPool
+) -> tuple[ReaderFn, SizeFn] | None:
+    """Build ``(reader, size_fn)`` over the agent's mirrored transcript file.
 
-    Resolves an ``EventsTarget`` for the agent and reads the raw-transcript file
-    beneath its ``events_path``'s parent. The target is refreshed periodically
-    (``refresh_events_target``) so the reader survives a host stop/start.
+    ``reader() -> bytes`` reads the raw-transcript file beneath the resolved
+    ``EventsTarget``'s ``events_path`` parent; ``size_fn() -> int | None`` cheaply
+    stats its byte size over the warm connection pool so the poll can skip the read
+    when nothing changed. The target is refreshed periodically so both survive a
+    host stop/start.
     """
     initial_target = try_build_events_target_for_agent(
         mngr_ctx=mngr_ctx,
@@ -380,6 +395,7 @@ def _build_transcript_reader(mngr_ctx: MngrContext, agent: AgentDetails) -> Read
 
     target: EventsTarget = initial_target
     refreshed_at: float = time.monotonic()
+    agent_name = str(agent.name)
 
     def _transcript_path(t: EventsTarget) -> Path:
         assert t.events_path is not None
@@ -398,21 +414,38 @@ def _build_transcript_reader(mngr_ctx: MngrContext, agent: AgentDetails) -> Read
             return b""
         return target.host.read_file(_transcript_path(target))
 
-    return reader
+    def size_fn() -> int | None:
+        if target.events_path is None:
+            return None
+        path = _transcript_path(target)
+
+        def _stat(_a: AgentInterface, host: OnlineHostInterface) -> int | None:
+            result = host.execute_stateful_command(f"stat -c %s {shlex.quote(str(path))} 2>/dev/null")
+            out = (result.stdout or "").strip()
+            return int(out) if result.success and out.isdigit() else None
+
+        try:
+            return pool.run_on_host(agent_name, _stat)
+        except Exception:  # noqa: BLE001 - a failed stat just means "read anyway"
+            return None
+
+    return reader, size_fn
 
 
 def _transcript_stream(
     mngr_ctx: MngrContext,
     agent: AgentDetails,
     max_tool_output_chars: int,
+    pool: ConnectionPool,
 ) -> Iterator[str]:
     """SSE generator: full backfill, then live events, with periodic heartbeats."""
-    reader = _build_transcript_reader(mngr_ctx, agent)
-    if reader is None:
+    built = _build_transcript_reader(mngr_ctx, agent, pool)
+    if built is None:
         yield _sse({"type": "error", "message": "Agent host is not readable (offline and no volume)."})
         return
+    reader, size_fn = built
 
-    tailer = TranscriptTailer(reader)
+    tailer = TranscriptTailer(reader, size_fn=size_fn)
     existing_event_ids: set[str] = set()
     tool_name_by_call_id: dict[str, str] = {}
 

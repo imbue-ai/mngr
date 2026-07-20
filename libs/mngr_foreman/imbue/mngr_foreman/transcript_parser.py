@@ -288,11 +288,25 @@ def parse_claude_session_lines(
 
         if event_type == "assistant":
             _parse_assistant_message(
-                raw, uuid, timestamp, existing_event_ids, tool_name_by_call_id, new_events, max_tool_output_chars, session_id
+                raw,
+                uuid,
+                timestamp,
+                existing_event_ids,
+                tool_name_by_call_id,
+                new_events,
+                max_tool_output_chars,
+                session_id,
             )
         elif event_type == "user":
             _parse_user_message(
-                raw, uuid, timestamp, existing_event_ids, tool_name_by_call_id, new_events, max_tool_output_chars, session_id
+                raw,
+                uuid,
+                timestamp,
+                existing_event_ids,
+                tool_name_by_call_id,
+                new_events,
+                max_tool_output_chars,
+                session_id,
             )
         elif event_type == "attachment":
             _parse_queued_command_attachment(raw, uuid, timestamp, existing_event_ids, new_events, session_id)

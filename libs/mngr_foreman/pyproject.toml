@@ -38,9 +38,37 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
+  "--cov=imbue.mngr_foreman",
+  "--cov-report=term-missing",
+  "--cov-report=xml",
   "--durations=20",
   "--timeout=30",
   "--timeout-method=signal",
+  "--coverage-to-file",
+]
+
+[tool.coverage.run]
+parallel = true
+concurrency = ["multiprocessing"]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+]
+
+[tool.coverage.report]
+# Foreman is I/O-heavy (Flask SSE/routes, pty<->ws terminal bridge, remote SSH);
+# the pure logic (parser, uploads, input-state, connection pool, transcript
+# images/tailer) is well covered, but the server/terminal glue needs a live mngr
+# host to exercise. Gated at its own lower threshold and excluded from the repo's
+# combined 80% gate (see libs/mngr/pyproject.toml omit), matching mngr_vps/vultr.
+fail_under = 50
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
 ]
 
 [tool.pyright]

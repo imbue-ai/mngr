@@ -29,9 +29,7 @@ _LOCK = threading.Lock()
 
 
 def _evict_locked() -> None:
-    while _CACHE and (
-        len(_CACHE) > _CACHE_MAX_ENTRIES or sum(len(v[2]) for v in _CACHE.values()) > _CACHE_MAX_BYTES
-    ):
+    while _CACHE and (len(_CACHE) > _CACHE_MAX_ENTRIES or sum(len(v[2]) for v in _CACHE.values()) > _CACHE_MAX_BYTES):
         oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
         del _CACHE[oldest]
 
