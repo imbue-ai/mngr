@@ -74,9 +74,11 @@ class FakeCloudflareOps:
         # Stored bytes per bucket, served by both the per-bucket REST usage
         # fake and the GraphQL sweep fake; tests set entries directly.
         self.usage_bytes_by_bucket: dict[str, int] = {}
-        # Failure-injection knob: the next create_access_app call raises,
-        # exercising the add-service rollback path.
+        # Failure-injection knobs: the next create_access_app (or
+        # create_access_policy) call raises, exercising the add-service
+        # rollback paths.
         self.fail_next_create_access_app = False
+        self.fail_next_create_access_policy = False
 
     def create_tunnel(self, name: str) -> dict[str, Any]:
         tunnel_id = f"tunnel-{self._next_tunnel_id}"
@@ -161,6 +163,9 @@ class FakeCloudflareOps:
         return list(self.access_policies.get(app_id, []))
 
     def create_access_policy(self, app_id: str, policy: dict[str, Any]) -> dict[str, Any]:
+        if self.fail_next_create_access_policy:
+            self.fail_next_create_access_policy = False
+            raise CloudflareApiError(status_code=500, errors=[{"message": "simulated Access policy failure"}])
         policy_id = f"policy-{self._next_policy_id}"
         self._next_policy_id += 1
         stored = {**policy, "id": policy_id}

@@ -1626,16 +1626,16 @@ class ForwardingCtx:
         if policy is None:
             raise ServicePolicyMissingError(tunnel_name)
         created_access_app_id: str | None = None
-        if self.ops.get_access_app_by_domain(hostname) is None:
-            # A pre-existing app means the service was configured before (with a
-            # possibly customized policy) -- leave it untouched on re-add.
-            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
-            created_access_app_id = access_app["id"]
-            for cf_policy in policy_to_cf_rules(policy):
-                self.ops.create_access_policy(access_app["id"], cf_policy)
-
         is_dns_created_here = False
         try:
+            if self.ops.get_access_app_by_domain(hostname) is None:
+                # A pre-existing app means the service was configured before (with a
+                # possibly customized policy) -- leave it untouched on re-add.
+                access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
+                created_access_app_id = access_app["id"]
+                for cf_policy in policy_to_cf_rules(policy):
+                    self.ops.create_access_policy(access_app["id"], cf_policy)
+
             cname_target = f"{tid}.cfargotunnel.com"
             existing_dns = self.ops.list_dns_records(name=hostname)
             if not existing_dns:

@@ -3514,6 +3514,27 @@ def test_ctx_add_service_rolls_back_on_access_app_failure() -> None:
     assert [r for r in ingress if "hostname" in r] == []
 
 
+def test_ctx_add_service_rolls_back_access_app_on_policy_failure() -> None:
+    """A policy-attachment failure must delete the just-created Access App (no policy-less app remains)."""
+    ctx = make_fake_forwarding_ctx()
+    info = ctx.create_tunnel("alice", "agent1")
+    ctx.set_tunnel_auth(
+        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "o@x.com"}}]}])
+    )
+    ctx.fake.fail_next_create_access_policy = True
+    with pytest.raises(CloudflareApiError):
+        ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    assert ctx.fake.dns_records == []
+    assert ctx.fake.access_apps == {}
+    ingress = ctx.fake.tunnel_configs[info.tunnel_id]["config"]["ingress"]
+    assert [r for r in ingress if "hostname" in r] == []
+    # A retry after the transient failure succeeds and attaches the policy.
+    retried = ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    app_ids = [a["id"] for a in ctx.fake.access_apps.values() if a["domain"] == retried.hostname]
+    assert len(app_ids) == 1
+    assert ctx.fake.access_policies[app_ids[0]] != []
+
+
 def test_ctx_add_service_without_any_policy_is_refused() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
