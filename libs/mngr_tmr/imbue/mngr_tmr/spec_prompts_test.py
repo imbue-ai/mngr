@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr_mapreduce.launching import REDUCER_INPUTS_DIRNAME
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
@@ -135,3 +137,30 @@ def test_spec_reducer_prompt_uses_override_template(tmp_path: Path) -> None:
         template_path=override,
     )
     assert prompt.startswith("CUSTOM REDUCER over apps/minds/specs")
+
+
+def test_committed_minds_specs_mapper_template_renders() -> None:
+    # The minds variant ships apps/minds/tmr/specs_mapper.j2 as an {% extends %}
+    # of the packaged template; render it through the builder to prove it is
+    # valid Jinja, fills both block slots, and inherits the contract body.
+    repo_root = Path(__file__).resolve().parents[4]
+    minds_template = repo_root / "apps" / "minds" / "tmr" / "specs_mapper.j2"
+    if not minds_template.is_file():
+        pytest.skip("apps/minds tree not present (running outside the monorepo checkout)")
+    prompt = build_spec_mapper_prompt(
+        feature_path="apps/minds/specs/authentication/signin.feature",
+        units=_sample_units(),
+        corpus_root="apps/minds/specs",
+        test_roots=("apps/minds",),
+        testing_flags=(),
+        template_path=minds_template,
+    )
+    # The variant's blocks are filled with minds specifics...
+    assert "minds app" in prompt
+    assert "minds_snapshot_resume" in prompt
+    # ...the generic placement default is replaced...
+    assert "test taxonomy" in prompt  # the minds block also speaks of the repo taxonomy
+    assert "@pytest.mark.release" in prompt
+    # ...and the packaged contract body is inherited, not duplicated.
+    assert "READ-ONLY" in prompt
+    assert "PARTIAL_STEADY" in prompt

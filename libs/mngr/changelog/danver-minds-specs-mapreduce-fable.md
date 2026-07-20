@@ -1,0 +1,1 @@
+Add the generated CLI documentation page for the new `mngr tmr-specs` command (`docs/commands/secondary/tmr-specs.md`), the spec-anchored test map-reduce recipe registered by the `imbue-mngr-tmr` plugin.
