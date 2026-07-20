@@ -270,10 +270,11 @@ def test_specs_list_area_is_segment_granular_not_a_string_prefix(tmp_path: Path)
     assert result.stdout == ""
 
 
-def test_specs_group_exposes_validate_and_list_but_not_query() -> None:
+def test_specs_group_exposes_validate_list_and_matrix_but_not_query() -> None:
     result = CliRunner().invoke(cli, ["specs", "--help"])
 
     assert result.exit_code == 0, result.output
     assert "validate" in result.output
     assert "list" in result.output
+    assert "matrix" in result.output
     assert "query" not in result.output

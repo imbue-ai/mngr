@@ -15,6 +15,14 @@ class SpecUnitKind(UpperCaseStrEnum):
     RULE = auto()
 
 
+class SpecCoverage(UpperCaseStrEnum):
+    """How completely a spec unit is witnessed by tests that back-link to its coordinate."""
+
+    FULL = auto()
+    PARTIAL = auto()
+    NONE = auto()
+
+
 class SpecStep(FrozenModel):
     """One step of a spec unit: keyword plus text (table/docstring arguments are not carried)."""
 
@@ -58,3 +66,15 @@ class CorpusScan(FrozenModel):
     units: tuple[SpecUnit, ...] = Field(description="All representable units, in file order then document order")
     violations: tuple[SpecViolation, ...] = Field(description="All language violations found, in deterministic order")
     feature_file_count: int = Field(description="Count of .feature files seen during the scan")
+
+
+class WitnessLink(FrozenModel):
+    """One ``witnesses`` marker harvested from the test tree: a test's back-link to a spec coordinate."""
+
+    test: str = Field(description="The pytest node id of the test carrying the marker")
+    coordinate: str | None = Field(
+        description="The coordinate from the marker's first positional arg, or None when it is missing or not a string"
+    )
+    partial: str | None = Field(
+        description="The marker's 'partial' note stating what the test does not cover, or None when it covers the unit fully"
+    )

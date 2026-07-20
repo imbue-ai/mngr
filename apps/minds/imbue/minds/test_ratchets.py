@@ -332,6 +332,14 @@ def test_prevent_direct_subprocess() -> None:
         # for the same e2e / snapshot entrypoints. Same justification: one-shot
         # git shell-outs from test / operator code, never from product code.
         "*/desktop_client/default_workspace_template_worktree.py",
+        # ``behavioral_specs/witnesses.py`` shells out to a single, one-shot
+        # ``pytest --collect-only`` to harvest ``witnesses`` markers for
+        # ``minds specs matrix``. It is a synchronous, read-only probe bounded
+        # by a hard ``subprocess.run(timeout=...)`` (which kills the child on
+        # expiry), so there is no lingering process for a ConcurrencyGroup to
+        # clean up -- the same one-shot-probe justification as
+        # ``deployment_tests/helpers.py``'s ``modal environment list`` call.
+        "*/behavioral_specs/witnesses.py",
     )
     # The one allowed match is ``cli/env.py::_exec_into_recover``,
     # which uses ``os.execvp`` to REPLACE the current process with

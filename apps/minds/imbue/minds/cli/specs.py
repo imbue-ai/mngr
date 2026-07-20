@@ -13,6 +13,7 @@ default invocation.
 
 import json
 from collections.abc import Callable
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
@@ -30,8 +31,16 @@ from imbue.minds.core.behavioral_specs.data_types import CorpusScan
 from imbue.minds.core.behavioral_specs.data_types import SpecUnit
 from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
 from imbue.minds.core.behavioral_specs.data_types import SpecViolation
+from imbue.minds.core.behavioral_specs.data_types import WitnessLink
+from imbue.minds.core.behavioral_specs.witnesses import find_broken_witness_links
+from imbue.minds.core.behavioral_specs.witnesses import group_witness_links_by_coordinate
+from imbue.minds.core.behavioral_specs.witnesses import harvest_witness_links
+from imbue.minds.core.behavioral_specs.witnesses import render_broken_witness_link_diagnostic
+from imbue.minds.core.behavioral_specs.witnesses import render_matrix_record
 from imbue.minds.errors import SpecCorpusRootNotFoundError
+from imbue.minds.errors import SpecDanglingWitnessError
 from imbue.minds.errors import SpecListingIncompleteError
+from imbue.minds.errors import SpecTestsRootNotFoundError
 from imbue.minds.errors import SpecValidationFailedError
 from imbue.minds.utils.output import write_stdout_line
 from imbue.mngr.cli.output_helpers import write_stderr_line
@@ -39,6 +48,10 @@ from imbue.mngr.cli.output_helpers import write_stderr_line
 # The real corpus, relative to the repo root (the documented working directory
 # for ``uv run minds specs ...``).
 DEFAULT_CORPUS_ROOT: Final[Path] = Path("apps/minds/specs")
+
+# The default test tree ``matrix`` collects witnesses markers from, relative to
+# the repo root (the documented working directory).
+DEFAULT_TESTS_ROOT: Final[Path] = Path("apps/minds")
 
 
 def _root_option(command: Callable[..., None]) -> Callable[..., None]:
@@ -76,9 +89,11 @@ def specs() -> None:
     """Inspect and validate the behavioral-spec corpus (apps/minds/specs).
 
     The corpus language (folders, tags, coordinates, invariants, sidecars) is
-    defined by the minds-behavioral-specs skill; `validate` enforces it, and
-    `list` emits one JSONL record per authored unit (Scenario, Scenario
-    Outline, or Rule), optionally filtered by kind, area, tag, name, or step.
+    defined by the minds-behavioral-specs skill; `validate` enforces it, `list`
+    emits one JSONL record per authored unit (Scenario, Scenario Outline, or
+    Rule), optionally filtered by kind, area, tag, name, or step, and `matrix`
+    joins the corpus against the `witnesses` test markers to report per-unit
+    coverage.
     """
 
 
@@ -98,17 +113,25 @@ def _emit_unit_records(
         write_stdout_line(json.dumps(spec_unit_to_record(unit, all_units, corpus_root), ensure_ascii=False))
 
 
+@pure
+def _omitting_violations(scan: CorpusScan) -> tuple[SpecViolation, ...]:
+    return tuple(violation for violation in scan.violations if violation.is_unit_omitted)
+
+
+def _raise_if_units_were_omitted(omitting_violations: Sequence[SpecViolation]) -> None:
+    if omitting_violations:
+        raise SpecListingIncompleteError(
+            f"the listing is incomplete: {len(omitting_violations)} problem(s) prevented units from being "
+            "represented; run `minds specs validate` for the full picture"
+        )
+
+
 def _fail_if_units_were_omitted(scan: CorpusScan) -> None:
     """Surface unit-omitting problems on stderr and exit nonzero: the emitted listing is incomplete."""
-    omitting_violations = tuple(violation for violation in scan.violations if violation.is_unit_omitted)
-    if not omitting_violations:
-        return
+    omitting_violations = _omitting_violations(scan)
     for violation in omitting_violations:
         write_stderr_line(_format_violation(violation))
-    raise SpecListingIncompleteError(
-        f"the listing is incomplete: {len(omitting_violations)} problem(s) prevented units from being "
-        "represented; run `minds specs validate` for the full picture"
-    )
+    _raise_if_units_were_omitted(omitting_violations)
 
 
 @specs.command(name="validate")
@@ -238,3 +261,83 @@ def specs_list(
     )
     _emit_unit_records(matching_units, scan.units, corpus_root)
     _fail_if_units_were_omitted(scan)
+
+
+def _require_test_roots(test_roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    for test_root in test_roots:
+        if not test_root.exists():
+            raise SpecTestsRootNotFoundError(
+                f"Tests root '{test_root}' does not exist. "
+                f"Run from the repo root (where the default '{DEFAULT_TESTS_ROOT}' exists) or pass --tests."
+            )
+    return test_roots
+
+
+def _fail_matrix_if_incomplete_or_broken(scan: CorpusScan, broken_links: Sequence[WitnessLink]) -> None:
+    """Surface corpus omissions and broken witness links on stderr, then exit nonzero.
+
+    Coverage gaps are data (exit 0); this only fires for corpus problems that
+    omitted units (identical treatment to ``list``) or for markers that name no
+    real unit. When both occur, both diagnostic sets print and the omission
+    error is raised first.
+    """
+    omitting_violations = _omitting_violations(scan)
+    for violation in omitting_violations:
+        write_stderr_line(_format_violation(violation))
+    for broken_link in broken_links:
+        write_stderr_line(render_broken_witness_link_diagnostic(broken_link))
+    _raise_if_units_were_omitted(omitting_violations)
+    if broken_links:
+        raise SpecDanglingWitnessError(
+            f"{len(broken_links)} witnesses marker(s) do not name a real spec unit; "
+            "fix the coordinate(s) or the marker usage (see the stderr diagnostics above)"
+        )
+
+
+@specs.command(name="matrix")
+@_root_option
+@click.option(
+    "--tests",
+    "test_roots",
+    type=click.Path(path_type=Path),
+    multiple=True,
+    default=(DEFAULT_TESTS_ROOT,),
+    show_default=True,
+    help=(
+        "Test root to collect `witnesses` markers from; repeatable. Passed to an inner "
+        "pytest --collect-only run, so paths resolve from the current directory -- the default "
+        "collects the whole minds test tree, so run from the repo root (or pass --tests)."
+    ),
+)
+def specs_matrix(corpus_root: Path, test_roots: tuple[Path, ...]) -> None:
+    """Join the corpus against the `witnesses` test markers and emit per-unit coverage as JSONL.
+
+    Runs an inner `pytest --collect-only` over the --tests roots (so it needs
+    the dev environment), harvesting every `witnesses(coordinate, partial=...)`
+    marker, then emits one JSONL record per corpus unit on stdout, in corpus
+    scan order. Record fields, in order: coordinate, kind (scenario |
+    scenario-outline | rule), name, file (as rooted at --root; repo-relative for
+    the default invocation), line, coverage (full | partial | none), and
+    witnesses (objects with the test's pytest node id and its partial note, in
+    collection order). A record's coverage is "full" when at least one
+    witnessing test covers the unit fully (no partial note), "partial" when
+    witnesses exist but every one is partial, and "none" when no test witnesses
+    it.
+
+    Coverage gaps are data, not errors: an all-"none" corpus still exits 0.
+    Broken witness links are errors: a marker whose coordinate matches no unit
+    (dangling), or invalid marker usage (no positional coordinate, or a
+    non-string one), is reported as one `<node id>: ...` line on stderr after
+    all stdout records, then exits nonzero. Corpus problems that omit units are
+    treated exactly as in `list`. Stdout carries nothing but JSONL.
+    """
+    scan = scan_corpus(_require_corpus_root(corpus_root))
+    resolved_test_roots = _require_test_roots(test_roots)
+    links = harvest_witness_links(resolved_test_roots)
+    links_by_coordinate = group_witness_links_by_coordinate(links)
+    for unit in scan.units:
+        record = render_matrix_record(unit, links_by_coordinate.get(unit.coordinate, []))
+        write_stdout_line(json.dumps(record, ensure_ascii=False))
+    unit_coordinates = frozenset(unit.coordinate for unit in scan.units)
+    broken_links = find_broken_witness_links(links, unit_coordinates)
+    _fail_matrix_if_incomplete_or_broken(scan, broken_links)
