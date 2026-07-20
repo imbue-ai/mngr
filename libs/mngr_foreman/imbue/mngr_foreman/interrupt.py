@@ -17,6 +17,9 @@ from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 
+# Bound the send-keys command so an unresponsive host can't wedge the interrupt.
+_HOST_COMMAND_TIMEOUT_SECONDS = 10.0
+
 
 class InterruptError(Exception):
     """Raised when the interrupt keystroke could not be delivered."""
@@ -50,7 +53,7 @@ def send_interrupt_to_agent(mngr_ctx: MngrContext, agent_name: str) -> None:
     )
     command = f"tmux send-keys -t {target.as_shell_arg()} Escape"
     try:
-        result = host.execute_stateful_command(command)
+        result = host.execute_stateful_command(command, timeout_seconds=_HOST_COMMAND_TIMEOUT_SECONDS)
     except Exception as e:  # noqa: BLE001 - host/exec errors become a clean interrupt error
         raise InterruptError(f"Failed to send interrupt to {agent_name!r}: {e}") from e
 

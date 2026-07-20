@@ -19,8 +19,15 @@ keepalive -- no compute, negligible memory. This trades ~nothing for removing th
 ~3s discovery from the hot paths.
 
 Concurrency: the Flask server is threaded and a single paramiko connection is not
-safe to drive from multiple threads at once, so each host handle carries a lock
-and all access to a host is serialized through ``run_on_host``.
+safe to drive from multiple threads at once. Providers cache one
+``HostInterface`` per ``host_id``, so two agents on the same host resolve to the
+*same* host object and must not drive it concurrently. ``run_on_host`` therefore
+serializes on a lock keyed by the **host object** (not the per-agent handle):
+resolution happens under the per-agent handle lock, but the command runs under
+the shared per-host lock, so every command to a given connection is serialized
+regardless of which agent triggered it. The keepalive fans out across hosts with
+per-host worker threads and a bounded command timeout, so one hung host (TCP up
+but unresponsive) can neither block the rest of the fleet nor stall the loop.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
@@ -51,6 +59,11 @@ _ON_STATES = frozenset({"RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"})
 _KEEPALIVE_INTERVAL_SECONDS = 25.0
 # Cached send matches self-heal within this window if an agent moved hosts.
 _MATCHES_TTL_SECONDS = 60.0
+# Bound every keepalive SSH touch so an unresponsive host (TCP up, no reply) can't
+# block indefinitely; the fan-out keeps the rest of the fleet warm meanwhile.
+_KEEPALIVE_TIMEOUT_SECONDS = 10.0
+# Cap the keepalive fan-out so a large fleet doesn't spawn a thread per host.
+_KEEPALIVE_MAX_WORKERS = 16
 
 
 @dataclass
@@ -71,6 +84,12 @@ class ConnectionPool:
         self.mngr_ctx = mngr_ctx
         self._lock = threading.Lock()
         self._handles: dict[str, _Handle] = {}
+        # Serialization lock per *host object*, keyed by id() so two agents that
+        # resolve to the same cached HostInterface share one lock around its
+        # paramiko connection. Bounded by the number of distinct host objects ever
+        # resolved (tiny); id() reuse after GC is harmless (only one live object
+        # can hold a given id, and a GC'd host has no live callers to serialize).
+        self._host_locks: dict[int, threading.Lock] = {}
         self._registry: Any = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -82,6 +101,16 @@ class ConnectionPool:
                 handle = _Handle()
                 self._handles[agent_name] = handle
             return handle
+
+    def _host_lock_for(self, host: OnlineHostInterface) -> threading.Lock:
+        """Return the lock that serializes all commands to ``host``'s connection."""
+        key = id(host)
+        with self._lock:
+            lock = self._host_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._host_locks[key] = lock
+            return lock
 
     def invalidate(self, agent_name: str) -> None:
         """Forget a cached handle so the next access re-resolves (e.g. after error)."""
@@ -108,7 +137,10 @@ class ConnectionPool:
     def run_on_host(self, agent_name: str, fn: Callable[[AgentInterface, OnlineHostInterface], T]) -> T:
         """Resolve (cached) and run ``fn(agent, host)`` serialized on the host lock.
 
-        Drops the cached handle on any failure so the next call re-resolves.
+        Resolution happens under the per-agent handle lock; the command then runs
+        under the per-*host* lock, so two agents sharing one host connection can't
+        drive it concurrently. Drops the cached handle on any failure so the next
+        call re-resolves.
         """
         handle = self._handle_for(agent_name)
         try:
@@ -122,7 +154,11 @@ class ConnectionPool:
                         allow_auto_start=False,
                         mngr_ctx=self.mngr_ctx,
                     )
-                return fn(handle.agent, handle.host)
+                agent, host = handle.agent, handle.host
+            # Execute outside the agent handle lock, under the shared per-host lock,
+            # so all commands to this connection serialize even across agents.
+            with self._host_lock_for(host):
+                return fn(agent, host)
         except Exception:
             self.invalidate(agent_name)
             raise
@@ -142,6 +178,11 @@ class ConnectionPool:
             except Exception as e:  # noqa: BLE001 - a bad tick must not kill the maintainer
                 logger.trace("warm-pool tick error: {}", e)
 
+    def _warm_one(self, name: str) -> None:
+        """Keep one agent's send match-list fresh and its SSH connection alive."""
+        self.get_send_matches(name)
+        self.run_on_host(name, _ping_host)
+
     def _tick(self) -> None:
         if self._registry is None:
             return
@@ -153,24 +194,35 @@ class ConnectionPool:
             for name in list(self._handles):
                 if name not in on_agents:
                     self._handles.pop(name, None)
-        # Warm each on-state agent: keep the send match-list fresh AND the SSH
-        # connection alive, so even the first user action hits a warm path.
-        for name in on_agents:
-            try:
-                self.get_send_matches(name)
-                self.run_on_host(name, _ping_host)
-            except Exception as e:  # noqa: BLE001 - one unreachable host must not stop the rest
-                logger.trace("warm-pool keepalive for {} failed: {}", name, e)
+        if not on_agents:
+            return
+        # Warm agents concurrently: each SSH touch is bounded by
+        # _KEEPALIVE_TIMEOUT_SECONDS, and the fan-out means one hung host neither
+        # blocks the others nor stalls the loop (worst case ~ one timeout, not N).
+        futures = {}
+        with ThreadPoolExecutor(
+            max_workers=min(_KEEPALIVE_MAX_WORKERS, len(on_agents)), thread_name_prefix="foreman-warm"
+        ) as executor:
+            for name in on_agents:
+                futures[name] = executor.submit(self._warm_one, name)
+        for name, future in futures.items():
+            error = future.exception()
+            if error is not None:
+                logger.trace("warm-pool keepalive for {} failed: {}", name, error)
 
     def stop(self) -> None:
         self._stop.set()
 
 
 def _ping_host(_agent: AgentInterface, host: OnlineHostInterface) -> None:
-    """Cheap liveness touch to keep an SSH connection warm; no-op for local hosts."""
+    """Cheap liveness touch to keep an SSH connection warm; no-op for local hosts.
+
+    Bounded by a timeout so a host that accepts TCP but never replies can't wedge
+    the keepalive on this connection.
+    """
     if getattr(host, "is_local", False):
         return
-    host.execute_stateful_command("true")
+    host.execute_stateful_command("true", timeout_seconds=_KEEPALIVE_TIMEOUT_SECONDS)
 
 
 def send_via_pool(pool: ConnectionPool, agent_name: str, message: str) -> list[tuple[str, str]]:

@@ -212,19 +212,33 @@
   // while the tab is hidden (slower) so the title stays live in background tabs.
   function installStatePolling(agentName, onState) {
     let timer = null;
+    let burstUntil = 0;
     function tick() {
       fetch("/api/agents/" + encodeURIComponent(agentName) + "/input-state")
         .then((r) => r.json())
         .then(onState)
         .catch(() => {});
     }
+    function interval() {
+      if (document.hidden) return 15000;
+      return Date.now() < burstUntil ? 800 : 4000;
+    }
     function schedule() {
       if (timer) clearInterval(timer);
-      timer = setInterval(tick, document.hidden ? 15000 : 4000);
+      timer = setInterval(tick, interval());
+    }
+    // After a send, poll input-state rapidly for a short window so the composer's
+    // working/blocked state (and any API-key/permission dialog) shows up fast.
+    function burst() {
+      burstUntil = Date.now() + 12000;
+      tick();
+      schedule();
+      setTimeout(schedule, 12000);
     }
     document.addEventListener("visibilitychange", () => { tick(); schedule(); });
     tick();
     schedule();
+    return { burst: burst };
   }
 
   // ==========================================================================
@@ -766,7 +780,7 @@
     // Poll input-state: drives the composer's blocked/working UI and the tab
     // title. Keeps polling (slower) while hidden so the title stays live in a
     // background tab. Each poll is a tmux pane capture over SSH.
-    installStatePolling(name, (d) => {
+    const statePoll = installStatePolling(name, (d) => {
       document.title = statusTitle(d, name + " — chat");
       if (d.blocked) setBlocked(); else clearBlocked();
       applyMngrBusy(d.busy);
@@ -804,6 +818,8 @@
             input.value = "";
             autoGrow();
             clearBlocked();
+            // Burst the input-state poll so the working/blocked UI reacts fast.
+            statePoll.burst();
             // Show it immediately as "queued" (purple); the transcript swaps it
             // for a normal bubble when the delivered message arrives.
             addQueued(msg);

@@ -30,7 +30,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(2))
+    rc.check_time_sleep(_DIR, snapshot(3))
 
 
 def test_prevent_global_keyword() -> None:
@@ -159,7 +159,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(62))
+    rc.check_trailing_comments(_DIR, snapshot(67))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -276,7 +276,7 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # the per-instance in-memory SSLContext. It cannot be a pydantic model, and
     # setting the context from outside the class would evade this ratchet while
     # doing the same thing, so the __init__ stays.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(4))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(5))
 
 
 def test_prevent_cast_usage() -> None:

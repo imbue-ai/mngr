@@ -98,6 +98,9 @@ _MENU_OPTION_RE = re.compile(r"^\s*\d+\.\s", re.MULTILINE)
 # How many lines from the bottom of the pane to inspect (a dialog always occupies
 # the bottom); scanning only the tail avoids matching old output still on screen.
 _TAIL_LINES = 25
+
+# Bound the capture-pane probe so an unresponsive host can't wedge the poll.
+_HOST_COMMAND_TIMEOUT_SECONDS = 10.0
 # The one generic label -- the UI shows a single "interactive prompt" state
 # regardless of which dialog it is.
 _GENERIC_DIALOG_REASON = "interactive prompt"
@@ -130,7 +133,10 @@ def detect_blocking_dialog(pool: ConnectionPool, agent_name: str) -> str | None:
 
     def _capture(agent: AgentInterface, host: OnlineHostInterface) -> str | None:
         target = TmuxWindowTarget(session_name=agent.session_name, window=window)
-        result = host.execute_stateful_command(f"tmux capture-pane -p -t {target.as_shell_arg()}")
+        result = host.execute_stateful_command(
+            f"tmux capture-pane -p -t {target.as_shell_arg()}",
+            timeout_seconds=_HOST_COMMAND_TIMEOUT_SECONDS,
+        )
         if not result.success:
             logger.trace("input-state capture-pane for {} failed: {}", agent_name, result.stderr or result.stdout)
             return None

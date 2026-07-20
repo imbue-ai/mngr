@@ -42,6 +42,7 @@ from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
 from imbue.mngr_foreman.messaging import send_message_to_agent
+from imbue.mngr_foreman.poll_schedule import ActivityTracker
 from imbue.mngr_foreman.terminal import handle_host_shell_ws
 from imbue.mngr_foreman.terminal import handle_orchestrator_ws
 from imbue.mngr_foreman.terminal import handle_terminal_ws
@@ -65,9 +66,11 @@ _STATIC_PACKAGE: Final[str] = "imbue.mngr_foreman.static"
 _SAFE_IMAGE_ID_CHARS: Final[frozenset[str]] = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
 )
-_TRANSCRIPT_POLL_SECONDS: Final[float] = 1.5
 _TARGET_REFRESH_SECONDS: Final[float] = 30.0
 _HEARTBEAT_SECONDS: Final[float] = 15.0
+# Bound every foreground host command (stat/probe) so an unresponsive host can't
+# wedge an SSE poll or request thread indefinitely.
+_HOST_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 def _read_static(rel_path: str, asset_dir: Path | None) -> tuple[bytes, str] | None:
@@ -145,6 +148,9 @@ def create_app(
     # 25MB file cap for multipart overhead); write_upload re-checks the raw bytes.
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + 1024 * 1024
     sock = Sock(app)
+    # Shared across requests: the send route pokes an agent into fast-poll mode,
+    # the transcript SSE loops read it to pick their cadence.
+    activity = ActivityTracker()
 
     # ---- pages ------------------------------------------------------------
 
@@ -233,7 +239,7 @@ def create_app(
             )
 
         return Response(
-            _transcript_stream(mngr_ctx, agent, max_tool_output_chars, pool),
+            _transcript_stream(mngr_ctx, agent, max_tool_output_chars, pool, registry, activity),
             mimetype="text/event-stream",
             headers=_sse_headers(),
         )
@@ -267,6 +273,9 @@ def create_app(
             # so the UI can hint at the terminal page (phase 2).
             logger.info("Message to {} failed: {}", name, e)
             return jsonify({"ok": False, "error": str(e)}), 502
+        # Poke the transcript tailer(s) for this agent into fast-poll mode so the
+        # user's own message (and the reply that follows) surface with minimal lag.
+        activity.poke(name)
         return jsonify({"ok": True})
 
     @app.route("/api/agents/<name>/input-state")
@@ -436,7 +445,10 @@ def _build_transcript_reader(
         path = _transcript_path(target)
 
         def _stat(_a: AgentInterface, host: OnlineHostInterface) -> int | None:
-            result = host.execute_stateful_command(f"stat -c %s {shlex.quote(str(path))} 2>/dev/null")
+            result = host.execute_stateful_command(
+                f"stat -c %s {shlex.quote(str(path))} 2>/dev/null",
+                timeout_seconds=_HOST_COMMAND_TIMEOUT_SECONDS,
+            )
             out = (result.stdout or "").strip()
             return int(out) if result.success and out.isdigit() else None
 
@@ -448,11 +460,22 @@ def _build_transcript_reader(
     return reader, size_fn
 
 
+def _agent_state(registry: AgentRegistry, agent_name: str) -> str | None:
+    """Current state of ``agent_name`` from the live registry, or None if gone."""
+    card = registry.get_agent(agent_name)
+    if card is None:
+        return None
+    state = card.state.value if hasattr(card.state, "value") else card.state
+    return str(state).upper()
+
+
 def _transcript_stream(
     mngr_ctx: MngrContext,
     agent: AgentDetails,
     max_tool_output_chars: int,
     pool: ConnectionPool,
+    registry: AgentRegistry,
+    activity: ActivityTracker,
 ) -> Iterator[str]:
     """SSE generator: full backfill, then live events, with periodic heartbeats."""
     built = _build_transcript_reader(mngr_ctx, agent, pool)
@@ -489,10 +512,17 @@ def _transcript_stream(
     yield from _emit(backfill_lines)
     yield _sse({"type": "backfill_complete"})
 
-    # Live follow.
+    # Live follow at an adaptive cadence: fast right after a send and while the
+    # agent is RUNNING, idle-slow while it's WAITING (see poll_schedule).
+    agent_name = str(agent.name)
     last_heartbeat = time.monotonic()
     while True:
-        time.sleep(_TRANSCRIPT_POLL_SECONDS)
+        state = _agent_state(registry, agent_name)
+        # A working agent is emitting events; keep it in fast mode (and leave a
+        # short fast tail after it stops, so the final message lands promptly).
+        if state == "RUNNING":
+            activity.poke(agent_name)
+        time.sleep(activity.next_interval(agent_name, state))
         try:
             new_lines = tailer.poll()
         except Exception as e:  # noqa: BLE001
