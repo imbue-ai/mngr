@@ -704,6 +704,22 @@ function createBundle() {
     }
   });
 
+  // Server redirects bypass will-navigate: a trusted local page loading in the
+  // chrome view can 302 to agent content -- e.g. the recovery route redirects
+  // to its return_to workspace URL the moment the health tracker reports
+  // HEALTHY (a restored recovery window hits this immediately at startup).
+  // Intercept the redirect and route the target through navigateBundle so the
+  // workspace lands on the caged content surface. Following it here would load
+  // untrusted agent content into the trusted chrome view -- and fail anyway,
+  // since only the workspace-content session trusts the forward proxy's
+  // self-signed loopback cert.
+  chromeView.webContents.on('will-redirect', (event, url) => {
+    if (selectSurfaceForUrl(url) === SURFACE_CONTENT) {
+      event.preventDefault();
+      navigateBundle(bundle, url);
+    }
+  });
+
   // When the chrome (titlebar) view's renderer dies -- it runs in a separate
   // process from the content view and can be reaped independently over a long
   // sleep -- Electron leaves a blank, dead titlebar with no recovery affordance.
@@ -917,6 +933,19 @@ function wireContentViewEvents(bundle, contentView) {
     }
   });
 
+  // Symmetric redirect guard: will-navigate above only sees renderer-initiated
+  // navigations, so a server redirect could still land a trusted backend-origin
+  // page on the untrusted content surface. Route it to the chrome surface
+  // instead. (The /goto auth bridge's own redirect targets the
+  // agent-<id>.localhost subdomain, not the backend origin, so it passes
+  // through untouched.)
+  contentView.webContents.on('will-redirect', (event, url) => {
+    if (isBackendOriginUrl(url)) {
+      event.preventDefault();
+      navigateBundle(bundle, url);
+    }
+  });
+
   // Workspace pages (with live websockets) often attach `beforeunload`
   // handlers. Without a dialog host, Electron stalls the unload forever,
   // so the home button and workspace-switching navigate-content calls
@@ -1127,7 +1156,9 @@ function ensureBundleChromeWrapper(bundle) {
   let pathname = null;
   try { pathname = new URL(bundle.chromeView.webContents.getURL()).pathname; } catch { pathname = null; }
   if (pathname !== '/_chrome') {
-    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+    // Load failures surface via onChromeNavigate / the error takeover; the
+    // rejected promise alone would just print an unhandled-rejection warning.
+    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome').catch(() => {});
   }
 }
 
@@ -1189,9 +1220,10 @@ function navigateBundle(bundle, url) {
     // commits; until then the /_chrome wrapper (titlebar + white content
     // mirror, accent-tinted) stays visible as the loading surface. A content
     // view already showing the previous workspace stays visible through the
-    // load, matching pre-swap behavior.
+    // load, matching pre-swap behavior. Failures are handled by the
+    // did-fail-load fallback (returns Home), so the rejection is swallowed.
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      bundle.contentView.webContents.loadURL(absolute);
+      bundle.contentView.webContents.loadURL(absolute).catch(() => {});
     }
     closeModal(bundle);
     return;
@@ -1213,7 +1245,10 @@ function navigateBundle(bundle, url) {
   updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(absolute));
   hideBundleContentView(bundle);
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.webContents.loadURL(absolute);
+    // A local page that server-redirects to agent content is re-routed by the
+    // chrome view's will-redirect guard (which cancels this load, rejecting
+    // the promise); other failures surface via onChromeNavigate never firing.
+    bundle.chromeView.webContents.loadURL(absolute).catch(() => {});
   }
   closeModal(bundle);
 }
