@@ -313,6 +313,18 @@ def _unit_from_scenario(
     for examples in scenario.examples:
         _claim_block_tags(examples.tags, file, folder_parts, claims, violations)
     kind = SpecUnitKind.SCENARIO_OUTLINE if scenario.keyword in _OUTLINE_KEYWORDS else SpecUnitKind.SCENARIO
+    if kind == SpecUnitKind.SCENARIO and scenario.examples:
+        violations.append(
+            SpecViolation(
+                file=file,
+                line=scenario.examples[0].location.line,
+                message=(
+                    f"Examples blocks belong to a Scenario Outline, not a {scenario.keyword}; "
+                    "declare the unit as a Scenario Outline or drop the Examples"
+                ),
+                is_unit_omitted=False,
+            )
+        )
     return SpecUnit(
         coordinate=coordinate,
         kind=kind,

@@ -520,3 +520,31 @@ def test_spec_unit_to_record_serializes_stable_field_order_and_kind_spelling(tmp
     assert rule_record["kind"] == "rule"
     assert rule_record["steps"] == []
     assert rule_record["parent"] is None
+
+
+def test_scan_corpus_rejects_examples_blocks_under_a_plain_scenario(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "signin.feature": (
+                "Feature: F\n"
+                "\n"
+                "  @a-tag\n"
+                "  Scenario: not an outline\n"
+                "    Given <a>\n"
+                "\n"
+                "    Examples:\n"
+                "      | a |\n"
+                "      | 1 |\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert len(scan.violations) == 1
+    violation = scan.violations[0]
+    assert violation.line == 7
+    assert "Examples" in violation.message
+    assert "Scenario Outline" in violation.message
+    assert [(unit.coordinate, unit.kind) for unit in scan.units] == [("a-tag", SpecUnitKind.SCENARIO)]
