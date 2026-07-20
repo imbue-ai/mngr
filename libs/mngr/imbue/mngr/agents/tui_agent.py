@@ -26,6 +26,7 @@ from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.tui_utils import is_slash_command_message
 from imbue.mngr.agents.tui_utils import raise_for_unconfirmed_submission
 from imbue.mngr.agents.tui_utils import submit_message_and_confirm
+from imbue.mngr.agents.tui_utils import TUI_READY_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import wait_for_paste_visible
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -69,6 +70,17 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
 
     def get_tui_ready_indicator(self) -> str | re.Pattern[str]:
         return self.TUI_READY_INDICATOR
+
+    def get_tui_ready_timeout_seconds(self) -> float:
+        """How long to poll for the TUI ready indicator before a send fails.
+
+        Defaults to the generic ``TUI_READY_TIMEOUT_SECONDS``. Subclasses whose
+        startup legitimately renders the composer late override this upward -- codex,
+        for instance, replays the entire rollout on resume before its header appears,
+        so a long conversation can need well past the 30s default; timing out there
+        turns a slow-but-fine resume into a hard send failure.
+        """
+        return TUI_READY_TIMEOUT_SECONDS
 
     @abstractmethod
     def _build_submission_evidence_probes(
@@ -134,7 +146,12 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._preflight_send_message(self.tmux_target)
-            wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
+            wait_for_tui_ready(
+                self,
+                self.tmux_target,
+                self.get_tui_ready_indicator(),
+                timeout_seconds=self.get_tui_ready_timeout_seconds(),
+            )
             self._warn_if_preexisting_input_text(self.tmux_target)
             self._send_tmux_literal_keys(self.tmux_target, message)
             wait_for_paste_visible(self, self.tmux_target, message)
@@ -197,4 +214,9 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         """
         super().wait_for_ready_signal(is_creating, start_action, timeout)
         if is_creating:
-            wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
+            wait_for_tui_ready(
+                self,
+                self.tmux_target,
+                self.get_tui_ready_indicator(),
+                timeout_seconds=self.get_tui_ready_timeout_seconds(),
+            )

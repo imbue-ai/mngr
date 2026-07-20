@@ -376,6 +376,18 @@ class CodexAgent(
     # with the rendered, ready composer.
     TUI_READY_INDICATOR: ClassVar[str] = "/model to change"
 
+    # Codex resume replays the *entire* rollout before the header/composer renders, so
+    # a long conversation's banner can appear well past the generic 30s default. That
+    # is a slow-but-fine resume, not a failure, so we wait longer here -- otherwise the
+    # readiness poll times out and turns the resume into a hard send failure. The
+    # system_interface send endpoint no longer blocks the user on this (it acks after a
+    # short budget and delivers in the background), so a longer wait costs the user
+    # nothing and just makes the eventual delivery reliable.
+    _TUI_READY_TIMEOUT_SECONDS: ClassVar[float] = 90.0
+
+    def get_tui_ready_timeout_seconds(self) -> float:
+        return self._TUI_READY_TIMEOUT_SECONDS
+
     def get_expected_process_name(self) -> str:
         # The codex CLI is a single Rust binary; ps/tmux show the literal name.
         return "codex"
