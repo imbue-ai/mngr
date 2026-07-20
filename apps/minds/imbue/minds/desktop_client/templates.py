@@ -1483,7 +1483,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         if (reportBtn) {
           reportBtn.addEventListener('click', function () {
             // Open the get-help / report-a-bug modal, scoped to this workspace. The
-            // recovery page now renders on the CHROME surface (trusted preload.js),
+            // recovery page renders on the CHROME surface (trusted preload.js),
             // so call the window.minds bridge directly -- the workspace is stuck, so
             // pass assistAvailable=false. In browser mode inside the /_chrome iframe
             // there is no bridge, so postMessage to the parent shell (which opens

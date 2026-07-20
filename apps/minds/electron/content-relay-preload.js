@@ -12,11 +12,11 @@
 // legitimately need: `open-request-modal` (the workspace app opens a pending
 // permission request), `open-help` (the agent-origin loading / recovery page
 // opens the report-a-bug modal), and `reload-crashed-view` (the content-view
-// crash page's Reload button). Everything the trusted local pages used to relay
-// through here -- sign-in modal, stop-mind confirm, open-in-new-window, titlebar
-// accent preview -- now renders on the CHROME surface and calls the
-// `window.minds` bridge directly, so it must NOT be reachable from foreign
-// agent content and is deliberately absent below.
+// crash page's Reload button). The trusted-surface affordances -- sign-in
+// modal, stop-mind confirm, open-in-new-window, titlebar accent preview --
+// render on the CHROME surface and call the `window.minds` bridge directly;
+// they must NOT be reachable from foreign agent content and are deliberately
+// absent below.
 const { ipcRenderer } = require('electron');
 
 // Request ids are server-issued (`evt-<uuid hex>`). Accept only a conservative

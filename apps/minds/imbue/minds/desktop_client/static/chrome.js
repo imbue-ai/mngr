@@ -5,7 +5,7 @@
 (function () {
   var isElectron = !!window.minds;
 
-  // A trusted local/native page (Landing, Create, Settings, ...) now renders its
+  // A trusted local/native page (Landing, Create, Settings, ...) renders its
   // own body directly under the titlebar via ChromeShell and has NO
   // #content-frame -- it IS the main frame, so navigation is full-page rather
   // than driving a child iframe (browser) or the content WebContentsView. The

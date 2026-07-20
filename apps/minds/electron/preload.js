@@ -100,23 +100,22 @@ contextBridge.exposeInMainWorld('minds', {
   showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
 
   // Landing-page Stop button: ask the main process to show a native
-  // confirmation dialog and (on confirm) issue the host stop itself. Reachable
-  // directly now that the Landing page renders on the trusted chrome surface
-  // (it previously routed through the content-view relay). Main re-validates the
-  // agent id.
+  // confirmation dialog and (on confirm) issue the host stop itself. The Landing
+  // page renders on the trusted chrome surface, so it calls this bridge
+  // directly; main re-validates the agent id.
   confirmStopMind: (agentId, name) => ipcRenderer.send('confirm-stop-mind', agentId, name),
 
   // Create-screen sign-in: open the shared modal overlay loaded with the
-  // sign-in page. Reachable directly now that the Create page renders on the
-  // trusted chrome surface (previously via the content-view relay).
+  // sign-in page. The Create page renders on the trusted chrome surface, so it
+  // calls this bridge directly.
   openSigninModal: () => ipcRenderer.send('open-signin-modal'),
 
   // Workspace-settings color picker: paint this window's titlebar optimistically
   // with the just-picked accent so the user sees it immediately, without waiting
-  // for the PATCH -> mngr label subprocess -> SSE round-trip. Reachable directly
-  // now that the settings page renders on the trusted chrome surface (previously
-  // via the content-view relay). Main re-validates the agent id + accent shape
-  // and only repaints the sending bundle's chrome view.
+  // for the PATCH -> mngr label subprocess -> SSE round-trip. The settings page
+  // renders on the trusted chrome surface, so it calls this bridge directly; main
+  // re-validates the agent id + accent shape and only repaints the sending
+  // bundle's chrome view.
   previewWorkspaceAccent: (agentId, accent) =>
     ipcRenderer.send('preview-workspace-accent', agentId, accent),
 

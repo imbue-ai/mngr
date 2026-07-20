@@ -16,7 +16,7 @@ from typing import Final
 # shell (e.g. the minds recovery page under the desktop titlebar) can pull in only
 # the card-scoped rules (``LOADING_PAGE_CARD_CSS``) and supply its own body layout,
 # without the full-viewport ``body`` centering fighting a fixed titlebar. The proxy
-# loader uses ``LOADING_PAGE_CSS`` (both halves) exactly as before.
+# loader uses ``LOADING_PAGE_CSS`` (both halves).
 #
 # ``_LOADING_PAGE_BODY_CSS`` centers a single ``.card`` in the viewport.
 _LOADING_PAGE_BODY_CSS: Final[str] = """\

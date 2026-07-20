@@ -654,7 +654,7 @@ function createBundle() {
 
   // A trusted local page renders in the chrome view itself, so the chrome view's
   // OWN navigation is what drives the titlebar accent + the restored-URL
-  // bookkeeping (mirroring onContentNavigate, which now handles only agent
+  // bookkeeping (mirroring onContentNavigate, which handles only agent
   // content). The /_chrome agent-wrapper is skipped: on an agent path the accent
   // + current-workspace come from the content view's did-navigate, and a wrapper
   // nav must not clobber them (the accent race). A local page never displays a
@@ -2022,13 +2022,13 @@ function restoreWindowBounds(bundle, entry) {
 }
 
 // ---------- Centralized chrome SSE ----------
-// Every chrome and (formerly) sidebar view used to open its own
-// EventSource to /_chrome/events. Chromium caps same-host HTTP/1.1
-// connections at 6, so with a couple of workspace windows + sidebars,
-// subsequent requests (/_chrome/sidebar, /inbox/list, home navigation)
-// would queue behind the SSE streams -- load-finish latencies could
-// creep from 50ms to 8+ seconds. Running one SSE connection in the main
-// process and broadcasting events via IPC avoids the exhaustion entirely.
+// If every chrome view opened its own EventSource to /_chrome/events,
+// Chromium's cap of 6 same-host HTTP/1.1 connections would bite: with a couple
+// of workspace windows open, subsequent requests (/_chrome/sidebar,
+// /inbox/list, home navigation) would queue behind the SSE streams and
+// load-finish latencies could creep from 50ms to 8+ seconds. Running one SSE
+// connection in the main process and broadcasting events via IPC avoids the
+// exhaustion entirely.
 
 // Whether we have already taken over every window with the discovery-pipeline
 // "blocked" error screen. Guards against re-driving the takeover when the
@@ -3137,9 +3137,7 @@ async function startBackendWithRetry() {
               // The chrome SSE loop started (unauthenticated) before this
               // exchange; now that the default session holds the authenticated
               // minds_session, kick it to reconnect authenticated right away
-              // instead of waiting for its natural reconnect backoff. This
-              // preserves the reconnect the removed content->default cookie
-              // watcher used to trigger.
+              // instead of waiting for its natural reconnect backoff.
               kickChromeSSEReconnect();
             } catch (err) {
               console.warn('[startup] Failed to sync cookie to content partition:', err);
