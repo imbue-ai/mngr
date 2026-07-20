@@ -1011,6 +1011,11 @@ def submit_manual_bug_report(
     event: Event = {
         "message": title,
         "level": "info",
+        # A unique fingerprint per report: without it Sentry groups every
+        # manual bug report (same message shape, same submission path) into
+        # one catch-all issue, making per-report triage, assignment, and
+        # resolution impossible.
+        "fingerprint": ["manual-bug-report", uuid.uuid4().hex],
         "tags": {MANUALLY_SUBMITTED_TAG: "true"},
         "extra": extra,
     }

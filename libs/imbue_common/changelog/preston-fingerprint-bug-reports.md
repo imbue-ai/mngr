@@ -1,0 +1,1 @@
+Manually-submitted bug reports now carry a unique Sentry fingerprint ("manual-bug-report" + a fresh UUID), so each report becomes its own Sentry issue instead of all reports grouping into one catch-all issue. Per-report triage, assignment, and resolution now work; automated triage (open-seer) can treat each report as a distinct issue.

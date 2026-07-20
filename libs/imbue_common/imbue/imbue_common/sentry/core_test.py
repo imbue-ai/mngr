@@ -365,6 +365,12 @@ def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disable
     assert tags["manually_submitted"] == "true"
     extra = cast(dict, event["extra"])
     assert extra["bug_report"]["description"] == "boom"
+    # Each report must land in its own Sentry issue: a unique fingerprint per
+    # submission, never the shared-message grouping (which produced one
+    # catch-all issue for every report ever filed).
+    fingerprint = cast(list, event["fingerprint"])
+    assert fingerprint[0] == "manual-bug-report"
+    assert len(fingerprint[1]) == 32
 
 
 @pytest.fixture
