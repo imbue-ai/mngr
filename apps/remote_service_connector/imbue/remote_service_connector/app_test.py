@@ -3704,6 +3704,18 @@ def test_route_set_account_plan_litellm_failure_aborts_switch(monkeypatch: pytes
     assert row["plan_name"] == "explorer"
 
 
+def test_get_litellm_user_spend_reports_zero_when_litellm_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transport-level LiteLLM failure degrades the display-only spend to zero (no 500)."""
+
+    def _raise_transport_error(
+        method: str, path: str, json_body: dict[str, object] | None = None, params: dict[str, str] | None = None
+    ) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(app_mod, "_litellm_request", _raise_transport_error)
+    assert app_mod.get_litellm_user_spend("user-1") == (0.0, None)
+
+
 # ---------------------------------------------------------------------------
 # Account admin endpoint tests (email-addressed, admin-key authenticated)
 # ---------------------------------------------------------------------------

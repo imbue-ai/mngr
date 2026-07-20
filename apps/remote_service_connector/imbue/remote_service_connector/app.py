@@ -2483,8 +2483,10 @@ def get_litellm_user_spend(user_id: str) -> tuple[float, str | None]:
     """
     try:
         response = _litellm_request("GET", "/user/info", params={"user_id": user_id})
-    except HTTPException as exc:
-        logger.warning("LiteLLM /user/info for %s failed (%s); reporting zero spend", user_id[:8], exc.status_code)
+    except (HTTPException, httpx.HTTPError) as exc:
+        # HTTPException covers HTTP >= 400 responses and missing proxy config;
+        # httpx.HTTPError covers transport failures (proxy unreachable).
+        logger.warning("LiteLLM /user/info for %s failed (%s); reporting zero spend", user_id[:8], exc)
         return 0.0, None
     data = response.json()
     info = data.get("user_info") if isinstance(data, dict) else None
