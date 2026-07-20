@@ -1,0 +1,216 @@
+Integrate witness branches from the spec-mapper agents whose outputs have
+been uploaded into ``{{ inputs_dirname }}/`` (a sibling of the current
+directory's contents, in the integrator's work_dir). Each subdirectory
+``{{ inputs_dirname }}/<agent_name>/`` contains the mapper's
+``test_output/{{ mapper_outcome_filename }}`` and (when it made commits)
+a ``branch.bundle``.
+
+The behavioral-spec corpus under {{ corpus_root }} is READ-ONLY for the whole
+pipeline: never commit any change to it, and never cherry-pick one. The
+operator mechanically refuses to publish an integrated branch whose diff
+touches the corpus, so a single corpus edit invalidates the entire run's
+output.
+
+# Discover and fetch qualifying branches
+
+Run this from the git repo root to filter and fetch the branches whose
+agents reported real work (and didn't regress their witnessing tests):
+
+```bash
+set -euo pipefail
+
+INPUTS_DIR="{{ inputs_dirname }}"
+FETCHED_BRANCHES=()
+
+should_pull() {
+    python3 - "$1" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+if data.get("errored"):
+    sys.exit(1)
+changes = data.get("changes") or {}
+if not any((c or {}).get("status") == "SUCCEEDED" for c in changes.values()):
+    sys.exit(1)
+if data.get("tests_passing_before") is True and data.get("tests_passing_after") is not True:
+    sys.exit(1)
+sys.exit(0)
+PYEOF
+}
+
+bundle_branch() {
+    git bundle list-heads "$1" \
+        | awk 'NR==1 { sub(/^refs\/heads\//, "", $2); print $2 }'
+}
+
+for agent_dir in "$INPUTS_DIR"/*/; do
+    outcome="$agent_dir/test_output/{{ mapper_outcome_filename }}"
+    bundle="$agent_dir/branch.bundle"
+    [ -f "$outcome" ] || continue
+    [ -f "$bundle" ] || continue
+    if ! should_pull "$outcome"; then
+        echo "Skipping $agent_dir (did not meet the should-pull predicate)"
+        continue
+    fi
+    branch=$(bundle_branch "$bundle")
+    if [ -z "$branch" ]; then
+        echo "Skipping $agent_dir (could not read branch ref from bundle)"
+        continue
+    fi
+    echo "Fetching $branch from $bundle"
+    git fetch --no-tags "$bundle" "+$branch:$branch"
+    FETCHED_BRANCHES+=("$branch")
+done
+
+printf '%s\n' "${FETCHED_BRANCHES[@]}"
+```
+
+The branches you must cherry-pick are exactly the printed ones. If no
+branches qualify, write an outcome describing that (no squashed/impl
+commits), still run the coverage matrix below, and proceed to publishing
+the outputs archive.
+
+# Cherry-pick strategy
+
+Use cherry-pick (NOT merge) to build a clean linear history. The goal is a
+branch with a flat list of commits that is easy to review.
+
+1. For each branch in the list, inspect the commits. Each branch should have
+   commits prefixed with a change kind in brackets, like [CREATE_TEST],
+   [IMPROVE_TEST], [FIX_TEST], or [FIX_IMPL], followed by the coordinates
+   the commit serves.
+
+2. Collect all commits into two groups:
+   a) "Test" commits: those tagged [CREATE_TEST], [IMPROVE_TEST], or [FIX_TEST].
+   b) "Impl" commits: those tagged [FIX_IMPL].
+
+3. Cherry-pick in this order:
+   a) FIRST: cherry-pick all test commits and squash them into a SINGLE commit.
+      Use a commit message like: "[TEST] Combined witness-test changes from N agents"
+   b) THEN: cherry-pick each [FIX_IMPL] commit individually, keeping them as
+      separate commits. Before cherry-picking, READ the commit messages of all
+      FIX_IMPL commits (they name the coordinates whose witnessing forced the
+      fix) and rank them by priority (most impactful spec divergence first).
+      Cherry-pick in that priority order.
+
+4. If a cherry-pick has conflicts, try to resolve them. If you cannot resolve
+   a conflict for a particular branch, skip it and record it as failed.
+
+5. After cherry-picking, record the commit hashes using `git rev-parse HEAD`
+   after each step (the squashed commit and each impl commit).
+
+# Normalize the integrated suite
+
+After cherry-picking you hold every mapper's witnesses in one tree. This is
+the only point in the pipeline where cross-task relationships are visible, so
+do the things no single mapper could. Keep each normalization change as its
+own commit prefixed `[NORMALIZE]`.
+
+## How to run tests for verification
+
+Verify a change by running the affected witnessing tests directly with pytest
+in your work_dir, by node id, scoped to the blast radius -- just the tests a
+change actually touched, not the whole suite:
+
+```bash
+uv run pytest <affected_test_node_id> [<more_node_ids>...]
+```
+
+Exit code 0 with no failures confirms the change. Whenever you have applied
+ANY change to the tree (an integrated cherry-pick, a dedup, or a FIXME
+resolution), verify the affected tests before publishing. If verification
+fails, back the change out or record it as unverified.
+
+## Dedupe fixtures parallel mappers created independently
+
+The mappers work blind to each other over the same corpus, so several may
+have independently created near-identical fixtures or helpers (two signin
+helpers, two fake-clock fixtures). Consolidate genuine duplicates into one
+shared fixture (in the appropriate conftest) and switch the witnesses onto
+it, but keep two guardrails:
+
+- Never extract a test's core action -- the observable behavior its spec unit
+  is about must stay written out explicitly in the test. Extract only the
+  surrounding scaffolding.
+- Only consolidate when the shared fixture genuinely improves clarity;
+  over-extraction makes witnesses harder to read against their spec units.
+
+Verify every consolidation by running the affected witnessing tests. Record
+each under "normalizations" in the outcome.
+
+## Audit the witness links and record verified coverage
+
+Run the coverage matrix over the integrated tree and ship it as an artifact
+(the publish step copies .test_output):
+
+```bash
+uv run {{ specs_matrix_cmd }} > .test_output/{{ matrix_filename }}
+```
+
+A nonzero exit means broken witness links: a marker whose coordinate matches
+no spec unit (e.g. a typo), or invalid marker usage. Fix the markers as a
+`[NORMALIZE]` commit and re-run until the matrix exits cleanly; if a link
+problem cannot be fixed here, record it under "escalations". The artifact is
+how the report shows verified (not merely claimed) per-coordinate coverage,
+so always write it -- even when no branches qualified.
+
+## Resolve or escalate cross-cutting blockers
+
+Mappers flag setup they could not fix suite-wide with `# FIXME(tmr-specs): ...`
+comments (and BLOCKED changes in their outcomes). Collect them from the
+integrated tree:
+
+```bash
+grep -rn "FIXME(tmr-specs):" . || true
+```
+
+For each distinct blocker:
+
+- If you can resolve it suite-wide AND verify it by running the affected
+  witnessing tests, do so, remove the FIXME comment, commit as `[NORMALIZE]`,
+  and record it under "normalizations".
+- If it requires something the environment does not provide (credentials,
+  infrastructure), or is otherwise beyond what you can verify here, leave the
+  FIXME in place and record it under "escalations" so it reaches the user. Do
+  NOT apply an unverifiable cross-cutting change.
+
+# Writing the outcome and publishing outputs
+
+After integrating and normalizing, write the result atomically to avoid races
+with the orchestrator reading it:
+
+1. First write to .test_output/{{ reducer_outcome_filename }}.draft (relative to the git repo root)
+2. Then rename (mv) the .draft file to .test_output/{{ reducer_outcome_filename }}
+
+The schema is:
+
+{"squashed_branches": ["branch1", "branch2"],
+ "squashed_commit_hash": "abc1234",
+ "impl_priority": ["branch3"],
+ "impl_commit_hashes": {"branch3": "def5678"},
+ "failed": ["branch4"],
+ "normalizations": [{"summary_markdown": "Consolidated two independently-created signin fixtures into conftest (verified across 4 witnesses)"}],
+ "escalations": [{"title": "workspace-bridge witnesses need a Docker daemon", "detail_markdown": "The bridge scenarios cannot be driven in this environment; their units stay PARTIAL_IMPROVABLE until a daemon is available."}]}
+
+Fields:
+- squashed_branches: branch names whose test commits were squashed
+- squashed_commit_hash: commit hash of the squashed test commit (short is fine)
+- impl_priority: impl branch names in priority order, highest first
+- impl_commit_hashes: mapping of impl branch name to its commit hash on the integrated branch
+- failed: branch names that could not be integrated
+- normalizations: suite-wide cleanups you applied and verified (each with summary_markdown). Omit or use [] if none.
+- escalations: cross-cutting problems you could NOT resolve or verify, to surface to the user (each with title and detail_markdown). Omit or use [] if none.
+
+Then, finally, publish the outputs archive. Run this from the git repo root:
+
+{{ publish_snippet }}
+
+This MUST be the very last step. The orchestrator polls for outputs.tar.gz
+and treats its appearance as the signal that you are done. The .tmp + rename
+sequence prevents the orchestrator from reading a half-written archive.
+
+# Important: do not ask for user input
+
+For this initial request, do NOT ask the user for any input or clarification.
+Work autonomously. If a cherry-pick has conflicts you cannot resolve, skip
+that branch and record it as failed. If the user sends follow-up messages
+later, you may ask them questions at that point.
