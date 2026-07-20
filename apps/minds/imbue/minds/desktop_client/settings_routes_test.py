@@ -428,3 +428,33 @@ def test_revoke_requires_authentication(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 403
+
+
+def test_account_signout_keeps_the_app_usable(tmp_path: Path) -> None:
+    """Signing out of an Imbue account must not clear the device session.
+
+    ``minds_session`` is the app/device unlock (minted from the one-time code
+    ``minds run`` emits), independent of any Imbue account and required for all
+    local app use. Account sign-out must therefore leave the app usable -- this
+    guards against re-introducing a device-cookie clear on account sign-out,
+    which would lock the user out of the whole app after they merely
+    disconnected a cloud account.
+    """
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {}, {})
+
+    # Authenticated (device cookie set by the fixture): an auth-gated route works.
+    assert client.get("/settings").status_code == 200
+
+    logout = client.post("/accounts/user-abc123/logout")
+    assert logout.status_code == 303
+    # The sign-out response must not expire the device session cookie.
+    cleared_cookies = [
+        header
+        for header in logout.headers.getlist("Set-Cookie")
+        if header.startswith(f"{SESSION_COOKIE_NAME}=") and "1970" in header
+    ]
+    assert cleared_cookies == []
+
+    # Same client, device cookie intact: the app is still usable after sign-out.
+    assert client.get("/settings").status_code == 200
