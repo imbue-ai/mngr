@@ -85,24 +85,18 @@ _SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS: Final[int] = 120
 _PROBE_TIMEOUT_SECONDS: Final[int] = 120
 _SERVICES_REGISTERED_TIMEOUT_SECONDS: Final[int] = 120
 
-# Services that must re-register their port in runtime/applications.toml after a
-# resume. ``system_interface`` and ``terminal`` are always-on core services.
-# ``web`` was deliberately removed from the template (its ``[program:web]``
-# supervisord entry and ``libs/web_server`` scaffold), so it is no longer
-# expected. ``browser`` also autostarts and registers, but is asserted with a
+# The always-on core services that must re-register in runtime/applications.toml
+# after a resume. ``browser`` also registers but is asserted separately, with a
 # shed exception (see ``test_resumed_workspace_registered_expected_services``).
 _CORE_REGISTERED_SERVICES: Final[tuple[str, ...]] = ("system_interface", "terminal")
 _BROWSER_SERVICE_NAME: Final[str] = "browser"
 
-# The earlyoom shed ledger inside the workspace container. earlyoom's ``-N`` hook
-# (scripts/earlyoom_record_shed.py) appends one record per kill here; the path is
-# pinned by ``OOM_PRIORITY_RUNTIME_DIR`` in the template's ``.mngr/settings.toml``.
-# Used only as human-facing corroboration in the browser-shed evidence dump.
+# earlyoom's shed ledger inside the container (written by its ``-N`` hook; path
+# pinned by ``OOM_PRIORITY_RUNTIME_DIR`` in the template's ``.mngr/settings.toml``).
+# Only human-facing corroboration in the shed evidence dump, not the decision.
 _SHED_LEDGER_PATH: Final[str] = "/mngr/code/runtime/oom_priority/events/shed.jsonl"
-# supervisord's own log, where a signal-killed program is recorded as
-# ``terminated by SIG...`` (or, when the killed child is forward_port.py and its
-# bash wrapper propagates the status, ``exit status 137``/``143`` for
-# SIGKILL/SIGTERM). This is the decisive browser-shed signal.
+# supervisord's own log; the (post-resume-scoped) browser-shed signal is read
+# from here -- see ``_gather_browser_shed_diagnostics``.
 _SUPERVISORD_LOG_PATH: Final[str] = "/var/log/supervisor/supervisord.log"
 
 # mngr lifecycle states that mean the agent's tmux window is alive (as opposed
@@ -264,9 +258,8 @@ def _gather_browser_shed_diagnostics(container_name: str) -> tuple[bool, str]:
     or a hard failure.
     """
     diagnostic = (
-        # Decide shed-vs-regression shell-side, scoped to the current supervisord
-        # instance: reset the match on each "supervisord started" marker so only a
-        # browser OOM-signal kill logged after the last (post-resume) start counts.
+        # Shed decision, scoped to the current supervisord instance by resetting on
+        # each "supervisord started" marker (see docstring).
         f"log={_SUPERVISORD_LOG_PATH}; "
         "awk '/supervisord started with pid/{seen=1;killed=0} "
         "seen&&/exited: browser/&&/terminated by SIGKILL|terminated by SIGTERM|exit status 137|exit status 143/{killed=1} "
@@ -481,8 +474,6 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
 
     if _BROWSER_SERVICE_NAME in applications_toml:
         return
-    # browser is absent: pass only with positive evidence it was shed under
-    # memory pressure; otherwise it genuinely failed to re-register.
     was_shed, diagnostics = _gather_browser_shed_diagnostics(running_workspace.container_name)
     assert was_shed, (
         "browser did not re-register in applications.toml after resume, and there is no evidence it was "
