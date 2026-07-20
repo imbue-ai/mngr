@@ -826,10 +826,11 @@ def render_inbox_unavailable_fragment(message: str = "") -> str:
     return CATALOG.render("InboxUnavailable", message=message)
 
 
-# CSS for the recovery page's restart controls, appended to the shared
-# ``LOADING_PAGE_CSS``. The card itself, spinner, heading and message all come
-# from the shared loading page, so the recovery page's loading state is
-# byte-identical to the mngr_forward proxy loader.
+# CSS for the recovery page's restart controls, appended after the shared
+# ``LOADING_PAGE_CARD_CSS`` inside the ChromeShell head. The card itself,
+# spinner, heading and message all come from ``render_loading_card``, so the
+# recovery page's loading state stays identical to the mngr_forward proxy
+# loader.
 _RECOVERY_STYLE: Final[str] = """\
       .hidden { display: none; }
 
@@ -1092,7 +1093,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // 1000ms matches the mngr_forward proxy loader's poll interval, keeping
         // the two loading pages a user may see during recovery in lockstep, and
         // is a whole multiple of the spinner's 1s rotation period (see
-        // LOADING_PAGE_CSS' ``spin`` keyframe) so the one eventual state-change
+        // LOADING_PAGE_CARD_CSS' ``spin`` keyframe) so the one eventual state-change
         // reload lands at the animation's cycle boundary rather than mid-spin.
         var REFRESH_INTERVAL_MS = 1000;
 
