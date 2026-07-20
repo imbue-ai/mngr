@@ -32,6 +32,7 @@ from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
 from imbue.mngr_foreman.messaging import send_message_to_agent
+from imbue.mngr_foreman.terminal import handle_orchestrator_ws
 from imbue.mngr_foreman.terminal import handle_terminal_ws
 from imbue.mngr_foreman.transcript_parser import parse_claude_session_lines
 from imbue.mngr_foreman.transcript_tail import ReaderFn
@@ -103,6 +104,12 @@ def create_app(
     @app.route("/a/<name>/terminal")
     def terminal_page(name: str) -> Response:
         # The terminal page is a static shell; it reads <name> from the URL.
+        return _serve_static_or_404("terminal.html")
+
+    @app.route("/terminal")
+    def orchestrator_terminal_page() -> Response:
+        # Orchestrator shell: same static shell; JS detects the path and opens
+        # the /ws/terminal websocket (a plain bash on the foreman host).
         return _serve_static_or_404("terminal.html")
 
     @app.route("/static/<path:rel_path>")
@@ -182,6 +189,11 @@ def create_app(
         # Bridge the socket to a `mngr connect <name>` pty. Any agent type works
         # here -- the terminal is a raw tmux attach, not transcript-specific.
         handle_terminal_ws(ws, name)
+
+    @sock.route("/ws/terminal")
+    def orchestrator_ws(ws: object) -> None:
+        # Bridge the socket to a plain `bash -l` on the foreman server machine.
+        handle_orchestrator_ws(ws)
 
     return app
 

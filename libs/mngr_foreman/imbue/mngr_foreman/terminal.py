@@ -115,16 +115,32 @@ def _teardown(child_pid: int, master_fd: int) -> None:
         pass
 
 
-def handle_terminal_ws(ws: Any, agent_name: str) -> None:
-    """Bridge a websocket to a ``mngr connect <agent_name>`` pty until either closes.
+def _spawn_bash_pty() -> tuple[int, int]:
+    """Fork a child running a login shell (``bash -l``) on a fresh pty.
 
-    ``ws`` is a flask-sock/simple-websocket connection (``receive``/``send``/
-    ``close``). Runs in the request's own thread (threaded werkzeug). A reader
-    thread pumps pty output -> websocket; this thread pumps websocket input ->
-    pty and handles resize control messages.
+    Used by the orchestrator terminal -- a plain shell on the foreman server
+    machine itself (no mngr, no agent). Returns ``(child_pid, master_fd)``.
     """
-    logger.info("Opening terminal to agent {}", agent_name)
-    child_pid, master_fd = _spawn_connect_pty(agent_name)
+    child_pid, master_fd = pty.fork()
+    if child_pid == 0:
+        # --- child ---
+        env = dict(os.environ)
+        env.pop("TMUX", None)
+        env.setdefault("TERM", "xterm-256color")
+        try:
+            os.execvpe("bash", ["bash", "-l"], env)
+        except OSError:
+            os._exit(127)
+    return child_pid, master_fd
+
+
+def _bridge_pty_to_ws(ws: Any, child_pid: int, master_fd: int, label: str) -> None:
+    """Bridge a websocket to an already-spawned pty until either side closes.
+
+    A reader thread pumps pty output -> websocket; this thread pumps websocket
+    input -> pty and handles resize control messages. Binary WS frames are raw
+    keystrokes; text frames are JSON control messages.
+    """
     stop = threading.Event()
 
     def _pump_pty_to_ws() -> None:
@@ -150,7 +166,7 @@ def handle_terminal_ws(ws: Any, agent_name: str) -> None:
             except Exception:  # noqa: BLE001 - close is best-effort
                 pass
 
-    reader = threading.Thread(target=_pump_pty_to_ws, name=f"foreman-term-{agent_name}", daemon=True)
+    reader = threading.Thread(target=_pump_pty_to_ws, name=f"foreman-term-{label}", daemon=True)
     reader.start()
 
     try:
@@ -174,7 +190,22 @@ def handle_terminal_ws(ws: Any, agent_name: str) -> None:
         stop.set()
         reader.join(timeout=_SELECT_TIMEOUT_SECONDS + 1.0)
         _teardown(child_pid, master_fd)
-        logger.info("Closed terminal to agent {}", agent_name)
+
+
+def handle_terminal_ws(ws: Any, agent_name: str) -> None:
+    """Bridge a websocket to a ``mngr connect <agent_name>`` pty until either closes."""
+    logger.info("Opening terminal to agent {}", agent_name)
+    child_pid, master_fd = _spawn_connect_pty(agent_name)
+    _bridge_pty_to_ws(ws, child_pid, master_fd, label=agent_name)
+    logger.info("Closed terminal to agent {}", agent_name)
+
+
+def handle_orchestrator_ws(ws: Any) -> None:
+    """Bridge a websocket to a plain ``bash -l`` pty on the foreman server host."""
+    logger.info("Opening orchestrator terminal (bash -l)")
+    child_pid, master_fd = _spawn_bash_pty()
+    _bridge_pty_to_ws(ws, child_pid, master_fd, label="orchestrator")
+    logger.info("Closed orchestrator terminal")
 
 
 def _handle_control_message(message: str, master_fd: int, child_pid: int) -> None:

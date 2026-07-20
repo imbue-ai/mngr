@@ -233,12 +233,87 @@ a:hover { text-decoration: underline; }
 .topbar .termlink { color: var(--fg-dim); font-size: 12px; }
 .topbar .termlink:hover { color: var(--accent); }
 
-/* terminal page: xterm fills everything below the topbar */
+/* terminal page: control bar + xterm fill everything below the topbar */
 .term-body { overflow: hidden; }
+
+.ctrlbar {
+  position: fixed;
+  top: 44px; left: 0; right: 0;
+  z-index: 4;
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.ctrlbar::-webkit-scrollbar { display: none; }
+.ctrlbar button {
+  flex: 0 0 auto;
+  min-width: 40px;
+  padding: 7px 10px;
+  background: var(--bg-inset);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 13px;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
+}
+.ctrlbar button:active { background: var(--accent); color: #06202b; }
+.ctrlbar button.paste { color: var(--accent); }
+
 #term {
   position: fixed;
-  top: 44px; left: 0; right: 0; bottom: 0;
+  top: 89px; left: 0; right: 0; bottom: 0;
   padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   background: var(--bg-inset);
 }
 #term .xterm { height: 100%; }
+
+/* paste fallback popover (clipboard API blocked on insecure origins) */
+.paste-popover {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+.paste-popover[hidden] { display: none; }
+.paste-popover .pp-inner {
+  width: min(92vw, 480px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+}
+.paste-popover .pp-title { color: var(--fg-dim); font-size: 12px; margin-bottom: 8px; }
+.paste-popover textarea {
+  width: 100%;
+  background: var(--bg-inset);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px;
+  font-family: var(--mono);
+  font-size: 14px;
+  resize: vertical;
+}
+.paste-popover .pp-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.paste-popover .pp-actions button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--fg);
+  font-family: var(--mono);
+  cursor: pointer;
+}
+.paste-popover #pp-send { background: var(--accent); color: #06202b; border: none; font-weight: 600; }

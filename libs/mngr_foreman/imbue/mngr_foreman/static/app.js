@@ -429,17 +429,30 @@
   // ==========================================================================
   // Terminal page: xterm.js <-> pty websocket bridge
   // ==========================================================================
-  function terminalNameFromPath() {
+  // Terminal target: either an agent (/a/<name>/terminal) or the orchestrator
+  // shell (/terminal, a plain bash on the foreman server host).
+  function terminalTarget() {
     const m = location.pathname.match(/^\/a\/(.+)\/terminal$/);
-    return m ? decodeURIComponent(m[1]) : "";
+    if (m) {
+      const name = decodeURIComponent(m[1]);
+      return { kind: "agent", name: name, wsPath: "/ws/agents/" + encodeURIComponent(name) + "/terminal", back: "/a/" + encodeURIComponent(name), label: name };
+    }
+    return { kind: "orchestrator", name: "", wsPath: "/ws/terminal", back: "/", label: "orchestrator (this box)" };
   }
 
+  // Control-bar key → escape sequence sent straight down the WS.
+  const CTRL_SEQ = {
+    up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D",
+    enter: "\r", esc: "\x1b", tab: "\t", shifttab: "\x1b[Z",
+    pgup: "\x1b[5~", pgdn: "\x1b[6~",
+  };
+
   function initTerminal() {
-    const name = terminalNameFromPath();
-    document.getElementById("agent-name").textContent = name;
-    document.title = "foreman · " + name + " · terminal";
+    const tgt = terminalTarget();
+    document.getElementById("agent-name").textContent = tgt.label;
+    document.title = "foreman · " + tgt.label + " · terminal";
     const back = document.getElementById("back");
-    if (back) back.href = "/a/" + encodeURIComponent(name);
+    if (back) back.href = tgt.back;
 
     if (typeof Terminal === "undefined") {
       setConn("xterm failed to load");
@@ -457,39 +470,28 @@
     fit.fit();
 
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = proto + "//" + location.host + "/ws/agents/" + encodeURIComponent(name) + "/terminal";
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(proto + "//" + location.host + tgt.wsPath);
     ws.binaryType = "arraybuffer";
+    const encoder = new TextEncoder();
 
+    function wsSend(data) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(typeof data === "string" ? encoder.encode(data) : data);
+    }
     function sendResize() {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
     }
 
-    ws.onopen = () => {
-      setConn("live");
-      fit.fit();
-      sendResize();
-      term.focus();
-    };
+    ws.onopen = () => { setConn("live"); fit.fit(); sendResize(); term.focus(); };
     ws.onmessage = (ev) => {
-      // Binary frames are terminal output; decode as UTF-8 and write.
-      if (ev.data instanceof ArrayBuffer) {
-        term.write(new Uint8Array(ev.data));
-      } else if (typeof ev.data === "string") {
-        term.write(ev.data);
-      }
+      if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+      else if (typeof ev.data === "string") term.write(ev.data);
     };
     ws.onclose = () => { setConn("closed"); term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n"); };
     ws.onerror = () => setConn("error");
 
-    // Keystrokes -> pty as binary.
-    const encoder = new TextEncoder();
-    term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data));
-    });
+    term.onData((data) => wsSend(data));
 
-    // Reflow on rotate/resize; debounce so we don't spam winsize changes.
     let resizeTimer = null;
     function onResize() {
       if (resizeTimer) clearTimeout(resizeTimer);
@@ -497,6 +499,62 @@
     }
     window.addEventListener("resize", onResize);
     window.addEventListener("orientationchange", onResize);
+
+    // ---- mobile control bar ----
+    // Buttons must NOT steal focus from the terminal: preventDefault on
+    // mousedown/touchstart so the xterm textarea keeps focus.
+    const bar = document.getElementById("ctrlbar");
+    if (bar) {
+      bar.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("mousedown", (e) => e.preventDefault());
+        btn.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+        btn.addEventListener("click", (e) => {
+          e.preventDefault();
+          const key = btn.getAttribute("data-seq");
+          if (key === "paste") { doPaste(); return; }
+          const seq = CTRL_SEQ[key];
+          if (seq) wsSend(seq);
+          term.focus();
+        });
+      });
+    }
+
+    // ---- paste: clipboard API, with a text-popover fallback ----
+    // navigator.clipboard.readText requires a secure context (https/localhost);
+    // over plain http:// to a remote host it's unavailable or rejects, so fall
+    // back to a popover the user pastes into and sends.
+    const popover = document.getElementById("paste-popover");
+    function doPaste() {
+      const clip = navigator.clipboard;
+      if (clip && typeof clip.readText === "function") {
+        clip.readText().then((text) => {
+          if (text) wsSend(text);
+          term.focus();
+        }).catch(() => showPastePopover());
+      } else {
+        showPastePopover();
+      }
+    }
+    function showPastePopover() {
+      if (!popover) return;
+      const ta = document.getElementById("pp-text");
+      popover.hidden = false;
+      ta.value = "";
+      ta.focus();
+    }
+    function hidePastePopover() {
+      if (popover) popover.hidden = true;
+      term.focus();
+    }
+    if (popover) {
+      document.getElementById("pp-send").addEventListener("click", () => {
+        const ta = document.getElementById("pp-text");
+        if (ta.value) wsSend(ta.value);
+        hidePastePopover();
+      });
+      document.getElementById("pp-cancel").addEventListener("click", hidePastePopover);
+      popover.addEventListener("click", (e) => { if (e.target === popover) hidePastePopover(); });
+    }
   }
 
   window.foreman = { initIndex: initIndex, initAgent: initAgent, initTerminal: initTerminal };

@@ -15,7 +15,30 @@
     <span class="spacer"></span>
     <span class="meta" id="conn">connecting…</span>
   </div>
+  <div class="ctrlbar" id="ctrlbar">
+    <button data-seq="up">↑</button>
+    <button data-seq="down">↓</button>
+    <button data-seq="left">←</button>
+    <button data-seq="right">→</button>
+    <button data-seq="enter">Enter</button>
+    <button data-seq="esc">Esc</button>
+    <button data-seq="tab">Tab</button>
+    <button data-seq="shifttab">⇧Tab</button>
+    <button data-seq="pgup">PgUp</button>
+    <button data-seq="pgdn">PgDn</button>
+    <button data-seq="paste" class="paste">Paste</button>
+  </div>
   <div id="term"></div>
+  <div class="paste-popover" id="paste-popover" hidden>
+    <div class="pp-inner">
+      <div class="pp-title">Paste text (clipboard blocked on this connection)</div>
+      <textarea id="pp-text" rows="3" placeholder="paste here…" autocomplete="off"></textarea>
+      <div class="pp-actions">
+        <button id="pp-cancel">cancel</button>
+        <button id="pp-send">send</button>
+      </div>
+    </div>
+  </div>
   <script src="/static/vendor/xterm.min.js"></script>
   <script src="/static/vendor/xterm-addon-fit.min.js"></script>
   <script src="/static/app.js"></script>
