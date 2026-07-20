@@ -1878,6 +1878,15 @@ def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
 _USER_ID_PREFIX_LENGTH = 16
 
 
+def derive_username_prefix(user_id: str) -> str:
+    """The 16-hex prefix of a SuperTokens user id, used to namespace tunnels/leases/buckets.
+
+    Also the ``account_entitlements.username_prefix`` lookup key, so every
+    caller must derive it identically -- always go through this helper.
+    """
+    return user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+
+
 def _default_email_getter(
     user_id: str,
     user_getter: Callable[[str], Any] = get_user,
@@ -1944,8 +1953,7 @@ def _authenticate_supertokens(
         raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
 
     user_id = session.get_user_id()
-    # Derive 16-char hex prefix from UUID
-    user_id_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+    user_id_prefix = derive_username_prefix(user_id)
 
     # Resolve the verified email live from the core rather than trusting the
     # token's cached email-verification claim. That claim is baked into the
@@ -5089,7 +5097,7 @@ def _resolve_user_id_by_email(email: str) -> str:
 
 def _admin_ensure_entitlements(email: str) -> AccountEntitlements:
     user_id = _resolve_user_id_by_email(email)
-    username_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+    username_prefix = derive_username_prefix(user_id)
     return ensure_account_entitlements(user_id=user_id, username_prefix=username_prefix, email=email)
 
 
