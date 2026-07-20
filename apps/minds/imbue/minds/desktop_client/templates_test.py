@@ -888,26 +888,33 @@ def test_local_pages_render_the_chromeshell_titlebar() -> None:
 
 def test_chrome_shell_local_mode_differs_from_agent_content_surface() -> None:
     # Both ChromeShell modes lock the document to the viewport (overflow: hidden)
-    # and bleed the accent-tracking --titlebar-bg body background around an inset
-    # content surface. They differ in what fills the region below the titlebar:
-    # a local page wraps its content in the workspace-shaped `#local-page-card`
-    # scroll container; the agent surface leaves the slot to pages.Chrome's
-    # content iframe (no card of its own).
+    # and frame an inset content surface with the workspace accent, but they SOURCE
+    # the accent differently so a local-page surface swap can't flood the whole
+    # window with it (the regression that flashed a color on navigation):
+    #   - agent surface: the <body> background tracks --titlebar-bg and pages.Chrome
+    #     floats the content iframe over it (no card of its own).
+    #   - local page: the <body> is opaque-neutral; the accent is painted only by
+    #     the `#local-page-card`'s box-shadow ring, which appears/disappears with
+    #     the card.
     agent = CATALOG.render("ChromeShell", is_agent_content_surface=True, _content="<i>x</i>")
     local = CATALOG.render("ChromeShell", _content="<i>x</i>")
     assert "overflow: hidden" in agent
     assert "overflow: hidden" in local
     assert 'id="local-page-card"' not in agent
     assert local.count('id="local-page-card"') == 1
-    # The card carries the page surface + rounded workspace-card geometry and is
-    # the scroll container.
+    # The card carries the page surface + rounded workspace-card geometry, is the
+    # scroll container, and paints the accent bleed via its own ring.
     assert "bg-surface-primary text-primary" in local
     assert "rounded-[12px]" in local
     assert "overflow-y-auto" in local
-    # Both modes bleed the accent through the <body> background (var(--titlebar-bg)
-    # on the body, in addition to the titlebar), so the token appears twice.
+    assert "box-shadow: 0 0 0 4px var(--titlebar-bg" in local
+    # var(--titlebar-bg) appears twice in each mode, but on different elements:
+    # agent = titlebar + body background; local = titlebar + card ring. The agent
+    # body carries the accent background; the local body does NOT (only the titlebar
+    # + card do), so the local body can't flood the window during a swap.
     assert agent.count("var(--titlebar-bg") == 2
     assert local.count("var(--titlebar-bg") == 2
+    assert "box-shadow: 0 0 0 4px var(--titlebar-bg" not in agent
 
 
 def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:

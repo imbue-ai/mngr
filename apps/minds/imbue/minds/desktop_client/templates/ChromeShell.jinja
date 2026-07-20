@@ -9,15 +9,16 @@
     local/native page (Landing, Create, Settings, ...) renders its own body in
     the slot, wrapped in the ``#local-page-card`` -- an inset rounded card shaped
     exactly like the workspace content surface -- which is the page's scroll
-    container. The accent-tracking body bleeds around the card just like around
-    a workspace.
+    container. The workspace accent bleeds around the card via the card's own
+    box-shadow ring, so it frames the card just like the workspace itself.
   - Agent content surface (``is_agent_content_surface=True``): pages.Chrome
-    fills the slot with the content iframe (the browser-mode agent surface).
+    fills the slot with the content iframe (the browser-mode agent surface); the
+    accent bleeds through the body background behind the inset content view.
 
-  In both modes the document is locked to the viewport (``overflow: hidden``)
-  and the body background tracks ``--titlebar-bg`` so an active workspace accent
-  (or the neutral chrome) bleeds through the content card's insets and rounded
-  corners.
+  In both modes the document is locked to the viewport (``overflow: hidden``).
+  The accent source differs by mode (body background on the agent surface, the
+  card's box-shadow ring on local pages -- see the body/card blocks below) so a
+  local-page swap never floods the whole window with the accent.
 
   ``is_mac`` (traffic-light spacer + hidden window controls) and
   ``mngr_forward_origin`` (the body data attribute chrome.js reads to build
@@ -31,13 +32,24 @@
 #}
 {% set _is_mac = is_mac if is_mac is not none else chrome_is_mac() %}
 {% set _mngr_forward_origin = mngr_forward_origin if mngr_forward_origin is not none else chrome_mngr_forward_origin() %}
-{# Both modes lock the document to the viewport and track --titlebar-bg on the
-   body, so the workspace accent (or the neutral chrome) bleeds around the inset
-   content card: the content WebContentsView / #content-frame iframe on the agent
-   surface, the #local-page-card wrapper (below) on local pages. Local pages
-   scroll INSIDE that card, not the document. #}
-{% set _body_class = body_class if body_class else "font-sans antialiased" %}
-{% set _body_style = body_style if body_style else "background-color: var(--titlebar-bg, var(--c-surface-primary));" %}
+{# Both modes lock the document to the viewport. Where the accent bleed comes
+   from differs by mode:
+   - Agent surface: the body background tracks --titlebar-bg, and the content
+     WebContentsView / #content-frame iframe floats over it inset by 4px, so the
+     accent shows in the cutout frame around the workspace.
+   - Local pages: the body stays OPAQUE-NEUTRAL and the accent bleed is painted
+     by the #local-page-card's own box-shadow ring (below). This is deliberate:
+     a full-body accent floods the whole window for a frame during a surface swap
+     (the shell pushes the incoming workspace's accent onto the outgoing local
+     page before it navigates), which reads as a jarring flash of color. Painting
+     the ring on the card keeps the accent tied to the card's own paint. #}
+{% if is_agent_content_surface %}
+  {% set _body_class = body_class if body_class else "font-sans antialiased" %}
+  {% set _body_style = body_style if body_style else "background-color: var(--titlebar-bg, var(--c-surface-primary));" %}
+{% else %}
+  {% set _body_class = body_class if body_class else "bg-surface-primary text-primary font-sans antialiased" %}
+  {% set _body_style = body_style %}
+{% endif %}
 {# The document never scrolls in either mode (the card / content view scrolls),
    so both opt out of the global stable scrollbar gutter -- otherwise classic
    scrollbars reserve a dead 15px strip on an edge-to-edge locked surface. #}
@@ -142,13 +154,17 @@
   {# Local pages render inside a card shaped exactly like the workspace content
      surface (left/right 4px, top 38px, bottom 4px insets + 12px radius --
      matches CONTENT_INSET / CONTENT_CORNER_RADIUS in electron/main.js and the
-     agent wrapper's #content-frame), so the accent-tracking body bleeds around
-     it just like around a workspace. The card is the scroll container; pages
-     that center vertically wrap their content in ``min-h-full`` (the card has a
-     definite height, so percentage heights resolve). #}
+     agent wrapper's #content-frame). The workspace accent bleeds around it via
+     the card's own 4px box-shadow ring (var(--titlebar-bg); transparent = the
+     neutral body shows through on non-workspace screens) -- NOT via the body
+     background, so the accent can't flood the window during a surface swap. The
+     ring's top 4px falls under the fixed titlebar (z-100) and is hidden there.
+     The card is the scroll container; pages that center vertically wrap their
+     content in ``min-h-full`` (the card has a definite height, so percentage
+     heights resolve). #}
   <div id="local-page-card"
        class="fixed left-[4px] top-[38px] rounded-[12px] bg-surface-primary text-primary overflow-y-auto"
-       style="width: calc(100% - 8px); height: calc(100% - 42px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;">
+       style="width: calc(100% - 8px); height: calc(100% - 42px); box-shadow: 0 0 0 4px var(--titlebar-bg, transparent), 0 1px 0 rgba(255,255,255,0.05) inset;">
     {{ content }}
   </div>
   {% endif %}
