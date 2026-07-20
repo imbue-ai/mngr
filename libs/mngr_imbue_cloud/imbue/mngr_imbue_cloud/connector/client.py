@@ -760,6 +760,19 @@ class ImbueCloudConnectorClient(MutableModel):
             json={"plan": plan},
             timeout=self.timeout_seconds,
         )
+        # A 403 here is a refusal with a stated reason (e.g. the ally plan
+        # requires a paid-listed email), not an authentication failure, so
+        # surface the server's plain-string detail directly instead of letting
+        # ``_check`` wrap it as "Unauthenticated". Structured quota 403s still
+        # get the typed quota error first.
+        if response.status_code == 403:
+            self._raise_if_quota_exceeded(response)
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = None
+            if isinstance(detail, str) and detail:
+                raise ImbueCloudAccountError(detail)
         return self._check(response, ImbueCloudAccountError)
 
     # ------------------------------------------------------------------

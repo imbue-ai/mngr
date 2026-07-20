@@ -19,6 +19,7 @@ from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
@@ -477,6 +478,18 @@ def test_set_account_plan_posts_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install_mock_httpx(monkeypatch, handler)
     body = client.set_account_plan(SecretStr("tok"), "ally")
     assert body["plan_name"] == "ally"
+
+
+def test_set_account_plan_ineligible_403_surfaces_server_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An eligibility refusal raises ImbueCloudAccountError with the server's reason, not an auth error."""
+    reason = "The 'ally' plan requires partner access (a paid-listed email)"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": reason})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudAccountError, match="partner access"):
+        client.set_account_plan(SecretStr("tok"), "ally")
 
 
 def test_admin_account_endpoints_use_admin_paths(monkeypatch: pytest.MonkeyPatch) -> None:
