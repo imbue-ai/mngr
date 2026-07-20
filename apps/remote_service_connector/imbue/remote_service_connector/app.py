@@ -1593,12 +1593,6 @@ class ForwardingCtx:
         self.ops.delete_tunnel(tid)
         self._kv_delete_safe(tunnel_name)
 
-    def count_services(self, tunnel_name: str, username: str) -> int:
-        """Return the number of services currently configured on a tunnel."""
-        tunnel = self.get_tunnel_or_raise(tunnel_name)
-        config = self.ops.get_tunnel_config(tunnel["id"])
-        return len(non_catchall_rules(config.get("config", {}).get("ingress", [])))
-
     def add_service(
         self,
         tunnel_name: str,
