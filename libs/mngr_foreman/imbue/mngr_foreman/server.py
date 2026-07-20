@@ -7,6 +7,7 @@ foreman assumes one user driving one box.
 
 from __future__ import annotations
 
+import gzip
 import json
 import time
 from collections.abc import Iterator
@@ -97,6 +98,13 @@ def _content_type_for(filename: str) -> str:
     return "application/octet-stream"
 
 
+_COMPRESSIBLE_PREFIXES: Final[tuple[str, ...]] = ("text/", "application/javascript", "application/json", "image/svg")
+
+
+def _is_compressible(content_type: str) -> bool:
+    return content_type.startswith(_COMPRESSIBLE_PREFIXES)
+
+
 def _sse(event_dict: dict) -> str:
     return f"data: {json.dumps(event_dict)}\n\n"
 
@@ -146,7 +154,22 @@ def create_app(
         if result is None:
             return Response("Not found", status=404, mimetype="text/plain")
         data, content_type = result
-        return Response(data, mimetype=content_type.split(";")[0], content_type=content_type)
+        headers: dict[str, str] = {}
+        # Vendored libs are pinned/versioned -> cache hard (the 3-4MB one-time cost
+        # per device that was making cold loads slow). The app's own JS/CSS/HTML
+        # change on deploy -> revalidate so updates propagate.
+        if rel_path.startswith("vendor/"):
+            headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            headers["Cache-Control"] = "no-cache"
+        # Gzip compressible text assets on the fly when the client accepts it
+        # (woff2/images are already compressed -> skip). Halves the first-load
+        # bytes for the big JS libs before the immutable cache kicks in.
+        if _is_compressible(content_type) and "gzip" in request.headers.get("Accept-Encoding", ""):
+            data = gzip.compress(data, 6)
+            headers["Content-Encoding"] = "gzip"
+            headers["Vary"] = "Accept-Encoding"
+        return Response(data, mimetype=content_type.split(";")[0], content_type=content_type, headers=headers)
 
     # ---- agent list -------------------------------------------------------
 
@@ -414,11 +437,10 @@ def run_server(
     mngr_ctx: MngrContext,
     host: str,
     port: int,
-    foreman_only: bool,
     max_tool_output_chars: int,
 ) -> None:
     """Start the registry and serve forever (blocking)."""
-    registry = AgentRegistry(mngr_ctx, foreman_only=foreman_only)
+    registry = AgentRegistry(mngr_ctx)
     registry.start()
     app = create_app(mngr_ctx, registry, max_tool_output_chars)
     # threaded=True so SSE connections (one long-lived generator each) don't

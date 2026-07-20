@@ -9,7 +9,7 @@
   --bg: #000000;
   --bg-raised: #0a0a0a;
   --bg-inset: #101010;
-  --bg-user: #161616;     /* user-message highlight block */
+  --bg-user: #0f2318;     /* delivered user message: green-tinted block */
   --fg: #ffffff;
   --fg-dim: #b0b0b0;
   --fg-faint: #6a6a6a;
@@ -105,7 +105,7 @@ a:hover { text-decoration: underline; }
 .entry { padding: 6px 0; }
 /* user message: flows like the rest of the transcript, no "> " prefix, no
    distinct text color -- distinguished ONLY by a subtle background rectangle.
-   That background is the state carrier: default = delivered, purple = queued. */
+   That background is the state carrier: green = sent/delivered, purple = queued. */
 .entry.user {
   color: var(--fg);
   white-space: pre-wrap;

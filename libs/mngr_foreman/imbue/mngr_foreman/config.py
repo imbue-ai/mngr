@@ -26,7 +26,3 @@ class ForemanPluginConfig(PluginConfig):
         default=20000,
         description="Cap on tool_result output length in the transcript parser. 0 means unlimited.",
     )
-    foreman_only: bool = Field(
-        default=False,
-        description="If true, only show agents labelled foreman=1. CLI --foreman-only overrides.",
-    )

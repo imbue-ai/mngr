@@ -28,23 +28,19 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr_foreman.mngr_bin import resolve_mngr_binary
 
-_FOREMAN_LABEL_KEY: Final[str] = "foreman"
-_FOREMAN_LABEL_VALUE: Final[str] = "1"
 # Bound each subscriber queue so a dead/slow SSE client cannot grow memory
 # without limit; on overflow we drop the client (it reconnects and re-seeds).
 _SUBSCRIBER_QUEUE_MAXSIZE: Final[int] = 256
 
 
-def _is_foreman_agent(agent: AgentDetails) -> bool:
-    return agent.labels.get(_FOREMAN_LABEL_KEY) == _FOREMAN_LABEL_VALUE
-
-
 class AgentRegistry:
-    """Thread-safe live map of agent_id -> AgentDetails with change fan-out."""
+    """Thread-safe live map of agent_id -> AgentDetails with change fan-out.
 
-    def __init__(self, mngr_ctx: MngrContext, foreman_only: bool = False) -> None:
+    Tracks every agent in mngr's view -- foreman has no label filter.
+    """
+
+    def __init__(self, mngr_ctx: MngrContext) -> None:
         self._mngr_ctx = mngr_ctx
-        self._foreman_only = foreman_only
         self._lock = threading.Lock()
         self._agents: dict[str, AgentDetails] = {}
         self._subscribers: set[queue.Queue[dict]] = set()
@@ -73,8 +69,7 @@ class AgentRegistry:
                 logger.warning("Initial agent snapshot failed (starting empty): {}", e)
                 return
             for agent in result.agents:
-                if self._passes_filter(agent):
-                    sink[str(agent.id)] = agent
+                sink[str(agent.id)] = agent
             logger.info("Seeded foreman registry with {} agent(s)", len(sink))
 
     def _start_observe_stream(self) -> None:
@@ -109,15 +104,10 @@ class AgentRegistry:
 
     def _apply_full_state(self, agents: tuple[AgentDetails, ...]) -> None:
         with self._lock:
-            self._agents = {str(a.id): a for a in agents if self._passes_filter(a)}
+            self._agents = {str(a.id): a for a in agents}
         self._broadcast({"type": "snapshot", "agents": self.snapshot()})
 
     def _apply_upsert(self, agent: AgentDetails) -> None:
-        if not self._passes_filter(agent):
-            # An agent that stops matching the filter (shouldn't happen for
-            # labels, but be safe) is treated as a removal.
-            self._apply_remove(str(agent.id))
-            return
         with self._lock:
             self._agents[str(agent.id)] = agent
         self._broadcast({"type": "upsert", "agent": _agent_to_card(agent)})
@@ -167,9 +157,6 @@ class AgentRegistry:
                     self._subscribers.discard(q)
 
     # --- helpers ---------------------------------------------------------
-
-    def _passes_filter(self, agent: AgentDetails) -> bool:
-        return (not self._foreman_only) or _is_foreman_agent(agent)
 
     class _AgentsReset:
         """Context manager: build a fresh agent map, then swap it in atomically."""

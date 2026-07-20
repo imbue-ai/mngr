@@ -63,6 +63,27 @@
     document.head.appendChild(l);
   }
 
+  // Warm the render libs during idle right after page load, so by the time the
+  // user scrolls to code/math/diagram content the lib is already cached and
+  // rendering is instant (non-blocking; loaders are memoized). Combined with the
+  // server's immutable cache headers this is a one-time cost per device.
+  let _prefetchedRenderLibs = false;
+  function prefetchRenderLibs() {
+    if (_prefetchedRenderLibs) return;
+    _prefetchedRenderLibs = true;
+    loadStyle("/static/vendor/highlight-atom-one-dark.min.css");
+    loadScript("/static/vendor/highlight.min.js").catch(() => {});
+    loadStyle("/static/vendor/katex/katex.min.css");
+    loadScript("/static/vendor/katex/katex.min.js")
+      .then(() => loadScript("/static/vendor/katex/auto-render.min.js"))
+      .catch(() => {});
+    loadScript("/static/vendor/mermaid.min.js").catch(() => {});
+  }
+  function schedulePrefetch() {
+    if (window.requestIdleCallback) window.requestIdleCallback(prefetchRenderLibs, { timeout: 3000 });
+    else setTimeout(prefetchRenderLibs, 1500);
+  }
+
   // ```mermaid fences -> rendered diagrams. Must run BEFORE syntax highlighting
   // so the mermaid source isn't highlighted as code.
   function renderMermaidIn(container) {
@@ -674,6 +695,7 @@
       es.onerror = () => setConn("reconnecting");
     }
     connect();
+    schedulePrefetch(); // warm highlight/katex/mermaid during idle
 
     // ---- composer ----
     const input = document.getElementById("input");

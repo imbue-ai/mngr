@@ -18,7 +18,6 @@ class ForemanServeCliOptions(CommonCliOptions):
 
     host: str | None = None
     port: int | None = None
-    foreman_only: bool = False
 
 
 def _resolve_foreman_config(mngr_ctx: Any) -> ForemanPluginConfig:
@@ -35,12 +34,6 @@ def _resolve_foreman_config(mngr_ctx: Any) -> ForemanPluginConfig:
 @click.command(name="serve")
 @click.option("--host", default=None, help="Bind host (default from config, else 0.0.0.0).")
 @click.option("--port", type=int, default=None, help="Bind port (default from config, else 8700).")
-@click.option(
-    "--foreman-only",
-    is_flag=True,
-    default=False,
-    help="Only show agents labelled foreman=1 (created via `mngr foreman create` in phase 3).",
-)
 @add_common_options
 @click.pass_context
 def serve(ctx: click.Context, **kwargs: Any) -> None:
@@ -57,13 +50,11 @@ def serve(ctx: click.Context, **kwargs: Any) -> None:
     config = _resolve_foreman_config(mngr_ctx)
     host = opts.host if opts.host is not None else config.host
     port = opts.port if opts.port is not None else config.port
-    foreman_only = opts.foreman_only or config.foreman_only
 
     logger.info(
-        "Starting foreman server on http://{}:{} (foreman_only={}, max_tool_output_chars={})",
+        "Starting foreman server on http://{}:{} (max_tool_output_chars={})",
         host,
         port,
-        foreman_only,
         config.max_tool_output_chars,
     )
 
@@ -71,6 +62,5 @@ def serve(ctx: click.Context, **kwargs: Any) -> None:
         mngr_ctx=mngr_ctx,
         host=host,
         port=port,
-        foreman_only=foreman_only,
         max_tool_output_chars=config.max_tool_output_chars,
     )

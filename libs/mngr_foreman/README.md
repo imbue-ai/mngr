@@ -29,26 +29,20 @@ to the public internet.
 - `host` (default `0.0.0.0`)
 - `max_tool_output_chars` (default `20000`, `0` = unlimited) — cap on tool-result
   and non-diff tool-input length in the transcript.
-- `foreman_only` (default `false`) — only show agents labelled `foreman=1`.
 
-CLI flags (`--port`, `--host`, `--foreman-only`) override config.
+CLI flags (`--port`, `--host`) override config.
+
+Foreman shows **every agent in mngr's view** — chat (live transcript + send) for
+`claude` agents, a web terminal for any type. Create agents with plain
+`mngr create`; there is no foreman-specific create command or label filter.
 
 ## Status
 
-- **Phase 1:** agent list, transcript view, send message.
-- **Phase 2:** web terminal — `mngr connect` bridged over a pty↔websocket to
-  xterm.js (`terminal.py`, `/a/<name>/terminal`, `WS /ws/agents/<name>/terminal`)
-  for `/login`, permission prompts, and interrupts. `TMUX` is stripped from the
-  child env; closing the tab detaches the tmux client without touching the agent.
-- **Phase 3:** `mngr foreman create` — forwards all args to `mngr create`, adds
-  `--label foreman=1`, and optionally runs a `--bootstrap <script>` on the new
-  agent (via `mngr exec` in its work_dir) post-create. `serve --foreman-only`
-  filters the list/registry to `foreman=1` agents. See `cli/create.py`.
-
-  ```bash
-  mngr foreman create my-agent --new-host --in modal
-  mngr foreman create my-agent --bootstrap ./setup.sh
-  ```
+- **Agent list, transcript view, send message.**
+- **Web terminal** — `mngr connect` bridged over a pty↔websocket to xterm.js
+  (`terminal.py`, `/a/<name>/terminal`, `WS /ws/agents/<name>/terminal`) for
+  `/login`, permission prompts, and interrupts. `TMUX` is stripped from the child
+  env; closing the tab detaches the tmux client without touching the agent.
 
 ## Notes / limitations
 
