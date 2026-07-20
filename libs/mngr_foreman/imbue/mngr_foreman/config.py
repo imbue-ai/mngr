@@ -16,7 +16,7 @@ class ForemanPluginConfig(PluginConfig):
 
     port: int = Field(
         default=8700,
-        description="Default bind port for ``mngr foreman serve`` when --port is not passed.",
+        description="Default bind port for ``mngr foreman`` when --port is not passed.",
     )
     host: str = Field(
         default="0.0.0.0",

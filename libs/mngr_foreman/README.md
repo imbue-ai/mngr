@@ -14,7 +14,7 @@ parses it into diff-capable transcript events.
 ## Usage
 
 ```bash
-mngr foreman serve --port 8700 --host 0.0.0.0
+mngr foreman --port 8700 --host 0.0.0.0
 ```
 
 Then open `http://<box>:8700/` from any device on the network.
@@ -55,7 +55,7 @@ Foreman shows **every agent in mngr's view** — chat (live transcript + send) f
   clear it.
 - `marked` (markdown renderer) is vendored under `static/vendor/`; raw HTML in
   assistant output is escaped, not rendered.
-- **Warm connection pool & idle-stop:** `serve` keeps a warm SSH connection to
+- **Warm connection pool & idle-stop:** `mngr foreman` keeps a warm SSH connection to
   every host with a RUNNING/WAITING agent (a periodic `true` ping every ~25s) so
   sends/reads/dialog-probes are fast. That ping registers as SSH activity in
   mngr's idle tracking, so **foreman inhibits auto-idle-shutdown on the hosts it
