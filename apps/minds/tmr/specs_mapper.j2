@@ -1,0 +1,149 @@
+{# Minds spec-witnessing variant of the task-file mapper prompt. Renders
+   against the task-file mapper context: task_id, kind, context_json,
+   outcome_filename, publish_snippet. The task is one behavioral-spec unit
+   (from `minds specs plan --for-tmr`); the agent writes the cheapest
+   sufficient test witnessing it. -#}
+You are writing tests for the minds app (`apps/minds/`) that witness one unit
+of its behavioral-spec corpus (`apps/minds/specs/`): the desktop client and
+its `/api/v1` surface, Docker/remote workspaces, env provisioning, and the
+deployment/services suites.
+
+# The spec unit
+
+Your task is the spec unit with coordinate `{{ task_id }}` (kind: {{ kind }}).
+Its enriched export record is:
+
+```json
+{{ context_json }}
+```
+
+How to read it:
+
+- raw_steps are the unit's own steps; effective_steps fold the file's
+  Background in (feature-level, then rule-level for units nested under a
+  Rule). Test the EFFECTIVE behavior.
+- For a Scenario Outline (kind "scenario-outline"), examples carries the
+  table: one header and every body row. Cover EVERY row.
+- feature / rule carry the names and descriptions of the enclosing Feature
+  and (when nested) Rule.
+- prose carries the relevant overview.md files and the file's sidecar.
+- applicable_rules lists the invariants (Rules) binding this unit, resolved
+  corpus -> folder -> file. Your test must not violate them, and where a row
+  of behavior intersects an invariant, prefer asserting the invariant holds.
+
+The spec unit -- not the current implementation -- defines the correct
+behavior. If the implementation contradicts the spec, the spec wins as the
+statement of intended behavior (see "Tests-only" below for what to do about
+it).
+
+# Specs are read-only
+
+NEVER edit, move, rename, or delete anything under `apps/minds/specs/`. The
+corpus is the stable contract this work links against; the reducer rejects
+any branch that touches it.
+
+# Write the cheapest sufficient witness
+
+1. Find the code that implements the unit's behavior and look for existing
+   tests near it. Strongly prefer updating or extending an existing test
+   that already exercises the behavior over writing a new one.
+2. If no existing test can witness the unit, write ONE new test in the
+   closest existing test file (matching the file's fixtures and style).
+   Cheapest means: a unit/integration-level test using the shared fixtures
+   (temp_host_dir, temp_mngr_ctx, local_provider, and the helpers in the
+   nearest conftest.py / testing.py) -- never a Docker/Modal/deployment test
+   for behavior that can be observed in-process. Follow
+   apps/minds/docs/testing-overview.md.
+3. Every test you create or modify MUST carry the marker
+   `@pytest.mark.witnesses("{{ task_id }}")`. When the test does not cover
+   the whole unit, say exactly what it misses with
+   `partial="<what is not covered>"`. A test may witness several units, but
+   only add other coordinates when the test genuinely verifies them.
+4. Scenario Outlines become `@pytest.mark.parametrize` tests, one parameter
+   set per Examples row, covering every row.
+5. Run the tests you touched and make them pass:
+   `uv run pytest <node ids>`. Record each run in test_runs.
+
+# Tests-only by default
+
+Do NOT change implementation code to conform to the spec. Your commits may
+touch test files, conftest.py, and testing.py helpers only. If the
+implementation contradicts the spec unit -- the behavior the spec describes
+is not what the code does -- that is a gap, not something to fix here:
+
+1. Leave a comment at the relevant spot in the code, on its own line, in
+   exactly this form so a later step can find it:
+
+     # FIXME(tmr): <one-line description of the gap between spec and implementation>
+
+2. Record a change (typically ADD_TEST) with status "BLOCKED" and explain
+   the gap in summary_markdown.
+
+The same applies when the unit cannot be tested cheaply at all (it needs
+infrastructure a single test cannot stand up): do not paper over it with a
+brittle hack; flag it as BLOCKED with a FIXME(tmr) comment instead.
+
+# Committing your changes
+
+IMPORTANT: Each change kind MUST get its own separate commit. Changes of the
+same kind should be combined in one commit. The commit message MUST start
+with the kind in brackets. Examples:
+
+  [ADD_TEST] Witness authentication.fresh-code via the login redirect flow
+  [IMPROVE_TEST] Mark the existing session test as witnessing authentication.survives-restart
+
+The change kinds for this run are ADD_TEST (a new witness test) and
+IMPROVE_TEST (an existing test updated to witness the unit, e.g. by gaining
+the marker or missing assertions). Do NOT commit FIX_IMPL changes; gaps are
+BLOCKED outcomes, not implementation fixes.
+
+# Writing the result
+
+Write the result atomically to avoid races with the orchestrator reading it:
+1. First write to .test_output/{{ outcome_filename }}.draft (relative to the git repo root)
+2. Then rename (mv) the .draft file to .test_output/{{ outcome_filename }}
+
+The schema is:
+
+{"changes": {"ADD_TEST": {"status": "SUCCEEDED", "summary_markdown": "Added a parametrized witness for both Examples rows"}},
+ "errored": false,
+ "tests_passing_before": null,
+ "tests_passing_after": true,
+ "summary_markdown": "Added test_signin_witnesses_fresh_code; it passes.",
+ "test_runs": [
+   {"run_name": "<try_1>", "description_markdown": "initial run of the new witness test"}
+ ]}
+
+Fields:
+- changes: object keyed by change kind (ADD_TEST, IMPROVE_TEST). Each value
+  has status (SUCCEEDED, FAILED, BLOCKED) and summary_markdown. One entry
+  per kind -- do not duplicate kinds. A unit that is already fully witnessed
+  by an existing marked test needs no change: an empty changes object is a
+  correct, good outcome, NOT a failure.
+- errored: true only for infrastructure errors that prevented you from working.
+- tests_passing_before: were the touched tests passing before your changes
+  (null if none existed)?
+- tests_passing_after: are the touched tests passing now?
+- summary_markdown: overall markdown summary of what happened.
+- test_runs: list of objects, one per test run, in order. Each has run_name
+  and description_markdown.
+
+# Publishing the outputs archive
+
+After the outcome file is written, package the outputs and publish them
+where the orchestrator can find them. Run this from the git repo root:
+
+{{ publish_snippet }}
+
+This MUST be the very last step. The orchestrator polls for outputs.tar.gz
+and treats its appearance as the signal that you are done. The .tmp + rename
+sequence prevents the orchestrator from reading a half-written archive. Omit
+branch.bundle when you made no commits beyond the base branch.
+
+# Important: do not ask for user input
+
+For this initial request, do NOT ask the user for any input or clarification.
+Work autonomously. If something is unclear or you are blocked, produce a
+result with the appropriate change status set to "BLOCKED" and explain in
+the summary_markdown. If the user sends follow-up messages later, you may
+ask them questions at that point.

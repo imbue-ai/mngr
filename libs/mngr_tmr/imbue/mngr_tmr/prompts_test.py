@@ -87,6 +87,31 @@ def test_committed_minds_mapper_template_renders() -> None:
     assert "--mngr-e2e-run-name" not in prompt
 
 
+def test_committed_minds_specs_templates_render() -> None:
+    # The minds spec-witnessing variant ships apps/minds/tmr/specs_mapper.j2 and
+    # specs_reducer.j2; render them through the task-file builders to prove they
+    # are valid Jinja against the task-file render contexts.
+    repo_root = Path(__file__).resolve().parents[4]
+    mapper_template = repo_root / "apps" / "minds" / "tmr" / "specs_mapper.j2"
+    reducer_template = repo_root / "apps" / "minds" / "tmr" / "specs_reducer.j2"
+    if not mapper_template.is_file() or not reducer_template.is_file():
+        pytest.skip("apps/minds tree not present (running outside the monorepo checkout)")
+    mapper_prompt = build_task_file_mapper_prompt(
+        task_id="authentication.fresh-code",
+        kind="scenario",
+        context_json='{"coordinate": "authentication.fresh-code", "effective_steps": []}',
+        template_path=mapper_template,
+    )
+    assert "authentication.fresh-code" in mapper_prompt
+    assert "witnesses" in mapper_prompt
+    assert "apps/minds/specs" in mapper_prompt
+    assert TESTING_AGENT_OUTCOME_FILENAME in mapper_prompt
+    reducer_prompt = build_integrator_prompt(template_path=reducer_template)
+    assert REDUCER_INPUTS_DIRNAME in reducer_prompt
+    assert "check-witnesses" in reducer_prompt
+    assert "minds specs validate" in reducer_prompt
+
+
 def test_build_integrator_prompt_uses_override_template(tmp_path: Path) -> None:
     override = tmp_path / "custom_reducer.j2"
     override.write_text("CUSTOM REDUCER reading {{ inputs_dirname }}\n")

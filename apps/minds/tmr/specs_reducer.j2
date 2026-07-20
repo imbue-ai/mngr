@@ -1,0 +1,202 @@
+{# Minds spec-witnessing variant of the task-file reducer prompt. Renders
+   against the integrator context: inputs_dirname, mapper_outcome_filename,
+   reducer_outcome_filename, publish_snippet. Integrates the mapper branches
+   that added witness tests, then enforces the spec-corpus gates. -#}
+Integrate the witness-test branches from the spec-mapping agents whose
+outputs have been uploaded into ``{{ inputs_dirname }}/`` (a sibling of the
+current directory's contents, in your work_dir). Each subdirectory
+``{{ inputs_dirname }}/<agent_name>/`` contains the agent's
+``test_output/{{ mapper_outcome_filename }}`` and (when it made commits) a
+``branch.bundle``. Each agent wrote (or updated) tests witnessing one
+behavioral-spec unit of the minds corpus under ``apps/minds/specs/``.
+
+# Discover and fetch qualifying branches
+
+Run this from the git repo root to filter and fetch the branches whose
+agents reported real witness work (and didn't leave failing tests):
+
+```bash
+set -euo pipefail
+
+INPUTS_DIR="{{ inputs_dirname }}"
+FETCHED_BRANCHES=()
+
+should_pull() {
+    python3 - "$1" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+if data.get("errored"):
+    sys.exit(1)
+changes = data.get("changes") or {}
+if not any((c or {}).get("status") == "SUCCEEDED" for c in changes.values()):
+    sys.exit(1)
+if data.get("tests_passing_after") is False:
+    sys.exit(1)
+sys.exit(0)
+PYEOF
+}
+
+bundle_branch() {
+    git bundle list-heads "$1" \
+        | awk 'NR==1 { sub(/^refs\/heads\//, "", $2); print $2 }'
+}
+
+for agent_dir in "$INPUTS_DIR"/*/; do
+    outcome="$agent_dir/test_output/{{ mapper_outcome_filename }}"
+    bundle="$agent_dir/branch.bundle"
+    [ -f "$outcome" ] || continue
+    [ -f "$bundle" ] || continue
+    if ! should_pull "$outcome"; then
+        echo "Skipping $agent_dir (did not meet the should-pull predicate)"
+        continue
+    fi
+    branch=$(bundle_branch "$bundle")
+    if [ -z "$branch" ]; then
+        echo "Skipping $agent_dir (could not read branch ref from bundle)"
+        continue
+    fi
+    echo "Fetching $branch from $bundle"
+    git fetch --no-tags "$bundle" "+$branch:$branch"
+    FETCHED_BRANCHES+=("$branch")
+done
+
+printf '%s\n' "${FETCHED_BRANCHES[@]}"
+```
+
+The branches you must integrate are exactly the printed ones. If no branches
+qualify, write an outcome describing that (no squashed commits) and proceed
+straight to publishing the outputs archive.
+
+# Integration strategy
+
+Use cherry-pick (NOT merge) to build a clean linear history.
+
+1. For each fetched branch, inspect the commits. They should be tagged
+   [ADD_TEST] or [IMPROVE_TEST] -- this run is tests-only.
+2. If any commit touches files outside test code (test files, conftest.py,
+   testing.py) -- above all any commit tagged [FIX_IMPL] or touching
+   production code -- do NOT cherry-pick it. Record the branch under
+   "failed" with the reason, and note it under "escalations".
+3. Cherry-pick the remaining commits and squash them into a SINGLE commit
+   with a message like: "[ADD_TEST] Witness tests for spec units (from N agents)".
+4. If a cherry-pick has conflicts, try to resolve them (two agents often
+   touched the same test file). If you cannot resolve a conflict for a
+   particular branch, skip it and record it as failed.
+5. After cherry-picking, record the squashed commit hash with `git rev-parse HEAD`.
+
+# The spec corpus is read-only
+
+No mapper branch may modify anything under ``apps/minds/specs/``. After
+integrating, verify:
+
+```bash
+git diff --name-only "$MNGR_GIT_BASE_BRANCH...HEAD" -- apps/minds/specs/
+```
+
+This MUST print nothing. If any spec file was touched, back those changes
+out (`git checkout "$MNGR_GIT_BASE_BRANCH" -- apps/minds/specs/` and amend
+the integration commit), and record an escalation naming the branch that did
+it.
+
+# Deduplicate the generated tests
+
+This is the only point in the pipeline where all generated tests are visible
+together. Read the tests the integrated branches added or modified:
+
+- If two branches wrote tests covering the same behavior (e.g. a scenario
+  and one row of a related outline, or two agents that both chose to extend
+  the same existing test), keep the better one and drop the other. Prefer
+  the test that covers more of its spec unit (fewer partial= notes).
+- Every generated or modified test must carry
+  `@pytest.mark.witnesses("<coordinate>")` for the unit it covers. Drop
+  markers that do not correspond to what the test actually verifies.
+- Keep each deduplication as its own commit prefixed `[NORMALIZE]`, and
+  record it under "normalizations".
+
+# Gate the integrated tree
+
+Before publishing, all of these MUST pass:
+
+1. Spec validation:
+
+   ```bash
+   uv run minds specs validate
+   ```
+
+2. The witnesses-coordinate check (fails on any marker naming a coordinate
+   no corpus unit claims):
+
+   ```bash
+   uv run minds specs check-witnesses
+   ```
+
+3. The blast-radius pytest subset: run the test files the integration
+   touched, with the unit/integration marker expression:
+
+   ```bash
+   TOUCHED=$(git diff --name-only "$MNGR_GIT_BASE_BRANCH...HEAD" -- '*_test.py' 'test_*.py')
+   uv run pytest $TOUCHED -m 'not acceptance and not release and not docker and not docker_sdk and not minds_deployment and not minds_services and not minds_snapshot_resume'
+   ```
+
+   If a merged test fails and you cannot fix it cheaply within test code,
+   drop that test (revert its hunk) and record the branch as failed with the
+   reason. Do NOT fix implementation code to make a witness pass: the gap
+   between spec and implementation is an escalation, not a fix here.
+
+Also collect any `# FIXME(tmr):` comments the mappers left:
+
+```bash
+grep -rn "FIXME(tmr):" . || true
+```
+
+Record each distinct one under "escalations" (they describe spec-vs-implementation
+gaps and shared setup blockers for the user; do not try to resolve them by
+changing implementation code).
+
+If a gate cannot run in this environment (e.g. pytest cannot collect because
+of a missing dependency), record it as an escalation rather than guessing.
+
+# Writing the outcome and publishing outputs
+
+After integrating, write the result atomically to avoid races with the
+orchestrator reading it:
+
+1. First write to .test_output/{{ reducer_outcome_filename }}.draft (relative to the git repo root)
+2. Then rename (mv) the .draft file to .test_output/{{ reducer_outcome_filename }}
+
+The schema is:
+
+{"squashed_branches": ["branch1", "branch2"],
+ "squashed_commit_hash": "abc1234",
+ "impl_priority": [],
+ "impl_commit_hashes": {},
+ "failed": ["branch3"],
+ "normalizations": [{"summary_markdown": "Dropped the duplicate fresh-code witness in favor of the parametrized one"}],
+ "escalations": [{"title": "spec gap: spent codes are not refused", "detail_markdown": "authentication.used-code: the implementation accepts a spent code twice; mappers recorded BLOCKED. See FIXME(tmr) in apps/minds/imbue/minds/desktop_client/auth.py."}]}
+
+Fields:
+- squashed_branches: branch names whose commits were squashed into the
+  integration commit
+- squashed_commit_hash: commit hash of the squashed commit (short is fine)
+- impl_priority / impl_commit_hashes: always empty for this run (tests-only)
+- failed: branch names that could not be integrated (conflicts, out-of-scope
+  edits, or tests that could not pass without implementation changes)
+- normalizations: deduplication and cleanup commits you applied (each with
+  summary_markdown). Omit or use [] if none.
+- escalations: spec-vs-implementation gaps and blockers to surface to the
+  user (each with title and detail_markdown). Omit or use [] if none.
+
+Then, finally, publish the outputs archive. Run this from the git repo root:
+
+{{ publish_snippet }}
+
+This MUST be the very last step. The orchestrator polls for outputs.tar.gz
+and treats its appearance as the signal that you are done. The .tmp + rename
+sequence prevents the orchestrator from reading a half-written archive.
+
+# Important: do not ask for user input
+
+For this initial request, do NOT ask the user for any input or clarification.
+Work autonomously. If a cherry-pick has conflicts you cannot resolve, skip
+that branch and record it as failed. If the user sends follow-up messages
+later, you may ask them questions at that point.
