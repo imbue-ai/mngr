@@ -115,6 +115,11 @@ def test_specs_list_emits_one_json_record_per_unit_and_nothing_else_on_stdout(tm
     assert fresh_code["line"] == 4
     assert fresh_code["tags"] == ["fresh-code"]
     assert fresh_code["steps"][0] == {"keyword": "Given", "text": "the user is not signed in"}
+    # The lone Rule in this file binds its file-mates but not itself.
+    assert fresh_code["invariants"] == ["authentication.installation-bound"]
+    installation_bound = records[2]
+    assert installation_bound["coordinate"] == "authentication.installation-bound"
+    assert installation_bound["invariants"] == []
 
 
 def test_specs_list_filters_by_unit_kind(tmp_path: Path) -> None:

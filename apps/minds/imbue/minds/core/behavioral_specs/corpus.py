@@ -14,6 +14,7 @@ consumes, so the rest of the code works with typed, validated objects.
 
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -156,6 +157,10 @@ _ALLOWED_STEP_KEYWORDS: Final[tuple[str, ...]] = ("Given", "When", "Then", "And"
 # violation (not in the construct list) but still denotes an outline, so the
 # unit's record stays truthful while validate reports the spelling.
 _OUTLINE_KEYWORDS: Final[tuple[str, ...]] = ("Scenario Outline", "Scenario Template")
+
+# The reserved filename whose Rules bind their whole folder subtree rather than
+# just their own file (per the minds-behavioral-specs skill's scope rules).
+_INVARIANTS_FEATURE_BASENAME: Final[str] = "invariants.feature"
 
 
 @pure
@@ -534,8 +539,43 @@ def spec_unit_kind_record_value(kind: SpecUnitKind) -> str:
 
 
 @pure
-def spec_unit_to_record(unit: SpecUnit) -> dict[str, Any]:
-    """Render a unit as the JSON object emitted (one per line) by ``minds specs list``/``query``."""
+def _rule_binds_unit(rule: SpecUnit, unit: SpecUnit, corpus_root: Path) -> bool:
+    """True when the Rule's scope covers the unit: same file, or an invariants.feature at/above its folder."""
+    if rule.file == unit.file:
+        return True
+    if rule.file.name != _INVARIANTS_FEATURE_BASENAME:
+        return False
+    rule_folder_parts = rule.file.relative_to(corpus_root).parent.parts
+    unit_folder_parts = unit.file.relative_to(corpus_root).parent.parts
+    return unit_folder_parts[: len(rule_folder_parts)] == rule_folder_parts
+
+
+@pure
+def binding_invariant_coordinates(unit: SpecUnit, units: Sequence[SpecUnit], corpus_root: Path) -> tuple[str, ...]:
+    """Coordinates of every Rule that binds this unit, in CorpusScan.units (scan) order.
+
+    A Rule binds a unit when it is in the same file (an ordinary file's Rule
+    binds that file's units; an invariants.feature Rule binds its file-mates) or
+    when it lives in an invariants.feature at or above the unit's folder. A Rule
+    never binds itself; a Rule's illustrating children share its file and so
+    list it here.
+    """
+    return tuple(
+        candidate_rule.coordinate
+        for candidate_rule in units
+        if candidate_rule.kind == SpecUnitKind.RULE
+        and candidate_rule is not unit
+        and _rule_binds_unit(candidate_rule, unit, corpus_root)
+    )
+
+
+@pure
+def spec_unit_to_record(unit: SpecUnit, units: Sequence[SpecUnit], corpus_root: Path) -> dict[str, Any]:
+    """Render a unit as the JSON object emitted (one per line) by ``minds specs list``/``query``.
+
+    ``units`` is the whole corpus (and ``corpus_root`` the scan root) so the
+    ``invariants`` field can name every binding Rule, which is cross-file data.
+    """
     return {
         "coordinate": unit.coordinate,
         "kind": spec_unit_kind_record_value(unit.kind),
@@ -545,6 +585,7 @@ def spec_unit_to_record(unit: SpecUnit) -> dict[str, Any]:
         "tags": list(unit.tags),
         "steps": [{"keyword": step.keyword, "text": step.text} for step in unit.steps],
         "parent": unit.parent,
+        "invariants": list(binding_invariant_coordinates(unit, units, corpus_root)),
     }
 
 

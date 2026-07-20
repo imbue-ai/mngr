@@ -10,10 +10,16 @@ from pathlib import Path
 
 from inline_snapshot import snapshot
 
+from imbue.minds.core.behavioral_specs.corpus import binding_invariant_coordinates
 from imbue.minds.core.behavioral_specs.corpus import scan_corpus
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_to_record
+from imbue.minds.core.behavioral_specs.data_types import SpecUnit
 from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
 from imbue.minds.core.behavioral_specs.testing import write_spec_corpus
+
+
+def _unit_with_coordinate(units: tuple[SpecUnit, ...], coordinate: str) -> SpecUnit:
+    return next(unit for unit in units if unit.coordinate == coordinate)
 
 
 def test_scan_corpus_extracts_scenario_unit_with_folder_qualified_coordinate(tmp_path: Path) -> None:
@@ -494,15 +500,226 @@ def test_spec_unit_to_record_serializes_stable_field_order_and_kind_spelling(tmp
 
     scan = scan_corpus(root)
 
-    child_record = spec_unit_to_record(scan.units[1])
+    child_record = spec_unit_to_record(scan.units[1], scan.units, root)
     rendered = json.dumps(child_record, ensure_ascii=False).replace(str(root), "<root>")
     assert rendered == snapshot(
-        '{"coordinate": "authentication.spent-code", "kind": "scenario-outline", "name": "Spent codes are refused", "file": "<root>/authentication/session.feature", "line": 7, "tags": ["spent-code", "edge-case"], "steps": [{"keyword": "When", "text": "anyone presents \\"<code>\\""}, {"keyword": "Then", "text": "authentication is refused"}], "parent": "authentication.installation-bound"}'
+        '{"coordinate": "authentication.spent-code", "kind": "scenario-outline", "name": "Spent codes are refused", "file": "<root>/authentication/session.feature", "line": 7, "tags": ["spent-code", "edge-case"], "steps": [{"keyword": "When", "text": "anyone presents \\"<code>\\""}, {"keyword": "Then", "text": "authentication is refused"}], "parent": "authentication.installation-bound", "invariants": ["authentication.installation-bound"]}'
     )
-    rule_record = spec_unit_to_record(scan.units[0])
+    rule_record = spec_unit_to_record(scan.units[0], scan.units, root)
     assert rule_record["kind"] == "rule"
     assert rule_record["steps"] == []
     assert rule_record["parent"] is None
+    # The lone Rule has no other Rule binding it, so its invariants list is empty.
+    assert rule_record["invariants"] == []
+
+
+def test_binding_invariants_file_scoped_rule_binds_same_file_units_only(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/signin.feature": (
+                "Feature: Sign-in\n"
+                "\n"
+                "  @fresh-code\n"
+                "  Scenario: fresh\n"
+                "    Given a thing\n"
+                "\n"
+                "  @installation-bound\n"
+                "  Rule: Only local tokens are accepted\n"
+            ),
+            "authentication/session.feature": (
+                "Feature: Session\n\n  @other-flow\n  Scenario: other\n    Given a thing\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    fresh_code = _unit_with_coordinate(scan.units, "authentication.fresh-code")
+    other_flow = _unit_with_coordinate(scan.units, "authentication.other-flow")
+    # The file-scoped Rule binds its file-mate but not a unit in a sibling file of the same folder.
+    assert binding_invariant_coordinates(fresh_code, scan.units, root) == ("authentication.installation-bound",)
+    assert binding_invariant_coordinates(other_flow, scan.units, root) == ()
+
+
+def test_binding_invariants_folder_invariants_rule_binds_folder_and_nested_subfolders(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/invariants.feature": (
+                "Feature: Authentication invariants\n\n  @single-use-codes\n  Rule: single use\n"
+            ),
+            "authentication/signin.feature": (
+                "Feature: Sign-in\n\n  @fresh-code\n  Scenario: fresh\n    Given a thing\n"
+            ),
+            "authentication/oauth/flow.feature": (
+                "Feature: OAuth\n\n  @nested-flow\n  Scenario: nested\n    Given a thing\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    fresh_code = _unit_with_coordinate(scan.units, "authentication.fresh-code")
+    nested_flow = _unit_with_coordinate(scan.units, "authentication.oauth.nested-flow")
+    assert binding_invariant_coordinates(fresh_code, scan.units, root) == ("authentication.single-use-codes",)
+    assert binding_invariant_coordinates(nested_flow, scan.units, root) == ("authentication.single-use-codes",)
+
+
+def test_binding_invariants_corpus_root_invariants_rule_binds_every_unit(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "invariants.feature": ("Feature: Corpus invariants\n\n  @global-rule\n  Rule: global\n"),
+            "authentication/signin.feature": (
+                "Feature: Sign-in\n\n  @fresh-code\n  Scenario: fresh\n    Given a thing\n"
+            ),
+            "networking/tunnels/hole-punching.feature": (
+                "Feature: Tunnels\n\n  @deep-flow\n  Scenario: deep\n    Given a thing\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    fresh_code = _unit_with_coordinate(scan.units, "authentication.fresh-code")
+    deep_flow = _unit_with_coordinate(scan.units, "networking.tunnels.deep-flow")
+    assert binding_invariant_coordinates(fresh_code, scan.units, root) == ("global-rule",)
+    assert binding_invariant_coordinates(deep_flow, scan.units, root) == ("global-rule",)
+
+
+def test_binding_invariants_rule_never_binds_itself(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/invariants.feature": (
+                "Feature: Authentication invariants\n\n  @single-use-codes\n  Rule: single use\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    single_use = _unit_with_coordinate(scan.units, "authentication.single-use-codes")
+    assert binding_invariant_coordinates(single_use, scan.units, root) == ()
+
+
+def test_binding_invariants_rule_is_bound_by_ancestor_invariants_but_not_its_own_descendants(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "invariants.feature": ("Feature: Corpus invariants\n\n  @global-rule\n  Rule: global\n"),
+            "authentication/invariants.feature": (
+                "Feature: Authentication invariants\n\n  @auth-rule\n  Rule: auth\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    global_rule = _unit_with_coordinate(scan.units, "global-rule")
+    auth_rule = _unit_with_coordinate(scan.units, "authentication.auth-rule")
+    # The ancestor invariants-file Rule binds the nested Rule, but not the reverse.
+    assert binding_invariant_coordinates(auth_rule, scan.units, root) == ("global-rule",)
+    assert binding_invariant_coordinates(global_rule, scan.units, root) == ()
+
+
+def test_binding_invariants_illustrating_child_lists_its_parent_rule(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/session.feature": (
+                "Feature: Session\n"
+                "\n"
+                "  @installation-bound\n"
+                "  Rule: Only local tokens are accepted\n"
+                "\n"
+                "    @foreign-token\n"
+                "    Example: A foreign token reads as signed out\n"
+                "      Given a session token minted under another data directory\n"
+                "      Then the user is treated as signed out\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    foreign_token = _unit_with_coordinate(scan.units, "authentication.foreign-token")
+    assert foreign_token.parent == "authentication.installation-bound"
+    # The child is in the same file as its Rule, so its binding invariants include that parent.
+    assert binding_invariant_coordinates(foreign_token, scan.units, root) == ("authentication.installation-bound",)
+
+
+def test_binding_invariants_unit_with_no_binding_rules_gets_empty_tuple(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/signin.feature": (
+                "Feature: Sign-in\n\n  @fresh-code\n  Scenario: fresh\n    Given a thing\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    assert binding_invariant_coordinates(scan.units[0], scan.units, root) == ()
+
+
+def test_binding_invariants_ordering_follows_corpus_scan_order(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "invariants.feature": (
+                "Feature: Corpus invariants\n"
+                "\n"
+                "  @root-first\n"
+                "  Rule: r1\n"
+                "\n"
+                "  @root-second\n"
+                "  Rule: r2\n"
+            ),
+            "authentication/invariants.feature": (
+                "Feature: Authentication invariants\n"
+                "\n"
+                "  @auth-first\n"
+                "  Rule: a1\n"
+                "\n"
+                "  @auth-second\n"
+                "  Rule: a2\n"
+            ),
+            "authentication/signin.feature": (
+                "Feature: Sign-in\n"
+                "\n"
+                "  @fresh-code\n"
+                "  Scenario: fresh\n"
+                "    Given a thing\n"
+                "\n"
+                "  @signin-local\n"
+                "  Rule: file-scoped\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    fresh_code = _unit_with_coordinate(scan.units, "authentication.fresh-code")
+    # Binding Rules appear in CorpusScan.units order: sorted file path, then document order. The file-scoped
+    # Rule (signin-local) is interleaved by its scan position, not grouped separately from the invariants files.
+    assert binding_invariant_coordinates(fresh_code, scan.units, root) == (
+        "authentication.auth-first",
+        "authentication.auth-second",
+        "authentication.signin-local",
+        "root-first",
+        "root-second",
+    )
 
 
 # The live corpus shipped in this repo (corpus_test.py sits at

@@ -87,11 +87,17 @@ _UNIT_KIND_BY_CLI_VALUE: Final[dict[str, SpecUnitKind]] = {
 }
 
 
-def _emit_unit_records(units: tuple[SpecUnit, ...], unit_kind: SpecUnitKind | None) -> None:
-    for unit in units:
+def _emit_unit_records(
+    units_to_emit: tuple[SpecUnit, ...],
+    # The whole corpus, so each record's invariants list can name binding Rules that the emitted subset may exclude.
+    all_units: tuple[SpecUnit, ...],
+    corpus_root: Path,
+    unit_kind: SpecUnitKind | None,
+) -> None:
+    for unit in units_to_emit:
         if unit_kind is not None and unit.kind != unit_kind:
             continue
-        write_stdout_line(json.dumps(spec_unit_to_record(unit), ensure_ascii=False))
+        write_stdout_line(json.dumps(spec_unit_to_record(unit, all_units, corpus_root), ensure_ascii=False))
 
 
 def _fail_if_units_were_omitted(scan: CorpusScan) -> None:
@@ -148,14 +154,16 @@ def specs_list(corpus_root: Path, unit_kind_value: str | None) -> None:
     rule), name, file (as rooted at --root; repo-relative for the default
     invocation from the repo root), line, tags (in authored order, without the
     '@' sigil; the first is the unit's identity), steps (objects with keyword
-    and text; empty for a Rule, Background steps not folded in), and parent
-    (the enclosing Rule's coordinate, or null). Units appear in file order,
-    then document order. Stdout carries nothing but JSONL; diagnostics go to
-    stderr.
+    and text; empty for a Rule, Background steps not folded in), parent (the
+    enclosing Rule's coordinate, or null), and invariants (coordinates of every
+    Rule that binds this unit -- Rules in the same file, plus invariants.feature
+    Rules at or above the unit's folder -- in corpus order). Units appear in
+    file order, then document order. Stdout carries nothing but JSONL;
+    diagnostics go to stderr.
     """
     scan = scan_corpus(_require_corpus_root(corpus_root))
     unit_kind = None if unit_kind_value is None else _UNIT_KIND_BY_CLI_VALUE[unit_kind_value]
-    _emit_unit_records(scan.units, unit_kind)
+    _emit_unit_records(scan.units, scan.units, corpus_root, unit_kind)
     _fail_if_units_were_omitted(scan)
 
 
@@ -213,5 +221,5 @@ def specs_query(
     matching_units = tuple(
         unit for unit in scan.units if _unit_passes_query_filters(unit, tag_filter, name_filter, step_filter)
     )
-    _emit_unit_records(matching_units, None)
+    _emit_unit_records(matching_units, scan.units, corpus_root, None)
     _fail_if_units_were_omitted(scan)
