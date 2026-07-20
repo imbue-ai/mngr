@@ -142,6 +142,32 @@ def _make_test_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return client
 
 
+_PLAN_VALUES_BY_NAME = {"explorer": EXPLORER_PLAN_VALUES, "ally": ALLY_PLAN_VALUES}
+
+
+def _seed_entitlements_row(
+    entitlements_store: InMemoryEntitlementsStore,
+    plan_name: str = "explorer",
+    user_id: str = _ADMIN_STUB_USER_ID,
+    username_prefix: str = _ADMIN_STUB_USERNAME,
+    **overrides: float,
+) -> None:
+    """Insert an entitlements row copied from the named launch plan, with per-test quota overrides."""
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": user_id,
+            "username_prefix": username_prefix,
+            "plan_name": plan_name,
+            **{**_PLAN_VALUES_BY_NAME[plan_name], **overrides},
+        }
+    )
+
+
+def _email_policy(email: str) -> AuthPolicy:
+    """Build the allow-only-this-email AuthPolicy used across the tunnel/service tests."""
+    return AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": email}}]}])
+
+
 def test_make_tunnel_name_format() -> None:
     assert make_tunnel_name("alice", "agent1") == "alice--agent1"
 
@@ -276,9 +302,7 @@ def test_delete_tunnel_raises_for_wrong_owner() -> None:
 def test_add_service_creates_dns_and_ingress() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
-    ctx.set_tunnel_auth(
-        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
-    )
+    ctx.set_tunnel_auth("alice--agent1", _email_policy("owner@x.com"))
     info = ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     assert info.hostname == "web--agent1--alice.example.com"
     assert len(ctx.fake.dns_records) == 1
@@ -338,9 +362,7 @@ def test_add_service_is_idempotent() -> None:
     """
     ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp"])
     ctx.create_tunnel("alice", "agent1")
-    ctx.set_tunnel_auth(
-        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
-    )
+    ctx.set_tunnel_auth("alice--agent1", _email_policy("owner@x.com"))
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:9090")
     assert len(ctx.fake.dns_records) == 1
@@ -372,9 +394,7 @@ def test_add_service_rejects_cname_pointing_elsewhere() -> None:
     ``add_service`` must refuse rather than silently leak traffic."""
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
-    ctx.set_tunnel_auth(
-        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
-    )
+    ctx.set_tunnel_auth("alice--agent1", _email_policy("owner@x.com"))
     hostname = make_hostname("web", "agent1", "alice", "example.com")
     ctx.fake.dns_records.append(
         {"id": "stray", "name": hostname, "content": "different-tunnel.cfargotunnel.com", "type": "CNAME"}
@@ -414,9 +434,7 @@ def test_tunnel_auth_get_set() -> None:
 def test_service_auth_get_set() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
-    ctx.set_tunnel_auth(
-        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
-    )
+    ctx.set_tunnel_auth("alice--agent1", _email_policy("owner@x.com"))
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
     ctx.set_service_auth("alice--agent1", "alice", "web", policy)
@@ -1705,9 +1723,7 @@ def test_ctx_remove_service_scrubs_ingress_rule() -> None:
     """Removing a service drops its hostname from the tunnel config's ingress."""
     ctx = make_fake_forwarding_ctx()
     info = ctx.create_tunnel("alice", "agent1")
-    ctx.set_tunnel_auth(
-        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
-    )
+    ctx.set_tunnel_auth("alice--agent1", _email_policy("owner@x.com"))
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     ctx.remove_service("alice--agent1", "alice", "web")
     config = ctx.fake.tunnel_configs[info.tunnel_id]
@@ -2264,14 +2280,7 @@ def test_route_lease_host_returns_quota_403_at_workspace_cap(
 ) -> None:
     """A lease past the account's max_remote_workspaces is refused with structured detail."""
     client, backend, entitlements_store, _litellm = _make_pool_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "explorer",
-            **{**EXPLORER_PLAN_VALUES, "max_remote_workspaces": 1},
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "explorer", max_remote_workspaces=1)
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"),
         version="v0.1.0",
@@ -2728,14 +2737,7 @@ def test_create_bucket_duplicate_returns_409(monkeypatch: pytest.MonkeyPatch) ->
 def test_create_bucket_at_quota_returns_403(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bucket creation past the account's max_buckets entitlement is refused."""
     client, fake, _store, entitlements_store = _make_bucket_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "explorer",
-            **{**EXPLORER_PLAN_VALUES, "max_buckets": 1},
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "explorer", max_buckets=1)
     assert client.post("/buckets", json={"name": "first"}, headers=_admin_headers()).status_code == 200
     resp = client.post("/buckets", json={"name": "one-more"}, headers=_admin_headers())
     assert resp.status_code == 403
@@ -3354,14 +3356,7 @@ def test_ensure_account_entitlements_raises_when_plan_not_seeded() -> None:
 
 def test_route_create_tunnel_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "explorer",
-            **{**EXPLORER_PLAN_VALUES, "max_tunnels": 1},
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "explorer", max_tunnels=1)
     assert client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).status_code == 200
     resp = client.post("/tunnels", json={"agent_id": "agent2"}, headers=_admin_headers())
     assert resp.status_code == 403
@@ -3374,14 +3369,7 @@ def test_route_create_tunnel_returns_quota_403_at_cap(monkeypatch: pytest.Monkey
 
 def test_route_add_service_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "explorer",
-            **{**EXPLORER_PLAN_VALUES, "max_services_per_tunnel": 1},
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "explorer", max_services_per_tunnel=1)
     client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
     first = client.post(
         "/tunnels/testuser--agent1/services",
@@ -3408,14 +3396,7 @@ def test_route_add_service_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPa
 def test_route_add_service_agent_auth_respects_owner_quota_by_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     """Agent (tunnel-token) auth resolves the owner's quota via the tunnel-name prefix."""
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "explorer",
-            **{**EXPLORER_PLAN_VALUES, "max_services_per_tunnel": 1},
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "explorer", max_services_per_tunnel=1)
     created = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).json()
     agent = _agent_headers(created["tunnel_id"])
     first = client.post(
@@ -3502,9 +3483,7 @@ def test_ctx_add_service_rolls_back_on_access_app_failure() -> None:
     """A failed Access Application creation must leave nothing behind (no public exposure)."""
     ctx = make_fake_forwarding_ctx()
     info = ctx.create_tunnel("alice", "agent1")
-    ctx.set_tunnel_auth(
-        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "o@x.com"}}]}])
-    )
+    ctx.set_tunnel_auth("alice--agent1", _email_policy("o@x.com"))
     ctx.fake.fail_next_create_access_app = True
     with pytest.raises(CloudflareApiError):
         ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
@@ -3518,9 +3497,7 @@ def test_ctx_add_service_rolls_back_access_app_on_policy_failure() -> None:
     """A policy-attachment failure must delete the just-created Access App (no policy-less app remains)."""
     ctx = make_fake_forwarding_ctx()
     info = ctx.create_tunnel("alice", "agent1")
-    ctx.set_tunnel_auth(
-        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "o@x.com"}}]}])
-    )
+    ctx.set_tunnel_auth("alice--agent1", _email_policy("o@x.com"))
     ctx.fake.fail_next_create_access_policy = True
     with pytest.raises(CloudflareApiError):
         ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
@@ -3546,7 +3523,7 @@ def test_ctx_add_service_without_any_policy_is_refused() -> None:
 def test_ctx_create_tunnel_fallback_policy_does_not_clobber_existing_default() -> None:
     """Re-creating a tunnel with a fallback must preserve a user-set default policy."""
     ctx = make_fake_forwarding_ctx()
-    user_policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "guest@y.com"}}]}])
+    user_policy = _email_policy("guest@y.com")
     ctx.create_tunnel("alice", "agent1", default_auth_policy=user_policy)
     fallback = app_mod.owner_email_auth_policy("owner@x.com")
     ctx.create_tunnel("alice", "agent1", fallback_auth_policy=fallback)
@@ -3571,14 +3548,7 @@ def _make_sync_quota_test_client(
 
 def test_sync_put_active_record_refused_at_quota(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, entitlements_store = _make_sync_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "explorer",
-            **{**EXPLORER_PLAN_VALUES, "max_active_synced_workspaces": 1},
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "explorer", max_active_synced_workspaces=1)
     first = client.put(
         "/sync/records/host-1", json=_sync_record_body(host_id="host-1", agent_id="agent-1"), headers=_admin_headers()
     )
@@ -3644,14 +3614,7 @@ def test_route_get_account_reports_plan_entitlements_and_usage(monkeypatch: pyte
 
 def test_route_set_account_plan_same_plan_is_noop_preserving_bumps(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "ally",
-            **{**ALLY_PLAN_VALUES, "max_remote_workspaces": 42},
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "ally", max_remote_workspaces=42)
     resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
     assert resp.status_code == 200
     assert resp.json()["entitlements"]["max_remote_workspaces"] == 42
@@ -3661,14 +3624,7 @@ def test_route_set_account_plan_same_plan_is_noop_preserving_bumps(monkeypatch: 
 
 def test_route_set_account_plan_switch_overwrites_wholesale(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "explorer",
-            **{**EXPLORER_PLAN_VALUES, "max_remote_workspaces": 42},
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "explorer", max_remote_workspaces=42)
     resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
     assert resp.status_code == 200
     body = resp.json()
@@ -3688,14 +3644,7 @@ def test_route_set_account_plan_unknown_plan_returns_400(monkeypatch: pytest.Mon
 def test_route_set_account_plan_litellm_failure_aborts_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed LiteLLM budget push fails the whole switch; the row is unchanged."""
     client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": _ADMIN_STUB_USER_ID,
-            "username_prefix": _ADMIN_STUB_USERNAME,
-            "plan_name": "explorer",
-            **EXPLORER_PLAN_VALUES,
-        }
-    )
+    _seed_entitlements_row(entitlements_store, "explorer")
     litellm.fail_user_writes = True
     resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
     assert resp.status_code == 500
@@ -3849,13 +3798,11 @@ def _add_bucket_with_key(
 def _seed_sweep_row(
     entitlements_store: InMemoryEntitlementsStore, user_id: str, prefix: str, max_total_bucket_bytes: int
 ) -> None:
-    entitlements_store.insert_entitlements_if_absent(
-        {
-            "user_id": user_id,
-            "username_prefix": prefix,
-            "plan_name": "explorer",
-            **{**EXPLORER_PLAN_VALUES, "max_total_bucket_bytes": max_total_bucket_bytes},
-        }
+    _seed_entitlements_row(
+        entitlements_store,
+        user_id=user_id,
+        username_prefix=prefix,
+        max_total_bucket_bytes=max_total_bucket_bytes,
     )
 
 
