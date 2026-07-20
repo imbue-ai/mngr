@@ -15,7 +15,9 @@ This audits the Minds app against Google's **CASA Tier 2** requirements, which a
 
 A follow-up change implemented the self-contained ("A-list") fixes. The scorecard below reflects the post-fix state; each changed row is annotated. Items whose only remaining uncertainty is behavior inside the external SuperTokens connector are now marked 🟦 PROBABLY rather than PARTIAL/NOT MET, since they cannot be confirmed or fixed from this repo.
 
-Fixed to ✅ MET: 6.1.1 (dependency + secret scanning), 1.1.2 / 1.3.1 (one-time-code TTL), 2.2.1 / 6.6.1 (logout clears cookie + Electron storage), 5.1.7 (first-party CSP + nosniff), 3.2.2 (OAuth `state`), 3.2.1 (PKCE — Google), plus 5.1.9 shell-quoting hardening.
+Fixed to ✅ MET: 6.1.1 (dependency + secret scanning), 1.1.2 / 1.3.1 (one-time-code TTL), 5.1.7 (first-party CSP + nosniff), 3.2.2 (OAuth `state`), 3.2.1 (PKCE — Google), plus 5.1.9 shell-quoting hardening.
+
+Confirmed already ✅ MET (verdict corrected, no code change): 2.2.1 (account tokens revoked server-side) and 6.6.1 (no user credential lives in browser storage). An earlier revision of this branch cleared the device-level `minds_session` cookie + Electron storage on account sign-out; that was reverted because it conflated app-unlock with account sign-out and would have locked users out of local-only app use — see 2.2.1 / 6.6.1.
 
 Reclassified to 🟦 PROBABLY (SuperTokens): 1.1.1 (sign-in brute-force), 1.1.3 (password hashing), 2.2.2 (session invalidation on password change).
 
@@ -36,7 +38,7 @@ Still open (require a product/design decision or an external service, see [remed
 | 1.3.3 | OOB verifier securely random | ✅ MET |
 | 1.3.4 | OOB verifier resistant to brute force | 🟡 PARTIAL (256-bit entropy; no rate limit) |
 | 2.1.1 | No tokens in URL params | 🟡 PARTIAL |
-| 2.2.1 | Logout invalidates stateful/refresh tokens | ✅ MET (fixed: cookie cleared on logout) |
+| 2.2.1 | Logout invalidates stateful/refresh tokens | ✅ MET (account tokens revoked server-side) |
 | 2.2.2 | Sessions terminated on password change | 🟦 PROBABLY (SuperTokens) |
 | 2.2.3 | Stateless tokens expire ≤24h | ❌ NOT MET (30-day cookie; design decision) |
 | 2.3.1 | Cookie `Secure` attribute | ❌ NOT MET (justified — loopback HTTP only) |
@@ -73,7 +75,7 @@ Still open (require a product/design decision or an external service, see [remed
 | 6.3.1 | Origin header not used for auth decisions | ✅ MET |
 | 6.4.1 | Not susceptible to subdomain takeover | 🟡 PARTIAL / N/A |
 | 6.5.1 | No credentials/tokens in logs | ✅ MET |
-| 6.6.1 | Browser storage cleared on logout | ✅ MET (fixed: Electron storage cleared) |
+| 6.6.1 | Browser storage cleared on logout | ✅ MET (by architecture — no user creds in browser storage) |
 | 6.7.1 | Secrets stored securely | ✅ MET |
 | 7.1.1 | Webhooks over HTTPS/TLS | ⚪ N/A (no webhooks) |
 | 7.1.2 | Webhook endpoint ownership verified | ⚪ N/A |
@@ -125,7 +127,9 @@ Still open (require a product/design decision or an external service, see [remed
 🟡 **PARTIAL.** The one-time login code and desktop-client session bootstrap travel via query string: `/login?one_time_code=...`, `/authenticate?one_time_code=...` ([`app.py:265-333`](../imbue/minds/desktop_client/app.py)). The cross-agent-subdomain auth bridge also passes a signed token in the URL via `/goto/{agent_id}/` ([`libs/mngr_forward/imbue/mngr_forward/cookie.py:62-93`](../../../libs/mngr_forward/imbue/mngr_forward/cookie.py)), though it's short-lived (30s). The actual `minds_session` cookie and `MINDS_API_KEY` bearer token are never in a URL.
 
 ### 2.2.1 — Logout invalidates all stateful/refresh tokens
-✅ **MET (fixed on this branch).** `signout_user_via_plugin` still revokes the SuperTokens session and deletes local session state; additionally, both logout handlers (`_handle_account_logout` in `app.py` and `_handle_signout_api` in `supertokens_routes.py`) now call the new `clear_session_cookie` helper ([`cookie_manager.py`](../imbue/minds/desktop_client/cookie_manager.py)), which expires the `minds_session` cookie via `response.delete_cookie(SESSION_COOKIE_NAME, path="/")` matching the attributes it was set with. A unit test asserts the sign-out response emits an empty-value, past-expiry `Set-Cookie`. See also 6.6.1 for the Electron-side storage clear.
+✅ **MET.** Account sign-out revokes the **user's** session tokens: `signout_user_via_plugin` ([`supertokens_routes.py`](../imbue/minds/desktop_client/supertokens_routes.py)) calls `mngr imbue_cloud auth signout`, which revokes the SuperTokens session (access + refresh) and deletes the local session file. That is the stateful/refresh-token invalidation the requirement asks for.
+
+> Note: an earlier revision of this branch *also* cleared the `minds_session` cookie on account sign-out. That was reverted — `minds_session` is a device/app-unlock token (payload is the constant `"authenticated"`, minted from the one-time code `minds run` emits), **not** a user credential, and it gates all local app use (settings, local workspaces) independently of any Imbue account. Clearing it on account sign-out would have locked the user out of the whole app after they merely disconnected a cloud account. Account sign-out and app-lock are deliberately separate concerns.
 
 ### 2.2.2 — Sessions terminated after password change
 🟦 **PROBABLY (SuperTokens).** `_handle_forgot_password_api`/`_handle_reset_password_redirect` ([`supertokens_routes.py:748-778`](../imbue/minds/desktop_client/supertokens_routes.py)) are thin proxies to the external connector; session invalidation on password change is a SuperTokens-core responsibility (its default reset flow revokes sessions) and is not verifiable or fixable from this repo. Confirm the connector's SuperTokens config enables session revocation on reset.
@@ -252,7 +256,7 @@ Still open (require a product/design decision or an external service, see [remed
 ✅ **MET.** Dedicated redaction utilities exist and are used: `secret_redaction.py` (`redact_secret_flag_values`, `redact_secret_env_assignments`) and `_redact_url_credentials*` in `agent_creator.py`, applied to git URLs and subprocess command logging. No raw secret values found passed to `logger.*` calls.
 
 ### 6.6.1 — Browser storage cleared on logout
-✅ **MET (fixed on this branch).** The `minds_session` cookie is now deleted server-side on both logout routes (see 2.2.1), and `electron/main.js` clears cookies and web storage from both the default session and the `persist:workspace-content` partition on the authenticated→unauthenticated boundary (one-shot guard, re-armed on re-auth). The residual weakness is the cookie's 30-day lifetime if it is somehow retained out-of-band (tracked separately under 2.2.3).
+✅ **MET (by architecture).** The user's session material (the SuperTokens access/refresh tokens) lives **server-side**, not in browser storage, and is revoked on account sign-out (see 2.2.1) — so there is no cached user credential in `localStorage`/`sessionStorage`/IndexedDB to leave behind. The only browser-stored auth artifact is the `httponly` device-level `minds_session` cookie, which is intentionally *not* a user credential and intentionally survives account sign-out (it is the app-unlock, not the account session). A blanket `session.clearStorageData()` on account sign-out was considered and rejected: it would wipe unrelated per-agent content-partition storage and, coupled with clearing the device cookie, would lock the user out of the app. If a distinct "lock the app / sign out of this device" action is added later, clearing device storage there would be the correct place for it.
 
 ### 6.7.1 — Secrets stored securely
 ✅ **MET.** Session-signing key is a random 32-byte token written to a `0600` file via atomic write ([`auth.py:130-140`](../imbue/minds/desktop_client/auth.py)). Per-account data-encryption keys similarly stored `0600`, optionally password-wrapped via Argon2-derived key ([`dek_store.py:73-176`](../imbue/minds/desktop_client/dek_store.py)). `MINDS_API_KEY` is never persisted to disk — generated fresh in memory each run. CI/deploy secrets pulled from HashiCorp Vault at runtime, kept in process memory only.
@@ -292,7 +296,7 @@ Still open (require a product/design decision or an external service, see [remed
 - **6.1.1** — Dependabot + scheduled `pip-audit`/`pnpm audit` CI + gitleaks pre-commit hook.
 - **3.2.2 (`state`)** — Server-reflected, constant-time-verified CSRF `state` on the OAuth flow.
 - **3.2.1** — PKCE enabled and threaded end-to-end for Google (GitHub N/A).
-- **2.2.1 / 6.6.1** — Logout clears the `minds_session` cookie server-side and Electron session storage.
+- **2.2.1 / 6.6.1** — Verdict corrected to MET without code change: account sign-out already revokes the SuperTokens session tokens, and no user credential is stored in the browser. (An initial over-broad cookie/storage-clear on account sign-out was reverted — it conflated app-unlock with account sign-out.)
 - **1.1.2 / 1.3.1** — 15-minute TTL on the local one-time login code.
 - **5.1.7** — First-party CSP + `X-Content-Type-Options: nosniff` (scoped to exclude proxied agent content).
 - **5.1.9** — `shlex.quote` hardening of the `destroying.py` `bash -c` filter.

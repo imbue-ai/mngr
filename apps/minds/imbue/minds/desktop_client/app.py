@@ -46,7 +46,6 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import clear_session_cookie
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
@@ -2264,11 +2263,7 @@ def _handle_account_logout(
         return make_response(status_code=403, content="Not authenticated")
     if get_state().session_store is not None:
         signout_user_via_plugin(user_id)
-    response = make_response(status_code=303, headers={"Location": "/accounts"})
-    # Drop the local bare-origin session cookie so it does not outlive the
-    # revoked SuperTokens session (CASA 2.2.1 / 6.6.1).
-    clear_session_cookie(response)
-    return response
+    return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
 # -- Workspace settings routes --
