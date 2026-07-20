@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -3934,6 +3935,36 @@ def test_parse_r2_storage_graphql_response_takes_newest_snapshot_per_bucket() ->
     usage = app_mod.parse_r2_storage_graphql_response(response)
     # Rows arrive newest-first; the first row per bucket wins.
     assert usage == {"u1--a": 105, "u2--b": 7}
+
+
+def test_parse_r2_storage_graphql_response_warns_when_row_budget_is_hit(caplog: pytest.LogCaptureFixture) -> None:
+    """A response filling the query's row budget may be truncated and must not pass silently."""
+    full_page = {
+        "data": {
+            "viewer": {
+                "accounts": [
+                    {
+                        "r2StorageAdaptiveGroups": [
+                            {
+                                "max": {"payloadSize": 1, "metadataSize": 0},
+                                "dimensions": {"bucketName": "u1--a", "datetime": "2026-07-20T10:00:00Z"},
+                            }
+                        ]
+                        * app_mod._R2_STORAGE_GRAPHQL_ROW_LIMIT
+                    }
+                ]
+            }
+        }
+    }
+    with caplog.at_level(logging.WARNING, logger=app_mod.__name__):
+        usage = app_mod.parse_r2_storage_graphql_response(full_page)
+    assert usage == {"u1--a": 1}
+    assert any("may be truncated" in record.getMessage() for record in caplog.records)
+    # A small (untruncated) response stays quiet.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=app_mod.__name__):
+        app_mod.parse_r2_storage_graphql_response({"data": {"viewer": {"accounts": []}}})
+    assert caplog.records == []
 
 
 def test_plans_migration_declares_all_quota_columns() -> None:

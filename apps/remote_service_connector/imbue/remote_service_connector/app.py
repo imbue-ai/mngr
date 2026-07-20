@@ -1013,17 +1013,23 @@ def cf_get_bucket_usage(client: httpx.Client, account_id: str, bucket_name: str)
     return cf_check(response)["result"]
 
 
+# Row budget for the sweep's GraphQL query. A response that fills the budget
+# may be truncated: buckets whose rows all fall past the limit are absent from
+# the usage map and count as zero, so the parser warns when the budget is hit.
+_R2_STORAGE_GRAPHQL_ROW_LIMIT: Final = 5000
+
 # GraphQL analytics query used by the storage-quota sweep: one request covers
 # every bucket in the account, regardless of bucket count, so the sweep never
 # scales its REST-API usage with the number of users. The dataset is
 # snapshot-based (lags by minutes), which is fine for an hourly sweep; the
 # real-time per-bucket REST endpoint above serves the display path instead.
-_R2_STORAGE_GRAPHQL_QUERY = """
+_R2_STORAGE_GRAPHQL_QUERY = (
+    """
 query R2StorageByBucket($accountTag: string!, $since: Time!) {
   viewer {
     accounts(filter: {accountTag: $accountTag}) {
       r2StorageAdaptiveGroups(
-        limit: 5000
+        limit: %d
         filter: {datetime_geq: $since}
         orderBy: [datetime_DESC]
       ) {
@@ -1040,6 +1046,8 @@ query R2StorageByBucket($accountTag: string!, $since: Time!) {
   }
 }
 """
+    % _R2_STORAGE_GRAPHQL_ROW_LIMIT
+)
 
 # How far back the sweep's GraphQL query looks for storage snapshots. Wide
 # enough to always contain at least one snapshot per bucket; the newest
@@ -1052,12 +1060,17 @@ def parse_r2_storage_graphql_response(data: dict[str, Any]) -> dict[str, int]:
 
     Rows arrive newest-first; the first row seen per bucket is its latest
     snapshot and wins. ``payloadSize`` + ``metadataSize`` together are the
-    bucket's stored bytes.
+    bucket's stored bytes. A response that fills the query's row budget may be
+    truncated (buckets past the limit count as zero usage, which can only
+    restore keys, never downgrade), so that case is logged as a warning
+    rather than passing silently.
     """
     usage_by_bucket: dict[str, int] = {}
+    row_count = 0
     accounts = data.get("data", {}).get("viewer", {}).get("accounts", []) if isinstance(data, dict) else []
     for account in accounts:
         for group in account.get("r2StorageAdaptiveGroups", []) or []:
+            row_count += 1
             dimensions = group.get("dimensions", {})
             bucket_name = dimensions.get("bucketName")
             if not bucket_name or bucket_name in usage_by_bucket:
@@ -1066,6 +1079,13 @@ def parse_r2_storage_graphql_response(data: dict[str, Any]) -> dict[str, int]:
             payload = int(max_values.get("payloadSize") or 0)
             metadata = int(max_values.get("metadataSize") or 0)
             usage_by_bucket[bucket_name] = payload + metadata
+    if row_count >= _R2_STORAGE_GRAPHQL_ROW_LIMIT:
+        logger.warning(
+            "R2 storage GraphQL response hit the %d-row budget and may be truncated; "
+            "buckets past the limit count as zero usage (restore-only) this sweep. "
+            "Shorten the lookback window or shard the query if this persists.",
+            _R2_STORAGE_GRAPHQL_ROW_LIMIT,
+        )
     return usage_by_bucket
 
 
