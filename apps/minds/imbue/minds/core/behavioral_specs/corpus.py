@@ -7,12 +7,13 @@ one :class:`SpecUnit` per authored unit (Scenario, Scenario Outline, Rule),
 and collects every language violation as data rather than raising. Callers
 decide what to do with violations (the ``minds specs`` CLI prints them).
 
-The gherkin parser returns plain nested dicts; the private ``_Gherkin*``
+The gherkin parser returns plain nested dicts; the ``Gherkin*``
 pydantic models (in ``_gherkin.py``, shared with ``export.py``) mirror
 exactly the subset of the AST this package consumes, so the rest of the code
 works with typed, validated objects.
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -24,12 +25,12 @@ from pydantic import Field
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinDocument
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinRule
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinScenario
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinStep
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinTag
-from imbue.minds.core.behavioral_specs._gherkin import _parse_feature_file
+from imbue.minds.core.behavioral_specs._gherkin import GherkinDocument
+from imbue.minds.core.behavioral_specs._gherkin import GherkinRule
+from imbue.minds.core.behavioral_specs._gherkin import GherkinScenario
+from imbue.minds.core.behavioral_specs._gherkin import GherkinStep
+from imbue.minds.core.behavioral_specs._gherkin import GherkinTag
+from imbue.minds.core.behavioral_specs._gherkin import parse_feature_file
 from imbue.minds.core.behavioral_specs.data_types import CorpusScan
 from imbue.minds.core.behavioral_specs.data_types import SpecStep
 from imbue.minds.core.behavioral_specs.data_types import SpecUnit
@@ -73,7 +74,7 @@ def _is_kebab_case(name: str) -> bool:
 
 
 def _check_tags_are_kebab_case(
-    tags: tuple[_GherkinTag, ...],
+    tags: tuple[GherkinTag, ...],
     file: Path,
     violations: list[SpecViolation],
 ) -> None:
@@ -117,7 +118,7 @@ def _check_declaration_keyword(
 
 
 def _check_step_keywords(
-    steps: tuple[_GherkinStep, ...],
+    steps: tuple[GherkinStep, ...],
     file: Path,
     violations: list[SpecViolation],
 ) -> None:
@@ -170,7 +171,7 @@ def _claim_coordinate(
 
 
 def _claim_block_tags(
-    tags: tuple[_GherkinTag, ...],
+    tags: tuple[GherkinTag, ...],
     file: Path,
     folder_parts: tuple[str, ...],
     claims: dict[str, _ClaimSite],
@@ -195,7 +196,7 @@ def _missing_tag_violation(file: Path, line: int, unit_keyword: str, unit_name: 
 
 
 def _unit_from_scenario(
-    scenario: _GherkinScenario,
+    scenario: GherkinScenario,
     file: Path,
     folder_parts: tuple[str, ...],
     parent: str | None,
@@ -244,7 +245,7 @@ def _unit_from_scenario(
 
 
 def _unit_from_rule(
-    rule: _GherkinRule,
+    rule: GherkinRule,
     file: Path,
     folder_parts: tuple[str, ...],
     violations: list[SpecViolation],
@@ -271,7 +272,7 @@ def _unit_from_rule(
 
 
 def _extract_units_from_document(
-    document: _GherkinDocument,
+    document: GherkinDocument,
     file: Path,
     folder_parts: tuple[str, ...],
     violations: list[SpecViolation],
@@ -428,7 +429,8 @@ def _scan_corpus_structure(corpus_root: Path, violations: list[SpecViolation]) -
     .feature or .md file.
     """
     feature_files: list[Path] = []
-    for folder, child_folder_names, file_names in corpus_root.walk(top_down=True):
+    for folder_str, child_folder_names, file_names in os.walk(corpus_root):
+        folder = Path(folder_str)
         # Pruning in place steers the walk; sorting keeps traversal deterministic.
         child_folder_names[:] = sorted(name for name in child_folder_names if not name.startswith("."))
         for child_folder_name in child_folder_names:
@@ -520,7 +522,7 @@ def scan_corpus(corpus_root: Path) -> CorpusScan:
         folder_parts = feature_file.relative_to(corpus_root).parent.parts
         source_text = feature_file.read_text(encoding="utf-8")
         _check_no_language_header(source_text, feature_file, violations)
-        document = _parse_feature_file(feature_file, source_text, violations)
+        document = parse_feature_file(feature_file, source_text, violations)
         if document is None:
             continue
         units.extend(_extract_units_from_document(document, feature_file, folder_parts, violations, claims))

@@ -9,6 +9,7 @@ mistyped link, and ``minds specs check-witnesses`` fails on it.
 """
 
 import ast
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -79,6 +80,22 @@ def _pytestmark_calls(value: ast.AST) -> tuple[ast.Call, ...]:
     return ()
 
 
+@pure
+def _witness_calls_of(node: ast.AST) -> tuple[ast.Call, ...]:
+    """Extract the witnesses-marker calls attached to one AST node (decorators or pytestmark)."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return tuple(
+            decorator
+            for decorator in node.decorator_list
+            if isinstance(decorator, ast.Call) and _is_witnesses_call(decorator)
+        )
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets
+    ):
+        return tuple(call for call in _pytestmark_calls(node.value) if _is_witnesses_call(call))
+    return ()
+
+
 def find_witness_markers_in_source(source_text: str, file: Path) -> WitnessScan:
     """Find every pytest.mark.witnesses application in one Python source.
 
@@ -89,14 +106,7 @@ def find_witness_markers_in_source(source_text: str, file: Path) -> WitnessScan:
     problems: list[WitnessProblem] = []
     tree = ast.parse(source_text, filename=str(file))
     for node in ast.walk(tree):
-        calls: tuple[ast.Call, ...] = ()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            calls = tuple(decorator for decorator in node.decorator_list if _is_witnesses_call(decorator))
-        elif isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets
-        ):
-            calls = tuple(call for call in _pytestmark_calls(node.value) if _is_witnesses_call(call))
-        for call in calls:
+        for call in _witness_calls_of(node):
             result = _marker_from_call(call, file)
             if isinstance(result, WitnessMarker):
                 markers.append(result)
@@ -108,7 +118,8 @@ def find_witness_markers_in_source(source_text: str, file: Path) -> WitnessScan:
 def _iter_python_files(root: Path) -> list[Path]:
     """Yield every .py file under root, skipping hidden entries and __pycache__, sorted."""
     python_files: list[Path] = []
-    for folder, child_folder_names, file_names in root.walk(top_down=True):
+    for folder_str, child_folder_names, file_names in os.walk(root):
+        folder = Path(folder_str)
         child_folder_names[:] = sorted(
             name for name in child_folder_names if not name.startswith(".") and name != "__pycache__"
         )

@@ -217,7 +217,8 @@ def specs_plan(corpus_root: Path, for_tmr: bool, include_rules: bool) -> None:
     --include-rules to also plan invariant Rules. Stdout carries nothing but
     JSONL; diagnostics go to stderr.
     """
-    del for_tmr  # the only supported plan target for now; the flag keeps the invocation explicit
+    # The only supported plan target for now; the flag keeps the invocation explicit.
+    del for_tmr
     planned_kinds = {SpecUnitKind.SCENARIO, SpecUnitKind.SCENARIO_OUTLINE}
     if include_rules:
         planned_kinds.add(SpecUnitKind.RULE)

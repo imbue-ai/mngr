@@ -23,10 +23,10 @@ from pydantic import Field
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinDocument
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinExamples
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinStep
-from imbue.minds.core.behavioral_specs._gherkin import _parse_feature_file
+from imbue.minds.core.behavioral_specs._gherkin import GherkinDocument
+from imbue.minds.core.behavioral_specs._gherkin import GherkinExamples
+from imbue.minds.core.behavioral_specs._gherkin import GherkinStep
+from imbue.minds.core.behavioral_specs._gherkin import parse_feature_file
 from imbue.minds.core.behavioral_specs.corpus import scan_corpus
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_kind_record_value
 from imbue.minds.core.behavioral_specs.data_types import ApplicableRule
@@ -88,18 +88,18 @@ def _dedent_description(description: str) -> str:
 
 
 @pure
-def _steps_of(gherkin_steps: tuple[_GherkinStep, ...]) -> tuple[SpecStep, ...]:
+def _steps_of(gherkin_steps: tuple[GherkinStep, ...]) -> tuple[SpecStep, ...]:
     return tuple(SpecStep(keyword=step.keyword.strip(), text=step.text) for step in gherkin_steps)
 
 
 @pure
-def _examples_table_of(examples: _GherkinExamples) -> SpecExamplesTable:
+def _examples_table_of(examples: GherkinExamples) -> SpecExamplesTable:
     header = () if examples.table_header is None else tuple(cell.value for cell in examples.table_header.cells)
     rows = tuple(tuple(cell.value for cell in row.cells) for row in examples.table_body)
     return SpecExamplesTable(line=examples.location.line, header=header, rows=rows)
 
 
-def _enrichment_from_document(document: _GherkinDocument, file: Path) -> _FileEnrichment:
+def _enrichment_from_document(document: GherkinDocument, file: Path) -> _FileEnrichment:
     """Pull the export context out of one parsed document.
 
     Callers only parse files that produced units during the corpus scan, so
@@ -160,7 +160,7 @@ def _enrich_unit_files(unit_files: tuple[Path, ...]) -> dict[Path, _FileEnrichme
     enrichment_by_file: dict[Path, _FileEnrichment] = {}
     for unit_file in unit_files:
         discarded_violations: list[SpecViolation] = []
-        document = _parse_feature_file(unit_file, unit_file.read_text(encoding="utf-8"), discarded_violations)
+        document = parse_feature_file(unit_file, unit_file.read_text(encoding="utf-8"), discarded_violations)
         if document is None:
             raise SwitchError(f"unit-bearing file {unit_file} failed to re-parse during export")
         enrichment_by_file[unit_file] = _enrichment_from_document(document, unit_file)
