@@ -4327,6 +4327,86 @@ def _sweep_owner_email(user_id: str, email_getter: Callable[[str], str | None]) 
         return None
 
 
+def _revoke_extra_bucket_keys(
+    ops: CloudflareOps, key_store: KeyStore, counters: dict[str, int]
+) -> dict[str, list[dict[str, Any]]]:
+    """Enforce the single-key-per-bucket invariant; returns the surviving keys grouped by owner.
+
+    The newest key per (owner, bucket) survives; extras are revoked and their
+    rows dropped, counted in ``counters["extra_keys_revoked"]``.
+    """
+    keys_by_owner: dict[str, list[dict[str, Any]]] = {}
+    keys_by_owner_bucket: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in key_store.list_all_keys():
+        keys_by_owner_bucket.setdefault((str(row["owner_user_id"]), str(row["bucket_name"])), []).append(row)
+    for (owner_user_id, _bucket_name), rows in keys_by_owner_bucket.items():
+        ordered = sorted(rows, key=lambda r: str(r["created_at"]))
+        for extra in ordered[:-1]:
+            _best_effort_revoke_token(ops, str(extra["access_key_id"]))
+            key_store.delete_key(str(extra["access_key_id"]))
+            counters["extra_keys_revoked"] += 1
+        keys_by_owner.setdefault(owner_user_id, []).append(ordered[-1])
+    return keys_by_owner
+
+
+def _resolve_owner_storage_limit_bytes(
+    owner_user_id: str,
+    owner_prefix: str,
+    entitlements_store: EntitlementsStore,
+    email_getter: Callable[[str], str | None],
+) -> int | None:
+    """Resolve the owner's storage limit, lazily creating their entitlements row when needed.
+
+    Mirrors the request-path rule (paid pre-cutoff accounts land on ally).
+    Returns ``None`` for an unresolvable owner (no row and no verified email)
+    -- the sweep must skip them, never enforce against guessed limits.
+    """
+    existing = entitlements_store.get_entitlements(owner_user_id)
+    if existing is not None:
+        return int(existing["max_total_bucket_bytes"])
+    email = _sweep_owner_email(owner_user_id, email_getter)
+    if email is None:
+        return None
+    entitlements = ensure_account_entitlements(
+        user_id=owner_user_id, username_prefix=owner_prefix, email=email, store=entitlements_store
+    )
+    return entitlements.max_total_bucket_bytes
+
+
+def _enforce_owner_key_access(
+    ops: CloudflareOps,
+    key_store: KeyStore,
+    rows: list[dict[str, Any]],
+    is_over_quota: bool,
+    counters: dict[str, int],
+) -> None:
+    """Downgrade (or restore) one owner's bucket-key token policies around the storage quota.
+
+    A failed Cloudflare token update is logged and counted, skipping only
+    that key.
+    """
+    for row in rows:
+        access_key_id = str(row["access_key_id"])
+        bucket_name = str(row["bucket_name"])
+        token_name = _r2_token_name(bucket_name, row.get("alias"))
+        try:
+            if is_over_quota and row["access"] == "readwrite" and row.get("enforced_access") != "read":
+                ops.update_bucket_token_access(access_key_id, bucket_name, "read", token_name)
+                key_store.set_enforced_access(access_key_id, "read")
+                counters["keys_downgraded"] += 1
+            elif not is_over_quota and row.get("enforced_access") is not None:
+                ops.update_bucket_token_access(access_key_id, bucket_name, str(row["access"]), token_name)
+                key_store.set_enforced_access(access_key_id, None)
+                counters["keys_restored"] += 1
+            else:
+                # The key already reflects the desired state (intentionally
+                # read-only, already downgraded, or already restored).
+                pass
+        except (CloudflareApiError, httpx.HTTPError) as exc:
+            logger.error("Sweep failed to update token %s for bucket %s: %s", access_key_id, bucket_name, exc)
+            counters["key_update_failures"] += 1
+
+
 def run_r2_quota_sweep(
     ops: CloudflareOps,
     key_store: KeyStore,
@@ -4352,17 +4432,7 @@ def run_r2_quota_sweep(
 
     # Enforce the single-key-per-bucket invariant first: newest key per
     # (owner, bucket) survives, extras are revoked + dropped.
-    keys_by_owner: dict[str, list[dict[str, Any]]] = {}
-    keys_by_owner_bucket: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in key_store.list_all_keys():
-        keys_by_owner_bucket.setdefault((str(row["owner_user_id"]), str(row["bucket_name"])), []).append(row)
-    for (owner_user_id, _bucket_name), rows in keys_by_owner_bucket.items():
-        ordered = sorted(rows, key=lambda r: str(r["created_at"]))
-        for extra in ordered[:-1]:
-            _best_effort_revoke_token(ops, str(extra["access_key_id"]))
-            key_store.delete_key(str(extra["access_key_id"]))
-            counters["extra_keys_revoked"] += 1
-        keys_by_owner.setdefault(owner_user_id, []).append(ordered[-1])
+    keys_by_owner = _revoke_extra_bucket_keys(ops, key_store, counters)
 
     # One GraphQL query covers every bucket's stored bytes; a failure here
     # aborts the sweep (raising) rather than being mistaken for zero usage.
@@ -4375,49 +4445,18 @@ def run_r2_quota_sweep(
         owner_buckets = [name for name in all_buckets if name.startswith(bucket_prefix)]
         owner_usage_bytes = sum(usage_by_bucket.get(name, 0) for name in owner_buckets)
 
-        # Resolve the owner's storage limit, lazily creating their
-        # entitlements row when needed (mirrors the request-path rule: paid
-        # pre-cutoff accounts land on ally). An unresolvable owner is skipped
-        # -- never enforced against guessed limits.
-        existing = entitlements_store.get_entitlements(owner_user_id)
-        if existing is not None:
-            limit_bytes = int(existing["max_total_bucket_bytes"])
-        else:
-            email = _sweep_owner_email(owner_user_id, email_getter)
-            if email is None:
-                logger.error(
-                    "Sweep skipping user %s: no resolvable verified email for lazy plan assignment", owner_user_id[:8]
-                )
-                counters["users_skipped"] += 1
-                continue
-            entitlements = ensure_account_entitlements(
-                user_id=owner_user_id, username_prefix=owner_prefix, email=email, store=entitlements_store
+        limit_bytes = _resolve_owner_storage_limit_bytes(owner_user_id, owner_prefix, entitlements_store, email_getter)
+        if limit_bytes is None:
+            logger.error(
+                "Sweep skipping user %s: no resolvable verified email for lazy plan assignment", owner_user_id[:8]
             )
-            limit_bytes = entitlements.max_total_bucket_bytes
+            counters["users_skipped"] += 1
+            continue
 
         is_over_quota = owner_usage_bytes > limit_bytes
         if is_over_quota:
             counters["users_over_quota"] += 1
-        for row in rows:
-            access_key_id = str(row["access_key_id"])
-            bucket_name = str(row["bucket_name"])
-            token_name = _r2_token_name(bucket_name, row.get("alias"))
-            try:
-                if is_over_quota and row["access"] == "readwrite" and row.get("enforced_access") != "read":
-                    ops.update_bucket_token_access(access_key_id, bucket_name, "read", token_name)
-                    key_store.set_enforced_access(access_key_id, "read")
-                    counters["keys_downgraded"] += 1
-                elif not is_over_quota and row.get("enforced_access") is not None:
-                    ops.update_bucket_token_access(access_key_id, bucket_name, str(row["access"]), token_name)
-                    key_store.set_enforced_access(access_key_id, None)
-                    counters["keys_restored"] += 1
-                else:
-                    # The key already reflects the desired state (intentionally
-                    # read-only, already downgraded, or already restored).
-                    pass
-            except (CloudflareApiError, httpx.HTTPError) as exc:
-                logger.error("Sweep failed to update token %s for bucket %s: %s", access_key_id, bucket_name, exc)
-                counters["key_update_failures"] += 1
+        _enforce_owner_key_access(ops, key_store, rows, is_over_quota, counters)
     return counters
 
 
