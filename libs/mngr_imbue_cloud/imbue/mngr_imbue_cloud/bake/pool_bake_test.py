@@ -40,9 +40,42 @@ def test_finalize_tears_down_chat_agent_when_sentinel_present() -> None:
     runner = _ScriptedRunner({})
     finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
     labels = [label for label, _cmd in runner.calls]
-    assert labels == ["sshd-harden", "sentinel-wait", "chat-destroy", "sentinel-rm"]
+    assert labels == ["sshd-harden", "git-identity-reset", "sentinel-wait", "chat-destroy", "sentinel-rm"]
     destroy_cmd = next(cmd for label, cmd in runner.calls if label == "chat-destroy")
     assert "uv run mngr destroy" in destroy_cmd and "slice-x" in destroy_cmd
+
+
+def test_finalize_resets_baked_git_identity_to_a_neutral_value() -> None:
+    # The bake copies the operator's git identity into /mngr/code; finalize must
+    # overwrite it with the neutral bootstrap identity so adopting users' agents
+    # don't inherit the baker as their commit author.
+    runner = _ScriptedRunner({})
+    finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
+    reset_cmd = next(cmd for label, cmd in runner.calls if label == "git-identity-reset")
+    assert "cd /mngr/code" in reset_cmd
+    assert "git config --local user.name minds-bootstrap" in reset_cmd
+    assert "git config --local user.email bootstrap@minds.local" in reset_cmd
+    # It runs before the sentinel wait, so it applies even when no chat agent exists.
+    labels = [label for label, _cmd in runner.calls]
+    assert labels.index("git-identity-reset") < labels.index("sentinel-wait")
+
+
+def test_finalize_git_identity_reset_failure_is_best_effort() -> None:
+    # The rewrite hook is the authoritative per-agent attribution, so a failed
+    # identity reset is logged, not fatal, and teardown still proceeds.
+    runner = _ScriptedRunner({"git-identity-reset": (1, "", "boom")})
+    finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
+    assert "chat-destroy" in [label for label, _cmd in runner.calls]
+
+
+def test_finalize_still_resets_git_identity_when_no_chat_agent() -> None:
+    # Even when the sentinel times out (no chat agent), the identity reset must
+    # have already run, since it precedes the sentinel wait.
+    runner = _ScriptedRunner({"sentinel-wait": (124, "", "")})
+    finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
+    labels = [label for label, _cmd in runner.calls]
+    assert "git-identity-reset" in labels
+    assert "chat-destroy" not in labels
 
 
 def test_finalize_skips_teardown_on_sentinel_timeout() -> None:

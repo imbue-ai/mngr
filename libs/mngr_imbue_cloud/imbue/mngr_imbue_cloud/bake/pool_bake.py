@@ -57,6 +57,23 @@ DEFAULT_WORKSPACE_TEMPLATE_BAKE_TEMPLATES: Final[tuple[str, ...]] = ("main", "po
 # start re-create the chat agent under the user's own workspace name.
 INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
 
+# Neutral git identity written into the baked services checkout (/mngr/code) at
+# finalize time. mngr's cross-host create (GIT_MIRROR) copies the *operator's*
+# ``git config user.name/email`` into ``/mngr/code/.git/config``; on a shared,
+# pre-provisioned pool host that operator is whoever ran the bake (e.g. "Josh
+# Albrecht"), and every adopting user's agent -- which mirrors/worktrees from
+# /mngr/code -- would inherit it as its commit author. We overwrite it here with
+# the same neutral identity the DEFAULT_WORKSPACE_TEMPLATE bootstrap uses as its
+# only-if-unset fallback, so pool-host commits are never attributed to the baker.
+# (Per-agent commits are separately attributed to the agent by the template's
+# Bash-command rewrite hook; this only governs the leftover non-agent commits on
+# the shared checkout.) Local ``mngr`` worktree agents are unaffected -- they take
+# the GIT_WORKTREE path, which never runs this copy.
+_NEUTRAL_GIT_USER_NAME: Final[str] = "minds-bootstrap"
+_NEUTRAL_GIT_USER_EMAIL: Final[str] = "bootstrap@minds.local"
+# The baked services checkout whose repo-local git identity we reset.
+_BAKED_SERVICES_CHECKOUT_PATH: Final[str] = "/mngr/code"
+
 # 30 min: the inner ``mngr create`` builds a fresh Docker image on the host,
 # which can take 10-20 min (network bound).
 _MNGR_CREATE_TIMEOUT_SECONDS: Final[int] = 1800
@@ -409,6 +426,28 @@ def finalize_baked_pool_host(
     sshd_rc, _sshd_out, sshd_err = run_in_container(baked, "sshd-harden", sshd_command, 30.0)
     if sshd_rc != 0:
         logger.warning("Could not harden container sshd for {} (exit {}): {}", host_name, sshd_rc, sshd_err.strip())
+
+    # Reset the operator's git identity that the bake's cross-host create copied
+    # into the baked services checkout (see _NEUTRAL_GIT_USER_NAME). Runs before
+    # the sentinel wait so it applies even on hosts where the bootstrap never made
+    # a chat agent. Best-effort: the Bash-command rewrite hook is the authoritative
+    # per-agent attribution, so a transient failure here shouldn't fail an
+    # otherwise-good (and expensive) bake.
+    checkout = shlex.quote(_BAKED_SERVICES_CHECKOUT_PATH)
+    git_identity_command = " && ".join(
+        (
+            f"cd {checkout}",
+            f"git config --local user.name {shlex.quote(_NEUTRAL_GIT_USER_NAME)}",
+            f"git config --local user.email {shlex.quote(_NEUTRAL_GIT_USER_EMAIL)}",
+        )
+    )
+    identity_rc, _identity_out, identity_err = run_in_container(
+        baked, "git-identity-reset", git_identity_command, 30.0
+    )
+    if identity_rc != 0:
+        logger.warning(
+            "Could not reset baked git identity on {} (exit {}): {}", host_name, identity_rc, identity_err.strip()
+        )
 
     sentinel = shlex.quote(INITIAL_CHAT_SENTINEL_PATH)
     wait_command = (
