@@ -198,6 +198,14 @@
         {
           "name": "github-write-notifications",
           "description": "Mark notifications as read or manage notification subscriptions."
+        },
+        {
+          "name": "github-read-activity",
+          "description": "Read GitHub activity: starring and watching (stargazers, watchers, and the repositories a user starred or watches), event streams, and feeds."
+        },
+        {
+          "name": "github-write-activity",
+          "description": "Star or unstar a repository, or set or delete a repository watch subscription, for the authenticated user."
         }
       ]
     },
@@ -1577,6 +1585,39 @@
         {
           "name": "google-directions-compute-route-matrix",
           "description": "Compute a distance and duration matrix between multiple origins and destinations."
+        }
+      ]
+    }
+  ],
+  "google-slides": [
+    {
+      "scope": "google-slides-api",
+      "display_name": "Google Slides",
+      "description": "Any request to the Google Slides API.",
+      "permissions": [
+        {
+          "name": "google-slides-read-all",
+          "description": "Read anything from Google Slides."
+        },
+        {
+          "name": "google-slides-write-all",
+          "description": "Create, update, or delete anything in Google Slides."
+        },
+        {
+          "name": "google-slides-read-presentations",
+          "description": "Read a specific presentation."
+        },
+        {
+          "name": "google-slides-create-presentations",
+          "description": "Create new presentations."
+        },
+        {
+          "name": "google-slides-update-presentations",
+          "description": "Apply batch updates to a presentation's content."
+        },
+        {
+          "name": "google-slides-read-pages",
+          "description": "Read a specific page or its thumbnail from a presentation."
         }
       ]
     }
