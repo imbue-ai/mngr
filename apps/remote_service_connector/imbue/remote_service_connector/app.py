@@ -1613,8 +1613,8 @@ class ForwardingCtx:
 
         # Resolve the Access policy up front and create the Access Application
         # BEFORE any exposure exists (DNS/ingress). A failure here aborts the
-        # add outright -- the previous best-effort behavior could leave a
-        # service publicly reachable when the Access call failed.
+        # add outright, so a failed Access call can never leave a service
+        # publicly reachable.
         stored_default = self.ops.kv_get(tunnel_name)
         policy = AuthPolicy.model_validate_json(stored_default) if stored_default is not None else fallback_policy
         if policy is None:
