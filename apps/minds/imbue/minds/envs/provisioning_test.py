@@ -268,6 +268,11 @@ def _build_fake_providers(
             ("seed_paid_list_defaults", host_pool_dsn.get_secret_value(), tuple(domains), tuple(emails))
         )
 
+    def write_plan_defaults(host_pool_dsn, plan_rows_by_name, cg):
+        call_log["calls"].append(
+            ("write_plan_defaults", host_pool_dsn.get_secret_value(), tuple(sorted(plan_rows_by_name)))
+        )
+
     # Tracks deployed app versions across deploy + recover cycles. Lets
     # the fake `get_modal_app_latest_version` return None for the first
     # deploy and the captured pre-deploy id on subsequent calls.
@@ -348,6 +353,7 @@ def _build_fake_providers(
         list_modal_secrets=list_modal_secrets,
         apply_pool_hosts_migrations=apply_pool_hosts_migrations,
         seed_paid_list_defaults=seed_paid_list_defaults,
+        write_plan_defaults=write_plan_defaults,
         get_modal_app_latest_version=get_modal_app_latest_version,
         rollback_modal_app=rollback_modal_app,
         create_neon_snapshot_branch=create_neon_snapshot_branch,

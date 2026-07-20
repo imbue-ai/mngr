@@ -328,6 +328,13 @@ class InvalidAuthPolicyError(ValueError):
         super().__init__(f"Auth policy rejected: {reason}")
 
 
+class UnknownEntitlementColumnError(ValueError):
+    """Raised when an entitlements update names a column that does not exist."""
+
+    def __init__(self, unknown_columns: list[str]) -> None:
+        super().__init__(f"Unknown entitlement columns: {unknown_columns}")
+
+
 class ServicePolicyMissingError(RuntimeError):
     """Raised when a service would be added with no Access policy available at all."""
 
@@ -1542,6 +1549,10 @@ class ForwardingCtx:
                 self.ops.kv_put(name, default_auth_policy.model_dump_json())
             elif fallback_auth_policy is not None and self.ops.kv_get(name) is None:
                 self.ops.kv_put(name, fallback_auth_policy.model_dump_json())
+            else:
+                # A stored default already exists (or no fallback was given);
+                # an idempotent re-create must not clobber it.
+                pass
             return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=services)
 
         result = self.ops.create_tunnel(name)
@@ -2213,7 +2224,15 @@ class AccountEntitlements(PlanEntitlements):
     plan_name: str = Field(description="The plan this row was last assigned from")
 
     def quota_values(self) -> PlanEntitlements:
-        return PlanEntitlements(**{name: getattr(self, name) for name in QUOTA_ENTITLEMENT_NAMES})
+        return PlanEntitlements(
+            max_remote_workspaces=self.max_remote_workspaces,
+            max_tunnels=self.max_tunnels,
+            max_services_per_tunnel=self.max_services_per_tunnel,
+            max_buckets=self.max_buckets,
+            max_total_bucket_bytes=self.max_total_bucket_bytes,
+            monthly_llm_spend_usd=self.monthly_llm_spend_usd,
+            max_active_synced_workspaces=self.max_active_synced_workspaces,
+        )
 
 
 def _quota_values_from_row(row: tuple[Any, ...], offset: int) -> dict[str, Any]:
@@ -2315,7 +2334,7 @@ class PostgresEntitlementsStore:
         allowed = {"plan_name", *QUOTA_ENTITLEMENT_NAMES}
         unknown = set(values) - allowed
         if unknown:
-            raise ValueError(f"Unknown entitlement columns: {sorted(unknown)}")
+            raise UnknownEntitlementColumnError(sorted(unknown))
         assignments = ", ".join(f"{name} = %s" for name in values)
         conn = _get_pool_db_connection()
         try:
@@ -2354,7 +2373,9 @@ def _get_user_time_joined_ms(user_id: str, user_getter: Callable[[str], Any] = g
 def _initial_plan_name_for_user(
     user_id: str,
     email: str,
-    time_joined_getter: Callable[[str], int] = _get_user_time_joined_ms,
+    # Resolved at call time (not bound as a default) so tests that patch the
+    # module-level ``_get_user_time_joined_ms`` take effect.
+    time_joined_getter: Callable[[str], int] | None = None,
     paid_checker: Callable[[str], bool] = is_email_paid,
 ) -> str:
     """Pick the plan for a lazily-created entitlements row.
@@ -2362,7 +2383,8 @@ def _initial_plan_name_for_user(
     Accounts predating the feature-ship cutoff get ally when their email is
     paid-listed (the backfill rule); everyone else starts as explorer.
     """
-    if time_joined_getter(user_id) < _PREEXISTING_ACCOUNT_CUTOFF_EPOCH_MS and email and paid_checker(email):
+    resolved_getter = time_joined_getter if time_joined_getter is not None else _get_user_time_joined_ms
+    if resolved_getter(user_id) < _PREEXISTING_ACCOUNT_CUTOFF_EPOCH_MS and email and paid_checker(email):
         return _PLAN_ALLY
     return _PLAN_EXPLORER
 
@@ -4386,6 +4408,10 @@ def run_r2_quota_sweep(
                     ops.update_bucket_token_access(access_key_id, bucket_name, str(row["access"]), token_name)
                     key_store.set_enforced_access(access_key_id, None)
                     counters["keys_restored"] += 1
+                else:
+                    # The key already reflects the desired state (intentionally
+                    # read-only, already downgraded, or already restored).
+                    pass
             except (CloudflareApiError, httpx.HTTPError) as exc:
                 logger.error("Sweep failed to update token %s for bucket %s: %s", access_key_id, bucket_name, exc)
                 counters["key_update_failures"] += 1

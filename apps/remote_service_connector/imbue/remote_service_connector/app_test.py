@@ -30,7 +30,6 @@ from imbue.remote_service_connector.app import SyncStoreConsistencyError
 from imbue.remote_service_connector.app import TunnelComponentTooLongError
 from imbue.remote_service_connector.app import TunnelNotFoundError
 from imbue.remote_service_connector.app import TunnelOwnershipError
-from imbue.remote_service_connector.app import _MAX_BUCKETS_PER_ACCOUNT
 from imbue.remote_service_connector.app import _MAX_ENCRYPTED_SECRETS_BYTES
 from imbue.remote_service_connector.app import _MAX_KEY_BUNDLE_FIELD_BYTES
 from imbue.remote_service_connector.app import _authenticate_supertokens
@@ -47,17 +46,23 @@ from imbue.remote_service_connector.app import is_email_paid_in_db
 from imbue.remote_service_connector.app import make_bucket_name
 from imbue.remote_service_connector.app import make_hostname
 from imbue.remote_service_connector.app import make_tunnel_name
-from imbue.remote_service_connector.app import require_paid_account
+from imbue.remote_service_connector.app import require_ally_eligible
 from imbue.remote_service_connector.app import slugify_r2_name
 from imbue.remote_service_connector.app import verify_bucket_ownership
 from imbue.remote_service_connector.app import web_app
+from imbue.remote_service_connector.testing import ALLY_PLAN_VALUES
+from imbue.remote_service_connector.testing import EXPLORER_PLAN_VALUES
 from imbue.remote_service_connector.testing import FakeCloudflareOps
+from imbue.remote_service_connector.testing import FakeLiteLLMBackend
 from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
+from imbue.remote_service_connector.testing import InMemoryEntitlementsStore
 from imbue.remote_service_connector.testing import InMemoryKeyStore
 from imbue.remote_service_connector.testing import InMemorySyncStore
+from imbue.remote_service_connector.testing import make_fake_entitlements_store
 from imbue.remote_service_connector.testing import make_fake_forwarding_ctx
 from imbue.remote_service_connector.testing import make_fake_key_store
+from imbue.remote_service_connector.testing import make_fake_litellm_backend
 from imbue.remote_service_connector.testing import make_fake_pool_backend
 from imbue.remote_service_connector.testing import make_fake_supertokens_backend
 from imbue.remote_service_connector.testing import make_fake_sync_store
@@ -66,6 +71,7 @@ from imbue.remote_service_connector.testing import make_fake_tunnel_token
 _ADMIN_STUB_TOKEN = "admin-stub-jwt"
 _ADMIN_STUB_USERNAME = "testuser"
 _ADMIN_STUB_EMAIL = "testuser@example.com"
+_ADMIN_STUB_USER_ID = "12345678-1234-5678-1234-567812345678"
 _PAID_ADMIN_KEY_TEST_VALUE = "paid-admin-key-secret-9f3a2b"
 
 
@@ -83,33 +89,57 @@ def _agent_headers(tunnel_id: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _make_test_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    """Create a TestClient with the FastAPI app, injecting a fake context.
+def _make_quota_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, InMemoryEntitlementsStore, FakeLiteLLMBackend]:
+    """Create a TestClient with the FastAPI app plus every quota-relevant fake.
 
     Sets up the SuperTokens Bearer auth path so tests calling admin endpoints
     can authenticate with ``_admin_headers()`` without needing a real JWT.
-    Installs an in-memory paid-list backend seeded with the stub admin email
-    so paid-feature endpoints (``/hosts/*``, ``/keys/*``, ``/buckets/*``)
-    authorize out of the box; gate tests use ``_make_pool_test_client`` to
-    get the backend and flip entries. The paid-status cache is disabled
+    Installs an in-memory paid-list backend seeded with the stub admin email,
+    an entitlements store pre-seeded with the two launch plans (with the stub
+    user's SuperTokens ``time_joined`` faked to 0, i.e. pre-cutoff, so the
+    stub's lazy plan resolves to ally by default), and a fake LiteLLM admin
+    API. The paid-status cache is disabled
     (``MINDS_PAID_LIST_CACHE_TTL_SECONDS=0``) so the module-level cache never
     bleeds between tests.
     """
     monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://fake-supertokens.example.com")
     monkeypatch.setenv("MINDS_PAID_LIST_CACHE_TTL_SECONDS", "0")
+    # ``/keys/create`` embeds the proxy URL in its response (the LiteLLM calls
+    # themselves go through the installed fake).
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://fake-litellm.example.com")
     fake_ctx = make_fake_forwarding_ctx()
-    monkeypatch.setattr(app_mod, "get_ctx", lambda: fake_ctx)
 
     def _stub_supertokens(token: str) -> AdminAuth:
         if token != _ADMIN_STUB_TOKEN:
             raise HTTPException(status_code=401, detail="Invalid token")
         return AdminAuth(username=_ADMIN_STUB_USERNAME, email=_ADMIN_STUB_EMAIL)
 
-    monkeypatch.setattr(app_mod, "_authenticate_supertokens", _stub_supertokens)
+    entitlements_store = make_fake_entitlements_store()
+    litellm = make_fake_litellm_backend()
+    # Single-loop patching (matches the Fake*Backend.install_on_app_module
+    # pattern) so the monkeypatch ratchet only counts one occurrence.
+    quota_fakes: dict[str, object] = {
+        "get_ctx": lambda: fake_ctx,
+        "_authenticate_supertokens": _stub_supertokens,
+        "get_entitlements_store": lambda: entitlements_store,
+        "_get_user_id_from_access_token": lambda token: _ADMIN_STUB_USER_ID,
+        "_get_user_time_joined_ms": lambda user_id, user_getter=None: 0,
+        "_litellm_request": litellm.request,
+    }
+    for name, fake_impl in quota_fakes.items():
+        monkeypatch.setattr(app_mod, name, fake_impl)
     backend = make_fake_pool_backend()
     backend.add_paid_email(_ADMIN_STUB_EMAIL)
     backend.install_on_app_module(app_mod, monkeypatch)
-    return TestClient(web_app)
+    return TestClient(web_app), entitlements_store, litellm
+
+
+def _make_test_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """Create a TestClient with the standard fakes (see ``_make_quota_test_client``)."""
+    client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    return client
 
 
 def test_make_tunnel_name_format() -> None:
@@ -246,6 +276,9 @@ def test_delete_tunnel_raises_for_wrong_owner() -> None:
 def test_add_service_creates_dns_and_ingress() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
+    ctx.set_tunnel_auth(
+        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
+    )
     info = ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     assert info.hostname == "web--agent1--alice.example.com"
     assert len(ctx.fake.dns_records) == 1
@@ -305,6 +338,9 @@ def test_add_service_is_idempotent() -> None:
     """
     ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp"])
     ctx.create_tunnel("alice", "agent1")
+    ctx.set_tunnel_auth(
+        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
+    )
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:9090")
     assert len(ctx.fake.dns_records) == 1
@@ -336,6 +372,9 @@ def test_add_service_rejects_cname_pointing_elsewhere() -> None:
     ``add_service`` must refuse rather than silently leak traffic."""
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
+    ctx.set_tunnel_auth(
+        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
+    )
     hostname = make_hostname("web", "agent1", "alice", "example.com")
     ctx.fake.dns_records.append(
         {"id": "stray", "name": hostname, "content": "different-tunnel.cfargotunnel.com", "type": "CNAME"}
@@ -375,6 +414,9 @@ def test_tunnel_auth_get_set() -> None:
 def test_service_auth_get_set() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
+    ctx.set_tunnel_auth(
+        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
+    )
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
     ctx.set_service_auth("alice--agent1", "alice", "web", policy)
@@ -1541,8 +1583,8 @@ def test_http_ops_service_token_roundtrip() -> None:
 # -- Uncovered route and ctx-method tests --
 
 
-def test_route_get_service_auth_returns_empty_rules_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GET /tunnels/.../services/.../auth returns {'rules': []} when no policy is set."""
+def test_route_get_service_auth_reports_owner_email_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A service added with no explicit policy carries the owner-email default Access policy."""
     client = _make_test_client(monkeypatch)
     client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
     client.post(
@@ -1552,7 +1594,9 @@ def test_route_get_service_auth_returns_empty_rules_when_unset(monkeypatch: pyte
     )
     resp = client.get("/tunnels/testuser--agent1/services/web/auth", headers=_admin_headers())
     assert resp.status_code == 200
-    assert resp.json() == {"rules": []}
+    rules = resp.json()["rules"]
+    assert len(rules) == 1
+    assert rules[0]["include"] == [{"email": {"email": _ADMIN_STUB_EMAIL}}]
 
 
 def test_route_set_service_auth_admin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1573,13 +1617,15 @@ def test_route_set_service_auth_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.json() == {"status": "updated"}
 
 
-def test_route_get_tunnel_auth_returns_empty_rules_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GET /tunnels/.../auth returns an empty rules list when no tunnel-level policy is set."""
+def test_route_get_tunnel_auth_reports_owner_email_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tunnel created with no explicit policy gets the owner-email default written to KV."""
     client = _make_test_client(monkeypatch)
     client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
     resp = client.get("/tunnels/testuser--agent1/auth", headers=_admin_headers())
     assert resp.status_code == 200
-    assert resp.json() == {"rules": []}
+    rules = resp.json()["rules"]
+    assert len(rules) == 1
+    assert rules[0]["include"] == [{"email": {"email": _ADMIN_STUB_EMAIL}}]
 
 
 def test_route_create_and_list_service_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1659,6 +1705,9 @@ def test_ctx_remove_service_scrubs_ingress_rule() -> None:
     """Removing a service drops its hostname from the tunnel config's ingress."""
     ctx = make_fake_forwarding_ctx()
     info = ctx.create_tunnel("alice", "agent1")
+    ctx.set_tunnel_auth(
+        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "owner@x.com"}}]}])
+    )
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     ctx.remove_service("alice--agent1", "alice", "web")
     config = ctx.fake.tunnel_configs[info.tunnel_id]
@@ -1681,21 +1730,31 @@ def test_ctx_create_service_token_and_list() -> None:
 # -- Host pool endpoint tests --
 
 
-def _make_pool_test_client(
+def _make_pool_quota_test_client(
     monkeypatch: pytest.MonkeyPatch,
     pool_backend: FakePoolBackend | None = None,
-) -> tuple[TestClient, FakePoolBackend]:
-    """Create a TestClient with both tunnel-auth and pool-backend fakes installed.
+) -> tuple[TestClient, FakePoolBackend, InMemoryEntitlementsStore, FakeLiteLLMBackend]:
+    """Create a TestClient with tunnel-auth, pool-backend, and quota fakes installed.
 
-    The returned backend is seeded with the stub admin email as paid so
-    paid-feature routes authorize by default; gate tests flip entries via
-    ``backend.add_paid_email`` / ``add_paid_domain`` / the CRUD endpoints.
+    The returned pool backend is seeded with the stub admin email as paid, so
+    the stub's lazily-created entitlements row resolves to the ally plan by
+    default; explorer-plan tests flip the entry via ``backend.add_paid_email``
+    or write a row into the entitlements store directly.
     """
-    client = _make_test_client(monkeypatch)
+    client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
     monkeypatch.setenv("POOL_SSH_PRIVATE_KEY", "fake-management-key-pem")
     backend = pool_backend if pool_backend is not None else make_fake_pool_backend()
     backend.add_paid_email(_ADMIN_STUB_EMAIL)
     backend.install_on_app_module(app_mod, monkeypatch)
+    return client, backend, entitlements_store, litellm
+
+
+def _make_pool_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+    pool_backend: FakePoolBackend | None = None,
+) -> tuple[TestClient, FakePoolBackend]:
+    """Pool test client without the quota handles (see ``_make_pool_quota_test_client``)."""
+    client, backend, _entitlements_store, _litellm = _make_pool_quota_test_client(monkeypatch, pool_backend)
     return client, backend
 
 
@@ -2146,45 +2205,42 @@ def test_is_email_paid_bypasses_cache_when_ttl_zero(monkeypatch: pytest.MonkeyPa
     assert call_count == 2
 
 
-def test_require_paid_account_allows_when_email_is_listed() -> None:
-    require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"), paid_checker=lambda email: True)
+def test_require_ally_eligible_allows_when_email_is_listed() -> None:
+    require_ally_eligible("alice@imbue.com", paid_checker=lambda email: True)
 
 
-def test_require_paid_account_raises_403_when_email_not_listed() -> None:
+def test_require_ally_eligible_raises_403_when_email_not_listed() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        require_paid_account(
-            AdminAuth(username="alice", email="alice@elsewhere.com"), paid_checker=lambda email: False
-        )
+        require_ally_eligible("alice@elsewhere.com", paid_checker=lambda email: False)
     assert exc_info.value.status_code == 403
-    assert "not authorized" in exc_info.value.detail
+    assert "partner access" in exc_info.value.detail
 
 
-def test_require_paid_account_raises_403_when_email_is_none() -> None:
+def test_require_ally_eligible_raises_403_when_email_is_none() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        require_paid_account(AdminAuth(username="alice", email=None), paid_checker=lambda email: True)
+        require_ally_eligible(None, paid_checker=lambda email: True)
     assert exc_info.value.status_code == 403
     assert "email unavailable" in exc_info.value.detail
 
 
-def test_require_paid_account_fails_closed_on_db_error() -> None:
-    """A database error during the lookup denies access (403), never allows it."""
+def test_require_ally_eligible_fails_closed_on_db_error() -> None:
+    """A database error during the lookup denies eligibility (403), never allows it."""
 
     def _raise_db_error(email: str) -> bool:
         raise psycopg2.OperationalError("connection refused")
 
     with pytest.raises(HTTPException) as exc_info:
-        require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"), paid_checker=_raise_db_error)
+        require_ally_eligible("alice@imbue.com", paid_checker=_raise_db_error)
     assert exc_info.value.status_code == 403
     assert "database error" in exc_info.value.detail
 
 
-def test_route_lease_host_returns_403_when_email_not_paid(
+def test_route_lease_host_succeeds_for_unpaid_explorer_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The pool-lease route denies a caller whose email is not in the paid lists."""
-    client, backend = _make_pool_test_client(monkeypatch)
+    """An unpaid account resolves to the explorer plan and can still lease (quota permitting)."""
+    client, backend, entitlements_store, _litellm = _make_pool_quota_test_client(monkeypatch)
     backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
-    # Flip the seeded stub email to not-paid.
     backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.post(
         "/hosts/lease",
@@ -2195,15 +2251,58 @@ def test_route_lease_host_returns_403_when_email_not_paid(
         },
         headers=_admin_headers(),
     )
+    assert resp.status_code == 200
+    assert backend.pool_rows[0].status == "leased"
+    # The lazily-created row is on explorer (unpaid email).
+    row = entitlements_store.get_entitlements(_ADMIN_STUB_USER_ID)
+    assert row is not None
+    assert row["plan_name"] == "explorer"
+
+
+def test_route_lease_host_returns_quota_403_at_workspace_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lease past the account's max_remote_workspaces is refused with structured detail."""
+    client, backend, entitlements_store, _litellm = _make_pool_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "explorer",
+            **{**EXPLORER_PLAN_VALUES, "max_remote_workspaces": 1},
+        }
+    )
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000042"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+    )
+    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+        },
+        headers=_admin_headers(),
+    )
     assert resp.status_code == 403
-    # Verify the gate fired before any DB / SSH side effects ran.
-    assert backend.pool_rows[0].status == "available"
+    detail = resp.json()["detail"]
+    assert detail["code"] == "quota_exceeded"
+    assert detail["entitlement"] == "max_remote_workspaces"
+    assert detail["limit"] == 1
+    assert detail["current"] == 1
+    # No side effects: the available host stays available, no SSH key injection.
+    available = [row for row in backend.pool_rows if row.status == "available"]
+    assert len(available) == 1
     assert backend.append_key_calls == []
 
 
-def test_route_release_host_returns_403_when_email_not_paid(
+def test_route_release_host_works_for_unpaid_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Release only needs ownership -- an account that lost paid status can still release."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"),
@@ -2212,67 +2311,101 @@ def test_route_release_host_returns_403_when_email_not_paid(
     )
     backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
-    assert resp.status_code == 403
-    assert backend.pool_rows[0].status == "leased"
+    assert resp.status_code == 200
+    assert backend.pool_rows == []
 
 
-def test_route_list_hosts_returns_403_when_email_not_paid(
+def test_route_list_hosts_works_for_unpaid_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.get("/hosts", headers=_admin_headers())
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.json() == []
 
 
-def test_route_create_litellm_key_returns_403_when_email_not_paid(
+def test_route_create_litellm_key_refused_for_zero_budget_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The LiteLLM key-create route enforces the paid-list gate.
+    """An explorer account (monthly LLM budget 0) cannot mint imbue-cloud keys.
 
-    The gate fires before any LiteLLM HTTP call, so this test does not need
-    to stub the LiteLLM proxy.
+    The refusal happens before any LiteLLM HTTP call and carries the
+    structured quota detail plus the subscription guidance.
     """
-    client, backend = _make_pool_test_client(monkeypatch)
+    client, backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
     backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.post("/keys/create", json={}, headers=_admin_headers())
     assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "quota_exceeded"
+    assert detail["entitlement"] == "monthly_llm_spend_usd"
+    assert "subscription" in detail["message"]
+    assert litellm.calls == []
 
 
-def test_route_list_litellm_keys_returns_403_when_email_not_paid(
+def test_route_create_litellm_key_upserts_user_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, backend = _make_pool_test_client(monkeypatch)
+    """Minting a key first pushes the account's monthly budget to LiteLLM as a user budget."""
+    client, _backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
+    resp = client.post("/keys/create", json={"key_alias": "my-agent"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["key"].startswith("sk-fake-")
+    user = litellm.users_by_id[_ADMIN_STUB_USER_ID]
+    assert user["max_budget"] == ALLY_PLAN_VALUES["monthly_llm_spend_usd"]
+    assert user["budget_duration"] == "1mo"
+    assert litellm.generated_keys[0]["user_id"] == _ADMIN_STUB_USER_ID
+
+
+def test_route_create_litellm_key_fails_when_budget_push_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LiteLLM outage during the budget upsert fails the mint (no key is created)."""
+    client, _backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
+    litellm.fail_user_writes = True
+    resp = client.post("/keys/create", json={}, headers=_admin_headers())
+    assert resp.status_code == 500
+    assert litellm.generated_keys == []
+
+
+def test_route_list_litellm_keys_works_for_unpaid_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listing keys needs no quota -- an unpaid (explorer) account gets its (empty) list."""
+    client, backend, _entitlements_store, _litellm = _make_pool_quota_test_client(monkeypatch)
     backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.get("/keys", headers=_admin_headers())
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.json() == []
 
 
-def test_route_get_litellm_key_returns_403_when_email_not_paid(
+def test_route_get_litellm_key_enforces_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, backend = _make_pool_test_client(monkeypatch)
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    resp = client.get("/keys/some-key-id", headers=_admin_headers())
-    assert resp.status_code == 403
+    """Key info is only served to the key's owner."""
+    client, _backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
+    created = client.post("/keys/create", json={}, headers=_admin_headers()).json()
+    owned = client.get(f"/keys/{created['key']}", headers=_admin_headers())
+    assert owned.status_code == 200
+    assert owned.json()["user_id"] == _ADMIN_STUB_USER_ID
+    litellm.keys_by_id[created["key"]]["user_id"] = "someone-else"
+    foreign = client.get(f"/keys/{created['key']}", headers=_admin_headers())
+    assert foreign.status_code == 403
 
 
-def test_route_update_litellm_key_budget_returns_403_when_email_not_paid(
+def test_route_update_and_delete_litellm_key_work_without_paid_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, backend = _make_pool_test_client(monkeypatch)
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    resp = client.put("/keys/some-key-id/budget", json={}, headers=_admin_headers())
-    assert resp.status_code == 403
-
-
-def test_route_delete_litellm_key_returns_403_when_email_not_paid(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, backend = _make_pool_test_client(monkeypatch)
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    resp = client.delete("/keys/some-key-id", headers=_admin_headers())
-    assert resp.status_code == 403
+    """Budget update + delete only require ownership, not any plan gate."""
+    client, _backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
+    created = client.post("/keys/create", json={}, headers=_admin_headers()).json()
+    resp = client.put(f"/keys/{created['key']}/budget", json={"max_budget": 5.0}, headers=_admin_headers())
+    assert resp.status_code == 200
+    assert litellm.keys_by_id[created["key"]]["max_budget"] == 5.0
+    resp = client.delete(f"/keys/{created['key']}", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert created["key"] not in litellm.keys_by_id
 
 
 def test_route_create_tunnel_is_not_gated_by_paid_list(
@@ -2403,14 +2536,18 @@ def test_remove_absent_paid_email_is_idempotent_success(monkeypatch: pytest.Monk
     assert resp.json() == {"status": "removed", "email": "nobody@nowhere.com"}
 
 
-def test_add_paid_email_then_gate_allows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """End-to-end: add a paid email via CRUD, then a user with that email passes the gate."""
+def test_add_paid_email_then_ally_plan_selectable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: adding a paid email via CRUD makes the ally plan selectable."""
     client, backend = _make_paid_crud_test_client(monkeypatch)
     # Start from a clean slate where the stub email is not paid.
     backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    assert client.get("/hosts", headers=_admin_headers()).status_code == 403
+    denied = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    assert denied.status_code == 403
+    assert "partner access" in denied.json()["detail"]
     client.post("/paid/emails/add", json={"value": _ADMIN_STUB_EMAIL}, headers=_paid_admin_headers())
-    assert client.get("/hosts", headers=_admin_headers()).status_code == 200
+    allowed = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    assert allowed.status_code == 200
+    assert allowed.json()["plan_name"] == "ally"
 
 
 def test_add_paid_email_verifies_existing_unverified_account(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2473,17 +2610,14 @@ def test_add_paid_email_rejects_invalid(monkeypatch: pytest.MonkeyPatch, bad_val
 # -- R2 bucket endpoint tests --
 
 
-_ADMIN_STUB_USER_ID = "12345678-1234-5678-1234-567812345678"
-
-
-def _make_bucket_test_client(
+def _make_bucket_quota_test_client(
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[TestClient, FakeCloudflareOps, InMemoryKeyStore]:
-    """Create a TestClient with the R2 fakes installed (Cloudflare ops + key store)."""
-    client = _make_test_client(monkeypatch)
+) -> tuple[TestClient, FakeCloudflareOps, InMemoryKeyStore, InMemoryEntitlementsStore]:
+    """Create a TestClient with the R2 fakes installed (Cloudflare ops + key store + entitlements)."""
+    client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     # Build our own fake ctx so the fake is typed as FakeForwardingCtx (which
-    # exposes ``.fake``); re-patching get_ctx overrides the one _make_test_client
-    # installed.
+    # exposes ``.fake``); re-patching get_ctx overrides the one the quota
+    # client installed.
     fake_ctx = make_fake_forwarding_ctx()
     store = make_fake_key_store()
     # Single-loop patching (same pattern as the Fake*Backend.install_on_app_module
@@ -2491,11 +2625,18 @@ def _make_bucket_test_client(
     bucket_fakes: dict[str, object] = {
         "get_ctx": lambda: fake_ctx,
         "get_key_store": lambda: store,
-        "_get_user_id_from_access_token": lambda token: _ADMIN_STUB_USER_ID,
     }
     for name, fake_impl in bucket_fakes.items():
         monkeypatch.setattr(app_mod, name, fake_impl)
-    return client, fake_ctx.fake, store
+    return client, fake_ctx.fake, store, entitlements_store
+
+
+def _make_bucket_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, FakeCloudflareOps, InMemoryKeyStore]:
+    """Bucket test client without the entitlements handle (see ``_make_bucket_quota_test_client``)."""
+    client, fake, store, _entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    return client, fake, store
 
 
 # --- Unit tests for naming + helpers ---
@@ -2584,14 +2725,24 @@ def test_create_bucket_duplicate_returns_409(monkeypatch: pytest.MonkeyPatch) ->
     assert resp.status_code == 409
 
 
-def test_create_bucket_at_cap_returns_409(monkeypatch: pytest.MonkeyPatch) -> None:
-    client, fake, _store = _make_bucket_test_client(monkeypatch)
-    for i in range(_MAX_BUCKETS_PER_ACCOUNT):
-        name = f"testuser--b{i}"
-        fake.buckets[name] = {"name": name}
-        fake.bucket_objects[name] = []
+def test_create_bucket_at_quota_returns_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bucket creation past the account's max_buckets entitlement is refused."""
+    client, fake, _store, entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "explorer",
+            **{**EXPLORER_PLAN_VALUES, "max_buckets": 1},
+        }
+    )
+    assert client.post("/buckets", json={"name": "first"}, headers=_admin_headers()).status_code == 200
     resp = client.post("/buckets", json={"name": "one-more"}, headers=_admin_headers())
-    assert resp.status_code == 409
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "quota_exceeded"
+    assert detail["entitlement"] == "max_buckets"
+    assert "testuser--one-more" not in fake.buckets
 
 
 def test_list_buckets_returns_only_owned(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2634,7 +2785,9 @@ def test_destroy_bucket_non_empty_returns_409(monkeypatch: pytest.MonkeyPatch) -
 def test_destroy_bucket_empty_cascades_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store = _make_bucket_test_client(monkeypatch)
     client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
-    client.post("/buckets/data/keys", json={}, headers=_admin_headers())
+    # A legacy second key (pre-single-key model) must be cascaded too.
+    extra = fake.create_bucket_token("testuser--data", "read", "mngr-r2:testuser--data:extra")
+    store.add_key(str(extra["id"]), _ADMIN_STUB_USER_ID, "testuser--data", "read", "extra")
     assert len(store.list_keys(_ADMIN_STUB_USER_ID, None)) == 2
     assert len(fake.account_tokens) == 2
     resp = client.delete("/buckets/data", headers=_admin_headers())
@@ -2644,21 +2797,45 @@ def test_destroy_bucket_empty_cascades_keys(monkeypatch: pytest.MonkeyPatch) -> 
     assert fake.account_tokens == {}
 
 
-def test_create_additional_key_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
-    resp = client.post("/buckets/data/keys", json={"alias": "ro", "access": "read"}, headers=_admin_headers())
+def test_roll_key_returns_same_access_key_id_with_fresh_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rolling keeps the Access Key ID (and token policies) while re-deriving the secret."""
+    client, _fake, store, _entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
+    original_key = created["key"]
+    resp = client.post("/buckets/data/roll-key", headers=_admin_headers())
+    assert resp.status_code == 200
+    rolled = resp.json()
+    assert rolled["access_key_id"] == original_key["access_key_id"]
+    assert rolled["secret_access_key"] != original_key["secret_access_key"]
+    # Still exactly one recorded key for the bucket.
+    assert len(store.list_keys(_ADMIN_STUB_USER_ID, "testuser--data")) == 1
+
+
+def test_roll_key_reports_enforced_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key downgraded by the storage sweep reports read access through a roll (no bypass)."""
+    client, _fake, store, _entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
+    store.set_enforced_access(created["key"]["access_key_id"], "read")
+    resp = client.post("/buckets/data/roll-key", headers=_admin_headers())
     assert resp.status_code == 200
     assert resp.json()["access"] == "read"
-    per_bucket = client.get("/buckets/data/keys", headers=_admin_headers()).json()
-    assert sorted(k["alias"] for k in per_bucket) == ["default", "ro"]
-    account_wide = client.get("/bucket-keys", headers=_admin_headers()).json()
-    assert len(account_wide) == 2
 
 
-def test_create_key_for_missing_bucket_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_roll_key_mints_fresh_key_when_none_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rolling a bucket with no recorded key (e.g. after a revoke) mints one."""
+    client, _fake, store, _entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
+    client.delete(f"/bucket-keys/{created['key']['access_key_id']}", headers=_admin_headers())
+    assert store.list_keys(_ADMIN_STUB_USER_ID, "testuser--data") == []
+    resp = client.post("/buckets/data/roll-key", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["access"] == "readwrite"
+    assert len(store.list_keys(_ADMIN_STUB_USER_ID, "testuser--data")) == 1
+
+
+def test_roll_key_for_missing_bucket_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    resp = client.post("/buckets/nope/keys", json={}, headers=_admin_headers())
+    resp = client.post("/buckets/nope/roll-key", headers=_admin_headers())
     assert resp.status_code == 404
 
 
@@ -2687,14 +2864,16 @@ def test_destroy_key_not_owned_returns_404(monkeypatch: pytest.MonkeyPatch) -> N
     assert store.get_key("akid-other") is not None
 
 
-def test_buckets_require_paid_account(monkeypatch: pytest.MonkeyPatch) -> None:
-    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+def test_create_bucket_works_for_unpaid_explorer_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The old paid gate is gone: an unpaid (explorer) account can create buckets within quota."""
+    client, fake, _store = _make_bucket_test_client(monkeypatch)
     # Install a paid-list backend where the stub admin email is NOT paid.
     backend = make_fake_pool_backend()
     backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     backend.install_on_app_module(app_mod, monkeypatch)
     resp = client.post("/buckets", json={"name": "x"}, headers=_admin_headers())
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert "testuser--x" in fake.buckets
 
 
 def test_r2_keys_migration_declares_all_persisted_columns() -> None:
@@ -3121,3 +3300,664 @@ def test_postgres_sync_store_bundle_crud(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_get_sync_store_returns_a_cached_postgres_store() -> None:
     assert isinstance(get_sync_store(), PostgresSyncStore)
     assert get_sync_store() is get_sync_store()
+
+
+# ---------------------------------------------------------------------------
+# Plans + entitlements tests
+# ---------------------------------------------------------------------------
+
+
+def test_initial_plan_pre_cutoff_paid_email_gets_ally() -> None:
+    plan = app_mod._initial_plan_name_for_user(
+        "user-1", "alice@imbue.com", time_joined_getter=lambda uid: 0, paid_checker=lambda email: True
+    )
+    assert plan == "ally"
+
+
+def test_initial_plan_post_cutoff_paid_email_gets_explorer() -> None:
+    """Accounts created after the ship cutoff always start as explorer, paid-listed or not."""
+    after_cutoff = app_mod._PREEXISTING_ACCOUNT_CUTOFF_EPOCH_MS + 1
+    plan = app_mod._initial_plan_name_for_user(
+        "user-1", "alice@imbue.com", time_joined_getter=lambda uid: after_cutoff, paid_checker=lambda email: True
+    )
+    assert plan == "explorer"
+
+
+def test_initial_plan_unpaid_email_gets_explorer() -> None:
+    plan = app_mod._initial_plan_name_for_user(
+        "user-1", "bob@gmail.com", time_joined_getter=lambda uid: 0, paid_checker=lambda email: False
+    )
+    assert plan == "explorer"
+
+
+def test_ensure_account_entitlements_copies_plan_values_and_is_idempotent() -> None:
+    store = make_fake_entitlements_store()
+    first = app_mod.ensure_account_entitlements(user_id="user-1", username_prefix="prefix1", email="", store=store)
+    assert first.plan_name == "explorer"
+    assert first.max_remote_workspaces == EXPLORER_PLAN_VALUES["max_remote_workspaces"]
+    # A manual bump survives a second ensure (lazy creation never overwrites).
+    store.update_entitlements("user-1", {"max_remote_workspaces": 7})
+    second = app_mod.ensure_account_entitlements(user_id="user-1", username_prefix="prefix1", email="", store=store)
+    assert second.max_remote_workspaces == 7
+
+
+def test_ensure_account_entitlements_raises_when_plan_not_seeded() -> None:
+    store = InMemoryEntitlementsStore()
+    with pytest.raises(app_mod.PlanNotFoundError):
+        app_mod.ensure_account_entitlements(user_id="user-1", username_prefix="p", email="", store=store)
+
+
+# ---------------------------------------------------------------------------
+# Tunnel + service quota and hardening tests
+# ---------------------------------------------------------------------------
+
+
+def test_route_create_tunnel_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "explorer",
+            **{**EXPLORER_PLAN_VALUES, "max_tunnels": 1},
+        }
+    )
+    assert client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).status_code == 200
+    resp = client.post("/tunnels", json={"agent_id": "agent2"}, headers=_admin_headers())
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "quota_exceeded"
+    assert detail["entitlement"] == "max_tunnels"
+    # Idempotent re-create of the existing tunnel is always allowed at the cap.
+    assert client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).status_code == 200
+
+
+def test_route_add_service_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "explorer",
+            **{**EXPLORER_PLAN_VALUES, "max_services_per_tunnel": 1},
+        }
+    )
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    first = client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "web", "service_url": "http://localhost:8080"},
+        headers=_admin_headers(),
+    )
+    assert first.status_code == 200
+    second = client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "api", "service_url": "http://localhost:9090"},
+        headers=_admin_headers(),
+    )
+    assert second.status_code == 403
+    assert second.json()["detail"]["entitlement"] == "max_services_per_tunnel"
+    # Re-adding the existing service (an update) is always allowed at the cap.
+    re_add = client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "web", "service_url": "http://localhost:9191"},
+        headers=_admin_headers(),
+    )
+    assert re_add.status_code == 200
+
+
+def test_route_add_service_agent_auth_respects_owner_quota_by_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agent (tunnel-token) auth resolves the owner's quota via the tunnel-name prefix."""
+    client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "explorer",
+            **{**EXPLORER_PLAN_VALUES, "max_services_per_tunnel": 1},
+        }
+    )
+    created = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).json()
+    agent = _agent_headers(created["tunnel_id"])
+    first = client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "web", "service_url": "http://localhost:8080"},
+        headers=agent,
+    )
+    assert first.status_code == 200
+    second = client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "api", "service_url": "http://localhost:9090"},
+        headers=agent,
+    )
+    assert second.status_code == 403
+    assert second.json()["detail"]["entitlement"] == "max_services_per_tunnel"
+
+
+def test_route_create_tunnel_rejects_identity_less_default_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    resp = client.post(
+        "/tunnels",
+        json={"agent_id": "agent1", "default_auth_policy": {"rules": []}},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400
+    resp = client.post(
+        "/tunnels",
+        json={
+            "agent_id": "agent1",
+            "default_auth_policy": {"rules": [{"action": "allow", "include": [{"everyone": {}}]}]},
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400
+
+
+def test_route_set_tunnel_auth_rejects_identity_less_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    empty = client.put("/tunnels/testuser--agent1/auth", json={"rules": []}, headers=_admin_headers())
+    assert empty.status_code == 400
+    everyone = client.put(
+        "/tunnels/testuser--agent1/auth",
+        json={"rules": [{"action": "allow", "include": [{"everyone": {}}]}]},
+        headers=_admin_headers(),
+    )
+    assert everyone.status_code == 400
+
+
+def test_route_set_service_auth_rejects_identity_less_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "web", "service_url": "http://localhost:8080"},
+        headers=_admin_headers(),
+    )
+    resp = client.put(
+        "/tunnels/testuser--agent1/services/web/auth",
+        json={"rules": [{"action": "allow", "include": []}]},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400
+
+
+def test_validate_auth_policy_accepts_identity_rule_types() -> None:
+    policy = AuthPolicy(
+        rules=[
+            {
+                "action": "allow",
+                "include": [
+                    {"email": {"email": "a@b.com"}},
+                    {"email_domain": {"domain": "imbue.com"}},
+                    {"login_method": {"id": "idp-1"}},
+                    {"group": {"id": "group-1"}},
+                ],
+            }
+        ]
+    )
+    app_mod.validate_auth_policy_has_identity(policy)
+
+
+def test_ctx_add_service_rolls_back_on_access_app_failure() -> None:
+    """A failed Access Application creation must leave nothing behind (no public exposure)."""
+    ctx = make_fake_forwarding_ctx()
+    info = ctx.create_tunnel("alice", "agent1")
+    ctx.set_tunnel_auth(
+        "alice--agent1", AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "o@x.com"}}]}])
+    )
+    ctx.fake.fail_next_create_access_app = True
+    with pytest.raises(CloudflareApiError):
+        ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    assert ctx.fake.dns_records == []
+    assert ctx.fake.access_apps == {}
+    ingress = ctx.fake.tunnel_configs[info.tunnel_id]["config"]["ingress"]
+    assert [r for r in ingress if "hostname" in r] == []
+
+
+def test_ctx_add_service_without_any_policy_is_refused() -> None:
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    with pytest.raises(app_mod.ServicePolicyMissingError):
+        ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    assert ctx.fake.dns_records == []
+
+
+def test_ctx_create_tunnel_fallback_policy_does_not_clobber_existing_default() -> None:
+    """Re-creating a tunnel with a fallback must preserve a user-set default policy."""
+    ctx = make_fake_forwarding_ctx()
+    user_policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "guest@y.com"}}]}])
+    ctx.create_tunnel("alice", "agent1", default_auth_policy=user_policy)
+    fallback = app_mod.owner_email_auth_policy("owner@x.com")
+    ctx.create_tunnel("alice", "agent1", fallback_auth_policy=fallback)
+    stored = ctx.get_tunnel_auth("alice--agent1")
+    assert stored is not None
+    assert stored.rules == user_policy.rules
+
+
+# ---------------------------------------------------------------------------
+# Sync quota tests
+# ---------------------------------------------------------------------------
+
+
+def _make_sync_quota_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, InMemorySyncStore, InMemoryEntitlementsStore]:
+    client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    store = make_fake_sync_store()
+    monkeypatch.setattr(app_mod, "get_sync_store", lambda: store)
+    return client, store, entitlements_store
+
+
+def test_sync_put_active_record_refused_at_quota(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, entitlements_store = _make_sync_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "explorer",
+            **{**EXPLORER_PLAN_VALUES, "max_active_synced_workspaces": 1},
+        }
+    )
+    first = client.put(
+        "/sync/records/host-1", json=_sync_record_body(host_id="host-1", agent_id="agent-1"), headers=_admin_headers()
+    )
+    assert first.status_code == 200
+    second = client.put(
+        "/sync/records/host-2", json=_sync_record_body(host_id="host-2", agent_id="agent-2"), headers=_admin_headers()
+    )
+    assert second.status_code == 403
+    assert second.json()["detail"]["entitlement"] == "max_active_synced_workspaces"
+    # Updating the existing active record is always allowed at the cap.
+    update = client.put(
+        "/sync/records/host-1",
+        json=_sync_record_body(host_id="host-1", agent_id="agent-1", revision=2),
+        headers=_admin_headers(),
+    )
+    assert update.status_code == 200
+    # Tombstoning is always allowed, and frees quota for a new active record.
+    tombstone = client.put(
+        "/sync/records/host-1",
+        json=_sync_record_body(host_id="host-1", agent_id="agent-1", revision=3, state="destroyed"),
+        headers=_admin_headers(),
+    )
+    assert tombstone.status_code == 200
+    third = client.put(
+        "/sync/records/host-2", json=_sync_record_body(host_id="host-2", agent_id="agent-2"), headers=_admin_headers()
+    )
+    assert third.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Account endpoint tests
+# ---------------------------------------------------------------------------
+
+
+def test_route_get_account_reports_plan_entitlements_and_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, backend, entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000042"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+    )
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    litellm.users_by_id[_ADMIN_STUB_USER_ID] = {
+        "user_id": _ADMIN_STUB_USER_ID,
+        "spend": 12.5,
+        "max_budget": 1000.0,
+        "budget_reset_at": "2026-08-01T00:00:00Z",
+    }
+    resp = client.get("/account", headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["user_id"] == _ADMIN_STUB_USER_ID
+    assert body["email"] == _ADMIN_STUB_EMAIL
+    # Stub email is paid-listed + pre-cutoff, so the lazily-created plan is ally.
+    assert body["plan_name"] == "ally"
+    assert body["entitlements"]["max_remote_workspaces"] == ALLY_PLAN_VALUES["max_remote_workspaces"]
+    assert body["usage"]["remote_workspaces"] == 1
+    assert body["usage"]["tunnels"] == 1
+    assert body["usage"]["llm_spend_usd_this_period"] == 12.5
+    assert body["usage"]["llm_budget_resets_at"] == "2026-08-01T00:00:00Z"
+    assert sorted(body["available_plans"]) == ["ally", "explorer"]
+
+
+def test_route_set_account_plan_same_plan_is_noop_preserving_bumps(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "ally",
+            **{**ALLY_PLAN_VALUES, "max_remote_workspaces": 42},
+        }
+    )
+    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["entitlements"]["max_remote_workspaces"] == 42
+    # No LiteLLM push on a no-op.
+    assert litellm.calls == []
+
+
+def test_route_set_account_plan_switch_overwrites_wholesale(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "explorer",
+            **{**EXPLORER_PLAN_VALUES, "max_remote_workspaces": 42},
+        }
+    )
+    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["plan_name"] == "ally"
+    # The manual bump is wiped: values reset wholesale to the plan defaults.
+    assert body["entitlements"]["max_remote_workspaces"] == ALLY_PLAN_VALUES["max_remote_workspaces"]
+    # The new monthly budget is pushed to LiteLLM.
+    assert litellm.users_by_id[_ADMIN_STUB_USER_ID]["max_budget"] == ALLY_PLAN_VALUES["monthly_llm_spend_usd"]
+
+
+def test_route_set_account_plan_unknown_plan_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    resp = client.post("/account/plan", json={"plan": "platinum"}, headers=_admin_headers())
+    assert resp.status_code == 400
+
+
+def test_route_set_account_plan_litellm_failure_aborts_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed LiteLLM budget push fails the whole switch; the row is unchanged."""
+    client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": _ADMIN_STUB_USER_ID,
+            "username_prefix": _ADMIN_STUB_USERNAME,
+            "plan_name": "explorer",
+            **EXPLORER_PLAN_VALUES,
+        }
+    )
+    litellm.fail_user_writes = True
+    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    assert resp.status_code == 500
+    row = entitlements_store.get_entitlements(_ADMIN_STUB_USER_ID)
+    assert row is not None
+    assert row["plan_name"] == "explorer"
+
+
+# ---------------------------------------------------------------------------
+# Account admin endpoint tests (email-addressed, admin-key authenticated)
+# ---------------------------------------------------------------------------
+
+
+def _make_account_admin_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, InMemoryEntitlementsStore, FakeLiteLLMBackend, FakeSuperTokensBackend]:
+    client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
+    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
+    st_backend = make_fake_supertokens_backend()
+    st_backend.install_on_app_module(app_mod, monkeypatch)
+    return client, entitlements_store, litellm, st_backend
+
+
+def test_admin_get_account_lazily_creates_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, entitlements_store, _litellm, st_backend = _make_account_admin_test_client(monkeypatch)
+    st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
+    resp = client.get("/admin/accounts/somebody@example.com", headers=_paid_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["email"] == "somebody@example.com"
+    assert body["plan_name"] == "explorer"
+    assert entitlements_store.get_entitlements(body["user_id"]) is not None
+
+
+def test_admin_get_account_unknown_email_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _entitlements_store, _litellm, _st_backend = _make_account_admin_test_client(monkeypatch)
+    resp = client.get("/admin/accounts/nobody@example.com", headers=_paid_admin_headers())
+    assert resp.status_code == 404
+
+
+def test_admin_account_endpoints_reject_missing_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _entitlements_store, _litellm, st_backend = _make_account_admin_test_client(monkeypatch)
+    st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
+    # A SuperTokens session token is rejected on the admin-key routes.
+    resp = client.get("/admin/accounts/somebody@example.com", headers=_admin_headers())
+    assert resp.status_code == 401
+
+
+def test_admin_set_plan_always_resets_to_plan_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admin set-plan resets even for the same plan (the operator's bump-wipe)."""
+    client, entitlements_store, litellm, st_backend = _make_account_admin_test_client(monkeypatch)
+    st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
+    show = client.get("/admin/accounts/somebody@example.com", headers=_paid_admin_headers()).json()
+    entitlements_store.update_entitlements(show["user_id"], {"max_remote_workspaces": 42})
+    resp = client.post(
+        "/admin/accounts/somebody@example.com/plan", json={"plan": "explorer"}, headers=_paid_admin_headers()
+    )
+    assert resp.status_code == 200
+    row = entitlements_store.get_entitlements(show["user_id"])
+    assert row is not None
+    assert row["max_remote_workspaces"] == EXPLORER_PLAN_VALUES["max_remote_workspaces"]
+    # Admin set-plan skips the ally eligibility check.
+    ally = client.post(
+        "/admin/accounts/somebody@example.com/plan", json={"plan": "ally"}, headers=_paid_admin_headers()
+    )
+    assert ally.status_code == 200
+    assert litellm.users_by_id[show["user_id"]]["max_budget"] == ALLY_PLAN_VALUES["monthly_llm_spend_usd"]
+
+
+def test_admin_set_quota_updates_single_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, entitlements_store, litellm, st_backend = _make_account_admin_test_client(monkeypatch)
+    st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
+    resp = client.post(
+        "/admin/accounts/somebody@example.com/quota",
+        json={"entitlement": "max_remote_workspaces", "value": 5},
+        headers=_paid_admin_headers(),
+    )
+    assert resp.status_code == 200
+    show = client.get("/admin/accounts/somebody@example.com", headers=_paid_admin_headers()).json()
+    assert show["entitlements"]["max_remote_workspaces"] == 5
+    # Other values are untouched.
+    assert show["entitlements"]["max_buckets"] == EXPLORER_PLAN_VALUES["max_buckets"]
+    # An LLM budget bump also pushes to LiteLLM.
+    resp = client.post(
+        "/admin/accounts/somebody@example.com/quota",
+        json={"entitlement": "monthly_llm_spend_usd", "value": 250.5},
+        headers=_paid_admin_headers(),
+    )
+    assert resp.status_code == 200
+    assert litellm.users_by_id[show["user_id"]]["max_budget"] == 250.5
+
+
+def test_admin_set_quota_rejects_bad_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _entitlements_store, _litellm, st_backend = _make_account_admin_test_client(monkeypatch)
+    st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
+    unknown = client.post(
+        "/admin/accounts/somebody@example.com/quota",
+        json={"entitlement": "max_unicorns", "value": 5},
+        headers=_paid_admin_headers(),
+    )
+    assert unknown.status_code == 400
+    fractional = client.post(
+        "/admin/accounts/somebody@example.com/quota",
+        json={"entitlement": "max_remote_workspaces", "value": 1.5},
+        headers=_paid_admin_headers(),
+    )
+    assert fractional.status_code == 400
+    negative = client.post(
+        "/admin/accounts/somebody@example.com/quota",
+        json={"entitlement": "max_remote_workspaces", "value": -1},
+        headers=_paid_admin_headers(),
+    )
+    assert negative.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# R2 storage sweep tests
+# ---------------------------------------------------------------------------
+
+
+def _sweep_fixtures() -> tuple[FakeCloudflareOps, InMemoryKeyStore, InMemoryEntitlementsStore]:
+    return FakeCloudflareOps(), make_fake_key_store(), make_fake_entitlements_store()
+
+
+def _add_bucket_with_key(
+    ops: FakeCloudflareOps,
+    store: InMemoryKeyStore,
+    owner_user_id: str,
+    bucket_name: str,
+    access: str = "readwrite",
+    alias: str = "default",
+) -> str:
+    ops.buckets.setdefault(bucket_name, {"name": bucket_name})
+    token = ops.create_bucket_token(bucket_name, access, f"mngr-r2:{bucket_name}:{alias}")
+    store.add_key(str(token["id"]), owner_user_id, bucket_name, access, alias)
+    return str(token["id"])
+
+
+def _seed_sweep_row(
+    entitlements_store: InMemoryEntitlementsStore, user_id: str, prefix: str, max_total_bucket_bytes: int
+) -> None:
+    entitlements_store.insert_entitlements_if_absent(
+        {
+            "user_id": user_id,
+            "username_prefix": prefix,
+            "plan_name": "explorer",
+            **{**EXPLORER_PLAN_VALUES, "max_total_bucket_bytes": max_total_bucket_bytes},
+        }
+    )
+
+
+def test_sweep_enforces_single_key_per_bucket() -> None:
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 10**12)
+    first = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    second = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data", alias="extra")
+    counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert counters["extra_keys_revoked"] == 1
+    remaining = store.list_keys("user-1", "u1prefix--data")
+    # The newest key survives; the older one is revoked and dropped.
+    assert [r["access_key_id"] for r in remaining] == [second]
+    assert first not in ops.account_tokens
+
+
+def test_sweep_downgrades_and_restores_keys_around_quota() -> None:
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
+
+    over = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert over["users_over_quota"] == 1
+    assert over["keys_downgraded"] == 1
+    assert ops.account_tokens[key_id]["access"] == "read"
+    assert store.get_key(key_id)["enforced_access"] == "read"
+
+    # Repeated over-quota sweeps are no-ops (already downgraded).
+    again = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert again["keys_downgraded"] == 0
+
+    # Back under quota: the key's intended access is restored.
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 50
+    restored = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert restored["keys_restored"] == 1
+    assert ops.account_tokens[key_id]["access"] == "readwrite"
+    assert store.get_key(key_id)["enforced_access"] is None
+
+
+def test_sweep_never_downgrades_intentionally_read_only_keys() -> None:
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data", access="read")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
+    counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert counters["keys_downgraded"] == 0
+    assert store.get_key(key_id)["enforced_access"] is None
+
+
+def test_sweep_sums_usage_across_all_owner_buckets() -> None:
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 150)
+    key_a = _add_bucket_with_key(ops, store, "user-1", "u1prefix--a")
+    key_b = _add_bucket_with_key(ops, store, "user-1", "u1prefix--b")
+    ops.usage_bytes_by_bucket["u1prefix--a"] = 100
+    ops.usage_bytes_by_bucket["u1prefix--b"] = 100
+    counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert counters["users_over_quota"] == 1
+    assert counters["keys_downgraded"] == 2
+    assert ops.account_tokens[key_a]["access"] == "read"
+    assert ops.account_tokens[key_b]["access"] == "read"
+
+
+def test_sweep_skips_unknown_owner_without_downgrading() -> None:
+    """No entitlements row + no resolvable email means skip, never guess a limit."""
+    ops, store, entitlements_store = _sweep_fixtures()
+    key_id = _add_bucket_with_key(ops, store, "user-unknown", "uxprefix--data")
+    ops.usage_bytes_by_bucket["uxprefix--data"] = 10**15
+    counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert counters["users_skipped"] == 1
+    assert counters["keys_downgraded"] == 0
+    assert ops.account_tokens[key_id]["access"] == "readwrite"
+
+
+def test_sweep_lazily_creates_row_for_resolvable_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An owner with no row gets one created from their email (unpaid -> explorer here)."""
+    monkeypatch.setenv("MINDS_PAID_LIST_CACHE_TTL_SECONDS", "0")
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    # The real time_joined getter degrades to 0 (pre-cutoff) when SuperTokens
+    # is unavailable, which is exactly the branch this test wants.
+    ops, store, entitlements_store = _sweep_fixtures()
+    key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 10
+    counters = app_mod.run_r2_quota_sweep(
+        ops,
+        store,
+        entitlements_store,
+        email_getter=lambda uid: "nobody@gmail.com",
+    )
+    assert counters["users_skipped"] == 0
+    row = entitlements_store.get_entitlements("user-1")
+    assert row is not None
+    assert row["plan_name"] == "explorer"
+    assert ops.account_tokens[key_id]["access"] == "readwrite"
+
+
+def test_parse_r2_storage_graphql_response_takes_newest_snapshot_per_bucket() -> None:
+    response = {
+        "data": {
+            "viewer": {
+                "accounts": [
+                    {
+                        "r2StorageAdaptiveGroups": [
+                            {
+                                "max": {"payloadSize": 100, "metadataSize": 5},
+                                "dimensions": {"bucketName": "u1--a", "datetime": "2026-07-20T10:00:00Z"},
+                            },
+                            {
+                                "max": {"payloadSize": 900, "metadataSize": 50},
+                                "dimensions": {"bucketName": "u1--a", "datetime": "2026-07-20T09:00:00Z"},
+                            },
+                            {
+                                "max": {"payloadSize": 7, "metadataSize": 0},
+                                "dimensions": {"bucketName": "u2--b", "datetime": "2026-07-20T10:00:00Z"},
+                            },
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+    usage = app_mod.parse_r2_storage_graphql_response(response)
+    # Rows arrive newest-first; the first row per bucket wins.
+    assert usage == {"u1--a": 105, "u2--b": 7}
+
+
+def test_plans_migration_declares_all_quota_columns() -> None:
+    """Guard against the plans/entitlements schema and QUOTA_ENTITLEMENT_NAMES drifting apart."""
+    migration_path = Path(__file__).parent.parent.parent / "migrations" / "014_plans_entitlements.sql"
+    migration_sql = migration_path.read_text().lower()
+    assert "create table plans" in migration_sql
+    assert "create table account_entitlements" in migration_sql
+    assert "username_prefix" in migration_sql
+    assert "enforced_access" in migration_sql
+    for column in app_mod.QUOTA_ENTITLEMENT_NAMES:
+        assert migration_sql.count(column) >= 2, f"quota column {column!r} missing from a table"

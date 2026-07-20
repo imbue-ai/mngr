@@ -26,6 +26,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
@@ -346,10 +347,10 @@ def test_list_buckets_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [b.bucket_name for b in items] == ["u--a"]
 
 
-def test_create_bucket_key_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_roll_bucket_key_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/buckets/data/keys"
-        assert _json.loads(request.content) == {"access": "read", "alias": "ro"}
+        assert request.url.path == "/buckets/data/roll-key"
+        assert request.method == "POST"
         return httpx.Response(
             200,
             json={
@@ -357,13 +358,13 @@ def test_create_bucket_key_parses(monkeypatch: pytest.MonkeyPatch) -> None:
                 "secret_access_key": "s2",
                 "s3_endpoint": "https://acct.r2.cloudflarestorage.com",
                 "bucket_name": "u--data",
-                "access": "read",
+                "access": "readwrite",
             },
         )
 
     client = _install_mock_httpx(monkeypatch, handler)
-    material = client.create_bucket_key(SecretStr("tok"), "data", "ro", "read")
-    assert material.access == "read"
+    material = client.roll_bucket_key(SecretStr("tok"), "data")
+    assert material.access_key_id == "akid2"
     assert material.secret_access_key.get_secret_value() == "s2"
 
 
@@ -403,13 +404,128 @@ def test_list_bucket_keys_per_bucket_uses_scoped_path(monkeypatch: pytest.Monkey
     assert items[0].access_key_id == "akid"
 
 
-def test_destroy_bucket_key_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_quota_exceeded_403_raises_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connector's structured quota rejection surfaces as ImbueCloudQuotaExceededError."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/bucket-keys/akid1"
-        return httpx.Response(200, json={"status": "deleted"})
+        return httpx.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "quota_exceeded",
+                    "entitlement": "max_buckets",
+                    "limit": 5,
+                    "current": 5,
+                    "message": "Quota exceeded: this account allows 5 buckets and 5 are already in use.",
+                }
+            },
+        )
 
     client = _install_mock_httpx(monkeypatch, handler)
-    client.destroy_bucket_key(SecretStr("tok"), "akid1")
+    with pytest.raises(ImbueCloudQuotaExceededError) as exc_info:
+        client.create_bucket(SecretStr("tok"), "one-more", "readwrite")
+    assert exc_info.value.entitlement == "max_buckets"
+    assert exc_info.value.limit == 5
+    assert exc_info.value.current == 5
+
+
+def test_get_account_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account"
+        return httpx.Response(
+            200,
+            json={
+                "user_id": "user-1",
+                "email": "alice@imbue.com",
+                "plan_name": "ally",
+                "entitlements": {
+                    "max_remote_workspaces": 10,
+                    "max_tunnels": 50,
+                    "max_services_per_tunnel": 10,
+                    "max_buckets": 20,
+                    "max_total_bucket_bytes": 536870912000,
+                    "monthly_llm_spend_usd": 1000.0,
+                    "max_active_synced_workspaces": 200,
+                },
+                "usage": {
+                    "remote_workspaces": 2,
+                    "tunnels": 3,
+                    "buckets": 1,
+                    "total_bucket_bytes": 12345,
+                    "llm_spend_usd_this_period": 42.5,
+                    "llm_budget_resets_at": "2026-08-01T00:00:00Z",
+                    "active_synced_workspaces": 4,
+                },
+                "available_plans": ["ally", "explorer"],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    info = client.get_account(SecretStr("tok"))
+    assert info.plan_name == "ally"
+    assert info.entitlements.max_remote_workspaces == 10
+    assert info.usage.llm_spend_usd_this_period == 42.5
+    assert info.available_plans == ("ally", "explorer")
+
+
+def test_set_account_plan_posts_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account/plan"
+        assert _json.loads(request.content) == {"plan": "ally"}
+        return httpx.Response(200, json={"plan_name": "ally", "entitlements": {}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    body = client.set_account_plan(SecretStr("tok"), "ally")
+    assert body["plan_name"] == "ally"
+
+
+def test_admin_account_endpoints_use_admin_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/quota"):
+            assert _json.loads(request.content) == {"entitlement": "max_tunnels", "value": 60.0}
+            return httpx.Response(200, json={"status": "updated", "entitlement": "max_tunnels", "value": 60})
+        if request.url.path.endswith("/plan"):
+            return httpx.Response(200, json={"plan_name": "ally", "entitlements": {}})
+        return httpx.Response(
+            200,
+            json={
+                "user_id": "user-1",
+                "email": "alice@imbue.com",
+                "plan_name": "explorer",
+                "entitlements": {
+                    "max_remote_workspaces": 2,
+                    "max_tunnels": 50,
+                    "max_services_per_tunnel": 10,
+                    "max_buckets": 5,
+                    "max_total_bucket_bytes": 53687091200,
+                    "monthly_llm_spend_usd": 0.0,
+                    "max_active_synced_workspaces": 200,
+                },
+                "usage": {
+                    "remote_workspaces": 0,
+                    "tunnels": 0,
+                    "buckets": 0,
+                    "total_bucket_bytes": 0,
+                    "llm_spend_usd_this_period": 0.0,
+                    "llm_budget_resets_at": None,
+                    "active_synced_workspaces": 0,
+                },
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    info = client.admin_get_account(SecretStr("adm"), "alice@imbue.com")
+    assert info.plan_name == "explorer"
+    client.admin_set_account_plan(SecretStr("adm"), "alice@imbue.com", "ally")
+    client.admin_set_account_quota(SecretStr("adm"), "alice@imbue.com", "max_tunnels", 60)
+    assert seen == [
+        "/admin/accounts/alice@imbue.com",
+        "/admin/accounts/alice@imbue.com/plan",
+        "/admin/accounts/alice@imbue.com/quota",
+    ]
 
 
 # -- Paid lists (admin-key authenticated) --

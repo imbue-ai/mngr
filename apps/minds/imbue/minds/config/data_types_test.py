@@ -1,8 +1,10 @@
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
 
+from imbue.minds.config.data_types import PlanQuotasConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
 from imbue.minds.errors import MalformedMngrOutputError
@@ -87,3 +89,44 @@ def test_parse_agents_from_mngr_output_raises_on_missing_agents_key() -> None:
     output = json.dumps({"not_agents": []})
     with pytest.raises(MalformedMngrOutputError, match="missing 'agents' key"):
         parse_agents_from_mngr_output(output)
+
+
+def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
+    config = PlanQuotasConfig(
+        max_remote_workspaces=2,
+        max_tunnels=50,
+        max_services_per_tunnel=10,
+        max_buckets=5,
+        max_total_bucket_gb=50,
+        monthly_llm_spend_usd=0,
+        max_active_synced_workspaces=200,
+    )
+    row = config.to_plan_row()
+    assert row["max_total_bucket_bytes"] == 50 * 1024**3
+    assert row["monthly_llm_spend_usd"] == 0.0
+    assert row["max_remote_workspaces"] == 2
+    # Every quota column the connector's plans table carries is present.
+    assert sorted(row) == [
+        "max_active_synced_workspaces",
+        "max_buckets",
+        "max_remote_workspaces",
+        "max_services_per_tunnel",
+        "max_total_bucket_bytes",
+        "max_tunnels",
+        "monthly_llm_spend_usd",
+    ]
+
+
+def test_committed_deploy_tomls_all_define_the_launch_plans() -> None:
+    """Every tier ships the same explorer/ally plan definitions (per-user bumps handle exceptions)."""
+    envs_dir = Path(__file__).parent / "envs"
+    plan_blocks_by_tier: dict[str, dict[str, PlanQuotasConfig]] = {}
+    for tier in ("dev", "staging", "production", "ci"):
+        raw = tomllib.loads((envs_dir / tier / "deploy.toml").read_text())
+        plans = {name: PlanQuotasConfig.model_validate(values) for name, values in raw.get("plans", {}).items()}
+        plan_blocks_by_tier[tier] = plans
+    for tier, plans in plan_blocks_by_tier.items():
+        assert sorted(plans) == ["ally", "explorer"], f"tier {tier} is missing a launch plan"
+        assert plans == plan_blocks_by_tier["dev"], f"tier {tier} diverges from the shared plan values"
+    assert plan_blocks_by_tier["dev"]["explorer"].monthly_llm_spend_usd == 0.0
+    assert plan_blocks_by_tier["dev"]["ally"].monthly_llm_spend_usd == 1000.0
