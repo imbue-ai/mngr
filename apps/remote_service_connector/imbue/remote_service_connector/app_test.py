@@ -3849,7 +3849,9 @@ def test_sweep_downgrades_and_restores_keys_around_quota() -> None:
     assert over["users_over_quota"] == 1
     assert over["keys_downgraded"] == 1
     assert ops.account_tokens[key_id]["access"] == "read"
-    assert store.get_key(key_id)["enforced_access"] == "read"
+    downgraded_row = store.get_key(key_id)
+    assert downgraded_row is not None
+    assert downgraded_row["enforced_access"] == "read"
 
     # Repeated over-quota sweeps are no-ops (already downgraded).
     again = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
@@ -3860,7 +3862,9 @@ def test_sweep_downgrades_and_restores_keys_around_quota() -> None:
     restored = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
     assert restored["keys_restored"] == 1
     assert ops.account_tokens[key_id]["access"] == "readwrite"
-    assert store.get_key(key_id)["enforced_access"] is None
+    restored_row = store.get_key(key_id)
+    assert restored_row is not None
+    assert restored_row["enforced_access"] is None
 
 
 def test_sweep_never_downgrades_intentionally_read_only_keys() -> None:
@@ -3870,7 +3874,9 @@ def test_sweep_never_downgrades_intentionally_read_only_keys() -> None:
     ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
     counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
     assert counters["keys_downgraded"] == 0
-    assert store.get_key(key_id)["enforced_access"] is None
+    untouched_row = store.get_key(key_id)
+    assert untouched_row is not None
+    assert untouched_row["enforced_access"] is None
 
 
 def test_sweep_sums_usage_across_all_owner_buckets() -> None:

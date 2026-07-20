@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.config.data_types import PlanQuotasConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
@@ -93,13 +94,13 @@ def test_parse_agents_from_mngr_output_raises_on_missing_agents_key() -> None:
 
 def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
     config = PlanQuotasConfig(
-        max_remote_workspaces=2,
-        max_tunnels=50,
-        max_services_per_tunnel=10,
-        max_buckets=5,
-        max_total_bucket_gb=50,
+        max_remote_workspaces=NonNegativeInt(2),
+        max_tunnels=NonNegativeInt(50),
+        max_services_per_tunnel=NonNegativeInt(10),
+        max_buckets=NonNegativeInt(5),
+        max_total_bucket_gb=NonNegativeInt(50),
         monthly_llm_spend_usd=0,
-        max_active_synced_workspaces=200,
+        max_active_synced_workspaces=NonNegativeInt(200),
     )
     row = config.to_plan_row()
     assert row["max_total_bucket_bytes"] == 50 * 1024**3

@@ -25,6 +25,12 @@ def _plan_display_name(plan_name: str) -> str:
 
 
 @pure
+def _int_field(source: dict[str, Any], key: str) -> int:
+    raw = source.get(key)
+    return int(raw) if raw is not None else 0
+
+
+@pure
 def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
     """Build the template view model from the connector's account-info JSON.
 
@@ -34,33 +40,29 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
     entitlements = info.get("entitlements") or {}
     usage = info.get("usage") or {}
 
-    def _int(source: dict[str, Any], key: str) -> int:
-        raw = source.get(key)
-        return int(raw) if raw is not None else 0
-
     usage_rows: list[dict[str, str]] = [
         {
             "label": "Remote workspaces",
-            "used": str(_int(usage, "remote_workspaces")),
-            "limit": str(_int(entitlements, "max_remote_workspaces")),
+            "used": str(_int_field(usage, "remote_workspaces")),
+            "limit": str(_int_field(entitlements, "max_remote_workspaces")),
             "note": "Stopped remote workspaces still count until destroyed.",
         },
         {
             "label": "Shared links (tunnels)",
-            "used": str(_int(usage, "tunnels")),
-            "limit": str(_int(entitlements, "max_tunnels")),
-            "note": f"Up to {_int(entitlements, 'max_services_per_tunnel')} shared services per workspace.",
+            "used": str(_int_field(usage, "tunnels")),
+            "limit": str(_int_field(entitlements, "max_tunnels")),
+            "note": f"Up to {_int_field(entitlements, 'max_services_per_tunnel')} shared services per workspace.",
         },
         {
             "label": "Backup storage",
-            "used": format_gb(_int(usage, "total_bucket_bytes")),
-            "limit": format_gb(_int(entitlements, "max_total_bucket_bytes")),
+            "used": format_gb(_int_field(usage, "total_bucket_bytes")),
+            "limit": format_gb(_int_field(entitlements, "max_total_bucket_bytes")),
             "note": "Total across all storage buckets; backups turn read-only while over the limit.",
         },
         {
             "label": "Storage buckets",
-            "used": str(_int(usage, "buckets")),
-            "limit": str(_int(entitlements, "max_buckets")),
+            "used": str(_int_field(usage, "buckets")),
+            "limit": str(_int_field(entitlements, "max_buckets")),
             "note": "",
         },
         {
@@ -71,8 +73,8 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
         },
         {
             "label": "Synced workspaces",
-            "used": str(_int(usage, "active_synced_workspaces")),
-            "limit": str(_int(entitlements, "max_active_synced_workspaces")),
+            "used": str(_int_field(usage, "active_synced_workspaces")),
+            "limit": str(_int_field(entitlements, "max_active_synced_workspaces")),
             "note": "",
         },
     ]
