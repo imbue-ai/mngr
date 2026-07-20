@@ -81,6 +81,7 @@ from imbue.mngr_claude.plugin import CLAUDE_INSTALL_PATH
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
+from imbue.mngr_claude.plugin import InteractivePanelIndicator
 from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
 from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import _build_claude_install_command
@@ -3204,6 +3205,36 @@ def test_cost_threshold_indicator_no_match_with_neither_string() -> None:
     indicator = CostThresholdDialogIndicator()
     content = "Claude Code is running normally"
     assert indicator.matches(content) is False
+
+
+# =============================================================================
+# InteractivePanelIndicator Tests
+# =============================================================================
+
+# Footer lines captured from real Claude Code panels (2.1.214).
+_MODEL_PANEL_FOOTER = "Enter to set as default · s to use this session only · Esc to cancel"
+_STATUS_PANEL_FOOTER = "Esc to cancel"
+_CONFIG_PANEL_FOOTER = "Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"
+_READY_FOOTER = "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent"
+
+
+def test_interactive_panel_indicator_matches_cancel_footer() -> None:
+    """Panels offering 'Esc to cancel' (e.g. /model, /status) are detected."""
+    indicator = InteractivePanelIndicator()
+    assert indicator.matches(f"...\n{_MODEL_PANEL_FOOTER}") is True
+    assert indicator.matches(f"...\n{_STATUS_PANEL_FOOTER}") is True
+
+
+def test_interactive_panel_indicator_matches_clear_footer() -> None:
+    """Panels offering 'Esc to clear' (e.g. /config) are detected."""
+    indicator = InteractivePanelIndicator()
+    assert indicator.matches(f"...\n{_CONFIG_PANEL_FOOTER}") is True
+
+
+def test_interactive_panel_indicator_no_match_ready_footer() -> None:
+    """The ready input footer must not be mistaken for a panel."""
+    indicator = InteractivePanelIndicator()
+    assert indicator.matches(f"❯ \n{_READY_FOOTER}") is False
 
 
 # =============================================================================

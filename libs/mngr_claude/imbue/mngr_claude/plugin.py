@@ -1505,6 +1505,30 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
+class InteractivePanelIndicator(DialogIndicator):
+    """Detects an interactive selection panel opened by a TUI-local slash command.
+
+    ``/model``, ``/status``, ``/config``, ``/login`` and similar open a panel that
+    occupies the input row and captures keystrokes. A message pasted into it is
+    appended to the panel's own field rather than submitted, so the send must be
+    declined rather than delivered into the panel. The panels render a footer
+    offering Escape to dismiss (``Esc to cancel`` / ``Esc to clear``); that footer
+    is absent from the ready and mid-response states.
+    """
+
+    _MATCH_CANCEL: str = "Esc to cancel"
+    _MATCH_CLEAR: str = "Esc to clear"
+
+    def get_match_string(self) -> str:
+        return self._MATCH_CANCEL
+
+    def get_description(self) -> str:
+        return "interactive panel (e.g. from /model or /status)"
+
+    def matches(self, content: str) -> bool:
+        return self._MATCH_CANCEL in content or self._MATCH_CLEAR in content
+
+
 class ClaudeCoreAgent(
     BaseAgent[ClaudeAgentConfig],
     CliBackedAgentMixin,
@@ -2228,6 +2252,7 @@ class ClaudeAgent(
         ThemeSelectionIndicator(),
         EffortCalloutIndicator(),
         CostThresholdDialogIndicator(),
+        InteractivePanelIndicator(),
     )
 
     def _build_native_transcript_path_expression(self) -> str:
