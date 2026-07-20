@@ -1300,7 +1300,16 @@ function navigateBundle(bundle, url) {
       sendCurrentWorkspaceToBundleViews(bundle);
       updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(bundle.currentContentUrl));
       ensureBundleChromeWrapper(bundle);
-      showBundleContentView(bundle);
+      // getURL() also reports a PENDING navigation (this path deliberately
+      // doubles as the dedupe for a repeated open of a workspace whose first
+      // load is still in flight -- e.g. the recovery page's two poll loops both
+      // firing the healthy return). Only show immediately when the held page is
+      // actually committed; an in-flight load is revealed by onContentNavigate
+      // when it commits, keeping the loading surface (the wrapper) visible
+      // instead of a blank card.
+      if (!bundle.contentView.webContents.isLoading()) {
+        showBundleContentView(bundle);
+      }
       closeModal(bundle);
       return;
     }
