@@ -24,7 +24,6 @@ import re
 import shlex
 import threading
 import time
-import urllib.parse
 from collections.abc import Callable
 from collections.abc import Iterator
 from enum import Enum
@@ -4045,10 +4044,6 @@ class ResetPasswordRequest(BaseModel):
 class OAuthAuthorizeRequest(BaseModel):
     provider_id: str = Field(description="Third-party provider ID (e.g. 'google', 'github')")
     callback_url: str = Field(description="Callback URL registered with the provider")
-    # CSRF token the client generated. When set, it is reflected into the
-    # authorize URL's ``state`` query param so the provider echoes it back on
-    # the callback for the client to verify. None keeps the legacy behaviour.
-    state: str | None = Field(default=None, description="CSRF state to embed in the authorize URL")
 
 
 class OAuthAuthorizeResponse(BaseModel):
@@ -4407,25 +4402,15 @@ def auth_reset_password(body: ResetPasswordRequest) -> dict[str, str]:
         return {"status": "OK", "message": "Password has been reset"}
 
 
-def _authorize_url_with_state(authorize_url: str, state: str) -> str:
-    """Return ``authorize_url`` with the CSRF ``state`` query parameter set.
-
-    Any ``state`` the provider already placed on the URL is dropped so the
-    value the client generated is the one the provider echoes back, which is
-    what the client later verifies to defend against CSRF on the callback.
-    """
-    parsed = urllib.parse.urlparse(authorize_url)
-    preserved_params = [
-        (key, value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True) if key != "state"
-    ]
-    preserved_params.append(("state", state))
-    new_query = urllib.parse.urlencode(preserved_params)
-    return urllib.parse.urlunparse(parsed._replace(query=new_query))
-
-
 @web_app.post("/auth/oauth/authorize", response_model=OAuthAuthorizeResponse)
 def auth_oauth_authorize(body: OAuthAuthorizeRequest) -> OAuthAuthorizeResponse:
-    """Return the URL to which the user should be redirected to begin OAuth."""
+    """Return the URL to which the user should be redirected to begin OAuth.
+
+    The client injects its own CSRF ``state`` into this URL before opening the
+    browser, so the connector does not handle state here. When the provider uses
+    PKCE, the verifier the SDK minted is returned for the client to hold and pass
+    back on the callback (the connector is stateless across the two requests).
+    """
     with handle_endpoint_errors():
         _require_supertokens_configured()
         provider = get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
@@ -4444,15 +4429,9 @@ def auth_oauth_authorize(body: OAuthAuthorizeRequest) -> OAuthAuthorizeResponse:
                 user_context={},
             )
         )
-        # Reflect the client's CSRF state into the authorize URL when supplied.
-        authorize_url = (
-            _authorize_url_with_state(redirect.url_with_query_params, body.state)
-            if body.state is not None
-            else redirect.url_with_query_params
-        )
         return OAuthAuthorizeResponse(
             status="OK",
-            url=authorize_url,
+            url=redirect.url_with_query_params,
             pkce_code_verifier=redirect.pkce_code_verifier,
         )
 

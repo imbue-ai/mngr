@@ -13,11 +13,13 @@ OAuth code.
 The ``running_callback_server`` fixture lives in ``cli/conftest.py``.
 """
 
+import urllib.parse
 import urllib.request
 
 import pytest
 
 from imbue.mngr_imbue_cloud.cli.auth import _OAuthCaptureBox
+from imbue.mngr_imbue_cloud.cli.auth import _authorize_url_with_state
 from imbue.mngr_imbue_cloud.cli.auth import _verify_oauth_callback_state
 
 
@@ -89,3 +91,16 @@ def test_verify_oauth_callback_state_rejects_non_ascii_state() -> None:
     """A non-ASCII forged state is a clean mismatch, not an uncaught TypeError from compare_digest."""
     with pytest.raises(SystemExit):
         _verify_oauth_callback_state("expected-state", {"code": "abc", "state": "stäte"})
+
+
+def test_authorize_url_with_state_injects_state_client_side() -> None:
+    """The CLI injects its own CSRF state into the authorize URL, replacing any existing one, exactly once."""
+    result = _authorize_url_with_state(
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id=x&state=old&scope=email",
+        "my-csrf-state",
+    )
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(result).query)
+    assert query["state"] == ["my-csrf-state"]
+    # Other params are preserved and PKCE-style challenges would be untouched.
+    assert query["client_id"] == ["x"]
+    assert query["scope"] == ["email"]

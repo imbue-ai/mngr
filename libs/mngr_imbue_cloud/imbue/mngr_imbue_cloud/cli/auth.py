@@ -385,6 +385,26 @@ def _free_localhost_port() -> int:
     return port
 
 
+def _authorize_url_with_state(authorize_url: str, state: str) -> str:
+    """Return ``authorize_url`` with the CSRF ``state`` query parameter set to ``state``.
+
+    The CLI owns the CSRF state end to end: it injects the state into the
+    authorize URL itself rather than relying on the connector to reflect it, so
+    sign-in works against any connector version (the state is a pure OAuth-client
+    concern). Any ``state`` the connector or provider already placed on the URL
+    is dropped so the value we generated is the one the provider echoes back and
+    :func:`_verify_oauth_callback_state` checks on the callback. The url-safe
+    token charset is left untouched by ``urlencode`` and does not disturb a PKCE
+    ``code_challenge`` already on the URL.
+    """
+    parsed = urllib.parse.urlparse(authorize_url)
+    preserved_params = [
+        (key, value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True) if key != "state"
+    ]
+    preserved_params.append(("state", state))
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(preserved_params)))
+
+
 def _verify_oauth_callback_state(expected_state: str, callback_query_params: Mapping[str, str]) -> None:
     """Fail the flow unless the callback echoed back the exact CSRF state.
 
@@ -455,15 +475,17 @@ def oauth(
     client = make_connector_client(connector_url)
     store = make_session_store()
 
-    # Generate a fresh CSRF state for this sign-in. The connector reflects it
-    # into the authorize URL; the provider echoes it back on the callback, and
-    # we verify it below before exchanging the code.
+    # Generate a fresh CSRF state for this sign-in and inject it into the
+    # authorize URL ourselves (below), so the provider echoes it back on the
+    # callback and we verify it before exchanging the code. Owning the state
+    # client-side keeps sign-in working against any connector version.
     oauth_state = secrets.token_urlsafe(_OAUTH_STATE_TOKEN_BYTES)
 
-    authorize_response = client.auth_oauth_authorize(provider_id.lower(), callback_url, oauth_state)
-    authorize_url = authorize_response.get("url") or authorize_response.get("authorize_url")
-    if not isinstance(authorize_url, str) or not authorize_url:
+    authorize_response = client.auth_oauth_authorize(provider_id.lower(), callback_url)
+    base_authorize_url = authorize_response.get("url") or authorize_response.get("authorize_url")
+    if not isinstance(base_authorize_url, str) or not base_authorize_url:
         fail_with_json("Connector did not return an authorize URL", error_class="OAuthFailed")
+    authorize_url = _authorize_url_with_state(base_authorize_url, oauth_state)
     # PKCE verifier the connector minted for this flow (None when the provider
     # does not use PKCE). Held in memory only for the duration of the flow and
     # never logged or persisted.
