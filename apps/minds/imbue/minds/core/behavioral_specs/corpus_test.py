@@ -128,6 +128,225 @@ def test_scan_corpus_orders_units_by_file_path_then_document_order(tmp_path: Pat
     ]
 
 
+def test_scan_corpus_reports_parse_errors_with_line_and_skips_the_file(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/broken.feature": (
+                "Feature: Broken\n"
+                "\n"
+                "  @a-tag\n"
+                "  Scenario: s\n"
+                "    Given a\n"
+                '    """\n'
+                "    unclosed docstring\n"
+            ),
+            "authentication/good.feature": ("Feature: Good\n\n  @works\n  Scenario: s\n    Given a\n"),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert [unit.coordinate for unit in scan.units] == ["authentication.works"]
+    assert len(scan.violations) == 1
+    violation = scan.violations[0]
+    assert violation.file == root / "authentication" / "broken.feature"
+    assert violation.line == 8
+    assert "unexpected end of file" in violation.message
+    assert violation.is_unit_omitted is True
+    assert scan.feature_file_count == 2
+
+
+def test_scan_corpus_reports_non_kebab_case_tags_wherever_they_appear(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/signin.feature": (
+                "@Feature_Tag\n"
+                "Feature: Sign-in\n"
+                "\n"
+                "  @Bad_Identity @ok-auxiliary @badAux\n"
+                "  Scenario Outline: s\n"
+                "    Given <a>\n"
+                "\n"
+                "    @Examples_Tag\n"
+                "    Examples:\n"
+                "      | a |\n"
+                "      | 1 |\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    # The unit is still representable (its identity tag exists), so it is emitted.
+    assert [unit.coordinate for unit in scan.units] == ["authentication.Bad_Identity"]
+    offending = sorted((violation.line, violation.message) for violation in scan.violations)
+    assert len(offending) == 4
+    assert all("kebab-case" in message for _, message in offending)
+    assert [line for line, _ in offending] == [1, 4, 4, 8]
+    assert "Feature_Tag" in offending[0][1]
+    assert "Bad_Identity" in offending[1][1]
+    assert "badAux" in offending[2][1]
+    assert "Examples_Tag" in offending[3][1]
+    assert all(violation.is_unit_omitted is False for violation in scan.violations)
+
+
+def test_scan_corpus_reports_non_kebab_folder_and_file_names_and_unexpected_files(tmp_path: Path) -> None:
+    valid_feature = "Feature: F\n\n  @a-tag\n  Scenario: s\n    Given a\n"
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "Bad_Folder/fine.feature": valid_feature,
+            "good-folder/Bad_Name.feature": valid_feature.replace("@a-tag", "@b-tag"),
+            "good-folder/Bad_Sidecar.md": "prose\n",
+            "good-folder/notes.txt": "not a corpus artifact\n",
+            ".hidden-dir/ignored.feature": "not even parsed {",
+            "good-folder/.DS_Store": "binary junk",
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    messages = sorted(violation.message for violation in scan.violations)
+    assert len(messages) == 5
+    assert any("folder name 'Bad_Folder' is not kebab-case" in message for message in messages)
+    assert any("file basename 'Bad_Name' is not kebab-case" in message for message in messages)
+    assert any("file basename 'Bad_Sidecar' is not kebab-case" in message for message in messages)
+    # Bad_Sidecar.md also dangles (no Bad_Sidecar.feature): reported separately.
+    assert any("no matching" in message and "Bad_Sidecar" in message for message in messages)
+    assert any("notes.txt" in message and "only .feature and .md files" in message for message in messages)
+    # Hidden files and folders are tooling artifacts, not corpus content.
+    assert not any(".DS_Store" in message or "hidden" in message for message in messages)
+    assert {unit.coordinate for unit in scan.units} == {"Bad_Folder.a-tag", "good-folder.b-tag"}
+
+
+def test_scan_corpus_enforces_reserved_names_for_overview_and_invariants(tmp_path: Path) -> None:
+    valid_feature = "Feature: F\n\n  @a-tag\n  Scenario: s\n    Given a\n"
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "overview.md": "corpus context, no matching feature needed\n",
+            "authentication/overview.md": "folder context\n",
+            "authentication/overview.feature": valid_feature,
+            "authentication/invariants.feature": valid_feature.replace("@a-tag", "@b-tag"),
+            "authentication/invariants.md": "sidecar of invariants.feature\n",
+            "networking/invariants.md": "dangling: no invariants.feature here\n",
+            "networking/session.feature": valid_feature.replace("@a-tag", "@c-tag"),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    messages = sorted(violation.message for violation in scan.violations)
+    assert len(messages) == 2
+    assert any("overview" in message and "reserved" in message for message in messages)
+    assert any("invariants.md" in message and "no matching" in message for message in messages)
+    overview_violation = next(v for v in scan.violations if "reserved" in v.message)
+    assert overview_violation.file == root / "authentication" / "overview.feature"
+
+
+def test_scan_corpus_rejects_language_headers_even_for_english(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "signin.feature": ("# language: en\nFeature: F\n\n  @a-tag\n  Scenario: s\n    Given a\n"),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert len(scan.violations) == 1
+    violation = scan.violations[0]
+    assert violation.line == 1
+    assert "# language:" in violation.message
+    assert violation.is_unit_omitted is False
+    # The file still parses as English, so its units remain representable.
+    assert [unit.coordinate for unit in scan.units] == ["a-tag"]
+
+
+def test_scan_corpus_rejects_non_english_gherkin_dialects(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "connexion.feature": (
+                "# language: fr\n"
+                "Fonctionnalité: Connexion\n"
+                "\n"
+                "  @un-tag\n"
+                "  Scénario: ouverture\n"
+                "    Soit une chose\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert any("# language:" in violation.message and violation.line == 1 for violation in scan.violations)
+    assert any(
+        "English" in violation.message and "'fr'" in violation.message for violation in scan.violations
+    )
+
+
+def test_scan_corpus_rejects_feature_files_without_a_feature(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "empty.feature": "",
+            "comments-only.feature": "# nothing but a comment\n",
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.units == ()
+    assert len(scan.violations) == 2
+    assert all("exactly one Feature" in violation.message for violation in scan.violations)
+    assert {violation.file.name for violation in scan.violations} == {"empty.feature", "comments-only.feature"}
+
+
+def test_scan_corpus_rejects_english_synonym_keywords_outside_the_language_construct_list(tmp_path: Path) -> None:
+    # The skill's construct list is exhaustive: Feature, Background, Scenario
+    # (synonym Example), Scenario Outline with Examples, Rule, and the step
+    # keywords Given/When/Then/And/But. Other en-dialect spellings (Ability,
+    # Business Need, Scenario Template, Scenarios, '*') parse fine but are not
+    # part of the language.
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "synonyms.feature": (
+                "Ability: F\n"
+                "\n"
+                "  @a-tag\n"
+                "  Scenario Template: s\n"
+                "    Given <a>\n"
+                "\n"
+                "    Scenarios:\n"
+                "      | a |\n"
+                "      | 1 |\n"
+                "\n"
+                "  @b-tag\n"
+                "  Scenario: t\n"
+                "    * a freeform step\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    messages = sorted(violation.message for violation in scan.violations)
+    assert len(messages) == 4
+    assert any("'Ability'" in message and "'Feature'" in message for message in messages)
+    assert any("'Scenario Template'" in message for message in messages)
+    assert any("'Scenarios'" in message and "'Examples'" in message for message in messages)
+    assert any("'*'" in message for message in messages)
+    # Units are still representable; a Scenario Template is an outline.
+    assert [(unit.coordinate, unit.kind) for unit in scan.units] == [
+        ("a-tag", SpecUnitKind.SCENARIO_OUTLINE),
+        ("b-tag", SpecUnitKind.SCENARIO),
+    ]
+
+
 def test_scan_corpus_reports_untagged_unit_and_omits_it_from_records(tmp_path: Path) -> None:
     root = write_spec_corpus(
         tmp_path / "specs",
