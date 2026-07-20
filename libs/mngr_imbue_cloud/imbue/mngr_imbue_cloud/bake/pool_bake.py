@@ -410,7 +410,11 @@ def finalize_baked_pool_host(
     1. Bump the container sshd's pre-auth limits (best-effort): the default
        ``MaxStartups=10:30:100`` caps the pre-auth queue tightly and the lease +
        claim flow plus parallel ``mngr observe`` discovery routinely exceeds it.
-    2. Wait for the DEFAULT_WORKSPACE_TEMPLATE bootstrap's initial-chat sentinel, then destroy the
+    2. Reset the baked services checkout's repo-local git identity to a neutral
+       value (best-effort): the bake's cross-host create copied the operator's
+       ``git config user.name/email`` into ``/mngr/code``, and adopting users'
+       agents would otherwise inherit the baker as their commit author.
+    3. Wait for the DEFAULT_WORKSPACE_TEMPLATE bootstrap's initial-chat sentinel, then destroy the
        bootstrap-created chat agent (named after the bake host) and remove the
        sentinel -- so the user's first lease re-creates the chat agent under their
        own workspace name.
