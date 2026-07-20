@@ -37,6 +37,10 @@ When you click "Create" in the desktop client with a LOCAL-Docker provider, the 
 
 ## Quick start (first time and every time)
 
+> **First time on this machine?** Install the one-time prerequisites in
+> `apps/minds/docs/dev-setup.md` first (Docker, Node/pnpm, GNU rsync, GitHub
+> access, Vault login, Modal profile) -- the steps below assume they're in place.
+
 ```bash
 # 1. (Once) Install electron deps.
 cd apps/minds && pnpm install && cd ../..
@@ -46,12 +50,25 @@ cd apps/minds && pnpm install && cd ../..
 #    edits stay parallel-named). Required by `just minds-start`.
 just default-workspace-template-worktree   # clones default_workspace_template on the current mngr branch; set DEFAULT_WORKSPACE_TEMPLATE_DIR to speed it up
 
-# 3. (Once) Bootstrap your personal dev env. Pick a name like
-#    "dev-<your-user>" (convention; the DevEnvName validator requires the
-#    tier prefix FIRST -- "dev-" or "ci-" -- so "dev-josh" is valid but
-#    "josh-dev" is not). --create idempotently mkdirs the env root
-#    ~/.minds-dev-<your-user>/ if it doesn't exist.
-eval "$(uv run minds env activate --create dev-<your-user>)"
+# 3. (Once) Bootstrap your personal dev env. `minds env deploy` reads
+#    dev-tier provisioning credentials (Neon, SuperTokens, ...) from HCP
+#    Vault at command time, so set up two prerequisites first (each fails
+#    with a clear error if missing):
+#      - Vault: `vault login -method=oidc` once per session (browser OIDC;
+#        token lands at ~/.vault-token). The deploy CLI applies the imbue
+#        HCP VAULT_ADDR / VAULT_NAMESPACE defaults itself (vault_reader.py),
+#        so login is all you need.
+#      - Modal: ~/.modal.toml needs a profile for the dev tier's Modal
+#        workspace. `minds env activate --deploy` validates it and, if
+#        missing, prints the exact `modal token set --profile <workspace>`.
+#    Then pick an env name like "dev-<your-user>" (convention; the DevEnvName
+#    validator requires the tier prefix FIRST -- "dev-" or "ci-" -- so
+#    "dev-josh" is valid but "josh-dev" is not). --create idempotently
+#    mkdirs the env root ~/.minds-dev-<your-user>/ if it doesn't exist;
+#    --deploy pins MODAL_PROFILE to the tier's Modal workspace, which the
+#    following `minds env deploy` refuses to run without.
+vault login -method=oidc   # once per session; token lands at ~/.vault-token
+eval "$(uv run minds env activate --create --deploy dev-<your-user>)"
 uv run minds env deploy
 
 # 4. (Every time you start the app, in a fresh shell) Activate the env
@@ -135,9 +152,9 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 | `just deploy [--yes-i-mean-<tier>]` | Run `minds env deploy` on the activated env. For dev envs: provisions Modal env / Neon / SuperTokens + deploys both Modal apps + writes `~/.minds-<env>/{client.toml,secrets.toml}`. For tier deploys: pushes Vault secrets to Modal + deploys both Modal apps, no local state written. |
 | `just sync-vendor-mngr <default-workspace-template-path>` | One-shot: snapshot mngr HEAD into DEFAULT_WORKSPACE_TEMPLATE's vendor/mngr/ via `git archive` and commit in DEFAULT_WORKSPACE_TEMPLATE. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
 
-### Vault (for pool / slice bakes)
+### Vault (for `minds env deploy` and pool / slice bakes)
 
-Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets from Vault (the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.). (Baking new OVH classic VPS pool hosts is deprecated and no longer supported.) Two things to know:
+Both `minds env deploy` (which reads dev-tier provisioning credentials -- Neon, SuperTokens, etc. -- at command time) and slice bakes (`minds pool create`, `just bake-slice-{dev,prod}` -- the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.) read secrets from HCP Vault. (Baking new OVH classic VPS pool hosts is deprecated and no longer supported.) Two things to know:
 
 - **Login is interactive.** Run `vault login -method=oidc` once per session (browser OIDC); the token lands at `~/.vault-token`.
 - **`VAULT_ADDR` / `VAULT_NAMESPACE` are usually NOT set in a non-interactive shell.** The minds wrappers (`minds pool ...` and the `bake-*` recipes) apply the imbue HCP defaults automatically via `apps/minds/imbue/minds/envs/vault_reader.py`, so they "just work" with only the token -- **prefer them**. If you run a **raw** `vault` or `mngr imbue_cloud admin ...` command, a bare `vault` defaults to `https://127.0.0.1:8200` and fails with "connection refused" -- that is a missing address, **NOT** "logged out" (don't ask the operator to re-login, and don't ask them for `VAULT_ADDR`). Export the defaults first:

@@ -95,6 +95,23 @@ Deploy-mode adds:
   they operate against (`modal token set --profile <workspace>` once
   per tier).
 
+  For the **dev tier** the workspace is `minds-dev`, a *separate* Modal
+  workspace from `imbue`. Modal tokens are workspace-bound and there is no
+  shared dev token in Vault (nothing lives under `secrets/minds/dev/` for
+  this), so each developer provisions their own: you must be a member of
+  the `minds-dev` Modal workspace (ask in #project-minds-internal-product for
+  an invite), then run
+  `modal token new --profile minds-dev` and select the `minds-dev`
+  workspace in the browser. Verify with `modal profile list`: the
+  `minds-dev` profile must show workspace `minds-dev`. **Watch out:** a
+  profile *named* `minds-dev` that actually holds a token for a *different*
+  workspace (e.g. `imbue`) passes the activation-time check, which only
+  verifies the `[minds-dev]` section exists, not its token's workspace.
+  `minds env deploy` preflights the token's real workspace (via `modal
+  profile list`) and refuses with a clear error before touching any cloud
+  state, but running `modal profile list` yourself confirms the binding up
+  front.
+
 To deactivate:
 
 ```bash
