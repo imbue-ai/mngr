@@ -159,6 +159,10 @@
     const composer = document.getElementById("composer");
     const toolBodies = new Map(); // tool_call_id -> {body, toolName, resolved}
     const pendingResults = new Map(); // tool_call_id -> result event (arrived early)
+    // Optimistic "queued" bubbles: a message sent while the agent is busy shows
+    // immediately in purple, then swaps to a normal user bubble once it lands in
+    // the transcript. Each entry: { text, node }.
+    const pendingQueued = [];
 
     function atBottom() {
       return window.innerHeight + window.scrollY >= document.body.offsetHeight - 80;
@@ -209,9 +213,10 @@
       const body = el("div", "body");
       details.appendChild(body);
 
+      // Collapsed by default (tools + diffs); one tap expands. Assistant prose
+      // stays expanded -- only tool calls/results and framework lines collapse.
       if (DIFF_TOOLS[tc.tool_name] && tc.input_full) {
         body.appendChild(diffBlock(tc.tool_name, tc.input_full));
-        details.open = true;
       } else if (tc.input_full) {
         const pre = el("pre");
         pre.textContent = prettyInput(tc.input_full);
@@ -316,13 +321,56 @@
       if (escBtn) escBtn.disabled = false; // always usable; Escape is harmless
     }
 
+    // ---- optimistic "queued" bubbles ----
+    // Claude's CLI queues input pasted mid-turn, and the paste lands even while
+    // it generates (mngr's send preflight only blocks on dialogs). So a send
+    // while busy is real -- we just show it purple until the transcript confirms
+    // delivery, then resolveQueued swaps it for the normal user bubble.
+    function addQueued(text) {
+      const node = el("div", "entry user queued");
+      node.appendChild(el("span", "prompt", "> "));
+      node.appendChild(document.createTextNode(text));
+      tEl.appendChild(node);
+      pendingQueued.push({ text: text, node: node });
+      refreshWorking(); // keep the working dot pinned below the new bubble
+      scrollDown(true);
+    }
+    function resolveQueued(text) {
+      const key = (text || "").trim();
+      const i = pendingQueued.findIndex((q) => q.text.trim() === key);
+      if (i === -1) return;
+      const q = pendingQueued.splice(i, 1)[0];
+      if (q.node && q.node.parentNode) q.node.parentNode.removeChild(q.node);
+    }
+
+    // A framework/meta record (a /command, its stdout, or an isMeta line):
+    // a dim, collapsed one-liner -- never a user/assistant bubble.
+    function frameworkEl(ev) {
+      const details = el("details", "framework");
+      const summary = el("summary");
+      summary.appendChild(el("span", "fw-tag", "framework"));
+      summary.appendChild(el("span", "fw-label", ev.label || ""));
+      details.appendChild(summary);
+      const body = el("div", "fw-body");
+      const pre = el("pre");
+      pre.textContent = ev.detail || ev.label || "";
+      body.appendChild(pre);
+      details.appendChild(body);
+      return details;
+    }
+
     function renderEvent(ev) {
       const wasBottom = atBottom();
       if (ev.type === "user_message") {
+        // If we optimistically showed this as a "queued" bubble, drop the
+        // placeholder -- the real delivered message renders normally below.
+        resolveQueued(ev.content || "");
         const e = el("div", "entry user");
         e.appendChild(el("span", "prompt", "> "));
         e.appendChild(document.createTextNode(ev.content || ""));
         tEl.appendChild(e);
+      } else if (ev.type === "framework_message") {
+        tEl.appendChild(frameworkEl(ev));
       } else if (ev.type === "assistant_message") {
         const e = el("div", "entry assistant");
         if (ev.text && ev.text.trim()) {
@@ -448,7 +496,10 @@
     function send() {
       const msg = input.value.trim();
       if (!msg) return;
+      // Composer lock: disable the textarea + button while the POST is in flight
+      // so nothing is edited mid-send. Re-enabled in finally.
       sendBtn.disabled = true;
+      input.disabled = true;
       sendErr.hidden = true;
       fetch("/api/agents/" + encodeURIComponent(name) + "/message", {
         method: "POST",
@@ -461,6 +512,9 @@
             input.value = "";
             autoGrow();
             clearBlocked();
+            // Show it immediately as "queued" (purple); the transcript swaps it
+            // for a normal bubble when the delivered message arrives.
+            addQueued(msg);
           } else {
             const err = (d && d.error) || "send failed — open the terminal to resolve any prompt.";
             showError(err);
@@ -470,7 +524,7 @@
           }
         })
         .catch((e) => showError("network error: " + e))
-        .finally(() => { sendBtn.disabled = false; input.focus(); });
+        .finally(() => { sendBtn.disabled = false; input.disabled = false; input.focus(); });
     }
 
     sendBtn.addEventListener("click", send);

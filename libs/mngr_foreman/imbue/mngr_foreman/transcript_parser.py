@@ -53,10 +53,16 @@ _QUEUED_COMMAND_ATTACHMENT_TYPE = "queued_command"
 _QUEUED_COMMAND_PROMPT_MODE = "prompt"
 
 # A slash command the user types (``/foo bar``) is expanded by Claude Code into
-# an XML-ish block; we rebuild the original text so the user bubble shows what
-# was typed. Tags appear in varying order, so match them individually.
+# an XML-ish block; we rebuild the original text so the label shows what was
+# typed. Tags appear in varying order, so match them individually.
 _COMMAND_NAME_PATTERN = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
 _COMMAND_ARGS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+# The captured stdout of a local slash command (e.g. ``/login`` ->
+# "Login interrupted"). Claude Code wraps it in this tag inside a user message.
+_LOCAL_STDOUT_PATTERN = re.compile(r"<local-command-stdout>(.*?)</local-command-stdout>", re.DOTALL)
+
+# Longest a framework one-liner label may be before we clip it.
+_MAX_FRAMEWORK_LABEL_LENGTH = 120
 
 
 def _normalize_slash_command(text: str) -> str:
@@ -115,6 +121,44 @@ def _truncate(content: str, max_chars: int) -> str:
     if max_chars <= 0 or len(content) <= max_chars:
         return content
     return content[:max_chars] + "..."
+
+
+def _first_line(text: str, limit: int = _MAX_FRAMEWORK_LABEL_LENGTH) -> str:
+    """First non-empty line of ``text``, clipped to ``limit`` chars."""
+    for line in text.splitlines():
+        if line.strip():
+            clipped = line.strip()
+            return clipped if len(clipped) <= limit else clipped[:limit] + "…"
+    return ""
+
+
+def _framework_label_and_detail(raw: dict[str, Any], text: str) -> tuple[str, str] | None:
+    """Classify Claude Code framework noise, or None for a real user message.
+
+    The chat page renders framework records (a slash-command invocation, its
+    captured local stdout, or any ``isMeta`` bookkeeping message) as a dim,
+    collapsed one-liner rather than a user bubble. This returns ``(label, detail)``
+    -- the label is the collapsed summary; the detail is the full text shown when
+    expanded -- or ``None`` when ``text`` is genuine user input to show normally.
+
+    The signals all come straight from the JSONL, so we key on them rather than
+    re-deriving in JS: the ``<command-name>`` / ``<local-command-stdout>`` wrappers
+    Claude Code emits, and the ``isMeta`` flag it sets on injected messages.
+    """
+    # A slash-command invocation: "<command-name>login</command-name>...".
+    if _COMMAND_NAME_PATTERN.search(text):
+        command = _normalize_slash_command(text)
+        label = "/" + command.lstrip("/") if command else "command"
+        return label, label
+    # The local stdout of a slash command: "<local-command-stdout>...".
+    stdout_match = _LOCAL_STDOUT_PATTERN.search(text)
+    if stdout_match is not None:
+        out = stdout_match.group(1).strip()
+        return (_first_line(out) or "(no output)"), (out or "(no output)")
+    # Any other injected/bookkeeping message Claude Code marks meta.
+    if raw.get("isMeta"):
+        return (_first_line(text) or "(meta)"), (text.strip() or "(meta)")
+    return None
 
 
 def _is_resume_continuation_marker(raw: dict[str, Any]) -> bool:
@@ -320,21 +364,39 @@ def _parse_user_message(
     message: dict[str, Any] = raw.get("message", {})
     content = message.get("content")
 
-    # Emit user text message if there is actual user text.
+    # Emit a user text or framework message if there is actual user text.
     if not _has_tool_results_only(content):
         event_id = _make_event_id(uuid, "user")
         if event_id not in existing_event_ids:
-            text = _normalize_slash_command(_extract_text_content(content))
-            if text and text.strip() != _INTERRUPT_SENTINEL_TEXT and not _is_resume_continuation_marker(raw):
-                event: dict[str, Any] = {
-                    "timestamp": timestamp,
-                    "type": "user_message",
-                    "event_id": event_id,
-                    "source": _SOURCE,
-                    "role": "user",
-                    "content": text,
-                    "message_uuid": uuid,
-                }
+            raw_text = _extract_text_content(content)
+            stripped = raw_text.strip()
+            # Fully hidden: the interrupt sentinel and Claude Code's resume marker
+            # (its own UI hides the latter, so we do too).
+            if stripped and stripped != _INTERRUPT_SENTINEL_TEXT and not _is_resume_continuation_marker(raw):
+                framework = _framework_label_and_detail(raw, raw_text)
+                if framework is not None:
+                    # Claude Code framework noise (/command, its stdout, meta) ->
+                    # a collapsed one-liner, not a user bubble.
+                    label, detail = framework
+                    event: dict[str, Any] = {
+                        "timestamp": timestamp,
+                        "type": "framework_message",
+                        "event_id": event_id,
+                        "source": _SOURCE,
+                        "label": label,
+                        "detail": detail,
+                        "message_uuid": uuid,
+                    }
+                else:
+                    event = {
+                        "timestamp": timestamp,
+                        "type": "user_message",
+                        "event_id": event_id,
+                        "source": _SOURCE,
+                        "role": "user",
+                        "content": _normalize_slash_command(raw_text),
+                        "message_uuid": uuid,
+                    }
                 if session_id is not None:
                     event["session_id"] = session_id
                 existing_event_ids.add(event_id)

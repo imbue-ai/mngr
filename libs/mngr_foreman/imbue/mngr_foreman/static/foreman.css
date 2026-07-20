@@ -1,22 +1,28 @@
-/* Foreman: minimal, terminal-adjacent dark UI. Monospace, no chat bubbles. */
+/* Foreman: high-contrast terminal UI. Pure black, white text, flat/sharp,
+   monospace. No rounded chat bubbles -- messages are highlighted rectangles. */
 :root {
-  --bg: #0b0d10;
-  --bg-raised: #12151a;
-  --bg-inset: #0a0c0f;
-  --fg: #d7dce2;
-  --fg-dim: #8b95a1;
-  --fg-faint: #5b636d;
-  --border: #1e232b;
-  --accent: #5ec8f0;
-  --user: #9ece6a;
-  --add-bg: #12251a;
-  --add-fg: #9ece6a;
-  --del-bg: #2a1518;
-  --del-fg: #f7768e;
-  --err: #f7768e;
-  --chip-run: #9ece6a;
-  --chip-wait: #e0af68;
-  --chip-stop: #6b727c;
+  --bg: #000000;
+  --bg-raised: #0a0a0a;
+  --bg-inset: #101010;
+  --bg-user: #161616;     /* user-message highlight block */
+  --fg: #ffffff;
+  --fg-dim: #b0b0b0;
+  --fg-faint: #6a6a6a;
+  --border: #2c2c2c;
+  --border-strong: #ffffff;
+  --accent: #ffffff;      /* high-contrast; links are underlined to read as links */
+  --link: #7dc4ff;
+  --user: #ffffff;
+  --queued-bg: #241933;   /* purple: a message queued while the agent is busy */
+  --queued-bar: #a970ff;
+  --add-bg: #0e2417;
+  --add-fg: #6ee7a0;
+  --del-bg: #2a1216;
+  --del-fg: #ff7a92;
+  --err: #ff7a92;
+  --chip-run: #6ee7a0;
+  --chip-wait: #ffcf5c;
+  --chip-stop: #7a7a7a;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
@@ -33,7 +39,7 @@ html, body {
   -webkit-text-size-adjust: 100%;
 }
 
-a { color: var(--accent); text-decoration: none; }
+a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 .topbar {
@@ -60,20 +66,22 @@ a:hover { text-decoration: underline; }
   padding: 12px 14px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-left: 3px solid var(--border);
+  border-radius: 0;
   color: var(--fg);
 }
-.agent-card:hover { border-color: #2c333d; text-decoration: none; }
+.agent-card:hover { border-left-color: var(--border-strong); text-decoration: none; }
 .agent-card .row1 { display: flex; align-items: center; gap: 8px; }
 .agent-card .name { font-weight: 600; }
 .agent-card .row2 { color: var(--fg-dim); font-size: 12px; margin-top: 4px; display: flex; gap: 12px; flex-wrap: wrap; }
 .chip {
   font-size: 11px;
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: 0;
   border: 1px solid var(--border);
   color: var(--fg-dim);
-  text-transform: lowercase;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 .chip.running { color: var(--chip-run); border-color: #24361f; }
 .chip.waiting { color: var(--chip-wait); border-color: #3a3016; }
@@ -83,15 +91,22 @@ a:hover { text-decoration: underline; }
 /* ---- transcript ---- */
 .transcript { padding-bottom: 120px; }
 .entry { padding: 6px 0; }
+/* user message: a highlighted rectangle, not a rounded bubble. Sharp corners. */
 .entry.user {
   color: var(--user);
   white-space: pre-wrap;
   word-break: break-word;
-  border-left: 2px solid #2a3a1c;
-  padding-left: 10px;
-  margin: 10px 0;
+  background: var(--bg-user);
+  border-left: 3px solid var(--border-strong);
+  padding: 8px 12px;
+  margin: 12px 0;
 }
 .entry.user .prompt { color: var(--fg-faint); user-select: none; }
+/* queued: sent while the agent was busy, awaiting delivery confirmation. */
+.entry.user.queued {
+  background: var(--queued-bg);
+  border-left-color: var(--queued-bar);
+}
 
 .entry.assistant { margin: 8px 0; }
 .assistant-md { word-break: break-word; }
@@ -99,18 +114,18 @@ a:hover { text-decoration: underline; }
 .assistant-md pre {
   background: var(--bg-inset);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 10px;
   overflow-x: auto;
 }
 .assistant-md code { font-family: var(--mono); font-size: 13px; }
-.assistant-md :not(pre) > code { background: var(--bg-inset); padding: 1px 4px; border-radius: 4px; }
+.assistant-md :not(pre) > code { background: var(--bg-inset); padding: 1px 4px; border-radius: 0; }
 .assistant-md a { word-break: break-all; }
 
 .model-tag { color: var(--fg-faint); font-size: 11px; margin-bottom: 2px; }
 
 /* tool calls */
-.tool { margin: 6px 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-raised); overflow: hidden; }
+.tool { margin: 6px 0; border: 1px solid var(--border); border-radius: 0; background: var(--bg-raised); overflow: hidden; }
 .tool > summary, .tool .tool-head {
   cursor: pointer;
   padding: 6px 10px;
@@ -128,7 +143,7 @@ a:hover { text-decoration: underline; }
 .tool pre {
   margin: 6px 0 0;
   background: var(--bg-inset);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 8px;
   overflow-x: auto;
   white-space: pre-wrap;
@@ -137,8 +152,45 @@ a:hover { text-decoration: underline; }
 }
 .tool pre.result.error { color: var(--err); }
 
+/* framework/meta one-liners (a /command, its stdout, isMeta noise): dim italic,
+   collapsed by default, expandable. Deliberately understated -- not a message. */
+.framework { margin: 3px 0; }
+.framework > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--fg-faint);
+  font-size: 12px;
+  font-style: italic;
+  padding: 2px 0;
+}
+.framework > summary::-webkit-details-marker { display: none; }
+.framework .fw-tag {
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-style: normal;
+  font-size: 10px;
+  border: 1px solid var(--border);
+  padding: 0 5px;
+}
+.framework .fw-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.framework .fw-body { padding: 2px 0 4px; }
+.framework .fw-body pre {
+  margin: 0;
+  background: var(--bg-inset);
+  padding: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
 /* diffs */
-.diff { margin: 6px 0 0; background: var(--bg-inset); border-radius: 6px; overflow-x: auto; font-size: 13px; }
+.diff { margin: 6px 0 0; background: var(--bg-inset); border-radius: 0; overflow-x: auto; font-size: 13px; }
 .diff .dhead { color: var(--fg-dim); padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .diff .dline { display: block; padding: 0 8px; white-space: pre; }
 .diff .dline.add { background: var(--add-bg); color: var(--add-fg); }
@@ -153,6 +205,7 @@ a:hover { text-decoration: underline; }
   border-top: 1px solid var(--border);
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
 }
+/* one clean flex row: textarea + buttons share a height and sit on one baseline */
 .composer .inner { max-width: 900px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
 .composer textarea {
   flex: 1;
@@ -160,25 +213,37 @@ a:hover { text-decoration: underline; }
   background: var(--bg-inset);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 9px 11px;
+  border-radius: 0;
+  padding: 10px 12px;
   font-family: var(--mono);
   font-size: 14px;
+  line-height: 1.4;
   max-height: 40vh;
-  min-height: 40px;
+  min-height: 42px;
 }
-.composer textarea:focus { outline: none; border-color: var(--accent); }
-.composer button {
-  background: var(--accent);
-  color: #06202b;
-  border: none;
-  border-radius: 8px;
-  padding: 9px 16px;
+.composer textarea:focus { outline: none; border-color: var(--border-strong); }
+.composer textarea:disabled { opacity: 0.6; }
+/* flat, sharp, high-contrast buttons -- equal height, vertically centered */
+.composer button,
+.composer .esc-btn {
+  flex: 0 0 auto;
+  min-height: 42px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
   font-family: var(--mono);
   font-weight: 600;
   cursor: pointer;
 }
-.composer button:disabled { opacity: 0.5; cursor: default; }
+.composer button {
+  background: var(--accent);
+  color: #000;
+  border: 1px solid var(--accent);
+}
+.composer button:hover { background: #e0e0e0; border-color: #e0e0e0; }
+.composer button:disabled { opacity: 0.4; cursor: default; }
 .send-error {
   max-width: 900px;
   margin: 0 auto 8px;
@@ -186,7 +251,7 @@ a:hover { text-decoration: underline; }
   font-size: 12px;
   white-space: pre-wrap;
 }
-.send-error a { color: var(--accent); }
+.send-error a { color: var(--link); }
 
 /* composer greyed when a blocking dialog occupies the agent's TUI */
 .composer.blocked .inner { opacity: 0.4; pointer-events: none; }
@@ -196,12 +261,13 @@ a:hover { text-decoration: underline; }
   padding: 8px 11px;
   background: var(--bg-inset);
   border: 1px solid var(--chip-wait);
-  border-radius: 8px;
+  border-left: 3px solid var(--chip-wait);
+  border-radius: 0;
   color: var(--chip-wait);
   font-size: 13px;
 }
 .composer-blocked[hidden] { display: none; }
-.composer-blocked a { color: var(--accent); }
+.composer-blocked a { color: var(--link); }
 
 .status-line { color: var(--fg-faint); font-size: 12px; padding: 8px 0; text-align: center; }
 .unsupported { color: var(--fg-dim); padding: 30px 14px; text-align: center; }
@@ -236,14 +302,14 @@ a:hover { text-decoration: underline; }
   background: var(--bg-inset);
   color: var(--fg-dim);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 0;
   padding: 9px 12px;
   font-family: var(--mono);
   font-weight: 600;
   cursor: pointer;
 }
 .esc-btn:hover { color: var(--err); border-color: var(--err); }
-.esc-btn:disabled { opacity: 0.5; cursor: default; }
+.esc-btn:disabled { opacity: 0.4; cursor: default; }
 
 .topbar .termlink { color: var(--fg-dim); font-size: 12px; }
 .topbar .termlink:hover { color: var(--accent); }
@@ -280,7 +346,7 @@ a:hover { text-decoration: underline; }
   user-select: none;
   touch-action: manipulation;
 }
-.ctrlbar button:active { background: var(--accent); color: #06202b; }
+.ctrlbar button:active { background: var(--accent); color: #000; }
 .ctrlbar button.paste { color: var(--accent); }
 
 #term {
@@ -331,4 +397,4 @@ a:hover { text-decoration: underline; }
   font-family: var(--mono);
   cursor: pointer;
 }
-.paste-popover #pp-send { background: var(--accent); color: #06202b; border: none; font-weight: 600; }
+.paste-popover #pp-send { background: var(--accent); color: #000; border: none; font-weight: 600; }

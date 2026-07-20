@@ -131,6 +131,71 @@ def test_meta_and_resume_markers_dropped() -> None:
     assert [e.get("content") for e in events] == ["real"]
 
 
+def test_slash_command_invocation_is_framework() -> None:
+    line = _line(
+        type="user",
+        uuid="u1",
+        timestamp="t1",
+        message={"content": "<command-name>login</command-name><command-args></command-args>"},
+    )
+    events = parse_claude_session_lines([line])
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["type"] == "framework_message"
+    assert ev["label"] == "/login"
+    assert "content" not in ev  # a framework one-liner, not a user bubble
+
+
+def test_slash_command_with_args_label() -> None:
+    line = _line(
+        type="user",
+        uuid="u4",
+        timestamp="t4",
+        message={"content": "<command-name>model</command-name><command-args>opus</command-args>"},
+    )
+    events = parse_claude_session_lines([line])
+    assert events[0]["type"] == "framework_message"
+    assert events[0]["label"] == "/model opus"
+
+
+def test_local_command_stdout_is_framework() -> None:
+    line = _line(
+        type="user",
+        uuid="u2",
+        timestamp="t2",
+        message={"content": "<local-command-stdout>Login interrupted</local-command-stdout>"},
+    )
+    events = parse_claude_session_lines([line])
+    assert len(events) == 1
+    assert events[0]["type"] == "framework_message"
+    assert events[0]["label"] == "Login interrupted"
+    assert events[0]["detail"] == "Login interrupted"
+
+
+def test_generic_meta_message_is_framework_not_dropped() -> None:
+    # An isMeta message that is NOT the resume marker becomes a framework one-liner
+    # (multi-line detail preserved; label is the clipped first line).
+    line = _line(
+        type="user",
+        uuid="u3",
+        timestamp="t3",
+        isMeta=True,
+        message={"content": "Caveat: messages below were generated while running local commands.\nsecond line"},
+    )
+    events = parse_claude_session_lines([line])
+    assert len(events) == 1
+    assert events[0]["type"] == "framework_message"
+    assert events[0]["label"].startswith("Caveat:")
+    assert "second line" in events[0]["detail"]
+
+
+def test_normal_user_text_is_not_framework() -> None:
+    line = _line(type="user", uuid="u5", timestamp="t5", message={"content": "please refactor the parser"})
+    events = parse_claude_session_lines([line])
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "please refactor the parser"
+
+
 def test_lines_missing_uuid_or_timestamp_skipped() -> None:
     lines = [
         _line(type="user", timestamp="t1", message={"content": "no uuid"}),
@@ -164,7 +229,10 @@ def test_queued_command_attachment_parsed() -> None:
 
 
 def test_slash_command_normalized() -> None:
+    # A slash-command invocation is framework noise now, not a user bubble; the
+    # rebuilt "/name args" text becomes its collapsed label (leading slash deduped).
     text = "<command-name>/deploy</command-name><command-args>prod</command-args>"
     line = _line(type="user", uuid="u1", timestamp="t1", message={"content": text})
     events = parse_claude_session_lines([line])
-    assert events[0]["content"] == "/deploy prod"
+    assert events[0]["type"] == "framework_message"
+    assert events[0]["label"] == "/deploy prod"
