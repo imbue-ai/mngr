@@ -86,9 +86,11 @@ def specs() -> None:
     """Inspect and validate the behavioral-spec corpus (apps/minds/specs).
 
     The corpus language (folders, tags, coordinates, invariants, sidecars) is
-    defined by the minds-behavioral-specs skill; `validate` enforces it, and
+    defined by the minds-behavioral-specs skill; `validate` enforces it,
     `list`/`query` emit one JSONL record per authored unit (Scenario,
-    Scenario Outline, or Rule).
+    Scenario Outline, or Rule), `export` emits enriched records with each
+    unit's full context, `plan --for-tmr` emits TMR task packets, and
+    `check-witnesses` validates test-to-spec back-links.
     """
 
 
