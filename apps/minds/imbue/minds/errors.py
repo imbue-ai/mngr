@@ -151,6 +151,12 @@ class SpecValidationFailedError(MindError):
     ...
 
 
+class WitnessCheckFailedError(MindError):
+    """Raised by ``minds specs check-witnesses`` when witnesses markers are malformed or unknown."""
+
+    ...
+
+
 class SpecListingIncompleteError(MindError):
     """Raised by ``minds specs list``/``query`` when some units could not be represented as records.
 

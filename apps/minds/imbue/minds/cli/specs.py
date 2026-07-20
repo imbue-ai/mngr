@@ -1,4 +1,4 @@
-"""``minds specs {validate,list,query}`` -- the CLI over the behavioral-spec corpus.
+"""``minds specs {validate,list,query,export,plan,check-witnesses}`` -- the CLI over the behavioral-spec corpus.
 
 The corpus (``apps/minds/specs/`` in this repo) and its language are defined by
 the minds-behavioral-specs skill; ``imbue.minds.core.behavioral_specs`` is the
@@ -28,19 +28,27 @@ from imbue.minds.core.behavioral_specs.corpus import spec_unit_to_record
 from imbue.minds.core.behavioral_specs.data_types import SpecUnit
 from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
 from imbue.minds.core.behavioral_specs.data_types import SpecViolation
+from imbue.minds.core.behavioral_specs.data_types import WitnessProblem
 from imbue.minds.core.behavioral_specs.export import EXPORT_RECORD_SCHEMA_VERSION
 from imbue.minds.core.behavioral_specs.export import export_corpus
 from imbue.minds.core.behavioral_specs.export import exported_unit_to_record
 from imbue.minds.core.behavioral_specs.export import exported_unit_to_tmr_task_packet
+from imbue.minds.core.behavioral_specs.witnesses import check_witness_markers
+from imbue.minds.core.behavioral_specs.witnesses import find_witness_markers_in_paths
 from imbue.minds.errors import SpecCorpusRootNotFoundError
 from imbue.minds.errors import SpecListingIncompleteError
 from imbue.minds.errors import SpecValidationFailedError
+from imbue.minds.errors import WitnessCheckFailedError
 from imbue.minds.utils.output import write_stdout_line
 from imbue.mngr.cli.output_helpers import write_stderr_line
 
 # The real corpus, relative to the repo root (the documented working directory
 # for ``uv run minds specs ...``).
 DEFAULT_CORPUS_ROOT: Final[Path] = Path("apps/minds/specs")
+
+# Where check-witnesses looks for tests when no paths are passed: the minds
+# tree holds the tests that witness minds spec units.
+DEFAULT_WITNESS_CHECK_PATH: Final[Path] = Path("apps/minds")
 
 
 def _root_option(command: Callable[..., None]) -> Callable[..., None]:
@@ -222,6 +230,44 @@ def specs_plan(corpus_root: Path, for_tmr: bool, include_rules: bool) -> None:
             continue
         write_stdout_line(json.dumps(exported_unit_to_tmr_task_packet(unit), ensure_ascii=False))
     _fail_if_units_were_omitted(scan.violations)
+
+
+@pure
+def _format_witness_problem(problem: WitnessProblem) -> str:
+    if problem.line is None:
+        return f"{problem.file}: {problem.message}"
+    return f"{problem.file}:{problem.line}: {problem.message}"
+
+
+@specs.command(name="check-witnesses")
+@_root_option
+@click.argument("paths", nargs=-1, type=click.Path(exists=True, path_type=Path))
+def specs_check_witnesses(corpus_root: Path, paths: tuple[Path, ...]) -> None:
+    """Check that every @pytest.mark.witnesses coordinate names a real spec unit.
+
+    Scans the given Python files/directories (default: apps/minds) for
+    witnesses markers -- both decorator form and pytestmark assignments --
+    and reports every marker whose coordinate no unit of the corpus claims,
+    plus every marker with a non-literal (uncheckable) coordinate. Prints
+    one line per problem and exits nonzero if there are any; otherwise
+    prints a one-line summary. Exits nonzero without checking when the
+    corpus itself has unit-omitting violations (the coordinate set would be
+    incomplete).
+    """
+    scan = scan_corpus(_require_corpus_root(corpus_root))
+    _fail_if_units_were_omitted(scan.violations)
+    valid_coordinates = frozenset(unit.coordinate for unit in scan.units)
+    check_paths = paths if paths else (DEFAULT_WITNESS_CHECK_PATH,)
+    witness_scan = find_witness_markers_in_paths(check_paths)
+    problems = check_witness_markers(witness_scan, valid_coordinates)
+    for problem in problems:
+        write_stdout_line(_format_witness_problem(problem))
+    if problems:
+        raise WitnessCheckFailedError(f"{len(problems)} witnesses problem(s) found under {check_paths}")
+    write_stdout_line(
+        f"OK: {len(witness_scan.markers)} witnesses marker(s) checked against "
+        f"{len(valid_coordinates)} corpus coordinate(s)"
+    )
 
 
 @pure

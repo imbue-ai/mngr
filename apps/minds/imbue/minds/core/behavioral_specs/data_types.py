@@ -153,3 +153,22 @@ class CorpusExport(FrozenModel):
     )
     violations: tuple[SpecViolation, ...] = Field(description="All language violations found, in deterministic order")
     feature_file_count: int = Field(description="Count of .feature files seen during the scan")
+
+
+class WitnessMarker(FrozenModel):
+    """One ``@pytest.mark.witnesses`` application found in a Python test file."""
+
+    coordinate: str = Field(description="The coordinate the test declares it witnesses")
+    file: Path = Field(description="Python file carrying the marker")
+    line: int = Field(description="1-based line of the marker call")
+    partial: str | None = Field(
+        default=None, description="The partial= note (what the test does not cover), when given"
+    )
+
+
+class WitnessProblem(FrozenModel):
+    """One problem found while checking witnesses markers against the corpus."""
+
+    file: Path = Field(description="Python file the problem applies to")
+    line: int | None = Field(description="1-based line of the problem where available")
+    message: str = Field(description="Human-readable description of the problem")

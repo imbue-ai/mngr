@@ -298,3 +298,51 @@ def test_specs_plan_requires_an_explicit_target(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "--for-tmr" in result.stderr
+
+
+def test_specs_check_witnesses_accepts_markers_naming_real_units(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
+    test_file = tmp_path / "test_auth.py"
+    test_file.write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.mark.witnesses(\"authentication.fresh-code\")\n"
+        "def test_signs_in() -> None: ...\n"
+    )
+
+    result = CliRunner().invoke(specs, ["check-witnesses", "--root", str(root), str(test_file)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("OK: 1 witnesses marker(s) checked")
+
+
+def test_specs_check_witnesses_reports_unknown_coordinates_and_exits_nonzero(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
+    test_file = tmp_path / "test_auth.py"
+    test_file.write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.mark.witnesses(\"authentication.typoo\")\n"
+        "def test_signs_in() -> None: ...\n"
+    )
+
+    result = CliRunner().invoke(specs, ["check-witnesses", "--root", str(root), str(test_file)])
+
+    assert result.exit_code == 1
+    assert "unknown coordinate 'authentication.typoo'" in result.stdout
+    assert "1 witnesses problem(s)" in result.stderr
+
+
+def test_specs_check_witnesses_fails_before_checking_when_the_corpus_omits_units(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {"untagged.feature": "Feature: U\n\n  Scenario: no identity\n    Given a\n"},
+    )
+    test_file = tmp_path / "test_auth.py"
+    test_file.write_text("import pytest\n")
+
+    result = CliRunner().invoke(specs, ["check-witnesses", "--root", str(root), str(test_file)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "incomplete" in result.stderr
