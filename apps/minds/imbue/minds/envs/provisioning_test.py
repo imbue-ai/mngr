@@ -9,6 +9,7 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import DeployLifecycleConfig
@@ -935,7 +936,7 @@ def _explorer_plan_quotas() -> PlanQuotasConfig:
         max_services_per_tunnel=NonNegativeInt(10),
         max_buckets=NonNegativeInt(5),
         max_total_bucket_gb=NonNegativeInt(50),
-        monthly_llm_spend_usd=0.0,
+        monthly_llm_spend_usd=NonNegativeFloat(0.0),
         max_active_synced_workspaces=NonNegativeInt(200),
     )
 
