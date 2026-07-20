@@ -1,3 +1,5 @@
 Added the `minds-behavioral-specs` skill (`.claude/skills/minds-behavioral-specs/SKILL.md`): the definitional reference for the behavioral-spec language used by minds - Gherkin `.feature` files under `apps/minds/specs/`, validity via `gherkin-official`, kebab-case folder/file/tag naming, first-tag identity with folder-derived coordinates, invariants as `Rule:` blocks with folder scoping (reserved `invariants.feature` and `overview.md` basenames), the `witnesses` test back-link convention, and the `minds specs` CLI.
 
 Added the blueprint plan `blueprint/minds-behavioral-specs/` covering the skill, the CLI, and the re-expression of the authentication proof-of-concept spec in the new language.
+
+Updated the root `uv.lock` for the new `gherkin-official` dependency of `apps/minds` (see the minds changelog entry).

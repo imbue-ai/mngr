@@ -4,4 +4,12 @@ The spec includes a traceability appendix mapping each scenario tag and invarian
 
 Fixed documentation drift surfaced while writing the spec: `desktop_client/README.md` claimed the session cookie was issued with `Domain=localhost` and that the landing page redirected straight to a sole agent (the cookie is host-only with subdomain access via the forward server's `/goto/` auth bridge, and the landing page lists workspaces even when there is exactly one); a test-helper docstring repeating the stale cookie claim was also corrected.
 
-No runtime behavior changes.
+Added the `minds specs` CLI group (`uv run minds specs ...` from the repo root) over the behavioral-spec corpus at `apps/minds/specs/`, with three subcommands (all taking `--root`, defaulting to the real corpus):
+
+- `validate` parses every `.feature` with `gherkin-official` and enforces the behavioral-spec language rules (English keywords only, kebab-case folders/basenames/tags, an identity tag on every unit, unique coordinate claims including Feature/Examples block tags, reserved `overview`/`invariants` filenames, no dangling `.md` sidecars or foreign files), printing every violation with file and line and exiting nonzero on any.
+
+- `list` emits one JSONL record per authored unit (scenario, scenario-outline, or rule) carrying coordinate, kind, name, file, line, tags, steps, and the parent Rule's coordinate for nested units; `--unit` filters by kind. Stdout is pure JSONL; problems that omit units from the listing go to stderr with a nonzero exit.
+
+- `query` emits the same records filtered by `--tag` (exact raw tag or coordinate), `--name`, and `--step` (case-insensitive substrings), combined as AND.
+
+The scanning/validation engine lives in `imbue.minds.core.behavioral_specs` and takes the corpus root as a parameter for testability. Adds the `gherkin-official` dependency (the Cucumber reference parser, the arbiter of spec syntax).
