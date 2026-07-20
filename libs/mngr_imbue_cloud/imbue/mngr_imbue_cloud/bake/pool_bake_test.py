@@ -45,16 +45,19 @@ def test_finalize_tears_down_chat_agent_when_sentinel_present() -> None:
     assert "uv run mngr destroy" in destroy_cmd and "slice-x" in destroy_cmd
 
 
-def test_finalize_resets_baked_git_identity_to_a_neutral_value() -> None:
+def test_finalize_clears_baked_git_identity() -> None:
     # The bake copies the operator's git identity into /mngr/code; finalize must
-    # overwrite it with the neutral bootstrap identity so adopting users' agents
-    # don't inherit the baker as their commit author.
+    # unset it so adopting users' agents don't inherit the baker as their commit
+    # author (the bootstrap re-supplies its neutral fallback on adoption).
     runner = _ScriptedRunner({})
     finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
     reset_cmd = next(cmd for label, cmd in runner.calls if label == "git-identity-reset")
-    assert "cd /mngr/code" in reset_cmd
-    assert "git config --local user.name minds-bootstrap" in reset_cmd
-    assert "git config --local user.email bootstrap@minds.local" in reset_cmd
+    assert "git -C /mngr/code config --local --unset user.name" in reset_cmd
+    assert "git -C /mngr/code config --local --unset user.email" in reset_cmd
+    # It does not substitute any hardcoded identity value.
+    assert "minds-bootstrap" not in reset_cmd
+    # An already-absent key (git config --unset exit 5) is tolerated, not a failure.
+    assert "[ $? -eq 5 ]" in reset_cmd
     # It runs before the sentinel wait, so it applies even when no chat agent exists.
     labels = [label for label, _cmd in runner.calls]
     assert labels.index("git-identity-reset") < labels.index("sentinel-wait")
