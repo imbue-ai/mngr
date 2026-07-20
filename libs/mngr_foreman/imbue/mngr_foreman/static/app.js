@@ -261,6 +261,35 @@
       }
     }
 
+    // "Working" indicator: pinned pulsing dot shown while claude is presumably
+    // generating. Heuristic: a user_message or tool_result is the latest input
+    // (claude should respond), or the latest assistant message made tool calls
+    // (more to come). A plain-text assistant message with no tool calls means
+    // the turn completed -> clear it.
+    let working = false;
+    const escBtn = document.getElementById("esc");
+    const workingEl = el("div", "working");
+    workingEl.hidden = true;
+    workingEl.appendChild(el("span", "dot"));
+    workingEl.appendChild(el("span", null, "working…"));
+
+    function updateWorkingFrom(ev) {
+      if (ev.type === "user_message") {
+        working = true;
+      } else if (ev.type === "tool_result") {
+        working = true;
+      } else if (ev.type === "assistant_message") {
+        if ((ev.tool_calls || []).length > 0) working = true;
+        else if (ev.text && ev.text.trim()) working = false;
+        // else: empty assistant chunk -> leave state unchanged
+      }
+    }
+    function refreshWorking() {
+      workingEl.hidden = !working;
+      if (!workingEl.hidden) tEl.appendChild(workingEl); // keep it pinned last
+      if (escBtn) escBtn.disabled = false; // always usable; Escape is harmless
+    }
+
     function renderEvent(ev) {
       const wasBottom = atBottom();
       if (ev.type === "user_message") {
@@ -281,6 +310,8 @@
         if (toolBodies.has(ev.tool_call_id)) attachResult(ev);
         else pendingResults.set(ev.tool_call_id, ev);
       }
+      updateWorkingFrom(ev);
+      refreshWorking();
       scrollDown(wasBottom);
     }
 
@@ -367,6 +398,21 @@
     }
 
     sendBtn.addEventListener("click", send);
+
+    function sendInterrupt() {
+      if (!escBtn) return;
+      escBtn.disabled = true;
+      sendErr.hidden = true;
+      fetch("/api/agents/" + encodeURIComponent(name) + "/interrupt", { method: "POST" })
+        .then((r) => r.json().then((d) => ({ ok: r.ok, d: d })))
+        .then(({ ok, d }) => {
+          if (!(ok && d.ok)) showError((d && d.error) || "interrupt failed");
+        })
+        .catch((e) => showError("network error: " + e))
+        .finally(() => { escBtn.disabled = false; });
+    }
+    if (escBtn) escBtn.addEventListener("click", sendInterrupt);
+
     input.addEventListener("keydown", (e) => {
       // Enter sends; Shift+Enter newline. On touch keyboards Enter inserts a
       // newline (no reliable modifier), so rely on the send button there.

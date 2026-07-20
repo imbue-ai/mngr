@@ -28,6 +28,8 @@ from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr_foreman.agent_registry import AgentRegistry
+from imbue.mngr_foreman.interrupt import InterruptError
+from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
 from imbue.mngr_foreman.messaging import send_message_to_agent
 from imbue.mngr_foreman.terminal import handle_terminal_ws
@@ -160,6 +162,16 @@ def create_app(
             # A blocking TUI dialog (permission / login) lands here -- surface it
             # so the UI can hint at the terminal page (phase 2).
             logger.info("Message to {} failed: {}", name, e)
+            return jsonify({"ok": False, "error": str(e)}), 502
+        return jsonify({"ok": True})
+
+    @app.route("/api/agents/<name>/interrupt", methods=["POST"])
+    def api_interrupt(name: str) -> ResponseReturnValue:
+        # Send Escape to the agent's tmux pane (claude's "stop generating").
+        try:
+            send_interrupt_to_agent(mngr_ctx, name)
+        except InterruptError as e:
+            logger.info("Interrupt of {} failed: {}", name, e)
             return jsonify({"ok": False, "error": str(e)}), 502
         return jsonify({"ok": True})
 
