@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import subprocess
@@ -1019,6 +1020,41 @@ def test_remote_tiles_wait_for_the_initial_discovery_snapshot(tmp_path: Path) ->
     discovered_resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
     tiles = _collect_remote_workspace_tiles(discovered_resolver, session_store)
     assert [tile.agent_id for tile in tiles] == ["agent-elsewhere"]
+
+
+def test_remote_tiles_suppress_local_host_under_a_diverged_agent_id(tmp_path: Path) -> None:
+    """A synced record whose host is in local discovery is not a remote tile.
+
+    Records are keyed by host_id with agent_id as a mutable field, so a
+    workspace recovered/re-identified under a new agent id leaves a synced
+    ACTIVE record whose agent_id no longer matches live discovery. Reconciling
+    only by agent_id then renders that record as a spurious "remote" tile beside
+    the workspace's real local row -- a duplicate row for one workspace. The
+    record's stable host identity must suppress it: its host is local.
+    """
+    shared_host = HostId.generate()
+    live_agent = AgentId.generate()
+    stale_agent = AgentId.generate()
+
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@example.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(stale_agent),
+        host_id=str(shared_host),
+        display_name="workspace-one",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    # Discovery reports shared_host under a fresh live agent id (a local row).
+    agents_json = json.dumps(
+        {"agents": [{"id": str(live_agent), "labels": {"is_primary": "true"}, "host": {"id": str(shared_host)}}]}
+    )
+    resolver = make_resolver_with_data(agents_json=agents_json)
+
+    assert _collect_remote_workspace_tiles(resolver, session_store) == []
 
 
 class _AllAgentsKnownStaticResolver(StaticBackendResolver):

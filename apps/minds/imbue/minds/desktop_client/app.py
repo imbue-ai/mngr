@@ -901,6 +901,19 @@ def _collect_remote_workspace_tiles(
     if not backend_resolver.has_completed_initial_discovery():
         return []
     local_ids = {str(aid) for aid in backend_resolver.list_known_workspace_ids()}
+    # Records are keyed by host_id, but agent_id is a mutable field on the
+    # record that can diverge from live discovery when a workspace is
+    # recovered/re-identified under a new agent id. Reconciling only by
+    # agent_id then fails to recognize such a record as local, so it renders
+    # as a spurious "remote" tile beside the workspace's real local row -- a
+    # duplicate. Suppress by the record's stable host identity too: a record
+    # whose host is present in local discovery belongs to a local workspace,
+    # not "another device".
+    local_host_ids: set[str] = set()
+    for aid in backend_resolver.list_known_workspace_ids():
+        info = backend_resolver.get_agent_display_info(aid)
+        if info is not None:
+            local_host_ids.add(str(info.host_id))
     tiles: list[RemoteWorkspaceTile] = []
     seen_agent_ids: set[str] = set()
     for account in session_store.list_accounts():
@@ -908,6 +921,7 @@ def _collect_remote_workspace_tiles(
             is_remote_active = (
                 record.state == RECORD_STATE_ACTIVE
                 and record.agent_id not in local_ids
+                and record.host_id not in local_host_ids
                 and record.agent_id not in seen_agent_ids
             )
             if not is_remote_active:
