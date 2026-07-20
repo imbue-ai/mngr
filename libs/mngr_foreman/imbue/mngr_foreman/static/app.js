@@ -865,7 +865,7 @@
       const token = "[FILE: " + UPLOAD_DIR + "/" + storedName + "]";
       insertAtCursor(token + " ");
 
-      const chip = el("div", "upload-chip pending");
+      const chip = el("div", "upload-chip uploading");
       let objectUrl = null;
       if ((file.type || "").indexOf("image/") === 0) {
         objectUrl = URL.createObjectURL(file);
@@ -875,42 +875,72 @@
       } else {
         chip.appendChild(el("div", "file-icon", (file.name || storedName).slice(0, 18)));
       }
+      // Live progress overlay: a real bar from XHR upload.onprogress, then a
+      // "finalizing…" state while the server writes to the agent (not settled
+      // until the POST returns).
+      const prog = el("div", "up-progress");
+      const bar = el("div", "up-bar");
+      const pct = el("div", "up-pct", "0%");
+      prog.appendChild(bar);
+      prog.appendChild(pct);
+      chip.appendChild(prog);
       const x = el("button", "x", "×");
       x.title = "Remove attachment";
       x.addEventListener("click", function () { removeUpload(storedName); });
       chip.appendChild(x);
       uploadStrip.appendChild(chip);
-      uploads.set(storedName, { chip: chip, token: token, objectUrl: objectUrl });
-      showStrip();
 
       const fd = new FormData();
       fd.append("file", file);
       fd.append("filename", storedName);
-      fetch("/api/agents/" + encodeURIComponent(name) + "/upload", { method: "POST", body: fd })
-        .then((r) => r.json().then((d) => ({ ok: r.ok, d: d })))
-        .then(({ ok, d }) => {
-          if (ok && d.ok) chip.classList.remove("pending");
-          else markUploadError(chip, (d && d.error) || "failed");
-        })
-        .catch(() => markUploadError(chip, "network error"));
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/agents/" + encodeURIComponent(name) + "/upload");
+      xhr.upload.onprogress = function (e) {
+        if (!e.lengthComputable) return;
+        const p = Math.round((e.loaded / e.total) * 100);
+        bar.style.width = p + "%";
+        if (p >= 100) { pct.textContent = "finalizing…"; chip.classList.add("finalizing"); }
+        else { pct.textContent = p + "%"; }
+      };
+      xhr.onload = function () {
+        let d = null;
+        try { d = JSON.parse(xhr.responseText); } catch (_e) { /* non-json */ }
+        if (xhr.status >= 200 && xhr.status < 300 && d && d.ok) {
+          chip.classList.remove("uploading", "finalizing");
+          chip.classList.add("done");
+          if (prog.parentNode) prog.parentNode.removeChild(prog);
+        } else {
+          markUploadError(chip, (d && d.error) || ("HTTP " + xhr.status));
+        }
+      };
+      xhr.onerror = function () { markUploadError(chip, "network error"); };
+      uploads.set(storedName, { chip: chip, token: token, objectUrl: objectUrl, xhr: xhr });
+      showStrip();
+      xhr.send(fd);
     }
     function markUploadError(chip, msg) {
-      chip.classList.remove("pending");
+      chip.classList.remove("uploading", "finalizing");
       chip.classList.add("error");
       chip.title = "upload failed: " + msg;
+      const prog = chip.querySelector(".up-progress");
+      if (prog) prog.remove();
       if (!chip.querySelector(".err-badge")) chip.appendChild(el("div", "err-badge", "failed"));
     }
-    // Drop an upload's thumbnail + revoke its preview + rm the remote file. Does
-    // NOT touch the textarea (callers that removed the token themselves use this).
+    // Drop an upload's thumbnail + revoke its preview + rm the remote file. Aborts
+    // an in-flight upload first. Does NOT touch the textarea (callers that removed
+    // the token themselves use this).
     function dropUploadByName(storedName) {
       const entry = uploads.get(storedName);
       if (entry) {
+        if (entry.xhr && entry.xhr.readyState !== 4) { try { entry.xhr.abort(); } catch (_e) {} }
         if (entry.chip && entry.chip.parentNode) entry.chip.parentNode.removeChild(entry.chip);
         if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
         uploads.delete(storedName);
         showStrip();
       }
-      // Best-effort delete of the remote file (also covers manually-typed tokens).
+      // Best-effort delete of the remote file: idempotent rm -f covers a completed
+      // upload OR any partial write if an abort raced the server. Also covers
+      // manually-typed tokens.
       fetch("/api/agents/" + encodeURIComponent(name) + "/upload/" + encodeURIComponent(storedName), { method: "DELETE" }).catch(() => {});
     }
     // X button on the strip: remove the token from the textarea too, then drop.

@@ -1,15 +1,17 @@
-"""Tests for chat-upload name sanitising and host write/delete."""
+"""Tests for chat-upload name sanitising and host write/read/delete via the pool."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
+from typing import Callable
 from typing import cast
 
 import pytest
 
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_foreman import uploads
+from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.uploads import MAX_UPLOAD_BYTES
 from imbue.mngr_foreman.uploads import UploadError
 from imbue.mngr_foreman.uploads import UploadNotFound
@@ -18,10 +20,6 @@ from imbue.mngr_foreman.uploads import delete_upload
 from imbue.mngr_foreman.uploads import read_upload
 from imbue.mngr_foreman.uploads import sanitize_stored_name
 from imbue.mngr_foreman.uploads import write_upload
-
-# The context is only ever forwarded to the (monkeypatched) resolver, so a bare
-# stand-in cast to the expected type keeps the call sites honest without a real one.
-_CTX = cast(MngrContext, SimpleNamespace())
 
 
 @pytest.fixture(autouse=True)
@@ -51,9 +49,22 @@ class _FakeHost:
         return SimpleNamespace(success=self._rm_success, stdout="", stderr="permission denied")
 
 
-def _patch_resolve(monkeypatch: pytest.MonkeyPatch, host: _FakeHost, work_dir: str = "/home/agent/work") -> None:
-    agent = SimpleNamespace(work_dir=Path(work_dir))
-    monkeypatch.setattr(uploads, "_resolve_started_agent_and_host", lambda ctx, name: (agent, host))
+class _FakePool:
+    """Stands in for ConnectionPool: runs fn against a fake agent + host, or fails."""
+
+    def __init__(self, host: _FakeHost, work_dir: str = "/home/agent/work", fail: Exception | None = None) -> None:
+        self._host = host
+        self._agent = SimpleNamespace(work_dir=Path(work_dir))
+        self._fail = fail
+
+    def run_on_host(self, agent_name: str, fn: Callable[[Any, Any], Any]) -> Any:
+        if self._fail is not None:
+            raise self._fail
+        return fn(self._agent, self._host)
+
+
+def _pool(host: _FakeHost, **kwargs: Any) -> ConnectionPool:
+    return cast(ConnectionPool, _FakePool(host, **kwargs))
 
 
 # ---- sanitize_stored_name ----
@@ -88,101 +99,90 @@ def test_sanitize_rejects_overlong_extension() -> None:
 
 
 def test_sanitize_allows_multi_dot_stem() -> None:
-    # Only the final extension matters; a dotted stem is fine.
     assert sanitize_stored_name("archive.tar.gz") == "archive.tar.gz"
 
 
 # ---- write_upload ----
 
 
-def test_write_upload_writes_under_chat_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_write_upload_writes_under_chat_uploads() -> None:
     host = _FakeHost()
-    _patch_resolve(monkeypatch, host)
-    rel = write_upload(_CTX, "worker", "img.png", b"\x89PNG\x00\xff")
+    rel = write_upload(_pool(host), "worker", "img.png", b"\x89PNG\x00\xff")
     assert rel == "./chat_uploads/img.png"
     assert host.written == {"/home/agent/work/chat_uploads/img.png": b"\x89PNG\x00\xff"}
 
 
-def test_write_upload_rejects_oversize(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_write_upload_rejects_oversize() -> None:
     host = _FakeHost()
-    _patch_resolve(monkeypatch, host)
     with pytest.raises(UploadError):
-        write_upload(_CTX, "worker", "big.bin", b"x" * (MAX_UPLOAD_BYTES + 1))
+        write_upload(_pool(host), "worker", "big.bin", b"x" * (MAX_UPLOAD_BYTES + 1))
     assert host.written == {}  # never touched the host
 
 
-def test_write_upload_rejects_bad_name(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_write_upload_rejects_bad_name() -> None:
     host = _FakeHost()
-    _patch_resolve(monkeypatch, host)
     with pytest.raises(UploadError):
-        write_upload(_CTX, "worker", "../escape.png", b"data")
+        write_upload(_pool(host), "worker", "../escape.png", b"data")
     assert host.written == {}
 
 
-def test_write_upload_wraps_resolution_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _boom(ctx: object, name: str) -> object:
-        raise RuntimeError("host offline")
-
-    monkeypatch.setattr(uploads, "_resolve_started_agent_and_host", _boom)
-    with pytest.raises(UploadError, match="could not resolve agent host"):
-        write_upload(_CTX, "worker", "img.png", b"data")
+def test_write_upload_wraps_host_failure() -> None:
+    host = _FakeHost()
+    pool = _pool(host, fail=RuntimeError("host offline"))
+    with pytest.raises(UploadError, match="could not write to agent host"):
+        write_upload(pool, "worker", "img.png", b"data")
 
 
 # ---- delete_upload ----
 
 
-def test_delete_upload_runs_rm(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delete_upload_runs_rm() -> None:
     host = _FakeHost()
-    _patch_resolve(monkeypatch, host)
-    delete_upload(_CTX, "worker", "img.png")
+    delete_upload(_pool(host), "worker", "img.png")
     assert len(host.commands) == 1
     assert "rm -f" in host.commands[0]
     assert "/home/agent/work/chat_uploads/img.png" in host.commands[0]
 
 
-def test_delete_upload_raises_on_rm_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delete_upload_raises_on_rm_failure() -> None:
     host = _FakeHost(rm_success=False)
-    _patch_resolve(monkeypatch, host)
     with pytest.raises(UploadError):
-        delete_upload(_CTX, "worker", "img.png")
+        delete_upload(_pool(host), "worker", "img.png")
 
 
 # ---- read_upload / serving ----
 
 
-def test_read_upload_returns_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_upload_returns_bytes() -> None:
     host = _FakeHost(read_bytes=b"\x89PNG-data")
-    _patch_resolve(monkeypatch, host)
-    assert read_upload(_CTX, "worker", "img.png") == b"\x89PNG-data"
+    assert read_upload(_pool(host), "worker", "img.png") == b"\x89PNG-data"
 
 
-def test_read_upload_caches_second_call(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_upload_caches_second_call() -> None:
     host = _FakeHost(read_bytes=b"cached")
-    _patch_resolve(monkeypatch, host)
-    read_upload(_CTX, "worker", "img.png")
-    read_upload(_CTX, "worker", "img.png")
+    pool = _pool(host)
+    read_upload(pool, "worker", "img.png")
+    read_upload(pool, "worker", "img.png")
     assert host.read_calls == 1  # the second read is served from cache
 
 
-def test_read_upload_missing_raises_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_upload_missing_raises_not_found() -> None:
     host = _FakeHost(read_bytes=None)  # read_file raises FileNotFoundError
-    _patch_resolve(monkeypatch, host)
     with pytest.raises(UploadNotFound):
-        read_upload(_CTX, "worker", "gone.png")
+        read_upload(_pool(host), "worker", "gone.png")
 
 
-def test_read_upload_rejects_bad_name(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_upload_rejects_bad_name() -> None:
     host = _FakeHost(read_bytes=b"x")
-    _patch_resolve(monkeypatch, host)
     with pytest.raises(UploadError):
-        read_upload(_CTX, "worker", "../secret")
+        read_upload(_pool(host), "worker", "../secret")
 
 
-def test_delete_upload_invalidates_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delete_upload_invalidates_cache() -> None:
     host = _FakeHost(read_bytes=b"v1")
-    _patch_resolve(monkeypatch, host)
-    read_upload(_CTX, "worker", "img.png")  # populate cache
-    delete_upload(_CTX, "worker", "img.png")  # should evict
+    pool = _pool(host)
+    read_upload(pool, "worker", "img.png")  # populate cache
+    delete_upload(pool, "worker", "img.png")  # should evict
     assert ("worker", "img.png") not in uploads._SERVE_CACHE
 
 

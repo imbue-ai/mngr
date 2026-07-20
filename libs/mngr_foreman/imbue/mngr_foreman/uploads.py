@@ -16,15 +16,13 @@ from __future__ import annotations
 import shlex
 import time
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
-from imbue.mngr.api.address_parsers import parse_agent_address
-from imbue.mngr.api.find import find_one_agent
-from imbue.mngr.api.find import resolve_to_started_host_and_agent
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr_foreman.connection_pool import ConnectionPool
 
 # Where uploads land under the agent's work_dir, and the token path prefix.
 UPLOAD_DIR_NAME = "chat_uploads"
@@ -95,41 +93,26 @@ def sanitize_stored_name(name: str) -> str:
     return name
 
 
-def _resolve_started_agent_and_host(
-    mngr_ctx: MngrContext, agent_name: str
-) -> tuple[AgentInterface, OnlineHostInterface]:
-    address = parse_agent_address(agent_name)
-    host_ref, agent_ref = find_one_agent(address, mngr_ctx)
-    return resolve_to_started_host_and_agent(
-        host_ref=host_ref,
-        agent_ref=agent_ref,
-        allow_auto_start=False,
-        mngr_ctx=mngr_ctx,
-    )
-
-
-def _upload_path(agent: AgentInterface, stored_name: str) -> Path:
-    return agent.work_dir / UPLOAD_DIR_NAME / stored_name
-
-
-def write_upload(mngr_ctx: MngrContext, agent_name: str, stored_name: str, data: bytes) -> str:
+def write_upload(pool: ConnectionPool, agent_name: str, stored_name: str, data: bytes) -> str:
     """Write ``data`` to ``<work_dir>/chat_uploads/<stored_name>`` on the agent host.
 
-    Returns the workdir-relative token path (``./chat_uploads/<stored_name>``) that
-    the client embedded in the message. Raises ``UploadError`` on a bad name, an
-    oversize payload, or if the agent host cannot be reached.
+    Resolves through the warm connection pool. Returns the workdir-relative token
+    path (``./chat_uploads/<stored_name>``) the client embedded in the message.
+    Raises ``UploadError`` on a bad name, an oversize payload, or an unreachable host.
     """
     if len(data) > MAX_UPLOAD_BYTES:
         raise UploadError(f"file too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB)")
     safe = sanitize_stored_name(stored_name)
+
+    def _write(agent: AgentInterface, host: OnlineHostInterface) -> None:
+        # write_file writes bytes verbatim (binary-safe) and creates parent dirs.
+        host.write_file(agent.work_dir / UPLOAD_DIR_NAME / safe, data)
+
     try:
-        agent, host = _resolve_started_agent_and_host(mngr_ctx, agent_name)
-    except Exception as e:  # noqa: BLE001 - surface any resolution failure as a clean 4xx
-        raise UploadError(f"could not resolve agent host: {e}") from e
-    dest = _upload_path(agent, safe)
-    # write_file writes bytes verbatim (binary-safe) and creates parent dirs.
-    host.write_file(dest, data)
-    logger.info("foreman: wrote upload {} ({} bytes) for agent {}", dest, len(data), agent_name)
+        pool.run_on_host(agent_name, _write)
+    except Exception as e:  # noqa: BLE001 - surface any resolution/write failure as a clean 4xx
+        raise UploadError(f"could not write to agent host: {e}") from e
+    logger.info("foreman: wrote upload chat_uploads/{} ({} bytes) for agent {}", safe, len(data), agent_name)
     return f"./{UPLOAD_DIR_NAME}/{safe}"
 
 
@@ -148,7 +131,7 @@ def _cache_put(key: tuple[str, str], data: bytes) -> None:
         del _SERVE_CACHE[oldest]
 
 
-def read_upload(mngr_ctx: MngrContext, agent_name: str, stored_name: str) -> bytes:
+def read_upload(pool: ConnectionPool, agent_name: str, stored_name: str) -> bytes:
     """Read a previously uploaded file's bytes from the agent host (briefly cached).
 
     Raises ``UploadNotFound`` (-> 404) if the file is gone or unreadable, and
@@ -159,25 +142,26 @@ def read_upload(mngr_ctx: MngrContext, agent_name: str, stored_name: str) -> byt
     cached = _SERVE_CACHE.get(key)
     if cached is not None and time.monotonic() - cached[0] < _SERVE_CACHE_TTL_SECONDS:
         return cached[1]
+
+    def _read(agent: AgentInterface, host: OnlineHostInterface) -> bytes:
+        return host.read_file(agent.work_dir / UPLOAD_DIR_NAME / safe)
+
     try:
-        agent, host = _resolve_started_agent_and_host(mngr_ctx, agent_name)
-    except Exception as e:  # noqa: BLE001
-        raise UploadNotFound(f"could not resolve agent host: {e}") from e
-    dest = _upload_path(agent, safe)
-    try:
-        data = host.read_file(dest)
-    except Exception as e:  # noqa: BLE001 - missing/unreadable -> a graceful 404
+        data = pool.run_on_host(agent_name, _read)
+    except Exception as e:  # noqa: BLE001 - missing/unreadable/unreachable -> a graceful 404
         raise UploadNotFound(f"not found: {safe}") from e
     _cache_put(key, data)
     return data
 
 
-def delete_upload(mngr_ctx: MngrContext, agent_name: str, stored_name: str) -> None:
+def delete_upload(pool: ConnectionPool, agent_name: str, stored_name: str) -> None:
     """Best-effort remove of a previously uploaded file from the agent's workdir."""
     safe = sanitize_stored_name(stored_name)
     _SERVE_CACHE.pop((agent_name, safe), None)
-    agent, host = _resolve_started_agent_and_host(mngr_ctx, agent_name)
-    dest = _upload_path(agent, safe)
-    result = host.execute_stateful_command(f"rm -f {shlex.quote(str(dest))}")
+
+    def _rm(agent: AgentInterface, host: OnlineHostInterface) -> Any:
+        return host.execute_stateful_command(f"rm -f {shlex.quote(str(agent.work_dir / UPLOAD_DIR_NAME / safe))}")
+
+    result = pool.run_on_host(agent_name, _rm)
     if not result.success:
         raise UploadError(f"delete failed: {result.stderr or result.stdout}")

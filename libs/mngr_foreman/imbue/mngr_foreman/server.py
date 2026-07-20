@@ -29,6 +29,7 @@ from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr_foreman.agent_registry import AgentRegistry
+from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.input_state import detect_blocking_dialog
 from imbue.mngr_foreman.input_state import is_busy_state
 from imbue.mngr_foreman.input_state import is_permissions_blocked
@@ -112,6 +113,7 @@ def _sse(event_dict: dict) -> str:
 def create_app(
     mngr_ctx: MngrContext,
     registry: AgentRegistry,
+    pool: ConnectionPool,
     max_tool_output_chars: int,
 ) -> Flask:
     # static_folder=None: foreman serves its own bundled assets via importlib
@@ -225,7 +227,7 @@ def create_app(
         if not isinstance(message, str) or not message.strip():
             return jsonify({"ok": False, "error": "Message is empty"}), 400
         try:
-            send_message_to_agent(mngr_ctx, name, message)
+            send_message_to_agent(pool, name, message)
         except MessageSendError as e:
             # A blocking TUI dialog (permission / login) lands here -- surface it
             # so the UI can hint at the terminal page (phase 2).
@@ -253,7 +255,7 @@ def create_app(
         if is_permissions_blocked(agent):
             reason: str | None = "permission prompt"
         else:
-            reason = detect_blocking_dialog(mngr_ctx, name)
+            reason = detect_blocking_dialog(pool, name)
         return jsonify(
             {"blocked": reason is not None, "reason": reason, "running": True, "busy": busy, "state": state}
         )
@@ -281,7 +283,7 @@ def create_app(
         if upload is None or not stored_name:
             return jsonify({"ok": False, "error": "missing file or filename"}), 400
         try:
-            path = write_upload(mngr_ctx, name, stored_name, upload.read())
+            path = write_upload(pool, name, stored_name, upload.read())
         except UploadError as e:
             logger.info("Upload to {} failed: {}", name, e)
             return jsonify({"ok": False, "error": str(e)}), 400
@@ -293,7 +295,7 @@ def create_app(
         if registry.get_agent(name) is None:
             return Response("Not found", status=404, mimetype="text/plain")
         try:
-            data = read_upload(mngr_ctx, name, stored_name)
+            data = read_upload(pool, name, stored_name)
         except UploadNotFound:
             return Response("Not found", status=404, mimetype="text/plain")
         except UploadError as e:
@@ -308,7 +310,7 @@ def create_app(
     @app.route("/api/agents/<name>/upload/<stored_name>", methods=["DELETE"])
     def api_delete_upload(name: str, stored_name: str) -> ResponseReturnValue:
         try:
-            delete_upload(mngr_ctx, name, stored_name)
+            delete_upload(pool, name, stored_name)
         except UploadError as e:
             logger.info("Upload delete for {} failed: {}", name, e)
             return jsonify({"ok": False, "error": str(e)}), 400
@@ -439,10 +441,12 @@ def run_server(
     port: int,
     max_tool_output_chars: int,
 ) -> None:
-    """Start the registry and serve forever (blocking)."""
+    """Start the registry + warm connection pool and serve forever (blocking)."""
     registry = AgentRegistry(mngr_ctx)
     registry.start()
-    app = create_app(mngr_ctx, registry, max_tool_output_chars)
+    pool = ConnectionPool(mngr_ctx)
+    pool.start_maintainer(registry)
+    app = create_app(mngr_ctx, registry, pool, max_tool_output_chars)
     # threaded=True so SSE connections (one long-lived generator each) don't
     # block the list/message endpoints; use_reloader=False (single process).
     app.run(host=host, port=port, threaded=True, use_reloader=False, debug=False)

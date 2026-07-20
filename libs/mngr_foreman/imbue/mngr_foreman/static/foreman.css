@@ -351,9 +351,33 @@ a:hover { text-decoration: underline; }
   word-break: break-all;
   overflow: hidden;
 }
-.upload-chip.pending { opacity: 0.5; }
+.upload-chip.uploading img, .upload-chip.uploading .file-icon { opacity: 0.5; }
 .upload-chip.error { border-color: var(--err); }
 .upload-chip.error .file-icon, .upload-chip.error img { opacity: 0.4; }
+/* live upload progress overlay: a bottom bar + percent / finalizing label */
+.upload-chip .up-progress {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 14px;
+  background: rgba(0, 0, 0, 0.7);
+}
+.upload-chip .up-bar {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+.upload-chip .up-pct {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  text-align: center;
+  font-size: 8px;
+  line-height: 14px;
+  color: #fff;
+  mix-blend-mode: difference;
+}
+.upload-chip.finalizing .up-bar { width: 100%; background: var(--chip-wait); }
 .upload-chip .x {
   position: absolute;
   top: 0; right: 0;

@@ -34,12 +34,11 @@ import re
 
 from loguru import logger
 
-from imbue.mngr.api.address_parsers import parse_agent_address
-from imbue.mngr.api.find import find_one_agent
-from imbue.mngr.api.find import resolve_to_started_host_and_agent
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr_foreman.connection_pool import ConnectionPool
 
 
 def is_busy_state(state: str | None) -> bool:
@@ -119,32 +118,26 @@ def classify_blocking_pane(content: str) -> str | None:
     return None
 
 
-def detect_blocking_dialog(mngr_ctx: MngrContext, agent_name: str) -> str | None:
-    """Capture the agent's tmux pane and classify it. Returns a reason or None.
+def detect_blocking_dialog(pool: ConnectionPool, agent_name: str) -> str | None:
+    """Capture the agent's tmux pane (via the warm pool) and classify it.
 
-    Resolves the agent to its live host without auto-starting it. Any failure
-    (agent not found, host offline, capture error) returns None -- an
-    indeterminate probe must not grey a usable composer.
+    Resolves through the connection pool -- a cached, warm SSH connection -- so
+    the 4s poll no longer pays mngr's ~3s discovery each time. Any failure (agent
+    not found, host offline, capture error) returns None: an indeterminate probe
+    must not grey a usable composer.
     """
-    try:
-        address = parse_agent_address(agent_name)
-        host_ref, agent_ref = find_one_agent(address, mngr_ctx)
-        agent, host = resolve_to_started_host_and_agent(
-            host_ref=host_ref,
-            agent_ref=agent_ref,
-            allow_auto_start=False,
-            mngr_ctx=mngr_ctx,
-        )
-        target = TmuxWindowTarget(
-            session_name=agent.session_name,
-            window=mngr_ctx.config.tmux.primary_window_name,
-        )
+    window = pool.mngr_ctx.config.tmux.primary_window_name
+
+    def _capture(agent: AgentInterface, host: OnlineHostInterface) -> str | None:
+        target = TmuxWindowTarget(session_name=agent.session_name, window=window)
         result = host.execute_stateful_command(f"tmux capture-pane -p -t {target.as_shell_arg()}")
+        if not result.success:
+            logger.trace("input-state capture-pane for {} failed: {}", agent_name, result.stderr or result.stdout)
+            return None
+        return classify_blocking_pane(result.stdout)
+
+    try:
+        return pool.run_on_host(agent_name, _capture)
     except Exception as e:  # noqa: BLE001 - a failed probe is "unknown", not "blocked"
         logger.trace("input-state probe for {} failed: {}", agent_name, e)
         return None
-
-    if not result.success:
-        logger.trace("input-state capture-pane for {} failed: {}", agent_name, result.stderr or result.stdout)
-        return None
-    return classify_blocking_pane(result.stdout)
