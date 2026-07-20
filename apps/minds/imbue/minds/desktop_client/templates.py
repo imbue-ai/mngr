@@ -1054,7 +1054,12 @@ _RECOVERY_STYLE: Final[str] = """\
 # header, which scheduleRefresh reads to decide "keep waiting" vs. "reload".
 _RECOVERY_SCRIPT: Final[str] = """\
       (function () {
-        var root = document.querySelector('[data-agent-id]');
+        // Scope to the swappable page body: the persistent titlebar's switcher
+        // name ALSO carries data-agent-id (chrome.js stamps it), and on a
+        // swapped-in recovery page it precedes this card in document order --
+        // an unscoped query would bind to it and lose return_to/initial-status.
+        var pageRoot = document.getElementById('local-page-root') || document;
+        var root = pageRoot.querySelector('[data-agent-id]');
         if (!root) return;
         var agentId = root.dataset.agentId;
         var returnTo = root.dataset.returnTo || '';
