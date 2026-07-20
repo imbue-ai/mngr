@@ -1,0 +1,1 @@
+Regenerate the root `uv.lock` for `libs/mngr_forward`'s new `imbue-mngr-specs` dev-group dependency, added so the forward plugin's live-corpus guard test can import the corpus-scanning tooling. No runtime dependency changes.
