@@ -1,4 +1,4 @@
-{#def title, agent_id, service_name, mngr_forward_origin, initial_emails, has_account, accounts, redirect_url, ws_name, account_email #}
+{#def title, agent_id, service_name, mngr_forward_origin, initial_emails, has_account, accounts, redirect_url, ws_name, account_email, initial_accent="" #}
 {#
   Sharing editor page used by the workspace-settings sharing flow.
   mngr_forward_origin is the bare origin of the mngr forward plugin;
@@ -12,6 +12,7 @@
 {% endif %}
 {% endset %}
 <ChromeShell :title="title"
+      :initial_accent="initial_accent"
       scripts={{ _scripts }}>
   <PageContainer>
     <h1 id="page-heading" class="type-heading-lg text-primary">

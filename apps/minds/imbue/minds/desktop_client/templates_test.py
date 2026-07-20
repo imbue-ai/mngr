@@ -886,6 +886,41 @@ def test_local_pages_render_the_chromeshell_titlebar() -> None:
         assert "/_static/chrome.js" in html, f"{name}: chrome.js drives the titlebar"
 
 
+def test_workspace_scoped_local_pages_seed_the_accent_on_first_paint() -> None:
+    # Workspace-scoped local pages (settings / sharing / destroying / recovery) are
+    # reached FROM a workspace, so their titlebar carries that workspace's accent.
+    # They seed it inline (the --titlebar-bg :root rule + the .titlebar-surface
+    # contrast class) so the first paint isn't the neutral surface flashing before
+    # chrome.js primes the accent (the white-background flash on workspace -> settings).
+    accent = "#4b2e83"
+    seed = f"<style>:root {{ --titlebar-bg: {accent}; }}</style>"
+    renders = {
+        "WorkspaceSettings": render_workspace_settings(
+            agent_id=str(_AGENT_A), ws_name="ws", current_account=None, accounts=(), servers=(), current_color=accent
+        ),
+        "Sharing": render_sharing_editor(
+            agent_id=str(_AGENT_A),
+            service_name="svc",
+            title="Share",
+            mngr_forward_origin="http://localhost:8421",
+            initial_accent=accent,
+        ),
+        "Destroying": render_destroying_page(
+            agent_id=_AGENT_A, agent_name="ws", pid=1, status="running", initial_accent=accent
+        ),
+        "Recovery": render_recovery_page(
+            agent_id=_AGENT_A,
+            return_to=f"http://localhost:8421/goto/{_AGENT_A}/",
+            initial_status="stuck",
+            initial_error="",
+            initial_accent=accent,
+        ),
+    }
+    for name, html in renders.items():
+        assert seed in html, f"{name}: expected the --titlebar-bg :root seed for the accent"
+        assert "titlebar-surface" in html, f"{name}: expected the foreground-contrast class seeded"
+
+
 def test_chrome_shell_local_mode_differs_from_agent_content_surface() -> None:
     # Both ChromeShell modes lock the document to the viewport (overflow: hidden)
     # and bleed the accent-tracking --titlebar-bg body background around an inset

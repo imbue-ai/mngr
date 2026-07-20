@@ -1269,6 +1269,9 @@ def _handle_destroying_page(
         agent_name=workspace_name or agent_id,
         pid=record.pid,
         status=str(record.status).lower(),
+        # Seed the workspace accent so this workspace-scoped page paints the accent
+        # on its first frame instead of flashing the neutral surface.
+        initial_accent=_resolved_workspace_color(backend_resolver, parsed_id),
     )
     return make_html_response(content=html)
 
@@ -2018,6 +2021,9 @@ def _handle_recovery_page(
         initial_status=render_status,
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
+        # Seed the workspace accent so this workspace-scoped page paints the accent
+        # on its first frame instead of flashing the neutral surface.
+        initial_accent=_resolved_workspace_color(backend_resolver, aid),
     )
     # Expose the rendered status so the page's background convergence poll can
     # tell "still restarting" (keep waiting, no reload) from a state change
@@ -2638,6 +2644,9 @@ def _handle_sharing_page(
         redirect_url=f"/sharing/{agent_id}/{service_name}",
         ws_name=ws_name,
         account_email=account_email,
+        # Seed the workspace accent so this workspace-scoped page paints the accent
+        # on its first frame instead of flashing the neutral surface.
+        initial_accent=_resolved_workspace_color(backend_resolver, AgentId(agent_id)),
     )
     return make_html_response(content=html)
 

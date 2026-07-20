@@ -1544,6 +1544,7 @@ def render_recovery_page(
     initial_status: str,
     initial_error: str,
     ssh_command: str | None = None,
+    initial_accent: str = "",
 ) -> str:
     """Render the workspace-recovery page shown when the system interface is unresponsive.
 
@@ -1633,6 +1634,7 @@ def render_recovery_page(
         title="Reconnecting to workspace",
         head=head,
         scripts=scripts,
+        initial_accent=initial_accent,
         _content=content,
     )
 
@@ -1643,6 +1645,7 @@ def render_destroying_page(
     agent_name: str,
     pid: int,
     status: str,
+    initial_accent: str = "",
 ) -> str:
     """Render the detail page for an in-flight or recently-completed destroy.
 
@@ -1651,6 +1654,10 @@ def render_destroying_page(
     once status flips to ``done`` it redirects to ``/``. ``status`` is the initial
     server-side computed value (``running``/``failed``/``done``) so the page
     renders correctly even before the first poll completes.
+
+    ``initial_accent`` (the workspace's resolved color) seeds the titlebar inline so
+    this workspace-scoped page paints the accent on its first frame rather than
+    flashing the neutral surface until chrome.js primes it.
     """
     return CATALOG.render(
         "pages.Destroying",
@@ -1658,6 +1665,7 @@ def render_destroying_page(
         agent_name=agent_name,
         pid=pid,
         status=status,
+        initial_accent=initial_accent,
     )
 
 
@@ -1781,11 +1789,16 @@ def render_sharing_editor(
     redirect_url: str = "",
     ws_name: str = "",
     account_email: str = "",
+    initial_accent: str = "",
 ) -> str:
     """Render the sharing editor page used by the workspace-settings sharing flow.
 
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the page title points at ``{mngr_forward_origin}/goto/<agent>/``.
+
+    ``initial_accent`` (the workspace's resolved color) seeds the titlebar inline so
+    this workspace-scoped page paints the accent on its first frame rather than
+    flashing the neutral surface until chrome.js primes it.
     """
     return CATALOG.render(
         "pages.Sharing",
@@ -1799,6 +1812,7 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
+        initial_accent=initial_accent,
     )
 
 
