@@ -854,10 +854,25 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.isErrorState || bundle.window.isDestroyed()) return;
     const failedAgentId = parseWorkspaceId(validatedURL);
     if (!failedAgentId || failedAgentId !== bundle.currentWorkspaceId) return;
+    // Route to the workspace's recovery page rather than Home: it keeps the
+    // user's context (they asked for THIS workspace), shows diagnostics, and
+    // its health poll 302s straight back into the workspace -- through the
+    // redirect guard, onto the content surface, at the canonical main-built
+    // URL -- the moment it is reachable. So a failed link (wrong scheme /
+    // stale port) self-heals into the workspace instead of dumping the user
+    // on the workspace list. Home stays the fallback for the startup window
+    // where no forward origin is known yet.
+    const workspaceUrl = workspaceUrlForAgent(failedAgentId);
+    const target = workspaceUrl
+      ? toAbsoluteUrl(
+        '/agents/' + encodeURIComponent(failedAgentId)
+        + '/recovery?return_to=' + encodeURIComponent(workspaceUrl),
+      )
+      : (backendBaseUrl ? backendBaseUrl + '/' : null);
     console.warn(
-      `[content] Workspace load failed (${errorCode} ${errorDescription}) for ${validatedURL}; returning to Home`,
+      `[content] Workspace load failed (${errorCode} ${errorDescription}) for ${validatedURL}; routing to ${target}`,
     );
-    if (backendBaseUrl) navigateBundle(bundle, backendBaseUrl + '/');
+    if (target) navigateBundle(bundle, target);
   });
 
   // When the content view's renderer process dies (e.g. killed by the OS over a
