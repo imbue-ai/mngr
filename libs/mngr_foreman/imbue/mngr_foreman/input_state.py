@@ -1,26 +1,28 @@
-"""Detect whether an agent's claude TUI is showing a blocking interactive dialog.
+"""Detect whether an agent's claude TUI is blocking on a dialog, plus mngr's
+busy/idle signal -- the two inputs to the chat page's composer + working dot.
 
-The chat composer sends a message by pasting into the agent's tmux input box.
-While claude is showing a blocking dialog (trust, permission, plan approval,
-AskUserQuestion, the /login flow, ...) that paste can't be delivered -- mngr's
-own send path raises ``DialogDetectedError`` in exactly this case. So the chat
-page polls this detector and greys the composer when a dialog is up.
+The composer sends a message by pasting into the agent's tmux input box. While
+claude shows a blocking dialog (trust, permission, plan approval, AskUserQuestion,
+/login, the model picker, ...) that paste can't be delivered, so the chat page
+greys the composer and points at the terminal.
 
-**What the detector keys on** (investigated in mngr's send preflight,
-``mngr_claude/plugin.py`` ``_preflight_send_message`` + ``_DIALOG_INDICATORS``):
-mngr's built-in pane detection is *narrow* -- plain substring matches for five
-onboarding/cost dialogs (trust "Yes, I trust this folder", custom-API-key,
-theme-selection, effort-callout, cost-threshold) plus a ``permissions_waiting``
-hook file for permission prompts. It does NOT detect the /login screen,
-AskUserQuestion, or plan approval.
+**One catch-all pane detector.** Every Claude Code dialog renders the same shape:
+a numbered option list with the highlighted choice under a ``❯`` selection cursor,
+e.g. ``❯ 1. Yes``. So rather than enumerate each dialog (trust/theme/cost/... each
+with its own marker string), we key on that single shape -- the cursor on a
+numbered option (``❯ <n>.``) *plus* at least one sibling numbered option
+(``  <m>.``) in the bottom of the pane. The ready input row is ``❯`` (empty) or
+``❯ <typed text>`` -- never ``❯ <digit>.`` -- and a slash command like ``❯ /login``
+has no digit, so neither trips it. Requiring a sibling option guards against a
+stray ``❯ 1.`` echoed in transcript content: a real menu always has >=2 options,
+and the cursor line is anchored at line start so mid-line text can't match.
 
-We only need a single boolean "is any blocking dialog up", so the check is
-deliberately minimal: reuse mngr's five indicators verbatim (imported, free,
-and they yield a nice label) plus one generic signal -- the numbered-choice
-selection cursor ``❯ 1.``. Every claude choice dialog (permission, trust, plan,
-AskUserQuestion, the login menu, the model picker) renders its highlighted
-option that way, so the one cursor pattern covers them all. The chat page shows
-a single generic "interactive prompt" state regardless of which fired.
+**Free pane-less signal.** mngr's own field generator publishes
+``plugin.claude.waiting_reason == PERMISSIONS`` when claude is blocked on a
+tool-approval dialog (``_waiting_reason`` in ``mngr_claude/plugin.py``). We read it
+straight off the ``AgentDetails`` we already hold (``is_permissions_blocked``) and
+OR it with the pane rule, so a permission prompt greys the composer even without a
+tmux capture.
 
 Detection is a single ``tmux capture-pane`` over the agent's host per poll; the
 page polls lazily (only while visible + agent running), which the team approved.
@@ -37,32 +39,7 @@ from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
-from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
-from imbue.mngr_claude.plugin import CustomApiKeyDialogIndicator
-from imbue.mngr_claude.plugin import EffortCalloutIndicator
-from imbue.mngr_claude.plugin import ThemeSelectionIndicator
-from imbue.mngr_claude.plugin import TrustDialogIndicator
-
-# mngr's own pane indicators, reused verbatim so we stay in sync with its send path.
-_MNGR_DIALOG_INDICATORS = (
-    TrustDialogIndicator(),
-    CustomApiKeyDialogIndicator(),
-    ThemeSelectionIndicator(),
-    EffortCalloutIndicator(),
-    CostThresholdDialogIndicator(),
-)
-
-# A numbered menu option under the selection cursor: "❯ 1. Yes". Every claude
-# choice dialog (permission, trust, plan, AskUserQuestion, the login menu, the
-# model picker) renders its highlighted option this way. The ready input row is
-# "❯ " (empty) or "❯ <typed text>" -- never "❯ <digit>." -- so this does not
-# fire on the normal prompt.
-_CHOICE_CURSOR_RE = re.compile(r"❯\s*\d+\.")
-
-# How many lines from the bottom of the pane to inspect for the choice cursor
-# (a dialog always occupies the bottom); scanning only the tail avoids false
-# positives from old assistant text still on screen.
-_TAIL_LINES = 25
+from imbue.mngr.interfaces.data_types import AgentDetails
 
 
 def is_busy_state(state: str | None) -> bool:
@@ -84,8 +61,51 @@ def is_busy_state(state: str | None) -> bool:
     return (state or "").upper() == "RUNNING"
 
 
+def waiting_reason_of(agent: AgentDetails) -> str | None:
+    """Read claude's ``waiting_reason`` off the AgentDetails plugin fields, if present.
+
+    mngr's field generator publishes it under ``plugin.claude.waiting_reason`` (a
+    ``WaitingReason``: PERMISSIONS / END_OF_TURN), populated on the online
+    listing/observe path and absent (None) when the host wasn't probed online. The
+    stored value may be the enum or its serialized string, so normalize to an
+    upper-case string.
+    """
+    plugin = agent.plugin if isinstance(agent.plugin, dict) else {}
+    claude_fields = plugin.get("claude")
+    if not isinstance(claude_fields, dict):
+        return None
+    raw = claude_fields.get("waiting_reason")
+    return None if raw is None else str(getattr(raw, "value", raw)).upper()
+
+
+def is_permissions_blocked(agent: AgentDetails) -> bool:
+    """True if mngr already knows claude is blocked on a permission dialog.
+
+    A free, pane-less signal (``waiting_reason == PERMISSIONS``): the
+    permissions_waiting marker is set during a live turn. OR'd with the pane ``❯``
+    rule so a permission prompt greys the composer even before / without a capture.
+    """
+    reason = waiting_reason_of(agent)
+    return reason is not None and "PERMISSIONS" in reason
+
+
+# The highlighted numbered option under the selection cursor: "❯ 1. Yes". Anchored
+# at line start (after optional indent) so echoed transcript text mid-line can't
+# trip it. Every claude choice dialog renders its active option this way.
+_CHOICE_CURSOR_RE = re.compile(r"^\s*❯\s*\d+\.\s", re.MULTILINE)
+# Any *non-cursor* numbered option: "  2. No". A real menu always has >=2 options,
+# so requiring one of these alongside the cursor rejects a stray "❯ 1.".
+_MENU_OPTION_RE = re.compile(r"^\s*\d+\.\s", re.MULTILINE)
+# How many lines from the bottom of the pane to inspect (a dialog always occupies
+# the bottom); scanning only the tail avoids matching old output still on screen.
+_TAIL_LINES = 25
+# The one generic label -- the UI shows a single "interactive prompt" state
+# regardless of which dialog it is.
+_GENERIC_DIALOG_REASON = "interactive prompt"
+
+
 def classify_blocking_pane(content: str) -> str | None:
-    """Return a short reason if the pane shows a blocking dialog, else None.
+    """Return a reason if the pane's tail shows a numbered-choice dialog, else None.
 
     Pure function over a tmux pane capture -- unit-tested against fixtures. The
     reason is only a label (the UI shows one generic state); ``None`` means the
@@ -93,16 +113,9 @@ def classify_blocking_pane(content: str) -> str | None:
     """
     if not content:
         return None
-
-    # mngr's onboarding/cost dialogs fill the screen -- match against all of it.
-    for indicator in _MNGR_DIALOG_INDICATORS:
-        if indicator.matches(content):
-            return indicator.get_description()
-
-    # Any numbered-choice menu at the bottom of the pane is a blocking dialog.
     tail = "\n".join(content.splitlines()[-_TAIL_LINES:])
-    if _CHOICE_CURSOR_RE.search(tail):
-        return "interactive prompt"
+    if _CHOICE_CURSOR_RE.search(tail) and _MENU_OPTION_RE.search(tail):
+        return _GENERIC_DIALOG_REASON
     return None
 
 

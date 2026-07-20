@@ -1,9 +1,20 @@
-"""Tests for the blocking-dialog pane classifier."""
+"""Tests for the blocking-dialog pane classifier and the busy/idle signals."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import cast
+
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr_foreman.input_state import classify_blocking_pane
 from imbue.mngr_foreman.input_state import is_busy_state
+from imbue.mngr_foreman.input_state import is_permissions_blocked
+from imbue.mngr_foreman.input_state import waiting_reason_of
+
+
+def _agent_with_plugin(plugin: object) -> AgentDetails:
+    """A stand-in exposing just ``.plugin`` (all the state helpers touch)."""
+    return cast(AgentDetails, SimpleNamespace(plugin=plugin))
 
 # A normal, ready claude prompt (not blocked). Mirrors a real capture: a finished
 # assistant turn, then an empty input row and the status bar.
@@ -45,20 +56,15 @@ def test_empty_pane_not_blocked() -> None:
 
 
 def test_trust_dialog_detected() -> None:
+    # The former per-dialog patterns are gone; the trust dialog is a numbered menu
+    # like any other, caught by the single ❯ rule as the one generic label.
     pane = "Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder\n  2. No\n"
-    assert classify_blocking_pane(pane) == "trust dialog"
+    assert classify_blocking_pane(pane) == "interactive prompt"
 
 
 def test_theme_selection_detected() -> None:
     pane = "Choose the text style that looks best with your terminal:\n❯ 1. Dark\n  2. Light\n"
-    assert classify_blocking_pane(pane) == "theme selection dialog"
-
-
-def test_cost_threshold_needs_both_strings() -> None:
-    only_one = "Learn more about how to monitor your spending:\n"
-    assert classify_blocking_pane(only_one) != "cost threshold dialog"
-    both = "Learn more about how to monitor your spending:\nhttps://code.claude.com/docs\n"
-    assert classify_blocking_pane(both) == "cost threshold dialog"
+    assert classify_blocking_pane(pane) == "interactive prompt"
 
 
 def test_login_menu_detected_as_generic_prompt() -> None:
@@ -86,6 +92,30 @@ def test_askuserquestion_menu_detected() -> None:
 def test_choice_cursor_requires_number() -> None:
     # A slash command typed at the prompt ("❯ /login") is not a menu.
     assert classify_blocking_pane("output\n❯ /login\n") is None
+
+
+def test_lone_cursor_without_sibling_option_not_blocked() -> None:
+    # A stray "❯ 1." with no sibling numbered option (e.g. a fragment echoed in
+    # output) is not a menu -- a real dialog always renders >=2 options.
+    assert classify_blocking_pane("some log line\n❯ 1. only one option\n") is None
+
+
+def test_cursor_must_be_at_line_start() -> None:
+    # "❯ 1." embedded mid-line in echoed transcript content must not fire.
+    pane = "the assistant wrote: choose ❯ 1. Alpha or 2. Beta inline\nmore text\n"
+    assert classify_blocking_pane(pane) is None
+
+
+def test_numbered_list_in_output_without_cursor_not_blocked() -> None:
+    # Plain numbered lists in assistant output have options but no ❯ cursor.
+    pane = "Here are the steps:\n1. First\n2. Second\n3. Third\n❯\n"
+    assert classify_blocking_pane(pane) is None
+
+
+def test_indented_menu_detected() -> None:
+    # tmux panes often left-pad dialog content; the anchor allows leading indent.
+    pane = "  Select an option:\n  ❯ 1. Alpha\n    2. Beta\n"
+    assert classify_blocking_pane(pane) == "interactive prompt"
 
 
 # ---- is_busy_state: mngr's authoritative busy/idle signal for the working dot ----
@@ -120,3 +150,38 @@ def test_running_unknown_agent_type_is_not_busy() -> None:
 def test_none_and_empty_are_idle() -> None:
     assert is_busy_state(None) is False
     assert is_busy_state("") is False
+
+
+# ---- waiting_reason: the free, pane-less PERMISSIONS signal off AgentDetails ----
+
+
+def test_permissions_waiting_reason_is_blocked() -> None:
+    agent = _agent_with_plugin({"claude": {"waiting_reason": "PERMISSIONS"}})
+    assert is_permissions_blocked(agent) is True
+
+
+def test_permissions_waiting_reason_enum_value_is_blocked() -> None:
+    # The stored value may be the enum rather than a plain string.
+    reason = SimpleNamespace(value="PERMISSIONS")
+    agent = _agent_with_plugin({"claude": {"waiting_reason": reason}})
+    assert is_permissions_blocked(agent) is True
+
+
+def test_end_of_turn_reason_is_not_blocked() -> None:
+    agent = _agent_with_plugin({"claude": {"waiting_reason": "END_OF_TURN"}})
+    assert waiting_reason_of(agent) == "END_OF_TURN"
+    assert is_permissions_blocked(agent) is False
+
+
+def test_missing_waiting_reason_is_not_blocked() -> None:
+    # No claude plugin block, empty block, or absent field -> unknown -> not blocked.
+    assert is_permissions_blocked(_agent_with_plugin({})) is False
+    assert is_permissions_blocked(_agent_with_plugin({"claude": {}})) is False
+    assert is_permissions_blocked(_agent_with_plugin({"codex": {"x": 1}})) is False
+    assert waiting_reason_of(_agent_with_plugin({})) is None
+
+
+def test_non_dict_plugin_is_safe() -> None:
+    # Defensive: a malformed plugin payload must not raise, just read as unknown.
+    assert waiting_reason_of(_agent_with_plugin(None)) is None
+    assert is_permissions_blocked(_agent_with_plugin("oops")) is False

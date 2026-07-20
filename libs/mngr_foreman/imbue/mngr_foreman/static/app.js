@@ -308,7 +308,10 @@
       // busy === true / null / undefined: leave the transcript heuristic in charge.
     }
     function refreshWorking() {
-      workingEl.hidden = !working;
+      // State precedence: BLOCKED (a ❯ dialog / mngr PERMISSIONS -> greyed
+      // composer) beats "working", so never show the dot while blocked -- even if
+      // mngr still reads RUNNING because a mid-turn menu left the active marker set.
+      workingEl.hidden = !working || blocked;
       if (!workingEl.hidden) tEl.appendChild(workingEl); // keep it pinned last
       if (escBtn) escBtn.disabled = false; // always usable; Escape is harmless
     }
@@ -394,11 +397,13 @@
       blocked = true;
       composer.classList.add("blocked");
       if (composerBlocked) composerBlocked.hidden = false;
+      refreshWorking(); // BLOCKED hides the dot immediately, not on the next event
     }
     function clearBlocked() {
       blocked = false;
       composer.classList.remove("blocked");
       if (composerBlocked) composerBlocked.hidden = true;
+      refreshWorking(); // unblocking may reveal the dot again if still working
     }
 
     // Poll the input-state endpoint lazily: only while the tab is visible.

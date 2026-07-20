@@ -30,6 +30,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr_foreman.agent_registry import AgentRegistry
 from imbue.mngr_foreman.input_state import detect_blocking_dialog
 from imbue.mngr_foreman.input_state import is_busy_state
+from imbue.mngr_foreman.input_state import is_permissions_blocked
 from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
@@ -187,7 +188,14 @@ def create_app(
         busy = is_busy_state(state)
         if state not in ("RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"):
             return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "state": state})
-        reason = detect_blocking_dialog(mngr_ctx, name)
+        # BLOCKED beats busy in the UI: a mid-turn choice dialog can leave the
+        # 'active' marker set (state RUNNING) while a menu is up, so a dialog must
+        # win. mngr's own PERMISSIONS signal is a free, pane-less OR with the tmux
+        # ❯ capture -- when it already says PERMISSIONS we skip the capture.
+        if is_permissions_blocked(agent):
+            reason: str | None = "permission prompt"
+        else:
+            reason = detect_blocking_dialog(mngr_ctx, name)
         return jsonify(
             {"blocked": reason is not None, "reason": reason, "running": True, "busy": busy, "state": state}
         )
