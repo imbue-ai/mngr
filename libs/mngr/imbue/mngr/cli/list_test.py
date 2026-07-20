@@ -598,14 +598,13 @@ def _agent_with_idle(name: str, idle_seconds: float) -> AgentDetails:
 def test_sort_agents_by_cel_numeric_idle_ascending() -> None:
     """Sorting by a numeric CEL field must order numerically, not lexicographically.
 
-    The values span an order of magnitude (2.4, 14040.2, 111044) -- exactly the
-    spread a string comparator gets wrong, since "111044" < "14040" < "2.4"
-    lexicographically. The input is arranged in that wrong (string) order.
+    Uses 2 / 10 / 100: numerically 2 < 10 < 100, but as strings "10" < "100" <
+    "2", so a string comparator mis-orders them.
     """
     agents = [
-        _agent_with_idle("large", 111044),
-        _agent_with_idle("medium", 14040.2),
-        _agent_with_idle("small", 2.4),
+        _agent_with_idle("large", 100),
+        _agent_with_idle("medium", 10),
+        _agent_with_idle("small", 2),
     ]
     compiled = compile_cel_sort_keys("idle asc")
     result = _sort_agents_by_cel(agents, compiled)
@@ -617,9 +616,9 @@ def test_sort_agents_by_cel_numeric_idle_ascending() -> None:
 def test_sort_agents_by_cel_numeric_idle_descending() -> None:
     """Sorting a numeric CEL field descending must order numerically."""
     agents = [
-        _agent_with_idle("small", 2.4),
-        _agent_with_idle("medium", 14040.2),
-        _agent_with_idle("large", 111044),
+        _agent_with_idle("small", 2),
+        _agent_with_idle("medium", 10),
+        _agent_with_idle("large", 100),
     ]
     compiled = compile_cel_sort_keys("idle desc")
     result = _sort_agents_by_cel(agents, compiled)
@@ -630,7 +629,7 @@ def test_sort_agents_by_cel_numeric_idle_descending() -> None:
 
 def test_sort_agents_by_cel_numeric_missing_sorts_last() -> None:
     """Agents whose numeric CEL field is absent sort to the end in either direction."""
-    with_idle = _agent_with_idle("has-idle", 2.4)
+    with_idle = _agent_with_idle("has-idle", 2)
     without_idle = make_test_agent_details(name="no-idle")
 
     ascending = _sort_agents_by_cel([without_idle, with_idle], compile_cel_sort_keys("idle asc"))
@@ -1378,15 +1377,14 @@ def test_list_command_sorts_numeric_field_numerically(
 ) -> None:
     """`mngr ls --sort 'idle_seconds asc'` must order a numeric field numerically.
 
-    Drives the real list command end-to-end. The values span an order of
-    magnitude (2.4, 14040.2, 111044) and the agents are supplied in the order a
-    lexicographic comparator would (wrongly) produce, so a string sort leaves
-    them unsorted while a numeric sort reorders them ascending.
+    Drives the real list command end-to-end. Uses 2 / 10 / 100: numerically
+    2 < 10 < 100, but as strings "10" < "100" < "2", so a string sort would
+    mis-order them.
     """
     agents = [
-        make_test_agent_details(name="large", idle_seconds=111044),
-        make_test_agent_details(name="medium", idle_seconds=14040.2),
-        make_test_agent_details(name="small", idle_seconds=2.4),
+        make_test_agent_details(name="large", idle_seconds=100),
+        make_test_agent_details(name="medium", idle_seconds=10),
+        make_test_agent_details(name="small", idle_seconds=2),
     ]
     _patch_list_agents(monkeypatch, agents)
 
@@ -1400,7 +1398,7 @@ def test_list_command_sorts_numeric_field_numerically(
     assert result.exit_code == 0
     output = json.loads(result.output)
     idle_values = [agent["idle_seconds"] for agent in output["agents"]]
-    assert idle_values == [2.4, 14040.2, 111044]
+    assert idle_values == [2, 10, 100]
     assert [agent["name"] for agent in output["agents"]] == ["small", "medium", "large"]
 
 
