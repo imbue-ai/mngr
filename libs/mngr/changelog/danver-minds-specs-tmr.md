@@ -1,0 +1,1 @@
+Regenerated the CLI command docs for the new `mngr tmr-tasks` command (from the mngr-tmr plugin): `docs/commands/secondary/tmr-tasks.md`, with `tmr-tasks` added to SECONDARY_COMMANDS in `scripts/make_cli_docs.py`.
