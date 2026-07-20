@@ -444,7 +444,16 @@
     // The welcome splash hides the home button: the user must resolve the
     // account choice (sign up / log in / continue without an account) before
     // there is anywhere else to go.
-    if (homeBtn) homeBtn.hidden = ctx.kind === 'welcome';
+    if (homeBtn) {
+      homeBtn.hidden = ctx.kind === 'welcome';
+      // Selected (text-primary at rest) only on the landing page itself;
+      // everywhere else it rests muted and rises to primary on hover.
+      // Mirrors TitlebarButton's default/muted tones -- keep in sync.
+      var homeSelected = ctx.kind === 'home';
+      homeBtn.classList.toggle('text-primary', homeSelected);
+      homeBtn.classList.toggle('text-secondary', !homeSelected);
+      homeBtn.classList.toggle('hover:text-primary', !homeSelected);
+    }
     var isWorkspace = ctx.kind === 'workspace';
     var prevCrumbAgentId = currentCrumbAgentId;
     currentCrumbAgentId = isWorkspace ? ctx.agentId : null;
@@ -478,6 +487,11 @@
         if (!btn) return;
         var isActive = ctx.activeTab === tab;
         btn.classList.toggle('bg-fill-active', isActive);
+        // Active tab reads text-primary; a resting tab is muted (secondary,
+        // primary on hover). Mirrors TitlebarButton's tones -- keep in sync.
+        btn.classList.toggle('text-primary', isActive);
+        btn.classList.toggle('text-secondary', !isActive);
+        btn.classList.toggle('hover:text-primary', !isActive);
         if (isActive) btn.setAttribute('aria-current', 'page');
         else btn.removeAttribute('aria-current');
       });

@@ -149,19 +149,26 @@
          carry ``flex`` / ``inline-flex`` display classes that would beat a
          ``.hidden`` utility in the cascade (see Badge.jinja's note). #}
       <TitlebarButton id="back-btn" aria-label="Back" data-tooltip="Back" :hidden="not show_back"><Icon16 name="chevron-left" /></TitlebarButton>
-      <TitlebarButton id="home-btn" aria-label="Home" data-tooltip="Home" extra="gap-1.5 pr-2">
+      {# The home button is "selected" (text-primary at rest) only on the
+         landing page itself -- any other screen renders it muted (secondary,
+         primary on hover). Server-derived for the first paint: no workspace
+         crumb, no page crumb, and not the agent surface means Home. chrome.js
+         re-derives the same state from the content URL on every update. #}
+      <TitlebarButton id="home-btn" aria-label="Home" data-tooltip="Home" variant="crumb"
+                      :tone="'default' if (not is_agent_content_surface and not crumb_agent_id and not page_label) else 'muted'"
+                      extra="gap-1">
         <Icon16 name="home" />
         <span class="type-label">Minds</span>
       </TitlebarButton>
-      <div id="ws-crumb" class="flex items-center gap-0.5 min-w-0"{% if not crumb_agent_id %} hidden{% endif %}>
+      <div id="ws-crumb" class="flex items-center min-w-0"{% if not crumb_agent_id %} hidden{% endif %}>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>
-        <TitlebarButton id="workspace-switcher-btn" aria-label="Switch workspace" data-tooltip="Switch workspace" extra="gap-1 min-w-0">
+        <TitlebarButton id="workspace-switcher-btn" aria-label="Switch workspace" data-tooltip="Switch workspace" variant="crumb" extra="gap-1 min-w-0">
           <span id="workspace-switcher-name" class="type-label truncate max-w-[180px]"{% if crumb_agent_id %} data-agent-id="{{ crumb_agent_id }}"{% endif %}>{{ crumb_workspace_name }}</span>
-          <Icon16 name="chevron-down-small" extra="shrink-0" />
+          <Icon16 name="chevron-down-small" extra="shrink-0 text-tertiary" />
         </TitlebarButton>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>
-        <TitlebarButton id="ws-tab-workspace" aria-label="Workspace" data-tooltip="Workspace" :extra="'bg-fill-active' if active_tab == 'workspace' else ''" :aria-current="'page' if active_tab == 'workspace' else false"><Icon16 name="panels-top-left" /></TitlebarButton>
-        <TitlebarButton id="ws-tab-settings" aria-label="Workspace Settings" data-tooltip="Workspace Settings" :extra="'bg-fill-active' if active_tab == 'settings' else ''" :aria-current="'page' if active_tab == 'settings' else false"><Icon16 name="settings" /></TitlebarButton>
+        <TitlebarButton id="ws-tab-workspace" aria-label="Workspace" data-tooltip="Workspace" :tone="'default' if active_tab == 'workspace' else 'muted'" :extra="'ml-1 bg-fill-active' if active_tab == 'workspace' else 'ml-1'" :aria-current="'page' if active_tab == 'workspace' else false"><Icon16 name="panels-top-left" /></TitlebarButton>
+        <TitlebarButton id="ws-tab-settings" aria-label="Workspace Settings" data-tooltip="Workspace Settings" :tone="'default' if active_tab == 'settings' else 'muted'" :extra="'ml-1 bg-fill-active' if active_tab == 'settings' else 'ml-1'" :aria-current="'page' if active_tab == 'settings' else false"><Icon16 name="settings" /></TitlebarButton>
       </div>
       <div id="page-crumb" class="flex items-center gap-0.5 min-w-0"{% if not page_label %} hidden{% endif %}>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>

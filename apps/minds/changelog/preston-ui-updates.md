@@ -40,6 +40,8 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - Cmd+W no longer closes the window: it closes the active tab inside the displayed workspace's dockview instead (forwarded by the shell so it works even while typing in a terminal or browser panel; requires a workspace template with the matching close-active-tab handler). Closing the window remains available from File > Close Window, and Cmd+Q quits.
 
+- Titlebar breadcrumb polish: the Minds home button reads as selected (primary text) only on the workspace list itself and rests muted (secondary, rising to primary on hover) everywhere else; the home and workspace-name pills use tighter crumb geometry (px-1.5 py-1, gap-1); the switcher's dropdown chevron is tertiary; and the Workspace / Workspace Settings icon-tabs sit ml-1 after the slash, resting secondary and reading primary on hover or when active.
+
 - The workspace switcher menu opens shifted left so each row's workspace-name text lines up directly under the breadcrumb's workspace-name text.
 
 - The workspace switcher rows for OTHER workspaces carry an "open in new window" arrow (desktop app only); the current workspace's row and remote rows carry no action buttons. The per-row settings gear is gone -- workspace settings lives in the titlebar's settings tab. The right-click context-menu "Open in new window" entry is unchanged.

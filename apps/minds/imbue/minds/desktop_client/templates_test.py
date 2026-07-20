@@ -683,7 +683,7 @@ def test_render_chrome_page_contains_workspace_crumb_and_icon_tabs() -> None:
     assert 'id="page-crumb"' in html
     # Visibility is driven through the native ``hidden`` attribute (the blocks
     # carry flex display classes that would beat a ``hidden`` class).
-    assert 'id="ws-crumb" class="flex items-center gap-0.5 min-w-0" hidden' in html
+    assert 'id="ws-crumb" class="flex items-center min-w-0" hidden' in html
 
 
 def test_render_chrome_page_seeds_workspace_crumb_server_side() -> None:
@@ -693,12 +693,12 @@ def test_render_chrome_page_seeds_workspace_crumb_server_side() -> None:
     # while the content view loads. Without a crumb the block renders hidden
     # exactly as before.
     html = render_chrome_page(crumb_workspace_name="my-mind", crumb_agent_id="agent-abc123")
-    assert 'id="ws-crumb" class="flex items-center gap-0.5 min-w-0">' in html
+    assert 'id="ws-crumb" class="flex items-center min-w-0">' in html
     assert 'data-agent-id="agent-abc123"' in html
     assert ">my-mind</span>" in html
     assert 'id="ws-tab-workspace"' in html and "bg-fill-active" in html
     bare = render_chrome_page()
-    assert 'id="ws-crumb" class="flex items-center gap-0.5 min-w-0" hidden' in bare
+    assert 'id="ws-crumb" class="flex items-center min-w-0" hidden' in bare
 
 
 def test_render_chrome_page_contextual_back_button_starts_hidden() -> None:
