@@ -6,9 +6,8 @@ description: The definitional reference for how minds expresses behavioral speci
 # minds behavioral specs
 
 This skill defines the behavioral-spec language used by minds: what the
-artifacts are, where they live, and what their syntax and structure mean. It
-prescribes no workflow. Processes that create, update, or consume specs are
-defined elsewhere and refer back to this document.
+artifacts are, where they live, and what their syntax and structure mean.
+Processes that create, update, or consume specs are out of scope here.
 
 ## What a behavioral spec is
 
@@ -16,14 +15,14 @@ A behavioral spec describes the externally observable behavior of a minds
 surface: the flows a user or client can take (scenarios) and the properties
 that hold across all flows and states (invariants).
 
-The language has a deliberate register:
+The language's register:
 
 - Specs describe observable behavior only. How a test drives the system
   (test clients, waits, selectors, fixtures) never appears.
 - Protocol details (paths, status codes, redirect targets) appear only where
   they are part of the observable contract of the surface being specified.
 - Spec files never reference tests. The link runs the other way (see
-  "Tests back-link to specs" below).
+  "Tests back-link to specs").
 
 Behavioral specs are a distinct artifact class. Do not confuse them with the
 repo-root `specs/` and `blueprint/` directories (design documents and
@@ -48,12 +47,13 @@ apps/minds/specs/
 Naming and structure rules:
 
 - Folder names and file basenames are kebab-case.
-- Two basenames are reserved in every folder: `invariants.feature` (see
+- Two filenames are reserved in every folder: `invariants.feature` (see
   "Invariants and scope") and `overview.md` (prose context for the folder and
-  everything below it). These names must not be shadowed: no `.feature` file
-  named `overview`, no `.md` file named `invariants`.
+  everything below it). No `.feature` file may be named `overview`, since that
+  would make `overview.md` read as its sidecar.
 - Any other `.md` file is the sidecar of the `.feature` file with the same
-  basename in the same folder.
+  basename in the same folder; `invariants.md` is simply the sidecar of
+  `invariants.feature`. An `.md` file with no matching `.feature` is invalid.
 - Every folder has the same semantics, including the corpus root itself.
   Nesting is permitted; depth carries no special meaning.
 
@@ -63,18 +63,13 @@ never by links or paths written inside `.feature` files.
 ## Syntax: what "valid" means
 
 A `.feature` file is syntactically valid if and only if `gherkin-official`
-(the Cucumber reference parser, classic `.feature` syntax, English keywords)
-parses it. The version pinned by `apps/minds` is the arbiter. This skill does
-not restate the Gherkin grammar; the parser is the authority.
-
-On top of parseability, the language imposes these rules (enforced by
-`minds specs validate`):
-
-- Kebab-case folder names, file basenames, and tags.
-- Every `Scenario`, `Scenario Outline`, and `Rule` carries at least one tag;
-  the first tag is its identity (see next section).
-- Identity tags are unique within their folder subtree.
-- Reserved basenames are not shadowed.
+(the Cucumber reference parser, classic `.feature` syntax) parses it; the
+version pinned by `apps/minds` is the arbiter. The language uses the default
+English keywords only - no `# language:` headers. The available constructs
+are `Feature`, `Background`, `Scenario` (synonym `Example`),
+`Scenario Outline` with `Examples` tables, `Rule`, the step keywords
+`Given` / `When` / `Then` / `And` / `But`, data tables, doc strings, and `#`
+comments.
 
 A representative file:
 
@@ -105,38 +100,47 @@ Feature: Sign-in with a one-time login code
       | /authenticate |
 ```
 
-Free prose belongs in the description slots (under `Feature:`, `Rule:`,
-`Scenario:` headers, before the first step) and in the prose files
-(`overview.md`, sidecars). Prose explains; only Feature-file content defines
-behavior.
+Structural content - declarations, steps, tables - is normative. Description
+slots (the free prose under `Feature:`, `Rule:`, `Scenario:`, and
+`Scenario Outline:` headers, before the first step or child) and `.md` files
+explain, but do not define. The language does not partition explanatory prose
+between description slots and prose files; that split is the author's choice.
 
 ## Identity: tags and coordinates
 
-The first tag on a `Scenario`, `Scenario Outline`, or `Rule` is its identity.
+Tags may appear only on `Scenario`, `Scenario Outline`, and `Rule` units -
+not on `Feature` or `Examples`, where Gherkin permits them but nothing in
+this language consumes them. Every unit carries at least one tag.
 
-- Raw tags are short kebab-case names with no prefixes. Do not encode in the
-  tag anything its location already says.
-- A `Scenario Outline` has one identity covering all of its Examples rows.
-- Tags after the first are auxiliary labels: kebab-case, exempt from
-  uniqueness, and currently carrying no defined semantics.
+- The first tag is the unit's identity. A `Scenario Outline` has one
+  identity covering all of its Examples rows.
+- Tags after the first are auxiliary labels; they may repeat across units
+  and have no defined semantics.
+- All tags are short kebab-case names that do not encode anything the
+  unit's location already says.
 
 A unit's coordinate - the stable handle everything outside the spec uses to
-refer to it - is derived from its location: the folder path relative to the
-corpus root, with `/` replaced by `.`, then `.`, then the raw tag.
+refer to it - joins the folder names on the path from the corpus root to the
+unit's file, then its raw identity tag, with dots:
 
 - `@fresh-code` in `apps/minds/specs/authentication/signin.feature` has the
   coordinate `authentication.fresh-code`.
 - `@no-tls` in `apps/minds/specs/networking/tunnels/hole-punching.feature`
   has the coordinate `networking.tunnels.no-tls`.
+- `@single-use-codes` in `apps/minds/specs/invariants.feature` has the
+  coordinate `single-use-codes` - zero folders on the path, so the
+  coordinate is the raw tag alone.
 
-Counter-example, because this is the common wrong guess: the coordinate of
-`@fresh-code` above is NOT `authentication.signin.fresh-code`. File basenames
-never appear in coordinates. Only folders qualify. This is what lets a
-scenario move between files in its folder - or a file be renamed or split -
-without changing any unit's identity.
+Counter-example - the common wrong guess: the coordinate of `@fresh-code`
+above is NOT `authentication.signin.fresh-code`. File basenames never appear
+in coordinates; only folders qualify. This is what lets a scenario move
+between files in its folder - or a file be renamed or split - without any
+unit changing identity.
 
-The `@` sigil is Gherkin tag syntax and stays in the file; coordinates are
-bare dotted names.
+Coordinates derive from identity tags only; auxiliary tags never form
+coordinates. No two units may share a coordinate - equivalently, identity
+tags are unique among the units of a single folder. The `@` sigil is Gherkin
+tag syntax and stays in the file; coordinates are bare dotted names.
 
 ## Invariants and scope
 
@@ -144,11 +148,12 @@ An invariant is a property that must hold across all scenarios, states, and
 interleavings within its scope - not just the flows spelled out in scenarios.
 Invariants are written as `Rule:` blocks:
 
-- The Rule name states the property.
-- The Rule description carries the rationale.
-- Like scenarios, a Rule's first tag is its identity.
-- A Rule may have no children, or illustrating `Example:` scenarios as
-  children (each with its own identity tag).
+- The Rule name states the property; the Rule description carries the
+  rationale.
+- Identity works exactly as for scenarios: the first tag.
+- A Rule may stand alone, or carry illustrating scenarios as children
+  (`Scenario Outline` children included). Each child is a unit with its own
+  identity tag.
 
 Nothing in a tag marks a unit as an invariant. The kind is structural: being
 a `Rule:` is what makes it an invariant, and tooling reports the unit kind.
@@ -161,6 +166,27 @@ Scope is determined entirely by which file the Rule lives in:
 - This holds at every level: in `apps/minds/specs/authentication/invariants.feature`
   a Rule binds all of `authentication/`; in `apps/minds/specs/invariants.feature`
   it binds the entire corpus.
+
+A file-scoped Rule in an ordinary feature file:
+
+```gherkin
+Feature: Session lifetime
+
+  @survives-restart
+  Scenario: Sessions survive a desktop-client restart
+    Given a signed-in user
+    When the desktop client is stopped and started again
+    Then the user is still signed in
+
+  @installation-bound-tokens
+  Rule: Only session tokens minted by this installation are accepted
+    A token created under another data directory is treated as signed out.
+```
+
+Gherkin nests every scenario that follows a `Rule:` header under that Rule,
+so file-scoped Rules come after the file's ordinary scenarios.
+
+A subtree-scoped Rule in an `invariants.feature`, with an illustrating child:
 
 ```gherkin
 Feature: Authentication invariants
@@ -193,21 +219,21 @@ def test_login_page_redirects_via_script() -> None: ...
 - `partial=` states what the test does not cover; omit it when the test
   covers the unit fully.
 - A test may carry several `witnesses` markers.
-- The direction is one-way: tests name coordinates; spec files never name
-  tests. The marker is registered in the shared pytest settings and usable
-  from any project in the monorepo.
+- The marker is registered in the shared pytest settings and usable from any
+  project in the monorepo.
 
 ## Tooling
 
 `minds specs` is the CLI over the corpus (run as `uv run minds specs ...`
 from the repo root):
 
-- `validate` - parses every spec file and enforces the language rules above.
+- `validate` - parses every spec file and enforces the rules in this
+  document.
 - `list` - emits the corpus as JSONL, one record per unit (scenario,
   scenario outline, or rule), carrying coordinate, unit kind, and location.
 - `query` - the same records, filtered structurally (by tag, name, or step
   text).
 
 `uv run minds specs --help` is authoritative for invocation detail. For
-AST-level needs beyond the CLI, `gherkin-official` (already a dependency of
+AST-level needs beyond the CLI, `gherkin-official` (a dependency of
 `apps/minds`) is importable directly.
