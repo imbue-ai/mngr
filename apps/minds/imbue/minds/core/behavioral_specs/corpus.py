@@ -551,8 +551,7 @@ def _scan_corpus_structure(corpus_root: Path, violations: list[SpecViolation]) -
     """
     feature_files: list[Path] = []
     for folder, child_folder_names, file_names in corpus_root.walk(top_down=True):
-        # Prune hidden subfolders in place (the documented walk idiom) and keep
-        # traversal order deterministic.
+        # Pruning in place steers the walk; sorting keeps traversal deterministic.
         child_folder_names[:] = sorted(name for name in child_folder_names if not name.startswith("."))
         for child_folder_name in child_folder_names:
             if not _is_kebab_case(child_folder_name):

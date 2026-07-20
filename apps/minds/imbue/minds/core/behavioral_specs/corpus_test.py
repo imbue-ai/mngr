@@ -311,11 +311,6 @@ def test_scan_corpus_rejects_feature_files_without_a_feature(tmp_path: Path) -> 
 
 
 def test_scan_corpus_rejects_english_synonym_keywords_outside_the_language_construct_list(tmp_path: Path) -> None:
-    # The skill's construct list is exhaustive: Feature, Background, Scenario
-    # (synonym Example), Scenario Outline with Examples, Rule, and the step
-    # keywords Given/When/Then/And/But. Other en-dialect spellings (Ability,
-    # Business Need, Scenario Template, Scenarios, '*') parse fine but are not
-    # part of the language.
     root = write_spec_corpus(
         tmp_path / "specs",
         {

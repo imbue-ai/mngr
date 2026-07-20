@@ -1,5 +1,7 @@
 # Plan: minds behavioral specs — language, reference skill, CLI, exemplar
 
+Linear project: [Minds Specs](https://linear.app/imbue/project/minds-specs-2077af9e3eaa/overview)
+
 ## Overview
 
 - Formalize the minds behavioral-spec language as classic `.feature` files in strict official Gherkin, with `gherkin-official` (the Cucumber reference parser, classic matcher) as the sole validity authority: a file is valid if and only if it parses.
@@ -63,18 +65,18 @@ Exemplar (the authentication corpus — the conceptual contents of `authenticati
 
 ## Execution
 
-Deliverable 1 — Skill:
+Deliverable 1 — Skill ([MIND-124](https://linear.app/imbue/issue/MIND-124/minds-specs-designskill)):
 
 1. Write a clean, clear skill capturing the decisions and intent above.
 2. Delegate a Fable subagent to review it: apply /de-complect and the spirit of /crispy-comments, as an outside perspective that the phrasing introduces no scars, and highlight problems.
 3. Critically evaluate and incorporate the feedback; judgment calls go to the user.
 
-Deliverable 2 — CLI tool:
+Deliverable 2 — CLI tool ([MIND-125](https://linear.app/imbue/issue/MIND-125/minds-specs-cli-implementation)):
 
 1. Delegate a subagent to build the `minds specs` CLI with the features described above, using test-driven development.
 2. Delegate a subagent to write simple, limited documentation for the CLI in the standard, discoverable locations.
 
-Deliverable 3 — Feature migration:
+Deliverable 3 — Feature migration (the skill's sufficiency test, under [MIND-124](https://linear.app/imbue/issue/MIND-124/minds-specs-designskill)):
 
 1. Delegate a Fable subagent to read the skill and the now-obsolete `authentication.md`, complete the migration into `apps/minds/specs/authentication/`, and ground it against the existing tests and code behavior (judgment-based verification only). It does not annotate any tests — the corpus's `witnesses` backlinks are a separate PR.
 
