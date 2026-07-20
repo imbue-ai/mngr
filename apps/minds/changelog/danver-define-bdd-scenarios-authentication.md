@@ -13,3 +13,7 @@ Added the `minds specs` CLI group (`uv run minds specs ...` from the repo root) 
 - `query` emits the same records filtered by `--tag` (exact raw tag or coordinate), `--name`, and `--step` (case-insensitive substrings), combined as AND.
 
 The scanning/validation engine lives in `imbue.minds.core.behavioral_specs` and takes the corpus root as a parameter for testability. Adds the `gherkin-official` dependency (the Cucumber reference parser, the arbiter of spec syntax).
+
+Re-expressed the proof-of-concept `apps/minds/specs/authentication.md` as a corpus in the behavioral-spec language and deleted the old file. `apps/minds/specs/authentication/` now holds `overview.md` (the area's component statement, glossary, and out-of-scope list) plus five feature files -- `signin.feature`, `session.feature`, `landing.feature`, `post-login.feature`, `workspace-bridge.feature` (24 tagged scenarios/outlines) -- and `invariants.feature`, whose eight subtree-scoped Rules carry the old file's cross-cutting invariants. Every unit's coordinate is `authentication.<tag>` (e.g. `authentication.fresh-code`). The old file's traceability appendix and authoring notes were deliberately not carried over: test-to-spec links return as `witnesses` markers in a separate PR.
+
+Added a unit test (`behavioral_specs/corpus_test.py::test_live_corpus_has_no_violations`) asserting that the live corpus at `apps/minds/specs/` always satisfies the spec-language rules.
