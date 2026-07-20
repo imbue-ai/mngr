@@ -1671,6 +1671,7 @@ def render_chrome_page(
     mngr_forward_origin: str = "",
     initial_workspaces: Sequence[dict[str, str]] | None = None,
     agent_iframe_src: str = "about:blank",
+    initial_accent: str = "",
 ) -> str:
     """Render the agent-content wrapper page (title bar + sidebar + content iframe).
 
@@ -1687,6 +1688,11 @@ def render_chrome_page(
     the titlebar). The ``/_chrome`` route validates the requested agent id and
     builds the URL.
 
+    ``initial_accent`` (a ``#rrggbb`` when this wrapper is served for a specific
+    workspace) seeds ``--titlebar-bg`` inline so the first paint of a freshly
+    (re)loaded wrapper already carries the workspace accent, rather than flashing a
+    neutral titlebar until chrome.js is primed. Empty for a workspace-less wrapper.
+
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     is handled by a separate WebContentsView, and the sidebar page is loaded into
     the shared modal WebContentsView when opened.
@@ -1698,6 +1704,7 @@ def render_chrome_page(
         mngr_forward_origin=mngr_forward_origin,
         initial_workspaces=initial_workspaces or [],
         agent_iframe_src=agent_iframe_src,
+        initial_accent=initial_accent,
     )
 
 

@@ -1497,12 +1497,20 @@ function hideBundleContentView(bundle) {
 // Only (re)load it when it isn't already there, so an agent navigation doesn't
 // reload the wrapper (a spurious /_chrome chrome did-navigate would race the
 // content view's accent -- see onChromeNavigate).
-function ensureBundleChromeWrapper(bundle) {
+//
+// ``accentAgentId`` (the workspace we're switching to) is passed as ``?accent``
+// so the server seeds --titlebar-bg inline: the fresh wrapper renderer then
+// paints the accent on its FIRST frame instead of a neutral titlebar until
+// chrome.js is primed on did-finish-load (the white->accent->white->accent
+// titlebar flicker). ``?accent`` only tints the titlebar -- unlike ``?workspace``
+// it never points the (Electron-hidden) content iframe at agent content.
+function ensureBundleChromeWrapper(bundle, accentAgentId) {
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed() || !backendBaseUrl) return;
   let pathname = null;
   try { pathname = new URL(bundle.chromeView.webContents.getURL()).pathname; } catch { pathname = null; }
   if (pathname !== '/_chrome') {
-    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+    const query = accentAgentId ? '?accent=' + encodeURIComponent(accentAgentId) : '';
+    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome' + query);
   }
 }
 
@@ -1531,8 +1539,9 @@ function navigateBundle(bundle, url) {
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
-    updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
-    ensureBundleChromeWrapper(bundle);
+    const accentAgentId = parseAccentSourceAgentId(url);
+    updateBundleAccentAgentId(bundle, accentAgentId);
+    ensureBundleChromeWrapper(bundle, accentAgentId);
     showBundleContentView(bundle);
     bundle.activeSurface = SURFACE_CONTENT;
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {

@@ -788,6 +788,33 @@ def test_chrome_page_iframe_targets_a_workspace_only_for_a_valid_agent_id(tmp_pa
     assert "evil" not in bad.text
 
 
+def test_chrome_page_seeds_the_titlebar_accent_inline_for_a_workspace(tmp_path: Path) -> None:
+    """A wrapper served for a specific workspace seeds ``--titlebar-bg`` inline (an
+    ``<style>:root{...}`` block) so the freshly (re)loaded renderer paints the
+    workspace accent on its FIRST frame instead of flashing a neutral titlebar until
+    chrome.js is primed. Electron passes ``?accent=<id>`` (accent only -- no iframe);
+    the browser's ``?workspace=<id>`` also seeds it. Absent/invalid ids seed
+    nothing."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    valid_agent_id = "agent-00000000000000000000000000000001"
+    seed_marker = "<style>:root {"
+
+    # ?accent seeds the inline titlebar-bg block WITHOUT loading the iframe.
+    accented = client.get(f"/_chrome?accent={valid_agent_id}")
+    assert seed_marker in accented.text
+    # The accent path never points the iframe at agent content.
+    assert 'src="about:blank"' in accented.text
+
+    # The browser's ?workspace path seeds the accent too (alongside the iframe).
+    with_ws = client.get(f"/_chrome?workspace={valid_agent_id}")
+    assert seed_marker in with_ws.text
+
+    # No workspace / a bogus id -> no inline accent seed.
+    assert seed_marker not in client.get("/_chrome").text
+    assert seed_marker not in client.get("/_chrome?accent=..%2Fevil").text
+
+
 def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
     """Titlebar buttons carry data-tooltip labels (rendered as custom tooltips on
     the overlay surface) rather than native title= attributes, plus an aria-label

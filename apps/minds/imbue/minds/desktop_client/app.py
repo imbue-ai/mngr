@@ -1305,12 +1305,30 @@ def _handle_chrome_page() -> Response:
         if agent_id is not None:
             agent_iframe_src = f"{_get_mngr_forward_origin()}/goto/{agent_id}/"
 
+    # Seed the titlebar accent inline so a freshly (re)loaded wrapper paints the
+    # workspace accent on its FIRST frame instead of flashing a neutral titlebar
+    # until chrome.js is primed (the white->accent->white->accent flicker when
+    # navigating to a workspace). Sourced from ``?accent=<id>`` (Electron, which
+    # never loads the iframe) or the ``?workspace=<id>`` the browser wrapper
+    # already carries. Resolved to the workspace's stored color; DEFAULT when
+    # unknown. Both are validated agent ids -- never reflected raw.
+    initial_accent = ""
+    accent_param = request.args.get("accent", "").strip() or workspace_param
+    if accent_param:
+        try:
+            accent_agent_id = AgentId(accent_param)
+        except ValueError:
+            accent_agent_id = None
+        if accent_agent_id is not None:
+            initial_accent = _resolved_workspace_color(backend_resolver, accent_agent_id)
+
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(),
         initial_workspaces=initial_workspaces,
         agent_iframe_src=agent_iframe_src,
+        initial_accent=initial_accent,
     )
     return make_html_response(content=html)
 
