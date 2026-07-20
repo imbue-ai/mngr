@@ -1,3 +1,0 @@
-Fixed: dev-mode launches (`pnpm start` / `just minds-start`) now pass `MINDS_RESTIC_BINARY` to the Python backend, pointing at the pinned restic that the prestart hook already downloads into `apps/minds/resources/restic/`. Previously only packaged builds set it, so from-source backends fell back to `restic` on PATH and backup provisioning failed on any machine without a system restic (macOS devs were masked by brew's).
-
-Fixed: `scripts/ensure-binaries.js` now includes desync in its required-binaries check, so a partially populated `resources/` directory (e.g. from a checkout that predates the desync bundling) gets desync downloaded instead of being skipped.
