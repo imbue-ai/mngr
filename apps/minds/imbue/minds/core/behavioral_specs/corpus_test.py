@@ -1,7 +1,8 @@
 """Tests for behavioral-spec corpus scanning: unit extraction and rule validation.
 
-All corpora are synthetic (built under ``tmp_path`` via ``write_spec_corpus``);
-nothing here reads the live ``apps/minds/specs/`` corpus.
+Corpora are synthetic (built under ``tmp_path`` via ``write_spec_corpus``),
+except in the final test, which guards the live ``apps/minds/specs/`` corpus
+against language violations.
 """
 
 import json
@@ -520,6 +521,20 @@ def test_spec_unit_to_record_serializes_stable_field_order_and_kind_spelling(tmp
     assert rule_record["kind"] == "rule"
     assert rule_record["steps"] == []
     assert rule_record["parent"] is None
+
+
+# The live corpus shipped in this repo (corpus_test.py sits at
+# apps/minds/imbue/minds/core/behavioral_specs/, so parents[4] is apps/minds).
+_LIVE_CORPUS_ROOT = Path(__file__).resolve().parents[4] / "specs"
+
+
+def test_live_corpus_has_no_violations() -> None:
+    """The corpus at ``apps/minds/specs/`` always satisfies the spec-language rules."""
+    scan = scan_corpus(_LIVE_CORPUS_ROOT)
+
+    assert scan.violations == ()
+    # Guard against the root silently pointing at an empty or wrong directory.
+    assert len(scan.units) > 0
 
 
 def test_scan_corpus_rejects_examples_blocks_under_a_plain_scenario(tmp_path: Path) -> None:
