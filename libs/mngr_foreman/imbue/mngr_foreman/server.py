@@ -29,6 +29,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr_foreman.agent_registry import AgentRegistry
 from imbue.mngr_foreman.input_state import detect_blocking_dialog
+from imbue.mngr_foreman.input_state import is_busy_state
 from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
@@ -179,12 +180,17 @@ def create_app(
         # expensive tmux pane capture runs only past this gate.
         agent = registry.get_agent(name)
         if agent is None or agent.type != "claude":
-            return jsonify({"blocked": False, "reason": None, "running": False})
+            return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "state": None})
         state = str(agent.state.value if hasattr(agent.state, "value") else agent.state).upper()
+        # ``busy`` is mngr's authoritative "claude is generating" signal (RUNNING);
+        # the chat page uses it to clear a working dot the transcript tail misreads.
+        busy = is_busy_state(state)
         if state not in ("RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"):
-            return jsonify({"blocked": False, "reason": None, "running": False})
+            return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "state": state})
         reason = detect_blocking_dialog(mngr_ctx, name)
-        return jsonify({"blocked": reason is not None, "reason": reason, "running": True})
+        return jsonify(
+            {"blocked": reason is not None, "reason": reason, "running": True, "busy": busy, "state": state}
+        )
 
     @app.route("/api/agents/<name>/interrupt", methods=["POST"])
     def api_interrupt(name: str) -> ResponseReturnValue:

@@ -65,6 +65,25 @@ _CHOICE_CURSOR_RE = re.compile(r"❯\s*\d+\.")
 _TAIL_LINES = 25
 
 
+def is_busy_state(state: str | None) -> bool:
+    """True when mngr reports claude actively working (its turn in progress).
+
+    mngr promotes an agent to ``RUNNING`` only while the ``active`` marker file
+    exists and the claude process is alive -- the marker is created by claude's
+    UserPromptSubmit hook when a turn starts and removed by the Stop / idle-prompt
+    hooks when it ends (see ``mngr_claude/claude_config.py``). Every other state is
+    *not generating*: ``WAITING`` is idle at the prompt (END_OF_TURN) or blocked on
+    a dialog (PERMISSIONS), and STOPPED / DONE / REPLACED / UNKNOWN are all
+    non-running. So a single ``== RUNNING`` test is the authoritative busy/idle
+    signal that drives the chat page's working dot off (the transcript heuristic
+    turns it on instantly; this turns it off reliably).
+
+    ``RUNNING_UNKNOWN_AGENT_TYPE`` cannot arise for a claude agent (its type is
+    known), so it is deliberately *not* treated as busy here.
+    """
+    return (state or "").upper() == "RUNNING"
+
+
 def classify_blocking_pane(content: str) -> str | None:
     """Return a short reason if the pane shows a blocking dialog, else None.
 

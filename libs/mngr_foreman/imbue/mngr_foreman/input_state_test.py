@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from imbue.mngr_foreman.input_state import classify_blocking_pane
+from imbue.mngr_foreman.input_state import is_busy_state
 
 # A normal, ready claude prompt (not blocked). Mirrors a real capture: a finished
 # assistant turn, then an empty input row and the status bar.
@@ -85,3 +86,37 @@ def test_askuserquestion_menu_detected() -> None:
 def test_choice_cursor_requires_number() -> None:
     # A slash command typed at the prompt ("❯ /login") is not a menu.
     assert classify_blocking_pane("output\n❯ /login\n") is None
+
+
+# ---- is_busy_state: mngr's authoritative busy/idle signal for the working dot ----
+
+
+def test_running_is_busy() -> None:
+    # RUNNING = 'active' marker present + process alive = claude mid-turn.
+    assert is_busy_state("RUNNING") is True
+
+
+def test_running_is_case_insensitive() -> None:
+    # AgentDetails.state may arrive lower/mixed case depending on the enum repr.
+    assert is_busy_state("running") is True
+
+
+def test_waiting_is_idle() -> None:
+    # WAITING = END_OF_TURN (idle at prompt) or PERMISSIONS (blocked) -- not generating.
+    assert is_busy_state("WAITING") is False
+
+
+def test_terminal_states_are_idle() -> None:
+    for state in ("STOPPED", "DONE", "REPLACED", "UNKNOWN"):
+        assert is_busy_state(state) is False
+
+
+def test_running_unknown_agent_type_is_not_busy() -> None:
+    # Cannot arise for a claude agent (type is known); we do not treat the
+    # ambiguous "process up but activity unknown" state as busy.
+    assert is_busy_state("RUNNING_UNKNOWN_AGENT_TYPE") is False
+
+
+def test_none_and_empty_are_idle() -> None:
+    assert is_busy_state(None) is False
+    assert is_busy_state("") is False

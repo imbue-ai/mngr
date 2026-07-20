@@ -261,28 +261,51 @@
       }
     }
 
-    // "Working" indicator: pinned pulsing dot shown while claude is presumably
-    // generating. Heuristic: a user_message or tool_result is the latest input
-    // (claude should respond), or the latest assistant message made tool calls
-    // (more to come). A plain-text assistant message with no tool calls means
-    // the turn completed -> clear it.
+    // "Working" indicator: pinned pulsing dot shown while claude is generating.
+    // Two signals drive it:
+    //  - transcript heuristic (instant ON): a user_message or tool_result is the
+    //    latest input (claude should respond), or the latest assistant message
+    //    made tool calls (more to come). A plain-text assistant message with no
+    //    tool calls means the turn completed -> OFF. This is instant but can mis-
+    //    read the tail (e.g. after an interrupt the last event stays a tool_result
+    //    forever, so the dot would be stuck on).
+    //  - mngr lifecycle state (authoritative OFF): the input-state poll reports
+    //    busy=false whenever mngr sees no 'active' marker -- claude idle at the
+    //    prompt or blocked on a dialog. This clears a dot the heuristic misreads.
+    // mngr's OFF is ignored for a short grace window right after an ON, because
+    // the RUNNING state takes ~1-3s to propagate after a prompt is submitted, and
+    // acting on the pre-flip WAITING would blink the dot off immediately.
+    const MNGR_IDLE_GRACE_MS = 5000;
     let working = false;
+    let workingSince = 0;
     const escBtn = document.getElementById("esc");
     const workingEl = el("div", "working");
     workingEl.hidden = true;
     workingEl.appendChild(el("span", "dot"));
     workingEl.appendChild(el("span", null, "working…"));
 
+    function setWorking(v) {
+      if (v && !working) workingSince = Date.now();
+      working = v;
+    }
     function updateWorkingFrom(ev) {
       if (ev.type === "user_message") {
-        working = true;
+        setWorking(true);
       } else if (ev.type === "tool_result") {
-        working = true;
+        setWorking(true);
       } else if (ev.type === "assistant_message") {
-        if ((ev.tool_calls || []).length > 0) working = true;
-        else if (ev.text && ev.text.trim()) working = false;
+        if ((ev.tool_calls || []).length > 0) setWorking(true);
+        else if (ev.text && ev.text.trim()) setWorking(false);
         // else: empty assistant chunk -> leave state unchanged
       }
+    }
+    // Authoritative OFF from mngr's busy flag (see the input-state poll below).
+    function applyMngrBusy(busy) {
+      if (busy === false && working && Date.now() - workingSince > MNGR_IDLE_GRACE_MS) {
+        setWorking(false);
+        refreshWorking();
+      }
+      // busy === true / null / undefined: leave the transcript heuristic in charge.
     }
     function refreshWorking() {
       workingEl.hidden = !working;
@@ -384,7 +407,10 @@
     function pollInputState() {
       fetch("/api/agents/" + encodeURIComponent(name) + "/input-state")
         .then((r) => r.json())
-        .then((d) => { if (d.blocked) setBlocked(); else clearBlocked(); })
+        .then((d) => {
+          if (d.blocked) setBlocked(); else clearBlocked();
+          applyMngrBusy(d.busy);
+        })
         .catch(() => {});
     }
     function startInputStatePolling() {
