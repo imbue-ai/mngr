@@ -672,6 +672,7 @@ function createBundle() {
     // clobber preErrorUrl -- e.g. the quitting screen loads while isErrorState
     // is false -- leaving nothing to restore the window to on a quit backout.
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+    console.log(`[nav] chrome view committed ${url}`);
     if (parsed.pathname === '/_chrome') return;
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
@@ -716,6 +717,7 @@ function createBundle() {
   chromeView.webContents.on('will-redirect', (event, url) => {
     if (selectSurfaceForUrl(url) === SURFACE_CONTENT) {
       event.preventDefault();
+      console.log(`[nav] chrome-view redirect re-routed to content surface: ${url}`);
       navigateBundle(bundle, url);
     }
   });
@@ -781,6 +783,7 @@ function wireContentViewEvents(bundle, contentView) {
     // Home from the crash page, or Reload succeeded).
     bundle.isContentCrashed = false;
     bundle.crashedFromUrl = null;
+    console.log(`[nav] content view committed ${url}`);
     // A real navigation committed on the agent surface: make sure it is
     // visible. navigateBundle deliberately leaves the view hidden while a
     // workspace loads over the parked about:blank (the /_chrome wrapper is the
@@ -957,6 +960,7 @@ function wireContentViewEvents(bundle, contentView) {
   contentView.webContents.on('will-redirect', (event, url) => {
     if (isBackendOriginUrl(url)) {
       event.preventDefault();
+      console.log(`[nav] content-view redirect re-routed to chrome surface: ${url}`);
       navigateBundle(bundle, url);
     }
   });
@@ -1194,6 +1198,11 @@ function ensureBundleChromeWrapper(bundle) {
 function navigateBundle(bundle, url) {
   if (!bundle || bundle.window.isDestroyed() || !url) return;
   const absolute = toAbsoluteUrl(url);
+  // One line per routed navigation: which surface the URL resolved to. Cheap
+  // (navigations are user-driven) and the primary breadcrumb when debugging
+  // "clicked X, nothing happened" reports -- silence here means the click
+  // never reached main.
+  console.log(`[nav] ${selectSurfaceForUrl(absolute)} <- ${absolute}`);
   if (selectSurfaceForUrl(absolute) === SURFACE_CONTENT) {
     const targetAgentId = parseWorkspaceId(absolute);
     const existing = findBundleForWorkspace(targetAgentId);
