@@ -28,6 +28,7 @@ from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr_foreman.agent_registry import AgentRegistry
+from imbue.mngr_foreman.input_state import detect_blocking_dialog
 from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
@@ -171,6 +172,19 @@ def create_app(
             logger.info("Message to {} failed: {}", name, e)
             return jsonify({"ok": False, "error": str(e)}), 502
         return jsonify({"ok": True})
+
+    @app.route("/api/agents/<name>/input-state")
+    def api_input_state(name: str) -> ResponseReturnValue:
+        # Cheap gate first: only a running claude agent can show a dialog. The
+        # expensive tmux pane capture runs only past this gate.
+        agent = registry.get_agent(name)
+        if agent is None or agent.type != "claude":
+            return jsonify({"blocked": False, "reason": None, "running": False})
+        state = str(agent.state.value if hasattr(agent.state, "value") else agent.state).upper()
+        if state not in ("RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"):
+            return jsonify({"blocked": False, "reason": None, "running": False})
+        reason = detect_blocking_dialog(mngr_ctx, name)
+        return jsonify({"blocked": reason is not None, "reason": reason, "running": True})
 
     @app.route("/api/agents/<name>/interrupt", methods=["POST"])
     def api_interrupt(name: str) -> ResponseReturnValue:

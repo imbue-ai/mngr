@@ -20,7 +20,10 @@
   </div>
   <div class="composer" id="composer" hidden>
     <div class="send-error" id="send-error" hidden></div>
-    <div class="inner">
+    <div class="composer-blocked" id="composer-blocked" hidden>
+      interactive prompt — <a id="blocked-termlink" href="#">open terminal ›</a>
+    </div>
+    <div class="inner" id="composer-inner">
       <textarea id="input" rows="1" placeholder="message…" autocomplete="off"></textarea>
       <button id="send">send</button>
       <button id="esc" class="esc-btn" title="Send Escape (stop generating)">Esc</button>

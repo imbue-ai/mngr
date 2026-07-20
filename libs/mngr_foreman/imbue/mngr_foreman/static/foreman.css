@@ -188,6 +188,21 @@ a:hover { text-decoration: underline; }
 }
 .send-error a { color: var(--accent); }
 
+/* composer greyed when a blocking dialog occupies the agent's TUI */
+.composer.blocked .inner { opacity: 0.4; pointer-events: none; }
+.composer-blocked {
+  max-width: 900px;
+  margin: 0 auto 8px;
+  padding: 8px 11px;
+  background: var(--bg-inset);
+  border: 1px solid var(--chip-wait);
+  border-radius: 8px;
+  color: var(--chip-wait);
+  font-size: 13px;
+}
+.composer-blocked[hidden] { display: none; }
+.composer-blocked a { color: var(--accent); }
+
 .status-line { color: var(--fg-faint); font-size: 12px; padding: 8px 0; text-align: center; }
 .unsupported { color: var(--fg-dim); padding: 30px 14px; text-align: center; }
 

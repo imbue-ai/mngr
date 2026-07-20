@@ -360,6 +360,46 @@
     const input = document.getElementById("input");
     const sendBtn = document.getElementById("send");
     const sendErr = document.getElementById("send-error");
+    const composerBlocked = document.getElementById("composer-blocked");
+    const blockedTermlink = document.getElementById("blocked-termlink");
+    const termUrl = "/a/" + encodeURIComponent(name) + "/terminal";
+    if (blockedTermlink) blockedTermlink.href = termUrl;
+
+    // ---- blocking-dialog state: one generic greyed state, point at terminal ----
+    let blocked = false;
+    function setBlocked() {
+      blocked = true;
+      composer.classList.add("blocked");
+      if (composerBlocked) composerBlocked.hidden = false;
+    }
+    function clearBlocked() {
+      blocked = false;
+      composer.classList.remove("blocked");
+      if (composerBlocked) composerBlocked.hidden = true;
+    }
+
+    // Poll the input-state endpoint lazily: only while the tab is visible.
+    // A single tmux pane capture over SSH per poll; paused when hidden.
+    let pollTimer = null;
+    function pollInputState() {
+      fetch("/api/agents/" + encodeURIComponent(name) + "/input-state")
+        .then((r) => r.json())
+        .then((d) => { if (d.blocked) setBlocked(); else clearBlocked(); })
+        .catch(() => {});
+    }
+    function startInputStatePolling() {
+      if (pollTimer || document.hidden) return;
+      pollInputState();
+      pollTimer = setInterval(pollInputState, 4000);
+    }
+    function stopInputStatePolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopInputStatePolling();
+      else startInputStatePolling();
+    });
+    startInputStatePolling();
 
     function autoGrow() {
       input.style.height = "auto";
@@ -389,8 +429,13 @@
           if (ok && d.ok) {
             input.value = "";
             autoGrow();
+            clearBlocked();
           } else {
-            showError((d && d.error) || "send failed. Try the terminal page (phase 2) for blocking prompts.");
+            const err = (d && d.error) || "send failed — open the terminal to resolve any prompt.";
+            showError(err);
+            // A failed send usually means a blocking dialog ate the paste; flip
+            // to the greyed state immediately (the next poll re-confirms/clears).
+            setBlocked();
           }
         })
         .catch((e) => showError("network error: " + e))
