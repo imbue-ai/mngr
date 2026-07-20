@@ -127,6 +127,8 @@ _SHARED_MARKERS: Final[list[str]] = [
     "acceptance: marks tests as requiring network access, Modal credentials, etc. These are required to pass in CI",
     "release: marks tests as being required for release (but not for merging PRs)",
     "flaky: marks tests as known-flaky (retried by offload with a separate retry count)",
+    "witnesses(coordinate, partial=None): marks a test as verifying the behavioral-spec unit at the given"
+    " coordinate (see the minds-behavioral-specs skill); partial= notes what the test does not cover",
 ]
 
 # Additional markers registered by projects via register_marker().
