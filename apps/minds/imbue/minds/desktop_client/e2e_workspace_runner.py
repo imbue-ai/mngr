@@ -41,6 +41,7 @@ from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
+from playwright.sync_api import Playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -98,6 +99,14 @@ _BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
 # failures still surface.
 _CDP_CONNECT_TIMEOUT_MS: Final[float] = 60_000.0
 _ELECTRON_LAUNCH_ATTEMPTS: Final[int] = 3
+# A cross-origin main-frame navigation that lands while a CDP session is
+# already attached (Electron process-swaps the renderer -- the chrome view's
+# file://shell.html -> http://<backend>/ boot handoff) can leave the connected
+# Playwright client holding a page object frozen on the pre-swap URL forever.
+# A FRESH connection re-enumerates targets with their current URLs, so the
+# attach phase waits for the backend page in short rounds and reconnects
+# between rounds instead of trusting one session for the full budget.
+_PICK_ROUND_SECONDS: Final[int] = 20
 _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
@@ -485,6 +494,36 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     )
 
 
+def _connect_and_pick_content_page(playwright: Playwright, debug_port: int, timeout_seconds: int) -> tuple[Browser, Page]:
+    """Attach to Electron's CDP endpoint and return ``(browser, content_page)``.
+
+    Wraps ``connect_over_cdp`` + :func:`_pick_content_page` in short rounds
+    with a FRESH connection per round: a cross-origin main-frame navigation
+    that lands while a session is already attached (the chrome view's
+    file://shell.html -> http://<backend>/ boot handoff process-swaps the
+    renderer) can leave the connected client's page object frozen on the
+    pre-swap URL forever, while a fresh connection enumerates targets with
+    their current URLs. The caller owns (and must close) the returned browser.
+
+    Raises ``PlaywrightError`` / ``TimeoutError`` exactly like its two halves,
+    so callers' launch-flake handling is unchanged.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS)
+        remaining = deadline - time.monotonic()
+        round_seconds = min(_PICK_ROUND_SECONDS, max(1, int(remaining)))
+        try:
+            return browser, _pick_content_page(browser, round_seconds)
+        except TimeoutError:
+            browser.close()
+            if remaining <= _PICK_ROUND_SECONDS:
+                raise
+            logger.info(
+                "No backend page visible after a {}s round; reconnecting for a fresh target snapshot", round_seconds
+            )
+
+
 def _backend_origin_from_page(page: Page) -> str:
     """Extract ``http://localhost:<backend_port>`` from a content-view page URL.
 
@@ -784,20 +823,13 @@ def _attempt_create_workspace_via_electron(
         with sync_playwright() as playwright:
             try:
                 _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
-                browser = playwright.chromium.connect_over_cdp(
-                    f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
-                )
+                browser, page = _connect_and_pick_content_page(playwright, debug_port, _BACKEND_READY_TIMEOUT_SECONDS)
             except (PlaywrightError, TimeoutError) as exc:
                 raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
             # Always disconnect the browser once it is open, regardless of which
-            # phase fails: picking the content page is still part of the attach
-            # phase (a wedged-launch flake -> ``_ElectronConnectError``), while a
-            # create-flow failure is a real test failure that must propagate.
+            # phase fails: a create-flow failure is a real test failure that
+            # must propagate (the attach phase above is the launch-flake part).
             try:
-                try:
-                    page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
-                except (PlaywrightError, TimeoutError) as exc:
-                    raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
                 # Surface renderer console/JS errors into the run log so a stuck
                 # create step (creating.js handlers not attaching) is diagnosable.
                 _attach_renderer_diagnostics(page)
@@ -845,8 +877,8 @@ def electron_app_session(
             with sync_playwright() as playwright:
                 try:
                     _wait_for_cdp(attempt_port, _CDP_READY_TIMEOUT_SECONDS)
-                    browser = playwright.chromium.connect_over_cdp(
-                        f"http://127.0.0.1:{attempt_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
+                    browser, page = _connect_and_pick_content_page(
+                        playwright, attempt_port, _BACKEND_READY_TIMEOUT_SECONDS
                     )
                 except (PlaywrightError, TimeoutError) as exc:
                     last_error = _ElectronConnectError(f"Electron CDP attach failed on port {attempt_port}: {exc}")
@@ -858,17 +890,6 @@ def electron_app_session(
                     )
                     continue
                 try:
-                    try:
-                        page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
-                    except (PlaywrightError, TimeoutError) as exc:
-                        last_error = _ElectronConnectError(f"Electron CDP attach failed on port {attempt_port}: {exc}")
-                        logger.warning(
-                            "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
-                            attempt,
-                            _ELECTRON_LAUNCH_ATTEMPTS,
-                            last_error,
-                        )
-                        continue
                     _attach_renderer_diagnostics(page)
                     yield browser, page
                     return
