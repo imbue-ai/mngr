@@ -159,7 +159,9 @@ from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import extract_latest_codex_version
 from imbue.mngr_codex.codex_config import get_codex_auth_path
+from imbue.mngr_codex.codex_config import RUST_LOG_VALUE
 from imbue.mngr_codex.codex_config import get_codex_config_path
+from imbue.mngr_codex.codex_config import get_codex_tui_log_dir
 from imbue.mngr_codex.codex_config import get_codex_global_instructions_path
 from imbue.mngr_codex.codex_config import get_codex_home
 from imbue.mngr_codex.codex_config import get_codex_hooks_path
@@ -612,6 +614,7 @@ class CodexAgent(
             approval_policy=approval_policy,
             trusted_projects=[canonical_work_dir],
             config_overrides=self.agent_config.config_overrides,
+            log_dir=str(get_codex_tui_log_dir(codex_home)),
         )
         config_path = get_codex_config_path(codex_home)
         with log_span("Writing per-agent codex config to {}", config_path):
@@ -944,9 +947,13 @@ class CodexAgent(
         extra_str = (" " + " ".join(extra_args)) if extra_args else ""
 
         background_cmd = self._build_background_tasks_command()
-        mkdir_cmd = f"mkdir -p {shlex.quote(str(codex_home))}"
+        # Make the TUI-log dir too, so codex's file layer can open the heartbeat log.
+        mkdir_cmd = f"mkdir -p {shlex.quote(str(get_codex_tui_log_dir(codex_home)))}"
         cd_cmd = f"cd {shlex.quote(str(self.work_dir))}"
-        home_prefix = f"env CODEX_HOME={shlex.quote(str(codex_home))}"
+        # RUST_LOG=...,codex_otel=info makes codex write `codex.sse_event` delta lines
+        # into the TUI log (log_dir is set in config.toml); the system_interface tails
+        # those to drive "Thinking...". CODEX_HOME points codex at the per-agent home.
+        home_prefix = f"env CODEX_HOME={shlex.quote(str(codex_home))} RUST_LOG={shlex.quote(RUST_LOG_VALUE)}"
 
         # Resume the root conversation via `codex resume <id>`, shell-evaluated
         # because the stored command is replayed on each restart. `set --` / "$@"

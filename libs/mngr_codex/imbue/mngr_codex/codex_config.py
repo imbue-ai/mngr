@@ -328,6 +328,28 @@ def _tomlkit_to_plain_dict(value: Any) -> dict[str, Any]:
 
 
 @pure
+# Codex's plaintext TUI log -- the source of the ``codex.sse_event`` heartbeat that
+# the system_interface uses to drive the "Thinking..." indicator (codex's lifecycle
+# state is unreliable for that; the sse deltas are the real "generating now" signal).
+# We point ``log_dir`` at a DEDICATED subdir of CODEX_HOME rather than the default
+# ($CODEX_HOME/log), because codex deletes the default log file on every startup
+# (remove_legacy_tui_log_file) -- a custom dir is left alone. The tailer reads
+# ``<codex_home>/<TUI_LOG_DIR_NAME>/<TUI_LOG_FILENAME>``.
+TUI_LOG_DIR_NAME: str = "tui_log"
+TUI_LOG_FILENAME: str = "codex-tui.log"
+_LOG_DIR_KEY: str = "log_dir"
+
+# RUST_LOG for the codex process: the default tracing targets PLUS ``codex_otel=info``,
+# which is what makes codex emit ``codex.sse_event`` delta lines into the TUI log.
+# Setting RUST_LOG replaces codex's fallback wholesale, so the defaults are re-listed.
+RUST_LOG_VALUE: str = "codex_core=info,codex_tui=info,codex_rmcp_client=info,codex_otel=info"
+
+
+def get_codex_tui_log_dir(codex_home: Path) -> Path:
+    """Return the dedicated TUI-log directory under ``codex_home`` (codex's log_dir)."""
+    return codex_home / TUI_LOG_DIR_NAME
+
+
 def build_codex_config(
     *,
     model: str | None,
@@ -336,6 +358,7 @@ def build_codex_config(
     approval_policy: str | None,
     trusted_projects: Sequence[str],
     config_overrides: Mapping[str, Any],
+    log_dir: str | None = None,
 ) -> dict[str, Any]:
     """Build a per-agent ``config.toml`` body (low -> high precedence).
 
@@ -371,6 +394,8 @@ def build_codex_config(
         config["sandbox_mode"] = sandbox_mode
     if approval_policy is not None:
         config["approval_policy"] = approval_policy
+    if log_dir is not None:
+        config[_LOG_DIR_KEY] = log_dir
     config["notice"] = dict(_NOTICE_SUPPRESSORS)
 
     projects: dict[str, Any] = {}
