@@ -20,10 +20,13 @@ contextBridge.exposeInMainWorld('minds', {
   // Content events (forwarded from main process)
   // Instant local navigation: main asks the persistent chrome shell to swap a
   // hub page in place (fetch + #local-page-root replacement) instead of a full
-  // chrome-view load. See chrome.js's swap engine.
+  // chrome-view load. See chrome.js's swap engine. ``shellReady`` is the
+  // handshake chrome.js sends once its swap listener is registered, so main
+  // never dispatches a swap into a document that cannot hear it.
   onSwapLocalPage: (callback) => {
     ipcRenderer.on('swap-local-page', (_event, url) => callback(url));
   },
+  shellReady: () => ipcRenderer.send('shell-ready'),
   onContentURLChange: (callback) => {
     ipcRenderer.on('content-url-changed', (_event, url) => callback(url));
   },

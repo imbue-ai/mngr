@@ -1247,7 +1247,17 @@ function loadLocalIntoChrome(bundle, absolute) {
   const wc = bundle.chromeView.webContents;
   let pathname = null;
   try { pathname = new URL(absolute).pathname; } catch { pathname = null; }
-  if (pathname && isSwappableLocalPath(pathname) && chromeViewHasShell(bundle)) {
+  // Mirror the renderer's canSwapTo: the CURRENT page must also be a hub page
+  // (an excluded page always leaves via a full navigation for its document
+  // lifecycle), so we don't dispatch a swap the renderer will refuse and then
+  // burn the watchdog grace period on its fallback.
+  let currentPathname = null;
+  try { currentPathname = new URL(wc.getURL()).pathname; } catch { currentPathname = null; }
+  if (
+    pathname && isSwappableLocalPath(pathname)
+    && currentPathname && isSwappableLocalPath(currentPathname)
+    && chromeViewHasShell(bundle)
+  ) {
     wc.send('swap-local-page', absolute);
     if (bundle.pendingSwapTimer) clearTimeout(bundle.pendingSwapTimer);
     bundle.pendingSwapUrl = absolute;

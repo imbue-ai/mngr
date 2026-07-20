@@ -494,13 +494,21 @@
   // redirect when warranted. Called from the displayed-workspace sources
   // (``onCurrentWorkspaceChanged`` in Electron, the URL-poll in browser mode)
   // but NOT from the accent-only call paths.
+  // The last agent that was actually displayed, surviving the null gaps local
+  // screens introduce (visiting a workspace's settings nulls the displayed
+  // workspace, then revealing it re-sets it). The recovery-redirect lock is
+  // cleared only when the user moves to a DIFFERENT workspace -- not on every
+  // reveal of the same one -- otherwise a settings <-> workspace flip during a
+  // stuck episode yanks the user to recovery on every single return.
+  var lastDisplayedAgentId = null;
   function setDisplayedWorkspaceAgentId(agentId) {
-    if (currentTitleAgentId !== agentId && agentId) {
-      // Agent identity changed -- clear the recovery-redirect lock so a
-      // user who navigates back to a still-stuck workspace gets bounced
-      // to recovery again instead of landing on the 503 page.
+    if (agentId && lastDisplayedAgentId !== agentId) {
+      // Genuinely different workspace -- re-arm its once-per-episode
+      // recovery redirect so a still-stuck workspace bounces to recovery
+      // instead of landing on the 503 page.
       delete redirectedAgents[agentId];
     }
+    if (agentId) lastDisplayedAgentId = agentId;
     currentTitleAgentId = agentId || null;
     if (currentTitleAgentId) maybeRedirectToRecovery();
   }
@@ -634,6 +642,9 @@
     // Instant local navigation: main asks the shell to swap a hub page in
     // place instead of a full chrome-view load. Falls back to a real
     // navigation when the swap can't run (not a shell page, fetch failure).
+    // The shell-ready handshake tells main this listener exists, so a swap is
+    // never dispatched into a document that cannot hear it (e.g. a click
+    // milliseconds after a full page load, before deferred scripts ran).
     if (window.minds.onSwapLocalPage) {
       window.minds.onSwapLocalPage(function (url) {
         if (canSwapTo(url)) {
@@ -642,6 +653,7 @@
           window.location = url;
         }
       });
+      if (window.minds.shellReady) window.minds.shellReady();
     }
     // In Electron mode the current workspace is authoritative via IPC: main.js
     // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
