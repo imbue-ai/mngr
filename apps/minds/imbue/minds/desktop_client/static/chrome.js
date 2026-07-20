@@ -56,10 +56,11 @@
   // scripts never rebuild -- no white flash, no breadcrumb blink, ~instant.
   // Mirrors isSwappableLocalPath in electron/surface-routing.js (this script
   // cannot require it); keep the two lists in sync. Pages excluded from the
-  // list (welcome, creating, destroying, recovery, auth, help, full-page
-  // sharing) do FULL navigations so their timers / pollers / SSE
-  // subscriptions get a real document lifecycle. A swapped-out page receives
-  // a ``minds:page-teardown`` window event to close its own live resources.
+  // list (welcome, creating, destroying, auth, help, full-page sharing) do
+  // FULL navigations so their timers / pollers / SSE subscriptions get a
+  // real document lifecycle. A swapped-out page receives a
+  // ``minds:page-teardown`` window event to close its own live resources;
+  // swappable pages with loops (the landing list, recovery) guard them on it.
   function isSwappablePath(pathname) {
     if (!pathname) return false;
     return (
@@ -69,15 +70,19 @@
       || pathname === '/accounts'
       || pathname === '/_chrome'
       || /^\/workspace\/agent-[a-f0-9]+\/settings$/i.test(pathname)
+      // Recovery is swappable: its poll loops are minds:page-teardown-guarded
+      // and its card CSS lives in the page body, so hub <-> recovery hops (a
+      // flapping workspace's most common transition) keep the titlebar intact.
+      || /^\/agents\/agent-[a-f0-9]+\/recovery$/i.test(pathname)
     );
   }
   function canSwapTo(url) {
     // Only same-origin hub pages, only when this document carries the swap
     // containers, and -- crucially -- only when the CURRENT page is itself a
     // hub page: swapping out of an excluded page (creating, destroying,
-    // recovery, welcome) would leave its auto-navigating timers/pollers alive
-    // in the persistent document. Those pages always leave via a full
-    // navigation, which tears their document down properly.
+    // welcome) would leave its auto-navigating timers/pollers alive in the
+    // persistent document. Those pages always leave via a full navigation,
+    // which tears their document down properly.
     if (!document.getElementById('local-page-root')) return false;
     if (!isSwappablePath(window.location.pathname)) return false;
     try {

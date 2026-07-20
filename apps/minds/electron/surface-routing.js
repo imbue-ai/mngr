@@ -90,6 +90,11 @@ function isSwappableLocalPath(pathname) {
     || pathname === '/accounts'
     || pathname === '/_chrome'
     || /^\/workspace\/agent-[a-f0-9]+\/settings$/i.test(pathname)
+    // Recovery flips to/from the workspace wrapper constantly while a
+    // workspace flaps; swapping it keeps the titlebar from blinking on every
+    // hop. Its poll loops carry minds:page-teardown guards (see
+    // _RECOVERY_SCRIPT in templates.py).
+    || /^\/agents\/agent-[a-f0-9]+\/recovery$/i.test(pathname)
   );
 }
 

@@ -14,6 +14,7 @@ const {
   parseWorkspaceId,
   parseAccentSourceAgentId,
   selectSurfaceForUrl,
+  isSwappableLocalPath,
   SURFACE_CONTENT,
   SURFACE_CHROME,
 } = require('../../electron/surface-routing');
@@ -72,6 +73,33 @@ test('selectSurfaceForUrl: agent content -> content view; every trusted local pa
     '/auth/login',
   ]) {
     assert.equal(selectSurfaceForUrl(BASE + path), SURFACE_CHROME, `${path} should be chrome`);
+  }
+});
+
+test('isSwappableLocalPath: hub pages (including recovery) swap in place; lifecycle pages need full navigations', () => {
+  for (const path of [
+    '/',
+    '/create',
+    '/settings',
+    '/accounts',
+    '/_chrome',
+    `/workspace/${AGENT}/settings`,
+    // Recovery is swappable: its poll loops are minds:page-teardown-guarded, so
+    // the constant hub <-> recovery hops of a flapping workspace keep the
+    // titlebar intact instead of blinking on every full load.
+    `/agents/${AGENT}/recovery`,
+  ]) {
+    assert.equal(isSwappableLocalPath(path), true, `${path} should be swappable`);
+  }
+  for (const path of [
+    '/welcome',
+    `/creating/${AGENT}`,
+    `/destroying/${AGENT}`,
+    '/auth/login',
+    '/help',
+    `/sharing/${AGENT}/code`,
+  ]) {
+    assert.equal(isSwappableLocalPath(path), false, `${path} should require a full navigation`);
   }
 });
 

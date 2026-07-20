@@ -1086,6 +1086,13 @@ _RECOVERY_SCRIPT: Final[str] = """\
 
         var latestHealth = null;
 
+        // Set when the chrome shell swaps this page out in place (recovery is a
+        // swappable page; there is no document teardown). Every poll loop and
+        // navigation below checks it so a departed recovery page can neither
+        // keep polling nor navigate the shell out from under the current page.
+        var pageTornDown = false;
+        window.addEventListener('minds:page-teardown', function () { pageTornDown = true; }, { once: true });
+
         // The background convergence/healthy polls below run on this cadence.
         // 1000ms matches the mngr_forward proxy loader's poll interval, keeping
         // the two loading pages a user may see during recovery in lockstep, and
@@ -1170,15 +1177,29 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // to the shell bridge, which loads it into the caged content view. In a
         // plain browser (no bridge) follow the server's healthy 302 as before.
         function goToWorkspace() {
+          if (pageTornDown) return;
           if (window.minds && window.minds.navigateContent && returnTo) {
             window.minds.navigateContent(returnTo);
           } else {
             window.location.assign(pollUrl());
           }
         }
+        // Re-render the recovery route's current state. In the desktop shell
+        // this routes through the bridge so the shell swaps the page in place
+        // (no full load, no titlebar rebuild); a plain browser reloads.
+        function rerenderState() {
+          if (pageTornDown) return;
+          if (window.minds && window.minds.navigateContent) {
+            window.minds.navigateContent(pollUrl());
+          } else {
+            window.location.assign(pollUrl());
+          }
+        }
         function scheduleRefresh() {
           setTimeout(function () {
+            if (pageTornDown) return;
             fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' }).then(function (resp) {
+              if (pageTornDown) return;
               if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
                 goToWorkspace();
                 return;
@@ -1187,7 +1208,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
                 scheduleRefresh();
                 return;
               }
-              window.location.assign(pollUrl());
+              rerenderState();
             }, function () {
               scheduleRefresh();
             });
@@ -1204,7 +1225,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // the user back to the now-recovered workspace.
         function scheduleHealthyPoll() {
           setTimeout(function () {
+            if (pageTornDown) return;
             fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual' }).then(function (resp) {
+              if (pageTornDown) return;
               if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
                 goToWorkspace();
                 return;
@@ -1225,7 +1248,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // there is no return_to to go home to.
         var healthyPollArmed = false;
         function armHealthyPoll() {
-          if (healthyPollArmed || !returnTo) return;
+          if (healthyPollArmed || !returnTo || pageTornDown) return;
           healthyPollArmed = true;
           scheduleHealthyPoll();
         }
@@ -1242,6 +1265,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         var INDETERMINATE_REPROBE_MS = 8000;
         function scheduleIndeterminateReprobe(autoDispatch) {
           setTimeout(function () {
+            if (pageTornDown) return;
             fetchHealth().then(function (data) { applyHealth(data, autoDispatch); }, function () {
               scheduleIndeterminateReprobe(autoDispatch);
             });
@@ -1388,6 +1412,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // arrives as the ``indeterminate`` tier -- handled below as a live
         // "reconnecting" state rather than a verdict.
         function applyHealth(data, autoDispatch) {
+          if (pageTornDown) return;
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;

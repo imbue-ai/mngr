@@ -481,6 +481,14 @@ function createBundleWebContentsViews(win) {
   // first paint lands; the default background is transparent, which would
   // briefly show the accent through.)
   contentView.setBackgroundColor('#ffffff');
+  // Commit a real (blank) document immediately. A WebContentsView that has
+  // NEVER navigated exposes a CDP page target with no committed document, and
+  // Playwright's connect_over_cdp hangs forever initializing that target --
+  // which deterministically broke the e2e harness's attach once keep-alive
+  // residency stopped blanking this view on local-page navigations (before
+  // that, the first local nav's about:blank load masked this). A pending
+  // real navigation (workspace restore) simply supersedes this load.
+  contentView.webContents.loadURL('about:blank').catch(() => {});
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
   // The content view hosts agent content ONLY, and is shown only while the
@@ -1678,6 +1686,13 @@ function createBundleOverlayView(bundle) {
   // Transparent so each hosted overlay's own dim backdrop reveals the workspace
   // behind it instead of an opaque rectangle.
   modal.setBackgroundColor('#00000000');
+  // Commit a real (blank) document immediately: the warm host page cannot load
+  // until the backend is up (loadOverlayHost no-ops without backendBaseUrl),
+  // and a never-navigated WebContents exposes a CDP page target that hangs
+  // Playwright's connect_over_cdp initialization forever -- the e2e harness
+  // attaches during startup, before the backend is ready. loadOverlayHost's
+  // later real load simply supersedes this. (Same fix as the content view.)
+  modal.webContents.loadURL('about:blank').catch(() => {});
   // Hidden until an overlay is opened: a full-window view would otherwise
   // capture every pointer event over the window (Electron has no per-view
   // click-through), so it must not be visible while idle.
