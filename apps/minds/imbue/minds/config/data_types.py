@@ -1,7 +1,6 @@
 import json
 from enum import auto
 from pathlib import Path
-from typing import Annotated
 from typing import Final
 
 from pydantic import AnyUrl
@@ -12,6 +11,7 @@ from pydantic import model_validator
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.errors import DeployLifecycleConfigError
 from imbue.minds.errors import MalformedMngrOutputError
@@ -307,7 +307,7 @@ class PlanQuotasConfig(FrozenModel):
     max_services_per_tunnel: NonNegativeInt = Field(description="Max forwarded services per tunnel")
     max_buckets: NonNegativeInt = Field(description="Max R2 buckets")
     max_total_bucket_gb: NonNegativeInt = Field(description="Max total GB across all the account's buckets")
-    monthly_llm_spend_usd: Annotated[float, Field(ge=0)] = Field(
+    monthly_llm_spend_usd: NonNegativeFloat = Field(
         description="Monthly LLM spend cap in USD (rolling; 0 disables imbue-cloud key minting)"
     )
     max_active_synced_workspaces: NonNegativeInt = Field(description="Max ACTIVE synced workspace records")
