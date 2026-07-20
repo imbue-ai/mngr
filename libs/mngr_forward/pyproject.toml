@@ -23,6 +23,11 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[dependency-groups]
+dev = [
+    "imbue-mngr-specs==0.1.0",
+]
+
 [project.entry-points.mngr]
 forward = "imbue.mngr_forward.plugin"
 
@@ -36,6 +41,7 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
+imbue-mngr-specs = { workspace = true }
 imbue-common = { workspace = true }
 concurrency-group = { workspace = true }
 
