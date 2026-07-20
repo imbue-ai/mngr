@@ -8,8 +8,9 @@ and collects every language violation as data rather than raising. Callers
 decide what to do with violations (the ``minds specs`` CLI prints them).
 
 The gherkin parser returns plain nested dicts; the private ``_Gherkin*``
-pydantic models below mirror exactly the subset of the AST this module
-consumes, so the rest of the code works with typed, validated objects.
+pydantic models (in ``_gherkin.py``, shared with ``export.py``) mirror
+exactly the subset of the AST this package consumes, so the rest of the code
+works with typed, validated objects.
 """
 
 import re
@@ -18,118 +19,24 @@ from typing import Any
 from typing import Final
 from typing import assert_never
 
-from gherkin.errors import CompositeParserException
-from gherkin.errors import ParserError
-from gherkin.parser import Parser
-from gherkin.token_matcher import TokenMatcher
-from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.minds.core.behavioral_specs._gherkin import _GherkinBackground
+from imbue.minds.core.behavioral_specs._gherkin import _GherkinDocument
+from imbue.minds.core.behavioral_specs._gherkin import _GherkinRule
+from imbue.minds.core.behavioral_specs._gherkin import _GherkinScenario
+from imbue.minds.core.behavioral_specs._gherkin import _GherkinStep
+from imbue.minds.core.behavioral_specs._gherkin import _GherkinTag
+from imbue.minds.core.behavioral_specs._gherkin import _parse_feature_file
 from imbue.minds.core.behavioral_specs.data_types import CorpusScan
 from imbue.minds.core.behavioral_specs.data_types import SpecStep
 from imbue.minds.core.behavioral_specs.data_types import SpecUnit
 from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
 from imbue.minds.core.behavioral_specs.data_types import SpecViolation
 from imbue.minds.errors import SpecCorpusRootNotFoundError
-
-
-class _GherkinNode(FrozenModel):
-    """Base for pydantic mirrors of gherkin AST nodes; unknown AST fields are ignored."""
-
-    model_config = ConfigDict(frozen=True, extra="ignore", arbitrary_types_allowed=False)
-
-
-class _GherkinLocation(_GherkinNode):
-    """Line/column position of an AST node in its source file."""
-
-    line: int = Field(description="1-based source line")
-
-
-class _GherkinTag(_GherkinNode):
-    """A tag as written in the source, including the '@' sigil."""
-
-    location: _GherkinLocation = Field(description="Position of the tag")
-    name: str = Field(description="Tag text including the leading '@'")
-
-
-class _GherkinStep(_GherkinNode):
-    """A single step line of a scenario or background."""
-
-    location: _GherkinLocation = Field(description="Position of the step")
-    keyword: str = Field(description="Step keyword as parsed, with trailing space (e.g. 'Given ')")
-    text: str = Field(description="Step text after the keyword")
-
-
-class _GherkinExamples(_GherkinNode):
-    """An Examples block of a Scenario Outline."""
-
-    location: _GherkinLocation = Field(description="Position of the Examples header")
-    tags: tuple[_GherkinTag, ...] = Field(description="Tags on the Examples block")
-    keyword: str = Field(description="Examples keyword as parsed")
-
-
-class _GherkinScenario(_GherkinNode):
-    """A Scenario or Scenario Outline node."""
-
-    location: _GherkinLocation = Field(description="Position of the declaration header")
-    tags: tuple[_GherkinTag, ...] = Field(description="Tags on the unit")
-    keyword: str = Field(description="Declaration keyword as parsed")
-    name: str = Field(description="Unit name after the keyword")
-    steps: tuple[_GherkinStep, ...] = Field(description="Steps of the unit in order")
-    examples: tuple[_GherkinExamples, ...] = Field(description="Examples blocks (Scenario Outline only)")
-
-
-class _GherkinBackground(_GherkinNode):
-    """A Background node (never a unit; carried only for keyword validation)."""
-
-    location: _GherkinLocation = Field(description="Position of the declaration header")
-    keyword: str = Field(description="Declaration keyword as parsed")
-    steps: tuple[_GherkinStep, ...] = Field(description="Steps of the background in order")
-
-
-class _GherkinRuleChild(_GherkinNode):
-    """One child envelope of a Rule: exactly one of background/scenario is set."""
-
-    background: _GherkinBackground | None = Field(default=None, description="Background child, if this is one")
-    scenario: _GherkinScenario | None = Field(default=None, description="Scenario child, if this is one")
-
-
-class _GherkinRule(_GherkinNode):
-    """A Rule node."""
-
-    location: _GherkinLocation = Field(description="Position of the declaration header")
-    tags: tuple[_GherkinTag, ...] = Field(description="Tags on the Rule")
-    keyword: str = Field(description="Declaration keyword as parsed")
-    name: str = Field(description="Rule name after the keyword")
-    children: tuple[_GherkinRuleChild, ...] = Field(description="Child envelopes in document order")
-
-
-class _GherkinFeatureChild(_GherkinNode):
-    """One child envelope of a Feature: exactly one of background/scenario/rule is set."""
-
-    background: _GherkinBackground | None = Field(default=None, description="Background child, if this is one")
-    scenario: _GherkinScenario | None = Field(default=None, description="Scenario child, if this is one")
-    rule: _GherkinRule | None = Field(default=None, description="Rule child, if this is one")
-
-
-class _GherkinFeature(_GherkinNode):
-    """The Feature node of a document."""
-
-    location: _GherkinLocation = Field(description="Position of the Feature header")
-    tags: tuple[_GherkinTag, ...] = Field(description="Tags on the Feature")
-    language: str = Field(description="Dialect the document was parsed with (e.g. 'en')")
-    keyword: str = Field(description="Feature keyword as parsed")
-    name: str = Field(description="Feature name after the keyword")
-    children: tuple[_GherkinFeatureChild, ...] = Field(description="Child envelopes in document order")
-
-
-class _GherkinDocument(_GherkinNode):
-    """A parsed gherkin document."""
-
-    feature: _GherkinFeature | None = Field(default=None, description="The Feature, or None for an empty document")
 
 
 # A kebab-case name: lowercase letters/digits in groups separated by single hyphens.
@@ -456,38 +363,6 @@ def _check_no_language_header(source_text: str, file: Path, violations: list[Spe
                     is_unit_omitted=False,
                 )
             )
-
-
-def _parse_feature_file(
-    feature_file: Path,
-    source_text: str,
-    violations: list[SpecViolation],
-) -> _GherkinDocument | None:
-    """Parse one .feature file, recording parse failures as violations and returning None for them."""
-    try:
-        parsed = Parser().parse(source_text, TokenMatcher())
-    except CompositeParserException as exc:
-        for parse_error in exc.errors:
-            violations.append(
-                SpecViolation(
-                    file=feature_file,
-                    line=parse_error.location["line"],
-                    message=f"gherkin parse error: {parse_error}; the file's units were omitted from records",
-                    is_unit_omitted=True,
-                )
-            )
-        return None
-    except ParserError as exc:
-        violations.append(
-            SpecViolation(
-                file=feature_file,
-                line=None,
-                message=f"gherkin parse error: {exc}; the file's units were omitted from records",
-                is_unit_omitted=True,
-            )
-        )
-        return None
-    return _GherkinDocument.model_validate(parsed)
 
 
 @pure
