@@ -5,14 +5,19 @@
 (function () {
   var isElectron = !!window.minds;
 
-  // A trusted local/native page (Landing, Create, Settings, ...) now renders its
+  // A trusted local/native page (Landing, Create, Settings, ...) renders its
   // own body directly under the titlebar via ChromeShell and has NO
   // #content-frame -- it IS the main frame, so navigation is full-page rather
   // than driving a child iframe (browser) or the content WebContentsView. The
   // agent-wrapper page (pages.Chrome) and the Electron chrome view both carry a
   // #content-frame; a local page does not. This holds in both browser and
-  // Electron mode, so it is the single signal for "am I a local page".
-  var isLocalPage = !document.getElementById('content-frame');
+  // Electron mode. A FUNCTION (not a boot-time constant) because the swap
+  // engine below can exchange the page body in place -- including swapping the
+  // wrapper's iframe in or out -- so the answer can change over this
+  // document's lifetime.
+  function isLocalPage() {
+    return !document.getElementById('content-frame');
+  }
 
   // ``mngr forward`` plugin's bare origin (e.g. ``http://localhost:8421``).
   // Workspace links (``/goto/<agent>/``) target the plugin, not minds.
@@ -43,6 +48,128 @@
   // synchronous lookup. The contrasting titlebar foreground is derived
   // from the accent in pure CSS (``.titlebar-surface`` in app.css), not here.
 
+  // -- Local page swap engine ------------------------------------------------
+  //
+  // The chrome shell document is PERSISTENT for the hub pages: navigating
+  // among them fetches the target page and swaps #local-page-root +
+  // #local-page-scripts in place (then pushState), so the titlebar and shell
+  // scripts never rebuild -- no white flash, no breadcrumb blink, ~instant.
+  // Mirrors isSwappableLocalPath in electron/surface-routing.js (this script
+  // cannot require it); keep the two lists in sync. Pages excluded from the
+  // list (welcome, creating, destroying, recovery, auth, help, full-page
+  // sharing) do FULL navigations so their timers / pollers / SSE
+  // subscriptions get a real document lifecycle. A swapped-out page receives
+  // a ``minds:page-teardown`` window event to close its own live resources.
+  function isSwappablePath(pathname) {
+    if (!pathname) return false;
+    return (
+      pathname === '/'
+      || pathname === '/create'
+      || pathname === '/settings'
+      || pathname === '/accounts'
+      || pathname === '/_chrome'
+      || /^\/workspace\/agent-[a-f0-9]+\/settings$/i.test(pathname)
+    );
+  }
+  function canSwapTo(url) {
+    // Only same-origin hub pages, only when this document carries the swap
+    // containers, and -- crucially -- only when the CURRENT page is itself a
+    // hub page: swapping out of an excluded page (creating, destroying,
+    // recovery, welcome) would leave its auto-navigating timers/pollers alive
+    // in the persistent document. Those pages always leave via a full
+    // navigation, which tears their document down properly.
+    if (!document.getElementById('local-page-root')) return false;
+    if (!isSwappablePath(window.location.pathname)) return false;
+    try {
+      var u = new URL(url, window.location.href);
+      return u.origin === window.location.origin && isSwappablePath(u.pathname);
+    } catch (e) {
+      return false;
+    }
+  }
+  var swapSeq = 0;
+  function swapLocalPage(url, opts) {
+    var seq = ++swapSeq;
+    return fetch(url, { credentials: 'same-origin' }).then(function (resp) {
+      if (!resp.ok) throw new Error('swap fetch HTTP ' + resp.status);
+      return resp.text();
+    }).then(function (htmlText) {
+      if (seq !== swapSeq) return; // superseded by a newer swap
+      var doc = new DOMParser().parseFromString(htmlText, 'text/html');
+      var newRoot = doc.getElementById('local-page-root');
+      var newScripts = doc.getElementById('local-page-scripts');
+      var curRoot = document.getElementById('local-page-root');
+      var curScripts = document.getElementById('local-page-scripts');
+      if (!newRoot || !curRoot) throw new Error('swap target not a shell page');
+      // Let the outgoing page close its live resources (SSE, intervals).
+      try { window.dispatchEvent(new Event('minds:page-teardown')); } catch (e) {}
+      document.title = doc.title || 'Minds';
+      document.documentElement.className = doc.documentElement.className;
+      // Adopt the page's body classes/style but preserve the live modal-open
+      // marker main toggles for drag-region handling.
+      var modalOpen = document.body.classList.contains('modal-open');
+      document.body.className = doc.body.className;
+      if (modalOpen) document.body.classList.add('modal-open');
+      document.body.style.cssText = doc.body.style.cssText;
+      curRoot.replaceWith(document.adoptNode(newRoot));
+      if (curScripts) curScripts.remove();
+      // Scripts inserted via innerHTML/adopt don't execute: re-create each one
+      // in order (src scripts awaited so page-script order is preserved).
+      var container = document.createElement('div');
+      container.id = 'local-page-scripts';
+      container.style.display = 'none';
+      document.body.appendChild(container);
+      var chain = Promise.resolve();
+      if (newScripts) {
+        Array.prototype.slice.call(newScripts.querySelectorAll('script')).forEach(function (old) {
+          chain = chain.then(function () {
+            return new Promise(function (resolve) {
+              var s = document.createElement('script');
+              for (var i = 0; i < old.attributes.length; i++) {
+                s.setAttribute(old.attributes[i].name, old.attributes[i].value);
+              }
+              if (old.src) {
+                s.onload = resolve;
+                s.onerror = resolve;
+                container.appendChild(s);
+              } else {
+                s.textContent = old.textContent;
+                container.appendChild(s);
+                resolve();
+              }
+            });
+          });
+        });
+      }
+      return chain.then(function () {
+        if (seq !== swapSeq) return;
+        if (!(opts && opts.fromHistory)) {
+          try { history.pushState({ mindsSwap: true }, '', url); } catch (e) {}
+        }
+        applyModeSetup();
+        window.scrollTo(0, 0);
+        var u = new URL(url, window.location.href);
+        lastContentUrl = u.pathname + u.search;
+        applyTitlebarContext();
+        // Local pages derive their accent from their own path; the wrapper's
+        // accent is owned by the Electron main pushes (and was seeded
+        // server-side via the ?accent= param).
+        if (u.pathname !== '/_chrome') {
+          applyTitleAccent(accentSourceFromPath(u.pathname));
+        }
+      });
+    });
+  }
+  // Browser-mode history traversal across swapped entries.
+  window.addEventListener('popstate', function () {
+    var target = window.location.pathname + window.location.search;
+    if (canSwapTo(target)) {
+      swapLocalPage(target, { fromHistory: true }).catch(function () {
+        window.location.reload();
+      });
+    }
+  });
+
   // -- Navigation adapter ---------------------------------------------------
   function navigateContent(url) {
     // Optimistically re-derive the titlebar context from the target URL so
@@ -53,12 +180,19 @@
     lastContentUrl = url;
     applyTitlebarContext();
     if (isElectron) window.minds.navigateContent(url);
-    else if (isLocalPage) window.location = url;
-    else document.getElementById('content-frame').src = url;
+    else if (isLocalPage()) {
+      if (canSwapTo(url)) {
+        swapLocalPage(url).catch(function () { window.location = url; });
+      } else {
+        window.location = url;
+      }
+    } else {
+      document.getElementById('content-frame').src = url;
+    }
   }
   function goBack() {
     if (isElectron) window.minds.contentGoBack();
-    else if (isLocalPage) window.history.back();
+    else if (isLocalPage()) window.history.back();
     else { try { document.getElementById('content-frame').contentWindow.history.back(); } catch (e) {} }
   }
 
@@ -434,15 +568,23 @@
     else navigateContent('/inbox?keep_open=1');
   };
 
+  // Electron-mode setup for the CURRENT page body: the agent-wrapper hides its
+  // iframe (the content is a separate WebContentsView) and the browser-mode
+  // switcher backdrop. Re-run after every swap -- a freshly swapped-in wrapper
+  // carries a fresh (unhidden) iframe.
+  function applyModeSetup() {
+    if (!isElectron) return;
+    var electronContentFrame = document.getElementById('content-frame');
+    if (electronContentFrame) electronContentFrame.style.display = 'none';
+    var backdrop = document.getElementById('sidebar-backdrop');
+    if (backdrop) backdrop.style.display = 'none';
+  }
+
   if (isElectron) {
     document.getElementById('min-btn').onclick = function () { window.minds.minimize(); };
     document.getElementById('max-btn').onclick = function () { window.minds.maximize(); };
     document.getElementById('close-btn').onclick = function () { window.minds.close(); };
-    // The agent-wrapper page hides its iframe in Electron (the content is a
-    // separate WebContentsView); a local page has no #content-frame to hide.
-    var electronContentFrame = document.getElementById('content-frame');
-    if (electronContentFrame) electronContentFrame.style.display = 'none';
-    document.getElementById('sidebar-backdrop').style.display = 'none';
+    applyModeSetup();
   } else {
     // Browser mode: backdrop click outside the panel + Escape close the
     // sidebar, matching the Electron sidebar's behavior.
@@ -460,27 +602,45 @@
   // by Chrome.jinja), which is the same script the overlay's modal pages use.
 
   // -- Title + URL tracking -------------------------------------------------
-  if (isLocalPage) {
+  if (isLocalPage()) {
     // A trusted local page IS the chrome view/page's own document (there is no
     // #content-frame and no separate content WebContentsView). Derive the
     // titlebar breadcrumb + accent from OUR OWN location: main pushes
     // ``content-url-changed`` only for the agent content surface, and a local
     // page never displays a workspace, so the displayed-workspace /
     // recovery-redirect lock stays null. Runs identically in Electron and the
-    // browser; each full-page navigation among local routes re-runs this
-    // script, and (in Electron) the SSE ``workspaces`` tick replays the accent
-    // once its color cache is primed (see handleChromeEvent).
+    // browser (the server may have pre-rendered the same context, in which
+    // case this is a no-op repaint); swapped-in pages get the equivalent from
+    // the swap engine, and (in Electron) the SSE ``workspaces`` tick replays
+    // the accent once its color cache is primed (see handleChromeEvent).
     lastContentUrl = window.location.pathname;
     applyTitlebarContext();
     applyTitleAccent(accentSourceFromPath(window.location.pathname));
-  } else if (isElectron) {
+  }
+  if (isElectron) {
     // The titlebar's breadcrumb / icon-tabs / contextual back arrow track the
     // content view's URL, which main pushes on every navigation (and replays
     // when this chrome view (re)loads, via primeViewWithCachedChromeState).
+    // Subscribed regardless of the CURRENT body (local page vs wrapper): the
+    // persistent shell can swap between them, and main's intended-surface
+    // gating means pushes only arrive when the content surface owns the
+    // titlebar.
     if (window.minds.onContentURLChange) {
       window.minds.onContentURLChange(function (url) {
         lastContentUrl = url || null;
         applyTitlebarContext();
+      });
+    }
+    // Instant local navigation: main asks the shell to swap a hub page in
+    // place instead of a full chrome-view load. Falls back to a real
+    // navigation when the swap can't run (not a shell page, fetch failure).
+    if (window.minds.onSwapLocalPage) {
+      window.minds.onSwapLocalPage(function (url) {
+        if (canSwapTo(url)) {
+          swapLocalPage(url).catch(function () { window.location = url; });
+        } else {
+          window.location = url;
+        }
       });
     }
     // In Electron mode the current workspace is authoritative via IPC: main.js
@@ -510,9 +670,10 @@
     window.minds.onAccentChanged(function (agentId) {
       applyTitleAccent(agentId || null);
     });
-  } else {
+  } else if (!isLocalPage()) {
     setInterval(function () {
       try {
+        if (isLocalPage()) return;
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
         if (lastContentUrl !== loc) {
           lastContentUrl = loc;

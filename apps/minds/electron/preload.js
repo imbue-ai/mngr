@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld('minds', {
   contentGoBack: () => ipcRenderer.send('content-go-back'),
 
   // Content events (forwarded from main process)
+  // Instant local navigation: main asks the persistent chrome shell to swap a
+  // hub page in place (fetch + #local-page-root replacement) instead of a full
+  // chrome-view load. See chrome.js's swap engine.
+  onSwapLocalPage: (callback) => {
+    ipcRenderer.on('swap-local-page', (_event, url) => callback(url));
+  },
   onContentURLChange: (callback) => {
     ipcRenderer.on('content-url-changed', (_event, url) => callback(url));
   },

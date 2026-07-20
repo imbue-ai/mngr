@@ -73,10 +73,31 @@ function selectSurfaceForUrl(url) {
   return parseWorkspaceId(url) ? SURFACE_CONTENT : SURFACE_CHROME;
 }
 
+// The chrome surface's HUB pages, swappable in-place inside the persistent
+// chrome shell document (fetch-and-swap of #local-page-root) so the titlebar
+// never rebuilds and navigation between them is instant. Deliberately a small
+// allowlist: transitional / live-machinery pages (welcome, creating,
+// destroying, recovery, auth, help, the full sharing page) do FULL navigations
+// so their timers, pollers, and SSE subscriptions get a real document
+// lifecycle. chrome.js mirrors this list (it cannot require this module);
+// keep the two in sync.
+function isSwappableLocalPath(pathname) {
+  if (!pathname) return false;
+  return (
+    pathname === '/'
+    || pathname === '/create'
+    || pathname === '/settings'
+    || pathname === '/accounts'
+    || pathname === '/_chrome'
+    || /^\/workspace\/agent-[a-f0-9]+\/settings$/i.test(pathname)
+  );
+}
+
 module.exports = {
   parseWorkspaceId,
   parseAccentSourceAgentId,
   selectSurfaceForUrl,
+  isSwappableLocalPath,
   SURFACE_CONTENT,
   SURFACE_CHROME,
 };

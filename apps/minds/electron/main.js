@@ -17,6 +17,7 @@ const {
   parseWorkspaceId,
   parseAccentSourceAgentId,
   selectSurfaceForUrl,
+  isSwappableLocalPath,
   SURFACE_CONTENT,
 } = require('./surface-routing');
 
@@ -616,6 +617,10 @@ function createBundle() {
     // Snapshot of contentWorkspaceReady taken when the workspace was parked
     // behind a local page, restored on reveal (see navigateBundle).
     parkedWorkspaceReady: false,
+    // In-flight in-place swap dispatched to the chrome shell, with its
+    // lost-swap fallback timer (see loadLocalIntoChrome / onChromeNavigate).
+    pendingSwapUrl: null,
+    pendingSwapTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
     // Whether the content view is currently displaying a REACHABLE workspace
@@ -692,6 +697,20 @@ function createBundle() {
     // is false -- leaving nothing to restore the window to on a quit backout.
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
     console.log(`[nav] chrome view committed ${url}`);
+    // Confirm a dispatched in-place swap (its pushState lands here as
+    // did-navigate-in-page) so the lost-swap fallback timer stands down.
+    if (bundle.pendingSwapUrl) {
+      try {
+        const pending = new URL(bundle.pendingSwapUrl);
+        if (parsed.pathname === pending.pathname && parsed.search === pending.search) {
+          bundle.pendingSwapUrl = null;
+          if (bundle.pendingSwapTimer) {
+            clearTimeout(bundle.pendingSwapTimer);
+            bundle.pendingSwapTimer = null;
+          }
+        }
+      } catch { /* noop */ }
+    }
     if (parsed.pathname === '/_chrome') return;
     // A commit from a SUPERSEDED navigation (the user flipped surfaces before
     // this page finished loading) must not clobber the newer navigation's
@@ -1203,6 +1222,53 @@ function contentViewHoldsWorkspace(bundle, agentId) {
   return parseWorkspaceId(view.webContents.getURL()) === agentId;
 }
 
+// Whether the chrome view currently hosts a live backend-served shell document
+// (able to receive swap-local-page IPC). A full load in flight means no
+// reliable listener, so callers fall back to a real navigation.
+function chromeViewHasShell(bundle) {
+  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed() || !backendBaseUrl) return false;
+  const wc = bundle.chromeView.webContents;
+  if (wc.isLoading()) return false;
+  try {
+    return new URL(wc.getURL()).origin === new URL(backendBaseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+// Drive the chrome view to a local URL: swap the page in place inside the
+// persistent shell when possible (hub pages -- instant, titlebar untouched),
+// else a full load. A dispatched swap is watched: if no commit for it arrives
+// within the grace period (shell mid-teardown so the IPC had no listener, or
+// the renderer died between check and dispatch), fall back to a full load so
+// a navigation is never silently lost.
+function loadLocalIntoChrome(bundle, absolute) {
+  if (!bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
+  const wc = bundle.chromeView.webContents;
+  let pathname = null;
+  try { pathname = new URL(absolute).pathname; } catch { pathname = null; }
+  if (pathname && isSwappableLocalPath(pathname) && chromeViewHasShell(bundle)) {
+    wc.send('swap-local-page', absolute);
+    if (bundle.pendingSwapTimer) clearTimeout(bundle.pendingSwapTimer);
+    bundle.pendingSwapUrl = absolute;
+    bundle.pendingSwapTimer = setTimeout(() => {
+      if (
+        bundle.pendingSwapUrl === absolute
+        && !bundle.window.isDestroyed()
+        && bundle.chromeView
+        && !bundle.chromeView.webContents.isDestroyed()
+      ) {
+        console.warn(`[nav] swap not confirmed in time; full-loading ${absolute}`);
+        bundle.chromeView.webContents.loadURL(absolute).catch(() => {});
+      }
+    }, 1500);
+  } else {
+    // Load failures surface via onChromeNavigate / the error takeover; the
+    // rejected promise alone would just print an unhandled-rejection warning.
+    wc.loadURL(absolute).catch(() => {});
+  }
+}
+
 // The most recent SSE-carried accent color for ``agentId``, or null. Used to
 // seed the /_chrome wrapper's titlebar color server-side so its first paint is
 // already workspace-tinted (no neutral-then-accent pop-in while the wrapper's
@@ -1237,9 +1303,9 @@ function ensureBundleChromeWrapper(bundle) {
   if (pathname !== '/_chrome' || bundle.chromeView.webContents.isLoading()) {
     const accent = accentColorForAgent(bundle.currentAccentAgentId);
     const url = backendBaseUrl + '/_chrome' + (accent ? '?accent=' + encodeURIComponent(accent) : '');
-    // Load failures surface via onChromeNavigate / the error takeover; the
-    // rejected promise alone would just print an unhandled-rejection warning.
-    bundle.chromeView.webContents.loadURL(url).catch(() => {});
+    // Swapped in place when the persistent shell is live (instant, titlebar
+    // untouched); full load otherwise (startup, crash recovery).
+    loadLocalIntoChrome(bundle, url);
   }
 }
 
@@ -1374,10 +1440,11 @@ function navigateBundle(bundle, url) {
   updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(absolute));
   hideBundleContentView(bundle);
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    // A local page that server-redirects to agent content is re-routed by the
-    // chrome view's will-redirect guard (which cancels this load, rejecting
-    // the promise); other failures surface via onChromeNavigate never firing.
-    bundle.chromeView.webContents.loadURL(absolute).catch(() => {});
+    // Hub pages swap in place inside the persistent shell (instant, titlebar
+    // untouched); everything else full-loads. A local page that
+    // server-redirects to agent content is re-routed by the chrome view's
+    // will-redirect guard.
+    loadLocalIntoChrome(bundle, absolute);
   }
   closeModal(bundle);
 }

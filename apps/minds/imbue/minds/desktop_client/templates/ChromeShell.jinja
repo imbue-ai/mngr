@@ -1,4 +1,4 @@
-{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, accent="", body_class="", body_style="", head="", scripts="" #}
+{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, accent="", crumb_workspace_name="", crumb_agent_id="", active_tab="", page_label="", show_back=False, body_class="", body_style="", head="", scripts="" #}
 {#
   Shared trusted app shell: the fixed breadcrumb titlebar + browser-mode floating
   workspace switcher + accent / chrome.js wiring, wrapping a page body passed in
@@ -21,6 +21,21 @@
   scope) so a workspace-scoped page's first paint already carries the right
   titlebar color -- no neutral-then-accent pop-in while chrome.js waits for the
   SSE color cache. chrome.js repaints live changes on top exactly as before.
+
+  The titlebar CONTEXT can likewise be rendered server-side so the first paint
+  already shows the right breadcrumb instead of flashing the bare home state
+  until chrome.js derives it: ``crumb_workspace_name`` + ``crumb_agent_id`` +
+  ``active_tab`` ('workspace' | 'settings') pre-open the workspace crumb, or
+  ``page_label`` pre-fills the "/ page-name" crumb; ``show_back`` unhides the
+  contextual back arrow. chrome.js re-derives the same values from the URL at
+  boot (idempotent -- no visual change), and owns every later update.
+
+  For instant navigation among the hub pages, the page body is wrapped in
+  ``#local-page-root`` and the page's own scripts in ``#local-page-scripts``:
+  chrome.js's swap engine fetches a target hub page, swaps root + scripts in
+  place, and pushState's -- the shell (titlebar, shell scripts) persists. A
+  swapped-out page receives a ``minds:page-teardown`` window event to close
+  any live resources (SSE, intervals).
 
   ``is_mac`` (traffic-light spacer + hidden window controls) and
   ``mngr_forward_origin`` (the body data attribute chrome.js reads to build
@@ -82,7 +97,14 @@
 <script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/chrome.js" defer></script>
 {%- if scripts %}
+{# The page's OWN scripts, containered so the swap engine can replace and
+   re-execute them per swapped-in page (shell scripts above run once).
+   display:none keeps the div out of layout; scripts execute regardless. #}
+<div id="local-page-scripts" style="display: none">
 {{ scripts }}
+</div>
+{%- else %}
+<div id="local-page-scripts" style="display: none"></div>
 {%- endif %}
 {% endset %}
 <Base :title="title"
@@ -122,24 +144,24 @@
          (display:none !important), never a ``hidden`` class: these elements
          carry ``flex`` / ``inline-flex`` display classes that would beat a
          ``.hidden`` utility in the cascade (see Badge.jinja's note). #}
-      <TitlebarButton id="back-btn" aria-label="Back" data-tooltip="Back" hidden><Icon16 name="chevron-left" /></TitlebarButton>
+      <TitlebarButton id="back-btn" aria-label="Back" data-tooltip="Back" :hidden="not show_back"><Icon16 name="chevron-left" /></TitlebarButton>
       <TitlebarButton id="home-btn" aria-label="Home" data-tooltip="Home" extra="gap-1.5 pr-2">
         <Icon16 name="home" />
         <span class="type-label">Minds</span>
       </TitlebarButton>
-      <div id="ws-crumb" class="flex items-center gap-0.5 min-w-0" hidden>
+      <div id="ws-crumb" class="flex items-center gap-0.5 min-w-0"{% if not crumb_agent_id %} hidden{% endif %}>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>
         <TitlebarButton id="workspace-switcher-btn" aria-label="Switch workspace" data-tooltip="Switch workspace" extra="gap-1 min-w-0">
-          <span id="workspace-switcher-name" class="type-label truncate max-w-[180px]"></span>
+          <span id="workspace-switcher-name" class="type-label truncate max-w-[180px]"{% if crumb_agent_id %} data-agent-id="{{ crumb_agent_id }}"{% endif %}>{{ crumb_workspace_name }}</span>
           <Icon16 name="chevron-down-small" extra="shrink-0" />
         </TitlebarButton>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>
-        <TitlebarButton id="ws-tab-workspace" aria-label="Workspace" data-tooltip="Workspace"><Icon16 name="panels-top-left" /></TitlebarButton>
-        <TitlebarButton id="ws-tab-settings" aria-label="Workspace Settings" data-tooltip="Workspace Settings"><Icon16 name="settings" /></TitlebarButton>
+        <TitlebarButton id="ws-tab-workspace" aria-label="Workspace" data-tooltip="Workspace" :extra="'bg-fill-active' if active_tab == 'workspace' else ''" :aria-current="'page' if active_tab == 'workspace' else false"><Icon16 name="panels-top-left" /></TitlebarButton>
+        <TitlebarButton id="ws-tab-settings" aria-label="Workspace Settings" data-tooltip="Workspace Settings" :extra="'bg-fill-active' if active_tab == 'settings' else ''" :aria-current="'page' if active_tab == 'settings' else false"><Icon16 name="settings" /></TitlebarButton>
       </div>
-      <div id="page-crumb" class="flex items-center gap-0.5 min-w-0" hidden>
+      <div id="page-crumb" class="flex items-center gap-0.5 min-w-0"{% if not page_label %} hidden{% endif %}>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>
-        <span id="page-crumb-name" class="type-label text-primary truncate max-w-[240px] px-1"></span>
+        <span id="page-crumb-name" class="type-label text-primary truncate max-w-[240px] px-1">{{ page_label }}</span>
       </div>
     </div>
     <div class="flex items-center justify-end shrink-0">
@@ -176,5 +198,12 @@
     </div>
   </div>
 
-  {{ content }}
+  {# The swappable page body. chrome.js's swap engine replaces this element
+     (and #local-page-scripts) in place for hub-page navigation, leaving the
+     titlebar + switcher + shell scripts untouched. ``display: contents`` keeps
+     it layout-transparent so pages whose body classes flex-center their
+     content (Creating, Welcome, ...) are unaffected by the extra wrapper. #}
+  <div id="local-page-root" style="display: contents">
+    {{ content }}
+  </div>
 </Base>

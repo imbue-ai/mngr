@@ -524,7 +524,7 @@
   })();
 </script>
 {% endset %}
-<PageNarrowContainer title="Create a workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+<PageNarrowContainer title="Create a workspace" page_label="New workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
   {# Submission is a JS fetch to POST /api/v1/workspaces (the same create front
      door agents use); see the submit handler in the scripts block. The form
      element keeps the field layout + native required-field validation. #}

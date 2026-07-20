@@ -115,6 +115,9 @@
 {% endset %}
 <ChromeShell title={{ "Settings: " ~ ws_name }}
       :accent="current_color"
+      :crumb_workspace_name="ws_name"
+      :crumb_agent_id="agent_id"
+      active_tab="settings"
       body_class="bg-surface-primary text-primary font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>

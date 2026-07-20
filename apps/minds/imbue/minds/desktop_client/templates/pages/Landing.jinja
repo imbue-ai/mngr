@@ -296,7 +296,13 @@
       var el2 = document.querySelector('[data-providers-last-snapshot]');
       if (el2) el2.textContent = relativeAgo(lastFullSnapshotAt);
     }
-    setInterval(tickFreshness, 1000);
+    var freshnessTimer = setInterval(tickFreshness, 1000);
+    // The chrome shell swaps this page out in place for hub navigation (no
+    // document teardown), announcing it with ``minds:page-teardown``: stop the
+    // interval so a departed landing page doesn't keep ticking.
+    window.addEventListener('minds:page-teardown', function () {
+      clearInterval(freshnessTimer);
+    }, { once: true });
 
     function badgeClassForStatus(status) {
       if (status === 'ok') return 'bg-success/15 text-success';
@@ -615,7 +621,20 @@
     loadBackupStatus();
 
     var es = null;
+    // Set when the chrome shell swaps this page out in place (no document
+    // teardown): stops the SSE reconnect loop and closes the stream so a
+    // departed landing page can't keep listening -- or worse, fire its
+    // stale ``location.reload()`` while another page is showing.
+    var pageTornDown = false;
+    window.addEventListener('minds:page-teardown', function () {
+      pageTornDown = true;
+      if (es) {
+        es.close();
+        es = null;
+      }
+    }, { once: true });
     function connect() {
+      if (pageTornDown) return;
       if (es) es.close();
       es = new EventSource('/_chrome/events');
       es.onmessage = function (event) {
@@ -675,7 +694,7 @@
         if (!es) return;
         es.close();
         es = null;
-        setTimeout(connect, 5000);
+        if (!pageTornDown) setTimeout(connect, 5000);
       };
     }
     // Reconcile each row with its server-seeded liveness before the SSE opens.
@@ -903,7 +922,13 @@
         <div class="flex items-center justify-center min-h-[80vh]">
           <p class="text-tertiary text-center">Discovering agents...</p>
         </div>
-        <script>setTimeout(function() { location.reload(); }, 2000);</script>
+        <script>
+          (function () {
+            var t = setTimeout(function () { location.reload(); }, 2000);
+            // Cancelled if the chrome shell swaps this page out in place first.
+            window.addEventListener('minds:page-teardown', function () { clearTimeout(t); }, { once: true });
+          })();
+        </script>
       {% else %}
         <div class="text-center py-12">
           <p class="text-tertiary mb-6">No workspaces yet</p>
