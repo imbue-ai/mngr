@@ -163,6 +163,11 @@
     // immediately in purple, then swaps to a normal user bubble once it lands in
     // the transcript. Each entry: { text, node }.
     const pendingQueued = [];
+    // The upload token: "[FILE: ./chat_uploads/<uuid>.<ext>]". Captured group 1
+    // is the stored name. Used to render chips in the transcript and to delete a
+    // whole token on backspace. Build a fresh RegExp per use to reset lastIndex.
+    const FILE_TOKEN_SRC = "\\[FILE:\\s*\\./chat_uploads/([A-Za-z0-9._-]+)\\]";
+    const IMAGE_EXTS = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1, svg: 1 };
 
     function atBottom() {
       return window.innerHeight + window.scrollY >= document.body.offsetHeight - 80;
@@ -328,7 +333,7 @@
     // delivery, then resolveQueued swaps it for the normal user bubble.
     function addQueued(text) {
       const node = el("div", "entry user queued");
-      node.appendChild(document.createTextNode(text));
+      renderUserContent(node, text);
       tEl.appendChild(node);
       pendingQueued.push({ text: text, node: node });
       refreshWorking(); // keep the working dot pinned below the new bubble
@@ -358,6 +363,58 @@
       return details;
     }
 
+    // Full-screen image overlay (tap a transcript image thumbnail to expand).
+    function openLightbox(url) {
+      const ov = el("div", "lightbox");
+      const img = el("img");
+      img.src = url;
+      ov.appendChild(img);
+      ov.addEventListener("click", function () { ov.remove(); });
+      document.body.appendChild(ov);
+    }
+
+    // A [FILE: ...] token rendered as a chip: image -> inline thumbnail (tap to
+    // expand); other files -> an icon+name link to the serve endpoint.
+    function fileChip(storedName) {
+      const url = "/api/agents/" + encodeURIComponent(name) + "/upload/" + encodeURIComponent(storedName);
+      const ext = (storedName.split(".").pop() || "").toLowerCase();
+      if (IMAGE_EXTS[ext]) {
+        const wrap = el("span", "file-chip img-chip");
+        const img = el("img");
+        img.src = url;
+        img.alt = storedName;
+        img.loading = "lazy";
+        img.addEventListener("click", function () { openLightbox(url); });
+        img.addEventListener("error", function () {
+          wrap.className = "file-chip missing";
+          wrap.textContent = "[missing file]";
+        });
+        wrap.appendChild(img);
+        return wrap;
+      }
+      const a = el("a", "file-chip file-doc");
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.appendChild(el("span", "fc-icon", "FILE"));
+      a.appendChild(el("span", "fc-name", storedName));
+      return a;
+    }
+
+    // Render user text, replacing [FILE: ...] tokens with chips (text in between
+    // is preserved). Used for both delivered and queued user messages.
+    function renderUserContent(container, text) {
+      const re = new RegExp(FILE_TOKEN_SRC, "g");
+      let last = 0;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > last) container.appendChild(document.createTextNode(text.slice(last, m.index)));
+        container.appendChild(fileChip(m[1]));
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) container.appendChild(document.createTextNode(text.slice(last)));
+    }
+
     function renderEvent(ev) {
       const wasBottom = atBottom();
       if (ev.type === "user_message") {
@@ -365,7 +422,7 @@
         // placeholder -- the real delivered message renders normally below.
         resolveQueued(ev.content || "");
         const e = el("div", "entry user");
-        e.appendChild(document.createTextNode(ev.content || ""));
+        renderUserContent(e, ev.content || "");
         tEl.appendChild(e);
       } else if (ev.type === "framework_message") {
         tEl.appendChild(frameworkEl(ev));
@@ -545,6 +602,15 @@
     if (escBtn) escBtn.addEventListener("click", sendInterrupt);
 
     input.addEventListener("keydown", (e) => {
+      // A backspace/forward-delete adjacent to a [FILE: ...] token removes the
+      // whole token (and its file) in one keystroke -- only for a collapsed caret;
+      // a range selection deletes normally.
+      if ((e.key === "Backspace" || e.key === "Delete") && input.selectionStart === input.selectionEnd) {
+        if (maybeDeleteToken(e.key === "Backspace")) {
+          e.preventDefault();
+          return;
+        }
+      }
       // Enter sends; Shift+Enter newline. On touch keyboards Enter inserts a
       // newline (no reliable modifier), so rely on the send button there.
       if (e.key === "Enter" && !e.shiftKey && !isTouch()) {
@@ -639,16 +705,45 @@
       chip.title = "upload failed: " + msg;
       if (!chip.querySelector(".err-badge")) chip.appendChild(el("div", "err-badge", "failed"));
     }
+    // Drop an upload's thumbnail + revoke its preview + rm the remote file. Does
+    // NOT touch the textarea (callers that removed the token themselves use this).
+    function dropUploadByName(storedName) {
+      const entry = uploads.get(storedName);
+      if (entry) {
+        if (entry.chip && entry.chip.parentNode) entry.chip.parentNode.removeChild(entry.chip);
+        if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
+        uploads.delete(storedName);
+        showStrip();
+      }
+      // Best-effort delete of the remote file (also covers manually-typed tokens).
+      fetch("/api/agents/" + encodeURIComponent(name) + "/upload/" + encodeURIComponent(storedName), { method: "DELETE" }).catch(() => {});
+    }
+    // X button on the strip: remove the token from the textarea too, then drop.
     function removeUpload(storedName) {
       const entry = uploads.get(storedName);
-      if (!entry) return;
-      removeTokenFromInput(entry.token);
-      if (entry.chip && entry.chip.parentNode) entry.chip.parentNode.removeChild(entry.chip);
-      if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
-      uploads.delete(storedName);
-      showStrip();
-      // Best-effort delete of the remote file.
-      fetch("/api/agents/" + encodeURIComponent(name) + "/upload/" + encodeURIComponent(storedName), { method: "DELETE" }).catch(() => {});
+      if (entry) removeTokenFromInput(entry.token);
+      dropUploadByName(storedName);
+    }
+    // Backspace/forward-delete deletes a whole [FILE: ...] token in one keystroke
+    // when the caret sits inside or against it. Returns true if it handled the key.
+    function maybeDeleteToken(isBackspace) {
+      const p = input.selectionStart;
+      const v = input.value;
+      const re = new RegExp(FILE_TOKEN_SRC, "g");
+      let m;
+      while ((m = re.exec(v)) !== null) {
+        const start = m.index;
+        const end = start + m[0].length;
+        const hit = isBackspace ? start < p && p <= end : start <= p && p < end;
+        if (hit) {
+          input.value = v.slice(0, start) + v.slice(end);
+          try { input.setSelectionRange(start, start); } catch (_e) {}
+          autoGrow();
+          dropUploadByName(m[1]);
+          return true;
+        }
+      }
+      return false;
     }
     function clearUploads() {
       uploads.forEach((entry) => {

@@ -43,7 +43,10 @@ from imbue.mngr_foreman.transcript_tail import TRANSCRIPT_SUBPATH
 from imbue.mngr_foreman.transcript_tail import TranscriptTailer
 from imbue.mngr_foreman.uploads import MAX_UPLOAD_BYTES
 from imbue.mngr_foreman.uploads import UploadError
+from imbue.mngr_foreman.uploads import UploadNotFound
+from imbue.mngr_foreman.uploads import content_type_for_name
 from imbue.mngr_foreman.uploads import delete_upload
+from imbue.mngr_foreman.uploads import read_upload
 from imbue.mngr_foreman.uploads import write_upload
 
 _STATIC_PACKAGE: Final[str] = "imbue.mngr_foreman.static"
@@ -235,6 +238,24 @@ def create_app(
             logger.info("Upload to {} failed: {}", name, e)
             return jsonify({"ok": False, "error": str(e)}), 400
         return jsonify({"ok": True, "path": path})
+
+    @app.route("/api/agents/<name>/upload/<stored_name>", methods=["GET"])
+    def api_get_upload(name: str, stored_name: str) -> ResponseReturnValue:
+        # Serve an uploaded file's bytes back for inline rendering (image chips).
+        if registry.get_agent(name) is None:
+            return Response("Not found", status=404, mimetype="text/plain")
+        try:
+            data = read_upload(mngr_ctx, name, stored_name)
+        except UploadNotFound:
+            return Response("Not found", status=404, mimetype="text/plain")
+        except UploadError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return Response(
+            data,
+            mimetype=content_type_for_name(stored_name).split(";")[0],
+            content_type=content_type_for_name(stored_name),
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.route("/api/agents/<name>/upload/<stored_name>", methods=["DELETE"])
     def api_delete_upload(name: str, stored_name: str) -> ResponseReturnValue:

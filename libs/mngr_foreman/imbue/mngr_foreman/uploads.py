@@ -14,6 +14,7 @@ sanitiser, so the write and delete paths cannot disagree.
 from __future__ import annotations
 
 import shlex
+import time
 from pathlib import Path
 
 from loguru import logger
@@ -35,8 +36,44 @@ _MAX_EXT_LENGTH = 12
 _MAX_STORED_NAME_LENGTH = 128
 
 
+# Serve cache: reading a mirrored file back over SFTP for every <img> render is
+# wasteful, so cache recently served bytes briefly, bounded by count and total
+# size. Keyed by (agent_name, stored_name).
+_SERVE_CACHE: dict[tuple[str, str], tuple[float, bytes]] = {}
+_SERVE_CACHE_TTL_SECONDS = 30.0
+_SERVE_CACHE_MAX_ENTRIES = 32
+_SERVE_CACHE_MAX_BYTES = 64 * 1024 * 1024
+
+# Content types we serve inline for common attachment kinds; anything else is a
+# generic download.
+_CONTENT_TYPE_BY_EXT = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+    "svg": "image/svg+xml",
+    "pdf": "application/pdf",
+    "txt": "text/plain; charset=utf-8",
+    "md": "text/plain; charset=utf-8",
+    "json": "application/json",
+    "csv": "text/csv; charset=utf-8",
+}
+
+
 class UploadError(Exception):
     """A rejected upload (bad name, oversize, or host-resolution failure)."""
+
+
+class UploadNotFound(UploadError):
+    """The requested upload does not exist (deleted, or never written)."""
+
+
+def content_type_for_name(name: str) -> str:
+    """Best-effort MIME type from a ``<uuid>.<ext>`` name (generic if unknown)."""
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return _CONTENT_TYPE_BY_EXT.get(ext, "application/octet-stream")
 
 
 def sanitize_stored_name(name: str) -> str:
@@ -96,9 +133,49 @@ def write_upload(mngr_ctx: MngrContext, agent_name: str, stored_name: str, data:
     return f"./{UPLOAD_DIR_NAME}/{safe}"
 
 
+def _cache_put(key: tuple[str, str], data: bytes) -> None:
+    if len(data) > _SERVE_CACHE_MAX_BYTES:
+        return  # too big to be worth caching
+    _SERVE_CACHE[key] = (time.monotonic(), data)
+    # Evict oldest entries until back under both budgets.
+    while _SERVE_CACHE and (
+        len(_SERVE_CACHE) > _SERVE_CACHE_MAX_ENTRIES
+        or sum(len(v[1]) for v in _SERVE_CACHE.values()) > _SERVE_CACHE_MAX_BYTES
+    ):
+        oldest = min(_SERVE_CACHE, key=lambda k: _SERVE_CACHE[k][0])
+        if oldest == key:  # never evict the entry we just wrote
+            break
+        del _SERVE_CACHE[oldest]
+
+
+def read_upload(mngr_ctx: MngrContext, agent_name: str, stored_name: str) -> bytes:
+    """Read a previously uploaded file's bytes from the agent host (briefly cached).
+
+    Raises ``UploadNotFound`` (-> 404) if the file is gone or unreadable, and
+    ``UploadError`` on a bad name.
+    """
+    safe = sanitize_stored_name(stored_name)
+    key = (agent_name, safe)
+    cached = _SERVE_CACHE.get(key)
+    if cached is not None and time.monotonic() - cached[0] < _SERVE_CACHE_TTL_SECONDS:
+        return cached[1]
+    try:
+        agent, host = _resolve_started_agent_and_host(mngr_ctx, agent_name)
+    except Exception as e:  # noqa: BLE001
+        raise UploadNotFound(f"could not resolve agent host: {e}") from e
+    dest = _upload_path(agent, safe)
+    try:
+        data = host.read_file(dest)
+    except Exception as e:  # noqa: BLE001 - missing/unreadable -> a graceful 404
+        raise UploadNotFound(f"not found: {safe}") from e
+    _cache_put(key, data)
+    return data
+
+
 def delete_upload(mngr_ctx: MngrContext, agent_name: str, stored_name: str) -> None:
     """Best-effort remove of a previously uploaded file from the agent's workdir."""
     safe = sanitize_stored_name(stored_name)
+    _SERVE_CACHE.pop((agent_name, safe), None)
     agent, host = _resolve_started_agent_and_host(mngr_ctx, agent_name)
     dest = _upload_path(agent, safe)
     result = host.execute_stateful_command(f"rm -f {shlex.quote(str(dest))}")
