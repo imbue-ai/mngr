@@ -60,8 +60,10 @@ def _marker_from_call(call: ast.Call, file: Path) -> WitnessMarker | WitnessProb
         )
     partial: str | None = None
     for keyword in call.keywords:
-        if keyword.arg == "partial" and isinstance(keyword.value, ast.Constant) and isinstance(
-            keyword.value.value, str
+        if (
+            keyword.arg == "partial"
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, str)
         ):
             partial = keyword.value.value
     return WitnessMarker(coordinate=coordinate, file=file, line=call.lineno, partial=partial)
@@ -89,9 +91,7 @@ def find_witness_markers_in_source(source_text: str, file: Path) -> WitnessScan:
     for node in ast.walk(tree):
         calls: tuple[ast.Call, ...] = ()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            calls = tuple(
-                decorator for decorator in node.decorator_list if _is_witnesses_call(decorator)
-            )
+            calls = tuple(decorator for decorator in node.decorator_list if _is_witnesses_call(decorator))
         elif isinstance(node, ast.Assign) and any(
             isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets
         ):

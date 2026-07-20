@@ -24,7 +24,6 @@ from pydantic import Field
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.core.behavioral_specs._gherkin import _GherkinBackground
 from imbue.minds.core.behavioral_specs._gherkin import _GherkinDocument
 from imbue.minds.core.behavioral_specs._gherkin import _GherkinRule
 from imbue.minds.core.behavioral_specs._gherkin import _GherkinScenario
@@ -37,7 +36,6 @@ from imbue.minds.core.behavioral_specs.data_types import SpecUnit
 from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
 from imbue.minds.core.behavioral_specs.data_types import SpecViolation
 from imbue.minds.errors import SpecCorpusRootNotFoundError
-
 
 # A kebab-case name: lowercase letters/digits in groups separated by single hyphens.
 _KEBAB_CASE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -132,8 +130,7 @@ def _check_step_keywords(
                     file=file,
                     line=step.location.line,
                     message=(
-                        f"step keyword '{keyword}' is not part of the spec language "
-                        f"(allowed: {allowed_rendered})"
+                        f"step keyword '{keyword}' is not part of the spec language (allowed: {allowed_rendered})"
                     ),
                     is_unit_omitted=False,
                 )
@@ -209,7 +206,9 @@ def _unit_from_scenario(
     _check_step_keywords(scenario.steps, file, violations)
     _check_tags_are_kebab_case(scenario.tags, file, violations)
     for examples in scenario.examples:
-        _check_declaration_keyword(examples.keyword, _ALLOWED_EXAMPLES_KEYWORDS, file, examples.location.line, violations)
+        _check_declaration_keyword(
+            examples.keyword, _ALLOWED_EXAMPLES_KEYWORDS, file, examples.location.line, violations
+        )
         _check_tags_are_kebab_case(examples.tags, file, violations)
     tags = tuple(_strip_tag_sigil(tag.name) for tag in scenario.tags)
     if not tags:
@@ -308,7 +307,11 @@ def _extract_units_from_document(
     for child in document.feature.children:
         if child.background is not None:
             _check_declaration_keyword(
-                child.background.keyword, _ALLOWED_BACKGROUND_KEYWORDS, file, child.background.location.line, violations
+                child.background.keyword,
+                _ALLOWED_BACKGROUND_KEYWORDS,
+                file,
+                child.background.location.line,
+                violations,
             )
             _check_step_keywords(child.background.steps, file, violations)
         elif child.scenario is not None:

@@ -38,9 +38,7 @@ class SpecUnit(FrozenModel):
     steps: tuple[SpecStep, ...] = Field(
         description="The unit's own steps in order (empty for a Rule; Background steps are not folded in)"
     )
-    parent: str | None = Field(
-        description="Coordinate of the enclosing Rule for units nested under one, else None"
-    )
+    parent: str | None = Field(description="Coordinate of the enclosing Rule for units nested under one, else None")
 
 
 class SpecViolation(FrozenModel):

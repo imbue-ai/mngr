@@ -137,9 +137,7 @@ def specs_validate(corpus_root: Path) -> None:
     for violation in scan.violations:
         write_stdout_line(_format_violation(violation))
     if scan.violations:
-        raise SpecValidationFailedError(
-            f"{len(scan.violations)} violation(s) found under {corpus_root}"
-        )
+        raise SpecValidationFailedError(f"{len(scan.violations)} violation(s) found under {corpus_root}")
     write_stdout_line(
         f"OK: {len(scan.units)} units across {scan.feature_file_count} feature file(s) under {corpus_root}"
     )
@@ -207,8 +205,7 @@ def specs_export(corpus_root: Path) -> None:
     "include_rules",
     is_flag=True,
     default=False,
-    help="Also emit packets for Rule units (invariants). By default only scenarios and "
-    "scenario outlines are planned.",
+    help="Also emit packets for Rule units (invariants). By default only scenarios and scenario outlines are planned.",
 )
 def specs_plan(corpus_root: Path, for_tmr: bool, include_rules: bool) -> None:
     """Emit TMR-ready task packets as JSONL, one per spec unit to fan out to agents.

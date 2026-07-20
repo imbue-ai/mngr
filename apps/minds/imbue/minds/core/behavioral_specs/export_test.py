@@ -209,24 +209,9 @@ def test_export_scopes_folder_invariants_to_their_subtree_only(tmp_path: Path) -
     root = write_spec_corpus(
         tmp_path / "specs",
         {
-            "invariants.feature": (
-                "Feature: Corpus invariants\n"
-                "\n"
-                "  @corpus-rule\n"
-                "  Rule: Holds everywhere\n"
-            ),
-            "alpha/invariants.feature": (
-                "Feature: Alpha invariants\n"
-                "\n"
-                "  @alpha-rule\n"
-                "  Rule: Holds under alpha\n"
-            ),
-            "alpha/beta/invariants.feature": (
-                "Feature: Beta invariants\n"
-                "\n"
-                "  @beta-rule\n"
-                "  Rule: Holds under beta\n"
-            ),
+            "invariants.feature": ("Feature: Corpus invariants\n\n  @corpus-rule\n  Rule: Holds everywhere\n"),
+            "alpha/invariants.feature": ("Feature: Alpha invariants\n\n  @alpha-rule\n  Rule: Holds under alpha\n"),
+            "alpha/beta/invariants.feature": ("Feature: Beta invariants\n\n  @beta-rule\n  Rule: Holds under beta\n"),
             "alpha/beta/deep.feature": "Feature: Deep\n\n  @deep-thing\n  Scenario: s\n    Given a\n",
             "alpha/shallow.feature": "Feature: Shallow\n\n  @shallow-thing\n  Scenario: s\n    Given a\n",
             "gamma/other.feature": "Feature: Other\n\n  @other-thing\n  Scenario: s\n    Given a\n",

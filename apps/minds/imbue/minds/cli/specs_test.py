@@ -188,9 +188,7 @@ def test_specs_query_combines_filters_with_and_semantics(tmp_path: Path) -> None
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
     runner = CliRunner()
 
-    both_match = runner.invoke(
-        specs, ["query", "--root", str(root), "--tag", "fresh-code", "--step", "login url"]
-    )
+    both_match = runner.invoke(specs, ["query", "--root", str(root), "--tag", "fresh-code", "--step", "login url"])
     tag_matches_step_does_not = runner.invoke(
         specs, ["query", "--root", str(root), "--tag", "fresh-code", "--step", "data directory"]
     )
@@ -304,10 +302,7 @@ def test_specs_check_witnesses_accepts_markers_naming_real_units(tmp_path: Path)
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
     test_file = tmp_path / "test_auth.py"
     test_file.write_text(
-        "import pytest\n"
-        "\n"
-        "@pytest.mark.witnesses(\"authentication.fresh-code\")\n"
-        "def test_signs_in() -> None: ...\n"
+        'import pytest\n\n@pytest.mark.witnesses("authentication.fresh-code")\ndef test_signs_in() -> None: ...\n'
     )
 
     result = CliRunner().invoke(specs, ["check-witnesses", "--root", str(root), str(test_file)])
@@ -320,10 +315,7 @@ def test_specs_check_witnesses_reports_unknown_coordinates_and_exits_nonzero(tmp
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
     test_file = tmp_path / "test_auth.py"
     test_file.write_text(
-        "import pytest\n"
-        "\n"
-        "@pytest.mark.witnesses(\"authentication.typoo\")\n"
-        "def test_signs_in() -> None: ...\n"
+        'import pytest\n\n@pytest.mark.witnesses("authentication.typoo")\ndef test_signs_in() -> None: ...\n'
     )
 
     result = CliRunner().invoke(specs, ["check-witnesses", "--root", str(root), str(test_file)])
