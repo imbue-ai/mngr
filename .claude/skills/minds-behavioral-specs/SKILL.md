@@ -108,16 +108,19 @@ between description slots and prose files; that split is the author's choice.
 
 ## Identity: tags and coordinates
 
-Tags may appear only on `Scenario`, `Scenario Outline`, and `Rule` units -
-not on `Feature` or `Examples`, where Gherkin permits them but nothing in
-this language consumes them. Every unit carries at least one tag.
+Tags may appear wherever Gherkin permits them: on units - `Scenario`,
+`Scenario Outline`, and `Rule` - and on `Feature` and `Examples` blocks.
+Every unit carries at least one tag.
 
-- The first tag is the unit's identity. A `Scenario Outline` has one
+- The first tag on a unit is its identity. A `Scenario Outline` has one
   identity covering all of its Examples rows.
 - Tags after the first are auxiliary labels; they may repeat across units
   and have no defined semantics.
-- All tags are short kebab-case names that do not encode anything the
-  unit's location already says.
+- Tags on `Feature` and `Examples` blocks have no defined semantics either -
+  in particular, they do not cascade to scenarios - but each claims a
+  coordinate (below) and must be unique like one.
+- All tags are short kebab-case names that do not encode anything their
+  location already says.
 
 A unit's coordinate - the stable handle everything outside the spec uses to
 refer to it - joins the folder names on the path from the corpus root to the
@@ -137,10 +140,11 @@ in coordinates; only folders qualify. This is what lets a scenario move
 between files in its folder - or a file be renamed or split - without any
 unit changing identity.
 
-Coordinates derive from identity tags only; auxiliary tags never form
-coordinates. No two units may share a coordinate - equivalently, identity
-tags are unique among the units of a single folder. The `@` sigil is Gherkin
-tag syntax and stays in the file; coordinates are bare dotted names.
+A coordinate is claimed by each unit's identity tag and by each tag on a
+`Feature` or `Examples` block; auxiliary tags claim nothing. No coordinate
+is claimed twice - equivalently, all claiming tags are unique within their
+folder. The `@` sigil is Gherkin tag syntax and stays in the file;
+coordinates are bare dotted names.
 
 ## Invariants and scope
 
