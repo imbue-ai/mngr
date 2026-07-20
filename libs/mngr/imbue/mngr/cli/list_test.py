@@ -1371,6 +1371,39 @@ def test_list_command_json_format_with_agents(
     assert "bravo" in names
 
 
+def test_list_command_sorts_numeric_field_numerically(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mngr ls --sort 'idle_seconds asc'` must order a numeric field numerically.
+
+    Drives the real list command end-to-end. The values span an order of
+    magnitude (2.4, 14040.2, 111044) and the agents are supplied in the order a
+    lexicographic comparator would (wrongly) produce, so a string sort leaves
+    them unsorted while a numeric sort reorders them ascending.
+    """
+    agents = [
+        make_test_agent_details(name="large", idle_seconds=111044),
+        make_test_agent_details(name="medium", idle_seconds=14040.2),
+        make_test_agent_details(name="small", idle_seconds=2.4),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "idle_seconds asc", "--fields", "name,idle_seconds"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    idle_values = [agent["idle_seconds"] for agent in output["agents"]]
+    assert idle_values == [2.4, 14040.2, 111044]
+    assert [agent["name"] for agent in output["agents"]] == ["small", "medium", "large"]
+
+
 def test_list_command_jsonl_format_with_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
