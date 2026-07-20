@@ -598,6 +598,14 @@ function createBundle() {
     activeSurface: SURFACE_CHROME,
     currentContentUrl: null,
     currentWorkspaceId: null,
+    // The last workspace (agent) URL this window displayed, retained even after
+    // navigating to a workspace-scoped local page (settings / sharing) so Back can
+    // return there. Opening a workspace hides + parks the content view when a local
+    // page comes up, and the chrome view's history keeps the empty ``/_chrome``
+    // wrapper as a back entry; without this, Back off a local page would land on
+    // that blank wrapper. Set by navigateBundle's content branch; consumed by
+    // onChromeNavigate when a Back/Forward lands the chrome view back on /_chrome.
+    workspaceReturnUrl: null,
     // Whether the content view is currently displaying a REACHABLE workspace
     // rather than the "Loading workspace" proxy loader. The mngr_forward proxy
     // serves that loader (HTTP 503) at the workspace's own URL while the backend
@@ -670,7 +678,25 @@ function createBundle() {
     // clobber preErrorUrl -- e.g. the quitting screen loads while isErrorState
     // is false -- leaving nothing to restore the window to on a quit backout.
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
-    if (parsed.pathname === '/_chrome') return;
+    if (parsed.pathname === '/_chrome') {
+      // The chrome view is on the empty agent wrapper. When navigateBundle drives
+      // this (opening a workspace) it has already shown the content view over it,
+      // so ``activeSurface`` is SURFACE_CONTENT and there's nothing to do. But a
+      // Back/Forward can also land here -- e.g. Back from a workspace's settings
+      // page -- while the content view is hidden (``activeSurface`` still
+      // SURFACE_CHROME): that would strand the user on a blank wrapper, so re-open
+      // the workspace this wrapper represents instead. Deferred a tick because
+      // navigating synchronously inside a navigation event can crash
+      // (electron#19887); navigateBundle won't reload /_chrome (already there), so
+      // this doesn't recurse.
+      if (bundle.activeSurface === SURFACE_CHROME && bundle.workspaceReturnUrl) {
+        const target = bundle.workspaceReturnUrl;
+        setImmediate(() => {
+          if (!bundle.window.isDestroyed()) navigateBundle(bundle, target);
+        });
+      }
+      return;
+    }
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     if (bundle.currentWorkspaceId !== null) {
@@ -1537,6 +1563,9 @@ function navigateBundle(bundle, url) {
     bundle.contentWorkspaceReady = false;
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
+    // Remember this workspace so Back off a later workspace-scoped local page can
+    // return to it (see onChromeNavigate's /_chrome branch).
+    bundle.workspaceReturnUrl = url;
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
     const accentAgentId = parseAccentSourceAgentId(url);
