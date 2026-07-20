@@ -14,7 +14,9 @@ consumes, so the rest of the code works with typed, validated objects.
 
 import re
 from pathlib import Path
+from typing import Any
 from typing import Final
+from typing import assert_never
 
 from gherkin.errors import CompositeParserException
 from gherkin.errors import ParserError
@@ -469,6 +471,58 @@ def _parse_feature_file(
         )
         return None
     return _GherkinDocument.model_validate(parsed)
+
+
+@pure
+def spec_unit_matches_tag(unit: SpecUnit, tag_or_coordinate: str) -> bool:
+    """True when the value exactly matches one of the unit's raw tags or its coordinate.
+
+    A single leading '@' sigil on the value is tolerated (tags are written
+    with one in .feature files but recorded bare).
+    """
+    bare_value = tag_or_coordinate.removeprefix("@")
+    return bare_value in unit.tags or bare_value == unit.coordinate
+
+
+@pure
+def spec_unit_matches_name_substring(unit: SpecUnit, name_substring: str) -> bool:
+    """True when the unit's name contains the value, case-insensitively."""
+    return name_substring.lower() in unit.name.lower()
+
+
+@pure
+def spec_unit_matches_step_substring(unit: SpecUnit, step_substring: str) -> bool:
+    """True when any of the unit's own step texts contains the value, case-insensitively."""
+    return any(step_substring.lower() in step.text.lower() for step in unit.steps)
+
+
+@pure
+def spec_unit_kind_record_value(kind: SpecUnitKind) -> str:
+    """Render a unit kind as its JSONL record spelling."""
+    match kind:
+        case SpecUnitKind.SCENARIO:
+            return "scenario"
+        case SpecUnitKind.SCENARIO_OUTLINE:
+            return "scenario-outline"
+        case SpecUnitKind.RULE:
+            return "rule"
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@pure
+def spec_unit_to_record(unit: SpecUnit) -> dict[str, Any]:
+    """Render a unit as the JSON object emitted (one per line) by ``minds specs list``/``query``."""
+    return {
+        "coordinate": unit.coordinate,
+        "kind": spec_unit_kind_record_value(unit.kind),
+        "name": unit.name,
+        "file": str(unit.file),
+        "line": unit.line,
+        "tags": list(unit.tags),
+        "steps": [{"keyword": step.keyword, "text": step.text} for step in unit.steps],
+        "parent": unit.parent,
+    }
 
 
 def _scan_corpus_structure(corpus_root: Path, violations: list[SpecViolation]) -> list[Path]:

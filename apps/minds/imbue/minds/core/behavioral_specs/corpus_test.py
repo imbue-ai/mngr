@@ -4,9 +4,13 @@ All corpora are synthetic (built under ``tmp_path`` via ``write_spec_corpus``);
 nothing here reads the live ``apps/minds/specs/`` corpus.
 """
 
+import json
 from pathlib import Path
 
+from inline_snapshot import snapshot
+
 from imbue.minds.core.behavioral_specs.corpus import scan_corpus
+from imbue.minds.core.behavioral_specs.corpus import spec_unit_to_record
 from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
 from imbue.minds.core.behavioral_specs.testing import write_spec_corpus
 
@@ -481,3 +485,38 @@ def test_scan_corpus_reports_untagged_unit_and_omits_it_from_records(tmp_path: P
     assert "at least one tag" in violation.message
     assert "No identity tag here" in violation.message
     assert violation.is_unit_omitted is True
+
+
+def test_spec_unit_to_record_serializes_stable_field_order_and_kind_spelling(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/session.feature": (
+                "Feature: Session\n"
+                "\n"
+                "  @installation-bound\n"
+                "  Rule: Only local tokens are accepted\n"
+                "\n"
+                "    @spent-code @edge-case\n"
+                "    Scenario Outline: Spent codes are refused\n"
+                "      When anyone presents \"<code>\"\n"
+                "      Then authentication is refused\n"
+                "\n"
+                "      Examples:\n"
+                "        | code |\n"
+                "        | c1   |\n"
+            ),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    child_record = spec_unit_to_record(scan.units[1])
+    rendered = json.dumps(child_record, ensure_ascii=False).replace(str(root), "<root>")
+    assert rendered == snapshot(
+        '{"coordinate": "authentication.spent-code", "kind": "scenario-outline", "name": "Spent codes are refused", "file": "<root>/authentication/session.feature", "line": 7, "tags": ["spent-code", "edge-case"], "steps": [{"keyword": "When", "text": "anyone presents \\"<code>\\""}, {"keyword": "Then", "text": "authentication is refused"}], "parent": "authentication.installation-bound"}'
+    )
+    rule_record = spec_unit_to_record(scan.units[0])
+    assert rule_record["kind"] == "rule"
+    assert rule_record["steps"] == []
+    assert rule_record["parent"] is None

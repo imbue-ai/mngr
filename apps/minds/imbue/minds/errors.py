@@ -145,6 +145,23 @@ class SpecCorpusRootNotFoundError(MindError, FileNotFoundError):
     ...
 
 
+class SpecValidationFailedError(MindError):
+    """Raised by ``minds specs validate`` when the corpus has language violations (after listing them)."""
+
+    ...
+
+
+class SpecListingIncompleteError(MindError):
+    """Raised by ``minds specs list``/``query`` when some units could not be represented as records.
+
+    The representable records are still emitted on stdout first; this error
+    (after per-problem stderr diagnostics) makes the incompleteness visible to
+    pipelines via the exit code.
+    """
+
+    ...
+
+
 class InvalidSha256HexError(LimaImageError, ValueError):
     """Raised when a string is not a valid lowercase hex SHA-256 digest.
 
