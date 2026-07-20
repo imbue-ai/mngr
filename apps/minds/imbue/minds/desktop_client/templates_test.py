@@ -841,9 +841,10 @@ def test_local_pages_render_the_chromeshell_titlebar() -> None:
     # After the content-in-chrome move, every trusted local page renders the
     # shared ChromeShell titlebar directly (so the titlebar travels with the page
     # on the chrome surface). Each is a single document that carries exactly one
-    # titlebar, offsets its body below the fixed 38px titlebar (pt-[38px]), loads
-    # chrome.js, and carries NO content iframe -- that belongs only to the agent
-    # content surface (pages.Chrome).
+    # titlebar, renders its body inside the workspace-shaped `#local-page-card`
+    # (the accent-tracking background bleeds around it, like around a workspace),
+    # loads chrome.js, and carries NO content iframe -- that belongs only to the
+    # agent content surface (pages.Chrome).
     _creation_id = CreationId()
     renders = {
         "Landing": render_landing_page(accessible_agent_ids=()),
@@ -881,30 +882,32 @@ def test_local_pages_render_the_chromeshell_titlebar() -> None:
         assert html.count("<html") == 1, f"{name}: expected exactly one document"
         assert html.count('id="minds-titlebar"') == 1, f"{name}: expected one ChromeShell titlebar"
         assert 'id="content-frame"' not in html, f"{name}: local pages carry no content iframe"
-        assert "pt-[38px]" in html, f"{name}: body must sit below the fixed titlebar"
+        assert html.count('id="local-page-card"') == 1, f"{name}: body must render inside the content card"
         assert "/_static/chrome.js" in html, f"{name}: chrome.js drives the titlebar"
 
 
 def test_chrome_shell_local_mode_differs_from_agent_content_surface() -> None:
-    # The two ChromeShell modes render distinct document chrome. The agent
-    # content surface (pages.Chrome) locks the document to the viewport
-    # (overflow: hidden) and bleeds the workspace accent through the body
-    # background; a local page instead uses the neutral page surface and offsets
-    # its scrolling body below the titlebar (pt-[38px]) with no accent bleed.
+    # Both ChromeShell modes lock the document to the viewport (overflow: hidden)
+    # and bleed the accent-tracking --titlebar-bg body background around an inset
+    # content surface. They differ in what fills the region below the titlebar:
+    # a local page wraps its content in the workspace-shaped `#local-page-card`
+    # scroll container; the agent surface leaves the slot to pages.Chrome's
+    # content iframe (no card of its own).
     agent = CATALOG.render("ChromeShell", is_agent_content_surface=True, _content="<i>x</i>")
     local = CATALOG.render("ChromeShell", _content="<i>x</i>")
     assert "overflow: hidden" in agent
-    assert "pt-[38px]" not in agent
-    assert "overflow: hidden" not in local
-    assert "pt-[38px]" in local
+    assert "overflow: hidden" in local
+    assert 'id="local-page-card"' not in agent
+    assert local.count('id="local-page-card"') == 1
+    # The card carries the page surface + rounded workspace-card geometry and is
+    # the scroll container.
     assert "bg-surface-primary text-primary" in local
-    # The agent surface bleeds the workspace accent through the <body> background
-    # (var(--titlebar-bg) on the body, in addition to the titlebar), so the token
-    # appears twice; a local page uses the neutral page surface, so it appears only
-    # once -- on the titlebar itself. (Asserting merely "in agent" was vacuous: the
-    # titlebar carries that var in both modes.)
+    assert "rounded-[12px]" in local
+    assert "overflow-y-auto" in local
+    # Both modes bleed the accent through the <body> background (var(--titlebar-bg)
+    # on the body, in addition to the titlebar), so the token appears twice.
     assert agent.count("var(--titlebar-bg") == 2
-    assert local.count("var(--titlebar-bg") == 1
+    assert local.count("var(--titlebar-bg") == 2
 
 
 def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
@@ -923,9 +926,10 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     assert opted_out in render_sidebar_page()
     assert opted_out in render_help_page(include_logs_setting=False, workspace_agent_id="")
     assert opted_out in render_inbox_page(cards=())
-    # Normal scrolling content pages keep the reserved gutter so their layout
-    # doesn't shift sideways when a classic scrollbar appears.
-    assert '<html lang="en">' in render_landing_page(accessible_agent_ids=())
+    # Local pages are edge-to-edge locked documents too since the content-card
+    # move (the document never scrolls; ChromeShell's `#local-page-card` is the
+    # scroll container), so they opt out as well.
+    assert opted_out in render_landing_page(accessible_agent_ids=())
 
 
 def test_render_sidebar_page_contains_workspace_list() -> None:
@@ -1967,8 +1971,9 @@ def test_page_narrow_container_default_padding_and_max_width() -> None:
     assert "border border-default" not in html
     # The narrow page now carries the trusted app shell (titlebar) via ChromeShell.
     assert "minds-titlebar" in html
-    # The body is flex-centered around the column.
-    assert "flex items-center justify-center min-h-screen" in html
+    # The column is flex-centered inside ChromeShell's `#local-page-card` scroll
+    # container (min-h-full: the card has a definite height, so it resolves).
+    assert "min-h-full flex items-center justify-center" in html
 
 
 def test_page_narrow_container_form_padding_uses_p6() -> None:

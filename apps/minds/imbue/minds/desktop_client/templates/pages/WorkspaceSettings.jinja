@@ -114,7 +114,6 @@
 </script>
 {% endset %}
 <ChromeShell title={{ "Settings: " ~ ws_name }}
-      body_class="bg-surface-primary text-primary font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>
     <div id="workspace-settings" data-agent-id="{{ agent_id }}" data-is-stale="{{ 'true' if is_stale else 'false' }}">

@@ -7,13 +7,17 @@
 
   - Local page (default, ``is_agent_content_surface=False``): a trusted
     local/native page (Landing, Create, Settings, ...) renders its own body in
-    the slot. The body is pushed below the fixed titlebar (``pt-[38px]``) and
-    scrolls normally; the surface is the neutral page background.
+    the slot, wrapped in the ``#local-page-card`` -- an inset rounded card shaped
+    exactly like the workspace content surface -- which is the page's scroll
+    container. The accent-tracking body bleeds around the card just like around
+    a workspace.
   - Agent content surface (``is_agent_content_surface=True``): pages.Chrome
-    fills the slot with the content iframe (the browser-mode agent surface). The
-    document is locked to the viewport (``overflow: hidden``) and the body
-    background tracks ``--titlebar-bg`` so an active workspace accent bleeds
-    through the content surface's rounded corners.
+    fills the slot with the content iframe (the browser-mode agent surface).
+
+  In both modes the document is locked to the viewport (``overflow: hidden``)
+  and the body background tracks ``--titlebar-bg`` so an active workspace accent
+  (or the neutral chrome) bleeds through the content card's insets and rounded
+  corners.
 
   ``is_mac`` (traffic-light spacer + hidden window controls) and
   ``mngr_forward_origin`` (the body data attribute chrome.js reads to build
@@ -27,27 +31,21 @@
 #}
 {% set _is_mac = is_mac if is_mac is not none else chrome_is_mac() %}
 {% set _mngr_forward_origin = mngr_forward_origin if mngr_forward_origin is not none else chrome_mngr_forward_origin() %}
-{% if is_agent_content_surface %}
-  {% set _body_class = body_class if body_class else "font-sans antialiased" %}
-  {% set _body_style = body_style if body_style else "background-color: var(--titlebar-bg, var(--c-surface-primary));" %}
-{% else %}
-  {# Local pages: neutral page surface, and the body content sits below the
-     fixed 38px titlebar (which is out of flow). pt-[38px] pairs with a page's
-     own ``min-h-screen`` centering so, under border-box, the centered content
-     lands in the region below the titlebar rather than behind it. #}
-  {% set _body_class = (body_class if body_class else "bg-surface-primary text-primary font-sans antialiased") ~ " pt-[38px]" %}
-  {% set _body_style = body_style %}
-{% endif %}
-{# The agent content surface (pages.Chrome) is edge-to-edge, so it opts out of
-   the global stable scrollbar gutter; scrolling local pages keep the gutter to
-   avoid a sideways layout shift when a classic scrollbar appears. #}
-{% set _html_class = "no-scrollbar-gutter" if is_agent_content_surface else "" %}
+{# Both modes lock the document to the viewport and track --titlebar-bg on the
+   body, so the workspace accent (or the neutral chrome) bleeds around the inset
+   content card: the content WebContentsView / #content-frame iframe on the agent
+   surface, the #local-page-card wrapper (below) on local pages. Local pages
+   scroll INSIDE that card, not the document. #}
+{% set _body_class = body_class if body_class else "font-sans antialiased" %}
+{% set _body_style = body_style if body_style else "background-color: var(--titlebar-bg, var(--c-surface-primary));" %}
+{# The document never scrolls in either mode (the card / content view scrolls),
+   so both opt out of the global stable scrollbar gutter -- otherwise classic
+   scrollbars reserve a dead 15px strip on an edge-to-edge locked surface. #}
+{% set _html_class = "no-scrollbar-gutter" %}
 {% set _head %}
 <style>
   /* Things that can't easily be expressed as Tailwind utilities. */
-{%- if is_agent_content_surface %}
   html, body { height: 100%; overflow: hidden; }
-{%- endif %}
   #minds-titlebar { -webkit-app-region: drag; }
   #minds-titlebar button { -webkit-app-region: no-drag; }
   /* When the inbox modal (or any modal hosted in the main process's
@@ -138,5 +136,20 @@
     </div>
   </div>
 
+  {% if is_agent_content_surface %}
   {{ content }}
+  {% else %}
+  {# Local pages render inside a card shaped exactly like the workspace content
+     surface (left/right 4px, top 38px, bottom 4px insets + 12px radius --
+     matches CONTENT_INSET / CONTENT_CORNER_RADIUS in electron/main.js and the
+     agent wrapper's #content-frame), so the accent-tracking body bleeds around
+     it just like around a workspace. The card is the scroll container; pages
+     that center vertically wrap their content in ``min-h-full`` (the card has a
+     definite height, so percentage heights resolve). #}
+  <div id="local-page-card"
+       class="fixed left-[4px] top-[38px] rounded-[12px] bg-surface-primary text-primary overflow-y-auto"
+       style="width: calc(100% - 8px); height: calc(100% - 42px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;">
+    {{ content }}
+  </div>
+  {% endif %}
 </Base>

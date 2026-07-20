@@ -11,8 +11,10 @@
 <script src="/_static/creating.js" defer></script>
 {% endset %}
 <ChromeShell title="Creating your workspace..."
-      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-6"
       scripts={{ _scripts }}>
+  {# min-h-full centers within ChromeShell's #local-page-card scroll container;
+     taller content grows past 100% and scrolls instead of clipping at the top. #}
+  <div class="min-h-full flex items-center justify-center p-6">
   <main id="creating"
         class="w-full"
         data-agent-id="{{ agent_id }}"
@@ -100,4 +102,5 @@
     </section>
 
   </main>
+  </div>
 </ChromeShell>

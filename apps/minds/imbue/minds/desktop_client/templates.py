@@ -834,27 +834,29 @@ def render_inbox_unavailable_fragment(message: str = "") -> str:
 _RECOVERY_STYLE: Final[str] = """\
       .hidden { display: none; }
 
-      /* Keep the whole card within the region below the titlebar and lay it out
-         as a vertical stack: the header row and the restart button stay pinned at
-         the top, and only the troubleshooting block scrolls when its disclosures
-         are expanded. Without this the card grows past the viewport as dropdowns
-         open and -- because .recovery-shell-center flex-centers it -- the heading
-         and button slide off the top, out of reach of the page scrollbar. This
-         overrides the shared ``.card`` from LOADING_PAGE_CARD_CSS (appended after
-         it, so it wins). The 86px subtracted = the wrapper's 24px top+bottom
-         padding (48px) plus the fixed 38px ChromeShell titlebar. */
+      /* Keep the whole card within ChromeShell's `#local-page-card` viewport and
+         lay it out as a vertical stack: the header row and the restart button
+         stay pinned at the top, and only the troubleshooting block scrolls when
+         its disclosures are expanded. Without this the card grows past the
+         viewport as dropdowns open and -- because .recovery-shell-center
+         flex-centers it -- the heading and button slide off the top, out of
+         reach of the scrollbar. This overrides the shared ``.card`` from
+         LOADING_PAGE_CARD_CSS (appended after it, so it wins). The 90px
+         subtracted = the `#local-page-card`'s insets (38px titlebar + 4px bottom)
+         plus the wrapper's 24px top+bottom padding (48px). */
       .card {
         display: flex;
         flex-direction: column;
-        max-height: calc(100vh - 86px);
+        max-height: calc(100vh - 90px);
       }
       .row { flex-shrink: 0; }
 
-      /* Center the loading card in the region below the fixed 38px ChromeShell
-         titlebar (the recovery page renders on the chrome surface). Mirrors the
-         proxy loader's full-viewport body-centering, offset for the titlebar. */
+      /* Center the loading card within ChromeShell's `#local-page-card` (the
+         scroll container, which has a definite height -- so the percentage
+         resolves). Mirrors the proxy loader's full-viewport body-centering,
+         scoped to the card. */
       .recovery-shell-center {
-        min-height: calc(100dvh - 38px);
+        min-height: 100%;
         display: flex;
         align-items: center;
         justify-content: center;

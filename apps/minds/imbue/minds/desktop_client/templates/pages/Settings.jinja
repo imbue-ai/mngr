@@ -331,16 +331,16 @@
 <ChromeShell title="Settings" scripts={{ _scripts }}>
   <div class="max-w-[960px] mx-auto px-6">
     <div class="flex gap-8 items-start">
-      {# Left column: ``sticky`` + full viewport height so it stays put while the
-         whole window scrolls (scrollbar at the window edge, as before), with
-         "Back to workspaces" pinned to the bottom via ``mt-auto``. Pinned at
-         ``top-[38px]`` and sized ``h-[calc(100vh_-_38px)]`` so it stops just below
-         the fixed ChromeShell titlebar rather than sliding under it / overflowing
-         the viewport by the titlebar's height. Nav entries share identical base
-         classes (notably no ``bg-transparent``, which would beat the toggled-on
+      {# Left column: ``sticky`` so it stays put while ChromeShell's
+         #local-page-card (the scroll container) scrolls, with "Back to
+         workspaces" pinned to the bottom via ``mt-auto``. ``top-0`` pins it at
+         the card's top edge; ``h-[calc(100vh_-_42px)]`` matches the card's
+         visible height (100vh minus the 38px titlebar + 4px bottom inset) so it
+         neither overflows nor slides. Nav entries share identical base classes
+         (notably no ``bg-transparent``, which would beat the toggled-on
          ``bg-fill-hover`` and leave the active entry un-highlighted);
          ``selectSection`` in the page script toggles state. #}
-      <div class="w-48 shrink-0 sticky top-[38px] h-[calc(100vh_-_38px)] flex flex-col py-12">
+      <div class="w-48 shrink-0 sticky top-0 h-[calc(100vh_-_42px)] flex flex-col py-12">
         <h1 class="type-heading-lg text-primary mb-6">Settings</h1>
         {# Grouped into non-interactive section eyebrows ("Permissions" /
            "Other"). The eyebrows carry no ``data-settings-nav``, so the page

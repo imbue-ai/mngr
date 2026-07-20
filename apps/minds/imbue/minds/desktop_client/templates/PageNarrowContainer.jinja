@@ -25,9 +25,13 @@
 #}
 {%- set _padding_cls = "p-8" if padding == "default" else "p-6" -%}
 <ChromeShell title={{ title }}
-      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-4"
       scripts={{ scripts }}>
-  <div class="{{ _padding_cls }} {{ max_width }} w-full">
-    {{ content }}
+  {# min-h-full centers within ChromeShell's #local-page-card (the scroll
+     container, which has a definite height); taller content grows past 100%
+     and scrolls instead of clipping at the top. #}
+  <div class="min-h-full flex items-center justify-center p-4">
+    <div class="{{ _padding_cls }} {{ max_width }} w-full">
+      {{ content }}
+    </div>
   </div>
 </ChromeShell>

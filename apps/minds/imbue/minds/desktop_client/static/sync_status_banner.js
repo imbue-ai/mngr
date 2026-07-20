@@ -38,9 +38,10 @@
     // the page's top padding is fine.
     // top: 38px sits just below the fixed ChromeShell titlebar (h-[38px], z-[100])
     // so the strip is visible on the trusted local pages that render it (Landing /
-    // Create / Accounts) instead of being hidden behind the titlebar.
+    // Create / Accounts) instead of being hidden behind the titlebar; left/right
+    // 4px align it with the #local-page-card's insets.
     banner.style.cssText =
-      'position: fixed; top: 38px; left: 0; right: 0; z-index: 50; display: none; align-items: center; gap: 8px;' +
+      'position: fixed; top: 38px; left: 4px; right: 4px; z-index: 50; display: none; align-items: center; gap: 8px;' +
       'padding: 8px 16px; background: var(--c-surface-secondary, #f0f0f0);' +
       'border-bottom: 1px solid var(--c-border-primary, rgba(128,128,128,0.25));' +
       'box-shadow: 0 1px 4px rgba(0,0,0,0.08);';
