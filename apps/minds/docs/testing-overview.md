@@ -10,6 +10,14 @@ tests"): unit (`*_test.py`), integration (`test_*.py`, unmarked), acceptance
 (`@pytest.mark.acceptance`), and release (`@pytest.mark.release`). Minds adds a
 few app-specific markers (below).
 
+Tests that verify a behavioral-spec unit declare it with the
+`witnesses(coordinate, partial=...)` marker: the coordinate names a unit in the
+spec corpus under `apps/minds/specs/`, and `partial=` notes what the test does
+not cover. The marker is registered in the shared pytest settings, so any
+project in the monorepo can use it; the minds-behavioral-specs skill
+(`.claude/skills/minds-behavioral-specs/SKILL.md`) defines the convention, and
+`behavioral-specs.md` (in this folder) covers the `minds specs` CLI.
+
 ## Part 1 -- Where the tests live and where they run
 
 ### 1.1 Python unit / integration tests (`*_test.py`)

@@ -51,6 +51,7 @@ Then visit the login URL printed in the terminal to create your first agent.
 - [Glossary of key concepts](./docs/workspace/glossary.md)
 - [Desktop app](./docs/desktop-app.md)
 - [Latchkey permissions](./docs/latchkey-permissions.md)
+- [Behavioral specs](./docs/behavioral-specs.md)
 
 ## Testing live deployments
 
