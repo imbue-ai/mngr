@@ -74,11 +74,12 @@ class FakeCloudflareOps:
         # Stored bytes per bucket, served by both the per-bucket REST usage
         # fake and the GraphQL sweep fake; tests set entries directly.
         self.usage_bytes_by_bucket: dict[str, int] = {}
-        # Failure-injection knobs: the next create_access_app (or
-        # create_access_policy) call raises, exercising the add-service
-        # rollback paths.
+        # Failure-injection knobs: the next create_access_app /
+        # create_access_policy / delete_bucket_token call raises, exercising
+        # the add-service rollback and sweep revoke-retry paths.
         self.fail_next_create_access_app = False
         self.fail_next_create_access_policy = False
+        self.fail_next_delete_bucket_token = False
 
     def create_tunnel(self, name: str) -> dict[str, Any]:
         tunnel_id = f"tunnel-{self._next_tunnel_id}"
@@ -244,6 +245,9 @@ class FakeCloudflareOps:
         return {"id": token_id, "value": f"token-value-{token_id}"}
 
     def delete_bucket_token(self, token_id: str) -> None:
+        if self.fail_next_delete_bucket_token:
+            self.fail_next_delete_bucket_token = False
+            raise CloudflareApiError(status_code=500, errors=[{"message": "simulated token revoke failure"}])
         self.account_tokens.pop(token_id, None)
 
     def update_bucket_token_access(self, token_id: str, bucket_name: str, access: str, token_name: str) -> None:

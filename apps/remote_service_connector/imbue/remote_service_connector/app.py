@@ -4374,7 +4374,12 @@ def _revoke_extra_bucket_keys(
     """Enforce the single-key-per-bucket invariant; returns the surviving keys grouped by owner.
 
     The newest key per (owner, bucket) survives; extras are revoked and their
-    rows dropped, counted in ``counters["extra_keys_revoked"]``.
+    rows dropped, counted in ``counters["extra_keys_revoked"]``. The row is
+    dropped only after a successful Cloudflare revoke: the ``r2_keys`` table
+    is the sole record of keys, so dropping the row of a still-live token
+    would orphan a credential no later sweep could revoke or downgrade. A
+    failed revoke is logged, counted in ``counters["key_update_failures"]``,
+    and retried on the next sweep.
     """
     keys_by_owner: dict[str, list[dict[str, Any]]] = {}
     keys_by_owner_bucket: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -4383,8 +4388,14 @@ def _revoke_extra_bucket_keys(
     for (owner_user_id, _bucket_name), rows in keys_by_owner_bucket.items():
         ordered = sorted(rows, key=lambda r: str(r["created_at"]))
         for extra in ordered[:-1]:
-            _best_effort_revoke_token(ops, str(extra["access_key_id"]))
-            key_store.delete_key(str(extra["access_key_id"]))
+            access_key_id = str(extra["access_key_id"])
+            try:
+                ops.delete_bucket_token(access_key_id)
+            except (CloudflareApiError, httpx.HTTPError) as exc:
+                logger.error("Sweep failed to revoke extra key %s: %s", access_key_id, exc)
+                counters["key_update_failures"] += 1
+                continue
+            key_store.delete_key(access_key_id)
             counters["extra_keys_revoked"] += 1
         keys_by_owner.setdefault(owner_user_id, []).append(ordered[-1])
     return keys_by_owner

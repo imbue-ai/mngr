@@ -3819,6 +3819,30 @@ def test_sweep_enforces_single_key_per_bucket() -> None:
     assert first not in ops.account_tokens
 
 
+def test_sweep_keeps_extra_key_row_when_revoke_fails() -> None:
+    """A failed Cloudflare revoke keeps the r2_keys row so the next sweep retries.
+
+    Dropping the row of a still-live token would orphan a credential no later
+    sweep could revoke (or downgrade for storage-quota enforcement).
+    """
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 10**12)
+    first = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    second = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data", alias="extra")
+    ops.fail_next_delete_bucket_token = True
+    failed = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert failed["extra_keys_revoked"] == 0
+    assert failed["key_update_failures"] == 1
+    # Both the row and the live token survive the failed revoke.
+    assert {r["access_key_id"] for r in store.list_keys("user-1", "u1prefix--data")} == {first, second}
+    assert first in ops.account_tokens
+    # The next (healthy) sweep completes the revoke.
+    retried = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    assert retried["extra_keys_revoked"] == 1
+    assert [r["access_key_id"] for r in store.list_keys("user-1", "u1prefix--data")] == [second]
+    assert first not in ops.account_tokens
+
+
 def test_sweep_downgrades_and_restores_keys_around_quota() -> None:
     ops, store, entitlements_store = _sweep_fixtures()
     _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
