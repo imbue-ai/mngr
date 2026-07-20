@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>foreman · agent</title>
+  <link rel="stylesheet" href="/static/foreman.css" />
+</head>
+<body>
+  <div class="topbar">
+    <a href="/" class="brand">‹ foreman</a>
+    <span class="meta" id="agent-name"></span>
+    <span class="spacer"></span>
+    <a class="termlink" id="termlink" href="#">terminal ›</a>
+    <span class="meta" id="conn">connecting…</span>
+  </div>
+  <div class="wrap">
+    <div class="transcript" id="transcript"></div>
+  </div>
+  <div class="composer" id="composer" hidden>
+    <div class="send-error" id="send-error" hidden></div>
+    <div class="inner">
+      <textarea id="input" rows="1" placeholder="message…" autocomplete="off"></textarea>
+      <button id="send">send</button>
+    </div>
+  </div>
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/app.js"></script>
+  <script>foreman.initAgent();</script>
+</body>
+</html>

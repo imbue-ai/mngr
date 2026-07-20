@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>foreman</title>
+  <link rel="stylesheet" href="/static/foreman.css" />
+</head>
+<body>
+  <div class="topbar">
+    <span class="brand">foreman</span>
+    <span class="spacer"></span>
+    <span class="meta" id="conn">connecting…</span>
+  </div>
+  <div class="wrap">
+    <div class="agent-list" id="list">
+      <div class="loading">loading agents…</div>
+    </div>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>foreman.initIndex();</script>
+</body>
+</html>

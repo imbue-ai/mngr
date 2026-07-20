@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>foreman · terminal</title>
+  <link rel="stylesheet" href="/static/vendor/xterm.min.css" />
+  <link rel="stylesheet" href="/static/foreman.css" />
+</head>
+<body class="term-body">
+  <div class="topbar">
+    <a href="#" class="brand" id="back">‹ back</a>
+    <span class="meta" id="agent-name"></span>
+    <span class="spacer"></span>
+    <span class="meta" id="conn">connecting…</span>
+  </div>
+  <div id="term"></div>
+  <script src="/static/vendor/xterm.min.js"></script>
+  <script src="/static/vendor/xterm-addon-fit.min.js"></script>
+  <script src="/static/app.js"></script>
+  <script>foreman.initTerminal();</script>
+</body>
+</html>

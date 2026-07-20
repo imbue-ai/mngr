@@ -1,0 +1,170 @@
+"""Tests for the vendored+modified Claude transcript parser."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from imbue.mngr_foreman.transcript_parser import parse_claude_session_lines
+
+
+def _line(**kwargs: Any) -> str:
+    return json.dumps(kwargs)
+
+
+def _assistant_tool_use(uuid: str, ts: str, tool_name: str, tool_input: dict, call_id: str = "call-1") -> str:
+    return _line(
+        type="assistant",
+        uuid=uuid,
+        timestamp=ts,
+        message={
+            "model": "claude",
+            "content": [{"type": "tool_use", "id": call_id, "name": tool_name, "input": tool_input}],
+        },
+    )
+
+
+def _tool_result(uuid: str, ts: str, call_id: str, output: str, is_error: bool = False) -> str:
+    return _line(
+        type="user",
+        uuid=uuid,
+        timestamp=ts,
+        message={"content": [{"type": "tool_result", "tool_use_id": call_id, "content": output, "is_error": is_error}]},
+    )
+
+
+def test_user_and_assistant_text() -> None:
+    lines = [
+        _line(type="user", uuid="u1", timestamp="2026-01-01T00:00:00Z", message={"content": "hello there"}),
+        _line(
+            type="assistant",
+            uuid="a1",
+            timestamp="2026-01-01T00:00:01Z",
+            message={"model": "claude", "content": [{"type": "text", "text": "hi back"}]},
+        ),
+    ]
+    events = parse_claude_session_lines(lines)
+    assert [e["type"] for e in events] == ["user_message", "assistant_message"]
+    assert events[0]["content"] == "hello there"
+    assert events[1]["text"] == "hi back"
+
+
+def test_edit_attaches_full_untruncated_input_for_diff() -> None:
+    old = "x" * 5000
+    new = "y" * 5000
+    line = _assistant_tool_use(
+        "a1", "2026-01-01T00:00:00Z", "Edit", {"file_path": "/tmp/f.py", "old_string": old, "new_string": new}
+    )
+    events = parse_claude_session_lines([line], max_tool_output_chars=100)
+    tc = events[0]["tool_calls"][0]
+    # Diff tools must keep full strings regardless of the output cap.
+    assert tc["input_full"]["old_string"] == old
+    assert tc["input_full"]["new_string"] == new
+    assert tc["input_full"]["file_path"] == "/tmp/f.py"
+
+
+def test_write_and_multiedit_full_inputs() -> None:
+    write_line = _assistant_tool_use("a1", "t1", "Write", {"file_path": "/a", "content": "line1\nline2"})
+    multi_line = _assistant_tool_use(
+        "a2",
+        "t2",
+        "MultiEdit",
+        {"file_path": "/b", "edits": [{"old_string": "o1", "new_string": "n1"}, {"old_string": "o2", "new_string": "n2"}]},
+    )
+    events = parse_claude_session_lines([write_line, multi_line])
+    assert events[0]["tool_calls"][0]["input_full"]["content"] == "line1\nline2"
+    edits = events[1]["tool_calls"][0]["input_full"]["edits"]
+    assert [e["new_string"] for e in edits] == ["n1", "n2"]
+
+
+def test_non_diff_tool_input_is_capped_but_present() -> None:
+    long_cmd = "echo " + "z" * 1000
+    line = _assistant_tool_use("a1", "t1", "Bash", {"command": long_cmd})
+    events = parse_claude_session_lines([line], max_tool_output_chars=50)
+    full = events[0]["tool_calls"][0]["input_full"]["command"]
+    assert full.startswith("echo z")
+    assert full.endswith("...")
+    assert len(full) <= 53
+
+
+def test_tool_result_truncation_config() -> None:
+    call = _assistant_tool_use("a1", "t1", "Bash", {"command": "ls"})
+    result = _tool_result("u1", "t2", "call-1", "R" * 10000)
+    events = parse_claude_session_lines([call, result], max_tool_output_chars=200)
+    tr = next(e for e in events if e["type"] == "tool_result")
+    assert tr["output"].endswith("...")
+    assert len(tr["output"]) == 203  # 200 + "..."
+    assert tr["tool_name"] == "Bash"  # resolved via tool_name_by_call_id
+
+
+def test_tool_result_unlimited_when_zero() -> None:
+    call = _assistant_tool_use("a1", "t1", "Bash", {"command": "ls"})
+    result = _tool_result("u1", "t2", "call-1", "R" * 5000)
+    events = parse_claude_session_lines([call, result], max_tool_output_chars=0)
+    tr = next(e for e in events if e["type"] == "tool_result")
+    assert len(tr["output"]) == 5000
+
+
+def test_meta_and_resume_markers_dropped() -> None:
+    lines = [
+        # resume continuation marker (isMeta user) -> dropped
+        _line(
+            type="user",
+            uuid="u1",
+            timestamp="t1",
+            isMeta=True,
+            message={"content": "Continue from where you left off."},
+        ),
+        # synthetic no-response reply -> dropped
+        _line(
+            type="assistant",
+            uuid="a1",
+            timestamp="t2",
+            message={"model": "<synthetic>", "content": [{"type": "text", "text": "No response requested."}]},
+        ),
+        # interrupt sentinel -> dropped
+        _line(type="user", uuid="u2", timestamp="t3", message={"content": "[Request interrupted by user]"}),
+        # a real message survives
+        _line(type="user", uuid="u3", timestamp="t4", message={"content": "real"}),
+    ]
+    events = parse_claude_session_lines(lines)
+    assert [e.get("content") for e in events] == ["real"]
+
+
+def test_lines_missing_uuid_or_timestamp_skipped() -> None:
+    lines = [
+        _line(type="user", timestamp="t1", message={"content": "no uuid"}),
+        _line(type="user", uuid="u1", message={"content": "no ts"}),
+        "not json at all",
+        "",
+    ]
+    assert parse_claude_session_lines(lines) == []
+
+
+def test_dedup_across_calls_with_shared_state() -> None:
+    existing: set[str] = set()
+    names: dict[str, str] = {}
+    line = _line(type="user", uuid="u1", timestamp="t1", message={"content": "once"})
+    first = parse_claude_session_lines([line], existing_event_ids=existing, tool_name_by_call_id=names)
+    second = parse_claude_session_lines([line], existing_event_ids=existing, tool_name_by_call_id=names)
+    assert len(first) == 1
+    assert second == []  # already emitted -> deduped
+
+
+def test_queued_command_attachment_parsed() -> None:
+    line = _line(
+        type="attachment",
+        uuid="q1",
+        timestamp="t1",
+        attachment={"type": "queued_command", "commandMode": "prompt", "prompt": "queued msg"},
+    )
+    events = parse_claude_session_lines([line])
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "queued msg"
+
+
+def test_slash_command_normalized() -> None:
+    text = "<command-name>/deploy</command-name><command-args>prod</command-args>"
+    line = _line(type="user", uuid="u1", timestamp="t1", message={"content": text})
+    events = parse_claude_session_lines([line])
+    assert events[0]["content"] == "/deploy prod"
