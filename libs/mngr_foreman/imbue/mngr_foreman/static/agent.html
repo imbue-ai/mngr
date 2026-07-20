@@ -23,11 +23,14 @@
     <div class="composer-blocked" id="composer-blocked" hidden>
       interactive prompt — <a id="blocked-termlink" href="#">open terminal ›</a>
     </div>
+    <div class="upload-strip" id="upload-strip" hidden></div>
     <div class="inner" id="composer-inner">
+      <button id="attach" class="attach-btn" title="Attach image or file" aria-label="Attach">+</button>
       <textarea id="input" rows="1" placeholder="message…" autocomplete="off"></textarea>
       <button id="send">send</button>
       <button id="esc" class="esc-btn" title="Send Escape (stop generating)">Esc</button>
     </div>
+    <input type="file" id="file-input" multiple hidden />
   </div>
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/app.js"></script>

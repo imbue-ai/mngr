@@ -41,6 +41,10 @@ from imbue.mngr_foreman.transcript_parser import parse_claude_session_lines
 from imbue.mngr_foreman.transcript_tail import ReaderFn
 from imbue.mngr_foreman.transcript_tail import TRANSCRIPT_SUBPATH
 from imbue.mngr_foreman.transcript_tail import TranscriptTailer
+from imbue.mngr_foreman.uploads import MAX_UPLOAD_BYTES
+from imbue.mngr_foreman.uploads import UploadError
+from imbue.mngr_foreman.uploads import delete_upload
+from imbue.mngr_foreman.uploads import write_upload
 
 _STATIC_PACKAGE: Final[str] = "imbue.mngr_foreman.static"
 _TRANSCRIPT_POLL_SECONDS: Final[float] = 1.5
@@ -91,6 +95,9 @@ def create_app(
     # resources (see _read_static), so Flask's default /static route would only
     # add a duplicate rule pointing at a non-existent folder.
     app = Flask(__name__, static_folder=None)
+    # Reject oversize uploads at the framework edge (a little headroom over the
+    # 25MB file cap for multipart overhead); write_upload re-checks the raw bytes.
+    app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + 1024 * 1024
     sock = Sock(app)
 
     # ---- pages ------------------------------------------------------------
@@ -208,6 +215,34 @@ def create_app(
         except InterruptError as e:
             logger.info("Interrupt of {} failed: {}", name, e)
             return jsonify({"ok": False, "error": str(e)}), 502
+        return jsonify({"ok": True})
+
+    # ---- attachments ------------------------------------------------------
+
+    @app.route("/api/agents/<name>/upload", methods=["POST"])
+    def api_upload(name: str) -> ResponseReturnValue:
+        # Multipart: the file plus the client-generated "<uuid>.<ext>" name. We
+        # write it to <agent work_dir>/chat_uploads/ on the agent's host.
+        if registry.get_agent(name) is None:
+            return jsonify({"ok": False, "error": f"No agent named {name!r}"}), 404
+        upload = request.files.get("file")
+        stored_name = (request.form.get("filename") or "").strip()
+        if upload is None or not stored_name:
+            return jsonify({"ok": False, "error": "missing file or filename"}), 400
+        try:
+            path = write_upload(mngr_ctx, name, stored_name, upload.read())
+        except UploadError as e:
+            logger.info("Upload to {} failed: {}", name, e)
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, "path": path})
+
+    @app.route("/api/agents/<name>/upload/<stored_name>", methods=["DELETE"])
+    def api_delete_upload(name: str, stored_name: str) -> ResponseReturnValue:
+        try:
+            delete_upload(mngr_ctx, name, stored_name)
+        except UploadError as e:
+            logger.info("Upload delete for {} failed: {}", name, e)
+            return jsonify({"ok": False, "error": str(e)}), 400
         return jsonify({"ok": True})
 
     # ---- terminal websocket (phase 2) -------------------------------------

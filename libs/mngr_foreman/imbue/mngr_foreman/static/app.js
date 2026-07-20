@@ -328,7 +328,6 @@
     // delivery, then resolveQueued swaps it for the normal user bubble.
     function addQueued(text) {
       const node = el("div", "entry user queued");
-      node.appendChild(el("span", "prompt", "> "));
       node.appendChild(document.createTextNode(text));
       tEl.appendChild(node);
       pendingQueued.push({ text: text, node: node });
@@ -366,7 +365,6 @@
         // placeholder -- the real delivered message renders normally below.
         resolveQueued(ev.content || "");
         const e = el("div", "entry user");
-        e.appendChild(el("span", "prompt", "> "));
         e.appendChild(document.createTextNode(ev.content || ""));
         tEl.appendChild(e);
       } else if (ev.type === "framework_message") {
@@ -515,6 +513,9 @@
             // Show it immediately as "queued" (purple); the transcript swaps it
             // for a normal bubble when the delivered message arrives.
             addQueued(msg);
+            // The [FILE: ...] tokens went out with the message; the uploaded
+            // files stay in the agent's workdir. Clear the strip (don't delete).
+            clearUploads();
           } else {
             const err = (d && d.error) || "send failed — open the terminal to resolve any prompt.";
             showError(err);
@@ -554,6 +555,123 @@
     function isTouch() {
       return "ontouchstart" in window || navigator.maxTouchPoints > 0;
     }
+
+    // ---- attachments / uploads ----
+    // On paste-image or file-attach we generate the uuid client-side, drop a
+    // literal [FILE: ./chat_uploads/<uuid>.<ext>] token at the cursor (so the
+    // path sits where the image belongs in the message; Claude Code reads such
+    // paths natively), and upload to the agent's workdir in the background.
+    const uploadStrip = document.getElementById("upload-strip");
+    const attachBtn = document.getElementById("attach");
+    const fileInput = document.getElementById("file-input");
+    const uploads = new Map(); // storedName -> { chip, token, objectUrl }
+    const UPLOAD_DIR = "./chat_uploads";
+    const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+    function newUuid() {
+      if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+        const r = (Math.random() * 16) | 0;
+        return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+      });
+    }
+    function extFor(file) {
+      const name = file.name || "";
+      const dot = name.lastIndexOf(".");
+      let ext = dot > 0 ? name.slice(dot + 1) : "";
+      if (!ext && file.type) ext = file.type.split("/").pop();
+      ext = (ext || "bin").toLowerCase().replace(/[^a-z0-9]/g, "");
+      return ext || "bin";
+    }
+    function insertAtCursor(text) {
+      const s = input.selectionStart != null ? input.selectionStart : input.value.length;
+      const e = input.selectionEnd != null ? input.selectionEnd : input.value.length;
+      const v = input.value;
+      input.value = v.slice(0, s) + text + v.slice(e);
+      const pos = s + text.length;
+      try { input.setSelectionRange(pos, pos); } catch (_e) {}
+      autoGrow();
+    }
+    function removeTokenFromInput(token) {
+      input.value = input.value.replace(token + " ", "").replace(token, "");
+      autoGrow();
+    }
+    function showStrip() { uploadStrip.hidden = uploads.size === 0; }
+
+    function uploadFile(file) {
+      if (file.size > MAX_UPLOAD_BYTES) { showError("file too large (max 25MB): " + (file.name || "")); return; }
+      const storedName = newUuid() + "." + extFor(file);
+      const token = "[FILE: " + UPLOAD_DIR + "/" + storedName + "]";
+      insertAtCursor(token + " ");
+
+      const chip = el("div", "upload-chip pending");
+      let objectUrl = null;
+      if ((file.type || "").indexOf("image/") === 0) {
+        objectUrl = URL.createObjectURL(file);
+        const img = el("img");
+        img.src = objectUrl;
+        chip.appendChild(img);
+      } else {
+        chip.appendChild(el("div", "file-icon", (file.name || storedName).slice(0, 18)));
+      }
+      const x = el("button", "x", "×");
+      x.title = "Remove attachment";
+      x.addEventListener("click", function () { removeUpload(storedName); });
+      chip.appendChild(x);
+      uploadStrip.appendChild(chip);
+      uploads.set(storedName, { chip: chip, token: token, objectUrl: objectUrl });
+      showStrip();
+
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("filename", storedName);
+      fetch("/api/agents/" + encodeURIComponent(name) + "/upload", { method: "POST", body: fd })
+        .then((r) => r.json().then((d) => ({ ok: r.ok, d: d })))
+        .then(({ ok, d }) => {
+          if (ok && d.ok) chip.classList.remove("pending");
+          else markUploadError(chip, (d && d.error) || "failed");
+        })
+        .catch(() => markUploadError(chip, "network error"));
+    }
+    function markUploadError(chip, msg) {
+      chip.classList.remove("pending");
+      chip.classList.add("error");
+      chip.title = "upload failed: " + msg;
+      if (!chip.querySelector(".err-badge")) chip.appendChild(el("div", "err-badge", "failed"));
+    }
+    function removeUpload(storedName) {
+      const entry = uploads.get(storedName);
+      if (!entry) return;
+      removeTokenFromInput(entry.token);
+      if (entry.chip && entry.chip.parentNode) entry.chip.parentNode.removeChild(entry.chip);
+      if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
+      uploads.delete(storedName);
+      showStrip();
+      // Best-effort delete of the remote file.
+      fetch("/api/agents/" + encodeURIComponent(name) + "/upload/" + encodeURIComponent(storedName), { method: "DELETE" }).catch(() => {});
+    }
+    function clearUploads() {
+      uploads.forEach((entry) => {
+        if (entry.chip && entry.chip.parentNode) entry.chip.parentNode.removeChild(entry.chip);
+        if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
+      });
+      uploads.clear();
+      showStrip();
+    }
+
+    if (attachBtn) attachBtn.addEventListener("click", function () { fileInput.click(); });
+    if (fileInput) fileInput.addEventListener("change", function () {
+      Array.prototype.forEach.call(fileInput.files || [], uploadFile);
+      fileInput.value = "";
+    });
+    input.addEventListener("paste", function (e) {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      const files = [];
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].kind === "file") { const f = items[i].getAsFile(); if (f) files.push(f); }
+      }
+      if (files.length) { e.preventDefault(); files.forEach(uploadFile); }
+    });
   }
 
   // ==========================================================================
