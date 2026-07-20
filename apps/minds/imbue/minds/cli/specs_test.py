@@ -208,3 +208,93 @@ def test_specs_group_is_registered_on_the_minds_cli() -> None:
     assert result.exit_code == 0, result.output
     assert "validate" in result.output
     assert "query" in result.output
+    assert "export" in result.output
+    assert "plan" in result.output
+
+
+def test_specs_export_emits_enriched_records_with_schema_version(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
+
+    result = CliRunner().invoke(specs, ["export", "--root", str(root)])
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [record["coordinate"] for record in records] == [
+        "authentication.fresh-code",
+        "authentication.missing-code",
+        "authentication.installation-bound",
+        "authentication.foreign-token",
+    ]
+    fresh_code = records[0]
+    assert fresh_code["schema_version"] == 1
+    assert fresh_code["effective_steps"] == fresh_code["raw_steps"]
+    assert fresh_code["feature"]["name"] == "Sign-in"
+    assert fresh_code["rule"] is None
+    assert [prose["kind"] for prose in fresh_code["prose"]] == ["overview"]
+    assert fresh_code["prose"][0]["content"] == "corpus context\n"
+    foreign_token = records[3]
+    assert foreign_token["parent"] == "authentication.installation-bound"
+    assert foreign_token["rule"]["name"] == "Only tokens minted by this installation are accepted"
+    assert [rule["scope"] for rule in foreign_token["applicable_rules"]] == ["file"]
+    outline = records[1]
+    assert outline["examples"][0]["rows"] == [["/login"]]
+
+
+def test_specs_export_reports_omitted_units_on_stderr_and_exits_nonzero(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "good.feature": "Feature: G\n\n  @works\n  Scenario: s\n    Given a\n",
+            "untagged.feature": "Feature: U\n\n  Scenario: no identity\n    Given a\n",
+        },
+    )
+
+    result = CliRunner().invoke(specs, ["export", "--root", str(root)])
+
+    assert result.exit_code == 1
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [record["coordinate"] for record in records] == ["works"]
+    assert "incomplete" in result.stderr
+
+
+def test_specs_plan_emits_tmr_packets_for_scenarios_and_outlines_by_default(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
+
+    result = CliRunner().invoke(specs, ["plan", "--for-tmr", "--root", str(root)])
+
+    assert result.exit_code == 0, result.output
+    packets = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [(packet["id"], packet["kind"]) for packet in packets] == [
+        ("authentication.fresh-code", "scenario"),
+        ("authentication.missing-code", "scenario-outline"),
+        ("authentication.foreign-token", "scenario"),
+    ]
+    packet = packets[0]
+    assert packet["schema_version"] == 1
+    assert packet["display_id"] == "authentication-fresh-code"
+    assert packet["context"]["coordinate"] == "authentication.fresh-code"
+    assert packet["context"]["effective_steps"][0]["text"] == "the user is not signed in"
+
+
+def test_specs_plan_includes_rule_packets_only_when_asked(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
+
+    result = CliRunner().invoke(specs, ["plan", "--for-tmr", "--include-rules", "--root", str(root)])
+
+    assert result.exit_code == 0, result.output
+    packets = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [(packet["id"], packet["kind"]) for packet in packets] == [
+        ("authentication.fresh-code", "scenario"),
+        ("authentication.missing-code", "scenario-outline"),
+        ("authentication.installation-bound", "rule"),
+        ("authentication.foreign-token", "scenario"),
+    ]
+
+
+def test_specs_plan_requires_an_explicit_target(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
+
+    result = CliRunner().invoke(specs, ["plan", "--root", str(root)])
+
+    assert result.exit_code != 0
+    assert "--for-tmr" in result.stderr

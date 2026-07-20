@@ -25,10 +25,13 @@ from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_name_subs
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_step_substring
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_tag
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_to_record
-from imbue.minds.core.behavioral_specs.data_types import CorpusScan
 from imbue.minds.core.behavioral_specs.data_types import SpecUnit
 from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
 from imbue.minds.core.behavioral_specs.data_types import SpecViolation
+from imbue.minds.core.behavioral_specs.export import EXPORT_RECORD_SCHEMA_VERSION
+from imbue.minds.core.behavioral_specs.export import export_corpus
+from imbue.minds.core.behavioral_specs.export import exported_unit_to_record
+from imbue.minds.core.behavioral_specs.export import exported_unit_to_tmr_task_packet
 from imbue.minds.errors import SpecCorpusRootNotFoundError
 from imbue.minds.errors import SpecListingIncompleteError
 from imbue.minds.errors import SpecValidationFailedError
@@ -94,9 +97,9 @@ def _emit_unit_records(units: tuple[SpecUnit, ...], unit_kind: SpecUnitKind | No
         write_stdout_line(json.dumps(spec_unit_to_record(unit), ensure_ascii=False))
 
 
-def _fail_if_units_were_omitted(scan: CorpusScan) -> None:
+def _fail_if_units_were_omitted(violations: tuple[SpecViolation, ...]) -> None:
     """Surface unit-omitting problems on stderr and exit nonzero: the emitted listing is incomplete."""
-    omitting_violations = tuple(violation for violation in scan.violations if violation.is_unit_omitted)
+    omitting_violations = tuple(violation for violation in violations if violation.is_unit_omitted)
     if not omitting_violations:
         return
     for violation in omitting_violations:
@@ -158,7 +161,67 @@ def specs_list(corpus_root: Path, unit_kind_value: str | None) -> None:
     scan = scan_corpus(_require_corpus_root(corpus_root))
     unit_kind = None if unit_kind_value is None else _UNIT_KIND_BY_CLI_VALUE[unit_kind_value]
     _emit_unit_records(scan.units, unit_kind)
-    _fail_if_units_were_omitted(scan)
+    _fail_if_units_were_omitted(scan.violations)
+
+
+@specs.command(name="export")
+@_root_option
+def specs_export(corpus_root: Path) -> None:
+    """Emit enriched unit records as JSONL: everything a test-writing consumer needs.
+
+    Each record carries schema_version plus, beyond the `list` fields: the
+    unit's description, raw_steps and effective_steps (Background folded in),
+    Examples rows for Scenario Outlines, the Feature name/description, the
+    enclosing Rule's summary, the relevant prose (folder overview.md files
+    from the corpus root down, then the file's sidecar), and the applicable
+    invariants resolved root -> folder -> file (corpus invariants.feature,
+    ancestor folder invariants.feature files, and file-scoped Rules). Stdout
+    carries nothing but JSONL; diagnostics go to stderr.
+    """
+    scan = export_corpus(_require_corpus_root(corpus_root))
+    for unit in scan.units:
+        record = {"schema_version": EXPORT_RECORD_SCHEMA_VERSION, **exported_unit_to_record(unit)}
+        write_stdout_line(json.dumps(record, ensure_ascii=False))
+    _fail_if_units_were_omitted(scan.violations)
+
+
+@specs.command(name="plan")
+@_root_option
+@click.option(
+    "--for-tmr",
+    "for_tmr",
+    is_flag=True,
+    required=True,
+    help="Emit task packets for the TMR task-file recipe (`mngr tmr-tasks --tasks-file`).",
+)
+@click.option(
+    "--include-rules",
+    "include_rules",
+    is_flag=True,
+    default=False,
+    help="Also emit packets for Rule units (invariants). By default only scenarios and "
+    "scenario outlines are planned.",
+)
+def specs_plan(corpus_root: Path, for_tmr: bool, include_rules: bool) -> None:
+    """Emit TMR-ready task packets as JSONL, one per spec unit to fan out to agents.
+
+    Each packet carries schema_version, id (the unit's coordinate), display_id
+    (the coordinate with dots replaced by dashes, safe for agent/branch
+    names), kind, and context (the full enriched export record for the unit).
+    Scenarios and scenario outlines are planned by default; pass
+    --include-rules to also plan invariant Rules. Stdout carries nothing but
+    JSONL; diagnostics go to stderr.
+    """
+    del for_tmr  # the only supported plan target for now; the flag keeps the invocation explicit
+    planned_kinds = {SpecUnitKind.SCENARIO, SpecUnitKind.SCENARIO_OUTLINE}
+    if include_rules:
+        planned_kinds.add(SpecUnitKind.RULE)
+    scan = export_corpus(_require_corpus_root(corpus_root))
+    for unit in scan.units:
+        if unit.kind not in planned_kinds:
+            continue
+        write_stdout_line(json.dumps(exported_unit_to_tmr_task_packet(unit), ensure_ascii=False))
+    _fail_if_units_were_omitted(scan.violations)
 
 
 @pure
@@ -216,4 +279,4 @@ def specs_query(
         unit for unit in scan.units if _unit_passes_query_filters(unit, tag_filter, name_filter, step_filter)
     )
     _emit_unit_records(matching_units, None)
-    _fail_if_units_were_omitted(scan)
+    _fail_if_units_were_omitted(scan.violations)
