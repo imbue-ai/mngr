@@ -327,7 +327,6 @@ def _tomlkit_to_plain_dict(value: Any) -> dict[str, Any]:
     return converted
 
 
-@pure
 # Codex's plaintext TUI log -- the source of the ``codex.sse_event`` heartbeat that
 # the system_interface uses to drive the "Thinking..." indicator (codex's lifecycle
 # state is unreliable for that; the sse deltas are the real "generating now" signal).
@@ -350,6 +349,7 @@ def get_codex_tui_log_dir(codex_home: Path) -> Path:
     return codex_home / TUI_LOG_DIR_NAME
 
 
+@pure
 def build_codex_config(
     *,
     model: str | None,
