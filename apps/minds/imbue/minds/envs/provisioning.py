@@ -252,6 +252,10 @@ ApplyPoolHostsMigrationsFn = Callable[[SecretStr, ConcurrencyGroup], tuple[Path,
 # (host_pool_dsn, domains, emails, cg) -> None. Seed-if-absent default paid
 # domains/emails into the host_pool DB after migrations. Tests pass a no-op fake.
 SeedPaidListDefaultsFn = Callable[[SecretStr, tuple[str, ...], tuple[str, ...], ConcurrencyGroup], None]
+# (host_pool_dsn, plan_rows_by_name, cg) -> None. Write (overwriting) the
+# tier's plan definitions into the plans table after migrations. Tests pass a
+# no-op fake.
+WritePlanDefaultsFn = Callable[[SecretStr, dict[str, dict[str, float]], ConcurrencyGroup], None]
 # (app_name, modal_env, cg) -> latest deployed version id, or None for
 # never-deployed. Used at deploy start to capture pre-deploy state so
 # ``minds env recover`` can `modal app rollback` to it on failure.
@@ -355,6 +359,12 @@ class Providers(FrozenModel):
         description=(
             "(host_pool_dsn, domains, emails, cg) -> seed-if-absent the tier's default "
             "paid domains/emails into the host_pool DB after migrations."
+        ),
+    )
+    write_plan_defaults: WritePlanDefaultsFn = Field(
+        description=(
+            "(host_pool_dsn, plan_rows_by_name, cg) -> write (overwriting) the tier's plan "
+            "definitions into the plans table after migrations."
         ),
     )
     get_modal_app_latest_version: GetModalAppLatestVersionFn = Field(
@@ -787,6 +797,14 @@ def _deploy_env_locked(
             "Seeding default paid-list entries (domains={}, emails={})", list(paid_domains), list(paid_emails)
         ):
             providers.seed_paid_list_defaults(host_pool_dsn, paid_domains, paid_emails, parent_concurrency_group)
+
+    # Write (overwriting) the tier's plan definitions -- deploy.toml is the
+    # git-owned source of truth for plan defaults. Runs every deploy;
+    # per-user entitlement rows are never touched here.
+    if deploy_config.plans:
+        plan_rows_by_name = {name: config.to_plan_row() for name, config in deploy_config.plans.items()}
+        with info_span("Writing plan definitions ({})", sorted(plan_rows_by_name)):
+            providers.write_plan_defaults(host_pool_dsn, plan_rows_by_name, parent_concurrency_group)
 
     # Resolve the Modal deploy strategy now that we know whether a
     # migration ran. Done here (rather than at the CLI boundary) so the

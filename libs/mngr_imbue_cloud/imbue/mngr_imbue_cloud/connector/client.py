@@ -23,6 +23,7 @@ from pydantic import SecretStr
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr_imbue_cloud.data_types import AccountInfo
 from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeaseResult
@@ -38,6 +39,7 @@ from imbue.mngr_imbue_cloud.data_types import ServiceInfo
 from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.data_types import TunnelInfo
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
@@ -48,6 +50,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
@@ -102,12 +105,31 @@ class ImbueCloudConnectorClient(MutableModel):
     def _bearer(self, access_token: SecretStr) -> dict[str, str]:
         return {"Authorization": f"Bearer {access_token.get_secret_value()}"}
 
+    def _raise_if_quota_exceeded(self, response: httpx.Response) -> None:
+        """Raise the typed quota error when a 403 carries the connector's structured detail."""
+        if response.status_code != 403:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "quota_exceeded":
+            raise ImbueCloudQuotaExceededError(
+                str(detail.get("message", "Quota exceeded")),
+                entitlement=str(detail.get("entitlement", "")),
+                limit=float(detail.get("limit", 0)),
+                current=float(detail.get("current", 0)),
+            )
+
     def _check(self, response: httpx.Response, exc_cls: type[Exception]) -> dict[str, Any]:
         """Raise ``exc_cls`` on non-2xx, otherwise return parsed JSON.
 
-        Special-cases 401/403 -> ImbueCloudAuthError so callers can treat them
-        uniformly across all endpoints.
+        Special-cases the structured quota rejection ->
+        ImbueCloudQuotaExceededError, then 401/403 -> ImbueCloudAuthError so
+        callers can treat them uniformly across all endpoints.
         """
+        self._raise_if_quota_exceeded(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
         if response.status_code in (200, 201, 204):
@@ -625,6 +647,7 @@ class ImbueCloudConnectorClient(MutableModel):
 
     def _check_bucket(self, response: httpx.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""
+        self._raise_if_quota_exceeded(response)
         if response.status_code in (200, 201, 204):
             if not response.content:
                 return {}
@@ -684,20 +707,11 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._check_bucket(response)
 
-    def create_bucket_key(
-        self,
-        access_token: SecretStr,
-        name: str,
-        alias: str | None,
-        access: str,
-    ) -> R2KeyMaterial:
-        body: dict[str, Any] = {"access": access}
-        if alias is not None:
-            body["alias"] = alias
+    def roll_bucket_key(self, access_token: SecretStr, name: str) -> R2KeyMaterial:
+        """Return fresh credentials for a bucket's single key (same Access Key ID, new secret)."""
         response = httpx.post(
-            self._url(f"/buckets/{name}/keys"),
+            self._url(f"/buckets/{name}/roll-key"),
             headers=self._bearer(access_token),
-            json=body,
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         return R2KeyMaterial.model_validate(self._check_bucket(response))
@@ -715,13 +729,64 @@ class ImbueCloudConnectorClient(MutableModel):
             return []
         return [R2KeyInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
 
-    def destroy_bucket_key(self, access_token: SecretStr, access_key_id: str) -> None:
-        response = httpx.delete(
-            self._url(f"/bucket-keys/{access_key_id}"),
+    # ------------------------------------------------------------------
+    # Account (plan + entitlements + usage)
+    # ------------------------------------------------------------------
+
+    def get_account(self, access_token: SecretStr) -> AccountInfo:
+        """Fetch the account's plan, entitlement values, and live usage."""
+        response = self._send(
+            "GET",
+            self._url("/account"),
+            exc_cls=ImbueCloudAccountError,
             headers=self._bearer(access_token),
+            # Live usage fans out to Cloudflare + LiteLLM server-side; allow
+            # the same generous budget as the other multi-upstream calls.
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        self._check_bucket(response)
+        return AccountInfo.model_validate(self._check(response, ImbueCloudAccountError))
+
+    def set_account_plan(self, access_token: SecretStr, plan: str) -> dict[str, Any]:
+        """Switch the account's plan; returns ``{plan_name, entitlements}``."""
+        response = httpx.post(
+            self._url("/account/plan"),
+            headers=self._bearer(access_token),
+            json={"plan": plan},
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    # ------------------------------------------------------------------
+    # Account admin (email-addressed, MINDS_PAID_ADMIN_KEY authenticated)
+    # ------------------------------------------------------------------
+
+    def admin_get_account(self, admin_api_key: SecretStr, email: str) -> AccountInfo:
+        response = httpx.get(
+            self._url(f"/admin/accounts/{email}"),
+            headers=self._bearer(admin_api_key),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return AccountInfo.model_validate(self._check(response, ImbueCloudAccountError))
+
+    def admin_set_account_plan(self, admin_api_key: SecretStr, email: str, plan: str) -> dict[str, Any]:
+        response = httpx.post(
+            self._url(f"/admin/accounts/{email}/plan"),
+            headers=self._bearer(admin_api_key),
+            json={"plan": plan},
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    def admin_set_account_quota(
+        self, admin_api_key: SecretStr, email: str, entitlement: str, value: float
+    ) -> dict[str, Any]:
+        response = httpx.post(
+            self._url(f"/admin/accounts/{email}/quota"),
+            headers=self._bearer(admin_api_key),
+            json={"entitlement": entitlement, "value": value},
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudAccountError)
 
     # ------------------------------------------------------------------
     # Workspace sync (records + account key bundle)

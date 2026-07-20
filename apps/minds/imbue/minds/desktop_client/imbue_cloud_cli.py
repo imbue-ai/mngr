@@ -627,21 +627,47 @@ class ImbueCloudCli(MutableModel):
         body = self._expect_success(result, "bucket info")
         return R2BucketInfo.model_validate(body)
 
-    def create_bucket_key(
+    def roll_bucket_key(
         self,
         *,
         account: str,
         name: str,
-        access: str = "readwrite",
-        alias: str | None = None,
     ) -> R2BucketKeyMaterial:
-        """Mint an additional scoped key for the bucket ``name`` (short name)."""
-        args: list[str] = ["bucket", "keys", "create", name, "--access", access, "--account", account]
-        if alias is not None:
-            args.extend(["--alias", alias])
-        result = self._run(args, cg_name="imbue-cloud-bucket-keys-create", timeout_seconds=_KEY_OP_TIMEOUT_SECONDS)
-        body = self._expect_success(result, "bucket keys create")
+        """Roll the bucket's single key (same Access Key ID, fresh secret) and return it.
+
+        Each bucket has exactly one key and the secret is shown only once, so
+        this is how re-provisioning gets working credentials for an existing
+        bucket.
+        """
+        result = self._run(
+            ["bucket", "roll-key", name, "--account", account],
+            cg_name="imbue-cloud-bucket-roll-key",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        body = self._expect_success(result, "bucket roll-key")
         return R2BucketKeyMaterial.model_validate(body)
+
+    # ------------------------------------------------------------------
+    # Account (plan + entitlements + usage)
+    # ------------------------------------------------------------------
+
+    def get_account_info(self, account: str) -> dict[str, Any]:
+        """Return the account's plan, entitlement values, and live usage as a raw dict."""
+        result = self._run(
+            ["account", "show", "--account", account],
+            cg_name="imbue-cloud-account-show",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._expect_success(result, "account show")
+
+    def set_account_plan(self, account: str, plan: str) -> dict[str, Any]:
+        """Switch the account's plan; returns ``{plan_name, entitlements}``."""
+        result = self._run(
+            ["account", "set-plan", plan, "--account", account],
+            cg_name="imbue-cloud-account-set-plan",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._expect_success(result, "account set-plan")
 
     # ------------------------------------------------------------------
     # Workspace sync (records + key bundle)

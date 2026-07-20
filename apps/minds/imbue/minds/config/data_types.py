@@ -1,6 +1,7 @@
 import json
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Final
 
 from pydantic import AnyUrl
@@ -291,6 +292,39 @@ class PaidDefaultsConfig(FrozenModel):
     )
 
 
+class PlanQuotasConfig(FrozenModel):
+    """One plan's default quota entitlements, as committed in deploy.toml.
+
+    Written (overwriting) into the connector's ``plans`` table on every
+    deploy -- deploy.toml is the source of truth for plan definitions, while
+    per-user entitlement rows (copied from the plan at assignment) are only
+    ever edited via the admin API. Storage is configured in GB for
+    readability; the writer converts to bytes for the BIGINT column.
+    """
+
+    max_remote_workspaces: NonNegativeInt = Field(description="Max concurrent pool-host leases (running or stopped)")
+    max_tunnels: NonNegativeInt = Field(description="Max Cloudflare tunnels")
+    max_services_per_tunnel: NonNegativeInt = Field(description="Max forwarded services per tunnel")
+    max_buckets: NonNegativeInt = Field(description="Max R2 buckets")
+    max_total_bucket_gb: NonNegativeInt = Field(description="Max total GB across all the account's buckets")
+    monthly_llm_spend_usd: Annotated[float, Field(ge=0)] = Field(
+        description="Monthly LLM spend cap in USD (rolling; 0 disables imbue-cloud key minting)"
+    )
+    max_active_synced_workspaces: NonNegativeInt = Field(description="Max ACTIVE synced workspace records")
+
+    def to_plan_row(self) -> dict[str, float]:
+        """The connector-table column values for this plan (storage converted to bytes)."""
+        return {
+            "max_remote_workspaces": int(self.max_remote_workspaces),
+            "max_tunnels": int(self.max_tunnels),
+            "max_services_per_tunnel": int(self.max_services_per_tunnel),
+            "max_buckets": int(self.max_buckets),
+            "max_total_bucket_bytes": int(self.max_total_bucket_gb) * 1024**3,
+            "monthly_llm_spend_usd": float(self.monthly_llm_spend_usd),
+            "max_active_synced_workspaces": int(self.max_active_synced_workspaces),
+        }
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds env create`.
 
@@ -348,6 +382,14 @@ class DeployEnvConfig(FrozenModel):
         description=(
             "Default paid-access entries seeded (seed-if-absent) into the connector's "
             "paid_domains / paid_emails tables after migrations on each deploy."
+        ),
+    )
+    plans: dict[str, PlanQuotasConfig] = Field(
+        default_factory=dict,
+        description=(
+            "Plan definitions (plan name -> quota entitlements) written -- overwriting -- into the "
+            "connector's plans table after migrations on every deploy. Git is the source of truth "
+            "for plan defaults; per-user entitlement rows are managed via the admin API instead."
         ),
     )
 

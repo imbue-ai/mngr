@@ -1764,6 +1764,10 @@ def render_accounts_page(
     accounts: Sequence[object],
     default_account_id: str | None = None,
     enabled_by_user_id: Mapping[str, bool] | None = None,
+    # Per-account plan/usage view models (built by build_account_plan_view);
+    # None for an account whose info could not be fetched.
+    plan_view_by_user_id: Mapping[str, Mapping[str, object] | None] | None = None,
+    plan_error: str | None = None,
 ) -> str:
     """Render the manage accounts page.
 
@@ -1778,6 +1782,8 @@ def render_accounts_page(
         accounts=accounts,
         default_account_id=default_account_id or "",
         enabled_by_user_id=dict(enabled_by_user_id or {}),
+        plan_view_by_user_id=dict(plan_view_by_user_id or {}),
+        plan_error=plan_error or "",
     )
 
 

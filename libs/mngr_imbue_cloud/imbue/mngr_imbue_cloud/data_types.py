@@ -383,6 +383,43 @@ class R2BucketCreateResult(FrozenModel):
     key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
 
 
+class AccountEntitlementValues(FrozenModel):
+    """The quota values an account currently holds (mirrors the connector's PlanEntitlements)."""
+
+    max_remote_workspaces: int = Field(description="Max concurrent pool-host leases (running or stopped)")
+    max_tunnels: int = Field(description="Max Cloudflare tunnels")
+    max_services_per_tunnel: int = Field(description="Max forwarded services per tunnel")
+    max_buckets: int = Field(description="Max R2 buckets")
+    max_total_bucket_bytes: int = Field(description="Max total bytes across all the account's buckets")
+    monthly_llm_spend_usd: float = Field(description="Monthly LLM spend cap in USD (rolling)")
+    max_active_synced_workspaces: int = Field(description="Max ACTIVE synced workspace records")
+
+
+class AccountUsageInfo(FrozenModel):
+    """Live usage numbers for an account (mirrors the connector's AccountUsage)."""
+
+    remote_workspaces: int = Field(description="Current pool-host leases")
+    tunnels: int = Field(description="Current Cloudflare tunnels")
+    buckets: int = Field(description="Current R2 buckets")
+    total_bucket_bytes: int = Field(description="Total bytes across the account's buckets")
+    llm_spend_usd_this_period: float = Field(description="LiteLLM aggregate spend in the current budget period")
+    llm_budget_resets_at: str | None = Field(default=None, description="When the rolling LLM budget period resets")
+    active_synced_workspaces: int = Field(description="Current ACTIVE synced workspace records")
+
+
+class AccountInfo(FrozenModel):
+    """An account's plan, entitlement values, and live usage, from GET /account."""
+
+    user_id: SuperTokensUserId = Field(description="SuperTokens user id")
+    email: str = Field(description="The account's verified email")
+    plan_name: str = Field(description="Current plan name (e.g. 'explorer' or 'ally')")
+    entitlements: AccountEntitlementValues = Field(description="The account's current entitlement values")
+    usage: AccountUsageInfo = Field(description="Live usage, computed by the connector at request time")
+    available_plans: tuple[str, ...] = Field(
+        default=(), description="Every plan name currently seeded (for plan-selector UIs)"
+    )
+
+
 class SyncWorkspaceRecord(FrozenModel):
     """Wire form of one synced workspace record (transport-only; the plugin never decrypts).
 
