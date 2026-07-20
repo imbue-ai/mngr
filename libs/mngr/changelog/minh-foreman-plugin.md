@@ -1,0 +1,1 @@
+- Registered the `mngr foreman` command in the generated CLI docs (`docs/commands/secondary/foreman.md`), documenting the foreman web remote-control plugin's `serve` subcommand.

@@ -32,6 +32,10 @@ BINARY_FILE_EXCLUSION: Final[tuple[str, ...]] = (
     "*.pdf",
     "*.zip",
     "*.gz",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.otf",
 )
 
 

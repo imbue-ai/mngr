@@ -76,6 +76,7 @@ SECONDARY_COMMANDS = {
     "config",
     "event",
     "file",
+    "foreman",
     "forward",
     "gc",
     "gcp",
