@@ -32,8 +32,8 @@ from imbue.minds.core.behavioral_specs.data_types import SpecViolation
 from imbue.minds.errors import SpecCorpusRootNotFoundError
 from imbue.minds.errors import SpecListingIncompleteError
 from imbue.minds.errors import SpecValidationFailedError
-from imbue.minds.utils.output import write_stderr_line
 from imbue.minds.utils.output import write_stdout_line
+from imbue.mngr.cli.output_helpers import write_stderr_line
 
 # The real corpus, relative to the repo root (the documented working directory
 # for ``uv run minds specs ...``).

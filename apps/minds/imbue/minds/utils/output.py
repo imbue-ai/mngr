@@ -32,9 +32,3 @@ def emit_event(
             pass
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def write_stderr_line(message: str) -> None:
-    """Write a line to stderr. Use for diagnostics that must not pollute piped stdout."""
-    sys.stderr.write(message + "\n")
-    sys.stderr.flush()

@@ -25,6 +25,7 @@ from gherkin.token_matcher import TokenMatcher
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.core.behavioral_specs.data_types import CorpusScan
@@ -425,6 +426,10 @@ def _extract_units_from_document(
                     )
                     if child_unit is not None:
                         units.append(child_unit)
+                else:
+                    raise SwitchError(f"Rule child envelope with no known node type in {file}")
+        else:
+            raise SwitchError(f"Feature child envelope with no known node type in {file}")
     return units
 
 
