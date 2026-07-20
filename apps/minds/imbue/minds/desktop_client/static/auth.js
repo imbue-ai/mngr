@@ -146,14 +146,19 @@
     });
   }
 
-  // Fade + disable every OAuth button for the duration of the flow, and reveal
-  // the spinner only on the button whose provider the user clicked.
+  // Fade + disable every OAuth button for the duration of the flow. On the
+  // button whose provider the user clicked, swap its brand icon for the spinner
+  // (same 18px slot, so the button doesn't change width); the others keep their
+  // icon and just dim.
   function oauthSetButtonsBusy(provider) {
     document.querySelectorAll('.oauth-btn').forEach(function (b) {
       b.disabled = true;
       b.classList.add('opacity-60');
+      var isClicked = b.getAttribute('data-oauth') === provider;
       var spinner = b.querySelector('.oauth-btn-spinner');
-      if (spinner) spinner.classList.toggle('hidden', b.getAttribute('data-oauth') !== provider);
+      var icon = b.querySelector('.oauth-btn-icon');
+      if (spinner) spinner.classList.toggle('hidden', !isClicked);
+      if (icon) icon.classList.toggle('hidden', isClicked);
     });
   }
 
@@ -162,7 +167,9 @@
       b.disabled = false;
       b.classList.remove('opacity-60');
       var spinner = b.querySelector('.oauth-btn-spinner');
+      var icon = b.querySelector('.oauth-btn-icon');
       if (spinner) spinner.classList.add('hidden');
+      if (icon) icon.classList.remove('hidden');
     });
   }
 

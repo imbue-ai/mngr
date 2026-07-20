@@ -1,6 +1,6 @@
 Polished the Google / GitHub sign-in flow on the login page so the OAuth round-trip feels responsive instead of frozen:
 
-- Clicking a provider button now gives immediate feedback: a small spinner appears in front of that provider's logo and both provider buttons fade slightly while the browser round-trip runs.
+- Clicking a provider button now gives immediate feedback: that provider's logo is replaced by a spinner and both provider buttons fade slightly while the browser round-trip runs.
 
 - The status ("blue box") message is now staged and anchored to real progress rather than a single frozen line: "Opening your browser..." on click, "Waiting for you to finish signing in with Google/GitHub..." once the flow starts, and "Signing you in..." the moment sign-in completes.
 
