@@ -10,7 +10,6 @@ broken links, compute coverage, and render the matrix records.
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -23,6 +22,7 @@ from typing import assert_never
 
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.pure import pure
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_kind_record_value
 from imbue.minds.core.behavioral_specs.data_types import SpecCoverage
@@ -71,19 +71,18 @@ def harvest_witness_links(test_roots: Sequence[Path]) -> tuple[WitnessLink, ...]
         # Copy (never mutate) the ambient environment, adding the output-path var the plugin reads.
         subprocess_environment = {**os.environ, "MINDS_WITNESSES_OUTPUT_PATH": str(output_path)}
         start_time = time.monotonic()
-        try:
-            completed_collection = subprocess.run(
+        with ConcurrencyGroup(name="minds-specs-witness-collection") as concurrency_group:
+            completed_collection = concurrency_group.run_process_to_completion(
                 command,
                 env=subprocess_environment,
-                capture_output=True,
-                text=True,
                 timeout=_COLLECTION_HARD_TIMEOUT_SECONDS,
+                is_checked_after=False,
             )
-        except subprocess.TimeoutExpired as exc:
+        if completed_collection.is_timed_out:
             raise SpecWitnessCollectionError(
                 f"pytest --collect-only did not finish within {_COLLECTION_HARD_TIMEOUT_SECONDS:.0f}s over "
                 f"test roots {[str(test_root) for test_root in test_roots]}"
-            ) from exc
+            )
         elapsed_seconds = time.monotonic() - start_time
         if elapsed_seconds > _COLLECTION_WARN_THRESHOLD_SECONDS:
             logger.warning(
