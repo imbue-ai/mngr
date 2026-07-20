@@ -2,7 +2,7 @@
 
 The bulk of the CLI logic (option parsing, emit helpers, modal-snapshot
 disable) lives in ``imbue.mngr_mapreduce.cli`` and is tested there. This
-file only covers the TMR-specific glue: ``_TmrCommand``'s ``--`` separator
+file only covers the TMR-specific glue: ``SplitTestingFlagsCommand``'s ``--`` separator
 trick and the help-text surface contract.
 """
 
@@ -12,7 +12,7 @@ import click
 from click.testing import CliRunner
 from click.testing import Result
 
-from imbue.mngr_tmr.cli import _TmrCommand
+from imbue.mngr_tmr.cli import SplitTestingFlagsCommand
 from imbue.mngr_tmr.cli import tmr
 
 
@@ -68,10 +68,10 @@ def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
 def _invoke_tmr_command(
     args: list[str],
 ) -> tuple[Result, dict[str, Any]]:
-    """Invoke a dummy _TmrCommand with the given args and return (result, captured_params)."""
+    """Invoke a dummy SplitTestingFlagsCommand with the given args and return (result, captured_params)."""
     captured: dict[str, Any] = {}
 
-    @click.command(cls=_TmrCommand, context_settings={"ignore_unknown_options": True})
+    @click.command(cls=SplitTestingFlagsCommand, context_settings={"ignore_unknown_options": True})
     @click.argument("pytest_args", nargs=-1, type=click.UNPROCESSED)
     @click.option("--provider", default="local")
     @click.pass_context
@@ -84,7 +84,7 @@ def _invoke_tmr_command(
 
 
 def test_tmr_command_splits_on_double_dash() -> None:
-    """_TmrCommand correctly captures args after -- as testing_flags."""
+    """SplitTestingFlagsCommand correctly captures args after -- as testing_flags."""
     result, captured = _invoke_tmr_command(["tests/e2e", "--", "-m", "release"])
     assert result.exit_code == 0
     assert captured["pytest_args"] == ("tests/e2e",)

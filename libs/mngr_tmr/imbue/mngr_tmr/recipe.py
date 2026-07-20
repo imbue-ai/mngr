@@ -35,7 +35,7 @@ from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.report_upload import maybe_upload_report
 
-_BRANCH_BUNDLE_NAME = "branch.bundle"
+BRANCH_BUNDLE_NAME = "branch.bundle"
 
 _DEFAULT_RECIPE_NAME = "tmr"
 
@@ -59,6 +59,20 @@ class InvalidRecipeNameError(MngrError, ValueError):
     """
 
     ...
+
+
+def validate_recipe_name(value: str) -> str:
+    """Validate a recipe/variant name for use as a branch/agent/host name segment.
+
+    Shared by every recipe's ``name`` field validator. Raises
+    InvalidRecipeNameError (a ValueError) so pydantic wraps it.
+    """
+    if not _RECIPE_NAME_PATTERN.match(value):
+        raise InvalidRecipeNameError(
+            f"Invalid recipe name {value!r}: must start with an alphanumeric and contain only "
+            "alphanumerics, dashes, or underscores (it becomes a branch/agent/host name segment)."
+        )
+    return value
 
 
 def collect_tests(
@@ -86,7 +100,7 @@ def collect_tests(
     return test_ids
 
 
-def _apply_branch_bundle(
+def apply_branch_bundle(
     source_dir: Path,
     bundle_path: Path,
     branch_name: str,
@@ -117,7 +131,7 @@ def _apply_branch_bundle(
     return True
 
 
-def _has_local_branch(source_dir: Path, branch_name: str, cg: ConcurrencyGroup) -> bool:
+def has_local_branch(source_dir: Path, branch_name: str, cg: ConcurrencyGroup) -> bool:
     """Check whether a git branch exists in the local source_dir repo."""
     result = cg.run_process_to_completion(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch_name}"],
@@ -127,7 +141,7 @@ def _has_local_branch(source_dir: Path, branch_name: str, cg: ConcurrencyGroup) 
     return result.returncode == 0
 
 
-def _reducer_branch_applied(
+def reducer_branch_applied(
     ctx: MapReduceContext,
     reducer: AgentMetadata | None,
 ) -> bool:
@@ -138,7 +152,7 @@ def _reducer_branch_applied(
     """
     if reducer is None or reducer.branch_name is None or reducer.error_summary is not None:
         return False
-    return _has_local_branch(ctx.source_dir, reducer.branch_name, ctx.cg)
+    return has_local_branch(ctx.source_dir, reducer.branch_name, ctx.cg)
 
 
 class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
@@ -181,12 +195,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
     @field_validator("name")
     @classmethod
     def _validate_name(cls, value: str) -> str:
-        if not _RECIPE_NAME_PATTERN.match(value):
-            raise InvalidRecipeNameError(
-                f"Invalid recipe name {value!r}: must start with an alphanumeric and contain only "
-                "alphanumerics, dashes, or underscores (it becomes a branch/agent/host name segment)."
-            )
-        return value
+        return validate_recipe_name(value)
 
     def discover(self, ctx: MapReduceContext) -> list[MapReduceTask]:
         raw_ids = collect_tests(
@@ -220,19 +229,19 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         return build_integrator_prompt(template_path=self.reducer_prompt_path)
 
     def on_mapper_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: MapperInfo) -> None:
-        bundle = agent_dir / _BRANCH_BUNDLE_NAME
+        bundle = agent_dir / BRANCH_BUNDLE_NAME
         if bundle.is_file():
-            _apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg)
+            apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg)
 
     def on_reducer_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: ReducerInfo) -> None:
-        bundle = agent_dir / _BRANCH_BUNDLE_NAME
+        bundle = agent_dir / BRANCH_BUNDLE_NAME
         if not bundle.is_file():
             logger.warning("Reducer agent '{}' did not produce a branch bundle", info.agent_name)
             return
-        if not _apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg):
+        if not apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg):
             return
-        if _has_local_branch(ctx.source_dir, info.branch_name, ctx.cg):
-            _emit_reducer_branch(info.branch_name, ctx.output_opts)
+        if has_local_branch(ctx.source_dir, info.branch_name, ctx.cg):
+            emit_reducer_branch(info.branch_name, ctx.output_opts)
 
     def render_report(
         self,
@@ -243,7 +252,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         # Only surface a "Push integrated branch" hint when the reducer's
         # bundle actually landed locally; otherwise the command would
         # reference a nonexistent branch.
-        applied = _reducer_branch_applied(ctx, reducer)
+        applied = reducer_branch_applied(ctx, reducer)
         run_commands = _build_run_commands(
             ctx.run_name,
             recipe_name=self.name,
@@ -257,7 +266,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         )
         # Mirror to S3 (no-op without AWS creds) on every regeneration;
         # symmetric with the local file write.
-        _emit_report_url(maybe_upload_report(report_path, ctx.run_name), ctx.output_opts)
+        emit_report_url(maybe_upload_report(report_path, ctx.run_name), ctx.output_opts)
         return report_path
 
 
@@ -279,7 +288,7 @@ def _build_run_commands(
     return commands
 
 
-def _emit_reducer_branch(branch_name: str, output_opts: OutputOptions) -> None:
+def emit_reducer_branch(branch_name: str, output_opts: OutputOptions) -> None:
     """Emit the integrator branch name as a structured event when applicable."""
     match output_opts.output_format:
         case OutputFormat.JSON | OutputFormat.JSONL:
@@ -290,7 +299,7 @@ def _emit_reducer_branch(branch_name: str, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
-def _emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
+def emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
     """Emit the public URL of the report mirror, if upload occurred."""
     if url is None:
         return
