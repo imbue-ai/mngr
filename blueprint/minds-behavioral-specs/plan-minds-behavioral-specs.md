@@ -6,7 +6,7 @@
 - Capture the formal specification in a new declarative, process-neutral, evergreen skill at `.claude/skills/minds-behavioral-specs/SKILL.md` — the reference that future process skills and tools cite.
 - Make identity positional and derived: the first tag on a Scenario/Rule is its identity; its external coordinate is the folder-path qualifier plus the raw tag. Traceability is inverted into test-side `witnesses` markers. Invariants are `Rule:` blocks whose kind and scope come from structure, never spelled in tags.
 - Build the minimal `minds specs` CLI (`validate`, `list`, `query`; JSONL output) in this branch so the skill documents real tooling, not aspirations.
-- Rewrite the proof-of-concept `apps/minds/specs/authentication.md` into the new format as the in-tree exemplar.
+- Author the authentication spec corpus fresh in the new language as the in-tree exemplar. The experimental `apps/minds/specs/authentication.md` is deleted; it is not load-bearing and nothing is migrated from it.
 
 ## Expected behavior
 
@@ -31,47 +31,21 @@ The skill (`minds-behavioral-specs`):
 - Answers, declaratively: where spec files live and how the corpus is organized; how an individual file is structured; the exact dialect ("official Gherkin as accepted by gherkin-official, classic matcher — Feature/Background/Scenario/Scenario Outline/Examples/Rule/Given/When/Then/And/But, doc strings, data tables, comments"); identity and coordinate rules (example plus counter-example); invariant `Rule:` scoping, documented heavily with examples of both file-scoped and subtree-scoped rules; sidecar and overview relationships (positional, by basename/folder — not links); the `witnesses` convention; the CLI by name and purpose.
 - Stays evergreen: no authoring/updating/sharding process content; no mention of invariant numbering one way or the other; no flag listings that can drift; refers to living locations (`apps/minds/specs/`, `minds specs --help`) rather than snapshots of their contents.
 
-Exemplar rewrite (the resulting corpus):
+Exemplar (the authentication corpus, defined on its own terms):
 
-- `apps/minds/specs/authentication/` gains `overview.md`, `invariants.feature`, `signin.feature`, `session.feature`, `landing.feature`, `post-login.feature`, `workspace-bridge.feature`; the old `authentication.md` is deleted.
-- Glossary, component statement, and out-of-scope prose move to `overview.md`; per-feature narrative stays as Feature descriptions; the two parenthetical continuation lines (invalid in official Gherkin) fold into their step lines; the "notes from authoring" section is dropped as historical.
-- The traceability appendix becomes `witnesses` markers on the referenced tests in `apps/minds/.../desktop_client/` and `libs/mngr_forward/`; `(partial: ...)` notes become `partial=` arguments; `(gap)` rows simply have no witnesses; the two end-to-end script references are dropped for now (scripts are not pytest — noted as a known reduction).
-- Tag map (old identity, new raw tag; every coordinate is `authentication.<new>`):
+- `apps/minds/specs/authentication/` contains `overview.md`, `invariants.feature`, `signin.feature`, `session.feature`, `landing.feature`, `post-login.feature`, `workspace-bridge.feature`. The experimental `apps/minds/specs/authentication.md` is deleted.
+- `overview.md` carries the area's component statement, glossary, and out-of-scope list; each Feature's narrative lives in its own description.
+- `witnesses` markers are added to the desktop_client and mngr_forward tests that exercise each behavior, with `partial=` notes where a test covers only part of it; behaviors with no covering test simply have no witnesses (visible once derivation tooling exists). The convention is pytest-only; non-pytest scripts carry no annotations.
+- The corpus (file, Feature, identity tags; every coordinate is `authentication.<tag>`):
 
-| File | Old | New |
+| File | Feature | Identity tags |
 |---|---|---|
-| signin.feature | @signin-fresh-code | @fresh-code |
-| signin.feature | @signin-used-code | @used-code |
-| signin.feature | @signin-unknown-code | @unknown-code |
-| signin.feature | @signin-prefetch | @prefetch |
-| signin.feature | @signin-already-signed-in | @already-signed-in |
-| signin.feature | @signin-missing-code | @missing-code |
-| session.feature | @session-survives-restart | @survives-restart |
-| session.feature | @session-tampered | @tampered-token |
-| session.feature | @session-foreign | @foreign-token |
-| session.feature | @session-expiry | @expired-token |
-| landing.feature | @landing-signed-out | @signed-out-home |
-| landing.feature | @landing-consent-gate | @consent-gate |
-| landing.feature | @landing-discovering | @discovering |
-| landing.feature | @landing-empty | @empty-shows-create-form |
-| landing.feature | @landing-deep-link | @deep-link-prefill |
-| landing.feature | @landing-list | @lists-workspaces |
-| post-login.feature | @post-login-signed-out | @signed-out-arrival |
-| post-login.feature | @post-login-consent-first | @consent-first |
-| post-login.feature | @post-login-return-to | @safe-return-to |
-| post-login.feature | @post-login-defaults | @default-destination |
-| workspace-bridge.feature | @workspace-open | @open-from-landing |
-| workspace-bridge.feature | @workspace-direct-nav | @direct-navigation |
-| workspace-bridge.feature | @workspace-signed-out | @signed-out-workspace |
-| workspace-bridge.feature | @workspace-non-html | @non-html-refused |
-| invariants.feature | INV-1 | @single-use-codes |
-| invariants.feature | INV-2 | @no-data-without-session |
-| invariants.feature | INV-3 | @sessions-unforgeable |
-| invariants.feature | INV-4 | @signing-key-minted-once |
-| invariants.feature | INV-5 | @no-open-redirects |
-| invariants.feature | INV-6 | @single-credential |
-| invariants.feature | INV-7 | @fetch-never-spends |
-| invariants.feature | INV-8 | @credential-not-forwarded |
+| signin.feature | Sign-in with a one-time login code | @fresh-code, @used-code, @unknown-code, @prefetch, @already-signed-in, @missing-code |
+| session.feature | Session lifetime and integrity | @survives-restart, @tampered-token, @foreign-token, @expired-token |
+| landing.feature | Landing page routing | @signed-out-home, @consent-gate, @discovering, @empty-shows-create-form, @deep-link-prefill, @lists-workspaces |
+| post-login.feature | Post-sign-in destination | @signed-out-arrival, @consent-first, @safe-return-to, @default-destination |
+| workspace-bridge.feature | One sign-in opens every workspace | @open-from-landing, @direct-navigation, @signed-out-workspace, @non-html-refused |
+| invariants.feature | (Rules, subtree-scoped) | @single-use-codes, @no-data-without-session, @sessions-unforgeable, @signing-key-minted-once, @no-open-redirects, @single-credential, @fetch-never-spends, @credential-not-forwarded |
 
 ## Changes
 
@@ -79,8 +53,8 @@ Exemplar rewrite (the resulting corpus):
 - New `specs` command group in the minds CLI, following the existing `cli/` module-plus-test pattern, registered alongside `run`/`pool`/`server`/`env`/`paid`.
 - New runtime dependency for `apps/minds`: `gherkin-official` (the CLI ships with minds).
 - New shared pytest marker `witnesses`, registered in the centralized marker list in `libs/imbue_common` conftest hooks.
-- Rewrite: `apps/minds/specs/authentication.md` replaced by the `authentication/` folder described above.
-- Annotations: `witnesses` markers added to the tests currently named in the PoC traceability table (desktop_client test files; mngr_forward server tests), with `partial=` notes carried over.
+- New: the `apps/minds/specs/authentication/` corpus as defined above; the experimental `apps/minds/specs/authentication.md` is deleted, with no migration bookkeeping.
+- Annotations: `witnesses` markers added to the desktop_client and mngr_forward tests that exercise the specified behaviors, with `partial=` notes where coverage is incomplete.
 - Docs: one short paragraph in `apps/minds/docs/testing-overview.md` naming the `witnesses` convention and pointing at the skill and `apps/minds/specs/`.
 - Tests: unit tests for the spec-parsing/validation core and the CLI subcommands; ratchets respected; full suite green before finishing.
 - Changelog entries for every touched project: `apps/minds` (update the existing entry), `libs/mngr_forward` (new), `libs/imbue_common` (new), `dev` (new — skill, blueprint plan).
