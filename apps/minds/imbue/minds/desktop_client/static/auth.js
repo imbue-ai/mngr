@@ -125,6 +125,11 @@
   var oauthPollInterval = null;
   var oauthPollDeadline = 0;
 
+  // How often the login page polls the desktop server for OAuth-flow progress.
+  // Short so the app comes forward promptly once sign-in lands; these are cheap
+  // localhost requests.
+  var OAUTH_POLL_INTERVAL_MS = 500;
+
   var OAUTH_PROVIDER_LABELS = { google: 'Google', github: 'GitHub' };
 
   // The two shared classNames for the status box (the "blue box"). The waiting
@@ -224,6 +229,17 @@
     oauthSetMessage('Waiting for you to finish signing in with ' + providerLabel + ' in the browser...', OAUTH_STATUS_CLASS);
     if (oauthPollInterval) clearInterval(oauthPollInterval);
     oauthPollDeadline = Date.now() + 3 * 60 * 1000;
+    // Bring the app to the front (once) as soon as sign-in lands, switching the
+    // status to "Finishing up..." while mngr wires up the account. Reached from
+    // the 'finishing' state, or straight from 'done' if the mirror was so fast
+    // the poll never observed 'finishing'.
+    var broughtToFront = false;
+    function finishUp() {
+      if (broughtToFront) return;
+      broughtToFront = true;
+      oauthSetMessage('Finishing up...', OAUTH_STATUS_CLASS);
+      bringMindsToFront();
+    }
     oauthPollInterval = setInterval(async function () {
       if (Date.now() > oauthPollDeadline) {
         clearInterval(oauthPollInterval);
@@ -241,19 +257,23 @@
           oauthFail('Sign-in lost track of this flow. Try again.');
           return;
         }
+        if (s.state === 'finishing') {
+          // Sign-in is written to disk; mngr is still registering the provider.
+          // Bring the app forward now and show "Finishing up..." while it
+          // completes, but keep polling -- don't navigate until 'done'.
+          finishUp();
+          return;
+        }
         if (s.state === 'done') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          oauthSetMessage('Signing you in...', OAUTH_STATUS_CLASS);
-          bringMindsToFront();
+          finishUp();
           // Defer the navigation a beat so the bring-to-front request reaches
           // the main process before this view navigates away. On the standalone
           // /auth page that request is a window.postMessage the content-relay
           // preload forwards, and navigating immediately can tear the page down
           // before the message is dispatched -- which intermittently swallowed
-          // the raise (or only let it land as the workspace view loaded). A
-          // short delay makes delivery deterministic; "Signing you in..." covers
-          // it.
+          // the raise (or only let it land as the workspace view loaded).
           setTimeout(onAuthSuccess, 150);
           return;
         }
@@ -265,7 +285,7 @@
         }
         // state === 'running' -- keep polling.
       } catch (e) { /* transient network blip; keep polling */ }
-    }, 2000);
+    }, OAUTH_POLL_INTERVAL_MS);
   }
 
   document.addEventListener('click', function (e) {
