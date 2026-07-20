@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<!--
+  Content-view load-failure page.
+
+  Loaded LOCALLY into the workspace content view by main.js when a workspace
+  navigation fails at the network layer (did-fail-load) -- e.g. the workspace
+  host is unreachable, asleep, or the mngr_forward origin is gone (a dead/stale
+  ephemeral port from a prior app run). Without this the dead load leaves the
+  view painting its pinned-white background: a silent blank page.
+
+  Distinct from crashed.html: there the renderer *crashed*; here the renderer is
+  fine but couldn't reach the workspace, so Retry re-opens the workspace against
+  the CURRENT mngr_forward origin (rebuilt in main.js), which self-heals a stale
+  port. Runs under content-relay-preload.js (no window.minds bridge), so its
+  buttons drive the shell only through the allowlisted postMessage relay:
+    * Retry        -> minds:retry-content-load (re-open against the live origin)
+    * Report a bug -> minds:open-help (the existing report modal)
+
+  The error code / description / workspace id arrive as query params from
+  main.js. Stateless: it does NOT auto-retry (a workspace that's genuinely down
+  would loop) -- the user is the loop-breaker, matching crashed.html.
+-->
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Workspace unreachable</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* White surface with black text, matching crashed.html so the two shell
+       error pages read as one family. */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #ffffff;
+      color: #111111;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      user-select: none;
+      text-align: center;
+      padding: 24px;
+    }
+    .glyph {
+      width: 96px;
+      height: 96px;
+      margin-bottom: 24px;
+      opacity: 0.9;
+    }
+    .glyph svg { display: block; width: 100%; height: 100%; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 10px; }
+    p { font-size: 14px; line-height: 1.5; opacity: 0.75; max-width: 420px; }
+    .detail {
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 12px;
+      opacity: 0.45;
+      margin-top: 10px;
+      max-width: 440px;
+      word-break: break-word;
+    }
+    .actions { display: flex; gap: 12px; margin-top: 28px; }
+    button {
+      font: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 9px 18px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .primary { background: #111111; color: #ffffff; }
+    .primary:hover { background: #000000; }
+    .secondary { background: transparent; color: #111111; border-color: rgba(17, 17, 17, 0.3); }
+    .secondary:hover { border-color: rgba(17, 17, 17, 0.7); }
+  </style>
+</head>
+<body>
+  <div class="glyph">
+    <!-- Disconnected plug: two halves of a cable pulled apart. -->
+    <svg viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Disconnected">
+      <g stroke="#111111" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+        <!-- left cable + plug -->
+        <path d="M8 48 H30"/>
+        <path d="M30 34 h8 a6 6 0 0 1 6 6 v16 a6 6 0 0 1 -6 6 h-8 z"/>
+        <path d="M44 40 V56"/>
+        <!-- right socket + cable -->
+        <path d="M66 34 h-8 a6 6 0 0 0 -6 6 v16 a6 6 0 0 0 6 6 h8 z"/>
+        <path d="M66 48 H88"/>
+        <!-- separation spark marks -->
+        <path d="M49 26 l-3 6" opacity="0.55"/>
+        <path d="M62 24 l-3 6" opacity="0.55"/>
+        <path d="M55 20 v7" opacity="0.55"/>
+      </g>
+    </svg>
+  </div>
+  <h1>Can&rsquo;t reach this workspace</h1>
+  <p>Minds couldn&rsquo;t connect to this workspace. Its host may be starting up, asleep, or briefly unreachable. Your work is safe &mdash; retry to reconnect.</p>
+  <div class="detail" id="detail"></div>
+  <div class="actions">
+    <button class="primary" id="retry">Retry</button>
+    <button class="secondary" id="report">Report a bug</button>
+  </div>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var code = params.get('code') || '';
+      var description = params.get('description') || '';
+      var workspace = params.get('workspace') || '';
+
+      var detail = '';
+      if (description) detail = description;
+      if (code) detail += (detail ? ' ' : '') + '(' + code + ')';
+      document.getElementById('detail').textContent = detail;
+
+      document.getElementById('retry').addEventListener('click', function () {
+        window.postMessage({ type: 'minds:retry-content-load' }, '*');
+      });
+      document.getElementById('report').addEventListener('click', function () {
+        // agentId is validated in the preload + main process; empty -> unscoped report.
+        window.postMessage({ type: 'minds:open-help', agentId: workspace }, '*');
+      });
+    })();
+  </script>
+</body>
+</html>

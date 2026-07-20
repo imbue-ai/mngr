@@ -58,6 +58,14 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('reload-crashed-view');
     return;
   }
+  // Content-load error page (content-load-error.html) Retry button: ask the main
+  // process to re-open the workspace that failed to load, rebuilt against the live
+  // mngr_forward origin. No payload -- the target is the shell's own record of the
+  // failed workspace, so a foreign page can't smuggle a navigation target here.
+  if (data.type === 'minds:retry-content-load') {
+    ipcRenderer.send('retry-content-load');
+    return;
+  }
   // Create-screen sign-in: open the shared modal overlay loaded with the
   // sign-in page (so it covers the whole window, including the title bar).
   // No payload -- the main process builds the fixed `/auth/signin-modal` URL.

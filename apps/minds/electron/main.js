@@ -9,6 +9,7 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { computeBundleViewBounds } = require('./view-layout');
+const { shouldShowContentLoadError } = require('./content-error-policy');
 
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
 // main-process failures BEFORE anything else runs, so startup output (including
@@ -98,6 +99,14 @@ const CRASHED_PAGE_FILE = path.join(__dirname, 'crashed.html');
 // of the chrome view is visible (the content view overlays the rest), so the page
 // anchors its message + Reload button to that titlebar-height band.
 const CHROME_CRASHED_PAGE_FILE = path.join(__dirname, 'chrome-crashed.html');
+
+// Local error page shown in the content view when a workspace navigation fails
+// at the network layer (did-fail-load) -- the host is unreachable/asleep, or the
+// mngr_forward origin is gone (a dead/stale ephemeral port from a prior run).
+// Distinct from crashed.html (a renderer *crash*): the renderer is fine here but
+// couldn't reach the workspace, so the page's Retry re-opens the workspace
+// against the CURRENT forward origin rather than reloading the failed URL.
+const CONTENT_LOAD_ERROR_PAGE_FILE = path.join(__dirname, 'content-load-error.html');
 
 // Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
 // burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
@@ -219,6 +228,19 @@ function isCrashPageUrl(url) {
   if (!url || !url.startsWith('file://')) return false;
   try {
     return decodeURIComponent(new URL(url).pathname).endsWith('/crashed.html');
+  } catch {
+    return false;
+  }
+}
+
+// Whether ``url`` is our local content-load error page (content-load-error.html).
+// Same purpose as ``isCrashPageUrl``: the navigation handlers skip treating it as
+// real workspace content so the pre-error workspace id (which Retry re-opens) is
+// preserved, and a failure loading it never recurses into itself.
+function isContentLoadErrorPageUrl(url) {
+  if (!url || !url.startsWith('file://')) return false;
+  try {
+    return decodeURIComponent(new URL(url).pathname).endsWith('/content-load-error.html');
   } catch {
     return false;
   }
@@ -657,6 +679,12 @@ function createBundle() {
     // renderer died, re-loaded when the user clicks Reload on the crash page.
     isContentCrashed: false,
     crashedFromUrl: null,
+    // Content-view load-failure recovery. ``isContentLoadError`` is true while the
+    // local content-load error page is showing; ``contentLoadErrorAgentId`` is the
+    // workspace to re-open (against the CURRENT forward origin) when the user
+    // clicks Retry -- so a stale ephemeral port from a prior run self-heals.
+    isContentLoadError: false,
+    contentLoadErrorAgentId: null,
     // Chrome (titlebar) view renderer-crash recovery. True while the compact
     // chrome-crashed.html strip is showing in the chrome view; cleared when the
     // user clicks Reload (reloadCrashedChromeView) and the chrome reloads /_chrome.
@@ -737,14 +765,17 @@ function wireContentViewEvents(bundle, contentView) {
   });
 
   const onContentNavigate = (url, httpResponseCode) => {
-    // Loading the local crash page is not a real content navigation: skip all
-    // state updates so ``currentContentUrl`` / ``currentWorkspaceId`` keep
-    // pointing at the pre-crash workspace (which Reload re-loads).
-    if (isCrashPageUrl(url)) return;
-    // A genuine navigation clears any pending crash state (e.g. the user hit
-    // Home from the crash page, or Reload succeeded).
+    // Loading one of our local shell pages (the crash page or the content-load
+    // error page) is not a real content navigation: skip all state updates so
+    // ``currentContentUrl`` / ``currentWorkspaceId`` keep pointing at the
+    // pre-error workspace (which Reload / Retry re-opens).
+    if (isCrashPageUrl(url) || isContentLoadErrorPageUrl(url)) return;
+    // A genuine navigation clears any pending crash / load-error state (e.g. the
+    // user hit Home from the crash page, or Reload / Retry succeeded).
     bundle.isContentCrashed = false;
     bundle.crashedFromUrl = null;
+    bundle.isContentLoadError = false;
+    bundle.contentLoadErrorAgentId = null;
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
@@ -833,6 +864,61 @@ function wireContentViewEvents(bundle, contentView) {
         })
         .catch((err) => {
           console.error('[content-crash] failed to load crash page:', err && err.message);
+        });
+    });
+  });
+
+  // When a workspace navigation fails at the network layer, Electron fires
+  // ``did-fail-load`` and leaves the view painting its pinned-white background --
+  // a silent blank page with no way forward. Show a local error page instead,
+  // whose Retry re-opens the workspace against the CURRENT mngr_forward origin
+  // (so a stale ephemeral port from a prior run self-heals). ``shouldShowContentLoadError``
+  // filters out the benign cases (subframe failures, ERR_ABORTED from superseded
+  // loads, our own local pages, shutdown / full-app-error takeover). HTTP errors
+  // (4xx/5xx) never reach here -- the mngr_forward "Loading workspace" proxy
+  // answers 503 as a *successful* load, handled by ``did-navigate``. Defer the
+  // navigation to a later tick (electron#19887), mirroring the crash handler.
+  contentView.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (
+      !shouldShowContentLoadError({
+        errorCode,
+        isMainFrame,
+        isLocalShellPage: isCrashPageUrl(validatedURL) || isContentLoadErrorPageUrl(validatedURL),
+        isShuttingDown,
+        isErrorState: bundle.isErrorState,
+      })
+    ) {
+      return;
+    }
+    if (bundle.window.isDestroyed()) return;
+    if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
+    // Prefer the agent id parsed from the failed URL; fall back to the id stamped
+    // at load start by ``loadUrlIntoBundleContentView``.
+    const failedAgentId = parseWorkspaceId(validatedURL) || bundle.currentWorkspaceId || '';
+    console.error(
+      `[content-load-error] workspace navigation failed ` +
+        `(code=${errorCode} ${errorDescription}, url=${validatedURL || 'unknown'}, ` +
+        `workspace=${failedAgentId || 'unknown'})`
+    );
+    bundle.isContentCrashed = false;
+    bundle.crashedFromUrl = null;
+    bundle.isContentLoadError = true;
+    bundle.contentLoadErrorAgentId = failedAgentId || null;
+    setImmediate(() => {
+      if (bundle.window.isDestroyed()) return;
+      if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
+      // A real navigation (or a crash) since then superseded this.
+      if (!bundle.isContentLoadError) return;
+      contentView.webContents
+        .loadFile(CONTENT_LOAD_ERROR_PAGE_FILE, {
+          query: {
+            code: String(errorCode),
+            description: errorDescription || '',
+            workspace: failedAgentId || '',
+          },
+        })
+        .catch((err) => {
+          console.error('[content-load-error] failed to load error page:', err && err.message);
         });
     });
   });
@@ -1438,6 +1524,26 @@ function reloadCrashedContentView(bundle) {
   // as a normal content navigation.
   bundle.isContentCrashed = false;
   bundle.crashedFromUrl = null;
+  loadUrlIntoBundleContentView(bundle, target);
+}
+
+// Re-open the workspace after a content-view load failure, rebuilding the URL
+// against the CURRENT mngr_forward origin via ``workspaceUrlForAgent`` -- so a
+// stale ephemeral port from a prior app run (the common cause) is never reused.
+// Falls back to Home when the workspace id is unknown. Driven by the error
+// page's Retry button via the retry-content-load IPC relay. Stateless: if the
+// retry fails again, the error page reappears.
+function retryContentLoad(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!bundle.contentView || bundle.contentView.webContents.isDestroyed()) return;
+  const agentId = bundle.contentLoadErrorAgentId;
+  const target =
+    (agentId && workspaceUrlForAgent(agentId)) || (backendBaseUrl ? backendBaseUrl + '/' : null);
+  if (!target) return;
+  // Clear load-error state before loading so the ensuing did-navigate is
+  // processed as a normal content navigation.
+  bundle.isContentLoadError = false;
+  bundle.contentLoadErrorAgentId = null;
   loadUrlIntoBundleContentView(bundle, target);
 }
 
@@ -3389,6 +3495,15 @@ ipcMain.on('open-help', (event, agentId) => {
 // URL is the shell's own record of the pre-crash workspace, never the renderer's.
 ipcMain.on('reload-crashed-view', (event) => {
   reloadCrashedContentView(getBundleFromEvent(event));
+});
+
+// Retry a failed workspace load on behalf of the content-load error page
+// (content-load-error.html). Only content-relay-preload.js can emit this channel,
+// and only for an allowlisted `minds:retry-content-load` postMessage. No payload
+// -- the target is the shell's own record of the failed workspace, rebuilt
+// against the live forward origin, never a navigation target from the renderer.
+ipcMain.on('retry-content-load', (event) => {
+  retryContentLoad(getBundleFromEvent(event));
 });
 
 // Reload the crashed chrome (titlebar) view on behalf of chrome-crashed.html's
