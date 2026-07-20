@@ -14,6 +14,7 @@ from click.testing import Result
 
 from imbue.mngr_tmr.cli import _TmrCommand
 from imbue.mngr_tmr.cli import tmr
+from imbue.mngr_tmr.cli import tmr_tasks
 
 
 def test_cli_help(cli_runner: CliRunner) -> None:
@@ -122,3 +123,19 @@ def test_tmr_command_options_before_separator() -> None:
     assert captured["pytest_args"] == ("tests/",)
     assert captured["testing_flags"] == ("-m", "release")
     assert captured["provider"] == "docker"
+
+
+def test_tmr_tasks_help_surfaces_task_file_options(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(tmr_tasks, ["--help"])
+    assert result.exit_code == 0
+    assert "--tasks-file" in result.output
+    assert "--mapper-prompt" in result.output
+    assert "--reducer-prompt" in result.output
+    assert "--name" in result.output
+    assert "--provider" in result.output
+
+
+def test_tmr_tasks_requires_the_tasks_file_and_prompts(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(tmr_tasks, [])
+    assert result.exit_code != 0
+    assert "--tasks-file" in result.output

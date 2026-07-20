@@ -37,16 +37,8 @@ _MAPPER_TEMPLATE = "mapper.j2"
 _REDUCER_TEMPLATE = "reducer.j2"
 
 
-def _resolve_template(default_name: str, template_path: Path | None) -> Template:
-    """Return the Jinja template to render.
-
-    When ``template_path`` is None, use the packaged template named
-    ``default_name``. Otherwise load the override file, backing it with a
-    ``ChoiceLoader`` so the override may still ``{% extends %}`` or
-    ``{% include %}`` the packaged templates by their default names.
-    """
-    if template_path is None:
-        return _jinja_env.get_template(default_name)
+def _load_override_template(template_path: Path) -> Template:
+    """Load an override template file, backed by the packaged templates for extends/includes."""
     override_env = Environment(
         loader=ChoiceLoader(
             [
@@ -57,6 +49,19 @@ def _resolve_template(default_name: str, template_path: Path | None) -> Template
         autoescape=False,
     )
     return override_env.get_template(template_path.name)
+
+
+def _resolve_template(default_name: str, template_path: Path | None) -> Template:
+    """Return the Jinja template to render.
+
+    When ``template_path`` is None, use the packaged template named
+    ``default_name``. Otherwise load the override file, backing it with a
+    ``ChoiceLoader`` so the override may still ``{% extends %}`` or
+    ``{% include %}`` the packaged templates by their default names.
+    """
+    if template_path is None:
+        return _jinja_env.get_template(default_name)
+    return _load_override_template(template_path)
 
 
 # Bash that packages ``.test_output`` into the outputs archive. The agent
@@ -113,6 +118,30 @@ def build_test_agent_prompt(
         outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
         publish_snippet=_PUBLISH_OUTPUTS_SNIPPET,
         e2e_run_name=e2e_run_name,
+    )
+
+
+def build_task_file_mapper_prompt(
+    task_id: str,
+    kind: str,
+    context_json: str,
+    template_path: Path,
+) -> str:
+    """Build the mapper prompt for one task of a task-file recipe run.
+
+    There is no packaged default template: the caller (a variant such as the
+    minds spec-witnessing run) always supplies the template that anchors on
+    its task semantics. The template renders against ``task_id``, ``kind``,
+    ``context_json`` (the packet's context object as pretty-printed JSON),
+    ``outcome_filename``, and ``publish_snippet``.
+    """
+    template = _load_override_template(template_path)
+    return template.render(
+        task_id=task_id,
+        kind=kind,
+        context_json=context_json,
+        outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
+        publish_snippet=_PUBLISH_OUTPUTS_SNIPPET,
     )
 
 

@@ -8,6 +8,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_mapreduce.launching import REDUCER_INPUTS_DIRNAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_integrator_prompt
+from imbue.mngr_tmr.prompts import build_task_file_mapper_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.recipe import CollectTestsError
 from imbue.mngr_tmr.recipe import collect_tests
@@ -92,6 +93,23 @@ def test_build_integrator_prompt_uses_override_template(tmp_path: Path) -> None:
     prompt = build_integrator_prompt(template_path=override)
     assert prompt.startswith("CUSTOM REDUCER reading ")
     assert REDUCER_INPUTS_DIRNAME in prompt
+
+
+def test_build_task_file_mapper_prompt_renders_the_packet_context(tmp_path: Path) -> None:
+    # The task-file mapper prompt has no packaged default: the override is the
+    # template, and it receives the packet fields plus the shared outcome/publish
+    # context.
+    template = tmp_path / "task_mapper.j2"
+    template.write_text("DO {{ task_id }} ({{ kind }})\n{{ context_json }}\n{{ outcome_filename }}\n")
+    prompt = build_task_file_mapper_prompt(
+        task_id="authentication.fresh-code",
+        kind="scenario",
+        context_json='{"coordinate": "authentication.fresh-code"}',
+        template_path=template,
+    )
+    assert prompt.startswith("DO authentication.fresh-code (scenario)")
+    assert '{"coordinate": "authentication.fresh-code"}' in prompt
+    assert TESTING_AGENT_OUTCOME_FILENAME in prompt
 
 
 def test_collect_tests_with_real_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:

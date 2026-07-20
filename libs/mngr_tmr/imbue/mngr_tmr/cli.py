@@ -17,6 +17,8 @@ from imbue.mngr_mapreduce.cli import MapReduceCliOptions
 from imbue.mngr_mapreduce.cli import add_mapreduce_options
 from imbue.mngr_mapreduce.cli import run_mapreduce
 from imbue.mngr_tmr.recipe import TestMapReduceRecipe
+from imbue.mngr_tmr.task_file_recipe import TaskFileMapReduceRecipe
+from imbue.mngr_tmr.task_file_recipe import load_task_packets
 
 
 class TmrCliOptions(MapReduceCliOptions):
@@ -167,3 +169,107 @@ tests_passing_before/after booleans, and a markdown summary.""",
 ).register()
 
 add_pager_help_option(tmr)
+
+
+class TmrTasksCliOptions(MapReduceCliOptions):
+    """Options for the ``mngr tmr-tasks`` command (task-file specifics on top of the framework's)."""
+
+    name: str
+    tasks_file: str
+    mapper_prompt: str
+    reducer_prompt: str
+
+
+@click.command("tmr-tasks")
+@click.option(
+    "--tasks-file",
+    "tasks_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="JSONL task file: one packet per line with schema_version, id, optional display_id, kind, "
+    "and a free-form context object handed to the mapper prompt template.",
+)
+@click.option(
+    "--name",
+    default="tmr-tasks",
+    show_default=True,
+    help="Variant name, used as the prefix for this run's agent/branch/host names.",
+)
+@click.option(
+    "--mapper-prompt",
+    "mapper_prompt",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Mapper prompt template (required): rendered with task_id, kind, context_json, "
+    "outcome_filename, and publish_snippet. There is no packaged default because the task "
+    "semantics live with the producer of the task file.",
+)
+@click.option(
+    "--reducer-prompt",
+    "reducer_prompt",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Reducer prompt template (required): rendered with inputs_dirname, "
+    "mapper_outcome_filename, reducer_outcome_filename, and publish_snippet.",
+)
+@add_mapreduce_options
+@add_common_options
+@click.pass_context
+def tmr_tasks(ctx: click.Context, **kwargs: object) -> None:
+    mngr_ctx, output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="tmr-tasks",
+        command_class=TmrTasksCliOptions,
+    )
+    tasks_file = Path(opts.tasks_file)
+    recipe = TaskFileMapReduceRecipe(
+        name=opts.name,
+        packets=load_task_packets(tasks_file),
+        tasks_file=tasks_file,
+        mapper_prompt_path=Path(opts.mapper_prompt),
+        reducer_prompt_path=Path(opts.reducer_prompt),
+    )
+    run_mapreduce(recipe, opts, mngr_ctx, output_opts)
+
+
+CommandHelpMetadata(
+    key="tmr-tasks",
+    one_line_description="Fan out a JSONL task file to one agent per task and integrate their branches",
+    synopsis="mngr tmr-tasks --tasks-file <JSONL> --mapper-prompt <FILE> --reducer-prompt <FILE> [--name <VARIANT>] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]",
+    description="""This command runs the map-reduce framework over an explicit task file instead of pytest collection:
+
+1. Reads and validates --tasks-file: one JSON packet per line with
+   schema_version, id, optional display_id (used for agent/branch slugs),
+   kind, and a free-form context object.
+2. Launches one agent per task. The mapper prompt comes from --mapper-prompt
+   (required; there is no packaged default -- the task semantics live with
+   the producer of the task file), rendered with task_id, kind, context_json
+   (the packet's context as pretty JSON), outcome_filename, and
+   publish_snippet.
+3. Polls agents until all finish or individually time out; pulls each
+   agent's branch.bundle back into local branches.
+4. If any mapper produced outputs, launches a reducer agent with
+   --reducer-prompt to integrate the mapper branches.
+5. Generates the shared HTML report; mapper agents must write the same
+   testing_agent_outcome.json contract as `mngr tmr` mappers.
+
+The canonical producer is `minds specs plan --for-tmr`, which emits one
+packet per behavioral-spec unit; pair it with the minds spec-witnessing
+prompts at apps/minds/tmr/specs_mapper.j2 and apps/minds/tmr/specs_reducer.j2.""",
+    examples=(
+        (
+            "Fan out minds spec units to witness-test-writing agents",
+            "minds specs plan --for-tmr > /tmp/spec-tasks.jsonl && "
+            "mngr tmr-tasks --tasks-file /tmp/spec-tasks.jsonl --name tmr-minds-specs "
+            "--mapper-prompt apps/minds/tmr/specs_mapper.j2 --reducer-prompt apps/minds/tmr/specs_reducer.j2",
+        ),
+        ("Use Docker provider", "mngr tmr-tasks --provider docker --tasks-file tasks.jsonl ..."),
+        ("Limit to 4 concurrent agents", "mngr tmr-tasks --max-parallel-agents 4 --tasks-file tasks.jsonl ..."),
+    ),
+    see_also=(
+        ("tmr", "Run and fix tests in parallel using agents"),
+        ("list", "List agents"),
+    ),
+).register()
+
+add_pager_help_option(tmr_tasks)

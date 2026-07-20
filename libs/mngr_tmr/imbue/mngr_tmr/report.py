@@ -47,6 +47,7 @@ class ChangeKind(UpperCaseStrEnum):
     """What kind of change the agent attempted."""
 
     IMPROVE_TEST = auto()
+    ADD_TEST = auto()
     FIX_TEST = auto()
     FIX_IMPL = auto()
     FIX_TUTORIAL = auto()
@@ -209,7 +210,9 @@ _SECTION_COLORS: dict[ReportSection, str] = {
 
 _md = MarkdownIt()
 
-_NON_IMPL_CHANGE_KINDS = frozenset({ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST, ChangeKind.FIX_TUTORIAL})
+_NON_IMPL_CHANGE_KINDS = frozenset(
+    {ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST, ChangeKind.ADD_TEST, ChangeKind.FIX_TUTORIAL}
+)
 
 _CHANGE_STATUS_ICONS: dict[ChangeStatus, str] = {
     ChangeStatus.SUCCEEDED: "&#10003;",

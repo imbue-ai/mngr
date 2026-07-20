@@ -62,6 +62,16 @@ class InvalidRecipeNameError(MngrError, ValueError):
     ...
 
 
+def validate_recipe_name(value: str) -> str:
+    """Validate a recipe/variant name; usable as a pydantic field validator on recipe classes."""
+    if not _RECIPE_NAME_PATTERN.match(value):
+        raise InvalidRecipeNameError(
+            f"Invalid recipe name {value!r}: must start with an alphanumeric and contain only "
+            "alphanumerics, dashes, or underscores (it becomes a branch/agent/host name segment)."
+        )
+    return value
+
+
 def collect_tests(
     pytest_args: tuple[str, ...],
     source_dir: Path,
@@ -127,12 +137,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
     @field_validator("name")
     @classmethod
     def _validate_name(cls, value: str) -> str:
-        if not _RECIPE_NAME_PATTERN.match(value):
-            raise InvalidRecipeNameError(
-                f"Invalid recipe name {value!r}: must start with an alphanumeric and contain only "
-                "alphanumerics, dashes, or underscores (it becomes a branch/agent/host name segment)."
-            )
-        return value
+        return validate_recipe_name(value)
 
     def discover(self, ctx: MapReduceContext) -> list[MapReduceTask]:
         raw_ids = collect_tests(
@@ -194,7 +199,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         )
         # Mirror to S3 (no-op without AWS creds) on every regeneration;
         # symmetric with the local file write.
-        _emit_report_url(maybe_upload_report(report_path, ctx.run_name), ctx.output_opts)
+        emit_report_url(maybe_upload_report(report_path, ctx.run_name), ctx.output_opts)
         return report_path
 
 
@@ -216,7 +221,7 @@ def _build_run_commands(
     return commands
 
 
-def _emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
+def emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
     """Emit the public URL of the report mirror, if upload occurred."""
     if url is None:
         return
