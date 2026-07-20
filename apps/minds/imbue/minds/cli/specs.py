@@ -126,9 +126,7 @@ def specs_validate(corpus_root: Path) -> None:
     for violation in scan.violations:
         write_stdout_line(_format_violation(violation))
     if scan.violations:
-        raise SpecValidationFailedError(
-            f"{len(scan.violations)} violation(s) found under {corpus_root}"
-        )
+        raise SpecValidationFailedError(f"{len(scan.violations)} violation(s) found under {corpus_root}")
     write_stdout_line(
         f"OK: {len(scan.units)} units across {scan.feature_file_count} feature file(s) under {corpus_root}"
     )

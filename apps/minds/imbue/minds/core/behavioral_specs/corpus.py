@@ -12,6 +12,7 @@ pydantic models below mirror exactly the subset of the AST this module
 consumes, so the rest of the code works with typed, validated objects.
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -225,8 +226,7 @@ def _check_step_keywords(
                     file=file,
                     line=step.location.line,
                     message=(
-                        f"step keyword '{keyword}' is not part of the spec language "
-                        f"(allowed: {allowed_rendered})"
+                        f"step keyword '{keyword}' is not part of the spec language (allowed: {allowed_rendered})"
                     ),
                     is_unit_omitted=False,
                 )
@@ -302,7 +302,9 @@ def _unit_from_scenario(
     _check_step_keywords(scenario.steps, file, violations)
     _check_tags_are_kebab_case(scenario.tags, file, violations)
     for examples in scenario.examples:
-        _check_declaration_keyword(examples.keyword, _ALLOWED_EXAMPLES_KEYWORDS, file, examples.location.line, violations)
+        _check_declaration_keyword(
+            examples.keyword, _ALLOWED_EXAMPLES_KEYWORDS, file, examples.location.line, violations
+        )
         _check_tags_are_kebab_case(examples.tags, file, violations)
     tags = tuple(_strip_tag_sigil(tag.name) for tag in scenario.tags)
     if not tags:
@@ -401,7 +403,11 @@ def _extract_units_from_document(
     for child in document.feature.children:
         if child.background is not None:
             _check_declaration_keyword(
-                child.background.keyword, _ALLOWED_BACKGROUND_KEYWORDS, file, child.background.location.line, violations
+                child.background.keyword,
+                _ALLOWED_BACKGROUND_KEYWORDS,
+                file,
+                child.background.location.line,
+                violations,
             )
             _check_step_keywords(child.background.steps, file, violations)
         elif child.scenario is not None:
@@ -550,7 +556,9 @@ def _scan_corpus_structure(corpus_root: Path, violations: list[SpecViolation]) -
     .feature or .md file.
     """
     feature_files: list[Path] = []
-    for folder, child_folder_names, file_names in corpus_root.walk(top_down=True):
+    # Path.walk needs Python 3.12; the repo's type-check floor is 3.11.
+    for folder_name, child_folder_names, file_names in os.walk(corpus_root):
+        folder = Path(folder_name)
         # Pruning in place steers the walk; sorting keeps traversal deterministic.
         child_folder_names[:] = sorted(name for name in child_folder_names if not name.startswith("."))
         for child_folder_name in child_folder_names:

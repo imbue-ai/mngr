@@ -138,13 +138,7 @@ def test_scan_corpus_reports_parse_errors_with_line_and_skips_the_file(tmp_path:
         tmp_path / "specs",
         {
             "authentication/broken.feature": (
-                "Feature: Broken\n"
-                "\n"
-                "  @a-tag\n"
-                "  Scenario: s\n"
-                "    Given a\n"
-                '    """\n'
-                "    unclosed docstring\n"
+                'Feature: Broken\n\n  @a-tag\n  Scenario: s\n    Given a\n    """\n    unclosed docstring\n'
             ),
             "authentication/good.feature": ("Feature: Good\n\n  @works\n  Scenario: s\n    Given a\n"),
         },
@@ -275,12 +269,7 @@ def test_scan_corpus_rejects_non_english_gherkin_dialects(tmp_path: Path) -> Non
         tmp_path / "specs",
         {
             "connexion.feature": (
-                "# language: fr\n"
-                "Fonctionnalité: Connexion\n"
-                "\n"
-                "  @un-tag\n"
-                "  Scénario: ouverture\n"
-                "    Soit une chose\n"
+                "# language: fr\nFonctionnalité: Connexion\n\n  @un-tag\n  Scénario: ouverture\n    Soit une chose\n"
             ),
         },
     )
@@ -288,9 +277,7 @@ def test_scan_corpus_rejects_non_english_gherkin_dialects(tmp_path: Path) -> Non
     scan = scan_corpus(root)
 
     assert any("# language:" in violation.message and violation.line == 1 for violation in scan.violations)
-    assert any(
-        "English" in violation.message and "'fr'" in violation.message for violation in scan.violations
-    )
+    assert any("English" in violation.message and "'fr'" in violation.message for violation in scan.violations)
 
 
 def test_scan_corpus_rejects_feature_files_without_a_feature(tmp_path: Path) -> None:
@@ -419,7 +406,7 @@ def test_scan_corpus_accepts_a_rich_fully_valid_corpus(tmp_path: Path) -> None:
                 "  @fresh-code\n"
                 "  Scenario: Opening a fresh login URL signs the user in\n"
                 "    Given the user is not signed in\n"
-                '    When the user opens the login URL with payload:\n'
+                "    When the user opens the login URL with payload:\n"
                 '      """\n'
                 "      any doc string\n"
                 '      """\n'
@@ -495,7 +482,7 @@ def test_spec_unit_to_record_serializes_stable_field_order_and_kind_spelling(tmp
                 "\n"
                 "    @spent-code @edge-case\n"
                 "    Scenario Outline: Spent codes are refused\n"
-                "      When anyone presents \"<code>\"\n"
+                '      When anyone presents "<code>"\n'
                 "      Then authentication is refused\n"
                 "\n"
                 "      Examples:\n"

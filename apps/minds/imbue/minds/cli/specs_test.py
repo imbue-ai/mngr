@@ -188,9 +188,7 @@ def test_specs_query_combines_filters_with_and_semantics(tmp_path: Path) -> None
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
     runner = CliRunner()
 
-    both_match = runner.invoke(
-        specs, ["query", "--root", str(root), "--tag", "fresh-code", "--step", "login url"]
-    )
+    both_match = runner.invoke(specs, ["query", "--root", str(root), "--tag", "fresh-code", "--step", "login url"])
     tag_matches_step_does_not = runner.invoke(
         specs, ["query", "--root", str(root), "--tag", "fresh-code", "--step", "data directory"]
     )
