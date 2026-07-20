@@ -30,6 +30,7 @@ from pydantic import Field
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import AgentMetadata
@@ -50,6 +51,12 @@ from imbue.mngr_tmr.report import merged_status_html
 from imbue.mngr_tmr.report import read_static
 from imbue.mngr_tmr.spec_prompts import MATRIX_ARTIFACT_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
+
+
+class MatrixRecordParseError(MngrError, ValueError):
+    """Raised when a matrix JSONL record carries an unknown coverage spelling."""
+
+    ...
 
 
 class SpecChangeKind(UpperCaseStrEnum):
@@ -162,7 +169,7 @@ def _parse_coverage_record_value(value: str) -> SpecCoverage:
     elif value == "none":
         return SpecCoverage.NONE
     else:
-        raise ValueError(f"Unknown coverage record value: {value!r}")
+        raise MatrixRecordParseError(f"Unknown coverage record value: {value!r}")
 
 
 @pure

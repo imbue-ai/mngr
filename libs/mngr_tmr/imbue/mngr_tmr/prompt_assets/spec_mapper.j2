@@ -31,11 +31,11 @@ spec unit itself looks wrong, see "# If the spec looks wrong" below.
 A test declares which units it verifies with the witnesses marker, using the
 unit's coordinate:
 
-  @pytest.mark.witnesses("authentication.fresh-code")
-  def test_fresh_code_signs_in() -> None: ...
+  @pytest.mark.witnesses("checkout.fresh-cart")
+  def test_fresh_cart_checks_out() -> None: ...
 
-  @pytest.mark.witnesses("authentication.prefetch", partial="does not assert the code remains unspent")
-  def test_login_page_redirects_via_script() -> None: ...
+  @pytest.mark.witnesses("checkout.prefetch", partial="does not assert the cart remains unspent")
+  def test_checkout_page_redirects_via_script() -> None: ...
 
 - partial= states precisely what the test does NOT cover; omit it when the
   test covers the unit fully.
@@ -55,7 +55,7 @@ unit's scope -- check BOTH directions:
 
 - Coverage (forward): is every observable claim the unit's steps make
   actually verified by some witnessing test? If a step says an effect is
-  observable (a code becomes spent, a redirect lands on "/"), a test must
+  observable (a coupon becomes spent, a redirect lands on "/"), a test must
   observe it. Add whatever verification is missing.
 
 - Trace (backward): does every assertion in the witnessing tests trace back
@@ -84,7 +84,7 @@ touched test's partial= notes so they state exactly what remains uncovered.
 
 When your task's units include Rules (invariants), witness the property
 itself, not just the flows scenarios happen to describe: write tests that
-try to violate the property (present a spent code again, tamper with a
+try to violate the property (present a spent coupon again, tamper with a
 token, request user data without a session) and assert the system refuses.
 An invariant quantified over all states and interleavings usually cannot be
 fully witnessed by finitely many tests -- that is what honest partial= notes
@@ -178,7 +178,7 @@ Run exactly the witnessing tests you create or touch, by node id:
 
 Run them after each change (initial run, then after each fix attempt).
 Before each run, decide on a brief description: "initial run" for the first
-one, or something like "after adding the spent-code witness" for subsequent
+one, or something like "after adding the spent-coupon witness" for subsequent
 runs. Record each run in the test_runs field of the outcome.
 
 # Committing your changes
@@ -187,9 +187,9 @@ IMPORTANT: Each change kind MUST get its own separate commit. Changes of the
 same kind should be combined in one commit. The commit message MUST start
 with the kind in brackets, then name the coordinates it serves. Examples:
 
-  [CREATE_TEST] authentication.fresh-code, authentication.used-code: witness the signin flows
-  [IMPROVE_TEST] authentication.prefetch: remove assertion outside the unit's scope
-  [FIX_IMPL] authentication.single-use-codes: refuse a spent code on the authenticate route
+  [CREATE_TEST] checkout.fresh-cart, checkout.spent-cart: witness the checkout flows
+  [IMPROVE_TEST] checkout.prefetch: remove assertion outside the unit's scope
+  [FIX_IMPL] checkout.single-use-coupons: refuse a spent coupon on the redeem route
 
 This means if you make both a CREATE_TEST and a FIX_IMPL change, you should
 have exactly two commits. Do NOT mix different kinds in the same commit.
@@ -202,17 +202,17 @@ Write the result atomically to avoid races with the orchestrator reading it:
 
 The schema is:
 
-{"changes": {"CREATE_TEST": {"status": "SUCCEEDED", "summary_markdown": "Witnessed both signin scenarios"}},
+{"changes": {"CREATE_TEST": {"status": "SUCCEEDED", "summary_markdown": "Witnessed both checkout scenarios"}},
  "units": [
-   {"coordinate": "authentication.fresh-code",
+   {"coordinate": "checkout.fresh-cart",
     "verdict": "FULL",
-    "witnesses": [{"test": "apps/minds/imbue/minds/test_auth.py::test_fresh_code", "partial": null}],
+    "witnesses": [{"test": "apps/shop/test_checkout.py::test_fresh_cart", "partial": null}],
     "blockers": [],
     "spec_problems": [],
     "summary_markdown": "Created a witness covering every step."},
-   {"coordinate": "authentication.single-use-codes",
+   {"coordinate": "checkout.single-use-coupons",
     "verdict": "PARTIAL_STEADY",
-    "witnesses": [{"test": "apps/minds/imbue/minds/test_auth.py::test_spent_code", "partial": "does not exercise concurrent interleavings"}],
+    "witnesses": [{"test": "apps/shop/test_checkout.py::test_spent_coupon", "partial": "does not exercise concurrent interleavings"}],
     "blockers": [],
     "spec_problems": [],
     "summary_markdown": "The interleaving quantifier is untestable in kind."}
@@ -220,10 +220,10 @@ The schema is:
  "errored": false,
  "tests_passing_before": null,
  "tests_passing_after": true,
- "summary_markdown": "Witnessed the signin file; all touched tests pass.",
+ "summary_markdown": "Witnessed the checkout file; all touched tests pass.",
  "test_runs": [
    {"run_name": "try_1", "description_markdown": "initial run"},
-   {"run_name": "try_2", "description_markdown": "after adding the spent-code witness"}
+   {"run_name": "try_2", "description_markdown": "after adding the spent-coupon witness"}
  ]}
 
 Fields:

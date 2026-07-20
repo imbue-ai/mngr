@@ -8,11 +8,17 @@ AND-composition, plus the grouping/ordering/naming that is this recipe's own.
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_specs.data_types import SpecUnitKind
 from imbue.mngr_specs.testing import write_spec_corpus
+from imbue.mngr_tmr.spec_recipe import CorpusGateError
 from imbue.mngr_tmr.spec_recipe import NoSpecUnitsError
 from imbue.mngr_tmr.spec_recipe import SpecCorpusInvalidError
+from imbue.mngr_tmr.spec_recipe import SpecMapReduceRecipe
+from imbue.mngr_tmr.spec_recipe import build_spec_mapper_prompt_for_task
+from imbue.mngr_tmr.spec_recipe import corpus_touching_paths
 from imbue.mngr_tmr.spec_recipe import discover_spec_tasks
 
 _SIGNIN_FEATURE = """Feature: Sign in
@@ -156,3 +162,128 @@ def test_discover_spec_tasks_on_live_minds_corpus(tmp_path: Path) -> None:
     assert all(task.display_id is not None and "/" not in task.display_id for task in tasks)
     # The invariants file fans out as a first-class task like any other.
     assert "authentication/invariants.feature" in {task.id for task in tasks}
+
+
+def _git(cg: ConcurrencyGroup, cwd: Path, *args: str) -> str:
+    result = cg.run_process_to_completion(["git", *args], cwd=cwd)
+    return result.stdout
+
+
+def _write_gate_test_repo(cg: ConcurrencyGroup, repo_dir: Path) -> None:
+    """A repo with `main`, plus branches touching only src vs touching the corpus."""
+    repo_dir.mkdir()
+    _git(cg, repo_dir, "init", "--initial-branch", "main")
+    _git(cg, repo_dir, "config", "user.email", "tmr-specs-test@example.com")
+    _git(cg, repo_dir, "config", "user.name", "tmr-specs-test")
+    (repo_dir / "specs" / "authentication").mkdir(parents=True)
+    (repo_dir / "specs" / "authentication" / "signin.feature").write_text("Feature: Sign in\n")
+    (repo_dir / "src").mkdir()
+    (repo_dir / "src" / "app.py").write_text("VALUE = 1\n")
+    _git(cg, repo_dir, "add", ".")
+    _git(cg, repo_dir, "commit", "-q", "-m", "base")
+
+    _git(cg, repo_dir, "checkout", "-q", "-b", "clean-branch")
+    (repo_dir / "src" / "app.py").write_text("VALUE = 2\n")
+    _git(cg, repo_dir, "commit", "-q", "-am", "[FIX_IMPL] src change")
+
+    _git(cg, repo_dir, "checkout", "-q", "main")
+    _git(cg, repo_dir, "checkout", "-q", "-b", "dirty-branch")
+    (repo_dir / "specs" / "authentication" / "signin.feature").write_text("Feature: Edited\n")
+    (repo_dir / "src" / "app.py").write_text("VALUE = 3\n")
+    _git(cg, repo_dir, "commit", "-q", "-am", "mixed change touching the corpus")
+
+    _git(cg, repo_dir, "checkout", "-q", "main")
+
+
+def test_corpus_touching_paths_is_empty_for_a_branch_outside_the_corpus(
+    tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    repo_dir = tmp_path / "repo"
+    _write_gate_test_repo(cg, repo_dir)
+
+    touching = corpus_touching_paths(
+        source_dir=repo_dir, branch_name="clean-branch", corpus_root=Path("specs"), cg=cg
+    )
+
+    assert touching == ()
+
+
+def test_corpus_touching_paths_lists_corpus_files_the_branch_changes(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    repo_dir = tmp_path / "repo"
+    _write_gate_test_repo(cg, repo_dir)
+
+    touching = corpus_touching_paths(
+        source_dir=repo_dir, branch_name="dirty-branch", corpus_root=Path("specs"), cg=cg
+    )
+
+    assert touching == ("specs/authentication/signin.feature",)
+
+
+def test_corpus_touching_paths_raises_for_an_unknown_branch(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    repo_dir = tmp_path / "repo"
+    _write_gate_test_repo(cg, repo_dir)
+
+    with pytest.raises(CorpusGateError):
+        corpus_touching_paths(
+            source_dir=repo_dir, branch_name="no-such-branch", corpus_root=Path("specs"), cg=cg
+        )
+
+
+def test_spec_recipe_rejects_unsafe_variant_names() -> None:
+    with pytest.raises(ValidationError):
+        SpecMapReduceRecipe(name="bad/name", corpus_root=Path("specs"), test_roots=(Path("."),))
+
+
+def test_spec_recipe_requires_at_least_one_test_root() -> None:
+    with pytest.raises(ValidationError):
+        SpecMapReduceRecipe(corpus_root=Path("specs"), test_roots=())
+
+
+def test_spec_recipe_defaults_to_the_tmr_specs_variant_name() -> None:
+    recipe = SpecMapReduceRecipe(corpus_root=Path("apps/minds/specs"), test_roots=(Path("apps/minds"),))
+    assert recipe.name == "tmr-specs"
+    assert recipe.mapper_prompt_path is None
+    assert recipe.reducer_prompt_path is None
+
+
+def test_build_spec_mapper_prompt_for_task_lists_only_that_files_units(tmp_path: Path) -> None:
+    corpus_root = _write_two_area_corpus(tmp_path)
+
+    prompt = build_spec_mapper_prompt_for_task(
+        scan_root=corpus_root,
+        corpus_root_display=Path("specs"),
+        task_id="authentication/signin.feature",
+        area=None,
+        tag=None,
+        unit_kind=None,
+        test_roots_display=(Path("."),),
+        testing_flags=(),
+        template_path=None,
+    )
+
+    assert "specs/authentication/signin.feature" in prompt
+    assert "authentication.fresh-code" in prompt
+    assert "authentication.used-code" in prompt
+    # Units of other files stay out of this task's table...
+    assert "authentication.survives-restart" not in prompt
+    # ...but the invariants file's Rule appears as in-scope context.
+    assert "authentication.single-use-codes" in prompt
+
+
+def test_build_spec_mapper_prompt_for_task_respects_filters(tmp_path: Path) -> None:
+    corpus_root = _write_two_area_corpus(tmp_path)
+
+    prompt = build_spec_mapper_prompt_for_task(
+        scan_root=corpus_root,
+        corpus_root_display=Path("specs"),
+        task_id="authentication/signin.feature",
+        area=None,
+        tag="authentication.used-code",
+        unit_kind=None,
+        test_roots_display=(Path("."),),
+        testing_flags=(),
+        template_path=None,
+    )
+
+    assert "authentication.used-code" in prompt
+    assert "authentication.fresh-code" not in prompt

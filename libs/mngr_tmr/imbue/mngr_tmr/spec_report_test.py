@@ -184,7 +184,7 @@ def _row(
 ) -> SpecReportRow:
     return SpecReportRow(
         task_id="authentication/signin.feature",
-        agent_name=AgentName(f"agent-{uuid4().hex[:8]}"),
+        agent_name=AgentName(f"agent-{uuid4().hex}"),
         changes=changes or {},
         units=units,
         errored=errored,
@@ -192,7 +192,7 @@ def _row(
 
 
 def _unit(verdict: SpecUnitVerdict) -> UnitVerdictRecord:
-    return UnitVerdictRecord(coordinate=f"authentication.{uuid4().hex[:6]}", verdict=verdict)
+    return UnitVerdictRecord(coordinate=f"authentication.{uuid4().hex}", verdict=verdict)
 
 
 def test_spec_report_section_errored_is_failed() -> None:
@@ -246,8 +246,8 @@ def _write_agent_outcome(output_dir: Path, agent_name: str, outcome: dict[str, o
 
 def test_generate_spec_html_report_renders_rows_matrix_and_escalations(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
-    mapper_name = f"spec-mapper-{uuid4().hex[:8]}"
-    reducer_name = f"spec-reducer-{uuid4().hex[:8]}"
+    mapper_name = f"spec-mapper-{uuid4().hex}"
+    reducer_name = f"spec-reducer-{uuid4().hex}"
     _write_agent_outcome(
         output_dir,
         mapper_name,
@@ -334,7 +334,7 @@ def test_generate_spec_html_report_renders_rows_matrix_and_escalations(tmp_path:
 
 def test_generate_spec_html_report_shows_violation_banner_when_gate_trips(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
-    mapper_name = f"spec-mapper-{uuid4().hex[:8]}"
+    mapper_name = f"spec-mapper-{uuid4().hex}"
     _write_agent_outcome(output_dir, mapper_name, {"units": [], "changes": {}})
 
     report_path = generate_spec_html_report(
