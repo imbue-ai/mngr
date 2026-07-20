@@ -20,7 +20,9 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - Leaving a workspace for a local page no longer leaves that page unscrollable: the wrapper's viewport-lock CSS (height:100% + overflow:hidden) lived in the document head, which in-place swaps never replace, so it leaked onto swapped-in pages. It is now keyed off an html-element mode class that the swap engine's class adoption toggles correctly in both directions.
 
-- An overlay modal (workspace switcher, inbox, help) whose hosted page never finishes loading is force-closed after 10 seconds: the overlay view captures every pointer event from the moment it opens, so a stalled load previously left the app looking frozen with an invisible click-eating sheet over the window. Modal open-to-painted timings are also logged for diagnosis.
+- Opening an overlay modal (workspace switcher, inbox, help) can no longer freeze the app: the full-window overlay view used to capture every pointer event from the instant it opened while rendering nothing until the hosted page painted -- a slow load (observed at ~2s for the switcher's first open) presented as the whole app freezing. The view now stays hidden (and the window fully interactive) until the hosted page reports loaded, the hot modal templates are pre-compiled at server startup so even the first open is instant, and a modal that never loads is force-closed after 10 seconds as a backstop. Modal open-to-painted timings are logged for diagnosis.
+
+- The titlebar shows the workspace context (name plus the Workspace / Workspace Settings tabs, Workspace tab active) from the moment a workspace starts loading, not only once it commits: the titlebar wrapper seeds the breadcrumb server-side alongside the accent, and the shell also stamps the breadcrumb at navigation-claim time so switcher- and home-row-initiated hops update the bar instantly.
 
 - In-place hub swaps are now gated on an explicit renderer handshake (the shell document reports its swap listener is registered) instead of inferring readiness from the committed URL, so a swap can never be dispatched into a document that cannot hear it.
 

@@ -686,6 +686,21 @@ def test_render_chrome_page_contains_workspace_crumb_and_icon_tabs() -> None:
     assert 'id="ws-crumb" class="flex items-center gap-0.5 min-w-0" hidden' in html
 
 
+def test_render_chrome_page_seeds_workspace_crumb_server_side() -> None:
+    # The desktop shell passes the workspace being loaded (?agent=... resolved
+    # to a name by the route) so the wrapper's first paint already shows the
+    # workspace breadcrumb with the Workspace tab active -- no bare "Minds" bar
+    # while the content view loads. Without a crumb the block renders hidden
+    # exactly as before.
+    html = render_chrome_page(crumb_workspace_name="my-mind", crumb_agent_id="agent-abc123")
+    assert 'id="ws-crumb" class="flex items-center gap-0.5 min-w-0">' in html
+    assert 'data-agent-id="agent-abc123"' in html
+    assert ">my-mind</span>" in html
+    assert 'id="ws-tab-workspace"' in html and "bg-fill-active" in html
+    bare = render_chrome_page()
+    assert 'id="ws-crumb" class="flex items-center gap-0.5 min-w-0" hidden' in bare
+
+
 def test_render_chrome_page_contextual_back_button_starts_hidden() -> None:
     # The back arrow is contextual: hidden at rest, shown by chrome.js only on
     # pages that opt in (e.g. the create form). There is no forward arrow.

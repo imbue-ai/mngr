@@ -633,6 +633,10 @@ function createBundle() {
     // every click while invisible -- a stall must not freeze the app).
     modalOpenedAt: null,
     modalStallTimer: null,
+    // True between a fresh openModal and the hosted page's overlay-modal-loaded:
+    // the overlay view stays HIDDEN (not capturing input) until the modal has
+    // actually painted (see openModal's deferred show).
+    modalAwaitingLoad: false,
     currentContentUrl: null,
     currentWorkspaceId: null,
     // Whether the content view is currently displaying a REACHABLE workspace
@@ -1336,7 +1340,15 @@ function ensureBundleChromeWrapper(bundle) {
   // chrome view off the wrapper. Re-issuing the wrapper load cancels it.
   if (pathname !== '/_chrome' || bundle.chromeView.webContents.isLoading()) {
     const accent = accentColorForAgent(bundle.currentAccentAgentId);
-    const url = backendBaseUrl + '/_chrome' + (accent ? '?accent=' + encodeURIComponent(accent) : '');
+    // Seed the server-rendered titlebar: the accent AND the workspace crumb
+    // (name + tabs) for the workspace being displayed, so a fresh wrapper
+    // load first-paints with the full context instead of a bare "Minds"
+    // until the content commits. chrome.js owns every later update.
+    const params = new URLSearchParams();
+    if (accent) params.set('accent', accent);
+    if (bundle.currentWorkspaceId) params.set('agent', bundle.currentWorkspaceId);
+    const query = params.toString();
+    const url = backendBaseUrl + '/_chrome' + (query ? '?' + query : '');
     // Swapped in place when the persistent shell is live (instant, titlebar
     // untouched); full load otherwise (startup, crash recovery).
     loadLocalIntoChrome(bundle, url);
@@ -1399,6 +1411,13 @@ function navigateBundle(bundle, url) {
       updateOsTitle(bundle);
       sendCurrentWorkspaceToBundleViews(bundle);
       updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(bundle.currentContentUrl));
+      // Stamp the titlebar breadcrumb NOW rather than on commit: for
+      // navigations initiated outside the chrome renderer (sidebar rows,
+      // landing rows) the shell otherwise shows the previous context for the
+      // whole load. Idempotent with the commit-time push in onContentNavigate.
+      if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+        bundle.chromeView.webContents.send('content-url-changed', bundle.currentContentUrl);
+      }
       ensureBundleChromeWrapper(bundle);
       // getURL() also reports a PENDING navigation (this path deliberately
       // doubles as the dedupe for a repeated open of a workspace whose first
@@ -1426,6 +1445,10 @@ function navigateBundle(bundle, url) {
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
     updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(absolute));
+    // Optimistic breadcrumb stamp at claim time (see the reveal path above).
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      bundle.chromeView.webContents.send('content-url-changed', absolute);
+    }
     ensureBundleChromeWrapper(bundle);
     // Deliberately do NOT show the content view yet: it may be parked on
     // about:blank (hidden after a local page), and showing it now would cover
@@ -1735,19 +1758,34 @@ function openModal(bundle, url) {
   const id = overlayIdForUrl(url);
   if (!id) return;
   if (bundle.modalView.webContents.isDestroyed()) return;
-  // Raise the warm overlay view to the top of z-order and show it (full-window;
-  // it captures pointer events, as the modal overlay did before the migration).
+  // Raise the warm overlay view to the top of z-order.
   bundle.window.contentView.removeChildView(bundle.modalView);
   bundle.window.contentView.addChildView(bundle.modalView);
-  bundle.modalView.setVisible(true);
+  const freshOpen = !bundle.modalVisible;
   bundle.modalVisible = true;
   bundle.modalUrl = url;
+  if (freshOpen) {
+    // Do NOT show the view yet: shown, it is a full-window sheet that captures
+    // every pointer event (Electron has no per-view click-through) while
+    // rendering nothing until the hosted iframe paints -- a slow modal load
+    // (observed at ~2s for the workspace menu) froze the entire app. The view
+    // becomes visible when the hosted page reports overlay-modal-loaded; until
+    // then the window underneath stays fully interactive. The titlebar
+    // drag-region drop below is deferred with it.
+    bundle.modalAwaitingLoad = true;
+  } else {
+    // Modal-to-modal switch: the view is already visible and the overlay
+    // host's front/back iframe buffer swaps flash-free; keep it shown.
+    bundle.modalView.setVisible(true);
+  }
   // Notify the chrome view that the modal is open so it can drop the
   // ``-webkit-app-region: drag`` on #minds-titlebar. macOS unions drag
   // regions across all visible views in a window, so the chrome
   // titlebar's drag rule otherwise wins over the modal's no-drag in
   // the y=0..TITLEBAR strip and intercepts clicks (e.g. the inbox X).
-  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+  // Deferred to overlay-modal-loaded on a fresh open (see above): while the
+  // sheet is hidden the titlebar must keep its normal drag behavior.
+  if (!freshOpen && bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
     try {
       bundle.chromeView.webContents.send('modal-state-changed', { open: true });
     } catch { /* noop */ }
@@ -1779,6 +1817,7 @@ function closeModal(bundle) {
     bundle.modalStallTimer = null;
   }
   bundle.modalOpenedAt = null;
+  bundle.modalAwaitingLoad = false;
   bundle.modalView.setVisible(false);
   bundle.modalVisible = false;
   bundle.modalUrl = null;
@@ -4033,6 +4072,21 @@ ipcMain.on('overlay-modal-loaded', (event) => {
   if (bundle.modalOpenedAt !== null) {
     console.log(`[modal] loaded after ${Date.now() - bundle.modalOpenedAt}ms`);
     bundle.modalOpenedAt = null;
+  }
+  // Deferred show (see openModal): the hosted page has painted, so the
+  // full-window overlay view can start capturing input without the app ever
+  // presenting an invisible click-eating sheet. The titlebar drag-region drop
+  // deferred with it lands now too.
+  if (bundle.modalVisible && bundle.modalAwaitingLoad) {
+    bundle.modalAwaitingLoad = false;
+    if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
+      bundle.modalView.setVisible(true);
+    }
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      try {
+        bundle.chromeView.webContents.send('modal-state-changed', { open: true });
+      } catch { /* noop */ }
+    }
   }
   primeOverlayFrames(bundle);
 });

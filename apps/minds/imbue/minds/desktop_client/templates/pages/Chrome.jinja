@@ -1,4 +1,4 @@
-{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces, accent="" #}
+{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces, accent="", crumb_workspace_name="", crumb_agent_id="" #}
 {#
   Persistent chrome page (titlebar + sidebar + content iframe).
 
@@ -24,7 +24,10 @@
              :is_authenticated="is_authenticated"
              :mngr_forward_origin="mngr_forward_origin"
              :is_agent_content_surface="True"
-             :accent="accent">
+             :accent="accent"
+             :crumb_workspace_name="crumb_workspace_name"
+             :crumb_agent_id="crumb_agent_id"
+             :active_tab="'workspace' if crumb_agent_id else ''">
   {# White "mirror" sized exactly like the Electron contentView (left:4
      / top:38 / right:4 / bottom:4 / radius:12 -- matches CONTENT_INSET
      and CONTENT_CORNER_RADIUS in electron/main.js). Sits behind the

@@ -23,7 +23,9 @@ from typing import Final
 
 from flask import has_app_context
 from flask import request
+from loguru import logger
 from jinja2 import Environment
+from jinja2 import TemplateError
 from jinja2 import select_autoescape
 from jinjax import Catalog
 from pydantic import Field
@@ -1661,6 +1663,8 @@ def render_chrome_page(
     mngr_forward_origin: str = "",
     initial_workspaces: Sequence[dict[str, str]] | None = None,
     accent: str = "",
+    crumb_workspace_name: str = "",
+    crumb_agent_id: str = "",
 ) -> str:
     """Render the persistent chrome page (title bar + sidebar + content iframe).
 
@@ -1679,6 +1683,13 @@ def render_chrome_page(
     ``#rrggbb`` string) so the wrapper's first paint is already tinted when the
     desktop shell loads it for a workspace whose accent it knows; live updates
     still flow through chrome.js.
+
+    ``crumb_workspace_name`` + ``crumb_agent_id`` optionally seed the titlebar's
+    workspace breadcrumb (name + Workspace/Settings tabs, Workspace tab active)
+    server-side, mirroring the accent: the desktop shell passes the workspace it
+    is loading so the bar's first paint already carries the full context instead
+    of a bare "Minds" until the content view commits. chrome.js owns every later
+    update.
     """
     return CATALOG.render(
         "pages.Chrome",
@@ -1687,6 +1698,8 @@ def render_chrome_page(
         mngr_forward_origin=mngr_forward_origin,
         initial_workspaces=initial_workspaces or [],
         accent=accent,
+        crumb_workspace_name=crumb_workspace_name,
+        crumb_agent_id=crumb_agent_id,
     )
 
 
@@ -1730,6 +1743,30 @@ def render_sidebar_page(
 
 
 @pure
+def warm_template_caches() -> None:
+    """Render the hot always-available pages once so their JinjaX compiles are paid at startup.
+
+    JinjaX compiles each template lazily on first render, which showed up as a
+    ~2s first open of the workspace switcher (the overlay view captures input
+    from the moment it opens, so that compile presented as the whole app
+    freezing). Rendering these once from a background thread at server startup
+    makes the first real open as fast as every later one. Purely an
+    optimization: failures are swallowed (the real request path compiles on
+    demand exactly as before).
+    """
+    for render in (
+        render_chrome_page,
+        render_sidebar_page,
+        render_overlay_host_page,
+        lambda: render_help_page(include_logs_setting=False, workspace_agent_id=""),
+        lambda: render_inbox_page(cards=()),
+    ):
+        try:
+            render()
+        except (TemplateError, OSError):
+            logger.opt(exception=True).debug("Template warmup render failed (ignored)")
+
+
 def render_overlay_host_page() -> str:
     """Render the always-warm overlay host page loaded into the shared modal WebContentsView.
 

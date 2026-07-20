@@ -1340,12 +1340,29 @@ def _handle_chrome_page() -> Response:
     accent_arg = request.args.get("accent", "")
     accent = accent_arg.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", accent_arg) else ""
 
+    # Optional server-side titlebar breadcrumb, mirroring the accent: the
+    # desktop shell appends ?agent=agent-<hex> for the workspace it is loading
+    # so the wrapper's first paint already shows the workspace name + tabs
+    # instead of a bare "Minds" until the content view commits. Strictly
+    # validated; an unknown or unnamed workspace renders the same ellipsis
+    # placeholder chrome.js uses (never the raw id).
+    agent_arg = request.args.get("agent", "")
+    crumb_agent_id = agent_arg if re.fullmatch(r"agent-[a-f0-9]+", agent_arg) else ""
+    crumb_workspace_name = ""
+    if crumb_agent_id:
+        crumb_workspace_name = next(
+            (ws["name"] for ws in initial_workspaces if ws.get("id") == crumb_agent_id and ws.get("name")),
+            "…",
+        )
+
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(),
         initial_workspaces=initial_workspaces,
         accent=accent,
+        crumb_workspace_name=crumb_workspace_name,
+        crumb_agent_id=crumb_agent_id,
     )
     return make_html_response(content=html)
 
