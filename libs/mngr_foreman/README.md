@@ -55,3 +55,15 @@ Foreman shows **every agent in mngr's view** — chat (live transcript + send) f
   clear it.
 - `marked` (markdown renderer) is vendored under `static/vendor/`; raw HTML in
   assistant output is escaped, not rendered.
+- **Warm connection pool & idle-stop:** `serve` keeps a warm SSH connection to
+  every host with a RUNNING/WAITING agent (a periodic `true` ping every ~25s) so
+  sends/reads/dialog-probes are fast. That ping registers as SSH activity in
+  mngr's idle tracking, so **foreman inhibits auto-idle-shutdown on the hosts it
+  watches** while it runs — don't rely on idle-stop for hosts foreman is
+  monitoring. Local-provider agents use no SSH (the pool no-ops for them). Idle
+  cost is negligible: one held socket + a periodic 1-byte-ish keepalive per host,
+  zero CPU.
+- **Many tabs:** each open chat/list tab holds a long-lived SSE; the browser caps
+  ~6 connections per host, so hidden tabs drop their SSE and re-backfill on focus
+  (events are deduped by id, so the re-backfill is cheap). Keeps foreground
+  fetches sub-second even with ~10 tabs open.

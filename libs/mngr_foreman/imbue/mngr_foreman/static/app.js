@@ -308,9 +308,13 @@
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     }
 
+    // Drop the list SSE when the tab is hidden (frees a browser connection);
+    // reconnect re-sends a full snapshot, so no state is lost.
+    let es = null;
     function connect() {
       if (typeof EventSource === "undefined") { startPolling(); return; }
-      const es = new EventSource("/api/agents/stream");
+      if (es) return;
+      es = new EventSource("/api/agents/stream");
       es.onopen = () => { stopPolling(); setConn("live"); };
       es.onmessage = (ev) => {
         let msg;
@@ -321,6 +325,14 @@
       };
       es.onerror = () => { setConn("reconnecting"); startPolling(); };
     }
+    function disconnect() {
+      if (es) { es.close(); es = null; }
+      stopPolling();
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) disconnect();
+      else connect();
+    });
     connect();
   }
 
@@ -666,19 +678,33 @@
     }
 
     // ---- transcript SSE ----
+    // The transcript SSE is a long-lived connection; with many open tabs the
+    // browser's ~6-connections-per-host limit would starve asset/API fetches. So
+    // a hidden tab DROPS its transcript SSE and re-backfills on focus. Every
+    // event carries an event_id, so we dedup client-side -- the re-backfill after
+    // a reconnect only renders events that arrived while we were disconnected.
+    const seenEventIds = new Set();
+    let es = null;
+
     function connect() {
       if (typeof EventSource === "undefined") {
         setStatus("Live transcript needs EventSource support.");
         composer.hidden = false;
         return;
       }
+      if (es) return; // already connected
       setStatus("loading transcript…");
-      const es = new EventSource("/api/agents/" + encodeURIComponent(name) + "/transcript");
+      es = new EventSource("/api/agents/" + encodeURIComponent(name) + "/transcript");
       es.onopen = () => setConn("live");
       es.onmessage = (raw) => {
         let msg;
         try { msg = JSON.parse(raw.data); } catch (_e) { return; }
         if (msg.type === "event") {
+          const id = msg.event && msg.event.event_id;
+          if (id) {
+            if (seenEventIds.has(id)) return; // already rendered (dedup re-backfill)
+            seenEventIds.add(id);
+          }
           renderEvent(msg.event);
         } else if (msg.type === "backfill_complete") {
           clearStatus();
@@ -694,6 +720,13 @@
       };
       es.onerror = () => setConn("reconnecting");
     }
+    function disconnect() {
+      if (es) { es.close(); es = null; setConn("paused"); }
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) disconnect();
+      else connect();
+    });
     connect();
     schedulePrefetch(); // warm highlight/katex/mermaid during idle
 
