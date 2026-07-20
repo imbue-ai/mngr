@@ -181,18 +181,19 @@
   }
 
   // Sign-in just completed in the external browser, which stole OS focus. Ask
-  // the shell to raise the Minds window so the user doesn't have to alt-tab
-  // back. On the standalone /auth page (content view) there is no window.minds
-  // bridge, so we post an allowlisted message the content-relay preload
-  // forwards; in the sign-in modal (overlay view) the bridge is present.
-  function requestWindowFocus() {
+  // the shell to bring the whole Minds app to the front (stealing focus back
+  // from the browser) so the user lands in Minds instead of having to alt-tab.
+  // On the standalone /auth page (content view) there is no window.minds bridge,
+  // so we post an allowlisted message the content-relay preload forwards; in the
+  // sign-in modal (overlay view) the bridge is present.
+  function bringMindsToFront() {
     try {
-      if (window.minds && typeof window.minds.focusWindow === 'function') {
-        window.minds.focusWindow();
+      if (window.minds && typeof window.minds.bringAppToFront === 'function') {
+        window.minds.bringAppToFront();
       } else {
-        window.postMessage({ type: 'minds:focus-window' }, '*');
+        window.postMessage({ type: 'minds:bring-app-to-front' }, '*');
       }
-    } catch (e) { /* focus is best-effort; never block sign-in on it */ }
+    } catch (e) { /* best-effort; never block sign-in on it */ }
   }
 
   async function oauthSignIn(provider) {
@@ -243,11 +244,17 @@
         if (s.state === 'done') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          // Final step before the page navigates onward, plus the window raise
-          // so the user lands back in Minds rather than the browser.
           oauthSetMessage('Signing you in...', OAUTH_STATUS_CLASS);
-          requestWindowFocus();
-          onAuthSuccess();
+          bringMindsToFront();
+          // Defer the navigation a beat so the bring-to-front request reaches
+          // the main process before this view navigates away. On the standalone
+          // /auth page that request is a window.postMessage the content-relay
+          // preload forwards, and navigating immediately can tear the page down
+          // before the message is dispatched -- which intermittently swallowed
+          // the raise (or only let it land as the workspace view loaded). A
+          // short delay makes delivery deterministic; "Signing you in..." covers
+          // it.
+          setTimeout(onAuthSuccess, 150);
           return;
         }
         if (s.state === 'error') {

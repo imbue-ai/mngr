@@ -3263,12 +3263,13 @@ ipcMain.on('go-home', (event) => {
 });
 
 // OAuth sign-in finished in the external browser (which stole OS focus); the
-// login page asks us to raise the Minds window. Only pull focus if the window
-// isn't already focused, so we never yank the user out of the app when they
-// stayed put. Fires from the login page in either the content view (via the
-// content-relay `minds:focus-window` message) or the sign-in modal overlay
-// (via window.minds.focusWindow()); getBundleFromEvent resolves both.
-ipcMain.on('focus-window', (event) => {
+// login page asks us to bring the Minds app to the front. Only do so if the
+// window isn't already focused, so we never yank the user out of the app when
+// they stayed put. Fires from the login page in either the content view (via
+// the content-relay `minds:bring-app-to-front` message) or the sign-in modal
+// overlay (via window.minds.bringAppToFront()); getBundleFromEvent resolves
+// both.
+ipcMain.on('bring-app-to-front', (event) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || bundle.window.isDestroyed()) return;
   if (bundle.window.isFocused()) return;
