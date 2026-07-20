@@ -1660,6 +1660,7 @@ def render_chrome_page(
     is_authenticated: bool = False,
     mngr_forward_origin: str = "",
     initial_workspaces: Sequence[dict[str, str]] | None = None,
+    accent: str = "",
 ) -> str:
     """Render the persistent chrome page (title bar + sidebar + content iframe).
 
@@ -1673,6 +1674,11 @@ def render_chrome_page(
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     is handled by a separate WebContentsView, and the sidebar page is loaded into
     the shared modal WebContentsView when opened.
+
+    ``accent`` optionally seeds the titlebar's workspace color server-side (a
+    ``#rrggbb`` string) so the wrapper's first paint is already tinted when the
+    desktop shell loads it for a workspace whose accent it knows; live updates
+    still flow through chrome.js.
     """
     return CATALOG.render(
         "pages.Chrome",
@@ -1680,6 +1686,7 @@ def render_chrome_page(
         is_authenticated=is_authenticated,
         mngr_forward_origin=mngr_forward_origin,
         initial_workspaces=initial_workspaces or [],
+        accent=accent,
     )
 
 

@@ -1,4 +1,4 @@
-{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, body_class="", body_style="", head="", scripts="" #}
+{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, accent="", body_class="", body_style="", head="", scripts="" #}
 {#
   Shared trusted app shell: the fixed breadcrumb titlebar + browser-mode floating
   workspace switcher + accent / chrome.js wiring, wrapping a page body passed in
@@ -15,6 +15,12 @@
     document is locked to the viewport (``overflow: hidden``) and the body
     background tracks ``--titlebar-bg`` so an active workspace accent bleeds
     through the content surface's rounded corners.
+
+  ``accent`` is an optional ``#rrggbb`` workspace accent rendered SERVER-SIDE
+  (the ``--titlebar-bg`` variable plus the ``titlebar-surface`` self-theming
+  scope) so a workspace-scoped page's first paint already carries the right
+  titlebar color -- no neutral-then-accent pop-in while chrome.js waits for the
+  SSE color cache. chrome.js repaints live changes on top exactly as before.
 
   ``is_mac`` (traffic-light spacer + hidden window controls) and
   ``mngr_forward_origin`` (the body data attribute chrome.js reads to build
@@ -38,6 +44,11 @@
      in the region below the titlebar rather than behind it. #}
   {% set _body_class = (body_class if body_class else "bg-surface-primary text-primary font-sans antialiased") ~ " pt-[38px]" %}
   {% set _body_style = body_style %}
+{% endif %}
+{% if accent %}
+  {# Server-side accent: seed --titlebar-bg on the body so the titlebar's very
+     first paint is workspace-tinted. chrome.js takes over live updates. #}
+  {% set _body_style = _body_style ~ " --titlebar-bg: " ~ accent ~ ";" %}
 {% endif %}
 {# The agent content surface (pages.Chrome) is edge-to-edge, so it opts out of
    the global stable scrollbar gutter; scrolling local pages keep the gutter to
@@ -104,7 +115,7 @@
                       browser-mode settings/accounts/auth fallbacks). #}
   <div id="minds-titlebar"
        style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
-       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1">
+       class="{% if accent %}titlebar-surface {% endif %}fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1">
     <div class="flex-1 flex items-center gap-0.5 min-w-0">
       {% if _is_mac %}<div class="w-[72px] shrink-0" aria-hidden="true"></div>{% endif %}
       {# Visibility below is driven through the native ``hidden`` attribute

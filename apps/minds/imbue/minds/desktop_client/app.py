@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -1331,11 +1332,20 @@ def _handle_chrome_page() -> Response:
     backend_resolver = get_state().backend_resolver
     initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
 
+    # Optional server-side titlebar accent: the desktop shell appends
+    # ?accent=%23rrggbb when it (re)loads the wrapper for a workspace whose
+    # accent it already knows, so the bar's first paint is tinted instead of
+    # flashing neutral until the SSE color cache lands. Strictly validated;
+    # anything else renders the neutral bar exactly as before.
+    accent_arg = request.args.get("accent", "")
+    accent = accent_arg.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", accent_arg) else ""
+
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(),
         initial_workspaces=initial_workspaces,
+        accent=accent,
     )
     return make_html_response(content=html)
 

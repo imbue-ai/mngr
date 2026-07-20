@@ -351,8 +351,15 @@ function detachWindowsForWorkspace(agentId) {
       // page, so navigateBundle renders it in the chrome view and hides the
       // (agent) content view, clears currentWorkspaceId + notifies the chrome
       // renderer -- releasing its recovery-redirect lock -- and drops the
-      // titlebar accent to the neutral chrome.
+      // titlebar accent to the neutral chrome. Blank the parked page too: the
+      // workspace was DESTROYED, so the keep-alive residency must not offer a
+      // dead page for a later reveal.
       navigateBundle(b, backendBaseUrl + '/');
+      if (b.contentView && !b.contentView.webContents.isDestroyed()) {
+        try {
+          b.contentView.webContents.loadURL('about:blank').catch(() => {});
+        } catch { /* noop */ }
+      }
     }
   }
 }
@@ -597,6 +604,18 @@ function createBundle() {
     // the full-window modal bounds.
     tooltipVisible: false,
     inboxListReloadTimer: null,
+    // Which surface the LATEST navigateBundle call targeted ('chrome' |
+    // 'content'). The surfaces' did-navigate handlers only apply their state
+    // bookkeeping when their surface is the intended one, so a slow load from
+    // a SUPERSEDED navigation that commits late (e.g. a settings page landing
+    // after the user already flipped back to the workspace) cannot clobber
+    // the newer navigation's workspace identity / URL / accent, and a stale
+    // workspace commit cannot re-show the content view over a local page.
+    // Windows start on local pages (shell.html -> Home/welcome).
+    intendedSurface: 'chrome',
+    // Snapshot of contentWorkspaceReady taken when the workspace was parked
+    // behind a local page, restored on reveal (see navigateBundle).
+    parkedWorkspaceReady: false,
     currentContentUrl: null,
     currentWorkspaceId: null,
     // Whether the content view is currently displaying a REACHABLE workspace
@@ -674,6 +693,13 @@ function createBundle() {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
     console.log(`[nav] chrome view committed ${url}`);
     if (parsed.pathname === '/_chrome') return;
+    // A commit from a SUPERSEDED navigation (the user flipped surfaces before
+    // this page finished loading) must not clobber the newer navigation's
+    // workspace identity / URL / accent bookkeeping.
+    if (bundle.intendedSurface !== 'chrome') {
+      console.log('[nav] stale chrome commit ignored (content surface is current)');
+      return;
+    }
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     if (bundle.currentWorkspaceId !== null) {
@@ -779,6 +805,13 @@ function wireContentViewEvents(bundle, contentView) {
     // state updates so ``currentContentUrl`` / ``currentWorkspaceId`` keep
     // pointing at the pre-crash workspace (which Reload re-loads).
     if (isCrashPageUrl(url)) return;
+    // A commit from a SUPERSEDED navigation must not re-show the content view
+    // over a local page or clobber the newer navigation's bookkeeping (e.g. a
+    // slow workspace load landing after the user already went Home).
+    if (bundle.intendedSurface !== 'content') {
+      console.log('[nav] stale content commit ignored (chrome surface is current)');
+      return;
+    }
     // A genuine navigation clears any pending crash state (e.g. the user hit
     // Home from the crash page, or Reload succeeded).
     bundle.isContentCrashed = false;
@@ -1144,40 +1177,69 @@ function showBundleContentView(bundle) {
 // uses this so re-opening a workspace whose load failed retries instead of
 // no-oping on the stale claim.
 function isBundleDisplayingWorkspace(bundle, agentId) {
-  if (!bundle || !agentId) return false;
+  if (!contentViewHoldsWorkspace(bundle, agentId)) return false;
   const view = bundle.contentView;
-  if (!view || view.webContents.isDestroyed()) return false;
-  if (typeof view.getVisible === 'function' && !view.getVisible()) return false;
-  return parseWorkspaceId(view.webContents.getURL()) === agentId;
+  return typeof view.getVisible !== 'function' || view.getVisible();
 }
 
-// Hide the content view when leaving agent content, and release the agent
-// page's renderer by parking it on about:blank -- so no foreign workspace stays
-// resident/running behind a trusted local page. The view object itself is kept
-// (recreating it would have to re-wire events + re-assert z-order under the
-// modal view, which is error-prone): this reclaims the heavy renderer while
-// leaving a cheap idle view to reveal on the next agent navigation.
+// Hide the content view when leaving agent content. The workspace page is
+// deliberately kept RESIDENT (hidden, not unloaded): flipping between a
+// workspace and its settings tab -- or Home -- and back must be instant, and
+// unloading here forced a full /goto -> subdomain -> dockview re-boot on every
+// return (seconds of blank card, lost in-page layout). The cost is one live
+// workspace renderer behind a local page, the same footprint as displaying it.
 function hideBundleContentView(bundle) {
   if (!bundle || !bundle.contentView || bundle.contentView.webContents.isDestroyed()) return;
   bundle.contentView.setVisible(false);
-  try {
-    bundle.contentView.webContents.loadURL('about:blank');
-  } catch { /* noop */ }
+}
+
+// Whether the bundle's content view currently HOLDS ``agentId``'s page
+// (committed on its subdomain / auth bridge), visible or hidden. The hidden
+// case is the parked-workspace state navigateBundle reveals without a reload.
+function contentViewHoldsWorkspace(bundle, agentId) {
+  if (!bundle || !agentId) return false;
+  const view = bundle.contentView;
+  if (!view || view.webContents.isDestroyed()) return false;
+  return parseWorkspaceId(view.webContents.getURL()) === agentId;
+}
+
+// The most recent SSE-carried accent color for ``agentId``, or null. Used to
+// seed the /_chrome wrapper's titlebar color server-side so its first paint is
+// already workspace-tinted (no neutral-then-accent pop-in while the wrapper's
+// chrome.js waits for the SSE color cache).
+function accentColorForAgent(agentId) {
+  if (!agentId || !latestChromeState.workspaces) return null;
+  for (const w of latestChromeState.workspaces) {
+    if (w && w.id === agentId && typeof w.accent === 'string' && /^#[0-9a-f]{6}$/i.test(w.accent)) {
+      return w.accent;
+    }
+  }
+  return null;
 }
 
 // Ensure the chrome view is on the agent-wrapper (/_chrome) -- the titlebar with
 // an empty content region that the content view floats over on an agent path.
 // Only (re)load it when it isn't already there, so an agent navigation doesn't
 // reload the wrapper (a spurious /_chrome chrome did-navigate would race the
-// content view's accent -- see onChromeNavigate).
+// content view's accent -- see onChromeNavigate). The wrapper URL carries the
+// current accent as a query param purely for the server-side first paint; the
+// pathname-only comparison means accent changes never force a reload (chrome.js
+// repaints those live).
 function ensureBundleChromeWrapper(bundle) {
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed() || !backendBaseUrl) return;
   let pathname = null;
   try { pathname = new URL(bundle.chromeView.webContents.getURL()).pathname; } catch { pathname = null; }
-  if (pathname !== '/_chrome') {
+  // Reload when the committed page isn't the wrapper -- OR when a load is still
+  // in flight: getURL() only reports the COMMITTED page, so a superseded local
+  // page (e.g. a settings click the user flipped away from before it landed)
+  // could otherwise finish loading underneath the workspace and leave the
+  // chrome view off the wrapper. Re-issuing the wrapper load cancels it.
+  if (pathname !== '/_chrome' || bundle.chromeView.webContents.isLoading()) {
+    const accent = accentColorForAgent(bundle.currentAccentAgentId);
+    const url = backendBaseUrl + '/_chrome' + (accent ? '?accent=' + encodeURIComponent(accent) : '');
     // Load failures surface via onChromeNavigate / the error takeover; the
     // rejected promise alone would just print an unhandled-rejection warning.
-    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome').catch(() => {});
+    bundle.chromeView.webContents.loadURL(url).catch(() => {});
   }
 }
 
@@ -1223,6 +1285,25 @@ function navigateBundle(bundle, url) {
       closeModal(bundle);
       return;
     }
+    bundle.intendedSurface = 'content';
+    if (contentViewHoldsWorkspace(bundle, targetAgentId)) {
+      // The parked resident workspace: the content view still holds this
+      // workspace's live page from before the user flipped to a local screen
+      // (settings, Home). Reveal it -- no reload, no /goto round-trip, the
+      // in-page layout intact -- and re-claim the workspace identity.
+      console.log(`[nav] revealing parked workspace ${targetAgentId}`);
+      bundle.currentWorkspaceId = targetAgentId;
+      bundle.contentWorkspaceReady = bundle.parkedWorkspaceReady;
+      bundle.currentContentUrl = bundle.contentView.webContents.getURL();
+      bundle.preErrorUrl = bundle.currentContentUrl;
+      updateOsTitle(bundle);
+      sendCurrentWorkspaceToBundleViews(bundle);
+      updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(bundle.currentContentUrl));
+      ensureBundleChromeWrapper(bundle);
+      showBundleContentView(bundle);
+      closeModal(bundle);
+      return;
+    }
     bundle.currentWorkspaceId = targetAgentId;
     // We're only starting the navigation; the workspace isn't confirmed
     // reachable until ``did-navigate`` lands a non-loader status, so clear
@@ -1249,6 +1330,18 @@ function navigateBundle(bundle, url) {
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
       bundle.contentView.webContents.loadURL(absolute).catch(() => {});
     }
+    // Keep-alive residency means another window may still HOLD this workspace
+    // hidden (parked, claim released when it flipped to a local page). Now that
+    // THIS window is loading the live copy, blank those stale residents so two
+    // live views of one workspace never coexist.
+    for (const b of bundles) {
+      if (b === bundle || b.window.isDestroyed()) continue;
+      if (b.currentWorkspaceId !== targetAgentId && contentViewHoldsWorkspace(b, targetAgentId)) {
+        try {
+          b.contentView.webContents.loadURL('about:blank').catch(() => {});
+        } catch { /* noop */ }
+      }
+    }
     closeModal(bundle);
     return;
   }
@@ -1257,10 +1350,13 @@ function navigateBundle(bundle, url) {
   // recovery-redirect lock); the accent still tracks the wider workspace-scoped
   // screens via parseAccentSourceAgentId. The content view is hidden here, so no
   // reachable workspace is displayed -- clear readiness too (kept in lockstep
-  // with currentWorkspaceId, which it can only be true with).
+  // with currentWorkspaceId, which it can only be true with), remembering it so
+  // revealing the parked workspace can restore it without a fresh probe.
+  bundle.intendedSurface = 'chrome';
   bundle.currentContentUrl = absolute;
   bundle.preErrorUrl = absolute;
   if (bundle.currentWorkspaceId !== null) {
+    bundle.parkedWorkspaceReady = bundle.contentWorkspaceReady;
     bundle.currentWorkspaceId = null;
     bundle.contentWorkspaceReady = false;
     sendCurrentWorkspaceToBundleViews(bundle);
