@@ -747,9 +747,15 @@ class ImbueCloudConnectorClient(MutableModel):
         return AccountInfo.model_validate(self._check(response, ImbueCloudAccountError))
 
     def set_account_plan(self, access_token: SecretStr, plan: str) -> dict[str, Any]:
-        """Switch the account's plan; returns ``{plan_name, entitlements}``."""
-        response = httpx.post(
+        """Switch the account's plan; returns ``{plan_name, entitlements}``.
+
+        Idempotent server-side (re-selecting the current plan is a no-op), so
+        transport-level retries are safe.
+        """
+        response = self._send(
+            "POST",
             self._url("/account/plan"),
+            exc_cls=ImbueCloudAccountError,
             headers=self._bearer(access_token),
             json={"plan": plan},
             timeout=self.timeout_seconds,
@@ -761,16 +767,22 @@ class ImbueCloudConnectorClient(MutableModel):
     # ------------------------------------------------------------------
 
     def admin_get_account(self, admin_api_key: SecretStr, email: str) -> AccountInfo:
-        response = httpx.get(
+        response = self._send(
+            "GET",
             self._url(f"/admin/accounts/{email}"),
+            exc_cls=ImbueCloudAccountError,
             headers=self._bearer(admin_api_key),
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         return AccountInfo.model_validate(self._check(response, ImbueCloudAccountError))
 
     def admin_set_account_plan(self, admin_api_key: SecretStr, email: str, plan: str) -> dict[str, Any]:
-        response = httpx.post(
+        # Always resets to the plan's defaults, so a retried request lands in
+        # the same state (safe to retry on transport errors).
+        response = self._send(
+            "POST",
             self._url(f"/admin/accounts/{email}/plan"),
+            exc_cls=ImbueCloudAccountError,
             headers=self._bearer(admin_api_key),
             json={"plan": plan},
             timeout=self.timeout_seconds,
@@ -780,8 +792,12 @@ class ImbueCloudConnectorClient(MutableModel):
     def admin_set_account_quota(
         self, admin_api_key: SecretStr, email: str, entitlement: str, value: float
     ) -> dict[str, Any]:
-        response = httpx.post(
+        # A plain overwrite of one entitlement value (safe to retry on
+        # transport errors).
+        response = self._send(
+            "POST",
             self._url(f"/admin/accounts/{email}/quota"),
+            exc_cls=ImbueCloudAccountError,
             headers=self._bearer(admin_api_key),
             json={"entitlement": entitlement, "value": value},
             timeout=self.timeout_seconds,
