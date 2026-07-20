@@ -164,9 +164,7 @@ def test_load_matrix_records_returns_none_when_artifact_is_absent(tmp_path: Path
 
 def test_load_matrix_records_skips_malformed_lines_but_keeps_the_rest(tmp_path: Path) -> None:
     matrix_path = tmp_path / "matrix.jsonl"
-    good_line = json.dumps(
-        {"coordinate": "authentication.fresh-code", "coverage": "none", "witnesses": []}
-    )
+    good_line = json.dumps({"coordinate": "authentication.fresh-code", "coverage": "none", "witnesses": []})
     matrix_path.write_text(f"{good_line}\nnot json at all\n")
 
     record_by_coordinate = load_matrix_records(matrix_path)

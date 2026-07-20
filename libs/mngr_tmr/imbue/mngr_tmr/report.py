@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from enum import auto
 from importlib.resources import files
 from pathlib import Path
+from typing import TypeVar
 
 from jinja2 import Environment
 from jinja2 import PackageLoader
@@ -209,6 +210,9 @@ SECTION_COLORS: dict[ReportSection, str] = {
 }
 
 _md = MarkdownIt()
+
+# Keys are each recipe's own change-kind enum (ChangeKind, SpecChangeKind).
+_ChangeKindT = TypeVar("_ChangeKindT", bound=UpperCaseStrEnum)
 
 _NON_IMPL_CHANGE_KINDS = frozenset({ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST, ChangeKind.FIX_TUTORIAL})
 
@@ -399,7 +403,7 @@ def _format_test_id(test_node_id: str) -> str:
     return html.escape(test_node_id).replace("::", "::<wbr>")
 
 
-def format_changes(changes: Mapping[UpperCaseStrEnum, Change]) -> str:
+def format_changes(changes: Mapping[_ChangeKindT, Change]) -> str:
     """Format changes as concise kind + icon pairs (any recipe's change-kind enum)."""
     parts: list[str] = []
     for kind, change in changes.items():

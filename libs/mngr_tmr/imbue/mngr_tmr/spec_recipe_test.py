@@ -195,15 +195,11 @@ def _write_gate_test_repo(cg: ConcurrencyGroup, repo_dir: Path) -> None:
     _git(cg, repo_dir, "checkout", "-q", "main")
 
 
-def test_corpus_touching_paths_is_empty_for_a_branch_outside_the_corpus(
-    tmp_path: Path, cg: ConcurrencyGroup
-) -> None:
+def test_corpus_touching_paths_is_empty_for_a_branch_outside_the_corpus(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     repo_dir = tmp_path / "repo"
     _write_gate_test_repo(cg, repo_dir)
 
-    touching = corpus_touching_paths(
-        source_dir=repo_dir, branch_name="clean-branch", corpus_root=Path("specs"), cg=cg
-    )
+    touching = corpus_touching_paths(source_dir=repo_dir, branch_name="clean-branch", corpus_root=Path("specs"), cg=cg)
 
     assert touching == ()
 
@@ -212,9 +208,7 @@ def test_corpus_touching_paths_lists_corpus_files_the_branch_changes(tmp_path: P
     repo_dir = tmp_path / "repo"
     _write_gate_test_repo(cg, repo_dir)
 
-    touching = corpus_touching_paths(
-        source_dir=repo_dir, branch_name="dirty-branch", corpus_root=Path("specs"), cg=cg
-    )
+    touching = corpus_touching_paths(source_dir=repo_dir, branch_name="dirty-branch", corpus_root=Path("specs"), cg=cg)
 
     assert touching == ("specs/authentication/signin.feature",)
 
@@ -224,9 +218,7 @@ def test_corpus_touching_paths_raises_for_an_unknown_branch(tmp_path: Path, cg: 
     _write_gate_test_repo(cg, repo_dir)
 
     with pytest.raises(CorpusGateError):
-        corpus_touching_paths(
-            source_dir=repo_dir, branch_name="no-such-branch", corpus_root=Path("specs"), cg=cg
-        )
+        corpus_touching_paths(source_dir=repo_dir, branch_name="no-such-branch", corpus_root=Path("specs"), cg=cg)
 
 
 def test_spec_recipe_rejects_unsafe_variant_names() -> None:

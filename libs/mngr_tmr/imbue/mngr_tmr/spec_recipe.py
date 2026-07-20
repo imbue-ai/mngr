@@ -285,9 +285,7 @@ class SpecMapReduceRecipe(MapReduceRecipe, FrozenModel):
     area: str | None = Field(default=None, description="Only fan out units in this dot-joined folder subtree")
     tag: str | None = Field(default=None, description="Only fan out units with this exact tag or coordinate")
     unit_kind: SpecUnitKind | None = Field(default=None, description="Only fan out units of this kind")
-    testing_flags: tuple[str, ...] = Field(
-        default=(), description="Flags appended to the mappers' pytest invocations"
-    )
+    testing_flags: tuple[str, ...] = Field(default=(), description="Flags appended to the mappers' pytest invocations")
     mapper_prompt_path: Path | None = Field(
         default=None,
         description="Optional override template for the mapper prompt (falls back to the packaged "
@@ -295,8 +293,7 @@ class SpecMapReduceRecipe(MapReduceRecipe, FrozenModel):
     )
     reducer_prompt_path: Path | None = Field(
         default=None,
-        description="Optional override template for the reducer prompt (falls back to the packaged "
-        "spec_reducer.j2)",
+        description="Optional override template for the reducer prompt (falls back to the packaged spec_reducer.j2)",
     )
 
     @field_validator("name")
@@ -393,9 +390,7 @@ class SpecMapReduceRecipe(MapReduceRecipe, FrozenModel):
         emit_report_url(maybe_upload_report(report_path, ctx.run_name), ctx.output_opts)
         return report_path
 
-    def _gate_finding_for_report(
-        self, ctx: MapReduceContext, reducer: AgentMetadata | None
-    ) -> tuple[str, ...] | None:
+    def _gate_finding_for_report(self, ctx: MapReduceContext, reducer: AgentMetadata | None) -> tuple[str, ...] | None:
         """Derive the gate finding at render time (git is the single fact source)."""
         if reducer is None or reducer.branch_name is None:
             return None

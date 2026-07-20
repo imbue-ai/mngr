@@ -36,6 +36,7 @@ from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_specs.data_types import SpecCoverage
 from imbue.mngr_specs.witnesses import spec_coverage_record_value
+from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.report import Change
 from imbue.mngr_tmr.report import ChangeStatus
 from imbue.mngr_tmr.report import EXTRACTED_TEST_OUTPUT_DIR
@@ -50,7 +51,6 @@ from imbue.mngr_tmr.report import load_integrator_outcome
 from imbue.mngr_tmr.report import merged_status_html
 from imbue.mngr_tmr.report import read_static
 from imbue.mngr_tmr.spec_prompts import MATRIX_ARTIFACT_FILENAME
-from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 
 
 class MatrixRecordParseError(MngrError, ValueError):
@@ -408,8 +408,10 @@ def _build_spec_section_views(
         if section == ReportSection.IMPL_FIXES and integrator is not None and integrator.impl_priority:
             priority_order = {branch: i for i, branch in enumerate(integrator.impl_priority)}
             group = sorted(group, key=lambda r: priority_order.get(r.branch_name or "", len(priority_order)))
-        col_count = 5 if section not in (ReportSection.RUNNING, ReportSection.CLEAN_PASS) else (
-            2 if section == ReportSection.RUNNING else 3
+        col_count = (
+            5
+            if section not in (ReportSection.RUNNING, ReportSection.CLEAN_PASS)
+            else (2 if section == ReportSection.RUNNING else 3)
         )
         sections.append(
             {
@@ -449,9 +451,7 @@ def _build_coverage_rows(
                 spec_coverage_record_value(verified_record.coverage) if verified_record is not None else None
             )
             is_agreeing = (
-                None
-                if verified_record is None
-                else verified_record.coverage == coverage_of_verdict(unit.verdict)
+                None if verified_record is None else verified_record.coverage == coverage_of_verdict(unit.verdict)
             )
             witnesses = verified_record.witnesses if verified_record is not None else unit.witnesses
             coverage_rows.append(
@@ -464,7 +464,9 @@ def _build_coverage_rows(
                     "witnesses": _witness_views(witnesses),
                     "blockers": list(unit.blockers),
                     "has_spec_problems": bool(unit.spec_problems),
-                    "summary_html": render_markdown_without_raw_html(unit.summary_markdown) if unit.summary_markdown else "",
+                    "summary_html": render_markdown_without_raw_html(unit.summary_markdown)
+                    if unit.summary_markdown
+                    else "",
                 }
             )
     return coverage_rows
@@ -518,7 +520,10 @@ def generate_spec_html_report(
     coverage_rows = _build_coverage_rows(rows, verified_by_coordinate)
     spec_escalation_views = _build_spec_escalation_views(rows)
     escalation_views = (
-        [{"title": e.title, "detail_html": render_markdown_without_raw_html(e.detail_markdown)} for e in integrator.escalations]
+        [
+            {"title": e.title, "detail_html": render_markdown_without_raw_html(e.detail_markdown)}
+            for e in integrator.escalations
+        ]
         if integrator is not None
         else []
     )

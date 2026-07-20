@@ -15,10 +15,10 @@ from imbue.mngr_tmr.report import IntegratorResult
 from imbue.mngr_tmr.report import ReportSection
 from imbue.mngr_tmr.report import TestMapReduceResult
 from imbue.mngr_tmr.report import TestResult
-from imbue.mngr_tmr.report import merged_status_html
-from imbue.mngr_tmr.report import render_markdown
 from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report import merged_status_html
+from imbue.mngr_tmr.report import render_markdown
 
 SUCCEEDED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
 FAILED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="failed")}
