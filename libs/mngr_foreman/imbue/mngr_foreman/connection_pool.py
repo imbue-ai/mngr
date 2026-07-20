@@ -153,9 +153,11 @@ class ConnectionPool:
             for name in list(self._handles):
                 if name not in on_agents:
                     self._handles.pop(name, None)
-        # Warm each on-state agent (resolve if needed + ping to keep SSH alive).
+        # Warm each on-state agent: keep the send match-list fresh AND the SSH
+        # connection alive, so even the first user action hits a warm path.
         for name in on_agents:
             try:
+                self.get_send_matches(name)
                 self.run_on_host(name, _ping_host)
             except Exception as e:  # noqa: BLE001 - one unreachable host must not stop the rest
                 logger.trace("warm-pool keepalive for {} failed: {}", name, e)
