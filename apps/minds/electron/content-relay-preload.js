@@ -28,6 +28,15 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 // help URL the main process builds. The main process re-validates.
 const AGENT_ID_PATTERN = /^agent-[a-f0-9]{1,64}$/i;
 
+// The one outbound (main -> page) message: Cmd+W pressed while this view
+// displays a workspace. Re-posted into the page as an ordinary window message
+// so the system interface can close its active dockview tab. Outbound is safe
+// to relay without validation -- the page can only act on itself -- and main
+// only ever sends it for its own fixed reason (see registerShortcutsFor).
+ipcRenderer.on('close-active-tab', () => {
+  window.postMessage({ type: 'minds:close-active-tab' }, '*');
+});
+
 window.addEventListener('message', (event) => {
   // Only honour messages posted by this same top-level page, never by a
   // nested third-party iframe the workspace might embed.

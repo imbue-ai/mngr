@@ -420,6 +420,10 @@ function buildBundleWindowOptions() {
     title: 'Minds',
     show: false,
     autoHideMenuBar: true,
+    // Match the app's light surface so any gap between view paints (e.g. a
+    // chrome-view navigation between local pages) exposes white, not the
+    // platform default (black). The chrome view pins the same color below.
+    backgroundColor: '#ffffff',
   };
   if (isMac) {
     windowOptions.titleBarStyle = 'hiddenInset';
@@ -438,6 +442,13 @@ function createBundleWebContentsViews(win) {
       nodeIntegration: false,
     },
   });
+  // The chrome view now NAVIGATES between local pages (Home, Create, settings,
+  // and the /_chrome agent-wrapper). During each navigation Chromium paints the
+  // view's background color between the old page's teardown and the new page's
+  // first paint; the default is uninitialized (renders black over the window
+  // backing), which flashed the whole window black on every local navigation.
+  // Pin it to the app's light surface, mirroring the content view below.
+  chromeView.setBackgroundColor('#ffffff');
   const contentView = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, 'content-relay-preload.js'),
@@ -754,6 +765,11 @@ function wireContentViewEvents(bundle, contentView) {
     // Home from the crash page, or Reload succeeded).
     bundle.isContentCrashed = false;
     bundle.crashedFromUrl = null;
+    // A real navigation committed on the agent surface: make sure it is
+    // visible. navigateBundle deliberately leaves the view hidden while a
+    // workspace loads over the parked about:blank (the /_chrome wrapper is the
+    // loading surface); this is the moment real content exists to reveal.
+    showBundleContentView(bundle);
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
@@ -806,6 +822,27 @@ function wireContentViewEvents(bundle, contentView) {
 
   contentView.webContents.on('did-navigate', (_e, url, httpResponseCode) => onContentNavigate(url, httpResponseCode));
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
+
+  // A workspace load that fails outright (connection refused, bad TLS cert --
+  // e.g. a stale port squatted by another checkout's forward) never fires
+  // did-navigate: the hidden content view stays parked on about:blank and the
+  // window would sit on the empty /_chrome wrapper forever, with the stale
+  // ``currentWorkspaceId`` claim swallowing every retry. Route the window Home
+  // instead, releasing the claim. errorCode -3 (ERR_ABORTED) is a superseded
+  // load (another loadURL landed first), not a failure -- ignore it, along
+  // with subframe failures. Note the reachable-but-down case is NOT this path:
+  // mngr_forward serves its "Loading workspace" loader as a successful HTTP
+  // response, which commits normally and shows the loader.
+  contentView.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return;
+    if (bundle.isErrorState || bundle.window.isDestroyed()) return;
+    const failedAgentId = parseWorkspaceId(validatedURL);
+    if (!failedAgentId || failedAgentId !== bundle.currentWorkspaceId) return;
+    console.warn(
+      `[content] Workspace load failed (${errorCode} ${errorDescription}) for ${validatedURL}; returning to Home`,
+    );
+    if (backendBaseUrl) navigateBundle(bundle, backendBaseUrl + '/');
+  });
 
   // When the content view's renderer process dies (e.g. killed by the OS over a
   // long sleep, or an OOM), Electron leaves the view painting its pinned-white
@@ -915,8 +952,29 @@ function registerShortcutsFor(bundle, wc) {
       }
       return;
     }
-    // When the app menu is installed, it owns cmd+W / cmd+Q / cmd+N; handling
-    // them here too would double-fire (e.g. two new windows per cmd+N).
+    // Cmd+W closes the active dockview tab INSIDE the displayed workspace, not
+    // the window (the app menu deliberately carries no Cmd+W accelerator; Cmd+Q
+    // quits). Intercept it here -- before-input-event sees the keystroke even
+    // when focus is inside one of the workspace's embedded service iframes
+    // (terminal / browser panels), where a top-document keydown listener in the
+    // page would not -- and forward it into the page via the content relay's
+    // outbound channel; the system interface closes its active panel on the
+    // resulting ``minds:close-active-tab`` message. preventDefault so the
+    // page's own fallback keydown binding can't double-fire. macOS-only:
+    // Ctrl+W on other platforms stays untouched below because terminals use it
+    // as delete-word.
+    if (
+      isMac && input.meta && !input.shift && !input.alt && !input.control && key === 'w'
+      && bundle.contentView && !bundle.contentView.webContents.isDestroyed()
+      && wc === bundle.contentView.webContents
+      && bundle.currentWorkspaceId
+    ) {
+      event.preventDefault();
+      wc.send('close-active-tab');
+      return;
+    }
+    // When the app menu is installed, it owns cmd+Q / cmd+N; handling them here
+    // too would double-fire (e.g. two new windows per cmd+N).
     if (appMenuInstalled) return;
     // Ctrl+W on non-macOS: do NOT close the window. The keystroke should
     // reach the web content (terminal, editor) where it means "delete word"
@@ -1031,6 +1089,20 @@ function showBundleContentView(bundle) {
   updateBundleBounds(bundle);
 }
 
+// Whether the bundle's content view is ACTUALLY displaying ``agentId`` --
+// visible with a committed navigation for that workspace -- as opposed to
+// merely claiming it via the optimistically-stamped ``currentWorkspaceId``
+// (which a failed or still-loading navigation leaves dangling). navigateBundle
+// uses this so re-opening a workspace whose load failed retries instead of
+// no-oping on the stale claim.
+function isBundleDisplayingWorkspace(bundle, agentId) {
+  if (!bundle || !agentId) return false;
+  const view = bundle.contentView;
+  if (!view || view.webContents.isDestroyed()) return false;
+  if (typeof view.getVisible === 'function' && !view.getVisible()) return false;
+  return parseWorkspaceId(view.webContents.getURL()) === agentId;
+}
+
 // Hide the content view when leaving agent content, and release the agent
 // page's renderer by parking it on about:blank -- so no foreign workspace stays
 // resident/running behind a trusted local page. The view object itself is kept
@@ -1079,12 +1151,20 @@ function navigateBundle(bundle, url) {
   if (selectSurfaceForUrl(absolute) === SURFACE_CONTENT) {
     const targetAgentId = parseWorkspaceId(absolute);
     const existing = findBundleForWorkspace(targetAgentId);
-    if (existing) {
-      // This workspace is already open somewhere: focus that window (a no-op if
-      // it is this one, which is already displaying it) rather than loading a
-      // duplicate or needlessly reloading. Enforces one-window-per-workspace for
-      // EVERY caller (sidebar/landing rows, notification + deep-link opens, ...).
-      if (existing !== bundle) focusBundle(existing);
+    if (existing && existing !== bundle) {
+      // Another window owns this workspace: focus it rather than loading a
+      // duplicate. Enforces one-window-per-workspace for EVERY caller
+      // (sidebar/landing rows, notification + deep-link opens, ...).
+      focusBundle(existing);
+      closeModal(bundle);
+      return;
+    }
+    if (existing === bundle && isBundleDisplayingWorkspace(bundle, targetAgentId)) {
+      // Already displaying it -- nothing to do. Note the claim alone is NOT
+      // enough: ``currentWorkspaceId`` is stamped optimistically below before
+      // the load commits, so a failed/stalled load leaves the claim without the
+      // content. Re-checking the actual displayed state here means a re-click
+      // retries the load instead of being silently swallowed.
       closeModal(bundle);
       return;
     }
@@ -1102,7 +1182,14 @@ function navigateBundle(bundle, url) {
     sendCurrentWorkspaceToBundleViews(bundle);
     updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(absolute));
     ensureBundleChromeWrapper(bundle);
-    showBundleContentView(bundle);
+    // Deliberately do NOT show the content view yet: it may be parked on
+    // about:blank (hidden after a local page), and showing it now would cover
+    // the window with a blank card for the whole load -- or forever, if the
+    // load fails. ``onContentNavigate`` shows it when a real navigation
+    // commits; until then the /_chrome wrapper (titlebar + white content
+    // mirror, accent-tinted) stays visible as the loading surface. A content
+    // view already showing the previous workspace stays visible through the
+    // load, matching pre-swap behavior.
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
       bundle.contentView.webContents.loadURL(absolute);
     }
@@ -3024,8 +3111,11 @@ function installApplicationMenu() {
         },
         { type: 'separator' },
         {
+          // Deliberately NO Cmd+W accelerator: the app must not claim it, so
+          // the keystroke passes through to the focused web contents -- inside
+          // a workspace the dockview UI closes its active tab with it. Closing
+          // the window stays available from this menu item and Cmd+Q quits.
           label: 'Close Window',
-          accelerator: 'CmdOrCtrl+W',
           click: () => {
             const target = getMostRecentWindow();
             if (target && !target.window.isDestroyed()) target.window.close();
@@ -3253,9 +3343,11 @@ async function startBackendWithRetry() {
 
       initialBundle.isLoadingState = false;
       updateBundleBounds(initialBundle);
-      if (initialBundle.chromeView && !initialBundle.chromeView.webContents.isDestroyed()) {
-        initialBundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
-      }
+      // The chrome view is deliberately NOT pointed at /_chrome here: every
+      // startup route below ends in navigateBundle, which loads the landing
+      // local page straight into the chrome view (or the /_chrome wrapper for
+      // an agent restore, via ensureBundleChromeWrapper). Preloading /_chrome
+      // first would just double-navigate the chrome view and flash.
       // The initial window's overlay view was created before the backend was
       // up, so load its warm host page now that ``backendBaseUrl`` is known.
       loadOverlayHost(initialBundle);
