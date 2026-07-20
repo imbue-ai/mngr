@@ -842,9 +842,9 @@ def test_local_pages_render_the_chromeshell_titlebar() -> None:
     # shared ChromeShell titlebar directly (so the titlebar travels with the page
     # on the chrome surface). Each is a single document that carries exactly one
     # titlebar, renders its body inside the workspace-shaped `#local-page-card`
-    # (the accent-tracking background bleeds around it, like around a workspace),
-    # loads chrome.js, and carries NO content iframe -- that belongs only to the
-    # agent content surface (pages.Chrome).
+    # (whose box-shadow ring bleeds the workspace accent around it, like around a
+    # workspace), loads chrome.js, and carries NO content iframe -- that belongs
+    # only to the agent content surface (pages.Chrome).
     _creation_id = CreationId()
     renders = {
         "Landing": render_landing_page(accessible_agent_ids=()),
