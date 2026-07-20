@@ -863,6 +863,27 @@ function wireContentViewEvents(bundle, contentView) {
       console.log('[nav] stale content commit ignored (chrome surface is current)');
       return;
     }
+    // A commit for a DIFFERENT workspace than this window's claim, landing
+    // while the view is still HIDDEN (mid-load), is a stale cross-host commit:
+    // the hopped-away-from workspace's in-flight navigation finishing after
+    // the claim moved on. Ignore it -- running the bookkeeping below would
+    // clobber the claim and reveal the wrong workspace under the new
+    // titlebar. The target's own load (already issued) replaces this document
+    // when it commits. A VISIBLE cross-host commit is deliberately left
+    // alone: content history can legitimately traverse workspaces
+    // (contentGoBack), and a visible commit is the user doing exactly that.
+    const committedAgentId = parseWorkspaceId(url);
+    if (
+      committedAgentId
+      && bundle.currentWorkspaceId
+      && committedAgentId !== bundle.currentWorkspaceId
+      && bundle.contentView
+      && typeof bundle.contentView.getVisible === 'function'
+      && !bundle.contentView.getVisible()
+    ) {
+      console.log(`[nav] stale cross-host content commit ignored (committed ${committedAgentId}, claim ${bundle.currentWorkspaceId})`);
+      return;
+    }
     // A genuine navigation clears any pending crash state (e.g. the user hit
     // Home from the crash page, or Reload succeeded).
     bundle.isContentCrashed = false;
@@ -1463,11 +1484,25 @@ function navigateBundle(bundle, url) {
     // the window with a blank card for the whole load -- or forever, if the
     // load fails. ``onContentNavigate`` shows it when a real navigation
     // commits; until then the /_chrome wrapper (titlebar + white content
-    // mirror, accent-tinted) stays visible as the loading surface. A content
-    // view already showing the previous workspace stays visible through the
-    // load, matching pre-swap behavior. Failures are handled by the
-    // did-fail-load fallback (returns Home), so the rejection is swallowed.
+    // mirror, accent-tinted) stays visible as the loading surface. Failures
+    // are handled by the did-fail-load fallback, so the rejection is
+    // swallowed.
+    //
+    // Clean a mismatched resident first: if the view still holds a DIFFERENT
+    // workspace's page (a parked resident, or the workspace being hopped away
+    // from), hide it so the wrapper -- already tinted and crumbed for the
+    // TARGET -- is the loading surface. Without this a workspace->workspace
+    // hop kept the OLD workspace on screen under the NEW workspace's titlebar
+    // until the target committed: out of sync for the whole load, and
+    // indefinitely if the load stalled. (A same-workspace reload stays
+    // visible through the load, matching pre-swap behavior; the stale
+    // document itself is replaced when the target's load commits.)
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+      const heldAgentId = parseWorkspaceId(bundle.contentView.webContents.getURL());
+      if (heldAgentId && heldAgentId !== targetAgentId) {
+        console.log(`[nav] hiding mismatched content view (held ${heldAgentId}, loading ${targetAgentId})`);
+        hideBundleContentView(bundle);
+      }
       bundle.contentView.webContents.loadURL(absolute).catch(() => {});
     }
     // Keep-alive residency means another window may still HOLD this workspace
