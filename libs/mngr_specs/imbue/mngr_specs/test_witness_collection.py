@@ -8,7 +8,7 @@ conftest to register it out there); that warning must not fail the harvest.
 
 from pathlib import Path
 
-from imbue.minds.core.behavioral_specs.witnesses import harvest_witness_links
+from imbue.mngr_specs.witnesses import harvest_witness_links
 
 _SYNTHETIC_TEST_FILE = """
 import pytest

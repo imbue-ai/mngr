@@ -1,8 +1,7 @@
-"""Tests for the ``minds specs`` CLI group.
+"""Tests for the ``mngr specs`` CLI group.
 
 Every corpus is synthetic, built under ``tmp_path`` via ``write_spec_corpus``
-and pointed at with ``--root``; nothing here touches the live
-``apps/minds/specs/`` corpus.
+and pointed at with ``--root``; nothing here touches a real corpus.
 """
 
 import json
@@ -10,9 +9,8 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from imbue.minds.cli.specs import specs
-from imbue.minds.cli_entry import cli
-from imbue.minds.core.behavioral_specs.testing import write_spec_corpus
+from imbue.mngr_specs.cli import specs
+from imbue.mngr_specs.testing import write_spec_corpus
 
 _VALID_CORPUS = {
     "overview.md": "corpus context\n",
@@ -43,6 +41,24 @@ _VALID_CORPUS = {
         "      Then the user is treated as signed out\n"
     ),
 }
+
+
+def test_specs_group_exposes_validate_list_and_matrix() -> None:
+    result = CliRunner().invoke(specs, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "validate" in result.output
+    assert "list" in result.output
+    assert "matrix" in result.output
+    assert "query" not in result.output
+
+
+def test_specs_validate_requires_the_root_option() -> None:
+    result = CliRunner().invoke(specs, ["validate"])
+
+    # --root is required: click rejects the invocation before any scanning.
+    assert result.exit_code != 0
+    assert "--root" in result.output
 
 
 def test_specs_validate_reports_success_concisely_on_a_valid_corpus(tmp_path: Path) -> None:
@@ -268,13 +284,3 @@ def test_specs_list_area_is_segment_granular_not_a_string_prefix(tmp_path: Path)
     # 'auth' is a prefix of the string 'authentication' but not a whole folder segment, so nothing matches.
     assert result.exit_code == 0
     assert result.stdout == ""
-
-
-def test_specs_group_exposes_validate_list_and_matrix_but_not_query() -> None:
-    result = CliRunner().invoke(cli, ["specs", "--help"])
-
-    assert result.exit_code == 0, result.output
-    assert "validate" in result.output
-    assert "list" in result.output
-    assert "matrix" in result.output
-    assert "query" not in result.output

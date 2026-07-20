@@ -1,8 +1,6 @@
 """Tests for behavioral-spec corpus scanning: unit extraction and rule validation.
 
-Corpora are synthetic (built under ``tmp_path`` via ``write_spec_corpus``),
-except in the final test, which guards the live ``apps/minds/specs/`` corpus
-against language violations.
+Every corpus here is synthetic, built under ``tmp_path`` via ``write_spec_corpus``.
 """
 
 import json
@@ -10,12 +8,12 @@ from pathlib import Path
 
 from inline_snapshot import snapshot
 
-from imbue.minds.core.behavioral_specs.corpus import binding_invariant_coordinates
-from imbue.minds.core.behavioral_specs.corpus import scan_corpus
-from imbue.minds.core.behavioral_specs.corpus import spec_unit_to_record
-from imbue.minds.core.behavioral_specs.data_types import SpecUnit
-from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
-from imbue.minds.core.behavioral_specs.testing import write_spec_corpus
+from imbue.mngr_specs.corpus import binding_invariant_coordinates
+from imbue.mngr_specs.corpus import scan_corpus
+from imbue.mngr_specs.corpus import spec_unit_to_record
+from imbue.mngr_specs.data_types import SpecUnit
+from imbue.mngr_specs.data_types import SpecUnitKind
+from imbue.mngr_specs.testing import write_spec_corpus
 
 
 def _unit_with_coordinate(units: tuple[SpecUnit, ...], coordinate: str) -> SpecUnit:
@@ -708,20 +706,6 @@ def test_binding_invariants_ordering_follows_corpus_scan_order(tmp_path: Path) -
         "root-first",
         "root-second",
     )
-
-
-# The live corpus shipped in this repo (corpus_test.py sits at
-# apps/minds/imbue/minds/core/behavioral_specs/, so parents[4] is apps/minds).
-_LIVE_CORPUS_ROOT = Path(__file__).resolve().parents[4] / "specs"
-
-
-def test_live_corpus_has_no_violations() -> None:
-    """The corpus at ``apps/minds/specs/`` always satisfies the spec-language rules."""
-    scan = scan_corpus(_LIVE_CORPUS_ROOT)
-
-    assert scan.violations == ()
-    # Guard against the root silently pointing at an empty or wrong directory.
-    assert len(scan.units) > 0
 
 
 def test_scan_corpus_rejects_examples_blocks_under_a_plain_scenario(tmp_path: Path) -> None:

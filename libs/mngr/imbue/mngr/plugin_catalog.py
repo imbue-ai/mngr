@@ -35,6 +35,9 @@ UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
         "imbue-mngr-claude-subagent-proxy",
         # Canonical mapreduce recipe (test fan-out); internal tooling, offered nowhere on PyPI.
         "imbue-mngr-tmr",
+        # Behavioral-spec corpus tooling; internal for now. Intended to publish once the corpus
+        # model stabilizes, so spun-out repos can dev-depend on it to tend their own corpora.
+        "imbue-mngr-specs",
         # End-to-end test helper used only by mngr's own test suite (not an mngr plugin).
         "skitwright",
     }
@@ -426,6 +429,12 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         entry_point_name="schedule",
         package_name="imbue-mngr-schedule",
         description="Schedule command plugin for mngr - schedule remote invocations of mngr commands",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="specs",
+        package_name="imbue-mngr-specs",
+        description="Behavioral-spec corpus tooling for mngr - validate, list, and coverage-join Gherkin spec corpora",
         tier=PluginTier.INDEPENDENT,
     ),
     CatalogEntry(

@@ -14,7 +14,6 @@ dependencies = [
     "concurrency-group",
     "cryptography>=42.0",
     "flask>=3.0",
-    "gherkin-official>=39.1.0",
     "httpx>=0.27.0",
     "imbue-common",
     "itsdangerous>=2.2.0",
@@ -25,6 +24,7 @@ dependencies = [
     "imbue-mngr-aws",
     "imbue-mngr-forward",
     "imbue-mngr-latchkey",
+    "imbue-mngr-specs",
     "imbue-mngr-vps",
     "modal>=1.4.3",
     "paramiko>=3.0",
@@ -58,6 +58,7 @@ imbue-mngr = { workspace = true }
 imbue-mngr-aws = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
+imbue-mngr-specs = { workspace = true }
 imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }
 

@@ -2,11 +2,11 @@
 
 Loaded into an inner ``pytest --collect-only`` run via ``-p`` by
 ``witnesses.harvest_witness_links``. It imports only the standard library and
-pytest itself -- never any minds application code -- so collecting the test
-tree stays isolated from (and cheap relative to) the ``minds`` package. On
-collection finish it writes one JSON object per ``witnesses`` marker on every
-collected item -- ``{"test", "coordinate", "partial"}`` -- to the path named by
-the ``MINDS_WITNESSES_OUTPUT_PATH`` environment variable, recording marker
+pytest itself -- never any application code -- so collecting the test tree stays
+isolated from (and cheap relative to) the ``mngr_specs`` package. On collection
+finish it writes one JSON object per ``witnesses`` marker on every collected
+item -- ``{"test", "coordinate", "partial"}`` -- to the path named by the
+``MNGR_SPECS_WITNESSES_OUTPUT_PATH`` environment variable, recording marker
 arguments faithfully (a missing or non-string coordinate becomes null) and
 never crashing the collection run on odd marker usage.
 """
@@ -30,7 +30,7 @@ def _witness_records_for_item(item: pytest.Item) -> list[dict[str, object]]:
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
-    output_path_name = os.environ.get("MINDS_WITNESSES_OUTPUT_PATH")
+    output_path_name = os.environ.get("MNGR_SPECS_WITNESSES_OUTPUT_PATH")
     if output_path_name is None:
         return
     # Emit one JSONL line per witnesses marker across all collected items, in collection order.

@@ -1,9 +1,9 @@
-"""End-to-end tests for ``minds specs matrix``.
+"""End-to-end tests for ``mngr specs matrix``.
 
 Each test builds a synthetic corpus and a synthetic test tree under ``tmp_path``
 and points the command at both; the command shells out to a real inner
-``pytest --collect-only`` over the synthetic tests. Nothing here touches the
-live ``apps/minds/specs/`` corpus or the real minds test tree.
+``pytest --collect-only`` over the synthetic tests. Nothing here touches a real
+corpus or test tree.
 """
 
 import json
@@ -11,8 +11,8 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from imbue.minds.cli.specs import specs
-from imbue.minds.core.behavioral_specs.testing import write_spec_corpus
+from imbue.mngr_specs.cli import specs
+from imbue.mngr_specs.testing import write_spec_corpus
 
 _MATRIX_CORPUS = {
     "authentication/signin.feature": (
@@ -77,6 +77,31 @@ def test_specs_matrix_reports_full_partial_and_none_coverage(tmp_path: Path) -> 
     assert installation_bound["witnesses"] == []
     # matrix records are the coverage view, not the structural one: no steps/tags/invariants.
     assert set(fresh_code.keys()) == {"coordinate", "kind", "name", "file", "line", "coverage", "witnesses"}
+
+
+def test_specs_matrix_defaults_tests_root_to_corpus_parent(tmp_path: Path) -> None:
+    # A corpus at <project>/specs is witnessed by <project>'s tests, so omitting
+    # --tests must collect witnesses from the corpus root's parent directory.
+    project_dir = tmp_path / "project"
+    root = write_spec_corpus(project_dir / "specs", _MATRIX_CORPUS)
+    _write_tests_dir(
+        project_dir,
+        (
+            "import pytest\n"
+            "\n"
+            '@pytest.mark.witnesses("authentication.fresh-code")\n'
+            "def test_fresh_code() -> None:\n"
+            "    pass\n"
+        ),
+    )
+
+    result = CliRunner().invoke(specs, ["matrix", "--root", str(root)])
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    coverage_by_coordinate = {record["coordinate"]: record["coverage"] for record in records}
+    # The witness under the corpus's parent directory was collected without an explicit --tests.
+    assert coverage_by_coordinate["authentication.fresh-code"] == "full"
 
 
 def test_specs_matrix_exits_zero_when_no_test_witnesses_any_unit(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 """Harvesting ``witnesses`` markers from the test tree and joining them to the corpus.
 
-``minds specs matrix`` answers "which behavioral-spec units are witnessed by
+``mngr specs matrix`` answers "which behavioral-spec units are witnessed by
 tests, and how completely?". :func:`harvest_witness_links` runs an inner
 ``pytest --collect-only`` over the given test roots with a tiny stdlib-only
 plugin (``witness_collection_plugin``) that dumps every ``witnesses`` marker as
@@ -24,17 +24,21 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.pure import pure
-from imbue.minds.core.behavioral_specs.corpus import spec_unit_kind_record_value
-from imbue.minds.core.behavioral_specs.data_types import SpecCoverage
-from imbue.minds.core.behavioral_specs.data_types import SpecUnit
-from imbue.minds.core.behavioral_specs.data_types import WitnessLink
-from imbue.minds.errors import SpecWitnessCollectionError
+from imbue.mngr_specs.corpus import spec_unit_kind_record_value
+from imbue.mngr_specs.data_types import SpecCoverage
+from imbue.mngr_specs.data_types import SpecUnit
+from imbue.mngr_specs.data_types import WitnessLink
+from imbue.mngr_specs.errors import SpecWitnessCollectionError
 
 # Dotted import path of the collection plugin, loaded into the inner pytest run
 # with ``-p``. Hardcoded rather than imported so that importing this module
-# never pulls pytest into the production ``minds`` CLI (pytest is a dev-only
+# never pulls pytest into the production ``mngr specs`` CLI (pytest is a dev-only
 # dependency); the plugin itself is the only place that imports pytest.
-_WITNESS_COLLECTION_PLUGIN_MODULE: Final[str] = "imbue.minds.core.behavioral_specs.witness_collection_plugin"
+_WITNESS_COLLECTION_PLUGIN_MODULE: Final[str] = "imbue.mngr_specs.witness_collection_plugin"
+
+# Environment variable naming the JSONL file the collection plugin writes to.
+# Read only by the inner pytest process (the plugin), set only by this module.
+_WITNESSES_OUTPUT_PATH_ENV_VAR: Final[str] = "MNGR_SPECS_WITNESSES_OUTPUT_PATH"
 
 # pytest exit codes that are not failures for a collect-only harvest: 0 means
 # items were collected, 5 means none were (an empty test tree yields no links).
@@ -69,9 +73,9 @@ def harvest_witness_links(test_roots: Sequence[Path]) -> tuple[WitnessLink, ...]
             *(str(test_root) for test_root in test_roots),
         ]
         # Copy (never mutate) the ambient environment, adding the output-path var the plugin reads.
-        subprocess_environment = {**os.environ, "MINDS_WITNESSES_OUTPUT_PATH": str(output_path)}
+        subprocess_environment = {**os.environ, _WITNESSES_OUTPUT_PATH_ENV_VAR: str(output_path)}
         start_time = time.monotonic()
-        with ConcurrencyGroup(name="minds-specs-witness-collection") as concurrency_group:
+        with ConcurrencyGroup(name="mngr-specs-witness-collection") as concurrency_group:
             completed_collection = concurrency_group.run_process_to_completion(
                 command,
                 env=subprocess_environment,
@@ -166,7 +170,7 @@ def spec_coverage_record_value(coverage: SpecCoverage) -> str:
 
 @pure
 def render_matrix_record(unit: SpecUnit, links: Sequence[WitnessLink]) -> dict[str, Any]:
-    """Render one ``minds specs matrix`` JSONL record: the unit's identity plus its coverage and witnesses.
+    """Render one ``mngr specs matrix`` JSONL record: the unit's identity plus its coverage and witnesses.
 
     ``links`` are exactly the links whose coordinate is this unit's, in
     collection order; each becomes a ``{"test", "partial"}`` witness object.

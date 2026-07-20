@@ -4,16 +4,16 @@ from pathlib import Path
 
 from inline_snapshot import snapshot
 
-from imbue.minds.core.behavioral_specs.data_types import SpecCoverage
-from imbue.minds.core.behavioral_specs.data_types import SpecUnit
-from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
-from imbue.minds.core.behavioral_specs.data_types import WitnessLink
-from imbue.minds.core.behavioral_specs.witnesses import compute_spec_coverage
-from imbue.minds.core.behavioral_specs.witnesses import find_broken_witness_links
-from imbue.minds.core.behavioral_specs.witnesses import group_witness_links_by_coordinate
-from imbue.minds.core.behavioral_specs.witnesses import render_broken_witness_link_diagnostic
-from imbue.minds.core.behavioral_specs.witnesses import render_matrix_record
-from imbue.minds.core.behavioral_specs.witnesses import spec_coverage_record_value
+from imbue.mngr_specs.data_types import SpecCoverage
+from imbue.mngr_specs.data_types import SpecUnit
+from imbue.mngr_specs.data_types import SpecUnitKind
+from imbue.mngr_specs.data_types import WitnessLink
+from imbue.mngr_specs.witnesses import compute_spec_coverage
+from imbue.mngr_specs.witnesses import find_broken_witness_links
+from imbue.mngr_specs.witnesses import group_witness_links_by_coordinate
+from imbue.mngr_specs.witnesses import render_broken_witness_link_diagnostic
+from imbue.mngr_specs.witnesses import render_matrix_record
+from imbue.mngr_specs.witnesses import spec_coverage_record_value
 
 
 def _scenario_unit(coordinate: str) -> SpecUnit:

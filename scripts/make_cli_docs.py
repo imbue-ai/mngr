@@ -91,6 +91,7 @@ SECONDARY_COMMANDS = {
     "plugin",
     "schedule",
     "snapshot",
+    "specs",
     "tmr",
     "transcript",
     "tutor",

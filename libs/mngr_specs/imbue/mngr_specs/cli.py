@@ -1,14 +1,14 @@
-"""``minds specs {validate,list}`` -- the CLI over the behavioral-spec corpus.
+"""``mngr specs {validate,list,matrix}`` -- the CLI over a behavioral-spec corpus.
 
-The corpus (``apps/minds/specs/`` in this repo) and its language are defined by
-the minds-behavioral-specs skill; ``imbue.minds.core.behavioral_specs`` is the
-scanning/validation engine, and this module is only the click wiring around it.
+A corpus is any ``<project>/specs/`` directory (``apps/minds/specs`` is this
+repo's first corpus); its language is defined by the behavioral-specs skill.
+``imbue.mngr_specs.corpus`` / ``.witnesses`` are the scanning/validation engine,
+and this module is only the click wiring around it.
 
-Every subcommand takes ``--root``: the corpus location, defaulting to the real
-corpus relative to the current directory (so the documented invocation is
-``uv run minds specs ...`` from the repo root). Record ``file`` fields are the
-paths formed from that root as given, which makes them repo-relative for the
-default invocation.
+Every subcommand takes a required ``--root``: the corpus location. Record
+``file`` fields are the paths formed from that root as given, so running
+``uv run mngr specs --root <project>/specs ...`` from the repo root yields
+repo-relative paths.
 """
 
 import json
@@ -20,38 +20,30 @@ from typing import Final
 import click
 
 from imbue.imbue_common.pure import pure
-from imbue.minds.core.behavioral_specs.corpus import scan_corpus
-from imbue.minds.core.behavioral_specs.corpus import spec_unit_kind_record_value
-from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_area
-from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_name_substring
-from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_step_substring
-from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_tag
-from imbue.minds.core.behavioral_specs.corpus import spec_unit_to_record
-from imbue.minds.core.behavioral_specs.data_types import CorpusScan
-from imbue.minds.core.behavioral_specs.data_types import SpecUnit
-from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
-from imbue.minds.core.behavioral_specs.data_types import SpecViolation
-from imbue.minds.core.behavioral_specs.data_types import WitnessLink
-from imbue.minds.core.behavioral_specs.witnesses import find_broken_witness_links
-from imbue.minds.core.behavioral_specs.witnesses import group_witness_links_by_coordinate
-from imbue.minds.core.behavioral_specs.witnesses import harvest_witness_links
-from imbue.minds.core.behavioral_specs.witnesses import render_broken_witness_link_diagnostic
-from imbue.minds.core.behavioral_specs.witnesses import render_matrix_record
-from imbue.minds.errors import SpecCorpusRootNotFoundError
-from imbue.minds.errors import SpecDanglingWitnessError
-from imbue.minds.errors import SpecListingIncompleteError
-from imbue.minds.errors import SpecTestsRootNotFoundError
-from imbue.minds.errors import SpecValidationFailedError
-from imbue.minds.utils.output import write_stdout_line
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_stderr_line
-
-# The real corpus, relative to the repo root (the documented working directory
-# for ``uv run minds specs ...``).
-DEFAULT_CORPUS_ROOT: Final[Path] = Path("apps/minds/specs")
-
-# The default test tree ``matrix`` collects witnesses markers from, relative to
-# the repo root (the documented working directory).
-DEFAULT_TESTS_ROOT: Final[Path] = Path("apps/minds")
+from imbue.mngr_specs.corpus import scan_corpus
+from imbue.mngr_specs.corpus import spec_unit_kind_record_value
+from imbue.mngr_specs.corpus import spec_unit_matches_area
+from imbue.mngr_specs.corpus import spec_unit_matches_name_substring
+from imbue.mngr_specs.corpus import spec_unit_matches_step_substring
+from imbue.mngr_specs.corpus import spec_unit_matches_tag
+from imbue.mngr_specs.corpus import spec_unit_to_record
+from imbue.mngr_specs.data_types import CorpusScan
+from imbue.mngr_specs.data_types import SpecUnit
+from imbue.mngr_specs.data_types import SpecUnitKind
+from imbue.mngr_specs.data_types import SpecViolation
+from imbue.mngr_specs.data_types import WitnessLink
+from imbue.mngr_specs.errors import SpecCorpusRootNotFoundError
+from imbue.mngr_specs.errors import SpecDanglingWitnessError
+from imbue.mngr_specs.errors import SpecListingIncompleteError
+from imbue.mngr_specs.errors import SpecTestsRootNotFoundError
+from imbue.mngr_specs.errors import SpecValidationFailedError
+from imbue.mngr_specs.witnesses import find_broken_witness_links
+from imbue.mngr_specs.witnesses import group_witness_links_by_coordinate
+from imbue.mngr_specs.witnesses import harvest_witness_links
+from imbue.mngr_specs.witnesses import render_broken_witness_link_diagnostic
+from imbue.mngr_specs.witnesses import render_matrix_record
 
 
 def _root_option(command: Callable[..., None]) -> Callable[..., None]:
@@ -59,11 +51,11 @@ def _root_option(command: Callable[..., None]) -> Callable[..., None]:
         "--root",
         "corpus_root",
         type=click.Path(file_okay=False, path_type=Path),
-        default=DEFAULT_CORPUS_ROOT,
-        show_default=True,
+        required=True,
         help=(
-            "Corpus root directory. The default is the real corpus relative to the "
-            "current directory, so run from the repo root (or pass --root)."
+            "Corpus root directory, conventionally <project>/specs (e.g. apps/minds/specs). "
+            "Record file paths are formed from the root as given, so run from the repo root "
+            "for repo-relative paths."
         ),
     )(command)
 
@@ -72,7 +64,7 @@ def _require_corpus_root(corpus_root: Path) -> Path:
     if not corpus_root.is_dir():
         raise SpecCorpusRootNotFoundError(
             f"Spec corpus root '{corpus_root}' is not a directory. "
-            f"Run from the repo root (where the default '{DEFAULT_CORPUS_ROOT}' exists) or pass --root."
+            "Pass --root pointing at a corpus directory (conventionally <project>/specs, e.g. apps/minds/specs)."
         )
     return corpus_root
 
@@ -86,14 +78,17 @@ def _format_violation(violation: SpecViolation) -> str:
 
 @click.group(name="specs")
 def specs() -> None:
-    """Inspect and validate the behavioral-spec corpus (apps/minds/specs).
+    """Inspect and validate a behavioral-spec corpus.
 
-    The corpus language (folders, tags, coordinates, invariants, sidecars) is
-    defined by the minds-behavioral-specs skill; `validate` enforces it, `list`
-    emits one JSONL record per authored unit (Scenario, Scenario Outline, or
-    Rule), optionally filtered by kind, area, tag, name, or step, and `matrix`
-    joins the corpus against the `witnesses` test markers to report per-unit
-    coverage.
+    A corpus is any `<project>/specs/` directory, named per invocation with
+    `--root` (e.g. `--root apps/minds/specs`, this repo's first corpus). The
+    corpus language (folders, tags, coordinates, invariants, sidecars) is
+    defined by the behavioral-specs skill; `validate` enforces it, `list` emits
+    one JSONL record per authored unit (Scenario, Scenario Outline, or Rule),
+    optionally filtered by kind, area, tag, name, or step, and `matrix` joins
+    the corpus against the `witnesses` test markers to report per-unit coverage.
+
+    Run from the repo root: `uv run mngr specs --root <project>/specs ...`.
     """
 
 
@@ -110,7 +105,7 @@ def _emit_unit_records(
     corpus_root: Path,
 ) -> None:
     for unit in units_to_emit:
-        write_stdout_line(json.dumps(spec_unit_to_record(unit, all_units, corpus_root), ensure_ascii=False))
+        write_human_line(json.dumps(spec_unit_to_record(unit, all_units, corpus_root), ensure_ascii=False))
 
 
 @pure
@@ -122,7 +117,7 @@ def _raise_if_units_were_omitted(omitting_violations: Sequence[SpecViolation]) -
     if omitting_violations:
         raise SpecListingIncompleteError(
             f"the listing is incomplete: {len(omitting_violations)} problem(s) prevented units from being "
-            "represented; run `minds specs validate` for the full picture"
+            "represented; run `mngr specs validate` for the full picture"
         )
 
 
@@ -151,10 +146,10 @@ def specs_validate(corpus_root: Path) -> None:
     """
     scan = scan_corpus(_require_corpus_root(corpus_root))
     for violation in scan.violations:
-        write_stdout_line(_format_violation(violation))
+        write_human_line(_format_violation(violation))
     if scan.violations:
         raise SpecValidationFailedError(f"{len(scan.violations)} violation(s) found under {corpus_root}")
-    write_stdout_line(
+    write_human_line(
         f"OK: {len(scan.units)} units across {scan.feature_file_count} feature file(s) under {corpus_root}"
     )
 
@@ -234,14 +229,14 @@ def specs_list(
     """Emit the corpus as JSONL: one record per authored unit on stdout.
 
     Record fields, in order: coordinate, kind (scenario | scenario-outline |
-    rule), name, file (as rooted at --root; repo-relative for the default
-    invocation from the repo root), line, tags (in authored order, without the
-    '@' sigil; the first is the unit's identity), steps (objects with keyword
-    and text; empty for a Rule, Background steps not folded in), parent (the
-    enclosing Rule's coordinate, or null), and invariants (coordinates of every
-    Rule that binds this unit -- Rules in the same file, plus invariants.feature
-    Rules at or above the unit's folder -- in corpus order). Units appear in
-    file order, then document order.
+    rule), name, file (as rooted at --root; repo-relative when run from the repo
+    root), line, tags (in authored order, without the '@' sigil; the first is
+    the unit's identity), steps (objects with keyword and text; empty for a
+    Rule, Background steps not folded in), parent (the enclosing Rule's
+    coordinate, or null), and invariants (coordinates of every Rule that binds
+    this unit -- Rules in the same file, plus invariants.feature Rules at or
+    above the unit's folder -- in corpus order). Units appear in file order,
+    then document order.
 
     The --unit/--area/--tag/--name/--step filters are selection-only and
     AND-composed: a unit is emitted only when it passes every filter given, and
@@ -263,12 +258,20 @@ def specs_list(
     _fail_if_units_were_omitted(scan)
 
 
+@pure
+def _default_test_roots(corpus_root: Path, test_roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    """The test roots to harvest witnesses from: those passed, or the corpus root's parent by default."""
+    if test_roots:
+        return test_roots
+    return (corpus_root.parent,)
+
+
 def _require_test_roots(test_roots: tuple[Path, ...]) -> tuple[Path, ...]:
     for test_root in test_roots:
         if not test_root.exists():
             raise SpecTestsRootNotFoundError(
                 f"Tests root '{test_root}' does not exist. "
-                f"Run from the repo root (where the default '{DEFAULT_TESTS_ROOT}' exists) or pass --tests."
+                "Pass --tests, or omit it to default to the corpus root's parent directory."
             )
     return test_roots
 
@@ -301,12 +304,12 @@ def _fail_matrix_if_incomplete_or_broken(scan: CorpusScan, broken_links: Sequenc
     "test_roots",
     type=click.Path(path_type=Path),
     multiple=True,
-    default=(DEFAULT_TESTS_ROOT,),
-    show_default=True,
+    default=(),
     help=(
         "Test root to collect `witnesses` markers from; repeatable. Passed to an inner "
-        "pytest --collect-only run, so paths resolve from the current directory -- the default "
-        "collects the whole minds test tree, so run from the repo root (or pass --tests)."
+        "pytest --collect-only run, so paths resolve from the current directory. When omitted, "
+        "defaults to the corpus root's parent directory (a corpus at <project>/specs is witnessed "
+        "by <project>'s tests), so run from the repo root (or pass --tests)."
     ),
 )
 def specs_matrix(corpus_root: Path, test_roots: tuple[Path, ...]) -> None:
@@ -315,14 +318,15 @@ def specs_matrix(corpus_root: Path, test_roots: tuple[Path, ...]) -> None:
     Runs an inner `pytest --collect-only` over the --tests roots (so it needs
     the dev environment), harvesting every `witnesses(coordinate, partial=...)`
     marker, then emits one JSONL record per corpus unit on stdout, in corpus
-    scan order. Record fields, in order: coordinate, kind (scenario |
-    scenario-outline | rule), name, file (as rooted at --root; repo-relative for
-    the default invocation), line, coverage (full | partial | none), and
-    witnesses (objects with the test's pytest node id and its partial note, in
-    collection order). A record's coverage is "full" when at least one
-    witnessing test covers the unit fully (no partial note), "partial" when
-    witnesses exist but every one is partial, and "none" when no test witnesses
-    it.
+    scan order. When --tests is omitted it defaults to the corpus root's parent
+    directory (a corpus at <project>/specs is witnessed by <project>'s tests).
+    Record fields, in order: coordinate, kind (scenario | scenario-outline |
+    rule), name, file (as rooted at --root; repo-relative when run from the repo
+    root), line, coverage (full | partial | none), and witnesses (objects with
+    the test's pytest node id and its partial note, in collection order). A
+    record's coverage is "full" when at least one witnessing test covers the
+    unit fully (no partial note), "partial" when witnesses exist but every one
+    is partial, and "none" when no test witnesses it.
 
     Coverage gaps are data, not errors: an all-"none" corpus still exits 0.
     Broken witness links are errors: a marker whose coordinate matches no unit
@@ -332,12 +336,12 @@ def specs_matrix(corpus_root: Path, test_roots: tuple[Path, ...]) -> None:
     treated exactly as in `list`. Stdout carries nothing but JSONL.
     """
     scan = scan_corpus(_require_corpus_root(corpus_root))
-    resolved_test_roots = _require_test_roots(test_roots)
+    resolved_test_roots = _require_test_roots(_default_test_roots(corpus_root, test_roots))
     links = harvest_witness_links(resolved_test_roots)
     links_by_coordinate = group_witness_links_by_coordinate(links)
     for unit in scan.units:
         record = render_matrix_record(unit, links_by_coordinate.get(unit.coordinate, []))
-        write_stdout_line(json.dumps(record, ensure_ascii=False))
+        write_human_line(json.dumps(record, ensure_ascii=False))
     unit_coordinates = frozenset(unit.coordinate for unit in scan.units)
     broken_links = find_broken_witness_links(links, unit_coordinates)
     _fail_matrix_if_incomplete_or_broken(scan, broken_links)

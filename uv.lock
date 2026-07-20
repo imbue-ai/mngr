@@ -43,6 +43,7 @@ members = [
     "imbue-mngr-recursive",
     "imbue-mngr-robinhood",
     "imbue-mngr-schedule",
+    "imbue-mngr-specs",
     "imbue-mngr-tmr",
     "imbue-mngr-ttyd",
     "imbue-mngr-tutor",
@@ -2783,6 +2784,31 @@ requires-dist = [
 ]
 
 [[package]]
+name = "imbue-mngr-specs"
+version = "0.1.0"
+source = { editable = "libs/mngr_specs" }
+dependencies = [
+    { name = "click" },
+    { name = "concurrency-group" },
+    { name = "gherkin-official" },
+    { name = "imbue-common" },
+    { name = "imbue-mngr" },
+    { name = "loguru" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click" },
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
+    { name = "gherkin-official", specifier = ">=39.1.0" },
+    { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "loguru" },
+    { name = "pydantic", specifier = ">=2.0" },
+]
+
+[[package]]
 name = "imbue-mngr-tmr"
 version = "0.1.0"
 source = { editable = "libs/mngr_tmr" }
@@ -3416,13 +3442,13 @@ dependencies = [
     { name = "concurrency-group" },
     { name = "cryptography" },
     { name = "flask" },
-    { name = "gherkin-official" },
     { name = "httpx" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-aws" },
     { name = "imbue-mngr-forward" },
     { name = "imbue-mngr-latchkey" },
+    { name = "imbue-mngr-specs" },
     { name = "imbue-mngr-vps" },
     { name = "itsdangerous" },
     { name = "jinja2" },
@@ -3454,13 +3480,13 @@ requires-dist = [
     { name = "concurrency-group", editable = "libs/concurrency_group" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "flask", specifier = ">=3.0" },
-    { name = "gherkin-official", specifier = ">=39.1.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-aws", editable = "libs/mngr_aws" },
     { name = "imbue-mngr-forward", editable = "libs/mngr_forward" },
     { name = "imbue-mngr-latchkey", editable = "libs/mngr_latchkey" },
+    { name = "imbue-mngr-specs", editable = "libs/mngr_specs" },
     { name = "imbue-mngr-vps", editable = "libs/mngr_vps" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },

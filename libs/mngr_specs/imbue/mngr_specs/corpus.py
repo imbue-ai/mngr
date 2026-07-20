@@ -1,11 +1,12 @@
-"""Scanning of the behavioral-spec corpus (``apps/minds/specs`` in this repo).
+"""Scanning of a behavioral-spec corpus (any ``<project>/specs/`` directory;
+``apps/minds/specs`` is this repo's first corpus).
 
 The single entry point is :func:`scan_corpus`, a pure-ish reader: it walks a
 corpus root, parses every ``.feature`` file with ``gherkin-official`` (the
-arbiter of syntactic validity per the minds-behavioral-specs skill), extracts
-one :class:`SpecUnit` per authored unit (Scenario, Scenario Outline, Rule),
-and collects every language violation as data rather than raising. Callers
-decide what to do with violations (the ``minds specs`` CLI prints them).
+arbiter of syntactic validity per the behavioral-specs skill), extracts one
+:class:`SpecUnit` per authored unit (Scenario, Scenario Outline, Rule), and
+collects every language violation as data rather than raising. Callers decide
+what to do with violations (the ``mngr specs`` CLI prints them).
 
 The gherkin parser returns plain nested dicts; the private ``_Gherkin*``
 pydantic models below mirror exactly the subset of the AST this module
@@ -30,12 +31,12 @@ from pydantic import Field
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.core.behavioral_specs.data_types import CorpusScan
-from imbue.minds.core.behavioral_specs.data_types import SpecStep
-from imbue.minds.core.behavioral_specs.data_types import SpecUnit
-from imbue.minds.core.behavioral_specs.data_types import SpecUnitKind
-from imbue.minds.core.behavioral_specs.data_types import SpecViolation
-from imbue.minds.errors import SpecCorpusRootNotFoundError
+from imbue.mngr_specs.data_types import CorpusScan
+from imbue.mngr_specs.data_types import SpecStep
+from imbue.mngr_specs.data_types import SpecUnit
+from imbue.mngr_specs.data_types import SpecUnitKind
+from imbue.mngr_specs.data_types import SpecViolation
+from imbue.mngr_specs.errors import SpecCorpusRootNotFoundError
 
 
 class _GherkinNode(FrozenModel):
@@ -143,7 +144,7 @@ _KEBAB_CASE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+(-[a-z0-9]+
 # file (conservative): a spec never needs such a comment, directive or not.
 _LANGUAGE_HEADER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\s*#\s*language\s*:", re.IGNORECASE)
 
-# The spec language's exhaustive construct list (per the minds-behavioral-specs
+# The spec language's exhaustive construct list (per the behavioral-specs
 # skill). Other en-dialect spellings (Ability, Business Need, Scenario Template,
 # Scenarios, '*') parse fine under gherkin-official but are not in the language.
 _ALLOWED_FEATURE_KEYWORDS: Final[tuple[str, ...]] = ("Feature",)
@@ -159,7 +160,7 @@ _ALLOWED_STEP_KEYWORDS: Final[tuple[str, ...]] = ("Given", "When", "Then", "And"
 _OUTLINE_KEYWORDS: Final[tuple[str, ...]] = ("Scenario Outline", "Scenario Template")
 
 # The reserved filename whose Rules bind their whole folder subtree rather than
-# just their own file (per the minds-behavioral-specs skill's scope rules).
+# just their own file (per the behavioral-specs skill's scope rules).
 _INVARIANTS_FEATURE_BASENAME: Final[str] = "invariants.feature"
 
 
@@ -586,7 +587,7 @@ def binding_invariant_coordinates(unit: SpecUnit, units: Sequence[SpecUnit], cor
 
 @pure
 def spec_unit_to_record(unit: SpecUnit, units: Sequence[SpecUnit], corpus_root: Path) -> dict[str, Any]:
-    """Render a unit as the JSON object emitted (one per line) by ``minds specs list``.
+    """Render a unit as the JSON object emitted (one per line) by ``mngr specs list``.
 
     ``units`` is the whole corpus (and ``corpus_root`` the scan root) so the
     ``invariants`` field can name every binding Rule, which is cross-file data.
