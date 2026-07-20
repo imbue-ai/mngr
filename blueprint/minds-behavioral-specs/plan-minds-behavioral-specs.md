@@ -6,7 +6,7 @@
 - Capture the formal specification in a new declarative, process-neutral, evergreen skill at `.claude/skills/minds-behavioral-specs/SKILL.md` — the reference that future process skills and tools cite.
 - Make identity positional and derived: the first tag on a Scenario/Rule is its identity; its external coordinate is the folder-path qualifier plus the raw tag. Traceability is inverted into test-side `witnesses` markers. Invariants are `Rule:` blocks whose kind and scope come from structure, never spelled in tags.
 - Build the minimal `minds specs` CLI (`validate`, `list`, `query`; JSONL output) in this branch so the skill documents real tooling, not aspirations.
-- Author the authentication spec corpus fresh in the new language as the in-tree exemplar. The experimental `apps/minds/specs/authentication.md` is deleted; it is not load-bearing and nothing is migrated from it.
+- Deliver `apps/minds/specs/authentication/` as the in-tree exemplar: the conceptual contents of `apps/minds/specs/authentication.md` — essence, not accidents — re-expressed in the newly defined language. A Fable subagent authors it once the skill exists (the first sufficiency test of the skill); the old file is then deleted, replaced by its re-expression.
 
 ## Expected behavior
 
@@ -31,9 +31,10 @@ The skill (`minds-behavioral-specs`):
 - Answers, declaratively: where spec files live and how the corpus is organized; how an individual file is structured; the exact dialect ("official Gherkin as accepted by gherkin-official, classic matcher — Feature/Background/Scenario/Scenario Outline/Examples/Rule/Given/When/Then/And/But, doc strings, data tables, comments"); identity and coordinate rules (example plus counter-example); invariant `Rule:` scoping, documented heavily with examples of both file-scoped and subtree-scoped rules; sidecar and overview relationships (positional, by basename/folder — not links); the `witnesses` convention; the CLI by name and purpose.
 - Stays evergreen: no authoring/updating/sharding process content; no mention of invariant numbering one way or the other; no flag listings that can drift; refers to living locations (`apps/minds/specs/`, `minds specs --help`) rather than snapshots of their contents.
 
-Exemplar (the authentication corpus, defined on its own terms):
+Exemplar (the authentication corpus — the conceptual contents of `authentication.md`, re-expressed):
 
-- `apps/minds/specs/authentication/` contains `overview.md`, `invariants.feature`, `signin.feature`, `session.feature`, `landing.feature`, `post-login.feature`, `workspace-bridge.feature`. The experimental `apps/minds/specs/authentication.md` is deleted.
+- Authored by a Fable subagent as soon as the skill exists, from two inputs: the skill (the language) and `authentication.md` (the concepts). It validates its output with the tooling; `authentication.md` is deleted once replaced.
+- `apps/minds/specs/authentication/` contains `overview.md`, `invariants.feature`, `signin.feature`, `session.feature`, `landing.feature`, `post-login.feature`, `workspace-bridge.feature`.
 - `overview.md` carries the area's component statement, glossary, and out-of-scope list; each Feature's narrative lives in its own description.
 - `witnesses` markers are added to the desktop_client and mngr_forward tests that exercise each behavior, with `partial=` notes where a test covers only part of it; behaviors with no covering test simply have no witnesses (visible once derivation tooling exists). The convention is pytest-only; non-pytest scripts carry no annotations.
 - The corpus (file, Feature, identity tags; every coordinate is `authentication.<tag>`):
@@ -53,7 +54,7 @@ Exemplar (the authentication corpus, defined on its own terms):
 - New `specs` command group in the minds CLI, following the existing `cli/` module-plus-test pattern, registered alongside `run`/`pool`/`server`/`env`/`paid`.
 - New runtime dependency for `apps/minds`: `gherkin-official` (the CLI ships with minds).
 - New shared pytest marker `witnesses`, registered in the centralized marker list in `libs/imbue_common` conftest hooks.
-- New: the `apps/minds/specs/authentication/` corpus as defined above; the experimental `apps/minds/specs/authentication.md` is deleted, with no migration bookkeeping.
+- New: the `apps/minds/specs/authentication/` corpus as defined above, authored by a Fable subagent from the skill plus the conceptual contents of `authentication.md` (essence, not accidents); `authentication.md` is deleted once replaced by its re-expression.
 - Annotations: `witnesses` markers added to the desktop_client and mngr_forward tests that exercise the specified behaviors, with `partial=` notes where coverage is incomplete.
 - Docs: one short paragraph in `apps/minds/docs/testing-overview.md` naming the `witnesses` convention and pointing at the skill and `apps/minds/specs/`.
 - Tests: unit tests for the spec-parsing/validation core and the CLI subcommands; ratchets respected; full suite green before finishing.
