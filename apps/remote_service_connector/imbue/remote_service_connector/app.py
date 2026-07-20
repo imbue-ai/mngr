@@ -2474,15 +2474,22 @@ def upsert_litellm_user_budget(user_id: str, max_budget: float) -> None:
         _litellm_request("POST", "/user/update", json_body=body)
 
 
-def get_litellm_user_spend(user_id: str) -> tuple[float, str | None]:
+def get_litellm_user_spend(
+    user_id: str,
+    # Resolved at call time (not bound as a default) so installed fakes that
+    # replace the module-level ``_litellm_request`` still take effect.
+    request_fn: "Callable[..., httpx.Response] | None" = None,
+) -> tuple[float, str | None]:
     """Return (spend this budget period, budget reset timestamp) for the account.
 
     A user that does not exist in LiteLLM yet (never minted a key) reports
     zero spend. Any LiteLLM error also reports zero -- this feeds the
-    display-only usage endpoint, not enforcement.
+    display-only usage endpoint, not enforcement. ``request_fn`` is injected
+    for tests; production callers use the module-level ``_litellm_request``.
     """
+    resolved_request = request_fn if request_fn is not None else _litellm_request
     try:
-        response = _litellm_request("GET", "/user/info", params={"user_id": user_id})
+        response = resolved_request("GET", "/user/info", params={"user_id": user_id})
     except (HTTPException, httpx.HTTPError) as exc:
         # HTTPException covers HTTP >= 400 responses and missing proxy config;
         # httpx.HTTPError covers transport failures (proxy unreachable).
