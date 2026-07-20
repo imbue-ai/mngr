@@ -35,4 +35,4 @@ uv run mngr specs validate --root apps/minds/specs
 The `.feature` language this tool serves - folders, tags, coordinates,
 invariants as `Rule` blocks with folder scoping, overview/sidecar prose files,
 and the `witnesses` test back-link convention - is defined by the
-behavioral-specs skill (`.claude/skills/minds-behavioral-specs/`).
+behavioral-specs skill (`.claude/skills/behavioral-specs/`).

@@ -1,0 +1,1 @@
+Registered the new `specs` plugin (`imbue-mngr-specs`, corpus-generic behavioral-spec tooling; see the `mngr_specs` changelog entry) in the plugin catalog at the INDEPENDENT tier, listed it as unpublished for now, and added the generated CLI docs page for the `mngr specs` command group.

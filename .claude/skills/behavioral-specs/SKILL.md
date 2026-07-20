@@ -1,19 +1,19 @@
 ---
-name: minds-behavioral-specs
-description: The definitional reference for how minds expresses behavioral specifications - Gherkin .feature files under apps/minds/specs/, their folder and tag organization, coordinates, invariants as Rule blocks with folder scoping, overview/sidecar prose files, the witnesses test back-link convention, and the minds specs CLI. Use whenever reading, writing, validating, querying, or otherwise reasoning about behavioral specs or .feature files in this repo.
+name: behavioral-specs
+description: The definitional reference for behavioral specifications in this repo - Gherkin .feature files in per-project corpora at <project>/specs/ (e.g. apps/minds/specs/), their folder and tag organization, coordinates, invariants as Rule blocks with folder scoping, overview/sidecar prose files, the witnesses test back-link convention, and the mngr specs CLI. Use whenever reading, writing, validating, querying, or otherwise reasoning about behavioral specs or .feature files in this repo.
 ---
 
-# minds behavioral specs
+# behavioral specs
 
-This skill defines the behavioral-spec language used by minds: what the
-artifacts are, where they live, and what their syntax and structure mean.
-Processes that create, update, or consume specs are out of scope here.
+This skill defines the behavioral-spec language: what the artifacts are,
+where they live, and what their syntax and structure mean. Processes that
+create, update, or consume specs are out of scope here.
 
 ## What a behavioral spec is
 
-A behavioral spec describes the externally observable behavior of a minds
-surface: the flows a user or client can take (scenarios) and the properties
-that hold across all flows and states (invariants).
+A behavioral spec describes the externally observable behavior of one
+system's surface: the flows a user or client can take (scenarios) and the
+properties that hold across all flows and states (invariants).
 
 The language's register:
 
@@ -30,8 +30,15 @@ implementation plans) or with `docs/` (user-facing documentation).
 
 ## Where specs live
 
-The corpus root is `apps/minds/specs/`. Folders group specs by area; a folder
-holds `.feature` files (one Feature each) plus optional prose files:
+Specs are organized into corpora, one per independent system. A corpus root
+is that system's own `specs/` directory - `<project>/specs/` - so the corpus,
+its live-corpus guard test, and its witnesses markers travel with the
+codebase that owns them, including out of this monorepo if a project is ever
+spun out. The first corpus in this repo is `apps/minds/specs/`; other systems
+(e.g. `libs/mngr_forward`) grow their own the same way.
+
+Within a corpus, folders group specs by area; a folder holds `.feature`
+files (one Feature each) plus optional prose files:
 
 ```
 apps/minds/specs/
@@ -142,9 +149,10 @@ unit changing identity.
 
 A coordinate is claimed by each unit's identity tag and by each tag on a
 `Feature` or `Examples` block; auxiliary tags claim nothing. No coordinate
-is claimed twice - equivalently, all claiming tags are unique within their
-folder. The `@` sigil is Gherkin tag syntax and stays in the file;
-coordinates are bare dotted names.
+is claimed twice within its corpus - equivalently, all claiming tags are
+unique within their folder. Coordinates are corpus-relative: distinct
+corpora are distinct namespaces. The `@` sigil is Gherkin tag syntax and
+stays in the file; coordinates are bare dotted names.
 
 ## Invariants and scope
 
@@ -170,6 +178,9 @@ Scope is determined entirely by which file the Rule lives in:
 - This holds at every level: in `apps/minds/specs/authentication/invariants.feature`
   a Rule binds all of `authentication/`; in `apps/minds/specs/invariants.feature`
   it binds the entire corpus.
+- Scope never crosses a corpus boundary: an invariant binds only units of
+  its own corpus. When systems share a constraint, each corpus states it
+  from its own surface's perspective.
 
 A file-scoped Rule in an ordinary feature file:
 
@@ -225,11 +236,15 @@ def test_login_page_redirects_via_script() -> None: ...
 - A test may carry several `witnesses` markers.
 - The marker is registered in the shared pytest settings and usable from any
   project in the monorepo.
+- A project's tests witness that project's corpus. Within a corpus/test-tree
+  pairing (see `matrix`), every marker must name a unit of the paired corpus;
+  a marker that resolves to no unit is a broken link, not a coverage gap.
 
 ## Tooling
 
-`minds specs` is the CLI over the corpus (run as `uv run minds specs ...`
-from the repo root):
+`mngr specs` is the CLI over a corpus, named per invocation (run as
+`uv run mngr specs <subcommand> --root <project>/specs ...` from the repo
+root):
 
 - `validate` - parses every spec file and enforces the rules in this
   document.
@@ -237,9 +252,10 @@ from the repo root):
   scenario outline, or rule), carrying coordinate, unit kind, location,
   and the coordinates of the Rules in scope for the unit; structural
   filters select by folder area, unit kind, tag, name, or step text.
-- `matrix` - joins the corpus against the `witnesses` markers in the test
-  tree, reporting per-unit coverage.
+- `matrix` - joins the corpus against the `witnesses` markers in its paired
+  test tree (defaulting to the corpus root's parent, i.e. the owning
+  project), reporting per-unit coverage.
 
-`uv run minds specs --help` is authoritative for invocation detail. For
+`uv run mngr specs --help` is authoritative for invocation detail. For
 AST-level needs beyond the CLI, `gherkin-official` (a dependency of
-`apps/minds`) is importable directly.
+`mngr_specs`) is importable directly.

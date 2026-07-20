@@ -14,10 +14,11 @@ Tests that verify a behavioral-spec unit declare it with the
 `witnesses(coordinate, partial=...)` marker: the coordinate names a unit in the
 spec corpus under `apps/minds/specs/`, and `partial=` notes what the test does
 not cover. The marker is registered in the shared pytest settings, so any
-project in the monorepo can use it; the minds-behavioral-specs skill
-(`.claude/skills/minds-behavioral-specs/SKILL.md`) defines the convention,
-`behavioral-specs.md` (in this folder) covers the `minds specs` CLI, and
-`uv run minds specs matrix` reports per-unit coverage from the markers.
+project in the monorepo can use it; the behavioral-specs skill
+(`.claude/skills/behavioral-specs/SKILL.md`) defines the convention,
+`behavioral-specs.md` (in this folder) covers the CLI, and
+`uv run mngr specs matrix --root apps/minds/specs` reports per-unit coverage
+from the markers.
 
 ## Part 1 -- Where the tests live and where they run
 
