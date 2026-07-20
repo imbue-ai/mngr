@@ -4778,18 +4778,16 @@ def _decode_size_capped_base64(field_name: str, encoded: str, max_bytes: int) ->
     return decoded
 
 
-def _sync_caller_user_id(request: Request) -> str:
-    """Authenticate a sync endpoint call and return the caller's full user_id."""
-    auth = authenticate_request(request, get_ctx().ops)
-    require_admin(auth)
-    return _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
-
-
 def _sync_caller(request: Request) -> tuple[AdminAuth, str]:
     """Authenticate a sync endpoint call; returns (admin auth, full user_id)."""
     auth = authenticate_request(request, get_ctx().ops)
     admin = require_admin(auth)
     return admin, _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+
+
+def _sync_caller_user_id(request: Request) -> str:
+    """Authenticate a sync endpoint call and return the caller's full user_id."""
+    return _sync_caller(request)[1]
 
 
 @web_app.get("/sync/records")
