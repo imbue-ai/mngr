@@ -46,7 +46,8 @@ from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
-from imbue.mngr_forward.loading_page import render_loading_page
+from imbue.mngr_forward.loading_page import LOADING_CARD_CSS
+from imbue.mngr_forward.loading_page import render_loading_card
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 
@@ -1609,11 +1610,18 @@ def render_recovery_page(
         f' data-return-to="{html.escape(return_to)}"'
         f' data-initial-status="{html.escape(initial_status)}"'
     )
-    return render_loading_page(
-        style_extra=_RECOVERY_STYLE,
-        card_attrs=card_attrs,
-        card_extra=card_extra,
-        body_extra="    <script>\n" + _RECOVERY_SCRIPT + "    </script>\n",
+    # The card is embedded under the ChromeShell titlebar (pages.Recovery) so a
+    # stuck workspace never strands the user without the Minds home button --
+    # rather than rendered as the standalone loader page. Only the card-level
+    # CSS is pulled in (the page centering is Tailwind in the template), and the
+    # card's viewport allowance additionally clears the fixed 38px bar (the
+    # shared _RECOVERY_STYLE subtracts only the standalone page's padding).
+    style_html = LOADING_CARD_CSS + _RECOVERY_STYLE + "      .card { max-height: calc(100dvh - 86px); }\n"
+    return CATALOG.render(
+        "pages.Recovery",
+        card_html=render_loading_card(card_attrs=card_attrs, card_extra=card_extra),
+        style_html=style_html,
+        script_html=_RECOVERY_SCRIPT,
     )
 
 

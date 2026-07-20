@@ -12,9 +12,12 @@ on top via the ``card_extra`` / ``style_extra`` / ``body_extra`` hooks.
 
 from typing import Final
 
-# The shared stylesheet. ``body`` centers a single ``.card`` in the viewport;
-# ``.row`` lays the spinner beside the heading/message block.
-LOADING_PAGE_CSS: Final[str] = """\
+# The page-level half of the stylesheet: ``body`` centers a single ``.card``
+# in the viewport. Only the standalone page (the proxy loader) uses this; a
+# consumer that embeds the card in its own layout (e.g. the minds recovery
+# page, which wraps it under the app titlebar) supplies its own centering and
+# pulls in only ``LOADING_CARD_CSS``.
+LOADING_PAGE_CENTERING_CSS: Final[str] = """\
       html, body { height: 100%; margin: 0; }
       body {
         background: #fafafa;
@@ -26,6 +29,13 @@ LOADING_PAGE_CSS: Final[str] = """\
         padding: 24px;
         box-sizing: border-box;
       }
+"""
+
+# The card-level half: everything scoped to the ``.card`` and its contents
+# (``.row`` lays the spinner beside the heading/message block). Kept separate
+# so an embedding consumer renders the exact same card without inheriting the
+# page-level body rules.
+LOADING_CARD_CSS: Final[str] = """\
       .card {
         background: #fff;
         border: 1px solid #e4e4e7;
@@ -35,13 +45,14 @@ LOADING_PAGE_CSS: Final[str] = """\
         width: 100%;
         box-sizing: border-box;
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       }
       .row { display: flex; align-items: center; gap: 12px; }
-      h1 { font-size: 1.125rem; font-weight: 600; margin: 0; color: #18181b; }
-      p { margin: 6px 0 0; color: #52525b; font-size: 0.875rem; line-height: 1.5; }
+      .card h1 { font-size: 1.125rem; font-weight: 600; margin: 0; color: #18181b; }
+      .card p { margin: 6px 0 0; color: #52525b; font-size: 0.875rem; line-height: 1.5; }
       /* With no message (the loading state) the empty <p> is removed so the
          heading stays vertically centered against the spinner. */
-      p:empty { display: none; }
+      .card p:empty { display: none; }
       .spinner {
         width: 20px;
         height: 20px;
@@ -54,6 +65,9 @@ LOADING_PAGE_CSS: Final[str] = """\
       @keyframes spin { to { transform: rotate(360deg); } }
 """
 
+# The full stylesheet the standalone page serves.
+LOADING_PAGE_CSS: Final[str] = LOADING_PAGE_CENTERING_CSS + LOADING_CARD_CSS
+
 # The default heading/message. A consumer may override these at runtime (via
 # its own script) for non-loading states, but the initial render -- and the
 # proxy loader always -- shows this. The loading state has no message; the
@@ -61,6 +75,28 @@ LOADING_PAGE_CSS: Final[str] = """\
 # other states.
 _LOADING_TITLE: Final[str] = "Loading workspace"
 _LOADING_MESSAGE: Final[str] = ""
+
+
+def render_loading_card(*, card_attrs: str = "", card_extra: str = "") -> str:
+    """Render the canonical loading ``.card`` markup (no page around it).
+
+    The shared building block behind ``render_loading_page``; a consumer that
+    hosts the card inside its own layout (e.g. the minds recovery page, which
+    embeds it under the app titlebar) renders this plus ``LOADING_CARD_CSS``
+    so its card cannot drift from the proxy loader's.
+
+    ``card_attrs`` -- extra attributes on the ``.card`` element (e.g. ``data-*``).
+    ``card_extra`` -- extra markup appended inside the ``.card`` (e.g. buttons).
+    """
+    return f"""<div class="card"{card_attrs}>
+      <div class="row">
+        <div id="loading-spinner" class="spinner" aria-hidden="true"></div>
+        <div>
+          <h1 id="loading-title">{_LOADING_TITLE}</h1>
+          <p id="loading-message">{_LOADING_MESSAGE}</p>
+        </div>
+      </div>
+{card_extra}    </div>"""
 
 
 def render_loading_page(
@@ -90,15 +126,7 @@ def render_loading_page(
 {LOADING_PAGE_CSS}{style_extra}    </style>
   </head>
   <body>
-    <div class="card"{card_attrs}>
-      <div class="row">
-        <div id="loading-spinner" class="spinner" aria-hidden="true"></div>
-        <div>
-          <h1 id="loading-title">{_LOADING_TITLE}</h1>
-          <p id="loading-message">{_LOADING_MESSAGE}</p>
-        </div>
-      </div>
-{card_extra}    </div>
+    {render_loading_card(card_attrs=card_attrs, card_extra=card_extra)}
 {body_extra}  </body>
 </html>
 """

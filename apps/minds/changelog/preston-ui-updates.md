@@ -16,6 +16,8 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - Opening a workspace no longer flashes: the window and chrome view pin the app's light surface color (each chrome-view navigation used to expose an uninitialized black backing for a frame), and the workspace's content view stays hidden until its navigation actually commits -- the titlebar wrapper (with the accent-tinted white content card) is the loading surface, instead of a blank card. A workspace whose load fails outright (bad TLS cert, connection refused -- e.g. a stale port squatted by another checkout's forward) returns the window to Home instead of sitting on a blank screen, and re-clicking a workspace whose load stalled retries instead of being silently swallowed by the one-window-per-workspace check.
 
+- The workspace-recovery screen (shown while a workspace is unresponsive -- e.g. its docker daemon is stopped or unreachable) now renders under the app titlebar like every other screen, so the Minds home button, workspace switcher, and inbox stay reachable instead of stranding the user on a bare full-window card. Its loading card still comes from the same shared building block as the proxy loader, so the two cannot drift.
+
 - Cmd+W no longer closes the window: it closes the active tab inside the displayed workspace's dockview instead (forwarded by the shell so it works even while typing in a terminal or browser panel; requires a workspace template with the matching close-active-tab handler). Closing the window remains available from File > Close Window, and Cmd+Q quits.
 
 - The workspace switcher menu opens shifted left so each row's workspace-name text lines up directly under the breadcrumb's workspace-name text.

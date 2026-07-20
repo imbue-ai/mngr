@@ -1,0 +1,30 @@
+{#def card_html, style_html, script_html #}
+{#
+  Workspace-recovery page: the shared loading card (mngr_forward's
+  render_loading_card, so its loading state cannot drift from the proxy
+  loader's) wrapped in the ChromeShell titlebar layout. The recovery screen is
+  a trusted local page on the chrome surface, and a stuck workspace must never
+  strand the user without the titlebar -- the Minds home button, workspace
+  switcher, and inbox all stay reachable while the workspace recovers.
+
+  The card markup, its stylesheet (card CSS + the recovery overrides), and the
+  recovery driver script are assembled in templates.py (render_recovery_page)
+  and passed through pre-escaped; they are trusted server-built strings whose
+  embedded user data (agent id, return_to, ssh command) is already
+  html.escape'd there, hence the ``| safe`` pass-throughs.
+#}
+{% set _head %}
+<style>
+{{ style_html | safe }}</style>
+{% endset %}
+{% set _scripts %}
+<script>
+{{ script_html | safe }}</script>
+{% endset %}
+<ChromeShell title="Loading workspace" head={{ _head }} scripts={{ _scripts }}>
+  {# Center the card in the viewport region below the fixed 38px titlebar,
+     mirroring the standalone loader's body centering (24px padding). #}
+  <div class="min-h-[calc(100dvh_-_38px)] flex items-center justify-center p-6">
+    {{ card_html | safe }}
+  </div>
+</ChromeShell>
