@@ -206,6 +206,62 @@ def test_normal_user_text_is_not_framework() -> None:
     assert events[0]["content"] == "please refactor the parser"
 
 
+def _image_result(uuid: str, ts: str, call_id: str, content: list) -> str:
+    return _line(
+        type="user",
+        uuid=uuid,
+        timestamp=ts,
+        message={"content": [{"type": "tool_result", "tool_use_id": call_id, "content": content}]},
+    )
+
+
+def test_tool_result_image_passthrough() -> None:
+    line = _image_result(
+        "u1",
+        "t1",
+        "c1",
+        [
+            {"type": "text", "text": "here is the image"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+        ],
+    )
+    events = parse_claude_session_lines([line])
+    tr = [e for e in events if e["type"] == "tool_result"][0]
+    assert tr["output"] == "here is the image"  # image not folded into text
+    assert tr["images"] == [{"media_type": "image/png", "data": "AAAA"}]
+
+
+def test_tool_result_image_only_has_empty_output() -> None:
+    line = _image_result(
+        "u2", "t2", "c2", [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "ZZ"}}]
+    )
+    tr = [e for e in parse_claude_session_lines([line]) if e["type"] == "tool_result"][0]
+    assert tr["output"] == ""
+    assert tr["images"] == [{"media_type": "image/jpeg", "data": "ZZ"}]
+
+
+def test_tool_result_non_base64_image_dropped() -> None:
+    line = _image_result(
+        "u3",
+        "t3",
+        "c3",
+        [
+            {"type": "image", "source": {"type": "url", "url": "http://x/y.png"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ""}},
+        ],
+    )
+    tr = [e for e in parse_claude_session_lines([line]) if e["type"] == "tool_result"][0]
+    assert "images" not in tr  # both invalid -> no images field
+
+
+def test_tool_result_image_count_capped() -> None:
+    imgs = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": str(i)}} for i in range(10)]
+    tr = [e for e in parse_claude_session_lines([_image_result("u4", "t4", "c4", imgs)]) if e["type"] == "tool_result"][
+        0
+    ]
+    assert len(tr["images"]) == 6  # _MAX_TOOL_RESULT_IMAGES
+
+
 def test_lines_missing_uuid_or_timestamp_skipped() -> None:
     lines = [
         _line(type="user", timestamp="t1", message={"content": "no uuid"}),

@@ -39,10 +39,171 @@
     }
   }
 
+  // --- lazy vendored renderers (highlight.js / KaTeX / mermaid) --------------
+  // Each library is a heavy vendored asset, so we inject it only the first time
+  // matching content actually appears. Loaders are memoized by URL.
+  const _assetPromises = {};
+  function loadScript(src) {
+    if (_assetPromises[src]) return _assetPromises[src];
+    _assetPromises[src] = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("failed to load " + src));
+      document.head.appendChild(s);
+    });
+    return _assetPromises[src];
+  }
+  function loadStyle(href) {
+    if (_assetPromises["css:" + href]) return;
+    _assetPromises["css:" + href] = true;
+    const l = document.createElement("link");
+    l.rel = "stylesheet";
+    l.href = href;
+    document.head.appendChild(l);
+  }
+
+  // ```mermaid fences -> rendered diagrams. Must run BEFORE syntax highlighting
+  // so the mermaid source isn't highlighted as code.
+  function renderMermaidIn(container) {
+    const codes = container.querySelectorAll("code.language-mermaid");
+    if (!codes.length) return;
+    const divs = [];
+    codes.forEach((code) => {
+      const host = code.closest("pre") || code;
+      const div = document.createElement("div");
+      div.className = "mermaid";
+      div.textContent = code.textContent;
+      host.replaceWith(div);
+      divs.push(div);
+    });
+    loadScript("/static/vendor/mermaid.min.js")
+      .then(() => {
+        if (!window._foremanMermaidInit) {
+          window.mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+          window._foremanMermaidInit = true;
+        }
+        return window.mermaid.run({ nodes: divs });
+      })
+      .catch(() => {
+        divs.forEach((d) => { if (!d.querySelector("svg")) d.classList.add("mermaid-error"); });
+      });
+  }
+
+  function highlightCodeIn(container) {
+    const blocks = container.querySelectorAll("pre code");
+    if (!blocks.length) return;
+    loadStyle("/static/vendor/highlight-atom-one-dark.min.css");
+    loadScript("/static/vendor/highlight.min.js")
+      .then(() => {
+        blocks.forEach((b) => {
+          if (b.dataset.highlighted) return;
+          try { window.hljs.highlightElement(b); } catch (_e) { /* ignore */ }
+        });
+      })
+      .catch(() => {});
+  }
+
+  // Only load KaTeX when the text looks like real math -- a $$..$$ / \(..\) / \[..\]
+  // block, or a $..$ span that contains a LaTeX-ish char -- so plain "$5 and $10"
+  // currency never triggers it (and auto-render's balanced matching does the rest).
+  const _MATH_SIGNAL = /\$\$[\s\S]+?\$\$|\\\(|\\\[|\$[^$\n]*[\\^_{}][^$\n]*\$/;
+  function renderMathIn(container) {
+    if (!_MATH_SIGNAL.test(container.textContent || "")) return;
+    loadStyle("/static/vendor/katex/katex.min.css");
+    loadScript("/static/vendor/katex/katex.min.js")
+      .then(() => loadScript("/static/vendor/katex/auto-render.min.js"))
+      .then(() => {
+        try {
+          window.renderMathInElement(container, {
+            delimiters: [
+              { left: "$$", right: "$$", display: true },
+              { left: "\\[", right: "\\]", display: true },
+              { left: "\\(", right: "\\)", display: false },
+              { left: "$", right: "$", display: false },
+            ],
+            throwOnError: false,
+            ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+          });
+        } catch (_e) { /* ignore */ }
+      })
+      .catch(() => {});
+  }
+
+  // Make every link in assistant markdown open safely in a new tab.
+  function fixLinksIn(container) {
+    container.querySelectorAll("a[href]").forEach((a) => {
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+    });
+  }
+
+  // Rich-render a rendered assistant markdown container: mermaid, then syntax
+  // highlight, then math, then safe links.
+  function enrichAssistant(container) {
+    renderMermaidIn(container);
+    highlightCodeIn(container);
+    renderMathIn(container);
+    fixLinksIn(container);
+  }
+
+  // Append text to an element, turning bare URLs into safe links (for plain-text
+  // tool output). Cheap: one regex split, text nodes + anchors, no HTML parsing.
+  const _URL_RE = /(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+  function appendLinkified(parent, text) {
+    const parts = String(text == null ? "" : text).split(_URL_RE);
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 1) {
+        const a = document.createElement("a");
+        a.className = "autolink";
+        a.href = parts[i];
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = parts[i];
+        parent.appendChild(a);
+      } else if (parts[i]) {
+        parent.appendChild(document.createTextNode(parts[i]));
+      }
+    }
+  }
+
   // --- connection status ----------------------------------------------------
   function setConn(state) {
     const c = document.getElementById("conn");
     if (c) c.textContent = state;
+  }
+
+  // --- live agent state -> tab title ----------------------------------------
+  // Prefix the tab title with the agent's live state so background tabs show
+  // status at a glance. Mapping: blocked (dialog/permissions) -> NEEDS INPUT,
+  // busy/RUNNING -> WORKING, otherwise (running & idle) -> WAITING.
+  function statusTitle(d, base) {
+    let prefix = "";
+    if (d && d.running) {
+      if (d.blocked) prefix = "[NEEDS INPUT] ";
+      else if (d.busy) prefix = "[WORKING] ";
+      else prefix = "[WAITING] ";
+    }
+    return prefix + base;
+  }
+
+  // Poll an agent's input-state and call onState(d) each tick. Keeps polling
+  // while the tab is hidden (slower) so the title stays live in background tabs.
+  function installStatePolling(agentName, onState) {
+    let timer = null;
+    function tick() {
+      fetch("/api/agents/" + encodeURIComponent(agentName) + "/input-state")
+        .then((r) => r.json())
+        .then(onState)
+        .catch(() => {});
+    }
+    function schedule() {
+      if (timer) clearInterval(timer);
+      timer = setInterval(tick, document.hidden ? 15000 : 4000);
+    }
+    document.addEventListener("visibilitychange", () => { tick(); schedule(); });
+    tick();
+    schedule();
   }
 
   // ==========================================================================
@@ -251,23 +412,42 @@
       try { return JSON.stringify(inp, null, 2); } catch (_e) { return String(inp); }
     }
 
+    // An image block from a tool result (e.g. Read on an image): inline, tap to
+    // expand via the same overlay as upload thumbnails.
+    function toolImageEl(img) {
+      const src = "data:" + (img.media_type || "image/png") + ";base64," + img.data;
+      const image = el("img", "tool-image");
+      image.src = src;
+      image.loading = "lazy";
+      image.alt = "tool image";
+      image.addEventListener("click", function () { openLightbox(src); });
+      return image;
+    }
+
     function attachResult(ev) {
       const entry = toolBodies.get(ev.tool_call_id);
-      const pre = el("pre", "result" + (ev.is_error ? " error" : ""));
-      pre.textContent = ev.output || "";
-      // Long outputs collapse behind a summary; short ones show inline.
-      if ((ev.output || "").length > 1200) {
-        const det = el("details", "tool");
-        const sm = el("summary");
-        sm.appendChild(el("span", "tname", "output"));
-        sm.appendChild(el("span", "targ", (ev.output || "").length + " chars"));
-        det.appendChild(sm);
-        const b = el("div", "body");
-        b.appendChild(pre);
-        det.appendChild(b);
-        if (entry) entry.body.appendChild(det);
-      } else if (entry) {
-        entry.body.appendChild(pre);
+      const out = ev.output || "";
+      if (out) {
+        const pre = el("pre", "result" + (ev.is_error ? " error" : ""));
+        appendLinkified(pre, out);
+        // Long outputs collapse behind a summary; short ones show inline.
+        if (out.length > 1200) {
+          const det = el("details", "tool");
+          const sm = el("summary");
+          sm.appendChild(el("span", "tname", "output"));
+          sm.appendChild(el("span", "targ", out.length + " chars"));
+          det.appendChild(sm);
+          const b = el("div", "body");
+          b.appendChild(pre);
+          det.appendChild(b);
+          if (entry) entry.body.appendChild(det);
+        } else if (entry) {
+          entry.body.appendChild(pre);
+        }
+      }
+      // Inline any images the tool returned (image-only results have empty output).
+      if (entry && ev.images && ev.images.length) {
+        ev.images.forEach(function (img) { entry.body.appendChild(toolImageEl(img)); });
       }
     }
 
@@ -431,6 +611,7 @@
         if (ev.text && ev.text.trim()) {
           const md = el("div", "assistant-md");
           md.innerHTML = renderMarkdown(ev.text);
+          enrichAssistant(md); // syntax highlight, math, mermaid, safe links
           e.appendChild(md);
         }
         (ev.tool_calls || []).forEach((tc) => e.appendChild(toolCallEl(tc)));
@@ -509,31 +690,14 @@
       refreshWorking(); // unblocking may reveal the dot again if still working
     }
 
-    // Poll the input-state endpoint lazily: only while the tab is visible.
-    // A single tmux pane capture over SSH per poll; paused when hidden.
-    let pollTimer = null;
-    function pollInputState() {
-      fetch("/api/agents/" + encodeURIComponent(name) + "/input-state")
-        .then((r) => r.json())
-        .then((d) => {
-          if (d.blocked) setBlocked(); else clearBlocked();
-          applyMngrBusy(d.busy);
-        })
-        .catch(() => {});
-    }
-    function startInputStatePolling() {
-      if (pollTimer || document.hidden) return;
-      pollInputState();
-      pollTimer = setInterval(pollInputState, 4000);
-    }
-    function stopInputStatePolling() {
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    }
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) stopInputStatePolling();
-      else startInputStatePolling();
+    // Poll input-state: drives the composer's blocked/working UI and the tab
+    // title. Keeps polling (slower) while hidden so the title stays live in a
+    // background tab. Each poll is a tmux pane capture over SSH.
+    installStatePolling(name, (d) => {
+      document.title = statusTitle(d, name);
+      if (d.blocked) setBlocked(); else clearBlocked();
+      applyMngrBusy(d.busy);
     });
-    startInputStatePolling();
 
     function autoGrow() {
       input.style.height = "auto";
@@ -797,15 +961,21 @@
     const back = document.getElementById("back");
     if (back) back.href = tgt.back;
 
+    // Agent terminals show the live state in the tab title too (orchestrator
+    // shells have no agent state). Same lazy poll as the chat page.
+    if (tgt.kind === "agent" && tgt.name) {
+      installStatePolling(tgt.name, (d) => { document.title = statusTitle(d, tgt.name) + " · terminal"; });
+    }
+
     if (typeof Terminal === "undefined") {
       setConn("xterm failed to load");
       return;
     }
     const term = new Terminal({
       cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      fontFamily: '"Atkinson Hyperlegible Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 13,
-      theme: { background: "#0a0c0f", foreground: "#d7dce2" },
+      theme: { background: "#000000", foreground: "#ffffff" },
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);

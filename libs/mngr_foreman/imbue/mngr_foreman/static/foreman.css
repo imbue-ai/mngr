@@ -1,5 +1,10 @@
-/* Foreman: high-contrast terminal UI. Pure black, white text, flat/sharp,
-   monospace. No rounded chat bubbles -- messages are highlighted rectangles. */
+/* Atkinson Hyperlegible (prose) + Atkinson Hyperlegible Mono (code/terminal),
+   vendored woff2. @import must precede all rules. */
+@import url("/static/vendor/atkinson.css");
+
+/* Foreman: high-contrast UI. Pure black, white text, flat/sharp. Highly-legible
+   Atkinson Hyperlegible for prose, Atkinson Hyperlegible Mono for code. No rounded
+   chat bubbles -- messages are highlighted rectangles. */
 :root {
   --bg: #000000;
   --bg-raised: #0a0a0a;
@@ -23,7 +28,8 @@
   --chip-run: #6ee7a0;
   --chip-wait: #ffcf5c;
   --chip-stop: #7a7a7a;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --prose: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "Atkinson Hyperlegible Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 * { box-sizing: border-box; }
@@ -33,14 +39,19 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: var(--mono);
-  font-size: 14px;
+  font-family: var(--prose);
+  font-size: 15px;
   line-height: 1.55;
   -webkit-text-size-adjust: 100%;
 }
 
+/* code, diffs, tool output, and math stay monospace (Atkinson Mono) */
+pre, code, .diff, .hljs, .tool pre, .framework pre { font-family: var(--mono); }
+
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
+/* assistant links: visible + safe (new tab) */
+.assistant-md a, .tool a.autolink { color: var(--link); text-decoration: underline; }
 
 .topbar {
   position: sticky;
@@ -119,6 +130,36 @@ a:hover { text-decoration: underline; }
 .assistant-md code { font-family: var(--mono); font-size: 13px; }
 .assistant-md :not(pre) > code { background: var(--bg-inset); padding: 1px 4px; border-radius: 0; }
 .assistant-md a { word-break: break-all; }
+
+/* GFM tables: bordered, horizontally scrollable on narrow screens */
+.assistant-md table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.assistant-md th, .assistant-md td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; }
+.assistant-md th { background: var(--bg-inset); }
+
+/* KaTeX display math scrolls instead of overflowing the viewport */
+.assistant-md .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+.assistant-md .katex { color: var(--fg); }
+
+/* mermaid diagrams: centered, scrollable */
+.assistant-md .mermaid { margin: 8px 0; overflow-x: auto; text-align: center; }
+.assistant-md .mermaid svg { max-width: 100%; height: auto; }
+.assistant-md .mermaid.mermaid-error { color: var(--err); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+
+/* inline images returned by a tool (e.g. Read on an image): tap to expand */
+.tool-image {
+  max-width: 260px;
+  max-height: 260px;
+  border: 1px solid var(--border);
+  cursor: zoom-in;
+  display: block;
+  margin: 6px 0 0;
+}
 
 .model-tag { color: var(--fg-faint); font-size: 11px; margin-bottom: 2px; }
 
@@ -213,8 +254,8 @@ a:hover { text-decoration: underline; }
   border: 1px solid var(--border);
   border-radius: 0;
   padding: 10px 12px;
-  font-family: var(--mono);
-  font-size: 14px;
+  font-family: var(--prose);
+  font-size: 15px;
   line-height: 1.4;
   max-height: 40vh;
   min-height: 42px;

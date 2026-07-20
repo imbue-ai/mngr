@@ -82,6 +82,12 @@ def _content_type_for(filename: str) -> str:
         return "application/javascript; charset=utf-8"
     if filename.endswith(".json"):
         return "application/json; charset=utf-8"
+    if filename.endswith(".woff2"):
+        return "font/woff2"
+    if filename.endswith(".woff"):
+        return "font/woff"
+    if filename.endswith(".svg"):
+        return "image/svg+xml"
     return "application/octet-stream"
 
 

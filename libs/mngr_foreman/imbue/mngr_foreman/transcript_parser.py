@@ -33,6 +33,12 @@ _DIFF_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 _MAX_INPUT_PREVIEW_LENGTH = 200
 
+# A tool result (e.g. Read on an image, a screenshot) can carry base64 image
+# blocks. We pass them through as a dedicated field, bypassing text truncation,
+# but cap count + per-image size so a screenshot dump can't bloat the payload.
+_MAX_TOOL_RESULT_IMAGES = 6
+_MAX_IMAGE_DATA_CHARS = 12_000_000
+
 _SOURCE = "claude/foreman_transcript"
 
 # Sentinel Claude writes to the user channel when the user interrupts a turn
@@ -112,6 +118,25 @@ def _has_tool_results_only(content: str | list[Any] | Any) -> bool:
         elif isinstance(block, str):
             return False
     return True
+
+
+def _extract_image_block(item: dict[str, Any]) -> dict[str, str] | None:
+    """Pull a base64 image out of a tool_result content block, or None.
+
+    Shape written by Claude Code:
+    ``{"type":"image","source":{"type":"base64","media_type":"image/png","data":"<b64>"}}``.
+    Oversize payloads and non-base64 sources are dropped.
+    """
+    source = item.get("source")
+    if not isinstance(source, dict) or source.get("type") != "base64":
+        return None
+    data = source.get("data")
+    if not isinstance(data, str) or not data or len(data) > _MAX_IMAGE_DATA_CHARS:
+        return None
+    media_type = source.get("media_type")
+    if not isinstance(media_type, str) or not media_type.startswith("image/"):
+        media_type = "image/png"
+    return {"media_type": media_type, "data": data}
 
 
 def _make_event_id(uuid: str, suffix: str) -> str:
@@ -426,11 +451,18 @@ def _parse_user_message(
                 continue
 
             result_content = block.get("content", "")
+            images: list[dict[str, str]] = []
             if isinstance(result_content, list):
                 parts: list[str] = []
                 for item in result_content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        parts.append(item.get("text", ""))
+                    if isinstance(item, dict):
+                        item_type = item.get("type")
+                        if item_type == "text":
+                            parts.append(item.get("text", ""))
+                        elif item_type == "image" and len(images) < _MAX_TOOL_RESULT_IMAGES:
+                            image = _extract_image_block(item)
+                            if image is not None:
+                                images.append(image)
                     elif isinstance(item, str):
                         parts.append(item)
                 result_content = "\n".join(parts)
@@ -451,6 +483,8 @@ def _parse_user_message(
                 "is_error": bool(block.get("is_error", False)),
                 "message_uuid": uuid,
             }
+            if images:
+                event["images"] = images
             if session_id is not None:
                 event["session_id"] = session_id
             existing_event_ids.add(event_id)
