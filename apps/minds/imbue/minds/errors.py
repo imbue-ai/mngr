@@ -139,6 +139,12 @@ class LimaImageToolError(LimaImageError):
     ...
 
 
+class SpecCorpusRootNotFoundError(MindError, FileNotFoundError):
+    """Raised when the behavioral-spec corpus root passed to a scan is not an existing directory."""
+
+    ...
+
+
 class InvalidSha256HexError(LimaImageError, ValueError):
     """Raised when a string is not a valid lowercase hex SHA-256 digest.
 
