@@ -701,12 +701,19 @@ function createBundle() {
     primeViewWithCachedChromeState(bundle, chromeView.webContents);
   });
 
-  // Every full load replaces the document, so the previous document's
-  // 'shell-ready' handshake no longer holds; the incoming page's chrome.js
-  // re-sends it once its swap listener is registered. (In-place swaps and
-  // pushState don't fire this.)
-  chromeView.webContents.on('did-start-loading', () => {
-    bundle.chromeShellReady = false;
+  // Every full MAIN-FRAME load replaces the document, so the previous
+  // document's 'shell-ready' handshake no longer holds; the incoming page's
+  // chrome.js re-sends it once its swap listener is registered. Subframe and
+  // same-document activity must NOT clear it -- the persistent shell never
+  // re-sends the handshake, so a spurious clear (e.g. an iframe inside a
+  // swapped-in page loading) would permanently demote hub navigation to full
+  // loads. (Positional args kept as a fallback for the structured event.)
+  chromeView.webContents.on('did-start-navigation', (event, _url, isInPlace, isMainFrame) => {
+    const mainFrame = event && typeof event.isMainFrame === 'boolean' ? event.isMainFrame : isMainFrame;
+    const sameDocument = event && typeof event.isSameDocument === 'boolean' ? event.isSameDocument : isInPlace;
+    if (mainFrame && !sameDocument) {
+      bundle.chromeShellReady = false;
+    }
   });
 
   // A trusted local page renders in the chrome view itself, so the chrome view's
@@ -718,7 +725,7 @@ function createBundle() {
   // workspace, so it clears currentWorkspaceId (releasing the recovery-redirect
   // lock) while still tinting for the wider workspace-scoped screens (its own
   // breadcrumb, via chrome.js, reads its location directly).
-  const onChromeNavigate = (url) => {
+  const onChromeNavigate = (url, inPage) => {
     if (bundle.isErrorState) return;
     let parsed = null;
     try { parsed = new URL(url); } catch { return; }
@@ -728,7 +735,7 @@ function createBundle() {
     // clobber preErrorUrl -- e.g. the quitting screen loads while isErrorState
     // is false -- leaving nothing to restore the window to on a quit backout.
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
-    console.log(`[nav] chrome view committed ${url}`);
+    console.log(`[nav] chrome view committed (${inPage ? 'in-place' : 'full load'}) ${url}`);
     // Confirm a dispatched in-place swap (its pushState lands here as
     // did-navigate-in-page) so the lost-swap fallback timer stands down.
     if (bundle.pendingSwapUrl) {
@@ -740,6 +747,9 @@ function createBundle() {
             clearTimeout(bundle.pendingSwapTimer);
             bundle.pendingSwapTimer = null;
           }
+          // A confirmed swap is live proof the shell document and its swap
+          // listener are healthy; re-arm readiness in case anything cleared it.
+          bundle.chromeShellReady = true;
         }
       } catch { /* noop */ }
     }
@@ -763,8 +773,8 @@ function createBundle() {
     updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
     updateOsTitle(bundle);
   };
-  chromeView.webContents.on('did-navigate', (_e, url) => onChromeNavigate(url));
-  chromeView.webContents.on('did-navigate-in-page', (_e, url) => onChromeNavigate(url));
+  chromeView.webContents.on('did-navigate', (_e, url) => onChromeNavigate(url, false));
+  chromeView.webContents.on('did-navigate-in-page', (_e, url) => onChromeNavigate(url, true));
 
   // Defense in depth: the chrome view hosts ONLY trusted local pages served from
   // the backend origin. It must never navigate to untrusted agent content -- an

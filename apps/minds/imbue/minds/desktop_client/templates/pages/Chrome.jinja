@@ -43,8 +43,14 @@
        class="fixed left-[4px] top-[38px] rounded-[12px] bg-surface-primary pointer-events-none"
        style="width: calc(100% - 8px); height: calc(100% - 42px);"></div>
 
+  {# No eager src: chrome.js arms it (data-content-src) in BROWSER mode only.
+     In Electron the iframe is hidden and must never load -- an eager src="/"
+     kicked off a hidden Landing load on every wrapper mount, whose subframe
+     load activity flipped the chrome webContents into a "loading" state that
+     demoted subsequent hub navigations from in-place swaps to full loads
+     (the titlebar flash), and wasted a Landing render + SSE stream. #}
   <iframe id="content-frame"
-          src="/"
+          data-content-src="/"
           class="fixed left-[4px] top-[38px] border-0 rounded-[12px] bg-surface-primary"
           style="width: calc(100% - 8px); height: calc(100% - 42px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;"></iframe>
 </ChromeShell>

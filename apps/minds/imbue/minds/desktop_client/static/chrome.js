@@ -625,18 +625,23 @@
   // switcher backdrop. Re-run after every swap -- a freshly swapped-in wrapper
   // carries a fresh (unhidden) iframe.
   function applyModeSetup() {
-    if (!isElectron) return;
-    var electronContentFrame = document.getElementById('content-frame');
-    if (electronContentFrame) electronContentFrame.style.display = 'none';
-    var backdrop = document.getElementById('sidebar-backdrop');
-    if (backdrop) backdrop.style.display = 'none';
+    var contentFrame = document.getElementById('content-frame');
+    if (isElectron) {
+      if (contentFrame) contentFrame.style.display = 'none';
+      var backdrop = document.getElementById('sidebar-backdrop');
+      if (backdrop) backdrop.style.display = 'none';
+    } else if (contentFrame && !contentFrame.getAttribute('src')) {
+      // Browser mode: the wrapper's iframe ships without src (Electron must
+      // never load it -- see pages/Chrome.jinja); arm it here, at boot and
+      // after every swap that brings the wrapper in.
+      contentFrame.src = contentFrame.dataset.contentSrc || '/';
+    }
   }
 
   if (isElectron) {
     document.getElementById('min-btn').onclick = function () { window.minds.minimize(); };
     document.getElementById('max-btn').onclick = function () { window.minds.maximize(); };
     document.getElementById('close-btn').onclick = function () { window.minds.close(); };
-    applyModeSetup();
   } else {
     // Browser mode: backdrop click outside the panel + Escape close the
     // sidebar, matching the Electron sidebar's behavior.
@@ -648,6 +653,10 @@
       if (e.key === 'Escape') closeSidebar();
     });
   }
+  // Per-mode page fixup for the BOOT document (swaps re-run it per swapped-in
+  // page): Electron hides the browser-only iframe + inline switcher; browser
+  // mode arms the wrapper iframe's deferred src.
+  applyModeSetup();
 
   // Custom titlebar tooltips: the titlebar buttons carry ``data-tooltip``
   // labels and are wired by the shared /_static/tooltip_triggers.js (included
