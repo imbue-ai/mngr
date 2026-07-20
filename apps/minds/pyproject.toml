@@ -14,6 +14,7 @@ dependencies = [
     "concurrency-group",
     "cryptography>=42.0",
     "flask>=3.0",
+    "gherkin-official>=39.1.0",
     "httpx>=0.27.0",
     "imbue-common",
     "itsdangerous>=2.2.0",

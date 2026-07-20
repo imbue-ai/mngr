@@ -1515,6 +1515,18 @@ wheels = [
 ]
 
 [[package]]
+name = "gherkin-official"
+version = "39.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ab/73/511f4338d6f23f0c4d0f5ae0ffd942d891d73593d59ed2622abc749bf57e/gherkin_official-39.1.0.tar.gz", hash = "sha256:d5e98fa982411948b74aa72e4fe039dd51a07905dcd1e8bc58df47c8d5ae1800", size = 34009, upload-time = "2026-05-06T14:49:40.115Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/c3/080d581f02c868b1dfec88e7285a091d39d978f1d4f05126a586db0e6de2/gherkin_official-39.1.0-py3-none-any.whl", hash = "sha256:0e688b31bbc40561d950dc2b47cd3127fcc903f8cbf63d01fa45a0ec39fc72ab", size = 38845, upload-time = "2026-05-06T14:49:39.096Z" },
+]
+
+[[package]]
 name = "google-api-core"
 version = "2.30.3"
 source = { registry = "https://pypi.org/simple" }
@@ -3404,6 +3416,7 @@ dependencies = [
     { name = "concurrency-group" },
     { name = "cryptography" },
     { name = "flask" },
+    { name = "gherkin-official" },
     { name = "httpx" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
@@ -3441,6 +3454,7 @@ requires-dist = [
     { name = "concurrency-group", editable = "libs/concurrency_group" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "flask", specifier = ">=3.0" },
+    { name = "gherkin-official", specifier = ">=39.1.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
