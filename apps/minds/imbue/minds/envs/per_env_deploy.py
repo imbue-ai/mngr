@@ -871,6 +871,97 @@ def _list_modal_app_container_ids(*, app_id: str, modal_env: str, parent_cg: Con
     return tuple(ids)
 
 
+@pure
+def _modal_profile_token_workspace(rows: Sequence[object], profile: str) -> str | None:
+    """Return the Modal workspace the ``profile`` row's token is bound to, or None.
+
+    ``modal profile list --json`` emits one row per profile with ``name``,
+    ``workspace``, and ``active`` fields. Modal tokens are workspace-bound, so a
+    profile ``name``d ``minds-dev`` whose token actually belongs to ``imbue``
+    reports ``workspace == "imbue"`` here -- exactly the misroute a
+    same-named-but-wrong-token profile produces. Returns None when the profile
+    isn't listed or its row lacks a usable ``workspace`` string.
+    """
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        row: dict[str, object] = {str(key): value for key, value in raw_row.items()}
+        if row.get("name") != profile:
+            continue
+        workspace = row.get("workspace")
+        return workspace if isinstance(workspace, str) and workspace else None
+    return None
+
+
+def active_modal_token_workspace(profile: str, *, parent_cg: ConcurrencyGroup) -> str | None:
+    """Best-effort: the Modal workspace ``profile``'s token is bound to, or None.
+
+    Runs ``modal profile list --json`` (a read-only Modal call) and returns the
+    ``workspace`` of the row named ``profile``. Returns None -- so the caller
+    skips the check -- when modal exits non-zero or emits non-JSON; a transient
+    failure must never block a deploy (the deploy-time URL assertion in
+    ``provisioning`` is the backstop). A genuine spawn failure (modal not
+    installed) propagates, since the deploy needs modal regardless.
+    """
+    cg = parent_cg.make_concurrency_group(name="modal-profile-list")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["modal", "profile", "list", "--json"],
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        logger.warning(
+            "`modal profile list --json` failed (exit {}); skipping the token-workspace preflight.",
+            result.returncode,
+        )
+        return None
+    try:
+        rows = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.warning("`modal profile list --json` returned non-JSON ({}); skipping preflight.", exc)
+        return None
+    if not isinstance(rows, list):
+        return None
+    return _modal_profile_token_workspace(rows, profile)
+
+
+@pure
+def modal_token_reprovision_hint(modal_workspace: str) -> str:
+    """The copy-pasteable fix when a Modal profile's token is bound to the wrong workspace.
+
+    Single source of the reprovision guidance shared by the deploy preflight
+    (:func:`modal_token_workspace_mismatch_message`) and the deploy-time URL
+    assertion (``provisioning._assert_deploy_url_matches``).
+    """
+    return (
+        f"Mint a token for the right workspace with `modal token new --profile {modal_workspace}` "
+        f"(select the {modal_workspace!r} workspace in the browser), then re-activate and re-run."
+    )
+
+
+@pure
+def modal_token_workspace_mismatch_message(modal_workspace: str, token_workspace: str | None) -> str | None:
+    """Operator-facing error if ``token_workspace`` contradicts ``modal_workspace``, else None.
+
+    ``token_workspace`` is the pinned profile's actual bound workspace (from
+    :func:`active_modal_token_workspace`), or None when it couldn't be
+    determined -- None is treated as 'no problem' so a transient modal failure
+    never blocks a deploy. A concrete mismatch (e.g. a ``minds-dev`` profile
+    holding an ``imbue`` token) returns a copy-pasteable fix.
+    """
+    if token_workspace is None or token_workspace == modal_workspace:
+        return None
+    return (
+        f"The Modal profile {modal_workspace!r} (pinned via MODAL_PROFILE) holds a token bound to "
+        f"workspace {token_workspace!r}, not {modal_workspace!r} -- deploying would misroute every "
+        f"`modal` call to the wrong workspace. `minds env activate --deploy` only checks that the "
+        f"[{modal_workspace}] profile section exists, not its token's workspace. "
+        f"{modal_token_reprovision_hint(modal_workspace)} Verify with `modal profile list`."
+    )
+
+
 def per_env_secret_services() -> tuple[str, ...]:
     """Public accessor for the list of services that need per-env Modal Secrets."""
     return _PER_ENV_SECRET_SERVICES
