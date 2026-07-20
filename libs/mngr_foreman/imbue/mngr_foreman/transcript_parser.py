@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from typing import cast
 
 from loguru import logger
 
@@ -120,12 +121,14 @@ def _has_tool_results_only(content: str | list[Any] | Any) -> bool:
     return True
 
 
-def _extract_image_block(item: dict[str, Any]) -> dict[str, str] | None:
-    """Pull a base64 image out of a tool_result content block, or None.
+def _extract_image_block(item: dict[str, Any], image_id: str) -> dict[str, str] | None:
+    """Pull a base64 image out of a content block, or None.
 
-    Shape written by Claude Code:
+    Shape written by Claude Code (in tool results, human-pasted messages, and
+    queued-command attachments alike):
     ``{"type":"image","source":{"type":"base64","media_type":"image/png","data":"<b64>"}}``.
-    Oversize payloads and non-base64 sources are dropped.
+    Oversize payloads and non-base64 sources are dropped. ``image_id`` is a stable
+    handle the server can use to serve a large image by reference.
     """
     source = item.get("source")
     if not isinstance(source, dict) or source.get("type") != "base64":
@@ -136,7 +139,31 @@ def _extract_image_block(item: dict[str, Any]) -> dict[str, str] | None:
     media_type = source.get("media_type")
     if not isinstance(media_type, str) or not media_type.startswith("image/"):
         media_type = "image/png"
-    return {"media_type": media_type, "data": data}
+    return {"id": image_id, "media_type": media_type, "data": data}
+
+
+def _extract_images_from_content(content: Any, id_prefix: str) -> list[dict[str, str]]:
+    """Collect base64 image blocks from a content list, capped in count.
+
+    Handles the ``content`` list shared by tool results, human-pasted user
+    messages, and queued-command attachment prompts. ``id_prefix`` is combined
+    with the block index for a stable per-image id.
+    """
+    if not isinstance(content, list):
+        return []
+    images: list[dict[str, str]] = []
+    for index, item in enumerate(content):
+        if not isinstance(item, dict):
+            continue
+        block = cast("dict[str, Any]", item)
+        if block.get("type") != "image":
+            continue
+        if len(images) >= _MAX_TOOL_RESULT_IMAGES:
+            break
+        image = _extract_image_block(block, f"{id_prefix}-{index}")
+        if image is not None:
+            images.append(image)
+    return images
 
 
 def _make_event_id(uuid: str, suffix: str) -> str:
@@ -397,21 +424,26 @@ def _parse_user_message(
     message: dict[str, Any] = raw.get("message", {})
     content = message.get("content")
 
-    # Emit a user text or framework message if there is actual user text.
+    # Emit a user text / framework / paste-image message.
     if not _has_tool_results_only(content):
         event_id = _make_event_id(uuid, "user")
         if event_id not in existing_event_ids:
             raw_text = _extract_text_content(content)
             stripped = raw_text.strip()
+            # Human-pasted images ride alongside the text in the same content list.
+            paste_images = _extract_images_from_content(content, f"{uuid}-u")
             # Fully hidden: the interrupt sentinel and Claude Code's resume marker
             # (its own UI hides the latter, so we do too).
-            if stripped and stripped != _INTERRUPT_SENTINEL_TEXT and not _is_resume_continuation_marker(raw):
-                framework = _framework_label_and_detail(raw, raw_text)
+            is_hidden = stripped == _INTERRUPT_SENTINEL_TEXT or _is_resume_continuation_marker(raw)
+            if (stripped or paste_images) and not is_hidden:
+                # Framework detection applies only to text-bearing messages.
+                framework = _framework_label_and_detail(raw, raw_text) if stripped else None
+                event: dict[str, Any]
                 if framework is not None:
                     # Claude Code framework noise (/command, its stdout, meta) ->
                     # a collapsed one-liner, not a user bubble.
                     label, detail = framework
-                    event: dict[str, Any] = {
+                    event = {
                         "timestamp": timestamp,
                         "type": "framework_message",
                         "event_id": event_id,
@@ -430,6 +462,8 @@ def _parse_user_message(
                         "content": _normalize_slash_command(raw_text),
                         "message_uuid": uuid,
                     }
+                    if paste_images:
+                        event["images"] = paste_images
                 if session_id is not None:
                     event["session_id"] = session_id
                 existing_event_ids.add(event_id)
@@ -450,24 +484,20 @@ def _parse_user_message(
             if event_id in existing_event_ids:
                 continue
 
-            result_content = block.get("content", "")
-            images: list[dict[str, str]] = []
-            if isinstance(result_content, list):
+            raw_result_content = block.get("content", "")
+            images = _extract_images_from_content(raw_result_content, f"{uuid}-{tool_call_id}")
+            if isinstance(raw_result_content, list):
                 parts: list[str] = []
-                for item in result_content:
-                    if isinstance(item, dict):
-                        item_type = item.get("type")
-                        if item_type == "text":
-                            parts.append(item.get("text", ""))
-                        elif item_type == "image" and len(images) < _MAX_TOOL_RESULT_IMAGES:
-                            image = _extract_image_block(item)
-                            if image is not None:
-                                images.append(image)
+                for item in raw_result_content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        parts.append(item.get("text", ""))
                     elif isinstance(item, str):
                         parts.append(item)
                 result_content = "\n".join(parts)
-            elif not isinstance(result_content, str):
-                result_content = str(result_content)
+            elif isinstance(raw_result_content, str):
+                result_content = raw_result_content
+            else:
+                result_content = str(raw_result_content)
 
             tool_name = tool_name_by_call_id.get(tool_call_id, "unknown")
             result_content = _truncate(result_content, max_tool_output_chars)
@@ -502,7 +532,9 @@ def _parse_queued_command_attachment(
     """Emit a ``user_message`` event for a message the user queued while busy.
 
     Claude Code writes such a message as a ``queued_command`` attachment rather
-    than a normal ``user`` line. Only the ``prompt`` mode carries verbatim text.
+    than a normal ``user`` line. The ``prompt`` carries verbatim text (a string)
+    or, when the queued message had a pasted image, a content list of text +
+    image blocks.
     """
     attachment = raw.get("attachment")
     if not isinstance(attachment, dict):
@@ -511,10 +543,12 @@ def _parse_queued_command_attachment(
         return
     if attachment.get("commandMode") != _QUEUED_COMMAND_PROMPT_MODE:
         return
-    prompt = attachment.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
+    raw_prompt = attachment.get("prompt")
+    images = _extract_images_from_content(raw_prompt, f"{uuid}-q")
+    prompt_text = _extract_text_content(raw_prompt) if isinstance(raw_prompt, list) else raw_prompt
+    prompt = _normalize_slash_command(prompt_text) if isinstance(prompt_text, str) else ""
+    if not prompt.strip() and not images:
         return
-    prompt = _normalize_slash_command(prompt)
 
     event_id = _make_event_id(uuid, "queued")
     if event_id in existing_event_ids:
@@ -529,6 +563,8 @@ def _parse_queued_command_attachment(
         "content": prompt,
         "message_uuid": uuid,
     }
+    if images:
+        event["images"] = images
     if session_id is not None:
         event["session_id"] = session_id
     existing_event_ids.add(event_id)

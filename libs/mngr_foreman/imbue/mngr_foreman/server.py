@@ -37,6 +37,8 @@ from imbue.mngr_foreman.messaging import MessageSendError
 from imbue.mngr_foreman.messaging import send_message_to_agent
 from imbue.mngr_foreman.terminal import handle_orchestrator_ws
 from imbue.mngr_foreman.terminal import handle_terminal_ws
+from imbue.mngr_foreman.transcript_images import externalize_event_images
+from imbue.mngr_foreman.transcript_images import get_cached_image
 from imbue.mngr_foreman.transcript_parser import parse_claude_session_lines
 from imbue.mngr_foreman.transcript_tail import ReaderFn
 from imbue.mngr_foreman.transcript_tail import TRANSCRIPT_SUBPATH
@@ -50,6 +52,10 @@ from imbue.mngr_foreman.uploads import read_upload
 from imbue.mngr_foreman.uploads import write_upload
 
 _STATIC_PACKAGE: Final[str] = "imbue.mngr_foreman.static"
+# Characters allowed in a transcript-image id (uuid + tool_call_id + index).
+_SAFE_IMAGE_ID_CHARS: Final[frozenset[str]] = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+)
 _TRANSCRIPT_POLL_SECONDS: Final[float] = 1.5
 _TARGET_REFRESH_SECONDS: Final[float] = 30.0
 _HEARTBEAT_SECONDS: Final[float] = 15.0
@@ -173,6 +179,19 @@ def create_app(
             mimetype="text/event-stream",
             headers=_sse_headers(),
         )
+
+    @app.route("/api/agents/<name>/timage/<image_id>")
+    def api_transcript_image(name: str, image_id: str) -> ResponseReturnValue:
+        # Serve a large transcript image that was externalized out of its SSE
+        # frame. Bytes come from the in-memory cache keyed by the parser's id.
+        if not image_id or any(c not in _SAFE_IMAGE_ID_CHARS for c in image_id):
+            return Response("Not found", status=404, mimetype="text/plain")
+        cached = get_cached_image(image_id)
+        if cached is None:
+            return Response("Not found", status=404, mimetype="text/plain")
+        media_type, raw = cached
+        return Response(raw, mimetype=media_type.split(";")[0], content_type=media_type,
+                        headers={"Cache-Control": "no-cache"})
 
     # ---- send message -----------------------------------------------------
 
@@ -361,6 +380,9 @@ def _transcript_stream(
             max_tool_output_chars=max_tool_output_chars,
         )
         for event in events:
+            # Move large base64 images out-of-band so SSE frames stay small; the
+            # client fetches them by id from the /timage endpoint.
+            externalize_event_images(event)
             yield _sse({"type": "event", "event": event})
 
     # Backfill: first poll reads the whole file from offset 0.

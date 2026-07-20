@@ -210,6 +210,7 @@
   // Index page: agent list
   // ==========================================================================
   function initIndex() {
+    document.title = "foreman — home";
     const listEl = document.getElementById("list");
     const cards = new Map(); // id -> element
 
@@ -313,7 +314,7 @@
   function initAgent() {
     const name = agentNameFromPath();
     document.getElementById("agent-name").textContent = name;
-    document.title = "foreman · " + name;
+    document.title = name + " — chat";
     const termlink = document.getElementById("termlink");
     if (termlink) termlink.href = "/a/" + encodeURIComponent(name) + "/terminal";
     const tEl = document.getElementById("transcript");
@@ -412,14 +413,20 @@
       try { return JSON.stringify(inp, null, 2); } catch (_e) { return String(inp); }
     }
 
-    // An image block from a tool result (e.g. Read on an image): inline, tap to
+    // Source for a transcript image: inline base64 when the server left it in the
+    // event, else the /timage endpoint (large images are served by reference).
+    function imageSrc(img) {
+      if (img.data) return "data:" + (img.media_type || "image/png") + ";base64," + img.data;
+      return "/api/agents/" + encodeURIComponent(name) + "/timage/" + encodeURIComponent(img.id || "");
+    }
+    // A transcript image (from a tool result or a pasted message): inline, tap to
     // expand via the same overlay as upload thumbnails.
     function toolImageEl(img) {
-      const src = "data:" + (img.media_type || "image/png") + ";base64," + img.data;
+      const src = imageSrc(img);
       const image = el("img", "tool-image");
       image.src = src;
       image.loading = "lazy";
-      image.alt = "tool image";
+      image.alt = "image";
       image.addEventListener("click", function () { openLightbox(src); });
       return image;
     }
@@ -603,6 +610,8 @@
         resolveQueued(ev.content || "");
         const e = el("div", "entry user");
         renderUserContent(e, ev.content || "");
+        // Pasted / queued images ride along on the message.
+        if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
         tEl.appendChild(e);
       } else if (ev.type === "framework_message") {
         tEl.appendChild(frameworkEl(ev));
@@ -694,7 +703,7 @@
     // title. Keeps polling (slower) while hidden so the title stays live in a
     // background tab. Each poll is a tmux pane capture over SSH.
     installStatePolling(name, (d) => {
-      document.title = statusTitle(d, name);
+      document.title = statusTitle(d, name + " — chat");
       if (d.blocked) setBlocked(); else clearBlocked();
       applyMngrBusy(d.busy);
     });
@@ -957,14 +966,14 @@
   function initTerminal() {
     const tgt = terminalTarget();
     document.getElementById("agent-name").textContent = tgt.label;
-    document.title = "foreman · " + tgt.label + " · terminal";
+    document.title = tgt.kind === "agent" ? tgt.name + " — terminal" : "foreman — terminal";
     const back = document.getElementById("back");
     if (back) back.href = tgt.back;
 
     // Agent terminals show the live state in the tab title too (orchestrator
     // shells have no agent state). Same lazy poll as the chat page.
     if (tgt.kind === "agent" && tgt.name) {
-      installStatePolling(tgt.name, (d) => { document.title = statusTitle(d, tgt.name) + " · terminal"; });
+      installStatePolling(tgt.name, (d) => { document.title = statusTitle(d, tgt.name + " — terminal"); });
     }
 
     if (typeof Terminal === "undefined") {

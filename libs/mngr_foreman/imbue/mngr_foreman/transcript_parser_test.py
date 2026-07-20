@@ -228,7 +228,10 @@ def test_tool_result_image_passthrough() -> None:
     events = parse_claude_session_lines([line])
     tr = [e for e in events if e["type"] == "tool_result"][0]
     assert tr["output"] == "here is the image"  # image not folded into text
-    assert tr["images"] == [{"media_type": "image/png", "data": "AAAA"}]
+    assert len(tr["images"]) == 1
+    img = tr["images"][0]
+    assert img["media_type"] == "image/png" and img["data"] == "AAAA"
+    assert img["id"]  # a stable id for by-reference serving
 
 
 def test_tool_result_image_only_has_empty_output() -> None:
@@ -237,7 +240,8 @@ def test_tool_result_image_only_has_empty_output() -> None:
     )
     tr = [e for e in parse_claude_session_lines([line]) if e["type"] == "tool_result"][0]
     assert tr["output"] == ""
-    assert tr["images"] == [{"media_type": "image/jpeg", "data": "ZZ"}]
+    assert tr["images"][0]["media_type"] == "image/jpeg"
+    assert tr["images"][0]["data"] == "ZZ"
 
 
 def test_tool_result_non_base64_image_dropped() -> None:
@@ -260,6 +264,73 @@ def test_tool_result_image_count_capped() -> None:
         0
     ]
     assert len(tr["images"]) == 6  # _MAX_TOOL_RESULT_IMAGES
+
+
+def test_user_pasted_image_passthrough() -> None:
+    # A human-pasted image: text + image blocks together in a user message.
+    line = _line(
+        type="user",
+        uuid="up1",
+        timestamp="t1",
+        message={
+            "content": [
+                {"type": "text", "text": "look at this"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "PP"}},
+            ]
+        },
+    )
+    ev = [e for e in parse_claude_session_lines([line]) if e["type"] == "user_message"][0]
+    assert ev["content"] == "look at this"
+    assert ev["images"][0]["data"] == "PP"
+
+
+def test_user_image_only_message_still_emitted() -> None:
+    # An image-only paste (no text) must still produce a user_message.
+    line = _line(
+        type="user",
+        uuid="up2",
+        timestamp="t2",
+        message={"content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "IO"}}]},
+    )
+    events = [e for e in parse_claude_session_lines([line]) if e["type"] == "user_message"]
+    assert len(events) == 1
+    assert events[0]["content"] == ""
+    assert events[0]["images"][0]["data"] == "IO"
+
+
+def test_queued_command_with_image() -> None:
+    # A queued message whose prompt is a content list with a pasted image.
+    line = _line(
+        type="attachment",
+        uuid="q1",
+        timestamp="t3",
+        attachment={
+            "type": "queued_command",
+            "commandMode": "prompt",
+            "prompt": [
+                {"type": "text", "text": "handle this"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "QI"}},
+            ],
+        },
+    )
+    ev = [e for e in parse_claude_session_lines([line]) if e["type"] == "user_message"][0]
+    assert ev["content"] == "handle this"
+    assert ev["images"][0]["data"] == "QI"
+
+
+def test_image_ids_are_distinct() -> None:
+    line = _image_result(
+        "u9",
+        "t9",
+        "c9",
+        [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "B"}},
+        ],
+    )
+    tr = [e for e in parse_claude_session_lines([line]) if e["type"] == "tool_result"][0]
+    ids = [img["id"] for img in tr["images"]]
+    assert len(set(ids)) == 2  # distinct per-image ids
 
 
 def test_lines_missing_uuid_or_timestamp_skipped() -> None:
