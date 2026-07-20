@@ -3006,6 +3006,16 @@ def get_version() -> dict[str, str]:
     }
 
 
+def count_user_tunnels(ops: CloudflareOps, username_prefix: str) -> int:
+    """Count the user's tunnels.
+
+    Shared by the tunnel quota check (``POST /tunnels``) and the ``/account``
+    usage display so the two can never drift.
+    """
+    prefix = f"{username_prefix}{TUNNEL_NAME_SEP}"
+    return len([t for t in ops.list_tunnels(include_prefix=prefix) if t["name"].startswith(prefix)])
+
+
 @web_app.post("/tunnels")
 def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
     """Create a tunnel (idempotent) and return its info with token.
@@ -3024,8 +3034,7 @@ def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, obje
             validate_auth_policy_has_identity(body.default_auth_policy)
         tunnel_name = make_tunnel_name(admin.username, body.agent_id)
         if ctx.ops.get_tunnel_by_name(tunnel_name) is None:
-            prefix = f"{admin.username}{TUNNEL_NAME_SEP}"
-            current = len([t for t in ctx.ops.list_tunnels(include_prefix=prefix) if t["name"].startswith(prefix)])
+            current = count_user_tunnels(ctx.ops, admin.username)
             if current >= entitlements.max_tunnels:
                 raise_quota_exceeded("max_tunnels", entitlements.max_tunnels, current, "tunnels")
         fallback = owner_email_auth_policy(admin.email) if admin.email else None
@@ -4983,10 +4992,7 @@ def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str
     bucket logs a warning and counts that bucket as zero rather than failing
     the whole (display-only) request.
     """
-    tunnel_prefix = f"{username_prefix}{TUNNEL_NAME_SEP}"
-    tunnel_count = len(
-        [t for t in ops.list_tunnels(include_prefix=tunnel_prefix) if t["name"].startswith(tunnel_prefix)]
-    )
+    tunnel_count = count_user_tunnels(ops, username_prefix)
     owned_buckets = _list_owned_buckets(ops, username_prefix)
     total_bucket_bytes = 0
     for bucket in owned_buckets:
