@@ -23,11 +23,11 @@ from typing import Final
 
 from flask import has_app_context
 from flask import request
-from loguru import logger
 from jinja2 import Environment
 from jinja2 import TemplateError
 from jinja2 import select_autoescape
 from jinjax import Catalog
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel

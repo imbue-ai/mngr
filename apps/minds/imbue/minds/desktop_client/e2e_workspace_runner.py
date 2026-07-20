@@ -509,7 +509,7 @@ def _connect_and_pick_content_page(playwright: Playwright, debug_port: int, time
     so callers' launch-flake handling is unchanged.
     """
     deadline = time.monotonic() + timeout_seconds
-    while True:
+    while time.monotonic() < deadline:
         browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS)
         remaining = deadline - time.monotonic()
         round_seconds = min(_PICK_ROUND_SECONDS, max(1, int(remaining)))
@@ -522,6 +522,7 @@ def _connect_and_pick_content_page(playwright: Playwright, debug_port: int, time
             logger.info(
                 "No backend page visible after a {}s round; reconnecting for a fresh target snapshot", round_seconds
             )
+    raise TimeoutError(f"No Electron content page settled on a backend URL within {timeout_seconds}s")
 
 
 def _backend_origin_from_page(page: Page) -> str:
