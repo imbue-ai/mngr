@@ -577,41 +577,57 @@ def _read_failure_message(page: Page) -> str:
     return message or "unknown error: the '#error-message' element was empty"
 
 
-def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> None:
-    """Block until the create flow reaches the workspace or reports failure.
+def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, timeout_seconds: int) -> Page:
+    """Block until the create flow reaches the workspace or reports failure; return the workspace page.
 
-    The minds create flow has two mutually exclusive terminal states after
-    the create form is submitted: a redirect to the ``agent-<id>.localhost``
-    workspace URL (success), or the loading screen's failure sub-view
-    (``#failure-view``) becoming visible (failure -- ``creating.js``'s
-    ``showFailure()`` un-hides it once the status poll/SSE reports FAILED).
+    The create flow has two mutually exclusive terminal states after the create
+    form is submitted, and after the content-in-chrome surface split they live on
+    DIFFERENT WebContentsViews (separate CDP pages):
 
-    Polls both rather than only waiting for the success URL (the old
-    behavior), so a creation failure raises ``WorkspaceCreationFailedError``
-    with the surfaced error text immediately instead of hanging until
-    ``timeout_seconds`` expires. Raises ``PlaywrightTimeoutError`` if neither
-    state is reached within the budget.
+    - **success**: the ready workspace opens on the CONTENT view -- its own page
+      on the ``agent-<id>.localhost`` origin. ``creating.js`` hands the ready
+      workspace's ``/goto`` URL to the ``window.minds`` bridge, which shows it on
+      the content surface while the chrome view that drove the form
+      (``creating_page``) returns to the ``/_chrome`` wrapper. (Before the split
+      the workspace loaded into the same page, so this waited on
+      ``creating_page.url``; now it scans every WebContentsView for the content
+      page that reached the agent subdomain.)
+    - **failure**: the loading screen's failure sub-view (``#failure-view``)
+      becomes visible on ``creating_page`` (still showing the ``/creating``
+      loader) -- ``creating.js``'s ``showFailure()`` un-hides it once the status
+      poll/SSE reports FAILED.
+
+    Polls both rather than only waiting for success, so a creation failure raises
+    ``WorkspaceCreationFailedError`` with the surfaced error text immediately
+    instead of hanging until ``timeout_seconds`` expires. Returns the workspace
+    (content-view) ``Page``; raises ``PlaywrightTimeoutError`` if neither state is
+    reached within the budget.
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if _AGENT_SUBDOMAIN_PATTERN.search(page.url):
-            return
+        for context in browser.contexts:
+            for candidate in context.pages:
+                if _AGENT_SUBDOMAIN_PATTERN.search(candidate.url):
+                    return candidate
         try:
-            failure_is_visible = page.is_visible("#failure-view")
+            failure_is_visible = creating_page.is_visible("#failure-view")
         except PlaywrightError:
-            # A redirect to the workspace can destroy the execution context
-            # mid-check; loop so the next iteration re-reads page.url, which
-            # will match the success pattern and return.
+            # The chrome view re-navigates to /_chrome the instant the bridge
+            # shows the workspace, which can destroy the execution context
+            # mid-check; loop so the next iteration re-scans the pages and finds
+            # the content view now on the agent subdomain.
             failure_is_visible = False
         if failure_is_visible:
-            raise WorkspaceCreationFailedError(f"Workspace creation failed: {_read_failure_message(page)}")
-        page.wait_for_timeout(_CREATE_OUTCOME_POLL_INTERVAL_MS)
+            raise WorkspaceCreationFailedError(f"Workspace creation failed: {_read_failure_message(creating_page)}")
+        creating_page.wait_for_timeout(_CREATE_OUTCOME_POLL_INTERVAL_MS)
     raise PlaywrightTimeoutError(
-        f"Workspace neither became ready nor reported failure within {timeout_seconds}s (last URL: {page.url!r})"
+        f"Workspace neither became ready nor reported failure within {timeout_seconds}s "
+        f"(creating page last URL: {creating_page.url!r})"
     )
 
 
 def _drive_create_flow(
+    browser: Browser,
     page: Page,
     default_workspace_template_path: Path,
     workspace_name: str,
@@ -619,8 +635,12 @@ def _drive_create_flow(
     account_label: str | None = None,
     region: str | None = None,
     anthropic_api_key: str | None = None,
-) -> None:
-    """Drive the create form to a ready workspace on an attached page.
+) -> Page:
+    """Drive the create form to a ready workspace; return the workspace (content-view) page.
+
+    ``page`` is the chrome-view page the form is driven on; the ready workspace
+    opens on the separate content view, whose page this returns (see
+    ``_wait_for_workspace_ready_or_failure``).
 
     Runs exactly once per successful Electron attach; any failure here is a real
     test failure (not a wedged-launch flake) and propagates to fail the test.
@@ -703,19 +723,21 @@ def _drive_create_flow(
     # the workspace once creation completes.
     page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
-    # Race the workspace-ready redirect against the create flow's
-    # failure view, so a `mngr create` failure (e.g. an unregistered
-    # docker runtime) fails this run fast with the surfaced error
-    # rather than blocking the whole navigation budget.
-    _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
-    logger.info("Workspace ready at {}", page.url)
+    # Race the workspace-ready content page against the create flow's failure
+    # view, so a `mngr create` failure (e.g. an unregistered docker runtime)
+    # fails this run fast with the surfaced error rather than blocking the whole
+    # navigation budget. The ready workspace opens on the content view (a separate
+    # page); this chrome-view page returns to /_chrome.
+    workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
+    logger.info("Workspace ready at {}", workspace_page.url)
 
-    page.wait_for_selector(
+    workspace_page.wait_for_selector(
         _DOCKVIEW_WORKSPACE_SELECTOR,
         state="visible",
         timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
     )
     logger.info("system_interface dockview rendered; workspace creation complete")
+    return workspace_page
 
 
 def _attach_renderer_diagnostics(page: Page) -> None:
@@ -752,9 +774,9 @@ def _attempt_create_workspace_via_electron(
     (a wedged Electron the caller should recover by relaunching). Errors from the
     create flow itself propagate unchanged so real test failures are not retried.
 
-    ``on_workspace_ready``, if given, is called with the attached content page
-    once the workspace's ``system_interface`` has rendered, while the browser is
-    still connected (e.g. to send a chat message). Its exceptions propagate
+    ``on_workspace_ready``, if given, is called with the workspace (content-view)
+    page once the workspace's ``system_interface`` has rendered, while the browser
+    is still connected (e.g. to send a chat message). Its exceptions propagate
     unchanged -- they are real failures, not launch flakes, so they are not
     retried.
     """
@@ -779,7 +801,8 @@ def _attempt_create_workspace_via_electron(
                 # Surface renderer console/JS errors into the run log so a stuck
                 # create step (creating.js handlers not attaching) is diagnosable.
                 _attach_renderer_diagnostics(page)
-                _drive_create_flow(
+                workspace_page = _drive_create_flow(
+                    browser,
                     page,
                     default_workspace_template_path,
                     workspace_name,
@@ -789,7 +812,7 @@ def _attempt_create_workspace_via_electron(
                     anthropic_api_key=anthropic_api_key,
                 )
                 if on_workspace_ready is not None:
-                    on_workspace_ready(page)
+                    on_workspace_ready(workspace_page)
             finally:
                 browser.close()
 
@@ -877,8 +900,8 @@ def create_workspace_via_electron(
 
     ``anthropic_api_key`` selects the manual ``API_KEY`` AI provider and types
     the key into the create form (mutually exclusive with ``account_label``).
-    ``on_workspace_ready`` is called with the attached content page once the
-    workspace has rendered, before teardown -- e.g. to send a chat message and
+    ``on_workspace_ready`` is called with the workspace (content-view) page once
+    the workspace has rendered, before teardown -- e.g. to send a chat message and
     await the reply on the same Electron session.
 
     Returns once the workspace's ``system_interface`` dockview UI has
@@ -991,13 +1014,16 @@ def _pick_chrome_page(browser: Browser, timeout_seconds: int) -> Page:
 
 
 def drive_create_docker_imbue_workspace(
-    page: Page, default_workspace_template_path: Path, workspace_name: str
-) -> None:
+    browser: Browser, page: Page, default_workspace_template_path: Path, workspace_name: str
+) -> Page:
     """Fill + submit the create form for a local-Docker workspace with Imbue-Cloud AI.
 
     Local Docker compute keeps the workspace on this machine; Imbue-Cloud AI
     gives the agent working credentials (via the activated env's account) so it
     can answer the chat message. Backups are deferred to keep create fast.
+
+    ``page`` is the chrome-view page the form is driven on; returns the workspace
+    (content-view) page the ready workspace opens on.
     """
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
@@ -1051,13 +1077,14 @@ def drive_create_docker_imbue_workspace(
     # the workspace once creation completes.
     page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
-    _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
-    logger.info("Workspace ready at {}", page.url)
-    page.wait_for_selector(
+    workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
+    logger.info("Workspace ready at {}", workspace_page.url)
+    workspace_page.wait_for_selector(
         _DOCKVIEW_WORKSPACE_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
     )
     logger.info("system_interface dockview rendered")
-    _flow_screenshot(page, "02-workspace-dockview")
+    _flow_screenshot(workspace_page, "02-workspace-dockview")
+    return workspace_page
 
 
 def _agent_id_from_subdomain(url: str) -> str:
@@ -1273,15 +1300,25 @@ def run_full_workspace_flow(
                 backend_origin = _backend_origin_from_page(content_page)
 
                 logger.info("=== STEP 1: create local Docker workspace ===")
-                drive_create_docker_imbue_workspace(content_page, default_workspace_template_path, workspace_name)
+                # The create form is driven on the chrome view (content_page); the
+                # ready workspace opens on the content view (workspace_page). The
+                # dockview steps (message, terminal) and the agent-id read run on
+                # workspace_page; the chrome-surface steps below (home, landing,
+                # settings/destroy) stay on content_page.
+                workspace_page = drive_create_docker_imbue_workspace(
+                    browser, content_page, default_workspace_template_path, workspace_name
+                )
                 results["STEP 1 create"] = "PASS"
-                agent_id = _agent_id_from_subdomain(content_page.url)
+                agent_id = _agent_id_from_subdomain(workspace_page.url)
                 logger.info("Workspace agent id (from subdomain): {}", agent_id)
 
                 _run_flow_step(
-                    results, "STEP 2 message", content_page, lambda: _send_message_and_await_reply(content_page, token)
+                    results,
+                    "STEP 2 message",
+                    workspace_page,
+                    lambda: _send_message_and_await_reply(workspace_page, token),
                 )
-                _run_flow_step(results, "STEP 3 terminal", content_page, lambda: _open_terminal(content_page))
+                _run_flow_step(results, "STEP 3 terminal", workspace_page, lambda: _open_terminal(workspace_page))
                 _run_flow_step(
                     results,
                     "STEP 4 lifecycle",
