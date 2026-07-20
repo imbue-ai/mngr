@@ -9,6 +9,11 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { computeBundleViewBounds } = require('./view-layout');
+const {
+  parseWorkspaceId,
+  parseRecoveryAgentId,
+  toPersistedContentUrl,
+} = require('./workspace-urls');
 
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
 // main-process failures BEFORE anything else runs, so startup output (including
@@ -156,23 +161,9 @@ function getSessionStatePath() {
 }
 
 // -- URL/workspace helpers --
-
-function parseWorkspaceId(url) {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    // Final workspace URL: `<agent-id>.localhost:PORT/...`
-    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
-    if (hostMatch) return hostMatch[1];
-    // Auth-bridge URL: `localhost:PORT/goto/<agent-id>/` is the pending
-    // state before the subdomain cookie is installed. Recognising it lets
-    // findBundleForWorkspace de-dupe clicks during the redirect window.
-    const pathMatch = parsed.pathname.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
-    return pathMatch ? pathMatch[1] : null;
-  } catch {
-    return null;
-  }
-}
+// ``parseWorkspaceId`` / ``parseRecoveryAgentId`` / ``toPersistedContentUrl`` are
+// pure and live in ``./workspace-urls`` (required above) so they can be
+// unit-tested outside Electron.
 
 // Wider than ``parseWorkspaceId`` -- also recognises the workspace-scoped
 // minds-backend routes (``/workspace/<id>/settings``, ``/workspace/<id>/
@@ -1708,42 +1699,22 @@ function loadSessionState() {
   }
 }
 
-function toRelativeBackendUrl(url) {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-    return parsed.pathname + parsed.search + parsed.hash;
-  } catch {
-    return null;
-  }
-}
-
-// Canonicalise a window's live content URL into the form persisted in
-// ``window-state.json``. A workspace window's URL is on the agent subdomain
-// (``agent-<id>.localhost:<mngr_forward_port>/...``); stripping that to a bare
-// relative path loses the agent identity (the subdomain host) and would
-// reopen against the minds backend (the landing page) on restore. Persist the
-// port-independent ``/goto/<agent>/`` auth-bridge path instead -- it carries
-// the agent id, is recognised by ``parseWorkspaceId`` (so dead-workspace
-// filtering works), and ``toRestoredContentUrl`` rebuilds the live origin from
-// it. Everything else round-trips as a minds-backend-relative path.
-function toPersistedContentUrl(url) {
-  const agentId = parseWorkspaceId(url);
-  if (agentId) return `/goto/${encodeURIComponent(agentId)}/`;
-  return toRelativeBackendUrl(url);
-}
-
-// Inverse of ``toPersistedContentUrl``: turn a persisted entry's ``url`` back
-// into a loadable absolute URL. Workspace entries (``/goto/<agent>/``) are
-// rebuilt through ``workspaceUrlForAgent`` so the bridge targets the CURRENT
-// run's mngr_forward origin; other entries resolve against the minds backend.
-// Persisted urls are backend-relative, so resolve to absolute BEFORE parsing
-// the workspace id -- ``parseWorkspaceId`` runs ``new URL(url)``, which throws
-// (yielding null) on a bare relative path.
+// Inverse of ``toPersistedContentUrl`` (which lives in ``./workspace-urls``):
+// turn a persisted entry's ``url`` back into a loadable absolute URL. Workspace
+// entries (``/goto/<agent>/``) are rebuilt through ``workspaceUrlForAgent`` so
+// the bridge targets the CURRENT run's mngr_forward origin; other entries
+// resolve against the minds backend. Persisted urls are backend-relative, so
+// resolve to absolute BEFORE parsing the workspace id -- ``parseWorkspaceId``
+// runs ``new URL(url)``, which throws (yielding null) on a bare relative path.
+//
+// A legacy recovery URL (``/agents/<agent>/recovery?return_to=...``) persisted
+// before ``toPersistedContentUrl`` learned to canonicalise it is also rebuilt to
+// the live workspace here, so an already-broken window-state (its ``return_to``
+// pinned to a dead prior-run port) self-heals on the first restore rather than
+// reopening to a dead link.
 function toRestoredContentUrl(entry) {
   const absolute = toAbsoluteUrl(entry.url);
-  const agentId = parseWorkspaceId(absolute);
+  const agentId = parseWorkspaceId(absolute) || parseRecoveryAgentId(absolute);
   if (agentId) {
     const workspaceUrl = workspaceUrlForAgent(agentId);
     if (workspaceUrl) return workspaceUrl;
@@ -1806,8 +1777,11 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   for (const entry of state) {
     // Persisted urls are backend-relative; resolve to absolute so
     // ``parseWorkspaceId`` (``new URL``) can read the workspace id rather than
-    // throwing on the bare path.
-    const agentId = parseWorkspaceId(toAbsoluteUrl(entry.url));
+    // throwing on the bare path. Also recognise a legacy recovery URL so its
+    // window is dropped when the underlying workspace is gone (a fresh persist
+    // canonicalises it to ``/goto/<agent>/``, but old state may still carry it).
+    const absolute = toAbsoluteUrl(entry.url);
+    const agentId = parseWorkspaceId(absolute) || parseRecoveryAgentId(absolute);
     if (agentId && !knownAgentIdsSet.has(agentId)) {
       continue; // workspace no longer exists, skip silently
     }
