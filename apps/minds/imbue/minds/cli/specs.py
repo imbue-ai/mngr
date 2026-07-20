@@ -93,11 +93,8 @@ def _emit_unit_records(
     # The whole corpus, so each record's invariants list can name binding Rules that the emitted subset may exclude.
     all_units: tuple[SpecUnit, ...],
     corpus_root: Path,
-    unit_kind: SpecUnitKind | None,
 ) -> None:
     for unit in units_to_emit:
-        if unit_kind is not None and unit.kind != unit_kind:
-            continue
         write_stdout_line(json.dumps(spec_unit_to_record(unit, all_units, corpus_root), ensure_ascii=False))
 
 
@@ -143,11 +140,14 @@ def specs_validate(corpus_root: Path) -> None:
 def _unit_passes_list_filters(
     unit: SpecUnit,
     corpus_root: Path,
+    unit_kind: SpecUnitKind | None,
     area_filter: str | None,
     tag_filter: str | None,
     name_filter: str | None,
     step_filter: str | None,
 ) -> bool:
+    if unit_kind is not None and unit.kind != unit_kind:
+        return False
     if area_filter is not None and not spec_unit_matches_area(unit, area_filter, corpus_root):
         return False
     if tag_filter is not None and not spec_unit_matches_tag(unit, tag_filter):
@@ -184,8 +184,8 @@ def _unit_passes_list_filters(
     "tag_filter",
     default=None,
     help=(
-        "Keep the single unit with this exact raw tag (identity or auxiliary; a leading '@' is tolerated) "
-        "or this exact coordinate."
+        "Keep units with this exact raw tag (identity or auxiliary; a leading '@' is tolerated) "
+        "or this exact coordinate. Auxiliary tags may be shared, so several units can match."
     ),
 )
 @click.option(
@@ -223,17 +223,18 @@ def specs_list(
     The --unit/--area/--tag/--name/--step filters are selection-only and
     AND-composed: a unit is emitted only when it passes every filter given, and
     with no filters every unit is emitted (no match prints nothing, exit 0).
-    --area keeps a whole folder subtree; --tag keeps a single unit by exact raw
-    tag or coordinate. A record still lists its full invariants even when a
-    binding Rule is filtered out of the emitted set. Stdout carries nothing but
-    JSONL; diagnostics go to stderr.
+    --area keeps a whole folder subtree; --tag keeps units by exact raw tag or
+    exact coordinate (auxiliary tags may be shared across units). A record
+    still lists its full invariants even when a binding Rule is filtered out
+    of the emitted set. Stdout carries nothing but JSONL; diagnostics go to
+    stderr.
     """
     scan = scan_corpus(_require_corpus_root(corpus_root))
     unit_kind = None if unit_kind_value is None else _UNIT_KIND_BY_CLI_VALUE[unit_kind_value]
     matching_units = tuple(
         unit
         for unit in scan.units
-        if _unit_passes_list_filters(unit, corpus_root, area_filter, tag_filter, name_filter, step_filter)
+        if _unit_passes_list_filters(unit, corpus_root, unit_kind, area_filter, tag_filter, name_filter, step_filter)
     )
-    _emit_unit_records(matching_units, scan.units, corpus_root, unit_kind)
+    _emit_unit_records(matching_units, scan.units, corpus_root)
     _fail_if_units_were_omitted(scan)

@@ -169,6 +169,30 @@ def test_specs_list_filters_by_exact_tag_or_coordinate(tmp_path: Path) -> None:
     assert no_match.stdout == ""
 
 
+def test_specs_list_tag_filter_emits_every_unit_sharing_an_auxiliary_tag(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "authentication/signin.feature": (
+                "Feature: Sign-in\n\n  @fresh-code @happy-path\n  Scenario: fresh\n    Given a thing\n"
+            ),
+            "authentication/session.feature": (
+                "Feature: Session\n\n  @survives-restart @happy-path\n  Scenario: restart\n    Given a thing\n"
+            ),
+        },
+    )
+
+    result = CliRunner().invoke(specs, ["list", "--root", str(root), "--tag", "happy-path"])
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    # Auxiliary tags may repeat across units, so a --tag match is not necessarily unique.
+    assert [record["coordinate"] for record in records] == [
+        "authentication.survives-restart",
+        "authentication.fresh-code",
+    ]
+
+
 def test_specs_list_filters_by_case_insensitive_name_substring(tmp_path: Path) -> None:
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
 
