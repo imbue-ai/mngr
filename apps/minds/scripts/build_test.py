@@ -25,6 +25,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import tomllib
 import zipfile
 from pathlib import Path
 from typing import Final
@@ -192,6 +193,44 @@ def test_workspace_package_lists_are_consistent() -> None:
         f"build_test.py WORKSPACE_PACKAGES = {sorted(expected)}. "
         f"Differences (symmetric difference vs the test's list) by file: {mismatches}. "
         "Update every file so the package sets match exactly."
+    )
+
+
+def test_lock_has_no_intel_missing_wheels() -> None:
+    """Guard: the packaged env must install wheel-only on Intel (x86_64) macOS.
+
+    A dependency that ships a macOS arm64 wheel but no Intel-usable wheel
+    (macOS x86_64 / universal2 / pure-python) forces uv into a source build
+    during env-setup on an Intel Mac. Native (Rust/C) packages like cbor2 and
+    cryptography then need a compiler the user's machine doesn't have, so
+    `uv sync` fails and the backend never starts (a real user hit exactly this:
+    cbor2 6.x via modal, and cryptography 49.x, both dropped their macOS
+    x86_64 wheels). The `constraint-dependencies` in
+    electron/pyproject/pyproject.toml cap them to the last Intel-friendly
+    releases; this guard fails the build if any dep regresses that.
+
+    This is a pure lock-file audit -- no toolchain, no Intel runner, no Rust.
+    That matters: a GitHub Intel CI runner ships Rust, so it would silently
+    *pass* a source-build-only env and mask this failure.
+    """
+    lock = tomllib.loads((APP_ROOT / "electron" / "pyproject" / "uv.lock").read_text())
+    offenders = []
+    for pkg in lock.get("package", []):
+        wheel_files = [w.get("url", "").rsplit("/", 1)[-1] for w in pkg.get("wheels", [])]
+        if not wheel_files:
+            continue  # sdist-only: pure-python builds without a compiler; no arch wheel to miss
+        ships_mac_arm = any("macosx" in f and "arm64" in f for f in wheel_files)
+        ships_intel = any(
+            ("macosx" in f and "x86_64" in f) or "universal2" in f or f.endswith("none-any.whl") for f in wheel_files
+        )
+        if ships_mac_arm and not ships_intel:
+            offenders.append(f"{pkg['name']}=={pkg['version']}")
+    assert offenders == [], (
+        "Packaged env has dependencies that ship a macOS arm64 wheel but no "
+        f"Intel-usable wheel, so they would source-build on an Intel Mac: {offenders}. "
+        "Cap each in electron/pyproject/pyproject.toml [tool.uv] constraint-dependencies "
+        "to the last version publishing a macOS x86_64 or universal2 wheel, then re-run "
+        "`uv lock` in electron/pyproject/."
     )
 
 

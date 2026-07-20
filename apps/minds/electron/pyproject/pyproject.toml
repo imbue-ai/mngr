@@ -37,6 +37,17 @@ dependencies = [
 [tool.uv]
 exclude-newer = "14 days"
 
+# Keep the packaged env installable on Intel Macs. cbor2 6.x (via modal) and
+# cryptography 49.x dropped their macOS x86_64 wheels (arm64-only), so on an
+# Intel Mac uv would fall back to a Rust source build during env-setup, which
+# a normal user machine can't do -- `uv sync` fails and the backend never
+# starts. Capping to the last releases that publish an Intel wheel keeps
+# env-setup wheel-only on x86_64. Neither cap is required by any dependency
+# floor (max floor is cryptography>=42.0; modal imposes no cbor2 floor). The
+# test_lock_has_no_intel_missing_wheels guard fails the build if any dep
+# regresses this.
+constraint-dependencies = ["cbor2<6", "cryptography<49"]
+
 [tool.uv.sources]
 minds = { path = "../../../../apps/minds", editable = true }
 imbue-mngr = { path = "../../../../libs/mngr", editable = true }
