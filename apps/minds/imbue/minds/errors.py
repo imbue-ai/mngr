@@ -152,7 +152,7 @@ class SpecValidationFailedError(MindError):
 
 
 class SpecListingIncompleteError(MindError):
-    """Raised by ``minds specs list``/``query`` when some units could not be represented as records.
+    """Raised by ``minds specs list`` when some units could not be represented as records.
 
     The representable records are still emitted on stdout first; this error
     (after per-problem stderr diagnostics) makes the incompleteness visible to

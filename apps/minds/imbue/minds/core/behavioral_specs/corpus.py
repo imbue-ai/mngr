@@ -513,6 +513,21 @@ def spec_unit_matches_tag(unit: SpecUnit, tag_or_coordinate: str) -> bool:
 
 
 @pure
+def spec_unit_matches_area(unit: SpecUnit, area: str, corpus_root: Path) -> bool:
+    """True when the dotted area path is a prefix of (or equal to) the unit's folder parts.
+
+    The area's dot-separated segments are matched segment-by-segment against the
+    folder names on the path from the corpus root to the unit's file, so 'auth'
+    never matches the folder 'authentication', and a root-level unit whose
+    identity tag equals the area (empty folder path) never matches either. This
+    is a folder-subtree test, distinct from a string prefix on the coordinate.
+    """
+    area_segments = tuple(area.split("."))
+    unit_folder_parts = unit.file.relative_to(corpus_root).parent.parts
+    return unit_folder_parts[: len(area_segments)] == area_segments
+
+
+@pure
 def spec_unit_matches_name_substring(unit: SpecUnit, name_substring: str) -> bool:
     """True when the unit's name contains the value, case-insensitively."""
     return name_substring.lower() in unit.name.lower()
@@ -571,7 +586,7 @@ def binding_invariant_coordinates(unit: SpecUnit, units: Sequence[SpecUnit], cor
 
 @pure
 def spec_unit_to_record(unit: SpecUnit, units: Sequence[SpecUnit], corpus_root: Path) -> dict[str, Any]:
-    """Render a unit as the JSON object emitted (one per line) by ``minds specs list``/``query``.
+    """Render a unit as the JSON object emitted (one per line) by ``minds specs list``.
 
     ``units`` is the whole corpus (and ``corpus_root`` the scan root) so the
     ``invariants`` field can name every binding Rule, which is cross-file data.

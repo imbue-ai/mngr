@@ -152,14 +152,14 @@ def test_specs_list_reports_omitted_units_on_stderr_and_exits_nonzero(tmp_path: 
     assert "incomplete" in result.stderr
 
 
-def test_specs_query_filters_by_exact_tag_or_coordinate(tmp_path: Path) -> None:
+def test_specs_list_filters_by_exact_tag_or_coordinate(tmp_path: Path) -> None:
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
     runner = CliRunner()
 
-    by_raw_tag = runner.invoke(specs, ["query", "--root", str(root), "--tag", "fresh-code"])
-    by_coordinate = runner.invoke(specs, ["query", "--root", str(root), "--tag", "authentication.fresh-code"])
-    with_sigil = runner.invoke(specs, ["query", "--root", str(root), "--tag", "@fresh-code"])
-    no_match = runner.invoke(specs, ["query", "--root", str(root), "--tag", "fresh"])
+    by_raw_tag = runner.invoke(specs, ["list", "--root", str(root), "--tag", "fresh-code"])
+    by_coordinate = runner.invoke(specs, ["list", "--root", str(root), "--tag", "authentication.fresh-code"])
+    with_sigil = runner.invoke(specs, ["list", "--root", str(root), "--tag", "@fresh-code"])
+    no_match = runner.invoke(specs, ["list", "--root", str(root), "--tag", "fresh"])
 
     for result in (by_raw_tag, by_coordinate, with_sigil):
         assert result.exit_code == 0, result.output
@@ -169,33 +169,33 @@ def test_specs_query_filters_by_exact_tag_or_coordinate(tmp_path: Path) -> None:
     assert no_match.stdout == ""
 
 
-def test_specs_query_filters_by_case_insensitive_name_substring(tmp_path: Path) -> None:
+def test_specs_list_filters_by_case_insensitive_name_substring(tmp_path: Path) -> None:
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
 
-    result = CliRunner().invoke(specs, ["query", "--root", str(root), "--name", "LOGIN url"])
+    result = CliRunner().invoke(specs, ["list", "--root", str(root), "--name", "LOGIN url"])
 
     assert result.exit_code == 0, result.output
     records = [json.loads(line) for line in result.stdout.splitlines()]
     assert [record["coordinate"] for record in records] == ["authentication.fresh-code"]
 
 
-def test_specs_query_filters_by_case_insensitive_step_text_substring(tmp_path: Path) -> None:
+def test_specs_list_filters_by_case_insensitive_step_text_substring(tmp_path: Path) -> None:
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
 
-    result = CliRunner().invoke(specs, ["query", "--root", str(root), "--step", "ANOTHER data directory"])
+    result = CliRunner().invoke(specs, ["list", "--root", str(root), "--step", "ANOTHER data directory"])
 
     assert result.exit_code == 0, result.output
     records = [json.loads(line) for line in result.stdout.splitlines()]
     assert [record["coordinate"] for record in records] == ["authentication.foreign-token"]
 
 
-def test_specs_query_combines_filters_with_and_semantics(tmp_path: Path) -> None:
+def test_specs_list_combines_filters_with_and_semantics(tmp_path: Path) -> None:
     root = write_spec_corpus(tmp_path / "specs", _VALID_CORPUS)
     runner = CliRunner()
 
-    both_match = runner.invoke(specs, ["query", "--root", str(root), "--tag", "fresh-code", "--step", "login url"])
+    both_match = runner.invoke(specs, ["list", "--root", str(root), "--tag", "fresh-code", "--step", "login url"])
     tag_matches_step_does_not = runner.invoke(
-        specs, ["query", "--root", str(root), "--tag", "fresh-code", "--step", "data directory"]
+        specs, ["list", "--root", str(root), "--tag", "fresh-code", "--step", "data directory"]
     )
 
     assert both_match.exit_code == 0, both_match.output
@@ -205,9 +205,51 @@ def test_specs_query_combines_filters_with_and_semantics(tmp_path: Path) -> None
     assert tag_matches_step_does_not.stdout == ""
 
 
-def test_specs_group_is_registered_on_the_minds_cli() -> None:
+# A corpus with nested subfolders and a root-level unit whose identity tag is
+# an area name, to pin down --area's segment-granular, folder-only matching.
+_AREA_CORPUS = {
+    "invariants.feature": ("Feature: Corpus invariants\n\n  @authentication\n  Rule: a root-level rule\n"),
+    "authentication/signin.feature": ("Feature: Sign-in\n\n  @fresh-code\n  Scenario: fresh\n    Given a thing\n"),
+    "authentication/oauth/flow.feature": ("Feature: OAuth\n\n  @nested\n  Scenario: nested\n    Given a thing\n"),
+    "networking/tunnels/hole-punching.feature": ("Feature: Tunnels\n\n  @deep\n  Scenario: deep\n    Given a thing\n"),
+}
+
+
+def test_specs_list_area_selects_folder_subtree_and_excludes_a_root_tag_of_the_same_name(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _AREA_CORPUS)
+
+    result = CliRunner().invoke(specs, ["list", "--root", str(root), "--area", "authentication"])
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    # Units in authentication/ and its nested subfolder match; the root-level @authentication rule does not.
+    assert [record["coordinate"] for record in records] == ["authentication.oauth.nested", "authentication.fresh-code"]
+
+
+def test_specs_list_area_matches_a_deeper_subfolder_by_full_segments(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _AREA_CORPUS)
+
+    result = CliRunner().invoke(specs, ["list", "--root", str(root), "--area", "authentication.oauth"])
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [record["coordinate"] for record in records] == ["authentication.oauth.nested"]
+
+
+def test_specs_list_area_is_segment_granular_not_a_string_prefix(tmp_path: Path) -> None:
+    root = write_spec_corpus(tmp_path / "specs", _AREA_CORPUS)
+
+    result = CliRunner().invoke(specs, ["list", "--root", str(root), "--area", "auth"])
+
+    # 'auth' is a prefix of the string 'authentication' but not a whole folder segment, so nothing matches.
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
+def test_specs_group_exposes_validate_and_list_but_not_query() -> None:
     result = CliRunner().invoke(cli, ["specs", "--help"])
 
     assert result.exit_code == 0, result.output
     assert "validate" in result.output
-    assert "query" in result.output
+    assert "list" in result.output
+    assert "query" not in result.output

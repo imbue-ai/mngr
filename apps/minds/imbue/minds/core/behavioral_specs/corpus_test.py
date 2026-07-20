@@ -677,22 +677,10 @@ def test_binding_invariants_ordering_follows_corpus_scan_order(tmp_path: Path) -
         tmp_path / "specs",
         {
             "invariants.feature": (
-                "Feature: Corpus invariants\n"
-                "\n"
-                "  @root-first\n"
-                "  Rule: r1\n"
-                "\n"
-                "  @root-second\n"
-                "  Rule: r2\n"
+                "Feature: Corpus invariants\n\n  @root-first\n  Rule: r1\n\n  @root-second\n  Rule: r2\n"
             ),
             "authentication/invariants.feature": (
-                "Feature: Authentication invariants\n"
-                "\n"
-                "  @auth-first\n"
-                "  Rule: a1\n"
-                "\n"
-                "  @auth-second\n"
-                "  Rule: a2\n"
+                "Feature: Authentication invariants\n\n  @auth-first\n  Rule: a1\n\n  @auth-second\n  Rule: a2\n"
             ),
             "authentication/signin.feature": (
                 "Feature: Sign-in\n"

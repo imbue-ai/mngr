@@ -1,4 +1,4 @@
-"""``minds specs {validate,list,query}`` -- the CLI over the behavioral-spec corpus.
+"""``minds specs {validate,list}`` -- the CLI over the behavioral-spec corpus.
 
 The corpus (``apps/minds/specs/`` in this repo) and its language are defined by
 the minds-behavioral-specs skill; ``imbue.minds.core.behavioral_specs`` is the
@@ -21,6 +21,7 @@ import click
 from imbue.imbue_common.pure import pure
 from imbue.minds.core.behavioral_specs.corpus import scan_corpus
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_kind_record_value
+from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_area
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_name_substring
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_step_substring
 from imbue.minds.core.behavioral_specs.corpus import spec_unit_matches_tag
@@ -76,8 +77,8 @@ def specs() -> None:
 
     The corpus language (folders, tags, coordinates, invariants, sidecars) is
     defined by the minds-behavioral-specs skill; `validate` enforces it, and
-    `list`/`query` emit one JSONL record per authored unit (Scenario,
-    Scenario Outline, or Rule).
+    `list` emits one JSONL record per authored unit (Scenario, Scenario
+    Outline, or Rule), optionally filtered by kind, area, tag, name, or step.
     """
 
 
@@ -138,42 +139,17 @@ def specs_validate(corpus_root: Path) -> None:
     )
 
 
-@specs.command(name="list")
-@_root_option
-@click.option(
-    "--unit",
-    "unit_kind_value",
-    type=click.Choice(sorted(_UNIT_KIND_BY_CLI_VALUE)),
-    default=None,
-    help="Only emit units of this kind.",
-)
-def specs_list(corpus_root: Path, unit_kind_value: str | None) -> None:
-    """Emit the corpus as JSONL: one record per authored unit on stdout.
-
-    Record fields, in order: coordinate, kind (scenario | scenario-outline |
-    rule), name, file (as rooted at --root; repo-relative for the default
-    invocation from the repo root), line, tags (in authored order, without the
-    '@' sigil; the first is the unit's identity), steps (objects with keyword
-    and text; empty for a Rule, Background steps not folded in), parent (the
-    enclosing Rule's coordinate, or null), and invariants (coordinates of every
-    Rule that binds this unit -- Rules in the same file, plus invariants.feature
-    Rules at or above the unit's folder -- in corpus order). Units appear in
-    file order, then document order. Stdout carries nothing but JSONL;
-    diagnostics go to stderr.
-    """
-    scan = scan_corpus(_require_corpus_root(corpus_root))
-    unit_kind = None if unit_kind_value is None else _UNIT_KIND_BY_CLI_VALUE[unit_kind_value]
-    _emit_unit_records(scan.units, scan.units, corpus_root, unit_kind)
-    _fail_if_units_were_omitted(scan)
-
-
 @pure
-def _unit_passes_query_filters(
+def _unit_passes_list_filters(
     unit: SpecUnit,
+    corpus_root: Path,
+    area_filter: str | None,
     tag_filter: str | None,
     name_filter: str | None,
     step_filter: str | None,
 ) -> bool:
+    if area_filter is not None and not spec_unit_matches_area(unit, area_filter, corpus_root):
+        return False
     if tag_filter is not None and not spec_unit_matches_tag(unit, tag_filter):
         return False
     if name_filter is not None and not spec_unit_matches_name_substring(unit, name_filter):
@@ -183,14 +159,32 @@ def _unit_passes_query_filters(
     return True
 
 
-@specs.command(name="query")
+@specs.command(name="list")
 @_root_option
+@click.option(
+    "--unit",
+    "unit_kind_value",
+    type=click.Choice(sorted(_UNIT_KIND_BY_CLI_VALUE)),
+    default=None,
+    help="Only emit units of this kind.",
+)
+@click.option(
+    "--area",
+    "area_filter",
+    default=None,
+    help=(
+        "Keep units in this folder subtree, named as a dot-joined folder path from the corpus root "
+        "(e.g. 'authentication' or 'networking.tunnels'). Matched whole folder segment by segment, so "
+        "'auth' does not match the folder 'authentication', and (unlike --tag) it never matches on a unit's "
+        "identity tag."
+    ),
+)
 @click.option(
     "--tag",
     "tag_filter",
     default=None,
     help=(
-        "Keep units with this exact raw tag (identity or auxiliary; a leading '@' is tolerated) "
+        "Keep the single unit with this exact raw tag (identity or auxiliary; a leading '@' is tolerated) "
         "or this exact coordinate."
     ),
 )
@@ -206,20 +200,40 @@ def _unit_passes_query_filters(
     default=None,
     help="Keep units where any step text contains this substring (case-insensitive).",
 )
-def specs_query(
+def specs_list(
     corpus_root: Path,
+    unit_kind_value: str | None,
+    area_filter: str | None,
     tag_filter: str | None,
     name_filter: str | None,
     step_filter: str | None,
 ) -> None:
-    """Emit the same JSONL records as `list`, structurally filtered.
+    """Emit the corpus as JSONL: one record per authored unit on stdout.
 
-    All provided filters must match (AND). With no filters this is equivalent
-    to `list`. Stdout carries nothing but JSONL; diagnostics go to stderr.
+    Record fields, in order: coordinate, kind (scenario | scenario-outline |
+    rule), name, file (as rooted at --root; repo-relative for the default
+    invocation from the repo root), line, tags (in authored order, without the
+    '@' sigil; the first is the unit's identity), steps (objects with keyword
+    and text; empty for a Rule, Background steps not folded in), parent (the
+    enclosing Rule's coordinate, or null), and invariants (coordinates of every
+    Rule that binds this unit -- Rules in the same file, plus invariants.feature
+    Rules at or above the unit's folder -- in corpus order). Units appear in
+    file order, then document order.
+
+    The --unit/--area/--tag/--name/--step filters are selection-only and
+    AND-composed: a unit is emitted only when it passes every filter given, and
+    with no filters every unit is emitted (no match prints nothing, exit 0).
+    --area keeps a whole folder subtree; --tag keeps a single unit by exact raw
+    tag or coordinate. A record still lists its full invariants even when a
+    binding Rule is filtered out of the emitted set. Stdout carries nothing but
+    JSONL; diagnostics go to stderr.
     """
     scan = scan_corpus(_require_corpus_root(corpus_root))
+    unit_kind = None if unit_kind_value is None else _UNIT_KIND_BY_CLI_VALUE[unit_kind_value]
     matching_units = tuple(
-        unit for unit in scan.units if _unit_passes_query_filters(unit, tag_filter, name_filter, step_filter)
+        unit
+        for unit in scan.units
+        if _unit_passes_list_filters(unit, corpus_root, area_filter, tag_filter, name_filter, step_filter)
     )
-    _emit_unit_records(matching_units, scan.units, corpus_root, None)
+    _emit_unit_records(matching_units, scan.units, corpus_root, unit_kind)
     _fail_if_units_were_omitted(scan)
