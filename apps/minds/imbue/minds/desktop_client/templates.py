@@ -210,12 +210,14 @@ def _chrome_mngr_forward_origin() -> str:
     ``data-mngr-forward-origin`` attribute chrome.js reads to build
     ``/goto/<agent>/`` links, without threading it through each render function.
     Outside a request (e.g. template unit tests) it defaults to an empty string.
-    Mirrors app.py's ``_get_mngr_forward_origin``.
+    Mirrors app.py's ``_get_mngr_forward_origin``: minds always runs the proxy
+    with TLS + HTTP/2, so the scheme is ``https`` -- a plaintext link would die
+    with an empty response against the TLS listener.
     """
     if not has_app_context():
         return ""
     port = get_state().mngr_forward_port or 8421
-    return f"http://localhost:{port}"
+    return f"https://localhost:{port}"
 
 
 def _build_catalog() -> Catalog:
