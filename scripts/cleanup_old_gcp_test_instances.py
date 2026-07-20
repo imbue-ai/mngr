@@ -7,8 +7,10 @@ behind when a test session was killed before its in-process cleanup
 (``pytest_sessionfinish`` in ``libs/mngr_gcp/imbue/mngr_gcp/conftest.py``)
 could run. It selects instances by the ``mngr-pytest-launched=true`` label that
 ``GcpVpsClient.create_instance`` attaches to every pytest-launched instance and
-deletes those whose ``creation_timestamp`` is older than ``--max-age-hours``.
-Production instances never carry that label, so they are never touched.
+deletes those whose ``mngr-created-at`` instance metadata (which
+``create_instance`` stamps on every instance, since GCE labels cannot hold an
+ISO timestamp) is older than ``--max-age-hours``. Production instances never
+carry the pytest-launched label, so they are never touched.
 
 Skips silently (exit 0) when GCP credentials or a default project cannot be
 resolved, so it is safe to wire into CI before the secret is configured.

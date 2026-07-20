@@ -7,8 +7,9 @@ behind when a test session was killed before its in-process cleanup
 (``pytest_sessionfinish`` in ``libs/mngr_aws/imbue/mngr_aws/conftest.py``)
 could run. It selects instances by the ``mngr-pytest-launched=true`` tag that
 ``AwsVpsClient.create_instance`` attaches to every pytest-launched instance and
-terminates those whose EC2 ``LaunchTime`` is older than ``--max-age-hours``.
-Production instances never carry that tag, so they are never touched.
+terminates those whose ``mngr-created-at`` tag (which ``create_instance``
+stamps on every instance) is older than ``--max-age-hours``. Production
+instances never carry the pytest-launched tag, so they are never touched.
 
 Skips silently (exit 0) when AWS credentials cannot be resolved, so it is safe
 to wire into CI before the secret is configured.

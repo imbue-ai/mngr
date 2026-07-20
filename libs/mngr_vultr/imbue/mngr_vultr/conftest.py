@@ -144,12 +144,13 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def _list_leaked_instances(client: VultrVpsClient) -> list[dict[str, Any]]:
-    """Return Vultr instances bearing this session's tag (i.e., leaked)."""
-    try:
-        instances = client.list_instances()
-    except VpsApiError as e:
-        logger.warning("Vultr session-end leak check: list_instances failed: {}", e)
-        return []
+    """Return Vultr instances bearing this session's tag (i.e., leaked).
+
+    A ``list_instances`` failure propagates: the caller fails the session rather
+    than silently reporting "no leaks" for a scan that never ran (the same
+    policy the AWS / GCP / Azure session-end hooks apply).
+    """
+    instances = client.list_instances()
     return [inst for inst in instances if _SESSION_TAG in inst.get("tags", [])]
 
 
@@ -213,6 +214,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     ``VULTR_API_KEY`` is missing, the session is failed rather than skipped:
     a release run with no key cannot have created or scanned for instances,
     which is a misconfiguration worth surfacing loudly, not a benign skip.
+    A ``list_instances`` scan failure likewise fails the session rather than
+    silently reporting "no leaks" for a scan that never ran.
 
     On finding a real leak -- a destroy that either succeeded on a
     still-running instance (``DESTROYED``) or itself failed
@@ -245,7 +248,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         # os_id is required by the VultrVpsClient constructor but only used by
         # create_instance, which we never call from this cleanup path.
         client = VultrVpsClient(api_key=SecretStr(api_key), os_id=VULTR_TEST_OS_ID)
-        leaked = _list_leaked_instances(client)
+        try:
+            leaked = _list_leaked_instances(client)
+        except VpsApiError as e:
+            # A scan that cannot run must fail the session, not silently report "no leaks".
+            logger.error("Failed to scan for leaked Vultr test instances: {}", e)
+            _mark_session_failed(session)
+            return
         if not leaked:
             return
         lines = "\n".join(f"  {inst.get('id', '')} (label={inst.get('label', '')})" for inst in leaked)
