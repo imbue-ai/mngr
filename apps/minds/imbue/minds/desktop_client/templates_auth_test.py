@@ -46,9 +46,11 @@ def test_render_auth_page_includes_oauth_buttons() -> None:
 
 def test_render_auth_page_oauth_buttons_carry_click_spinner() -> None:
     # auth.js reveals ``.oauth-btn-spinner`` on the clicked provider's button as
-    # immediate feedback; the (hidden) spinner span must be present to reveal.
+    # immediate feedback. ``hidden`` must sit on a plain wrapper span (not on
+    # ``<Spinner>``, whose own ``inline-block`` would override ``display:none``
+    # and leave the spinner showing at rest), so assert the exact wrapper class.
     html = render_auth_page()
-    assert "oauth-btn-spinner" in html
+    assert 'class="oauth-btn-spinner hidden"' in html
 
 
 def test_render_auth_page_includes_toggle_links() -> None:

@@ -13,7 +13,11 @@
   as a group during an OAuth flow. The ``oauth-btn-spinner`` span sits (hidden)
   in front of the brand glyph; auth.js reveals it on the button the user
   clicked so there is immediate "something is happening" feedback while the
-  browser round-trip runs.
+  browser round-trip runs. ``hidden`` MUST live on this plain wrapper span, not
+  on the Spinner component itself -- Spinner renders its own ``inline-block``
+  display utility, which is emitted after ``.hidden`` in the compiled CSS and
+  would override ``display:none``, leaving the spinner visible at rest (mirrors
+  the PermissionsForm hidden-spinner pattern).
 
   ``extra`` is for one-off layout shims (``mb-2`` to space buttons in a
   vertical stack).
@@ -21,5 +25,5 @@
 {%- set _label = {"google": "Continue with Google", "github": "Continue with GitHub"}[provider] -%}
 <button data-oauth="{{ provider }}"
         class="oauth-btn w-full py-2 px-3 bg-surface-primary border border-default rounded-lg type-body cursor-pointer flex items-center justify-center gap-2 text-primary hover:bg-fill-hover {{ extra }}">
-  <Spinner size="sm" extra="oauth-btn-spinner hidden" /><auth.OauthIcon :provider="provider" /> {{ _label }}
+  <span class="oauth-btn-spinner hidden"><Spinner size="sm" /></span><auth.OauthIcon :provider="provider" /> {{ _label }}
 </button>
