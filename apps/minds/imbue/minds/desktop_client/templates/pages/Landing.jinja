@@ -77,12 +77,22 @@
       badge.style.display = badge.textContent ? '' : 'none';
     }
 
+    // Navigate to a local recovery URL through the shell bridge when present:
+    // main routes it into the persistent shell's in-place swap (recovery is a
+    // swappable page), so the titlebar never rebuilds. A bare window.location
+    // here was the last remaining full-load flash on the landing page's
+    // stopped/stuck rows. Plain browser falls back to a real navigation.
+    function goToRecovery(url) {
+      if (window.minds && window.minds.navigateContent) window.minds.navigateContent(url);
+      else window.location = url;
+    }
+
     window.landingRowClick = function (event, row) {
       var agentId = row.dataset.agentId;
       var status = healthStatusByAgent[agentId];
       var ret = row.dataset.defaultHref || '';
       if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
-        window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
+        goToRecovery('/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret));
       } else if (mindLivenessByAgent[agentId] === 'STOPPED') {
         // The mind's container is stopped, so loading the workspace directly would
         // strand the user on the loader for the full HEALTHY->STUCK probe-failure
@@ -92,8 +102,8 @@
         // the health tracker has never probed this stopped mind so it still reports
         // HEALTHY, and without the intent the recovery handler would 302 us right
         // back to the loader instead of dispatching the restart.
-        window.location = '/agents/' + encodeURIComponent(agentId)
-          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+        goToRecovery('/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart');
       } else if (window.minds && window.minds.navigateContent) {
         // Trusted local page on the chrome surface: hand the workspace (agent)
         // URL to the shell bridge so it opens in the caged content view (and
@@ -111,8 +121,8 @@
       if (!row) return;
       var agentId = row.dataset.agentId;
       var ret = row.dataset.defaultHref || '';
-      window.location = '/agents/' + encodeURIComponent(agentId)
-        + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+      goToRecovery('/agents/' + encodeURIComponent(agentId)
+        + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart');
     };
 
     // -- Bottom-left app-level launchers --
