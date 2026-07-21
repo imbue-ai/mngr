@@ -1462,6 +1462,52 @@ def test_icons_ts_matches_python_icon_dicts() -> None:
         assert ts_12_entries.get(name) == svg, f"ICONS_12[{name!r}] drifted between icons.ts and templates.py"
 
 
+def test_ui_ts_matches_python_button_and_input_recipes() -> None:
+    """Drift guard for the two class-recipe copies: ``frontend/src/ui.ts``
+    mirrors the ``BTN_BASE`` / ``BTN_SIZES`` / ``BTN_VARIANTS`` / ``INPUT_BASE``
+    Catalog globals so component-rendered buttons and inputs stay
+    pixel-identical to the JinjaX primitives. Every recipe must be
+    byte-identical in both copies (like the icons guard above)."""
+    ui_ts = (Path(__file__).resolve().parents[3] / "frontend" / "src" / "ui.ts").read_text()
+
+    def _section(start_marker: str, end_marker: str | None) -> str:
+        start = ui_ts.index(start_marker)
+        return ui_ts[start : ui_ts.index(end_marker, start)] if end_marker is not None else ui_ts[start:]
+
+    def _joined_string(section: str) -> str:
+        return "".join(re.findall(r'"([^"]*)"', section))
+
+    ts_btn_base = _joined_string(_section("export const BTN_BASE", "export const BTN_SIZES"))
+    assert ts_btn_base == CATALOG.jinja_env.globals["BTN_BASE"], "BTN_BASE drifted between ui.ts and templates.py"
+
+    ts_sizes = dict(
+        re.findall(
+            r'^  (\w+): "([^"]*)",$', _section("export const BTN_SIZES", "export const BTN_VARIANTS"), re.MULTILINE
+        )
+    )
+    assert ts_sizes == dict(CATALOG.jinja_env.globals["BTN_SIZES"]), "BTN_SIZES drifted between ui.ts and templates.py"
+
+    ts_variants = dict(
+        re.findall(
+            r'^  (\w+): "([^"]*)",$',
+            _section("export const BTN_VARIANTS", "export function buttonClasses"),
+            re.MULTILINE,
+        )
+    )
+    assert ts_variants == dict(CATALOG.jinja_env.globals["BTN_VARIANTS"]), (
+        "BTN_VARIANTS drifted between ui.ts and templates.py"
+    )
+
+    # TEXT_INPUT_CLASSES is TextInput.jinja's default-radius recipe: the
+    # single-line control's width + tight leading around INPUT_BASE, plus the
+    # md radius.
+    ts_text_input = _joined_string(_section("export const TEXT_INPUT_CLASSES", None))
+    expected_text_input = "w-full leading-tight " + CATALOG.jinja_env.globals["INPUT_BASE"] + " rounded-md"
+    assert ts_text_input == expected_text_input, (
+        "TEXT_INPUT_CLASSES drifted between ui.ts and TextInput.jinja's INPUT_BASE recipe"
+    )
+
+
 def test_dev_styleguide_smoke_mount_follows_the_boot_island_protocol() -> None:
     """The styleguide's JS-components section exercises the full mount
     protocol: a parseable ``#minds-boot-state`` JSON island carrying the smoke
