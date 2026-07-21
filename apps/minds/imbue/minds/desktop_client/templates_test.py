@@ -1155,7 +1155,7 @@ def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> 
     # parallel self-perpetuating probe chain per click.
     reprobe_start = html.find("function scheduleIndeterminateReprobe")
     reprobe_block = html[reprobe_start : html.find("function ", reprobe_start + 1)]
-    assert "if (reprobePending) return" in reprobe_block
+    assert "if (reprobePending || restartDispatched) return" in reprobe_block
 
 
 def test_render_recovery_page_unresponsive_verdict_stays_live_and_resets_state() -> None:
@@ -1190,6 +1190,35 @@ def test_render_recovery_page_unresponsive_verdict_stays_live_and_resets_state()
         block = html[start : html.find("function ", start + 1)]
         assert "show(retryBtn, false)" in block, f"{fn} must hide the backend-unreachable Retry button"
         assert "providerReasonEl.textContent = ''" in block, f"{fn} must clear the provider error text"
+
+
+def test_render_recovery_page_restart_dispatch_silences_reprobe_chain() -> None:
+    """A dispatched restart must silence the reprobe chain the verdict left armed.
+
+    The unresponsive verdict shows the Restart button while its slow re-probe
+    chain stays perpetually armed (a pending timer, or a heavy probe already in
+    flight), so a manual restart always races a stale probe result. Without a
+    guard that result overwrites the "Restarting your workspace" render (and
+    can re-POST a restart) seconds after the click, for the whole restart
+    duration. postRestart flips restartDispatched; applyHealth drops results
+    that arrive after it, and scheduleIndeterminateReprobe stops arming (and
+    firing) timers.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    post_start = html.find("function postRestart(")
+    post_block = html[post_start : html.find("function ", post_start + 1)]
+    assert "restartDispatched = true" in post_block
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert "if (restartDispatched) return" in apply_block
+    reprobe_start = html.find("function scheduleIndeterminateReprobe")
+    reprobe_block = html[reprobe_start : html.find("function ", reprobe_start + 1)]
+    assert "if (reprobePending || restartDispatched) return" in reprobe_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:

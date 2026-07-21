@@ -1181,11 +1181,21 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // the guard each retry would spawn a parallel self-perpetuating chain of
         // heavy probes.
         var reprobePending = false;
+        // Set once a restart POST goes out (manual click or the host_offline
+        // auto-dispatch); never reset within this page instance. From then on
+        // scheduleRefresh and the cheap healthy-poll own convergence (both end
+        // in a navigation that reloads this script), so the reprobe chain the
+        // pre-dispatch verdict left armed -- a pending timer or an in-flight
+        // heavy probe -- must go quiet: its stale result would overwrite the
+        // restarting render (and could re-POST a restart) seconds after the
+        // click.
+        var restartDispatched = false;
         function scheduleIndeterminateReprobe(autoDispatch) {
-          if (reprobePending) return;
+          if (reprobePending || restartDispatched) return;
           reprobePending = true;
           setTimeout(function () {
             reprobePending = false;
+            if (restartDispatched) return;
             fetchHealth().then(function (data) { applyHealth(data, autoDispatch); }, function () {
               scheduleIndeterminateReprobe(autoDispatch);
             });
@@ -1359,6 +1369,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // "Restart workspace" click), and the host_offline auto-dispatch passes
         // ``renderRestartingOffline`` so the user sees the workspace was offline.
         function postRestart(body, renderPending) {
+          restartDispatched = true;
           (renderPending || renderRestarting)();
           // The endpoint returns a 202 operation handle once the tracker is
           // RESTARTING; any other status means the dispatch did not start, so
@@ -1389,6 +1400,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // arrives as the ``indeterminate`` tier -- handled below as a live
         // "reconnecting" state rather than a verdict.
         function applyHealth(data, autoDispatch) {
+          // A restart is in flight (or its dispatch just failed): this result
+          // raced the dispatch, so it is stale -- the restarting render and
+          // scheduleRefresh own the page now, and rendering a verdict here
+          // would overwrite them (or re-dispatch a restart).
+          if (restartDispatched) return;
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;
