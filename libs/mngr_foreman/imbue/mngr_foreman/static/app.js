@@ -610,19 +610,31 @@
       if (last < text.length) container.appendChild(document.createTextNode(text.slice(last)));
     }
 
+    // Defer the expensive enrichment (syntax highlight / KaTeX / mermaid) until a
+    // message is near the viewport, instead of highlighting hundreds of code blocks
+    // up front. This is the bulk of a long transcript's load cost.
+    const enrichObserver = ("IntersectionObserver" in window)
+      ? new IntersectionObserver((entries, obs) => {
+          entries.forEach((en) => { if (en.isIntersecting) { obs.unobserve(en.target); enrichAssistant(en.target); } });
+        }, { root: scroller, rootMargin: "800px 0px" })
+      : null;
+    function lazyEnrich(md) { if (enrichObserver) enrichObserver.observe(md); else enrichAssistant(md); }
+
     // Position relative to the working dot: main content goes ABOVE it (normal
     // history / current turn), queued messages go BELOW it (still in the queue).
-    function addMain(node) { tEl.insertBefore(node, workingEl); }
-    function addQueued(node) { tEl.appendChild(node); }
+    // ``before`` (used while back-filling older history above the tail) inserts at
+    // that anchor instead of at the live position.
+    function addMain(node, before) { tEl.insertBefore(node, before || workingEl); }
+    function addQueued(node, before) { if (before) tEl.insertBefore(node, before); else tEl.appendChild(node); }
     // Queued (dark green, below dot) -> accepted (full green, above dot), in place.
-    function promoteBubble(rec) {
+    function promoteBubble(rec, before) {
       if (!rec || !rec.queued) return;
       rec.node.classList.remove("queued");
       rec.queued = false;
-      tEl.insertBefore(rec.node, workingEl); // move above the dot into history
+      tEl.insertBefore(rec.node, before || workingEl);
     }
 
-    function renderEvent(ev) {
+    function renderEvent(ev, before) {
       if (ev.type === "user_message") {
         const key = (ev.content || "").trim();
         // The transcript is the source of truth. The instant the message we sent
@@ -633,8 +645,6 @@
         if (ev.queued) {
           // Still in claude's queue -> dark-green bubble BELOW the dot.
           if (existing) {
-            // Re-assertion (e.g. the late queued_command attachment for the same
-            // text): only merge images it carries; never un-promote an accepted one.
             if (existing.queued && ev.images && ev.images.length) {
               ev.images.forEach((img) => existing.node.appendChild(toolImageEl(img)));
             }
@@ -642,45 +652,74 @@
             const e = el("div", "entry user queued");
             renderUserContent(e, ev.content || "");
             if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
-            addQueued(e);
+            addQueued(e, before);
             userBubbles.set(key, { node: e, queued: true });
           }
         } else if (existing) {
-          // The delivered turn for a message we already showed queued (the
-          // interrupt/Esc path writes such a line) -> promote in place.
-          promoteBubble(existing);
+          promoteBubble(existing, before);
         } else {
-          // A normal delivered turn (sent while idle) -> full-green, above the dot.
           const e = el("div", "entry user");
           renderUserContent(e, ev.content || "");
           if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
-          addMain(e);
+          addMain(e, before);
           userBubbles.set(key, { node: e, queued: false });
         }
       } else if (ev.type === "queue_accepted") {
-        // claude pulled this message off the queue (turn boundary or interrupt).
-        promoteBubble(userBubbles.get(ev.key));
+        promoteBubble(userBubbles.get(ev.key), before);
       } else if (ev.type === "queue_removed") {
-        // The user yanked the queue back to edit (popAll) -> drop the bubble.
         const rec = userBubbles.get(ev.key);
         if (rec && rec.queued) { rec.node.remove(); userBubbles.delete(ev.key); }
       } else if (ev.type === "framework_message") {
-        addMain(frameworkEl(ev));
+        addMain(frameworkEl(ev), before);
       } else if (ev.type === "assistant_message") {
         const e = el("div", "entry assistant");
         if (ev.text && ev.text.trim()) {
           const md = el("div", "assistant-md");
           md.innerHTML = renderMarkdown(ev.text);
-          enrichAssistant(md); // syntax highlight, math, mermaid, safe links
+          lazyEnrich(md); // highlight/math/mermaid when it scrolls into view
           e.appendChild(md);
         }
         (ev.tool_calls || []).forEach((tc) => e.appendChild(toolCallEl(tc)));
-        if (e.childNodes.length) addMain(e);
+        if (e.childNodes.length) addMain(e, before);
       } else if (ev.type === "tool_result") {
         if (toolBodies.has(ev.tool_call_id)) attachResult(ev);
         else pendingResults.set(ev.tool_call_id, ev);
       }
-      scrollDown();
+      if (!before) scrollDown(); // live/tail: follow the bottom. older: caller manages scroll.
+    }
+
+    // ---- initial-load rendering: tail now, older filled in above during idle ----
+    // The server ships the whole transcript in ~0.2s; painting hundreds of messages
+    // up front is the slow part. So buffer the first backfill, paint only the last
+    // TAIL_RENDER_COUNT immediately, and prepend the rest in idle chunks.
+    const TAIL_RENDER_COUNT = 40;
+    let backfilling = true;
+    let backfillBuffer = [];
+    function scheduleIdle(fn) {
+      if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 400 });
+      else setTimeout(fn, 16);
+    }
+    function flushInitialBackfill() {
+      const buf = backfillBuffer;
+      backfillBuffer = [];
+      const cut = Math.max(0, buf.length - TAIL_RENDER_COUNT);
+      const older = buf.slice(0, cut);
+      for (let i = cut; i < buf.length; i++) renderEvent(buf[i]); // tail -> instant paint
+      scrollDown(true);
+      if (older.length) fillOlder(older);
+    }
+    function fillOlder(older) {
+      const anchor = tEl.firstChild; // insert older content chronologically above the tail
+      let idx = 0;
+      function chunk() {
+        const oldH = scroller.scrollHeight;
+        const pinned = stick;
+        for (let n = 0; idx < older.length && n < 15; n++, idx++) renderEvent(older[idx], anchor);
+        if (pinned) scrollToBottom(); // stay at the tail while history fills above
+        else scroller.scrollTop += scroller.scrollHeight - oldH; // keep the viewport stable
+        if (idx < older.length) scheduleIdle(chunk);
+      }
+      scheduleIdle(chunk);
     }
 
     function setStatus(text) {
@@ -749,8 +788,10 @@
             if (seenEventIds.has(id)) return; // already rendered (dedup re-backfill)
             seenEventIds.add(id);
           }
-          renderEvent(msg.event);
+          if (backfilling) backfillBuffer.push(msg.event); // buffer the initial load
+          else renderEvent(msg.event);
         } else if (msg.type === "backfill_complete") {
+          if (backfilling) { backfilling = false; flushInitialBackfill(); }
           clearStatus();
           composer.hidden = false;
           scrollDown(true);
@@ -758,7 +799,11 @@
           clearStatus();
           addMain(el("div", "unsupported", "No transcript for agent type '" + msg.agent_type + "'."));
         } else if (msg.type === "error") {
-          setStatus(msg.message || "error");
+          // The stream can't read this agent (host offline, etc.). Don't surface
+          // raw text -- it's simply "not connected": red dot + locked composer.
+          // The watchdog keeps retrying and recovers on its own.
+          setConnState("offline");
+          setStatus("not connected — this agent isn't reachable right now");
           composer.hidden = false;
         }
       };
@@ -891,9 +936,9 @@
             setBlocked();
           }
         })
-        .catch((e) => {
+        .catch(() => {
           releaseSend();
-          showError("network error: " + e);
+          showError("not connected — your message wasn't sent. try again once reconnected.");
         });
     }
 
@@ -908,7 +953,7 @@
         .then(({ ok, d }) => {
           if (!(ok && d.ok)) showError((d && d.error) || "interrupt failed");
         })
-        .catch((e) => showError("network error: " + e))
+        .catch(() => showError("not connected — couldn't interrupt."))
         .finally(() => { escBtn.disabled = false; });
     }
     if (escBtn) escBtn.addEventListener("click", sendInterrupt);
