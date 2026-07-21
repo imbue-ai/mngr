@@ -16,12 +16,14 @@ Accounts page polls its progress from :class:`BackupTrimManager`.
 import threading
 from collections.abc import Callable
 from collections.abc import Sequence
+from enum import auto
 from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
@@ -43,20 +45,24 @@ from imbue.minds.errors import BackupProvisioningError
 # guards against a pathological loop.
 _MAX_TRIM_ROUNDS: Final = 8
 
-_RUNNING: Final = "running"
-_SUCCEEDED: Final = "succeeded"
-_FAILED: Final = "failed"
+
+class BackupTrimState(UpperCaseStrEnum):
+    """Lifecycle state of one account's backup-trim run."""
+
+    RUNNING = auto()
+    SUCCEEDED = auto()
+    FAILED = auto()
 
 
 class BackupTrimStatus(FrozenModel):
     """Progress of one account's backup-trim run, rendered on the Accounts page."""
 
-    state: str = Field(description="'running', 'succeeded', or 'failed'")
+    state: BackupTrimState = Field(description="Whether the run is still going and how it ended")
     detail: str = Field(description="Human-readable progress / outcome line")
 
     @property
     def is_running(self) -> bool:
-        return self.state == _RUNNING
+        return self.state == BackupTrimState.RUNNING
 
 
 class TrimmableRepo(FrozenModel):
@@ -246,7 +252,9 @@ class BackupTrimManager(MutableModel):
             existing = self.status_by_user_id.get(user_id)
             if existing is not None and existing.is_running:
                 return False
-            self.status_by_user_id[user_id] = BackupTrimStatus(state=_RUNNING, detail="Starting backup cleanup...")
+            self.status_by_user_id[user_id] = BackupTrimStatus(
+                state=BackupTrimState.RUNNING, detail="Starting backup cleanup..."
+            )
         thread = threading.Thread(
             target=self._run,
             kwargs={
@@ -262,7 +270,7 @@ class BackupTrimManager(MutableModel):
         thread.start()
         return True
 
-    def _set_status(self, user_id: str, state: str, detail: str) -> None:
+    def _set_status(self, user_id: str, state: BackupTrimState, detail: str) -> None:
         with self.status_lock:
             self.status_by_user_id[user_id] = BackupTrimStatus(state=state, detail=detail)
 
@@ -280,12 +288,14 @@ class BackupTrimManager(MutableModel):
                 account_email=account_email,
                 cli=cli,
                 paths=paths,
-                report_progress=lambda progress_detail: self._set_status(user_id, _RUNNING, progress_detail),
+                report_progress=lambda progress_detail: self._set_status(
+                    user_id, BackupTrimState.RUNNING, progress_detail
+                ),
             )
-            self._set_status(user_id, _SUCCEEDED if is_under_quota else _FAILED, detail)
+            self._set_status(user_id, BackupTrimState.SUCCEEDED if is_under_quota else BackupTrimState.FAILED, detail)
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
             logger.opt(exception=exc).warning("Backup trim for {} failed", account_email)
-            self._set_status(user_id, _FAILED, f"Backup cleanup failed: {exc}")
+            self._set_status(user_id, BackupTrimState.FAILED, f"Backup cleanup failed: {exc}")
         finally:
             # A crash from an unexpected exception type must not leave the
             # status stuck on "running" (the page would show a live cleanup
@@ -294,13 +304,15 @@ class BackupTrimManager(MutableModel):
                 current = self.status_by_user_id.get(user_id)
                 if current is not None and current.is_running:
                     self.status_by_user_id[user_id] = BackupTrimStatus(
-                        state=_FAILED, detail="Backup cleanup stopped unexpectedly; see the logs."
+                        state=BackupTrimState.FAILED, detail="Backup cleanup stopped unexpectedly; see the logs."
                     )
         outcome = self.get_status(user_id)
         if notification_dispatcher is not None and outcome is not None:
             notification_dispatcher.dispatch(
                 NotificationRequest(
-                    title="Backup cleanup finished" if outcome.state == _SUCCEEDED else "Backup cleanup failed",
+                    title="Backup cleanup finished"
+                    if outcome.state == BackupTrimState.SUCCEEDED
+                    else "Backup cleanup failed",
                     message=outcome.detail,
                     urgency=NotificationUrgency.NORMAL,
                 ),
