@@ -883,9 +883,7 @@ def _handle_workspace_resources(agent_id: str) -> WorkspaceResourcesResponse | R
     if parent_cg is None:
         return _json_error("Workspace resources are unavailable in this configuration", 503)
     try:
-        return workspace_settings.get_workspace_resources(
-            parsed_id, state.mngr_binary, state.mngr_host_dir, parent_cg
-        )
+        return workspace_settings.get_workspace_resources(parsed_id, state.mngr_binary, state.mngr_host_dir, parent_cg)
     except workspace_settings.WorkspaceResizeError as exc:
         return _json_error(str(exc), exc.status_code)
 
@@ -2048,9 +2046,7 @@ def create_api_v1_blueprint() -> Blueprint:
     # Workspace host resources: the read rides the ``minds-workspaces-read``
     # grant; the set-only resize is gated by ``minds-workspaces-resize`` at the
     # gateway (restart-to-apply stays behind ``minds-workspaces-recover``).
-    blueprint.add_url_rule(
-        "/workspaces/<agent_id>/resources", view_func=_handle_workspace_resources, methods=["GET"]
-    )
+    blueprint.add_url_rule("/workspaces/<agent_id>/resources", view_func=_handle_workspace_resources, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/resize", view_func=_handle_workspace_resize, methods=["POST"])
 
     # Backup service verification + management. The per-workspace health read

@@ -264,7 +264,9 @@ def test_get_host_resources_returns_valid_resources(local_provider: LocalProvide
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     resources = local_provider.get_host_resources(host)
 
+    assert resources.cpu is not None
     assert resources.cpu.count >= 1
+    assert resources.memory_gb is not None
     assert resources.memory_gb >= 0
 
 

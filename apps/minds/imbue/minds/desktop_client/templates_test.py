@@ -2159,3 +2159,20 @@ def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
     assert '<script type="application/json" id="minds-sentry-config">' in html
     assert '"environment": "staging"' in html
     assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html
+
+
+def test_render_workspace_settings_includes_hidden_resources_section() -> None:
+    # The Resources block ships hidden; workspace_resources.js reveals it only
+    # when the capability fetch reports the provider supports resizing.
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert 'id="resources-block" class="hidden"' in html
+    assert 'id="resources-cpus-input"' in html
+    assert 'id="resources-memory-input"' in html
+    assert 'id="resources-restart-dialog"' in html
+    assert "/_static/workspace_resources.js" in html

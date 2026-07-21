@@ -27,10 +27,10 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
+from imbue.mngr.interfaces.data_types import BYTES_PER_GIB
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
-from imbue.mngr.interfaces.data_types import BYTES_PER_GIB
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResizeCapabilities

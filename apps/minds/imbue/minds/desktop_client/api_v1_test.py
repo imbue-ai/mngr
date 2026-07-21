@@ -115,6 +115,8 @@ class _RecordingAgentCreator(AgentCreator):
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
+        cpus: int | None = None,
+        memory_gib: int | None = None,
     ) -> CreationId:
         self._last_call = {
             "repo_source": repo_source,
@@ -130,6 +132,8 @@ class _RecordingAgentCreator(AgentCreator):
             "color": color,
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
+            "cpus": cpus,
+            "memory_gib": memory_gib,
         }
         return CreationId()
 
@@ -2026,7 +2030,7 @@ def _write_fake_mngr_limit(directory: Path) -> str:
     script = directory / "mngr"
     script.write_text(
         "#!/bin/sh\n"
-        "case \"$*\" in\n"
+        'case "$*" in\n'
         f"  *--cpus*|*--memory*) echo '{_FAKE_LIMIT_SET_JSON}' ;;\n"
         f"  *limit*) echo '{_FAKE_LIMIT_READ_JSON}' ;;\n"
         "  *) exit 0 ;;\n"
@@ -2113,9 +2117,7 @@ def test_workspace_resources_routes_unknown_workspace_returns_404(
 
     assert client.get(f"/api/v1/workspaces/{AgentId()}/resources", headers=_auth_header()).status_code == 404
     assert (
-        client.post(
-            f"/api/v1/workspaces/{AgentId()}/resize", headers=_auth_header(), json={"cpus": 2}
-        ).status_code
+        client.post(f"/api/v1/workspaces/{AgentId()}/resize", headers=_auth_header(), json={"cpus": 2}).status_code
         == 404
     )
 

@@ -192,7 +192,9 @@ def test_get_host_resources_returns_defaults(temp_mngr_ctx: MngrContext) -> None
         id = HostId.generate()
 
     resources = provider.get_host_resources(MockHost())  # ty: ignore[invalid-argument-type]
+    assert resources.cpu is not None
     assert resources.cpu.count >= 1
+    assert resources.memory_gb is not None
     assert resources.memory_gb >= 0
 
 

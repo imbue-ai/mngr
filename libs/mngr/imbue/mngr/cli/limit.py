@@ -351,9 +351,7 @@ def _output_limits_report(entries: list[dict[str, Any]], output_opts: OutputOpti
                         "host {} ({}): resource resizing not supported", entry["host_name"], entry["provider"]
                     )
                     continue
-                configured_text = (
-                    f"cpus={_format_limit(configured['cpu_count'])} memory={_format_limit(configured['memory_gib'])}GiB"
-                )
+                configured_text = f"cpus={_format_limit(configured['cpu_count'])} memory={_format_limit(configured['memory_gib'])}GiB"
                 if actual is None:
                     write_human_line(
                         "host {} ({}): configured {} (not running)",
@@ -366,9 +364,7 @@ def _output_limits_report(entries: list[dict[str, Any]], output_opts: OutputOpti
                         f"cpus={_format_limit(actual['cpu_count'])} memory={_format_limit(actual['memory_gib'])}GiB"
                     )
                     if actual == configured:
-                        write_human_line(
-                            "host {} ({}): {}", entry["host_name"], entry["provider"], configured_text
-                        )
+                        write_human_line("host {} ({}): {}", entry["host_name"], entry["provider"], configured_text)
                     else:
                         write_human_line(
                             "host {} ({}): configured {}; running with {} (configured values apply on next restart)",

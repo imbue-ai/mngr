@@ -29,6 +29,7 @@ from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
 
+
 def _build_override_yaml() -> str:
     """Lima YAML override pinning the creation baseline the resize assertions start from.
 
@@ -47,6 +48,7 @@ memory: 2GiB
 disk: 10GiB
 networks: []
 """
+
 
 # The values the VM is created with (must match the override YAML above).
 _CREATE_CPUS = 2.0

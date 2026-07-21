@@ -27,11 +27,11 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr_lima.test_lima_btrfs_release import _LIMA_USER
 from imbue.mngr_lima.test_lima_btrfs_release import _ensure_lima_installed
 from imbue.mngr_lima.test_lima_btrfs_release import _ensure_packages_installed
 from imbue.mngr_lima.test_lima_btrfs_release import _ensure_test_user_exists
 from imbue.mngr_lima.test_lima_btrfs_release import _grant_user_repo_access
-from imbue.mngr_lima.test_lima_btrfs_release import _LIMA_USER
 
 pytestmark = [pytest.mark.release, pytest.mark.lima]
 

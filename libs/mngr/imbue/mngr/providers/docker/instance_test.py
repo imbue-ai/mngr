@@ -698,8 +698,9 @@ def test_volume_id_for_host_differs_for_different_hosts() -> None:
 # =========================================================================
 
 
+@pytest.mark.docker_sdk
 def test_get_host_resources_reports_no_limits_when_host_is_unknown(temp_mngr_ctx: MngrContext) -> None:
-    """get_host_resources reports unlimited (None) dimensions without needing a Docker daemon."""
+    """get_host_resources reports unlimited (None) dimensions for a host with no record or container."""
     provider = make_docker_provider(temp_mngr_ctx, "test-resources")
     host_id = HostId.generate()
     now = datetime.now(timezone.utc)

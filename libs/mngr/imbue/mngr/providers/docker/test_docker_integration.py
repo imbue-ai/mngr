@@ -562,7 +562,7 @@ def test_resize_host_applies_limits_live_to_running_container(docker_provider: D
     assert report.configured == HostResourceLimits(cpu_count=1.0, memory_gib=1.0)
     assert report.actual == HostResourceLimits(cpu_count=1.0, memory_gib=1.0)
     container.reload()
-    host_config = container.attrs["HostConfig"]
+    host_config = (container.attrs or {})["HostConfig"]
     assert host_config["NanoCpus"] == 1_000_000_000
     assert host_config["Memory"] == 1024**3
     assert host_config["MemorySwap"] == 1024**3
@@ -594,7 +594,7 @@ def test_resize_host_on_stopped_container_persists_and_reports_no_actual(
     assert report.configured == HostResourceLimits(cpu_count=2.0, memory_gib=1.0)
     assert report.actual is None
     container.reload()
-    assert container.attrs["HostConfig"]["NanoCpus"] == 2_000_000_000
+    assert (container.attrs or {})["HostConfig"]["NanoCpus"] == 2_000_000_000
 
     record = docker_provider._host_store.read_host_record(host_id, use_cache=False)
     assert record is not None and record.resources is not None

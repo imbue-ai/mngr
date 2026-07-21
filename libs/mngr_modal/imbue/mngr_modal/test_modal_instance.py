@@ -156,7 +156,9 @@ def test_get_host_resources(real_modal_provider: ModalProviderInstance) -> None:
     with created_host(real_modal_provider, HostName("test-host")) as host:
         resources = real_modal_provider.get_host_resources(host)
 
+        assert resources.cpu is not None
         assert resources.cpu.count >= 1
+        assert resources.memory_gb is not None
         assert resources.memory_gb >= 0.5
 
 

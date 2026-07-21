@@ -731,6 +731,7 @@ def test_get_host_resources_with_config(testing_provider: ModalProviderInstance)
 
     offline = testing_provider.to_offline_host(host_id)
     resources = testing_provider.get_host_resources(offline)
+    assert resources.cpu is not None
     assert resources.cpu.count == 4
     assert resources.memory_gb == 8.0
 
@@ -748,6 +749,7 @@ def test_get_host_resources_no_config(testing_provider: ModalProviderInstance) -
 
     offline = testing_provider.to_offline_host(host_id)
     resources = testing_provider.get_host_resources(offline)
+    assert resources.cpu is not None
     assert resources.cpu.count == 1
     assert resources.memory_gb == 1.0
 
@@ -2559,6 +2561,7 @@ def test_get_host_resources_fractional_cpu(testing_provider: ModalProviderInstan
     offline = testing_provider.to_offline_host(host_id)
     resources = testing_provider.get_host_resources(offline)
     # Fractional CPU should be rounded up to 1
+    assert resources.cpu is not None
     assert resources.cpu.count == 1
     assert resources.memory_gb == 0.5
 
@@ -2799,6 +2802,7 @@ def test_get_host_resources_missing_record(
     )
 
     resources = testing_provider.get_host_resources(offline)
+    assert resources.cpu is not None
     assert resources.cpu.count == 1
     assert resources.memory_gb == 1.0
     assert resources.cpu.frequency_ghz is None
