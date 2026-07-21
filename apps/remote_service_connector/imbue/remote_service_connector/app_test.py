@@ -295,6 +295,8 @@ def test_get_tunnel_for_agent_returns_none_when_absent() -> None:
 def test_get_tunnel_for_agent_returns_tunnel_with_services() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     tunnel = ctx.get_tunnel_for_agent("alice", "agent1")
     assert tunnel is not None
