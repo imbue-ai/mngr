@@ -1,4 +1,3 @@
-import time
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -24,6 +23,7 @@ from imbue.minds.desktop_client.restic_cli import ResticSnapshot
 from imbue.minds.desktop_client.restic_cli import forget_snapshots
 from imbue.minds.desktop_client.restic_cli import list_snapshots
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.polling import poll_for_value
 
 
 def _snapshot(snapshot_id: str, hour: int) -> ResticSnapshot:
@@ -179,13 +179,15 @@ class _CrashingImbueCloudCli(FakeImbueCloudCli):
 
 
 def _wait_until_not_running(manager: BackupTrimManager, user_id: str) -> BackupTrimStatus:
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
+    def _finished_status() -> BackupTrimStatus | None:
         status = manager.get_status(user_id)
         if status is not None and not status.is_running:
             return status
-        time.sleep(0.01)
-    raise AssertionError("trim run did not finish within the deadline")
+        return None
+
+    finished, _poll_count, _elapsed = poll_for_value(_finished_status, timeout=10.0, poll_interval=0.01)
+    assert finished is not None, "trim run did not finish within the deadline"
+    return finished
 
 
 def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: Path) -> None:
