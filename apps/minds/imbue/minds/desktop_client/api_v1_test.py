@@ -599,6 +599,31 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
 
 
+def test_create_workspace_coerces_validated_resource_spellings(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # The request schema runs in pydantic lax mode, so it also admits coercible
+    # cpus/memory_gib spellings (numeric strings, integral floats). A value the
+    # schema accepted must reach the creator instead of being silently dropped
+    # in favor of the provider default.
+    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "launch_mode": "DOCKER", "cpus": "4", "memory_gib": 8.0},
+    )
+
+    assert response.status_code == 202
+    assert creator.last_call["cpus"] == 4
+    assert creator.last_call["memory_gib"] == 8
+
+
 def test_create_workspace_requires_api_key_for_api_key_provider(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,

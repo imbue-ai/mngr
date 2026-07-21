@@ -522,6 +522,28 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
 # -- Cross-workspace mutation routes (create / destroy / lifecycle) --
 
 
+def _coerce_validated_positive_int(raw: object) -> int | None:
+    """Coerce a schema-validated optional positive-int body field to an int.
+
+    The request model already validated the field, but pydantic's lax mode also
+    admits coercible spellings (numeric strings, integral floats) that the raw
+    JSON body still carries verbatim -- mirror that coercion here so an accepted
+    value is never silently dropped.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float) and raw.is_integer():
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=CreateWorkspaceRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
 def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response:
@@ -592,8 +614,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # Optional CPU/memory allotment for the new host. Only the local providers
     # (docker, lima) support it; reject early for other modes so the caller is
     # not silently ignored. Structural bounds (int >= 1) come from the model.
-    requested_cpus = body.get("cpus")
-    requested_memory_gib = body.get("memory_gib")
+    requested_cpus = _coerce_validated_positive_int(body.get("cpus"))
+    requested_memory_gib = _coerce_validated_positive_int(body.get("memory_gib"))
     if (requested_cpus is not None or requested_memory_gib is not None) and launch_mode not in (
         LaunchMode.DOCKER,
         LaunchMode.LIMA,
@@ -695,10 +717,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         color=color,
         docker_runtime=docker_runtime,
         original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
-        cpus=requested_cpus if isinstance(requested_cpus, int) and not isinstance(requested_cpus, bool) else None,
-        memory_gib=requested_memory_gib
-        if isinstance(requested_memory_gib, int) and not isinstance(requested_memory_gib, bool)
-        else None,
+        cpus=requested_cpus,
+        memory_gib=requested_memory_gib,
     )
     return OperationHandleResponse(operation_id=str(creation_id), kind="create"), 202
 
