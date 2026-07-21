@@ -1474,8 +1474,8 @@ _RECOVERY_SCRIPT: Final[str] = """\
           // own -- e.g. a workspace whose container is stopped can classify
           // here first (a completed exec failure under absent/stalled
           // discovery cannot tell "stopped" from "broken ssh"), and the first
-          // trusted STOPPED snapshot then re-classifies to host_offline and
-          // dispatches the unattended cold boot.
+          // STOPPED snapshot -- stale or fresh -- then re-classifies to
+          // host_offline and dispatches the unattended cold boot.
           renderUnresponsive();
           scheduleIndeterminateReprobe(autoDispatch);
         }
