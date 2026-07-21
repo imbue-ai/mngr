@@ -12,6 +12,10 @@ if ! command -v claude &>/dev/null; then
     exit 0
 fi
 
+# Non-interactive ssh so a marketplace git fetch can never hang the hook at a
+# host-key or credential prompt.
+export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes'
+
 # The plugins and marketplaces are configured at project scope in
 # .claude/settings.json (extraKnownMarketplaces + enabledPlugins), so Claude
 # Code handles installation automatically; this hook only updates them.
@@ -22,8 +26,7 @@ fi
 # surfaced (but not fatal) so a session missing /autofix and friends says why,
 # instead of silently losing them.
 for plugin_id in "${PLUGIN_IDS[@]}"; do
-    if output=$(GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes' \
-        claude plugin update "$plugin_id" 2>&1); then
+    if output=$(claude plugin update "$plugin_id" 2>&1); then
         printf '%s\n' "$output"
         continue
     fi
@@ -32,8 +35,7 @@ for plugin_id in "${PLUGIN_IDS[@]}"; do
     # current scope -- e.g. a fresh machine, or a Sculptor workspace whose
     # project path has never seen an install. Converge by installing (which
     # lands at user scope, so every future workspace inherits it).
-    if install_output=$(GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes' \
-        claude plugin install "$plugin_id" 2>&1); then
+    if install_output=$(claude plugin install "$plugin_id" 2>&1); then
         printf '%s\n' "$install_output"
     else
         printf '%s\n' "$install_output" >&2
