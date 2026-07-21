@@ -430,6 +430,24 @@ def test_revoke_requires_authentication(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
+def test_real_response_carries_the_security_headers(tmp_path: Path) -> None:
+    """The after_request hook is actually wired up, not just unit-testable in isolation.
+
+    ``security_headers_test.py`` covers the header-building helpers directly; this
+    asserts the hook registered in ``create_desktop_client`` reaches a real
+    response, so the wiring itself cannot silently regress.
+    """
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {}, {})
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "default-src 'self'" in response.headers["Content-Security-Policy"]
+    assert "frame-src" in response.headers["Content-Security-Policy"]
+
+
 def test_account_signout_keeps_the_app_usable(tmp_path: Path) -> None:
     """Signing out of an Imbue account must not clear the device session.
 

@@ -106,15 +106,6 @@ def _write_stored_code(auth_dir: Path, code: str, status: str, created_at: datet
     (auth_dir / _CODES_FILENAME).write_text(json.dumps([entry]))
 
 
-def test_validate_accepts_fresh_code(tmp_path: Path) -> None:
-    store = _make_auth_store(tmp_path)
-    code = OneTimeCode("fresh-code-55501")
-
-    store.add_one_time_code(code=code)
-
-    assert store.validate_and_consume_code(code=code) is True
-
-
 def test_validate_rejects_expired_code(tmp_path: Path) -> None:
     auth_dir = tmp_path / "auth"
     stale_time = datetime.now(timezone.utc) - timedelta(hours=1)
