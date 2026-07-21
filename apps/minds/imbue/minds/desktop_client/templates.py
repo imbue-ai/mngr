@@ -1174,7 +1174,8 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // off) never starts auto-dispatching the restarts that entry suppresses.
         var INDETERMINATE_REPROBE_MS = 8000;
         // Only one reprobe timer may be pending at a time: the waiting states that
-        // arm this (indeterminate, backend-unreachable) re-arm it from applyHealth
+        // arm this (indeterminate, backend-unreachable, and the unresponsive
+        // verdicts) re-arm it from applyHealth
         // on every cycle, and the backend-unreachable state also offers a Retry
         // button whose immediate probe lands in the same applyHealth -- without
         // the guard each retry would spawn a parallel self-perpetuating chain of
