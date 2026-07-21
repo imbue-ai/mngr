@@ -151,6 +151,22 @@ class BackendResolverInterface(MutableModel, ABC):
         Default implementation is a no-op.
         """
 
+    def mark_host_lifecycle_transition_started(self, host_id: HostId) -> None:
+        """Retain ``host_id``'s workspace row across a UI-initiated stop/start.
+
+        A cloud VM transiently leaves discovery mid-transition; capturing its
+        current agents keeps the row (and its display info) on every active
+        surface until discovery re-lists the host, so it survives a page reload.
+        Default implementation is a no-op (resolvers without discovery have
+        nothing to retain).
+        """
+
+    def clear_host_lifecycle_transition(self, host_id: HostId) -> None:
+        """Drop any lifecycle-transition retention for ``host_id`` (e.g. after a failed action).
+
+        Default implementation is a no-op.
+        """
+
     def set_workspace_name_override(self, agent_id: AgentId, display_name: str, host_name: str | None) -> None:
         """Optimistically override a workspace's name until discovery confirms it.
 
@@ -486,6 +502,16 @@ def _to_agent_record(agent: DiscoveredAgent) -> _AgentRecord:
     return _AgentRecord(agent_id=agent.agent_id, host_id=agent.host_id, agent_name=agent.agent_name)
 
 
+def _display_info_from_agent(agent: DiscoveredAgent) -> AgentDisplayInfo:
+    """Project a ``DiscoveredAgent`` into the display fields the UI reads."""
+    return AgentDisplayInfo(
+        agent_name=str(agent.agent_name),
+        host_id=str(agent.host_id),
+        create_time=agent.create_time,
+        provider_name=str(agent.provider_name),
+    )
+
+
 def _find_system_services_agent(records: Iterable[_AgentRecord], workspace_agent_id: AgentId) -> AgentId | None:
     """Resolve the system-services agent that shares the workspace agent's host.
 
@@ -577,6 +603,30 @@ class _WorkspaceNameOverride(FrozenModel):
     set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
 
 
+# Sized for the slowest legitimate stop/start round-trip (a cloud VM's first stop
+# can run ~20 min; see workspace_lifecycle._HOST_STOP_START_TIMEOUT_SECONDS) plus
+# discovery reconcile headroom. Purely a backstop: a retention is normally dropped
+# the moment discovery re-lists the host, long before this.
+_HOST_TRANSITION_RETENTION_CAP_SECONDS: Final[float] = 1500.0
+
+
+class _HostTransitionRetention(FrozenModel):
+    """A host's agents captured when a UI-initiated stop/start began.
+
+    A cloud VM briefly leaves the discovery snapshot mid stop/start (deallocating,
+    not yet in the provider's offline bucket). During that window its workspace
+    would vanish from every ``list_active_workspace_ids`` surface -- and, unlike a
+    frontend grace timer, that loss survives a page reload. Retaining the
+    pre-transition agents keeps the row (and its display info) present until
+    discovery re-lists the host or the cap elapses.
+    """
+
+    agents: tuple[DiscoveredAgent, ...] = Field(
+        description="The host's discovered agents at the moment the action began"
+    )
+    set_at_monotonic: float = Field(description="time.monotonic() when captured, for the safety cap")
+
+
 class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
@@ -627,6 +677,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # rename, masking discovery in ``get_workspace_name`` / ``get_host_name`` until
     # discovery re-reads the renamed labels (or the TTL elapses). Guarded by _lock.
     _workspace_name_override_by_agent_id: dict[str, _WorkspaceNameOverride] = PrivateAttr(default_factory=dict)
+    # host_id_str -> the host's agents captured when a UI-initiated stop/start
+    # began, so the workspace row survives the brief discovery gap while the VM
+    # transitions (see _HostTransitionRetention). Guarded by _lock; swept once
+    # discovery re-lists the host or the safety cap elapses.
+    _transition_retention_by_host_id: dict[str, _HostTransitionRetention] = PrivateAttr(default_factory=dict)
     # host_id_str -> the agents last completely enumerated on that host (the
     # in-memory image of the persisted last-good topology). Updated under
     # _lock by update_agents; read by get_system_services_agent_id as the
@@ -710,6 +765,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._agents_result = result
             self._initial_discovery_done = True
             self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
+            self._sweep_transition_retentions_locked(result)
             self._sweep_workspace_name_overrides_locked()
             if self._merge_last_good_topology_locked(result.discovered_agents) and path is not None:
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
@@ -734,6 +790,26 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 or (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
             ):
                 del self._host_state_override_by_host_id[host_id_str]
+
+    def _sweep_transition_retentions_locked(self, result: ParsedAgentsResult) -> None:
+        """Drop retentions whose host discovery has re-listed, or that hit the safety cap.
+
+        Once the fresh snapshot again includes the host -- as a live agent or a
+        known host state (e.g. the provider's offline bucket now reporting it
+        STOPPED) -- the real row is back and the retention is unnecessary. The cap
+        bounds a retention whose host never returns so it cannot linger forever.
+        Must hold ``self._lock``.
+        """
+        present_host_ids = {str(agent.host_id) for agent in result.discovered_agents}
+        present_host_ids.update(result.host_state_by_host_id)
+        now = time.monotonic()
+        for host_id_str in tuple(self._transition_retention_by_host_id):
+            retention = self._transition_retention_by_host_id[host_id_str]
+            if (
+                host_id_str in present_host_ids
+                or (now - retention.set_at_monotonic) > _HOST_TRANSITION_RETENTION_CAP_SECONDS
+            ):
+                del self._transition_retention_by_host_id[host_id_str]
 
     def _sweep_workspace_name_overrides_locked(self) -> None:
         """Drop name overrides that the current snapshot has confirmed or that have expired.
@@ -902,12 +978,26 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """
         with self._lock:
             host_state_by_host_id = self._agents_result.host_state_by_host_id
-            return tuple(
+            live_ids = tuple(
                 agent.agent_id
                 for agent in self._agents_result.discovered_agents
                 if "is_primary" in agent.labels
                 and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
             )
+            # Rows for hosts mid UI-initiated stop/start that have transiently
+            # left the live snapshot are kept from the captured pre-transition
+            # agents, so the row survives a page reload until discovery re-lists
+            # the host (then the retention is swept). Only hosts absent from the
+            # live snapshot need this; a still-listed host is already in live_ids.
+            live_host_ids = {str(agent.host_id) for agent in self._agents_result.discovered_agents}
+            retained_ids = tuple(
+                agent.agent_id
+                for host_id_str, retention in self._transition_retention_by_host_id.items()
+                if host_id_str not in live_host_ids
+                for agent in retention.agents
+                if "is_primary" in agent.labels
+            )
+            return live_ids + retained_ids
 
     def list_restorable_workspace_ids(self) -> tuple[AgentId, ...]:
         """Union of live primary-workspace agents and last-good workspace agents.
@@ -1137,17 +1227,40 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return _find_system_services_agent(last_good, workspace_agent_id)
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
-        """Return display info from discovered agent data."""
+        """Return display info from discovered agent data.
+
+        Falls back to a lifecycle-transition retention when the agent has
+        transiently left the live snapshot (its host is mid stop/start), so the
+        retained row still renders name/provider/host until discovery returns.
+        """
         with self._lock:
             for agent in self._agents_result.discovered_agents:
                 if agent.agent_id == agent_id:
-                    return AgentDisplayInfo(
-                        agent_name=str(agent.agent_name),
-                        host_id=str(agent.host_id),
-                        create_time=agent.create_time,
-                        provider_name=str(agent.provider_name),
-                    )
+                    return _display_info_from_agent(agent)
+            for retention in self._transition_retention_by_host_id.values():
+                for agent in retention.agents:
+                    if agent.agent_id == agent_id:
+                        return _display_info_from_agent(agent)
             return None
+
+    def mark_host_lifecycle_transition_started(self, host_id: HostId) -> None:
+        """Capture ``host_id``'s current agents so its row survives the transition; fires on-change."""
+        host_id_str = str(host_id)
+        with self._lock:
+            captured = tuple(
+                agent for agent in self._agents_result.discovered_agents if str(agent.host_id) == host_id_str
+            )
+            self._transition_retention_by_host_id[host_id_str] = _HostTransitionRetention(
+                agents=captured, set_at_monotonic=time.monotonic()
+            )
+        self._fire_on_change()
+
+    def clear_host_lifecycle_transition(self, host_id: HostId) -> None:
+        """Drop any transition retention for ``host_id``; fires on-change only if one was present."""
+        with self._lock:
+            existed = self._transition_retention_by_host_id.pop(str(host_id), None) is not None
+        if existed:
+            self._fire_on_change()
 
     def has_completed_initial_discovery(self) -> bool:
         with self._lock:

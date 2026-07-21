@@ -70,10 +70,22 @@ def perform_mind_host_action(
     match action:
         case MindHostAction.STOP:
             argv = [mngr_binary, "stop", str(services_agent_id), "--quiet", "--stop-host"]
+            transitional_state = HostState.STOPPING
         case MindHostAction.START:
             argv = [mngr_binary, "start", str(services_agent_id), "--quiet"]
+            transitional_state = HostState.STARTING
         case _ as unreachable:
             assert_never(unreachable)
+
+    if host_id is not None:
+        # Before the (blocking, possibly minutes-long) mngr call -- during which
+        # the VM drops out of discovery -- retain the workspace row and flip the
+        # badge to the transitional state immediately. The retention keeps the row
+        # on the landing page even across a page reload (an in-flight action's
+        # frontend state does not survive one); it is cleared on failure below and
+        # swept once discovery re-lists the host on success.
+        backend_resolver.mark_host_lifecycle_transition_started(host_id)
+        backend_resolver.set_host_state_override(host_id, transitional_state)
 
     cg = concurrency_group.make_concurrency_group(name="workspace-lifecycle")
     try:
@@ -85,6 +97,7 @@ def perform_mind_host_action(
         logger.warning("Could not run mngr to {} host for {}: {!r}", action.value, workspace_agent_id, exc)
         if host_id is not None:
             backend_resolver.clear_host_state_override(host_id)
+            backend_resolver.clear_host_lifecycle_transition(host_id)
         return False
     if finished.returncode != 0:
         logger.warning(
@@ -96,6 +109,7 @@ def perform_mind_host_action(
         )
         if host_id is not None:
             backend_resolver.clear_host_state_override(host_id)
+            backend_resolver.clear_host_lifecycle_transition(host_id)
         return False
 
     if host_id is not None:

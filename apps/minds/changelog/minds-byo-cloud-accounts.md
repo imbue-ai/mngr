@@ -1,6 +1,8 @@
 - Added bring-your-own cloud accounts: paste AWS / GCP / Azure credentials in a new accounts modal on the create page, run a one-time `mngr <provider> prepare` as setup + credential validation (rolled back on failure), and create workspaces on your own cloud account. Accounts are stored as `byok-<backend>-<slug>` provider blocks (with a display-alias sidecar) that survive the boot reconciler; the compute dropdown, region/zone + machine-size pickers, and delete/rename flows all read from that one store.
 
-- AWS / GCP / Azure workspaces gained Stop / Start controls (real VM stop / deallocate, halting the user's own billing), with landing-page fixes for the slower cloud transitions: rows stay sticky through a stop/start instead of reloading into the create form, and the "Server not responding" badge is suppressed while a transition is in flight.
+- AWS / GCP / Azure workspaces gained Stop / Start controls (real VM stop / deallocate, halting the user's own billing), with landing-page fixes for the slower cloud transitions: a workspace's row stays put through a stop/start even though the VM briefly drops out of discovery -- the backend retains the row for the transition, so it survives a page reload (not just an open tab) -- and the "Server not responding" badge is suppressed while a transition is in flight.
+
+- The bring-your-own-key cloud-accounts UI and routes are gated behind the `FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS` env flag (off by default), so the feature ships dark until a build opts in.
 
 - Azure accounts are pinned to one region per entry (Azure's network scaffolding is region-locked); each entry gets its own resource group so multiple regions coexist as multiple entries. Region and machine-size offerings widened beyond US-only, with capacity-alternate machine families (t3a/m6i, n2, Dsv5/Dasv5) for fresh-subscription SkuNotAvailable restrictions.
 

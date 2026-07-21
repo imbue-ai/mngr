@@ -722,6 +722,60 @@ def test_list_restorable_workspace_ids_unions_live_and_last_good(tmp_path: Path)
     assert set(resolver.list_restorable_workspace_ids()) == {remembered_agent, fresh_agent}
 
 
+def test_lifecycle_transition_retains_active_row_through_discovery_gap() -> None:
+    """A host mid UI stop/start keeps its active row + display info while it drops out of discovery."""
+    host, agent = HostId.generate(), AgentId.generate()
+    resolver = MngrCliBackendResolver()
+    primary = _primary_system_services_agent(host, agent)
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(primary,),
+            host_state_by_host_id={str(host): HostState.RUNNING},
+        )
+    )
+    assert resolver.list_active_workspace_ids() == (agent,)
+
+    # User stops the host: mark the transition, then the VM drops out of discovery.
+    resolver.mark_host_lifecycle_transition_started(host)
+    resolver.update_agents(ParsedAgentsResult())
+    # Without the marker this would be () (see the last-good test above); the
+    # retention keeps the row AND its display info renderable.
+    assert resolver.list_active_workspace_ids() == (agent,)
+    info = resolver.get_agent_display_info(agent)
+    assert info is not None and info.host_id == str(host)
+
+    # Discovery re-lists the host (offline bucket now reports STOPPED): the
+    # retention is swept, and a genuine later loss really drops the row.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(primary,),
+            host_state_by_host_id={str(host): HostState.STOPPED},
+        )
+    )
+    assert resolver.list_active_workspace_ids() == (agent,)
+    resolver.update_agents(ParsedAgentsResult())
+    assert resolver.list_active_workspace_ids() == ()
+
+
+def test_lifecycle_transition_cleared_on_failure_does_not_retain() -> None:
+    """A cleared transition (failed action) must not keep a ghost row when the host drops."""
+    host, agent = HostId.generate(), AgentId.generate()
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_primary_system_services_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.RUNNING},
+        )
+    )
+    resolver.mark_host_lifecycle_transition_started(host)
+    resolver.clear_host_lifecycle_transition(host)
+    resolver.update_agents(ParsedAgentsResult())
+    assert resolver.list_active_workspace_ids() == ()
+
+
 def test_last_good_topology_preserves_other_host_on_partial_discovery_loss() -> None:
     """A snapshot missing one host must not erase that host's remembered pairing.
 
