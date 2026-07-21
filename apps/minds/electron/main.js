@@ -1771,6 +1771,20 @@ function toRelativeBackendUrl(url) {
   }
 }
 
+// The workspace whose recovery page ``url`` is, or null for any other URL.
+// Recovery URLs need their own canonicalisation (below) because their
+// ``return_to`` query embeds an absolute URL on the session's mngr_forward
+// origin, whose port changes every run.
+function parseRecoveryPageAgentId(url) {
+  if (!url) return null;
+  try {
+    const match = new URL(url).pathname.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // Canonicalise a window's live content URL into the form persisted in
 // ``window-state.json``. A workspace window's URL is on the agent subdomain
 // (``agent-<id>.localhost:<mngr_forward_port>/...``); stripping that to a bare
@@ -1779,9 +1793,16 @@ function toRelativeBackendUrl(url) {
 // port-independent ``/goto/<agent>/`` auth-bridge path instead -- it carries
 // the agent id, is recognised by ``parseWorkspaceId`` (so dead-workspace
 // filtering works), and ``toRestoredContentUrl`` rebuilds the live origin from
-// it. Everything else round-trips as a minds-backend-relative path.
+// it. A window sitting on a workspace's RECOVERY page also persists as the
+// workspace itself: the recovery URL's ``return_to`` query embeds an absolute
+// URL on this session's forward origin, so persisting it verbatim would send
+// next session's restored window to a dead port (the restored recovery page
+// goes healthy and 302s to the stale return_to). Restoring into the workspace
+// re-enters recovery through the normal unhealthy-redirect with fresh
+// parameters if it is still down. Everything else round-trips as a
+// minds-backend-relative path.
 function toPersistedContentUrl(url) {
-  const agentId = parseWorkspaceId(url);
+  const agentId = parseWorkspaceId(url) || parseRecoveryPageAgentId(url);
   if (agentId) return `/goto/${encodeURIComponent(agentId)}/`;
   return toRelativeBackendUrl(url);
 }
@@ -1790,12 +1811,15 @@ function toPersistedContentUrl(url) {
 // into a loadable absolute URL. Workspace entries (``/goto/<agent>/``) are
 // rebuilt through ``workspaceUrlForAgent`` so the bridge targets the CURRENT
 // run's mngr_forward origin; other entries resolve against the minds backend.
+// A persisted recovery-page URL (written by a build that predates the
+// recovery-aware ``toPersistedContentUrl``) is restored as its workspace too,
+// so its embedded stale-origin ``return_to`` is never navigated to.
 // Persisted urls are backend-relative, so resolve to absolute BEFORE parsing
 // the workspace id -- ``parseWorkspaceId`` runs ``new URL(url)``, which throws
 // (yielding null) on a bare relative path.
 function toRestoredContentUrl(entry) {
   const absolute = toAbsoluteUrl(entry.url);
-  const agentId = parseWorkspaceId(absolute);
+  const agentId = parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute);
   if (agentId) {
     const workspaceUrl = workspaceUrlForAgent(agentId);
     if (workspaceUrl) return workspaceUrl;
