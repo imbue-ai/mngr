@@ -36,5 +36,5 @@ normative mount protocol live in
 Component style mirrors default-workspace-template's
 `apps/system_interface/frontend/src/`: closure components
 (`export function X(): m.Component<Attrs>`), colocated `*.test.ts` vitest
-files, manual `m.redraw()` only from shared state code (later phases' store),
-never scattered in views.
+files, manual `m.redraw()` only from shared state code (`src/store.ts` and the
+page controllers), never scattered in views.

@@ -59,7 +59,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 |---|---|
 | `Notice` | Info / warn / success / error banner. Use HTML attribute passthrough (`id=`, `class="hidden"`) for JS-toggled messages. |
 | `StatusBadge` | Compact pill. `variant="neutral"` / `success` / `error` / `warn` / `info`. |
-| `Badge` | Notification badge on the `important` hue. `count` set -> a count pill (`type-badge` text, caps at 99+); no `count` -> an 8px dot. The titlebar requests button shows the count inline beside the icon (icon + badge in a `gap-[3px]` row; chrome.js sets the text + toggles the native `hidden` attribute -- not a `hidden` class, which the pill's baked-in `inline-flex` would beat). Carries no position; the caller places it. |
+| `Badge` | Notification badge on the `important` hue. `count` set -> a count pill (`type-badge` text, caps at 99+); no `count` -> an 8px dot. The titlebar requests button shows the count inline beside the icon (icon + badge in a `gap-[3px]` row, rendered by the mithril TitleBar component from the store's requests count). Carries no position; the caller places it. |
 | `Spinner` | CSS-only animated circle. `size="sm"` / `"md"` / `"lg"` ; `tone="default"` / `"accent"` (blue, for primary-action spinners) / `"inverse"` (derives from `currentColor`, for spinners inside solid-filled buttons like the Approve busy state). |
 
 ### Icons
@@ -70,12 +70,36 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `Icon12` | 12x12 title-bar chrome glyph (minimize / maximize / close). Single canonical `w-3 h-3` size; used only inside TitlebarButton `variant="control"`. |
 | `auth.OauthIcon` | Brand glyph (Google / GitHub). Stays separate from `Icon16` -- multi-color brand fills, not the single-color icon set. |
 
-### CSS classes for JS-rendered surfaces
+### Components vs remaining Jinja
 
-JavaScript can't call JinjaX components, so JS-built HTML is styled with
-Tailwind directly -- `static/app.css` declares `static/*.js` as a Tailwind
-`@source`, so utility classes written into a `className` string are
-generated exactly as they are in a template. Rule of thumb:
+The chrome/modal layer is client-rendered by the mithril components in
+`apps/minds/frontend/src`, compiled to `static/dist/chrome.bundle.js` and
+exposed as `window.MindsUI`: the titlebar, the workspace switcher menu,
+the landing page (rows + providers panel), the inbox's left list, and the
+sharing editor. A converted page's Jinja template is a thin shell --
+static chrome + a mount container + a `#minds-boot-state` JSON island +
+an inline mount call (see `frontend/src/mount.ts` and
+`specs/minds-chrome-mithril-migration/spec.md` for the protocol).
+
+Everything else stays server-rendered JinjaX: the auth flow, create,
+help, workspace settings, accounts, creating/destroying, the overlay
+host, and the permission-request detail fragments (which components
+innerHTML-swap as opaque server HTML by design).
+
+Components can't call JinjaX primitives, so component markup styles with
+the same Tailwind utilities templates use -- `static/app.css` declares
+`frontend/src` (and the remaining `static/*.js`) as Tailwind `@source`s,
+so utility classes written in a component are generated exactly as they
+are in a template. The button / input class recipes are mirrored in
+`frontend/src/ui.ts` (from the `BTN_*` / `INPUT_BASE` globals in
+`templates.py`) and the icon path data lives canonically in
+`frontend/src/icons.ts` (`templates.py` keeps a shrinking twin for the
+remaining Jinja call sites, with a byte-drift guard test). Hand-rolled
+DOM building (`createElement` / `.innerHTML` / `insertAdjacentHTML`) in
+static JS or inline template scripts is ratcheted
+(`test_minds_ratchets.py`); new or reworked UI belongs in the bundle.
+
+Rule of thumb for styling markup built outside templates:
 
 - **Used in a single place** (a one-off element built in one JS file):
   write the utilities inline on the element. No CSS class -- see the
@@ -103,14 +127,14 @@ instead (e.g. `.minds-tooltip`):
 | `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing workspace rows + Destroying. |
 | `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by the mithril `WorkspaceRow` component (`frontend/src/views/WorkspaceRow.ts`). Not an app.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a selector hook + `is-current` / `is-stale` state marker; it has no app.css styling.) |
-| `.titlebar-surface` / `.titlebar-btn-danger` | Titlebar self-theming. `.titlebar-surface` (toggled on the bar by `chrome.js` while a workspace accent is active) derives a black/white contrast from `--titlebar-bg` in pure CSS (lch relative color) and re-bases the foreground text tokens on it, so the title + buttons read on any accent -- no JS luminance. `-danger` keeps the destructive red hover regardless of accent. |
+| `.titlebar-surface` / `.titlebar-btn-danger` | Titlebar self-theming. `.titlebar-surface` (toggled on the bar by the store's accent effect -- `frontend/src/store.ts` -- while a workspace accent is active) derives a black/white contrast from `--titlebar-bg` in pure CSS (lch relative color) and re-bases the foreground text tokens on it, so the title + buttons read on any accent -- no JS luminance. `-danger` keeps the destructive red hover regardless of accent. |
 
 ## Where the shared tokens live
 
 | Source | Contents |
 |---|---|
 | `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_16` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
-| `static/app.css` | The `@theme` design tokens (colors, radius, type ramp, elevation) plus hand-written recipes: `.minds-card`, `.spinner` + `.spinner-accent` / `.spinner-inverse`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-surface` / `.titlebar-btn-danger`, and the runtime `--workspace-accent` / `--titlebar-bg` (set via inline style on the document root by chrome.js). |
+| `static/app.css` | The `@theme` design tokens (colors, radius, type ramp, elevation) plus hand-written recipes: `.minds-card`, `.spinner` + `.spinner-accent` / `.spinner-inverse`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-surface` / `.titlebar-btn-danger`, and the runtime `--workspace-accent` / `--titlebar-bg` (set via inline style on the document root by the store's accent effect in `frontend/src/store.ts`). |
 | `templates/pages/DevStyleguide.jinja` | The live visual catalog. Mount at `/_dev/styleguide` in a running app. Tells you what exists and what each variant looks like. |
 
 The type ramp (h1/h2/body/caption sizes), the text-color ramp (the 5

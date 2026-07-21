@@ -1,7 +1,8 @@
 // Workspace accent helper. The server attaches each workspace's `accent`
-// (a #rrggbb string) to the SSE workspaces payload; chrome.js / sidebar.js
-// drop it into the --titlebar-bg CSS variable, and the titlebar derives its
-// own contrasting foreground from that color in pure CSS (see
+// (a #rrggbb string) to the SSE workspaces payload; the component store
+// (frontend/src/store.ts) drops it into the --titlebar-bg CSS variable, and
+// the titlebar derives its own
+// contrasting foreground from that color in pure CSS (see
 // `.titlebar-surface` in app.css) -- no JS contrast math. The palette lives
 // server-side only (workspace_color.py) and reaches the client as
 // server-rendered swatches carrying data-color attributes -- there is

@@ -45,7 +45,7 @@
   hidden via JS; the content is a separate WebContentsView and window.minds
   exposes IPC adapters. ``head`` / ``scripts`` let a page append its own head
   tags / script tags after the shell's own (workspace_accent.js,
-  backup_health.js, sidebar_workspace_row.js, chrome.js).
+  backup_health.js, the component bundle, chrome.js).
 #}
 {% set _is_mac = is_mac if is_mac is not none else chrome_is_mac() %}
 {% set _mngr_forward_origin = mngr_forward_origin if mngr_forward_origin is not none else chrome_mngr_forward_origin() %}

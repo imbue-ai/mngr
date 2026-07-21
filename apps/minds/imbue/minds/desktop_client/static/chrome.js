@@ -285,7 +285,7 @@
     }
   }
   function closeSidebar() {
-    if (isElectron) return;  // Electron sidebar.js handles its own dismissal.
+    if (isElectron) return;  // Electron's overlay sidebar page dismisses via main's modal IPCs.
     if (!sidebarOpen) return;
     sidebarOpen = false;
     hideSidebarPanel();

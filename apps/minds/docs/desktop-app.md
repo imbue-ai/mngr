@@ -15,12 +15,9 @@ Everything else -- agent creation, discovery, proxying, authentication, the web 
 
 ### App shell
 
-The Electron window uses a frameless window (`frame: false` on Linux/Windows, `titleBarStyle: 'hiddenInset'` with `trafficLightPosition` on macOS). A custom title bar is injected into every backend page via `webContents.insertCSS()` and `webContents.executeJavaScript()` on the `dom-ready` event. The title bar uses `-webkit-app-region: drag` so the entire bar acts as a window drag handle, with buttons opted out via `no-drag`. The title bar provides:
+The Electron window is a frameless `BaseWindow` (`frame: false` on Linux/Windows, `titleBarStyle: 'hiddenInset'` with `trafficLightPosition` on macOS) composed of `WebContentsView`s managed by `electron/main.js`: a **chrome view** (the backend's `/_chrome` page -- the full-width titlebar plus the thin shell around the content), a **content view** (the workspace or a minds screen), and a shared **modal view** (loads the backend's overlay host page once and shows the workspace menu / inbox / help / sign-in / sharing modals as hosted iframes). The titlebar uses `-webkit-app-region: drag` so the bar acts as a window drag handle, with buttons opted out via `no-drag`.
 
-- **Navigation**: Back/forward buttons using `history.back()`/`history.forward()`
-- **Page title**: Tracks `document.title` via MutationObserver
-- **Open in browser**: Opens the current URL in the system browser
-- **Window controls**: Minimize/maximize/close buttons (on Linux/Windows; macOS uses native traffic lights)
+The chrome and modal surfaces are client-rendered by the mithril components in `apps/minds/frontend/src`, compiled to `static/dist/chrome.bundle.js` (the `window.MindsUI` mount namespace) and mounted synchronously from each page's `#minds-boot-state` island; `imbue/minds/desktop_client/templates/README.md` documents the component-vs-Jinja split. The same backend pages double as the browser-mode fallback, where `static/chrome.js` runs an in-place page swap engine instead of Electron's views.
 
 A separate `shell.html` page handles the loading spinner and error screen during startup.
 
