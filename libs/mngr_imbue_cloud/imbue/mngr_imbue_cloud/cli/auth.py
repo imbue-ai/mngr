@@ -3,7 +3,6 @@
 import getpass
 import html
 import http.server
-import json
 import socket
 import threading
 import time
@@ -357,23 +356,17 @@ _OAUTH_SUCCESS_PAGE_STYLE = (
 def _oauth_success_page(success_redirect_url: str | None) -> bytes:
     """Build the HTML the callback listener serves to the browser.
 
-    With a redirect URL, the page immediately navigates the browser there --
-    the minds desktop app passes its minds:// deeplink so the browser hands
-    focus back to the app -- and keeps a visible link as the fallback for
-    browsers that only follow custom schemes on a user gesture.
+    With a redirect URL, the page offers a link to it -- the minds desktop
+    app passes its minds:// deeplink so a click hands focus back to the app.
+    Deliberately a link rather than an automatic navigation: the click is a
+    user gesture, so browsers show their open-external-app prompt at a moment
+    the user chose instead of unprompted on page load.
     """
     if success_redirect_url is None:
         tail = "<p>You can close this tab and return to your terminal.</p>"
     else:
         href = html.escape(success_redirect_url, quote=True)
-        # JSON-encode for the script body, with angle brackets escaped so a
-        # crafted URL can't close the <script> tag and inject markup.
-        target = json.dumps(success_redirect_url).replace("<", "\\u003c").replace(">", "\\u003e")
-        tail = (
-            f'<p>Returning you to the app... if nothing happens, <a href="{href}">open the app</a> '
-            "and close this tab.</p>"
-            f"<script>window.location.href = {target};</script>"
-        )
+        tail = f'<p><a href="{href}">Open the app</a> and close this tab.</p>'
     page = (
         "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -451,9 +444,9 @@ def _free_localhost_port() -> int:
     "--success-redirect-url",
     default=None,
     help=(
-        "URL the success page redirects the browser to once the OAuth callback lands "
-        "(e.g. a minds:// deeplink so the desktop app regains focus). Default: no "
-        "redirect; the page just says to close the tab."
+        "URL the success page links to once the OAuth callback lands (e.g. a minds:// "
+        "deeplink so a click returns the user to the desktop app). Default: no link; "
+        "the page just says to close the tab."
     ),
 )
 @click.option("--connector-url", default=None, help="Override connector URL")

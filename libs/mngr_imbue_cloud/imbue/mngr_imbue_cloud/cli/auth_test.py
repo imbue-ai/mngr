@@ -69,20 +69,17 @@ def test_success_page_without_redirect_says_return_to_terminal() -> None:
     assert "<script>" not in page
 
 
-def test_success_page_with_redirect_navigates_and_links_to_url() -> None:
+def test_success_page_with_redirect_links_to_url_without_auto_navigation() -> None:
+    # Deliberately a plain link, not an automatic navigation: the click is the
+    # user gesture that triggers the browser's open-external-app prompt.
     page = _oauth_success_page("minds://").decode("utf-8")
-    assert 'window.location.href = "minds://"' in page
     assert '<a href="minds://">' in page
+    assert "<script>" not in page
 
 
 def test_success_page_escapes_redirect_url_markup() -> None:
-    """A crafted URL must not be able to inject markup into the page.
-
-    The href is attribute-escaped and the script target is JSON-encoded with
-    angle brackets unicode-escaped, so a ``</script>`` payload can't close
-    the script tag.
-    """
-    page = _oauth_success_page('minds://x?a=<b>&q="hi"</script>').decode("utf-8")
+    """A crafted URL must not be able to inject markup into the page: the
+    href is attribute-escaped."""
+    page = _oauth_success_page('minds://x?a=<b>&q="hi"').decode("utf-8")
     assert "<b>" not in page
-    assert 'href="minds://x?a=&lt;b&gt;&amp;q=&quot;hi&quot;&lt;/script&gt;"' in page
-    assert "\\u003c/script\\u003e" in page
+    assert 'href="minds://x?a=&lt;b&gt;&amp;q=&quot;hi&quot;"' in page
