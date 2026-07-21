@@ -296,11 +296,18 @@ def _bridge_pty_to_ws(ws: Any, child_pid: int, master_fd: int, label: str) -> No
     stop = threading.Event()
 
     def _pump_pty_to_ws() -> None:
+        # poll() rather than select.select(): select() raises "filedescriptor out
+        # of range in select()" the moment master_fd >= FD_SETSIZE (1024), so on a
+        # busy server (many open fds) every new terminal's pty fd lands above the
+        # limit and the reader dies instantly -> [disconnected]. poll() has no such
+        # cap.
+        poller = select.poll()
+        poller.register(master_fd, select.POLLIN)
+        timeout_ms = int(_SELECT_TIMEOUT_SECONDS * 1000)
         try:
             while not stop.is_set():
                 try:
-                    ready, _, _ = select.select([master_fd], [], [], _SELECT_TIMEOUT_SECONDS)
-                    if not ready:
+                    if not poller.poll(timeout_ms):
                         continue
                     data = os.read(master_fd, _READ_CHUNK)
                 except OSError:

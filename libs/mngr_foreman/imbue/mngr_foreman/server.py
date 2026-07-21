@@ -31,6 +31,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr_foreman.agent_registry import AgentRegistry
 from imbue.mngr_foreman.assets import ensure_assets
 from imbue.mngr_foreman.assets import get_asset_dir
@@ -152,6 +153,17 @@ def create_app(
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + 1024 * 1024
     sock = Sock(app)
 
+    # The dev server runs a fresh thread per request, and any request that touches
+    # SSH via pyinfra spins up a thread-local gevent Hub whose wakeup pipe leaks
+    # when that thread exits. Destroy it as each request finishes so those fds
+    # can't pile up (which eventually pushes fd numbers past select()'s 1024 cap
+    # and breaks terminals). No-op on threads that never touched gevent. Streaming
+    # SSE generators and WS handlers pop their request context early, so they clean
+    # up in their own finally blocks instead (see below); this covers the rest.
+    @app.teardown_request
+    def _cleanup_thread_hub(_exc: BaseException | None) -> None:
+        cleanup_thread_local_resources()
+
     # ---- pages ------------------------------------------------------------
 
     @app.route("/")
@@ -215,8 +227,11 @@ def create_app(
     @app.route("/api/agents/stream")
     def api_agents_stream() -> Response:
         def generate() -> Iterator[str]:
-            for message in registry.subscribe():
-                yield _sse(message)
+            try:
+                for message in registry.subscribe():
+                    yield _sse(message)
+            finally:
+                cleanup_thread_local_resources()  # destroy this thread's gevent Hub
 
         return Response(generate(), mimetype="text/event-stream", headers=_sse_headers())
 
@@ -365,10 +380,16 @@ def create_app(
 
     # ---- terminal websocket ----------------------------------------------
 
+    # Each WS handler runs on its own per-connection thread and touches SSH while
+    # building the terminal, so it leaves a thread-local gevent Hub that must be
+    # destroyed when the connection ends (teardown_request doesn't fire for these).
     @sock.route("/ws/agents/<name>/terminal")
     def terminal_ws(ws: object, name: str) -> None:
         # Bridge the socket to the agent's tmux (direct ssh, mngr-connect fallback).
-        handle_terminal_ws(ws, name, pool)
+        try:
+            handle_terminal_ws(ws, name, pool)
+        finally:
+            cleanup_thread_local_resources()
 
     @sock.route("/ws/hosts/<host>/terminal")
     def host_shell_ws(ws: object, host: str) -> None:
@@ -376,13 +397,19 @@ def create_app(
         # Resolve to any agent on this host; handle_host_shell_ws closes the ws
         # itself if the host can't be reached, so a missing agent is the only case
         # we short-circuit here (pass a sentinel the handler treats as unavailable).
-        agent_name = _first_agent_on_host(host) or ""
-        handle_host_shell_ws(ws, agent_name, host, pool)
+        try:
+            agent_name = _first_agent_on_host(host) or ""
+            handle_host_shell_ws(ws, agent_name, host, pool)
+        finally:
+            cleanup_thread_local_resources()
 
     @sock.route("/ws/terminal")
     def orchestrator_ws(ws: object) -> None:
         # Bridge the socket to a plain `bash -l` on the foreman server machine.
-        handle_orchestrator_ws(ws)
+        try:
+            handle_orchestrator_ws(ws)
+        finally:
+            cleanup_thread_local_resources()
 
     def _first_agent_on_host(host_name: str) -> str | None:
         for card in registry.snapshot():
@@ -472,6 +499,22 @@ def _transcript_stream(
     pool: ConnectionPool,
 ) -> Iterator[str]:
     """SSE generator: full backfill, then live events, with periodic heartbeats."""
+    try:
+        yield from _transcript_stream_inner(mngr_ctx, agent, strategy, max_tool_output_chars, pool)
+    finally:
+        # This generator runs for the whole connection on its own thread and pops
+        # its request context early, so teardown_request won't fire for it: destroy
+        # its thread-local gevent Hub here when the client disconnects.
+        cleanup_thread_local_resources()
+
+
+def _transcript_stream_inner(
+    mngr_ctx: MngrContext,
+    agent: AgentDetails,
+    strategy: TranscriptStrategy,
+    max_tool_output_chars: int,
+    pool: ConnectionPool,
+) -> Iterator[str]:
     built = _build_transcript_reader(mngr_ctx, agent, strategy.subpath, pool)
     if built is None:
         yield _sse({"type": "error", "message": "Agent host is not readable (offline and no volume)."})
