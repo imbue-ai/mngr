@@ -1674,6 +1674,17 @@ function sendOverlayCommand(bundle, cmd) {
   } catch { /* noop */ }
 }
 
+// The cached requests payload for view priming, replayed IN FULL (ids +
+// cards + auto_open): the store-fed inbox list renders straight from
+// ``cards``, so a partial reconstruction would wipe the list a view just
+// seeded from its boot island. Before the first SSE requests event arrives,
+// the empty-inbox shape.
+function cachedRequestsEventOrEmpty() {
+  return latestChromeState.requestsEvent !== null
+    ? latestChromeState.requestsEvent
+    : { type: 'requests', count: 0, request_ids: [], cards: [], auto_open: true };
+}
+
 // Replay the cached chrome state into the overlay's iframes. The hosted sidebar
 // renders its workspace list from the SSE-driven ``workspaces`` event and the
 // inbox keys off ``requests``; an iframe that just (re)loaded must be handed the
@@ -1686,16 +1697,7 @@ function primeOverlayFrames(bundle) {
   if (latestChromeState.authStatus) {
     sendToOverlayFrames(bundle, 'chrome-event', latestChromeState.authStatus);
   }
-  // Replay the full cached payload (ids + cards + auto_open): the store-fed
-  // inbox list renders straight from ``cards``, so a partial reconstruction
-  // here would wipe the list an iframe just seeded from its boot island.
-  sendToOverlayFrames(
-    bundle,
-    'chrome-event',
-    latestChromeState.requestsEvent !== null
-      ? latestChromeState.requestsEvent
-      : { type: 'requests', count: 0, request_ids: [], cards: [], auto_open: true },
-  );
+  sendToOverlayFrames(bundle, 'chrome-event', cachedRequestsEventOrEmpty());
   for (const [agentId, status] of systemInterfaceStatusByAgent) {
     if (!status || status === 'healthy') continue;
     sendToOverlayFrames(bundle, 'chrome-event', { type: 'system_interface_status', agent_id: agentId, status });
@@ -2676,14 +2678,7 @@ function primeViewWithCachedChromeState(bundle, wc) {
   if (latestChromeState.authStatus) {
     wc.send('chrome-event', latestChromeState.authStatus);
   }
-  // Full cached payload for the same reason as primeOverlayFrames: the
-  // store-fed views consume every field, not just count + ids.
-  wc.send(
-    'chrome-event',
-    latestChromeState.requestsEvent !== null
-      ? latestChromeState.requestsEvent
-      : { type: 'requests', count: 0, request_ids: [], cards: [], auto_open: true },
-  );
+  wc.send('chrome-event', cachedRequestsEventOrEmpty());
   // Replay the latest non-healthy system-interface status for each agent so a
   // freshly (re)loaded chrome/sidebar view re-learns which workspaces are
   // stuck / restarting. Unlike the events above, per-agent health is NOT held
