@@ -416,6 +416,24 @@ def test_find_git_common_dir_returns_none_when_not_in_git(tmp_path: Path, cg: Co
     assert result is None
 
 
+def test_find_git_common_dir_returns_none_when_path_does_not_exist(
+    tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """A path that does not exist is not a git repo -> None, not a crash.
+
+    Running git with a nonexistent cwd fails at process setup (ProcessSetupError),
+    which is otherwise surfaced loudly rather than swallowed; the exists() guard
+    turns this legitimate "not in a repo" case into None. Agent plugins pass an
+    agent work_dir that may not exist on this host (e.g. a blank workspace on a
+    docker/remote provider whose dir lives inside the container).
+    """
+    missing = tmp_path / "does-not-exist"
+    assert not missing.exists()
+
+    result = find_git_common_dir(missing, cg)
+    assert result is None
+
+
 def test_find_git_common_dir_returns_git_dir_for_regular_repo(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that find_git_common_dir returns .git for a regular repository."""
     git_dir = tmp_path / "my-repo"

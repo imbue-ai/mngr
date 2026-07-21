@@ -504,6 +504,14 @@ def find_git_common_dir(path: Path, cg: ConcurrencyGroup) -> Path | None:
     any other git failure is raised rather than swallowed (see
     ``_is_not_a_git_repository_error``).
     """
+    # A path that does not exist cannot be inside a git repository. Guard before
+    # spawning git: running it with a nonexistent cwd fails at process setup
+    # (ProcessSetupError, returncode None), which is deliberately surfaced loudly
+    # rather than treated as "no repo". Agent plugins pass a work_dir that may not
+    # exist on this host (e.g. a blank workspace on a docker/remote provider whose
+    # dir lives inside the container), and expect None for "not in a repo".
+    if not path.exists():
+        return None
     try:
         result = cg.run_process_to_completion(
             ["git", "rev-parse", "--git-common-dir"],
