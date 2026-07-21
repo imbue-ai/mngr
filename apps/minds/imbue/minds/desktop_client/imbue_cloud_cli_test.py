@@ -31,7 +31,7 @@ def test_expect_success_keeps_traceback_out_of_message_but_on_stderr() -> None:
         stderr=traceback_stderr,
     )
     with pytest.raises(ImbueCloudCliError) as exc_info:
-        cli._expect_success(result, "tunnels list")  # noqa: SLF001 - exercising the private error-surfacing path
+        cli._expect_success(result, "tunnels list")
 
     message = str(exc_info.value)
     assert "Traceback" not in message
@@ -53,7 +53,7 @@ def test_expect_success_raises_typed_quota_error_with_server_message() -> None:
     )
     result = MngrCallResult(returncode=1, stdout="", stderr="some log line\n" + body + "\n")
     with pytest.raises(ImbueCloudQuotaExceededCliError) as exc_info:
-        cli._expect_success(result, "bucket create")  # noqa: SLF001 - exercising the private error-surfacing path
+        cli._expect_success(result, "bucket create")
     assert "allows 5 buckets" in str(exc_info.value)
     assert "bucket create" in str(exc_info.value)
 

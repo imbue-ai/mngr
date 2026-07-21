@@ -843,7 +843,10 @@ def _parse_stderr_error_message(stderr: str) -> str | None:
         if lstripped.startswith("{"):
             try:
                 parsed, _consumed_until = decoder.raw_decode(stderr, offset + len(line) - len(lstripped))
-            except _json.JSONDecodeError:
+            except _json.JSONDecodeError as exc:
+                # Some other output line merely started with a brace; keep
+                # scanning for the real error body.
+                logger.warning("Skipping a brace-prefixed non-JSON stderr line while locating the error body: {}", exc)
                 parsed = None
             if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
                 return str(parsed["error"])
