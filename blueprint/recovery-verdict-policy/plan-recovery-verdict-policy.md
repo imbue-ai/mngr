@@ -158,8 +158,11 @@ container):
   check was observed cold-booting a stopped container -- its online gate read
   the stale replayed RUNNING state -- which invalidated the recovery page's
   evidence mid-probe (the container came up behind the classifier's back and
-  the page never dispatched or showed the offline restart). Only the recovery
-  flow's dispatched restart and explicit user actions may start a host.
+  the page never dispatched or showed the offline restart). Two execs
+  deliberately keep the auto-start behavior pending a design call: the
+  tunnel-token inject behind share-enable and the agent-facing SSH-grant
+  read/write; every diagnostic and cleanup exec fast-fails against a stopped
+  host instead.
 
 - The STOPPED/CRASHED -> HOST_OFFLINE verdict lost its freshness gate (see
   "Expected behavior" above): requiring a post-onset snapshot made the startup
