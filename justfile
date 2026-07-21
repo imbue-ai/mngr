@@ -203,6 +203,12 @@ test-quick args="":
 regenerate-agent-capabilities-doc:
   uv run python scripts/make_agent_capabilities_doc.py
 
+# Refresh the vendored Claude Code skills in .claude/skills/ from their upstream
+# repos, per .claude/vendored_skills.toml. Pass --check to report drift without
+# changing files; see the manifest header for details.
+sync-vendored-skills *args:
+  uv run python -m scripts.sync_vendored_skills {{args}}
+
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "not release"

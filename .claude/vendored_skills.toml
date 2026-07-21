@@ -1,0 +1,22 @@
+# Claude Code skills vendored into .claude/skills/ from external repositories.
+#
+# Sync (or first-vendor) with:
+#     just sync-vendored-skills            # or: uv run python -m scripts.sync_vendored_skills
+#     just sync-vendored-skills --check    # report drift without changing files
+#
+# `commit` is the upstream commit last vendored (maintained by the sync script).
+# Sync refuses to overwrite a local copy whose `commit` is not found upstream
+# (e.g. it references an upstream change that has not merged yet); use --force
+# once upstream has intentionally diverged.
+
+[skills.crispy-comments]
+repo = "https://github.com/DanverImbue/crispy-comments"
+ref = "main"
+include = ["SKILL.md"]
+commit = "8514b31c0781f83cfc4b4ecdda585c00a4504304"
+
+[skills.post-pr-to-slack]
+repo = "https://github.com/imbue-ai/sculptor"
+ref = "main"
+path = ".claude/skills/post-pr-to-slack"
+commit = "c64c32fc27cdea14f22bb51ce068503cd3ad62c5"
