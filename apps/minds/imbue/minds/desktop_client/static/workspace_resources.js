@@ -101,12 +101,7 @@
     }
   }
 
-  function applyResourcesState(data) {
-    cpuDimension = data.cpu || null;
-    memoryDimension = data.memory_gib || null;
-    updateCeilingHint(cpusCeilingEl, cpuDimension);
-    updateCeilingHint(memoryCeilingEl, memoryDimension);
-    var configured = data.configured || null;
+  function applyConfiguredValues(configured) {
     if (configured) {
       cpusInput.value = formatValue(configured.cpu_count);
       memoryInput.value = formatValue(configured.memory_gib);
@@ -115,6 +110,15 @@
     // show "no limit" rather than fake numbers.
     cpusInput.placeholder = configured && configured.cpu_count === null ? 'no limit' : '';
     memoryInput.placeholder = configured && configured.memory_gib === null ? 'no limit' : '';
+  }
+
+  function applyResourcesState(data) {
+    cpuDimension = data.cpu || null;
+    memoryDimension = data.memory_gib || null;
+    updateCeilingHint(cpusCeilingEl, cpuDimension);
+    updateCeilingHint(memoryCeilingEl, memoryDimension);
+    var configured = data.configured || null;
+    applyConfiguredValues(configured);
     setPendingNoteVisible(valuesDiffer(configured, data.actual || null));
     updateOverProvisionWarning();
   }
@@ -170,12 +174,7 @@
         }
         var configured = result.body.configured || null;
         var actual = result.body.actual || null;
-        if (configured) {
-          cpusInput.value = formatValue(configured.cpu_count);
-          memoryInput.value = formatValue(configured.memory_gib);
-          cpusInput.placeholder = configured.cpu_count === null ? 'no limit' : '';
-          memoryInput.placeholder = configured.memory_gib === null ? 'no limit' : '';
-        }
+        applyConfiguredValues(configured);
         updateOverProvisionWarning();
         var isPending = valuesDiffer(configured, actual);
         setPendingNoteVisible(isPending);
