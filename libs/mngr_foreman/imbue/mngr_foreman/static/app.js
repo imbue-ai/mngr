@@ -342,13 +342,15 @@
     const composer = document.getElementById("composer");
     const toolBodies = new Map(); // tool_call_id -> {body, toolName, resolved}
     const pendingResults = new Map(); // tool_call_id -> result event (arrived early)
-    // No optimistic rendering: a sent message stays in the composer until the
-    // transcript itself echoes it (see send()/renderEvent). userBubbles maps a
-    // message's text to its rendered bubble so a queued_command (purple) can be
-    // flipped to a delivered user_message (green) in place instead of duplicated.
-    const userBubbles = new Map(); // content-key -> { node, queued }
+    // Optimistic send: on send we render the message bubble immediately (class
+    // "pending") and clear the composer at once, so the send feels instant. The
+    // transcript echo later confirms it IN PLACE (pending class removed) rather
+    // than duplicating, since userBubbles dedups by content-key. A failed POST
+    // rolls the bubble back and restores the text. userBubbles also flips a
+    // queued_command (purple) to a delivered user_message (green) in place.
+    const userBubbles = new Map(); // content-key -> { node, queued, pending }
     let pendingSend = null; // text of a sent message awaiting its transcript echo
-    let pendingSendTimer = null; // safety re-enable if the echo never matches
+    let pendingSendTimer = null; // safety: confirm the pending bubble if echo never matches
     // The upload token: "[FILE: ./chat_uploads/<uuid>.<ext>]". Captured group 1
     // is the stored name. Used to render chips in the transcript and to delete a
     // whole token on backspace. Build a fresh RegExp per use to reset lastIndex.
@@ -615,7 +617,13 @@
           finishPendingSend();
         }
         const existing = userBubbles.get(key);
-        if (existing && existing.queued && !ev.queued) {
+        if (existing && existing.pending) {
+          // The optimistic bubble we rendered on send is now confirmed by the
+          // transcript: drop the "pending" look in place (no duplicate).
+          existing.node.classList.remove("pending");
+          existing.pending = false;
+          if (existing.queued && !ev.queued) { existing.node.classList.remove("queued"); existing.queued = false; }
+        } else if (existing && existing.queued && !ev.queued) {
           // A queued_command has now been delivered as a real turn: flip the
           // existing purple bubble to green in place rather than duplicating it.
           existing.node.classList.remove("queued");
@@ -750,11 +758,9 @@
       if (r) r.onclick = (e) => { e.preventDefault(); sendErr.hidden = true; };
     }
 
-    // Unlock the composer and clear the sent text. Called when the transcript
-    // confirms the message (renderEvent) or, as a fallback, from the safety timer.
-    function finishPendingSend() {
-      if (pendingSendTimer) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
-      pendingSend = null;
+    // Clear the composer immediately (optimistic send). The message is already
+    // rendered as a pending bubble, so there's nothing to lose by emptying now.
+    function clearComposer() {
       input.value = "";
       input.disabled = false;
       sendBtn.disabled = false;
@@ -762,23 +768,49 @@
       clearUploads();
       input.focus();
     }
-    // Re-open the composer for editing/retry without clearing (a failed send).
-    function unlockComposer() {
-      input.disabled = false;
-      sendBtn.disabled = false;
+    // Bookkeeping only: the composer was already cleared on send; here we just
+    // stop the safety timer once the transcript confirms (or the timer fires).
+    function finishPendingSend() {
+      if (pendingSendTimer) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
+      pendingSend = null;
+    }
+
+    // Render the just-sent message as a pending bubble, right now.
+    function renderPendingUser(text) {
+      const key = text.trim();
+      const wasBottom = atBottom();
+      const e = el("div", "entry user pending");
+      renderUserContent(e, text);
+      tEl.appendChild(e);
+      userBubbles.set(key, { node: e, queued: false, pending: true });
+      scrollDown(wasBottom);
+      return { node: e, key: key };
+    }
+    // Roll a pending bubble back (failed POST): remove it and restore the text so
+    // the user can edit/retry without losing what they typed.
+    function rollbackPending(pend, msg) {
+      finishPendingSend();
+      if (pend && pend.node) pend.node.remove();
+      if (pend) userBubbles.delete(pend.key);
+      if (!input.value.trim()) { input.value = msg; autoGrow(); }
     }
 
     function send() {
-      if (sendBtn.disabled) return; // a send is already in flight (guards Enter too)
+      if (sendBtn.disabled) return; // guard double-fire (Enter + click)
       const msg = input.value.trim();
       if (!msg) return;
-      // No optimistic rendering: the text STAYS in the composer as the pending
-      // state, but the WHOLE composer is locked (button + textarea uneditable)
-      // until the transcript echoes the message -- then finishPendingSend clears
-      // and unlocks it. renderEvent does the confirm match by content.
-      sendBtn.disabled = true;
-      input.disabled = true;
       sendErr.hidden = true;
+      // Optimistic: show the bubble and empty the composer NOW so send feels
+      // instant. The transcript echo confirms it in place; a failed POST rolls back.
+      const pend = renderPendingUser(msg);
+      clearComposer();
+      pendingSend = msg;
+      if (pendingSendTimer) clearTimeout(pendingSendTimer);
+      // Safety: if the echo never matches (content normalized), drop the pending
+      // look after a grace period so the bubble doesn't stay greyed forever.
+      pendingSendTimer = setTimeout(() => {
+        if (pendingSend === msg) { finishPendingSend(); if (pend.node) pend.node.classList.remove("pending"); }
+      }, 15000);
       fetch("/api/agents/" + encodeURIComponent(name) + "/message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -787,30 +819,20 @@
         .then((r) => r.json().then((d) => ({ ok: r.ok, d: d })))
         .then(({ ok, d }) => {
           if (ok && d.ok) {
-            // Delivered to claude's input. Wait for the transcript echo (matched
-            // by content) to clear + unlock the composer and render the real bubble.
-            pendingSend = msg;
             clearBlocked();
             statePoll.burst(); // fast input-state polling so working/blocked reacts
-            // Safety net: if the transcript echo never matches (e.g. the content
-            // got normalized), clear + unlock after a grace period so the composer
-            // can't lock up. The echo normally arrives in well under a second.
-            if (pendingSendTimer) clearTimeout(pendingSendTimer);
-            pendingSendTimer = setTimeout(() => {
-              if (pendingSend === msg) finishPendingSend();
-            }, 15000);
           } else {
             const err = (d && d.error) || "send failed — open the terminal to resolve any prompt.";
+            rollbackPending(pend, msg);
             showError(err);
             // A failed send usually means a blocking dialog ate the paste; flip
             // to the greyed state immediately (the next poll re-confirms/clears).
             setBlocked();
-            unlockComposer(); // let the user edit/retry (text is still there)
           }
         })
         .catch((e) => {
+          rollbackPending(pend, msg);
           showError("network error: " + e);
-          unlockComposer();
         });
     }
 

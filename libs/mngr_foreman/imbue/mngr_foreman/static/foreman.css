@@ -118,6 +118,8 @@ a:hover { text-decoration: underline; }
 }
 /* queued: sent while the agent was busy, awaiting delivery confirmation. */
 .entry.user.queued { background: var(--queued-bg); }
+/* pending: optimistically rendered on send, faded until the transcript confirms. */
+.entry.user.pending { opacity: 0.55; transition: opacity 0.15s ease-out; }
 
 .entry.assistant { margin: 8px 0; }
 .assistant-md { word-break: break-word; }
