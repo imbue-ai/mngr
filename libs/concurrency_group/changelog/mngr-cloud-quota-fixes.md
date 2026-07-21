@@ -1,1 +1,0 @@
-No concurrency_group changes of its own in this branch. The stacked PR's diff base (`mngr/cloud-quotas`) is behind `main`, so `main`'s already-merged concurrency_group changes (the subprocess reap log wording from the fix-errors-in-log PR) appear in the three-dot diff; this entry satisfies the changelog gate for that artifact.
