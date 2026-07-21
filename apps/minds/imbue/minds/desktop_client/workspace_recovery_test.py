@@ -29,7 +29,6 @@ from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
-from imbue.minds.desktop_client.workspace_recovery import is_workspace_discovery_stalled
 from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -547,27 +546,6 @@ def test_classification_trustworthiness_is_scoped_to_the_workspaces_own_provider
     assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is True
 
 
-def test_discovery_stalled_when_no_snapshot_or_snapshot_is_old() -> None:
-    """Discovery is stalled when the workspace's provider has no (or only an old) snapshot.
-
-    This is the dead-producer condition (e.g. the ``mngr latchkey forward``
-    supervisor died): the onset-based freshness gate can never open again, so the
-    probe path uses this predicate to stop waiting and gather direct evidence.
-    """
-    resolver = MngrCliBackendResolver()
-    agent_id = AgentId.generate()
-    _register_workspace_agent(resolver, agent_id, "docker")
-
-    # No snapshot for the provider at all: stalled.
-    assert is_workspace_discovery_stalled(resolver, agent_id) is True
-    # A recent snapshot: flowing normally.
-    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc))
-    assert is_workspace_discovery_stalled(resolver, agent_id) is False
-    # Several missed polls (providers poll every 30s): stalled.
-    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc) - timedelta(minutes=5))
-    assert is_workspace_discovery_stalled(resolver, agent_id) is True
-
-
 def test_classification_trustworthiness_without_onset_falls_back_to_age() -> None:
     """Without a recorded onset, trustworthiness falls back to the absolute-age freshness check.
 
@@ -693,8 +671,8 @@ def test_probe_attempts_exec_and_resolves_when_discovery_is_stalled(tmp_path: Pa
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     _drive_to_stuck_with_onset(tracker, workspace_agent)
-    # No provider snapshot is ever recorded: discovery is stalled.
-    assert is_workspace_discovery_stalled(resolver, workspace_agent) is True
+    # No provider snapshot is ever recorded, so the classification never becomes
+    # trustworthy and the exec is the only way out of INDETERMINATE.
 
     mngr_binary = _write_fake_mngr(tmp_path)
     with ConcurrencyGroup(name="test-probe-stalled") as cg:
@@ -741,3 +719,71 @@ def test_probe_skips_exec_for_a_trusted_not_running_host(tmp_path: Path) -> None
 
     assert _read_fake_mngr_invocations(mngr_binary) == []
     assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_probe_attempts_exec_for_an_untrusted_non_offline_state(tmp_path: Path) -> None:
+    """A stale, non-offline host state gathers direct evidence instead of waiting.
+
+    Any state the resolver cannot yet vouch for (no snapshot at/after the outage
+    onset has landed) that is not the STOPPED/CRASHED offline pair triggers the
+    exec immediately -- there is no fixed staleness threshold to wait out. Here a
+    pre-onset STOPPING resolves via the exec's completed failure (the stub exits 0
+    with no sentinel) to the consent-gated HOST_UNRESPONSIVE instead of spinning
+    at INDETERMINATE.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    # A pre-onset snapshot: within the absolute freshness window but still holding
+    # the pre-outage state, so the classification stays untrustworthy.
+    _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
+
+    mngr_binary = _write_fake_mngr(tmp_path)
+    with ConcurrencyGroup(name="test-probe-untrusted-stopping") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    exec_invocations = [line for line in _read_fake_mngr_invocations(mngr_binary) if line.startswith("exec ")]
+    assert exec_invocations, "an untrusted non-offline state must gather direct evidence via the exec"
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_probe_skips_exec_for_a_trusted_transitional_host(tmp_path: Path) -> None:
+    """A trusted transitional state is left to the classifier, not execced into a false verdict.
+
+    A fresh post-onset snapshot showing STOPPING is the host genuinely
+    mid-shutdown; firing a doomed exec there would flip a normal transition into a
+    premature consent-gated HOST_UNRESPONSIVE. The probe skips the exec and yields
+    INDETERMINATE (keep checking), so the next snapshot resolves it (e.g. to the
+    offline restart once it reads STOPPED).
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+
+    mngr_binary = _write_fake_mngr(tmp_path)
+    with ConcurrencyGroup(name="test-probe-trusted-stopping") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    assert _read_fake_mngr_invocations(mngr_binary) == []
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE

@@ -148,36 +148,6 @@ def is_recovery_classification_trustworthy(
     return last_snapshot_at is not None and last_snapshot_at >= onset
 
 
-# How long without any discovery snapshot for a workspace's provider before we
-# consider discovery itself stalled (a dead/wedged producer, not just a snapshot
-# that has not landed yet). Providers poll every 30s by default
-# (``discovery_poll_interval_seconds``), so this is three missed polls -- well
-# past the freshness-gate wait, which resolves within one poll when discovery is
-# healthy. A stalled stream means the snapshot-freshness gate can never open, so
-# the probe path stops waiting for it and gathers direct evidence instead.
-_DISCOVERY_STALL_THRESHOLD_SECONDS: Final[float] = 90.0
-
-
-def is_workspace_discovery_stalled(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> bool:
-    """Whether discovery has stopped producing snapshots for ``agent_id``'s provider.
-
-    True when the workspace's provider has no snapshot at all or its latest one
-    is older than ``_DISCOVERY_STALL_THRESHOLD_SECONDS``. Distinct from the
-    onset-based trustworthiness gate: that gate answers "has discovery
-    re-observed the host since the outage began?" and is expected to open within
-    one poll interval; this answers "is discovery producing observations at
-    all?". Only the passive-discovery resolver tracks snapshot times; any other
-    resolver (e.g. static test resolvers) is never considered stalled.
-    """
-    if not isinstance(backend_resolver, MngrCliBackendResolver):
-        return False
-    last_snapshot_at = _workspace_provider_snapshot_at(backend_resolver, agent_id)
-    if last_snapshot_at is None:
-        return True
-    age_seconds = (datetime.now(timezone.utc) - last_snapshot_at).total_seconds()
-    return age_seconds > _DISCOVERY_STALL_THRESHOLD_SECONDS
-
-
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
     """Build the argv for ``mngr stop`` on ``agent_id``, stopping its host with it."""
     return [mngr_binary, "stop", str(agent_id), "--quiet", "--stop-host"]
@@ -430,12 +400,16 @@ def probe_workspace_health(
     ``backend_resolver`` -- the single passive-discovery sampler shared with the
     rest of minds -- not re-sampled with a synchronous ``mngr list``. The reason
     the inner interface isn't answering comes from the batched in-container ``mngr
-    exec`` probe, which is fired when the provider is reachable and the host is
-    RUNNING (so an outage never pays a doomed provider round-trip), and also --
-    regardless of the recorded host state -- when discovery itself has stalled
-    (``is_workspace_discovery_stalled``): with no snapshots flowing, the exec's
-    own outcome is the only direct evidence available. The plugin's
-    resolver-snapshot mirror supplies the last probe.
+    exec`` probe, which is fired when the provider is reachable and the passive
+    layer cannot already answer: either the host is observed RUNNING (so the
+    container should be reachable and the exec tests the inner interface), or the
+    resolver's host state is not trustworthy yet (a stale pre-onset snapshot, or a
+    dead/stalled discovery producer whose freshness gate can never open) and that
+    state is not the STOPPED/CRASHED offline pair. When the passive layer cannot
+    answer, the exec's own outcome is the only direct evidence available; a fresh,
+    trustworthy, actionable state is left to the classifier so an outage never
+    pays a doomed provider round-trip. The plugin's resolver-snapshot mirror
+    supplies the last probe.
 
     The recovery page can be reached before discovery has re-observed the host
     after an outage (the STUCK redirect is no longer gated on freshness -- that
@@ -473,25 +447,36 @@ def probe_workspace_health(
         backend_resolver.get_provider_errors(), provider_name
     )
 
-    # In-container exec probe, only when the provider is reachable and either the
-    # host is RUNNING or discovery itself has stalled. The exec SSHes to the
-    # container via ``get_host`` (the connector's ~30s httpx), so it carries an
-    # explicit 30s-class cap and is skipped when the provider has a surfaced
-    # error or the (still-flowing) discovery stream already shows the host not
-    # running -- an outage never pays a doomed provider round-trip. When
-    # discovery has stalled (a dead producer), the host state can never be
-    # re-certified and the freshness gate can never open, so the exec is
-    # attempted regardless of the stale state: its outcome is the only direct
-    # evidence available, and it resolves the page to HEALTHY or a consent-gated
-    # HOST_UNRESPONSIVE instead of an indefinite INDETERMINATE. A non-clean
-    # outcome leaves ``in_container_stdout`` None.
+    # Whether the resolver's host state can be trusted for a verdict yet (a
+    # snapshot taken at/after the outage onset has landed). Computed here to gate
+    # the exec; re-read after the exec for the actual classification (see below).
+    state_is_trustworthy = is_recovery_classification_trustworthy(backend_resolver, tracker, agent_id)
+
+    # In-container exec probe, fired only when the provider is reachable (no
+    # surfaced error) and the passive layer will not already answer: either the
+    # host is observed RUNNING, or its state is not trustworthy yet (a stale
+    # pre-onset snapshot, or a dead/stalled discovery producer whose freshness
+    # gate can never open) and it is not the STOPPED/CRASHED offline pair. The
+    # offline pair is skipped because it auto-dispatches an idempotent ``mngr
+    # start`` off any snapshot (see ``_classify_dispatch_tier``); a doomed exec
+    # into a stopped container would only delay that restart. A fresh, trusted
+    # state (e.g. a transitional STOPPING) is left to the classifier rather than
+    # execced, so a normal transition is not prematurely consent-gated. The exec
+    # SSHes to the container via ``get_host`` (the connector's ~30s httpx), so it
+    # carries an explicit 30s-class cap; its outcome is the only direct evidence
+    # available when the passive layer is silent, resolving the page to HEALTHY or
+    # a consent-gated HOST_UNRESPONSIVE instead of an indefinite INDETERMINATE. A
+    # non-clean outcome leaves ``in_container_stdout`` None.
     in_container_stdout: str | None = None
     probe_timed_out = False
     probe_exec_attempted = False
     if (
         services_agent_id is not None
         and provider_error_message is None
-        and (host_state_enum == HostState.RUNNING or is_workspace_discovery_stalled(backend_resolver, agent_id))
+        and (
+            host_state_enum == HostState.RUNNING
+            or (not state_is_trustworthy and host_state_enum not in (HostState.STOPPED, HostState.CRASHED))
+        )
     ):
         probe_exec_attempted = True
         try:
