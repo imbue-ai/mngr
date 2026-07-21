@@ -20,6 +20,7 @@ Changes versus the original:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any
@@ -246,6 +247,7 @@ def parse_claude_session_lines(
     tool_name_by_call_id: dict[str, str] | None = None,
     max_tool_output_chars: int = 20000,
     session_id: str | None = None,
+    queue_state: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Parse raw Claude session JSONL lines into transcript events.
 
@@ -266,6 +268,8 @@ def parse_claude_session_lines(
         existing_event_ids = set()
     if tool_name_by_call_id is None:
         tool_name_by_call_id = {}
+    if queue_state is None:
+        queue_state = []
 
     new_events: list[tuple[str, dict[str, Any]]] = []
 
@@ -280,9 +284,16 @@ def parse_claude_session_lines(
             continue
 
         event_type: str = raw.get("type", "")
-        uuid: str = raw.get("uuid", "")
         timestamp: str = raw.get("timestamp", "")
 
+        # queue-operation records track the live message queue in real time
+        # (enqueue/remove/dequeue/popAll). They carry a timestamp but NO uuid, so
+        # they must be handled BEFORE the uuid guard below.
+        if event_type == "queue-operation":
+            _parse_queue_operation(raw, timestamp, existing_event_ids, queue_state, new_events, session_id)
+            continue
+
+        uuid: str = raw.get("uuid", "")
         if not uuid or not timestamp:
             continue
 
@@ -533,6 +544,112 @@ def _parse_user_message(
                 event["session_id"] = session_id
             existing_event_ids.add(event_id)
             new_events.append((timestamp, event))
+
+
+def _make_queue_event_id(timestamp: str, key: str, prefix: str) -> str:
+    """Deterministic event_id for a queue event -- queue-operation lines have no uuid."""
+    digest = hashlib.sha1(f"{timestamp}|{key}".encode()).hexdigest()[:16]
+    return f"queue-{prefix}-{digest}"
+
+
+def _parse_queue_operation(
+    raw: dict[str, Any],
+    timestamp: str,
+    existing_event_ids: set[str],
+    queue_state: list[dict[str, Any]],
+    new_events: list[tuple[str, dict[str, Any]]],
+    session_id: str | None = None,
+) -> None:
+    """Track Claude Code's live message queue and emit real-time queue events.
+
+    Claude writes a ``queue-operation`` line the INSTANT a message is queued (typed
+    while a turn is running) -- long before the delayed ``queued_command``
+    attachment (measured lag: seconds to over a minute). Foreman used to render
+    only that late attachment, so a queued message was invisible until accepted;
+    keying off these operations makes it appear immediately.
+
+    Replaying the operations in file order reconstructs the live queue (append-only,
+    pure FIFO), so a full re-read always converges on the correct pending set:
+      * ``enqueue`` (has content) -> a message entered the queue -> user_message(queued=True)
+      * ``remove``  (has content) -> accepted at a turn boundary  -> queue_accepted
+      * ``dequeue`` (no content)  -> accepted via interrupt (Esc) -> queue_accepted (FIFO head)
+      * ``popAll``  (has content) -> pulled back into the editor   -> queue_removed (all)
+    The later ``queued_command`` attachment and ``promptSource:"queued"`` user line
+    carry the SAME text; the client reconciles them by content-key rather than
+    drawing a second bubble.
+    """
+    if not timestamp:
+        return
+    op = raw.get("operation")
+    content = raw.get("content")
+    text = _extract_text_content(content) if content is not None else ""
+    key = text.strip()
+
+    if op == "enqueue":
+        if not key:
+            return
+        queue_state.append({"key": key, "text": text})
+        event_id = _make_queue_event_id(timestamp, key, "enq")
+        if event_id in existing_event_ids:
+            return
+        existing_event_ids.add(event_id)
+        event: dict[str, Any] = {
+            "timestamp": timestamp,
+            "type": "user_message",
+            "event_id": event_id,
+            "source": _SOURCE,
+            "role": "user",
+            "content": text,
+            "queued": True,
+        }
+        if session_id is not None:
+            event["session_id"] = session_id
+        new_events.append((timestamp, event))
+    elif op in ("remove", "dequeue"):
+        # Accepted: the model now sees this message. `remove` names it; the
+        # interrupt-path `dequeue` carries no content, so pop the FIFO head.
+        popped: dict[str, Any] | None = None
+        if key:
+            for i, item in enumerate(queue_state):
+                if item["key"] == key:
+                    popped = queue_state.pop(i)
+                    break
+        if popped is None and queue_state:
+            popped = queue_state.pop(0)
+        if popped is None:
+            return
+        event_id = _make_queue_event_id(timestamp, popped["key"], "acc")
+        if event_id in existing_event_ids:
+            return
+        existing_event_ids.add(event_id)
+        accepted: dict[str, Any] = {
+            "timestamp": timestamp,
+            "type": "queue_accepted",
+            "event_id": event_id,
+            "key": popped["key"],
+        }
+        if session_id is not None:
+            accepted["session_id"] = session_id
+        new_events.append((timestamp, accepted))
+    elif op == "popAll":
+        # The whole queue was yanked back into the editor (the user is editing a
+        # queued message); drop every pending bubble. Edited text re-arrives as a
+        # fresh enqueue.
+        for i, item in enumerate(list(queue_state)):
+            event_id = _make_queue_event_id(timestamp, item["key"], f"rm{i}")
+            if event_id in existing_event_ids:
+                continue
+            existing_event_ids.add(event_id)
+            removed: dict[str, Any] = {
+                "timestamp": timestamp,
+                "type": "queue_removed",
+                "event_id": event_id,
+                "key": item["key"],
+            }
+            if session_id is not None:
+                removed["session_id"] = session_id
+            new_events.append((timestamp, removed))
+        queue_state.clear()
 
 
 def _parse_queued_command_attachment(

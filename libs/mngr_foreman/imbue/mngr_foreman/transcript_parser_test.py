@@ -392,3 +392,57 @@ def test_slash_command_normalized() -> None:
     events = parse_claude_session_lines([line])
     assert events[0]["type"] == "framework_message"
     assert events[0]["label"] == "/deploy prod"
+
+
+def _qop(operation: str, ts: str, content: str | None = None) -> str:
+    d: dict[str, Any] = {"type": "queue-operation", "operation": operation, "timestamp": ts}
+    if content is not None:
+        d["content"] = content
+    return json.dumps(d)
+
+
+def _queue_view(events: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for e in events:
+        if e.get("type") == "user_message" and e.get("queued"):
+            out.append(("Q", e["content"]))
+        elif e.get("type") == "queue_accepted":
+            out.append(("A", e["key"]))
+        elif e.get("type") == "queue_removed":
+            out.append(("R", e["key"]))
+    return out
+
+
+def test_queue_enqueue_emits_queued_user_message() -> None:
+    # queue-operation records have NO uuid; they must still produce a queued bubble.
+    events = parse_claude_session_lines([_qop("enqueue", "t1", "hi there")])
+    assert _queue_view(events) == [("Q", "hi there")]
+    assert events[0]["queued"] is True
+
+
+def test_queue_remove_is_graceful_accept() -> None:
+    events = parse_claude_session_lines([_qop("enqueue", "t1", "do X"), _qop("remove", "t2", "do X")])
+    assert _queue_view(events) == [("Q", "do X"), ("A", "do X")]
+
+
+def test_queue_dequeue_accepts_fifo_head_without_content() -> None:
+    # Interrupt path: dequeue carries no content -> pop the FIFO head.
+    lines = [_qop("enqueue", "t1", "first"), _qop("enqueue", "t2", "second"), _qop("dequeue", "t3"), _qop("dequeue", "t4")]
+    assert _queue_view(parse_claude_session_lines(lines)) == [("Q", "first"), ("Q", "second"), ("A", "first"), ("A", "second")]
+
+
+def test_queue_popall_removes_all_pending() -> None:
+    lines = [_qop("enqueue", "t1", "a"), _qop("enqueue", "t2", "b"), _qop("popAll", "t3", "a")]
+    assert _queue_view(parse_claude_session_lines(lines)) == [("Q", "a"), ("Q", "b"), ("R", "a"), ("R", "b")]
+
+
+def test_queue_replay_is_deterministic_and_dedups() -> None:
+    # Persistent state across incremental calls converges; a re-read emits nothing new.
+    lines = [_qop("enqueue", "t1", "m1"), _qop("remove", "t2", "m1")]
+    eids: set[str] = set()
+    queue: list[dict[str, Any]] = []
+    first = parse_claude_session_lines(lines, existing_event_ids=eids, queue_state=queue)
+    assert _queue_view(first) == [("Q", "m1"), ("A", "m1")]
+    again = parse_claude_session_lines(lines, existing_event_ids=eids, queue_state=queue)
+    assert _queue_view(again) == []  # already emitted -> deduped
+    assert queue == []  # accepted -> no longer pending

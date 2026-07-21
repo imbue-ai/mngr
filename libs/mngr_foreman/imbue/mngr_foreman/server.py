@@ -67,7 +67,11 @@ _SAFE_IMAGE_ID_CHARS: Final[frozenset[str]] = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
 )
 _TARGET_REFRESH_SECONDS: Final[float] = 30.0
-_HEARTBEAT_SECONDS: Final[float] = 15.0
+# Frequent heartbeats so the client's liveness watchdog notices a dead stream
+# fast (a silently-dropped SSE otherwise looks "connected" but shows stale state).
+# Sent as a real data event, not a ": comment" -- EventSource never dispatches
+# comments to onmessage, so the client can't time them.
+_HEARTBEAT_SECONDS: Final[float] = 5.0
 # The transcript SSE loop polls at this fixed, consistent rate -- warm, never
 # adaptive-idle. Cheap because a stat-before-read skips the read when the file
 # hasn't grown (see TranscriptTailer), and the connection is always warm.
@@ -524,6 +528,9 @@ def _transcript_stream_inner(
     tailer = TranscriptTailer(reader, size_fn=size_fn)
     existing_event_ids: set[str] = set()
     tool_name_by_call_id: dict[str, str] = {}
+    # Live message-queue FIFO, replayed from the transcript's queue-operation lines
+    # so queued messages appear the instant they're enqueued (see the parser).
+    queue_state: list[dict[str, Any]] = []
 
     def _emit(lines: list[str]) -> Iterator[str]:
         if not lines:
@@ -533,6 +540,7 @@ def _transcript_stream_inner(
             existing_event_ids=existing_event_ids,
             tool_name_by_call_id=tool_name_by_call_id,
             max_tool_output_chars=max_tool_output_chars,
+            queue_state=queue_state,
         )
         for event in events:
             # Move large base64 images out-of-band so SSE frames stay small; the
@@ -562,7 +570,7 @@ def _transcript_stream_inner(
         yield from _emit(new_lines)
         now = time.monotonic()
         if now - last_heartbeat >= _HEARTBEAT_SECONDS:
-            yield ": heartbeat\n\n"
+            yield _sse({"type": "heartbeat"})
             last_heartbeat = now
 
 

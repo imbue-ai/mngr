@@ -59,6 +59,7 @@ def parse_common_transcript_lines(
     existing_event_ids: set[str] | None = None,
     tool_name_by_call_id: dict[str, str] | None = None,
     max_tool_output_chars: int = 20000,
+    queue_state: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize common-transcript JSONL ``lines`` into foreman UI event dicts, sorted by timestamp.
 

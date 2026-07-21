@@ -189,9 +189,17 @@
   }
 
   // --- connection status ----------------------------------------------------
+  // Also colours the top-bar liveness dot: green=live, red=offline/closed/error,
+  // amber(pulsing)=anything in between (connecting/reconnecting/polling).
   function setConn(state) {
     const c = document.getElementById("conn");
-    if (c) c.textContent = state;
+    if (!c) return;
+    c.textContent = state;
+    const live = state === "live";
+    const off = state === "offline" || state === "closed" || state === "error";
+    c.classList.toggle("live", live);
+    c.classList.toggle("offline", off);
+    c.classList.toggle("reconnecting", !live && !off);
   }
 
   // --- live agent state -> tab title ----------------------------------------
@@ -501,20 +509,17 @@
       }
     }
 
-    // "Working" indicator: pinned pulsing dot shown while claude is generating.
-    // Two signals drive it:
-    //  - transcript heuristic (instant ON): a user_message or tool_result is the
-    //    latest input (claude should respond), or the latest assistant message
-    //    made tool calls (more to come). A plain-text assistant message with no
-    //    tool calls means the turn completed -> OFF. This is instant but can mis-
-    //    read the tail (e.g. after an interrupt the last event stays a tool_result
-    //    forever, so the dot would be stuck on).
-    //  - mngr lifecycle state (authoritative OFF): the input-state poll reports
-    //    busy=false whenever mngr sees no 'active' marker -- claude idle at the
-    //    prompt or blocked on a dialog. This clears a dot the heuristic misreads.
-    // mngr's OFF is ignored for a short grace window right after an ON, because
-    // the RUNNING state takes ~1-3s to propagate after a prompt is submitted, and
-    // acting on the pre-flip WAITING would blink the dot off immediately.
+    // "Working" indicator: a pulsing dot that also anchors the queue -- accepted
+    // messages sit ABOVE it, still-queued messages BELOW it (mirrors the terminal).
+    // Two signals drive whether it shows:
+    //  - transcript heuristic: instant ON only (a user_message / tool_result / an
+    //    assistant message with tool calls means more is coming). It NEVER turns
+    //    the dot off -- the tail is easy to misread (a mid-turn text chunk, or a
+    //    post-interrupt tool_result that stays last forever).
+    //  - mngr's live busy flag (the input-state tmux poll): AUTHORITATIVE for both
+    //    ON and OFF. If the poll says busy, show the dot even when the heuristic
+    //    missed it (fixes "it's working but the dot's gone"); busy=false (after a
+    //    short grace) hides it. This is the ground truth.
     const MNGR_IDLE_GRACE_MS = 5000;
     let working = false;
     let workingSince = 0;
@@ -523,36 +528,38 @@
     workingEl.hidden = true;
     workingEl.appendChild(el("span", "dot"));
     workingEl.appendChild(el("span", null, "working…"));
+    // The dot lives permanently in the transcript as a fixed anchor: main content
+    // is inserted BEFORE it, queued bubbles are appended AFTER it. Just toggle its
+    // visibility; never move it.
+    tEl.appendChild(workingEl);
 
     function setWorking(v) {
       if (v && !working) workingSince = Date.now();
       working = v;
     }
     function updateWorkingFrom(ev) {
-      if (ev.type === "user_message") {
-        setWorking(true);
-      } else if (ev.type === "tool_result") {
-        setWorking(true);
-      } else if (ev.type === "assistant_message") {
-        if ((ev.tool_calls || []).length > 0) setWorking(true);
-        else if (ev.text && ev.text.trim()) setWorking(false);
-        // else: empty assistant chunk -> leave state unchanged
-      }
+      // Instant ON only. OFF is owned by the live poll (applyMngrBusy).
+      if (ev.type === "user_message") setWorking(true);
+      else if (ev.type === "tool_result") setWorking(true);
+      else if (ev.type === "assistant_message" && (ev.tool_calls || []).length > 0) setWorking(true);
     }
-    // Authoritative OFF from mngr's busy flag (see the input-state poll below).
+    // Authoritative busy flag from mngr's live tmux poll -- drives BOTH directions.
     function applyMngrBusy(busy) {
-      if (busy === false && working && Date.now() - workingSince > MNGR_IDLE_GRACE_MS) {
-        setWorking(false);
-        refreshWorking();
+      if (busy === true) {
+        if (!working) { setWorking(true); refreshWorking(); }
+      } else if (busy === false) {
+        // Ignore the pre-flip WAITING for a short grace after an ON (RUNNING takes
+        // ~1-3s to propagate after a prompt), else the dot blinks off immediately.
+        if (working && Date.now() - workingSince > MNGR_IDLE_GRACE_MS) {
+          setWorking(false);
+          refreshWorking();
+        }
       }
-      // busy === true / null / undefined: leave the transcript heuristic in charge.
     }
     function refreshWorking() {
-      // State precedence: BLOCKED (a ❯ dialog / mngr PERMISSIONS -> greyed
-      // composer) beats "working", so never show the dot while blocked -- even if
-      // mngr still reads RUNNING because a mid-turn menu left the active marker set.
+      // BLOCKED (a ❯ dialog / mngr PERMISSIONS) beats "working" -- never show the
+      // dot while blocked. The dot stays put (fixed anchor); only visibility flips.
       workingEl.hidden = !working || blocked;
-      if (!workingEl.hidden) tEl.appendChild(workingEl); // keep it pinned last
       if (escBtn) escBtn.disabled = false; // always usable; Escape is harmless
     }
 
@@ -624,33 +631,62 @@
       if (last < text.length) container.appendChild(document.createTextNode(text.slice(last)));
     }
 
+    // Position relative to the working dot: main content goes ABOVE it (normal
+    // history / current turn), queued messages go BELOW it (still in the queue).
+    function addMain(node) { tEl.insertBefore(node, workingEl); }
+    function addQueued(node) { tEl.appendChild(node); }
+    // Queued (dark green, below dot) -> accepted (full green, above dot), in place.
+    function promoteBubble(rec) {
+      if (!rec || !rec.queued) return;
+      rec.node.classList.remove("queued");
+      rec.queued = false;
+      tEl.insertBefore(rec.node, workingEl); // move above the dot into history
+    }
+
     function renderEvent(ev) {
       if (ev.type === "user_message") {
         const key = (ev.content || "").trim();
-        // The transcript is the single source of truth. The instant the message
-        // we sent shows up here (queued OR delivered) it has "landed" -- clear the
-        // box and unlock the input region for the next one.
-        if (pendingSend !== null && key === pendingSend) {
-          confirmSend();
-        }
+        // The transcript is the source of truth. The instant the message we sent
+        // shows up here (as an enqueue OR a delivered turn) it has "landed" --
+        // clear the box and unlock the composer for the next one.
+        if (pendingSend !== null && key === pendingSend) confirmSend();
         const existing = userBubbles.get(key);
-        if (existing) {
-          // Same message, new state: sync its colour to what claude recorded.
-          // queued_command -> purple; the later delivered turn -> green, in place.
-          existing.node.classList.toggle("queued", !!ev.queued);
-          existing.queued = !!ev.queued;
+        if (ev.queued) {
+          // Still in claude's queue -> dark-green bubble BELOW the dot.
+          if (existing) {
+            // Re-assertion (e.g. the late queued_command attachment for the same
+            // text): only merge images it carries; never un-promote an accepted one.
+            if (existing.queued && ev.images && ev.images.length) {
+              ev.images.forEach((img) => existing.node.appendChild(toolImageEl(img)));
+            }
+          } else {
+            const e = el("div", "entry user queued");
+            renderUserContent(e, ev.content || "");
+            if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
+            addQueued(e);
+            userBubbles.set(key, { node: e, queued: true });
+          }
+        } else if (existing) {
+          // The delivered turn for a message we already showed queued (the
+          // interrupt/Esc path writes such a line) -> promote in place.
+          promoteBubble(existing);
         } else {
-          // queued (typed while busy, still in claude's queue, not yet seen by the
-          // model) -> purple; delivered (claude has accepted it as a turn) -> green.
-          const e = el("div", ev.queued ? "entry user queued" : "entry user");
+          // A normal delivered turn (sent while idle) -> full-green, above the dot.
+          const e = el("div", "entry user");
           renderUserContent(e, ev.content || "");
-          // Pasted / queued images ride along on the message.
           if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
-          tEl.appendChild(e);
-          userBubbles.set(key, { node: e, queued: !!ev.queued });
+          addMain(e);
+          userBubbles.set(key, { node: e, queued: false });
         }
+      } else if (ev.type === "queue_accepted") {
+        // claude pulled this message off the queue (turn boundary or interrupt).
+        promoteBubble(userBubbles.get(ev.key));
+      } else if (ev.type === "queue_removed") {
+        // The user yanked the queue back to edit (popAll) -> drop the bubble.
+        const rec = userBubbles.get(ev.key);
+        if (rec && rec.queued) { rec.node.remove(); userBubbles.delete(ev.key); }
       } else if (ev.type === "framework_message") {
-        tEl.appendChild(frameworkEl(ev));
+        addMain(frameworkEl(ev));
       } else if (ev.type === "assistant_message") {
         const e = el("div", "entry assistant");
         if (ev.text && ev.text.trim()) {
@@ -660,7 +696,7 @@
           e.appendChild(md);
         }
         (ev.tool_calls || []).forEach((tc) => e.appendChild(toolCallEl(tc)));
-        if (e.childNodes.length) tEl.appendChild(e);
+        if (e.childNodes.length) addMain(e);
       } else if (ev.type === "tool_result") {
         if (toolBodies.has(ev.tool_call_id)) attachResult(ev);
         else pendingResults.set(ev.tool_call_id, ev);
@@ -672,7 +708,7 @@
 
     function setStatus(text) {
       let s = document.getElementById("stat");
-      if (!s) { s = el("div", "status-line"); s.id = "stat"; tEl.appendChild(s); }
+      if (!s) { s = el("div", "status-line"); s.id = "stat"; addMain(s); }
       s.textContent = text;
     }
     function clearStatus() {
@@ -686,20 +722,50 @@
     // event_id, so we dedup client-side and only render what we haven't seen.
     const seenEventIds = new Set();
     let es = null;
+    // ---- liveness ----
+    // The server pushes a heartbeat event every ~5s. We time them: if the stream
+    // goes quiet the browser may not notice a dead socket, so a watchdog flips the
+    // indicator to amber/red and force-reconnects, and LOCKS the composer so
+    // nothing is ever sent into a dead stream. The transcript keeps showing its
+    // last-known state meanwhile.
+    let lastMsgAt = Date.now();
+    let connLive = false;
+    let lastReconnectAt = 0;
+    const STALE_MS = 14000; // ~3 missed heartbeats -> stream is stale
+    const OFFLINE_MS = 30000; // still nothing -> declare offline
 
-    function connect() {
+    function setConnState(state) {
+      setConn(state); // top-bar dot colour + text
+      connLive = state === "live";
+      composer.classList.toggle("offline", !connLive);
+    }
+    function markLive() {
+      lastMsgAt = Date.now();
+      if (!connLive) setConnState("live");
+    }
+    function forceReconnect() {
+      const now = Date.now();
+      if (now - lastReconnectAt < 5000) return; // don't storm reconnects
+      lastReconnectAt = now;
+      if (es) { try { es.close(); } catch (_e) {} es = null; }
+      connect(true);
+    }
+
+    function connect(isReconnect) {
       if (typeof EventSource === "undefined") {
         setStatus("Live transcript needs EventSource support.");
         composer.hidden = false;
         return;
       }
       if (es) return; // already connected
-      setStatus("loading transcript…");
+      if (!isReconnect) setStatus("loading transcript…");
       es = new EventSource("/api/agents/" + encodeURIComponent(name) + "/transcript");
-      es.onopen = () => setConn("live");
+      es.onopen = () => markLive();
       es.onmessage = (raw) => {
+        markLive(); // any frame (incl. heartbeat) proves the stream is alive
         let msg;
         try { msg = JSON.parse(raw.data); } catch (_e) { return; }
+        if (msg.type === "heartbeat") return; // liveness only, nothing to render
         if (msg.type === "event") {
           const id = msg.event && msg.event.event_id;
           if (id) {
@@ -713,15 +779,21 @@
           scrollDown(true);
         } else if (msg.type === "unsupported") {
           clearStatus();
-          tEl.appendChild(el("div", "unsupported", "No transcript for agent type '" + msg.agent_type + "'."));
+          addMain(el("div", "unsupported", "No transcript for agent type '" + msg.agent_type + "'."));
         } else if (msg.type === "error") {
           setStatus(msg.message || "error");
           composer.hidden = false;
         }
       };
-      es.onerror = () => setConn("reconnecting");
+      es.onerror = () => { if (connLive) setConnState("reconnecting"); };
     }
-    connect();
+    connect(false);
+    setInterval(() => {
+      const gap = Date.now() - lastMsgAt;
+      if (gap < STALE_MS) { if (!connLive) setConnState("live"); return; }
+      setConnState(gap < OFFLINE_MS ? "reconnecting" : "offline");
+      forceReconnect();
+    }, 3000);
     schedulePrefetch(); // warm highlight/katex/mermaid during idle
 
     // ---- composer ----
@@ -809,6 +881,7 @@
 
     function send() {
       if (composer.classList.contains("awaiting")) return; // already waiting on one
+      if (!connLive) { showError("not connected — waiting to reconnect…"); return; }
       const msg = input.value.trim();
       if (!msg) return;
       sendErr.hidden = true;

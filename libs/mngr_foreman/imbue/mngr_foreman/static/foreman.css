@@ -9,7 +9,7 @@
   --bg: #000000;
   --bg-raised: #0a0a0a;
   --bg-inset: #101010;
-  --bg-user: #0f2318;     /* delivered user message: green-tinted block */
+  --bg-user: #123d22;     /* accepted user message: full green block (claude has it) */
   --fg: #ffffff;
   --fg-dim: #b0b0b0;
   --fg-faint: #6a6a6a;
@@ -18,8 +18,8 @@
   --accent: #ffffff;      /* high-contrast; links are underlined to read as links */
   --link: #7dc4ff;
   --user: #ffffff;
-  --queued-bg: #241933;   /* purple: a message queued while the agent is busy */
-  --queued-bar: #a970ff;
+  --queued-bg: #0c2416;   /* dark green: message still sitting in claude's queue */
+  --queued-bar: #3a7a52;
   --add-bg: #0e2417;
   --add-fg: #6ee7a0;
   --del-bg: #2a1216;
@@ -130,9 +130,9 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
 /* ---- transcript ---- */
 .transcript { padding-bottom: 120px; }
 .entry { padding: 6px 0; }
-/* user message: flows like the rest of the transcript, no "> " prefix, no
-   distinct text color -- distinguished ONLY by a subtle background rectangle.
-   That background is the state carrier: green = sent/delivered, purple = queued. */
+/* user message: flows like the rest of the transcript, distinguished ONLY by a
+   green background rectangle. Shade carries state: full green = accepted (claude
+   has it), dark green = still queued. No purple. */
 .entry.user {
   color: var(--fg);
   white-space: pre-wrap;
@@ -141,10 +141,30 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
   padding: 8px 12px;
   margin: 12px 0;
 }
-/* queued: typed while the agent was busy -- still sitting in claude's queue,
-   not yet seen by the model. Flips to the plain green block once claude accepts
-   it as a delivered turn (the transcript is the source of truth for the flip). */
+/* queued: typed while the agent was busy -- still in claude's queue, not yet seen
+   by the model. Rendered BELOW the working dot (mirrors the terminal), dark green.
+   Promotes to the full-green block ABOVE the dot when claude accepts it (the
+   transcript's queue-operation events drive the flip). */
 .entry.user.queued { background: var(--queued-bg); }
+
+/* connection liveness dot in the top bar: green = live, amber (pulsing) =
+   reconnecting, red = offline. The text still says the state; the dot is the
+   glanceable signal. */
+#conn { display: inline-flex; align-items: center; gap: 6px; }
+#conn::before {
+  content: "";
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+  flex: 0 0 auto;
+}
+#conn.live::before { background: var(--chip-run); }
+#conn.reconnecting::before { background: var(--chip-wait); animation: working-pulse 1.1s ease-in-out infinite; }
+#conn.offline::before { background: var(--err); }
+
+/* input gate: when the stream isn't live, lock the composer so nothing is sent
+   into a dead connection (the transcript still shows the last-known state). */
+.composer.offline .inner { opacity: 0.5; pointer-events: none; }
 
 .entry.assistant { margin: 8px 0; }
 .assistant-md { word-break: break-word; }
