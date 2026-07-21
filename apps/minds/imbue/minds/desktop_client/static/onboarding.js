@@ -89,7 +89,7 @@
         tipEl.innerHTML = TIPS[tipIdx];
         tipEl.style.opacity = '1';
       }, 250);
-    }, 4000);
+    }, 8000);
   }
 
   // ---- Begin: zoom into the workspace, then navigate ----

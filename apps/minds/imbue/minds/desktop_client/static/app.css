@@ -659,18 +659,34 @@ html.no-scrollbar-gutter {
 #theme-demo {
   --demo-accent: #0b292b;
 }
+/*
+ * Demo titlebar text/fills derive a black-or-white contrast base from the
+ * picked accent, exactly like the real titlebar does (.titlebar-surface
+ * above), so tabs and window dots read correctly on light and dark
+ * accents alike.
+ */
+#theme-demo {
+  --_demo-contrast: lch(from var(--demo-accent) calc((49.44 - l) * infinity) 0 0);
+}
+.demo-accent-bubble {
+  color: rgb(from var(--_demo-contrast) r g b / 0.95);
+}
+.demo-dot {
+  background: rgb(from var(--_demo-contrast) r g b / 0.35);
+}
 .demo-tab {
-  padding: 4px 12px;
+  padding: 5px 14px;
   border-radius: 8px 8px 0 0;
   font-size: 12px;
   line-height: 1.4;
-  color: rgba(255, 255, 255, 0.85);
-  background: rgba(255, 255, 255, 0.14);
-  margin-right: 2px;
+  color: rgb(from var(--_demo-contrast) r g b / 0.8);
+  background: rgb(from var(--_demo-contrast) r g b / 0.1);
+  margin-right: 3px;
   cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease;
 }
 .demo-tab:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgb(from var(--_demo-contrast) r g b / 0.18);
 }
 .demo-tab.demo-tab-active {
   background: var(--c-surface-primary);
@@ -688,6 +704,17 @@ html.no-scrollbar-gutter {
 }
 .service-marquee {
   mask-image: linear-gradient(to right, transparent, black 8%, black 92%, transparent);
+}
+
+/*
+ * Carousel brand icons are monochrome-black simple-icons SVGs served as
+ * <img>, so they can't take currentColor. Invert them under the app's
+ * class-based dark theme (the Tailwind ``dark:`` variant follows the OS
+ * prefers-color-scheme, which is the wrong signal here -- an OS in dark
+ * mode would invert icons on the still-light page and wash them out).
+ */
+.dark .service-icon {
+  filter: invert(1);
 }
 .service-marquee-track {
   animation: service-marquee-scroll 90s linear infinite;

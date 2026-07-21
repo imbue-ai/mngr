@@ -159,9 +159,9 @@
             <div id="theme-demo" class="w-full max-w-md rounded-xl overflow-hidden border border-subtle shadow-overlay text-left">
               <div id="demo-titlebar" class="flex items-center gap-1.5 px-3 pt-2" style="background-color: var(--demo-accent);">
                 <div class="flex gap-1.5 pr-2 py-2">
-                  <span class="w-2.5 h-2.5 rounded-full bg-white/40"></span>
-                  <span class="w-2.5 h-2.5 rounded-full bg-white/40"></span>
-                  <span class="w-2.5 h-2.5 rounded-full bg-white/40"></span>
+                  <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
+                  <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
+                  <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
                 </div>
                 <button type="button" class="demo-tab demo-tab-active" data-tab="chat">Chat</button>
                 <button type="button" class="demo-tab" data-tab="app">My app</button>
@@ -172,7 +172,7 @@
                 <div class="demo-pane" data-pane="chat">
                   <div class="type-helper text-tertiary mb-1.5">Chat with your agent</div>
                   <div class="rounded-lg bg-surface-primary border border-subtle px-3 py-2 type-helper text-secondary mb-1.5 max-w-[85%]">Build me a website for my bakery</div>
-                  <div class="rounded-lg px-3 py-2 type-helper max-w-[85%] ml-auto text-white" style="background-color: var(--demo-accent);">On it -- starting with the menu page.</div>
+                  <div class="demo-accent-bubble rounded-lg px-3 py-2 type-helper max-w-[85%] ml-auto" style="background-color: var(--demo-accent);">On it -- starting with the menu page.</div>
                 </div>
                 <div class="demo-pane hidden" data-pane="app">
                   <div class="type-helper text-tertiary mb-1.5">Apps your agent runs appear as tabs</div>
@@ -212,7 +212,7 @@
                     <span class="flex items-center gap-1.5 rounded-full border border-subtle bg-fill-subtle px-3 py-1.5 type-helper text-secondary whitespace-nowrap"
                           {% if _repeat == 1 %}aria-hidden="true"{% endif %}>
                       {% if service.icon_url %}
-                        <img src="{{ service.icon_url }}" alt="" class="w-3.5 h-3.5 dark:invert">
+                        <img src="{{ service.icon_url }}" alt="" class="service-icon w-3.5 h-3.5">
                       {% else %}
                         <span class="w-4 h-4 rounded-full bg-fill-subtle text-tertiary inline-flex items-center justify-center type-helper font-semibold">{{ service.display_name[0] }}</span>
                       {% endif %}
