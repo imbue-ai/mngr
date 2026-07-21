@@ -106,6 +106,16 @@ class EnvelopeStreamConsumer(MutableModel):
     """
 
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Resolver to feed observe + event lines into")
+    started_at: datetime = Field(
+        frozen=True,
+        default_factory=lambda: datetime.now(timezone.utc),
+        description=(
+            "When this consumer came up. Snapshots finished before this instant "
+            "are events-file replay (the pre-start backlog), whose provider "
+            "errors describe the gap while minds was closed rather than the "
+            "present, and are dropped by the observe handler."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # The shared span-aware, per-provider discovery reconciler. Every parsed
@@ -357,12 +367,29 @@ class EnvelopeStreamConsumer(MutableModel):
             # A clean snapshot re-arms the provider's error-log suppression (and
             # logs a recovery line if its error was previously logged).
             self._error_log_suppressor.record_provider_snapshot(event)
+            # A pre-start snapshot is events-file replay, and its error describes
+            # the gap while minds was closed, not the present: the detached
+            # discovery producer keeps polling after the quit flow stops the
+            # docker state container, so the backlog's last docker snapshot
+            # reliably carries "state container is stopped" -- already outdated,
+            # since minds restarts that container before this consumer runs.
+            # Drop the stale error (a genuinely-broken provider re-asserts it on
+            # the first fresh cycle); the snapshot's topology still merges below.
+            error = event.error
+            if error is not None and event.discovery_finished_at < self.started_at:
+                logger.info(
+                    "Dropping pre-start provider error for {} (snapshot at {}): {}",
+                    event.provider_name,
+                    event.discovery_finished_at,
+                    error.message,
+                )
+                error = None
             # A per-provider snapshot is also a discovery event, so update_providers
             # bumps last_event_at; merge just this provider's state + freshness.
             self.resolver.update_providers(
                 provider_name=event.provider_name,
                 provider=event.provider,
-                error=event.error,
+                error=error,
                 last_snapshot_at=event.discovery_finished_at,
             )
         else:
