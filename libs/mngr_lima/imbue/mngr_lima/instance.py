@@ -15,6 +15,7 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
