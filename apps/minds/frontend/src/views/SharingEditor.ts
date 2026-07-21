@@ -171,6 +171,10 @@ class SharingController {
       serverEmails.forEach((email) => {
         if (!this.added.includes(email)) this.added.push(email);
       });
+      // Invalidate any in-flight readiness poll loop: a late probe result
+      // (or its max-attempts fallback) must not resurface the URL section
+      // after sharing was disabled.
+      this.pollSeq += 1;
       this.urlPhase = "hidden";
     }
     if (isInitial) {

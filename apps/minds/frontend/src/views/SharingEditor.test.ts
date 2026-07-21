@@ -318,4 +318,38 @@ describe("SharingEditor readiness polling", () => {
     expect(root.querySelector("#url-ready")).not.toBeNull();
     expect(root.querySelector("#url-provisioning")).toBeNull();
   });
+
+  it("a late poll result cannot resurface the URL section after Disable", async () => {
+    vi.useFakeTimers();
+    let statusCalls = 0;
+    stubFetch({
+      [`GET ${STATUS_URL}`]: () => {
+        statusCalls += 1;
+        return statusCalls === 1
+          ? jsonResponse({ enabled: true, url: "https://ws.example.com", policy: { emails: [] } })
+          : jsonResponse({ enabled: false, policy: { emails: [] } });
+      },
+      // The edge never answers ready, so the poll loop keeps rescheduling.
+      [`GET ${STATUS_URL}/readiness?url=${encodeURIComponent("https://ws.example.com")}`]: () =>
+        jsonResponse({ ready: false }),
+      [`DELETE ${STATUS_URL}`]: () => jsonResponse({ ok: true }),
+    });
+    const { root } = mountFixture(extras());
+    await vi.advanceTimersByTimeAsync(0);
+    m.redraw.sync();
+    expect(root.querySelector("#url-provisioning")).not.toBeNull();
+
+    // Disable while the readiness poll's 2s retry is still pending.
+    (root.querySelector("#disable-btn") as HTMLElement).click();
+    await vi.advanceTimersByTimeAsync(0);
+    m.redraw.sync();
+    expect(root.querySelector("#url-section")).toBeNull();
+
+    // Run the abandoned loop well past its max-attempts fallback: the stale
+    // poll must not flip urlPhase back to "ready" in the disabled editor.
+    await vi.advanceTimersByTimeAsync(30000);
+    m.redraw.sync();
+    expect(root.querySelector("#url-section")).toBeNull();
+    expect(root.querySelector("#url-ready")).toBeNull();
+  });
 });
