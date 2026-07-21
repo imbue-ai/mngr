@@ -248,7 +248,11 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(3))
+    # 4: daemon.py's `mngr foreman -d` re-execs the server as a *detached* child
+    # (its own session, meant to outlive this command). A ConcurrencyGroup can't
+    # own it -- the group reaps its processes on exit, which is exactly what a
+    # daemon must avoid -- so this one spawn is a deliberate direct subprocess.
+    rc.check_direct_subprocess(_DIR, snapshot(4))
 
 
 def test_prevent_bare_tmux_targets() -> None:

@@ -23,6 +23,30 @@ Then open `http://<box>:8700/` from any device on the network.
 Bind to a tailnet IP (`--host 100.x.x.x`) or firewall the port. Do not expose it
 to the public internet.
 
+### Run in the background (`mngr foreman -d`)
+
+```bash
+mngr foreman -d --port 8700
+# foreman started (PID 12345) on http://0.0.0.0:8700/  — logs: ~/.mngr/foreman.log  stop: kill 12345
+```
+
+`-d`/`--background` detaches the server: the command prints the PID and returns
+immediately (exit 0), and the server keeps serving. It re-execs `mngr foreman`
+into its own session (`setsid`, no controlling tty) with stdout+stderr redirected
+to a log file, so it survives the terminal closing. Stop it with `kill <pid>`.
+
+- `--foreman-log-file PATH` — where the daemon's stdout+stderr go (default
+  `~/.mngr/foreman.log`). Named `--foreman-log-file` because `--log-file` is
+  already mngr's own structured-log flag.
+- `--pid-file PATH` — the daemon's pid-file (default `~/.mngr/foreman.pid`). If a
+  live PID is already recorded there, `-d` refuses to start a second copy and
+  prints `foreman already running (PID <pid>)` (exit 1). A stale pid-file (dead
+  PID) is ignored.
+
+The pinned frontend assets are fetched by the foreground command *before*
+forking, so a slow or failing first-run download is visible on your terminal
+rather than buried in the daemon log.
+
 ### Config (`[plugins.foreman]` in `settings.toml`)
 
 - `port` (default `8700`)

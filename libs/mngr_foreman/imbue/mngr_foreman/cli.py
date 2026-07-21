@@ -1,6 +1,9 @@
 """Click entry point for ``mngr foreman`` -- the always-on web remote-control server."""
 
+import sys
+from pathlib import Path
 from typing import Any
+from typing import Final
 
 import click
 from loguru import logger
@@ -9,10 +12,22 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_stderr_line
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
+from imbue.mngr_foreman import daemon
+from imbue.mngr_foreman.assets import ensure_assets
+from imbue.mngr_foreman.assets import get_asset_dir
 from imbue.mngr_foreman.config import ForemanPluginConfig
+from imbue.mngr_foreman.mngr_bin import resolve_mngr_binary
 from imbue.mngr_foreman.server import run_server
+
+# ``--log-file`` is already a common mngr option (mngr's own structured JSON log),
+# so the backgrounded server's stdout+stderr capture uses ``--foreman-log-file``.
+_DEFAULT_LOG_FILE: Final[Path] = Path.home() / ".mngr" / "foreman.log"
+_DEFAULT_PID_FILE: Final[Path] = Path.home() / ".mngr" / "foreman.pid"
 
 
 class ForemanCliOptions(CommonCliOptions):
@@ -20,6 +35,9 @@ class ForemanCliOptions(CommonCliOptions):
 
     host: str | None = None
     port: int | None = None
+    background: bool = False
+    foreman_log_file: Path = _DEFAULT_LOG_FILE
+    pid_file: Path = _DEFAULT_PID_FILE
 
 
 def _resolve_foreman_config(mngr_ctx: Any) -> ForemanPluginConfig:
@@ -33,9 +51,65 @@ def _resolve_foreman_config(mngr_ctx: Any) -> ForemanPluginConfig:
     return ForemanPluginConfig()
 
 
+def _run_in_background(
+    ctx: click.Context,
+    mngr_ctx: MngrContext,
+    host: str,
+    port: int,
+    log_file: Path,
+    pid_file: Path,
+) -> None:
+    """Launch the foreman server as a detached daemon and return immediately.
+
+    Guards against a second copy via ``pid_file``, ensures the frontend asset
+    cache in *this* (foreground) process so a slow or failing first-run fetch is
+    visible on the terminal rather than buried in the daemon's log, then re-execs
+    ``mngr foreman`` fully detached (see ``daemon.spawn_detached_foreman``).
+    """
+    running_pid = daemon.read_running_daemon_pid(pid_file)
+    if running_pid is not None:
+        write_stderr_line(f"foreman already running (PID {running_pid})")
+        ctx.exit(1)
+
+    # Fetch the pinned frontend libs here (parent) so first-run download failures
+    # surface on the terminal. The daemon's own ensure_assets is then a cache hit.
+    ensure_assets(get_asset_dir(mngr_ctx))
+
+    child_pid = daemon.spawn_detached_foreman(
+        mngr_binary=resolve_mngr_binary(),
+        forwarded_args=tuple(sys.argv[1:]),
+        log_file=log_file,
+    )
+    daemon.write_pid_file(pid_file, child_pid)
+    write_human_line(
+        f"foreman started (PID {child_pid}) on http://{host}:{port}/  — logs: {log_file}  stop: kill {child_pid}"
+    )
+
+
 @click.command(name="foreman")
 @click.option("--host", default=None, help="Bind host (default from config, else 0.0.0.0).")
 @click.option("--port", type=int, default=None, help="Bind port (default from config, else 8700).")
+@click.option(
+    "--background",
+    "-d",
+    is_flag=True,
+    default=False,
+    help="Run the server detached in the background (daemonize) and return immediately.",
+)
+@click.option(
+    "--foreman-log-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=_DEFAULT_LOG_FILE,
+    show_default=True,
+    help="With --background: file the daemon's stdout+stderr are redirected to.",
+)
+@click.option(
+    "--pid-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=_DEFAULT_PID_FILE,
+    show_default=True,
+    help="With --background: pid-file for the daemon (guards against a second copy).",
+)
 @add_common_options
 @click.pass_context
 def foreman(ctx: click.Context, **kwargs: Any) -> None:
@@ -47,10 +121,15 @@ def foreman(ctx: click.Context, **kwargs: Any) -> None:
     deployed to target boxes and there is no auth -- bind to a tailnet IP or
     firewall the port. Create agents with plain ``mngr create``.
 
+    Pass ``-d``/``--background`` to detach the server into the background; the
+    command prints its PID and returns, and the server keeps serving. Stop it
+    with ``kill <pid>`` (the PID is also in ``--pid-file``).
+
     \b
     Examples:
       mngr foreman --port 8700
       mngr foreman --host 100.64.0.1
+      mngr foreman -d --port 8700
     """
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -59,11 +138,27 @@ def foreman(ctx: click.Context, **kwargs: Any) -> None:
         is_format_template_supported=False,
     )
 
-    start_parent_death_watcher(mngr_ctx.concurrency_group)
-
     config = _resolve_foreman_config(mngr_ctx)
     host = opts.host if opts.host is not None else config.host
     port = opts.port if opts.port is not None else config.port
+
+    # The daemon child re-runs this same command (with -d still present) under the
+    # MNGR_FOREMAN_DAEMONIZED marker: it must NOT re-daemonize, and it must skip
+    # the parent-death watcher (a daemon is meant to outlive its launcher, whose
+    # exit would otherwise trip the getppid()-change kill).
+    if opts.background and not daemon.is_daemon_child():
+        _run_in_background(
+            ctx=ctx,
+            mngr_ctx=mngr_ctx,
+            host=host,
+            port=port,
+            log_file=opts.foreman_log_file,
+            pid_file=opts.pid_file,
+        )
+        return
+
+    if not daemon.is_daemon_child():
+        start_parent_death_watcher(mngr_ctx.concurrency_group)
 
     logger.info(
         "Starting foreman server on http://{}:{} (max_tool_output_chars={})",
@@ -83,7 +178,7 @@ def foreman(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="foreman",
     one_line_description="Always-on web remote control for your mngr agents [experimental]",
-    synopsis="mngr foreman [--host HOST] [--port PORT] [OPTIONS]",
+    synopsis="mngr foreman [--host HOST] [--port PORT] [-d] [OPTIONS]",
     description="""Runs a single Flask server on this box, over every agent in
 mngr's view: a mobile-friendly chat UI for claude agents (live transcript with
 markdown, syntax highlighting, KaTeX, mermaid, inline images and file uploads;
@@ -92,10 +187,16 @@ any agent type.
 
 No code is deployed to target boxes and there is no auth by design -- bind to a
 tailnet IP or firewall the port. Create agents with plain ``mngr create``;
-there is no foreman-specific create command or label filter.""",
+there is no foreman-specific create command or label filter.
+
+Pass ``-d``/``--background`` to run detached in the background: the command
+prints the server's PID and returns immediately while the server keeps serving.
+Stop it with ``kill <pid>`` (also written to ``--pid-file``); its stdout+stderr
+go to ``--foreman-log-file``.""",
     examples=(
         ("Serve on the default port", "mngr foreman --port 8700"),
         ("Bind to a specific tailnet IP", "mngr foreman --host 100.64.0.1"),
+        ("Run detached in the background", "mngr foreman -d --port 8700"),
     ),
 ).register()
 
