@@ -165,7 +165,9 @@ def test_run_backup_trim_reports_untrimmable_buckets_when_still_over(tmp_path: P
 class _RecordingNotificationDispatcher(NotificationDispatcher):
     """Dispatcher stand-in that records (title, message) pairs instead of showing anything."""
 
-    dispatched: list[tuple[str, str]] = Field(default_factory=list, description="(title, message) per dispatch call")
+    dispatched: list[tuple[str | None, str]] = Field(
+        default_factory=list, description="(title, message) per dispatch call"
+    )
 
     def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
         self.dispatched.append((request.title, request.message))
