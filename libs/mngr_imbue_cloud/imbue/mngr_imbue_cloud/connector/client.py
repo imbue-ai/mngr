@@ -62,6 +62,17 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
 
+# Tunnel-name convention mirrored from the connector
+# (``apps/remote_service_connector/.../app.py``): every tunnel is named
+# ``<username>--<agent-prefix>``, where ``<agent-prefix>`` is the first 16 hex
+# chars of the agent UUID (``"agent-"`` prefix stripped). Used only by the
+# ``find_tunnel_for_agent`` back-compat fallback, which enumerates tunnels and
+# matches on this trailing slug when the connector lacks the O(1) by-agent
+# endpoint. Keep in lockstep with the connector's ``TUNNEL_NAME_SEP`` /
+# ``_AGENT_ID_PREFIX_LENGTH``.
+_TUNNEL_NAME_SEP = "--"
+_AGENT_ID_PREFIX_LENGTH = 16
+
 # Transient-transport retry policy for connector calls. The connector is a
 # Modal app that scales to zero, so a call hitting a cold/scaling instance can
 # fail at the transport layer (DNS "Name or service not known" -> ConnectError,
@@ -558,6 +569,50 @@ class ImbueCloudConnectorClient(MutableModel):
         if not isinstance(body, list):
             return []
         return [_parse_tunnel_info(entry) for entry in body if isinstance(entry, dict)]
+
+    def find_tunnel_for_agent(self, access_token: SecretStr, agent_id: str) -> TunnelInfo | None:
+        """Resolve the caller's tunnel for ``agent_id``, or ``None`` if there is none.
+
+        Fast path: ``GET /tunnels/by-agent/{agent_id}`` resolves the exact
+        tunnel through Cloudflare's server-side name filter (2 Cloudflare
+        calls) rather than enumerating every tunnel and fetching each one's
+        config. On that endpoint, HTTP 200 with ``null`` means "no tunnel for
+        this agent yet".
+
+        Back-compat: a connector deployed before this endpoint existed answers
+        the unknown route with a generic 404. Clients update independently of
+        (and often ahead of) the connector, so a 404 here is treated as "this
+        connector is too old" and we transparently fall back to the O(n)
+        ``GET /tunnels`` enumeration, matching on the ``<username>--<agent>``
+        name convention. This keeps sharing working during the rollout window;
+        once the connector is redeployed, every call takes the fast path.
+        """
+        response = self._send(
+            "GET",
+            self._url(f"/tunnels/by-agent/{agent_id}"),
+            exc_cls=ImbueCloudTunnelError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            return self._find_tunnel_for_agent_via_list(access_token, agent_id)
+        body = self._check(response, ImbueCloudTunnelError)
+        if not body:
+            return None
+        return _parse_tunnel_info(body)
+
+    def _find_tunnel_for_agent_via_list(self, access_token: SecretStr, agent_id: str) -> TunnelInfo | None:
+        """O(n) fallback for connectors without the ``by-agent`` endpoint.
+
+        Enumerates the caller's tunnels and matches on the trailing
+        ``--<agent-prefix>`` slug the connector uses for tunnel names.
+        """
+        short_agent = agent_id.removeprefix("agent-")[:_AGENT_ID_PREFIX_LENGTH]
+        suffix = f"{_TUNNEL_NAME_SEP}{short_agent}"
+        for tunnel in self.list_tunnels(access_token):
+            if tunnel.tunnel_name.endswith(suffix):
+                return tunnel
+        return None
 
     def delete_tunnel(self, access_token: SecretStr, tunnel_name: str) -> None:
         response = self._send(

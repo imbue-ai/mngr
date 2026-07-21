@@ -98,3 +98,36 @@ def test_parse_conflict_stored_returns_none_without_a_stored_row() -> None:
     assert _parse_conflict_stored(body) is None
     # Brace-free stderr (no JSON document at all) parses to None too.
     assert _parse_conflict_stored("plain traceback text\nwithout any json\n") is None
+
+
+def test_find_tunnel_for_agent_uses_find_by_agent_subcommand() -> None:
+    """``find_tunnel_for_agent`` delegates to the connector's O(1) ``tunnels
+    find-by-agent`` lookup rather than listing every tunnel, and parses the
+    returned tunnel JSON."""
+    tunnel_json = {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "services": ["web"]}
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(tunnel_json)))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    tunnel = cli.find_tunnel_for_agent(account="owner@example.com", agent_id="agent-abc123")
+
+    assert tunnel is not None
+    assert tunnel.tunnel_name == "owner--abc123"
+    assert tunnel.services == ("web",)
+    recorded = caller.recorded_calls[0]
+    assert recorded.argv == (
+        "imbue_cloud",
+        "tunnels",
+        "find-by-agent",
+        "agent-abc123",
+        "--account",
+        "owner@example.com",
+    )
+
+
+def test_find_tunnel_for_agent_returns_none_when_plugin_emits_null() -> None:
+    """When no tunnel exists for the agent, the plugin emits the JSON literal
+    ``null`` and ``find_tunnel_for_agent`` maps it to ``None``."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(None)))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    assert cli.find_tunnel_for_agent(account="owner@example.com", agent_id="agent-abc123") is None

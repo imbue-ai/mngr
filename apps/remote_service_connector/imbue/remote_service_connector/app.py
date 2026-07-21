@@ -1651,6 +1651,26 @@ class ForwardingCtx:
             result.append(TunnelInfo(tunnel_name=name, tunnel_id=tid, services=services))
         return result
 
+    def get_tunnel_for_agent(self, username: str, agent_id: str) -> TunnelInfo | None:
+        """Resolve the caller's tunnel for a single agent in O(1) Cloudflare calls.
+
+        minds always knows the exact tunnel name it wants
+        (``<username>--<agent-prefix>``), so this resolves the tunnel via
+        Cloudflare's server-side name filter (:func:`cf_get_tunnel_by_name`)
+        plus a single config fetch -- 2 Cloudflare calls regardless of how
+        many tunnels the account owns. Contrast with :meth:`list_tunnels`,
+        which enumerates every tunnel under the user prefix and fetches each
+        one's config (O(n) calls). Returns ``None`` when the user has no
+        tunnel for the agent yet.
+        """
+        name = make_tunnel_name(username, agent_id)
+        tunnel = self.ops.get_tunnel_by_name(name)
+        if tunnel is None:
+            return None
+        tid = tunnel["id"]
+        services = self._list_services(tid, name, username)
+        return TunnelInfo(tunnel_name=name, tunnel_id=tid, services=services)
+
     def delete_tunnel(self, tunnel_name: str, username: str) -> None:
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
@@ -3138,6 +3158,31 @@ def list_tunnels(request: Request) -> list[dict[str, object]]:
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
         return [t.model_dump() for t in get_ctx().list_tunnels(admin.username)]
+
+
+@web_app.get("/tunnels/by-agent/{agent_id}")
+def get_tunnel_for_agent(request: Request, agent_id: str) -> dict[str, object] | None:
+    """Resolve the authenticated user's tunnel for ``agent_id`` (O(1) lookup).
+
+    Uses Cloudflare's server-side name filter plus one config fetch (2
+    Cloudflare calls) instead of the O(n) ``GET /tunnels`` path that
+    enumerates every tunnel and fetches each one's config. The static
+    ``by-agent`` prefix can never collide with a real ``{tunnel_name}``
+    (those always contain the ``--`` separator), so there is no ambiguity
+    with the other ``/tunnels/*`` routes.
+
+    Returns HTTP 200 with ``null`` when the user has no tunnel for the agent
+    yet (rather than 404). This is deliberate: a client hitting a connector
+    that predates this endpoint gets FastAPI's generic 404-for-unknown-route,
+    so reserving 404 exclusively for "endpoint absent" lets the client tell
+    "this connector is too old, fall back to enumerating ``GET /tunnels``"
+    apart from "the endpoint works and there is simply no tunnel" (200 null).
+    """
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        tunnel = get_ctx().get_tunnel_for_agent(admin.username, agent_id)
+        return tunnel.model_dump() if tunnel is not None else None
 
 
 @web_app.delete("/tunnels/{tunnel_name}")

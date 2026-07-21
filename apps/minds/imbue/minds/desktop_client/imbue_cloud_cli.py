@@ -46,13 +46,6 @@ _KEY_OP_TIMEOUT_SECONDS = 90.0
 # desktop client.
 _CONNECTOR_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
 
-# Mirrors ``apps/remote_service_connector/.../app.py`` -- the connector uses
-# the first 16 hex chars of the agent UUID (after stripping ``"agent-"``) as
-# the trailing slug of every tunnel name. Used by ``find_tunnel_for_agent``
-# to filter ``list_tunnels`` output without having to know the per-account
-# username prefix.
-_AGENT_ID_PREFIX_LENGTH = 16
-
 # The plugin's error_class marker for a structured quota refusal, as written
 # into its JSON stderr body by handle_imbue_cloud_errors. Substring-matched
 # (like the 503 unavailable_signal) because log lines may surround the body.
@@ -595,23 +588,25 @@ class ImbueCloudCli(MutableModel):
     def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
         """Return the tunnel registered for ``agent_id`` under ``account``, or None.
 
-        Uses ``list_tunnels`` and matches on the trailing-slug convention the
-        connector uses for tunnel names: ``<short_user>--<short_agent>``,
-        where ``short_agent`` is the first 16 hex chars of the agent UUID
-        (``"agent-"`` prefix stripped). Stable contract -- changing the
-        truncation length on the connector side requires updating
-        ``_AGENT_ID_PREFIX_LENGTH`` here in lockstep.
+        Delegates to the connector's O(1) ``tunnels find-by-agent`` lookup,
+        which resolves the exact tunnel via Cloudflare's server-side name
+        filter (2 Cloudflare calls) instead of enumerating every tunnel and
+        fetching each one's config -- the old ``list_tunnels`` path was O(n)
+        in the number of tunnels on the account and dominated the sharing
+        flow's latency.
 
         Returning ``None`` lets the sharing-status route distinguish
         "tunnel doesn't exist yet" (the user hasn't enabled sharing) from
         "tunnel exists but no service is registered for this name".
         """
-        short_agent = agent_id.removeprefix("agent-")[:_AGENT_ID_PREFIX_LENGTH]
-        suffix = f"--{short_agent}"
-        for tunnel in self.list_tunnels(account):
-            if tunnel.tunnel_name.endswith(suffix):
-                return tunnel
-        return None
+        result = self._run(
+            ["tunnels", "find-by-agent", agent_id, "--account", account],
+            cg_name="imbue-cloud-tunnels-find-by-agent",
+        )
+        body = self._expect_success(result, "tunnels find-by-agent")
+        if body is None:
+            return None
+        return TunnelInfo.model_validate(body)
 
     # ------------------------------------------------------------------
     # R2 buckets (one per workspace; used to back up the host_dir via restic)

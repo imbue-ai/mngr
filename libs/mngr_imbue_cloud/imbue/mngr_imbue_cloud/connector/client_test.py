@@ -939,3 +939,60 @@ def test_sync_records_auth_error_raises(monkeypatch: pytest.MonkeyPatch) -> None
     client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAuthError):
         client.list_sync_records(SecretStr("bad"))
+
+
+def test_find_tunnel_for_agent_parses_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/tunnels/by-agent/agent-abc123"
+        return httpx.Response(200, json={"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "services": ["web"]})
+
+    client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    tunnel = client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123")
+    assert tunnel is not None
+    assert tunnel.tunnel_name == "owner--abc123"
+    assert tunnel.services == ("web",)
+
+
+def test_find_tunnel_for_agent_returns_none_on_200_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The up-to-date connector answers "no tunnel" with 200 + null; no O(n)
+    # enumeration fallback is triggered.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/tunnels/by-agent/agent-abc123"
+        return httpx.Response(200, json=None)
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    assert client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123") is None
+    assert state["calls"] == 1
+
+
+def test_find_tunnel_for_agent_falls_back_to_list_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A connector that predates the by-agent endpoint 404s the unknown route;
+    # the client transparently falls back to enumerating GET /tunnels and
+    # matches on the trailing --<agent-prefix> slug.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/tunnels/by-agent/agent-abc123":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        assert request.url.path == "/tunnels"
+        return httpx.Response(
+            200,
+            json=[
+                {"tunnel_name": "owner--deadbeef", "tunnel_id": "t-0", "services": []},
+                {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "services": ["web"]},
+            ],
+        )
+
+    client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    tunnel = client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123")
+    assert tunnel is not None
+    assert tunnel.tunnel_name == "owner--abc123"
+    assert tunnel.services == ("web",)
+
+
+def test_find_tunnel_for_agent_fallback_returns_none_when_no_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/tunnels/by-agent/agent-abc123":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        return httpx.Response(200, json=[])
+
+    client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    assert client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123") is None
