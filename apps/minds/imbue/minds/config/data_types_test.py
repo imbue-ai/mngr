@@ -1,6 +1,7 @@
 import json
 import tomllib
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -119,16 +120,29 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
     ]
 
 
+_EXPECTED_DEPLOY_TIERS: Final[frozenset[str]] = frozenset({"ci", "dev", "staging", "production"})
+
+
 def test_committed_deploy_tomls_all_define_the_launch_plans() -> None:
-    """Every tier ships the same explorer/ally plan definitions (per-user bumps handle exceptions)."""
+    """Every tier ships the exact same plan definitions (per-user bumps handle exceptions).
+
+    Tiers are discovered from disk (every ``envs/*/deploy.toml``) rather than
+    hardcoded, so a newly-added tier cannot silently diverge; the known four
+    are asserted present so a renamed tier cannot drop out of coverage.
+    """
     envs_dir = Path(__file__).parent / "envs"
+    deploy_paths = sorted(envs_dir.glob("*/deploy.toml"))
+    discovered_tiers = {path.parent.name for path in deploy_paths}
+    assert _EXPECTED_DEPLOY_TIERS <= discovered_tiers, (
+        f"missing deploy.toml for tiers: {sorted(_EXPECTED_DEPLOY_TIERS - discovered_tiers)}"
+    )
     plan_blocks_by_tier: dict[str, dict[str, PlanQuotasConfig]] = {}
-    for tier in ("dev", "staging", "production", "ci"):
-        raw = tomllib.loads((envs_dir / tier / "deploy.toml").read_text())
+    for path in deploy_paths:
+        raw = tomllib.loads(path.read_text())
         plans = {name: PlanQuotasConfig.model_validate(values) for name, values in raw.get("plans", {}).items()}
-        plan_blocks_by_tier[tier] = plans
+        plan_blocks_by_tier[path.parent.name] = plans
     for tier, plans in plan_blocks_by_tier.items():
         assert sorted(plans) == ["ally", "explorer"], f"tier {tier} is missing a launch plan"
-        assert plans == plan_blocks_by_tier["dev"], f"tier {tier} diverges from the shared plan values"
+        assert plans == plan_blocks_by_tier["dev"], f"tier {tier} diverges from the shared [plans] values"
     assert plan_blocks_by_tier["dev"]["explorer"].monthly_llm_spend_usd == 0.0
     assert plan_blocks_by_tier["dev"]["ally"].monthly_llm_spend_usd == 1000.0

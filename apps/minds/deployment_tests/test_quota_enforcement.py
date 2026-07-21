@@ -15,6 +15,7 @@ below still proves the quota check-then-lease path works against the real DB
 from collections.abc import Callable
 
 import httpx
+import psycopg2
 import pytest
 
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
@@ -32,6 +33,37 @@ def _connector_url(env: SharedEnvHandle) -> str:
 
 def _auth_header(user: VerifiedUserHandle) -> dict[str, str]:
     return {"Authorization": f"Bearer {user.session_token.get_secret_value()}"}
+
+
+def _set_storage_limit_bytes(env: SharedEnvHandle, user_id: str, value: int) -> None:
+    """Write the user's max_total_bucket_bytes entitlement directly in the env's DB.
+
+    The deployment-test fixtures carry no paid-admin key, so over-quota
+    states are induced through the pool DSN instead of the admin API. A
+    limit of ``-1`` makes even an empty account measurably over quota.
+    """
+    conn = psycopg2.connect(env.neon_host_pool_dsn.get_secret_value())
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE account_entitlements SET max_total_bucket_bytes = %s WHERE user_id = %s",
+                    (value, user_id),
+                )
+                assert cur.rowcount == 1, f"no entitlements row for user {user_id!r} (GET /account not called yet?)"
+    finally:
+        conn.close()
+
+
+def _delete_cleanup_grants(env: SharedEnvHandle, user_id: str) -> None:
+    """Drop the test user's grant rows so repeated runs never touch the failed-grant budget."""
+    conn = psycopg2.connect(env.neon_host_pool_dsn.get_secret_value())
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM r2_cleanup_grants WHERE user_id = %s", (user_id,))
+    finally:
+        conn.close()
 
 
 @pytest.mark.timeout(180)
@@ -83,6 +115,69 @@ def test_ally_plan_requires_partner_access(
         )
     assert response.status_code == 403, f"expected an eligibility refusal, got {response.status_code}"
     assert "partner access" in response.text
+
+
+@pytest.mark.timeout(300)
+def test_storage_cleanup_grant_cycle(
+    shared_env: Callable[[str], SharedEnvHandle],
+    verified_user: VerifiedUserHandle,
+) -> None:
+    """Full storage-enforcement cycle against the real connector + DB + Cloudflare.
+
+    Downgrade (recheck while over quota flips the bucket key read-only) ->
+    cleanup grant restores it -> recheck settles the grant and, with the
+    quota back to normal, leaves the key writable. The recheck endpoint
+    applies the same enforcement the hourly sweep's confirm-and-flip path
+    uses, so this also exercises migration 015, the per-user enforcement
+    lock, and the live REST usage measurement end to end.
+    """
+    env = shared_env("default")
+    wait_for_env_ready(env)
+    connector_url = _connector_url(env)
+    user_id = str(verified_user.supertokens_user_id)
+
+    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+        # Materialize the entitlements row, then create a bucket whose single
+        # key is the thing enforcement flips.
+        account = client.get(f"{connector_url}/account", headers=_auth_header(verified_user))
+        assert account.status_code == 200, f"GET /account failed: {account.text[:400]!r}"
+        created = client.post(
+            f"{connector_url}/buckets",
+            headers=_auth_header(verified_user),
+            json={"name": "grant-cycle-probe"},
+        )
+        assert created.status_code == 200, f"bucket create failed: {created.text[:400]!r}"
+        try:
+            # Force the account over quota (empty usage > limit of -1) and
+            # apply enforcement: the key must come back downgraded.
+            _set_storage_limit_bytes(env, user_id, -1)
+            downgraded = client.post(f"{connector_url}/account/storage-recheck", headers=_auth_header(verified_user))
+            assert downgraded.status_code == 200, f"recheck failed: {downgraded.text[:400]!r}"
+            downgraded_body = downgraded.json()
+            assert downgraded_body["is_over_quota"] is True
+            assert downgraded_body["keys"], "the created bucket's key should be listed"
+            assert all(key["enforced_access"] == "read" for key in downgraded_body["keys"])
+
+            # A cleanup grant restores the key in place.
+            grant = client.post(f"{connector_url}/account/storage-cleanup-grant", headers=_auth_header(verified_user))
+            assert grant.status_code == 200, f"cleanup grant failed: {grant.text[:400]!r}"
+            grant_body = grant.json()
+            assert grant_body["status"] == "granted"
+            assert all(key["enforced_access"] is None for key in grant_body["keys"])
+
+            # Back under quota, the recheck settles the grant and leaves the
+            # key writable.
+            _set_storage_limit_bytes(env, user_id, 50 * 1024**3)
+            settled = client.post(f"{connector_url}/account/storage-recheck", headers=_auth_header(verified_user))
+            assert settled.status_code == 200, f"settling recheck failed: {settled.text[:400]!r}"
+            settled_body = settled.json()
+            assert settled_body["is_over_quota"] is False
+            assert settled_body["is_grant_settled"] is True
+            assert all(key["enforced_access"] is None for key in settled_body["keys"])
+        finally:
+            cleanup = client.delete(f"{connector_url}/buckets/grant-cycle-probe", headers=_auth_header(verified_user))
+            assert cleanup.status_code == 200, f"bucket cleanup failed: {cleanup.text[:400]!r}"
+            _delete_cleanup_grants(env, user_id)
 
 
 @pytest.mark.timeout(180)
