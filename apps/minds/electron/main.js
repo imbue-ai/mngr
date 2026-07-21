@@ -629,6 +629,11 @@ function createBundle() {
     // lost-swap fallback timer (see loadLocalIntoChrome / onChromeNavigate).
     pendingSwapUrl: null,
     pendingSwapTimer: null,
+    // Pathname of the chrome target loadLocalIntoChrome is currently driving
+    // the view toward; nulled when a navigation we did not drive starts.
+    // Lets ensureBundleChromeWrapper skip re-issuing a wrapper load that is
+    // already in flight (see there).
+    currentChromeTargetPathname: null,
     // True once the chrome view's current document has registered its
     // swap-local-page listener (the renderer's 'shell-ready' handshake).
     // Cleared on every full chrome-view load start; required by
@@ -708,11 +713,22 @@ function createBundle() {
   // re-sends the handshake, so a spurious clear (e.g. an iframe inside a
   // swapped-in page loading) would permanently demote hub navigation to full
   // loads. (Positional args kept as a fallback for the structured event.)
-  chromeView.webContents.on('did-start-navigation', (event, _url, isInPlace, isMainFrame) => {
+  chromeView.webContents.on('did-start-navigation', (event, navUrl, isInPlace, isMainFrame) => {
     const mainFrame = event && typeof event.isMainFrame === 'boolean' ? event.isMainFrame : isMainFrame;
     const sameDocument = event && typeof event.isSameDocument === 'boolean' ? event.isSameDocument : isInPlace;
     if (mainFrame && !sameDocument) {
       bundle.chromeShellReady = false;
+      // Keep the driven-target record honest: a main-frame navigation that
+      // does not match what loadLocalIntoChrome last drove (a redirect, a
+      // renderer-initiated nav) invalidates it.
+      const startedUrl = event && typeof event.url === 'string' ? event.url : navUrl;
+      try {
+        if (new URL(startedUrl).pathname !== bundle.currentChromeTargetPathname) {
+          bundle.currentChromeTargetPathname = null;
+        }
+      } catch {
+        bundle.currentChromeTargetPathname = null;
+      }
     }
   });
 
@@ -1314,6 +1330,10 @@ function loadLocalIntoChrome(bundle, absolute) {
   const wc = bundle.chromeView.webContents;
   let pathname = null;
   try { pathname = new URL(absolute).pathname; } catch { pathname = null; }
+  // The chrome target WE are driving the view toward (swap or full load).
+  // ensureBundleChromeWrapper consults it to tell "a superseded page is still
+  // loading" apart from "the wrapper itself is still loading" (see there).
+  bundle.currentChromeTargetPathname = pathname;
   // Mirror the renderer's canSwapTo: the CURRENT page must also be a hub page
   // (an excluded page always leaves via a full navigation for its document
   // lifecycle), so we don't dispatch a swap the renderer will refuse and then
@@ -1372,12 +1392,19 @@ function ensureBundleChromeWrapper(bundle) {
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed() || !backendBaseUrl) return;
   let pathname = null;
   try { pathname = new URL(bundle.chromeView.webContents.getURL()).pathname; } catch { pathname = null; }
-  // Reload when the committed page isn't the wrapper -- OR when a load is still
-  // in flight: getURL() only reports the COMMITTED page, so a superseded local
-  // page (e.g. a settings click the user flipped away from before it landed)
-  // could otherwise finish loading underneath the workspace and leave the
-  // chrome view off the wrapper. Re-issuing the wrapper load cancels it.
-  if (pathname !== '/_chrome' || bundle.chromeView.webContents.isLoading()) {
+  // Reload when the committed page isn't the wrapper -- OR when a load is
+  // still in flight for some OTHER page: a superseded local page (e.g. a
+  // settings click the user flipped away from before it landed) could
+  // otherwise finish loading underneath the workspace and leave the chrome
+  // view off the wrapper; re-issuing the wrapper load cancels it. When the
+  // in-flight load is ALREADY the wrapper (tracked via
+  // ``currentChromeTargetPathname`` -- getURL()'s committed/pending reporting
+  // is not reliable mid-flight), there is nothing to cancel: re-issuing would
+  // just restart the identical load and double the handoff's paint (observed
+  // as a second flash on the create -> workspace handoff, where a repeat
+  // navigateBundle lands during wrapper load #1).
+  const inFlightIsWrapper = bundle.currentChromeTargetPathname === '/_chrome';
+  if (pathname !== '/_chrome' || (bundle.chromeView.webContents.isLoading() && !inFlightIsWrapper)) {
     const accent = accentColorForAgent(bundle.currentAccentAgentId);
     // Seed the server-rendered titlebar: the accent AND the workspace crumb
     // (name + tabs) for the workspace being displayed, so a fresh wrapper
