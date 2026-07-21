@@ -226,8 +226,9 @@ export function mountInboxList(target: Element | null, options: MountInboxListOp
   // Reconcile local state against every store change: prune transients the
   // server's pending set has caught up with, and swap the detail pane to the
   // canonical "no longer available" fragment when the selection vanishes
-  // out from under the user (resolved elsewhere).
-  subscribe(() => {
+  // out from under the user (resolved elsewhere). Released with the mount
+  // (onremove below) so a torn-down page stops reconciling.
+  const unsubscribe = subscribe(() => {
     const ids = new Set(getRequestCards().map((card) => card.id));
     denyingIds.forEach((id) => {
       if (!ids.has(id)) denyingIds.delete(id);
@@ -265,7 +266,10 @@ export function mountInboxList(target: Element | null, options: MountInboxListOp
     },
   };
 
-  mountWithTeardown(el, { view: () => m(InboxList, { controller }) });
+  mountWithTeardown(el, {
+    view: () => m(InboxList, { controller }),
+    onremove: () => unsubscribe(),
+  });
 
   return {
     getSelectedId: () => selectedId,

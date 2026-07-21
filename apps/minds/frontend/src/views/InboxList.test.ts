@@ -206,6 +206,21 @@ describe("InboxList resolution flow", () => {
   });
 });
 
+describe("InboxList teardown", () => {
+  it("releases the store subscription on page teardown", async () => {
+    const { fetchCalls } = mountFixture(island([card("evt-1")], "evt-1", true));
+    window.dispatchEvent(new Event("minds:page-teardown"));
+    fetchCalls.length = 0;
+
+    // The selection vanishing after teardown must not trigger the torn-down
+    // page's unavailable-fragment refetch.
+    applyChromeEvent({ type: "requests", count: 0, request_ids: [], cards: [], auto_open: true });
+    await flushAsync();
+
+    expect(fetchCalls).toEqual([]);
+  });
+});
+
 describe("InboxList auto-open toggle", () => {
   it("POSTs the flipped value and ignores echoing pushes", () => {
     const { left, fetchCalls } = mountFixture(island([card("evt-1")]));
