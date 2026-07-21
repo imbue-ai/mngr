@@ -523,8 +523,10 @@ def _build_services_agent_running_probe(
     elif in_container.agent_processes.strip():
         output, answer = in_container.agent_processes, ProbeAnswer.YES
     else:
-        agent_token = str(services_agent_id) if services_agent_id is not None else "<system-services-agent>"
-        output, answer = f"(no live process carries MNGR_AGENT_ID={agent_token})", ProbeAnswer.NO
+        # sentinel_seen is True here, so the batched exec ran -- and the caller only
+        # launches it with a known services agent id, so it cannot be None on this branch.
+        assert services_agent_id is not None, "in-container probe ran without a services agent id"
+        output, answer = f"(no live process carries MNGR_AGENT_ID={services_agent_id})", ProbeAnswer.NO
     return Probe(question=_QUESTION_SERVICES_AGENT_RUNNING, command=command, output=output, answer=answer)
 
 
@@ -802,9 +804,10 @@ def _classify_dispatch_tier(
         # A trusted UNKNOWN / transitional (e.g. STOPPING) / absent state carries
         # no verdict of its own; fall through to the completed-exec evidence.
     if probe_exec_attempted:
-        # The exec completed without reaching the in-container script (a timeout
-        # returned above): direct fresh evidence the container is unreachable,
-        # independent of snapshot freshness. Consent-gated, never an auto-restart.
+        # The exec completed without reaching the in-container script (the timeout
+        # case already returned INDETERMINATE above): direct fresh evidence the
+        # container is unreachable, independent of snapshot freshness. Consent-gated,
+        # never an auto-restart.
         return DispatchTier.HOST_UNRESPONSIVE
     # No observation at all (the exec was not attempted and the snapshot carries
     # no trusted verdict): render no verdict and offer no restart -- keep checking.
