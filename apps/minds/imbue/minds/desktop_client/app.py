@@ -30,6 +30,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
+from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
 from imbue.minds.bootstrap import list_cloud_account_providers
 from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.config.data_types import ClientEnvConfig
@@ -1040,6 +1041,7 @@ def _handle_landing_page() -> Response:
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         cloud_accounts=list_cloud_account_providers(),
+        byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
         # A deep-link that pre-fills a repo/branch wants those advanced fields
         # visible; otherwise start on the simple preset cards.
         start_advanced=bool(git_url or branch),
@@ -1124,6 +1126,7 @@ def _handle_create_page() -> Response:
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         cloud_accounts=list_cloud_account_providers(),
+        byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
         # A deep-link that pre-fills a repo/branch wants those advanced fields
         # visible; otherwise start on the simple preset cards.
         start_advanced=bool(git_url or branch),

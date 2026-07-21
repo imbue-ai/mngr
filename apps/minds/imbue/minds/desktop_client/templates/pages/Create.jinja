@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, cloud_accounts=[], instance_types_by_backend={}, default_instance_type_by_backend={}, byok_region_options={}, byok_region_selected={}, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, cloud_accounts=[], byok_clouds_enabled=False, instance_types_by_backend={}, default_instance_type_by_backend={}, byok_region_options={}, byok_region_selected={}, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -930,6 +930,11 @@
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
                       {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
             {% endif %}{% endfor %}
+            {# Bring-your-own-key cloud accounts, gated behind the feature flag
+               (off by default). When disabled, the configured-account options and
+               the "add account" action entries are omitted entirely, so the
+               cloud modes are unreachable from the UI. #}
+            {% if byok_clouds_enabled %}
             {# Bring-your-own-key cloud accounts (pasted keys). The value carries the
                provider block name; data-backend maps back to the LaunchMode the
                create request submits, data-default-region preselects the region. #}
@@ -942,6 +947,7 @@
             <option value="ADD:aws">add AWS account&hellip;</option>
             <option value="ADD:gcp">add GCP account&hellip;</option>
             <option value="ADD:azure">add Azure account&hellip;</option>
+            {% endif %}
           </Select>
         </div>
         <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>

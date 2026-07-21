@@ -12,6 +12,7 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import _ensure_mngr_settings
 from imbue.minds.bootstrap import apply_bootstrap
 from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import mngr_host_dir_for
@@ -550,3 +551,15 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_is_bring_your_own_cloud_enabled_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Off by default (env absent), on only for the exact "1" value -- the feature
+    # ships dark behind FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS.
+    monkeypatch.delenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", raising=False)
+    assert is_bring_your_own_cloud_enabled() is False
+    monkeypatch.setenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", "1")
+    assert is_bring_your_own_cloud_enabled() is True
+    for off_value in ("0", "", "true", "yes"):
+        monkeypatch.setenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", off_value)
+        assert is_bring_your_own_cloud_enabled() is False

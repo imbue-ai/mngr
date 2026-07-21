@@ -464,6 +464,7 @@ def render_create_form(
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
     cloud_accounts: Sequence[Mapping[str, str]] | None = None,
+    byok_clouds_enabled: bool = False,
     selected_preset: str | None = None,
     start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
@@ -556,6 +557,7 @@ def render_create_form(
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
         cloud_accounts=[dict(account) for account in (cloud_accounts or [])],
+        byok_clouds_enabled=byok_clouds_enabled,
         # Machine-size picker options per compute mode, and the curated
         # placement lists for the BYOK-only modes (GCP zones / Azure regions) --
         # merged into the region machinery client-side.

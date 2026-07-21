@@ -885,6 +885,17 @@ def unset_imbue_cloud_provider_for_account(email: str, *, root_name: str | None 
 _BYOK_PROVIDER_NAME_PREFIX: Final[str] = "byok-"
 _BYOK_SUPPORTED_BACKENDS: Final[tuple[str, ...]] = ("aws", "gcp", "azure")
 
+# The bring-your-own-key cloud-accounts feature ships dark: the create-page UI
+# and the account routes stay hidden until this env var is ``"1"``. It is set by
+# the Electron shell (``env`` block in ``electron/backend.js``) for opted-in
+# builds, or exported ambiently for dev -- mirroring how ``SKIP_AUTH`` is read.
+_BYOK_CLOUDS_FEATURE_FLAG_ENV: Final[str] = "FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS"
+
+
+def is_bring_your_own_cloud_enabled() -> bool:
+    """Whether the bring-your-own-key cloud-accounts feature is turned on (off by default)."""
+    return os.getenv(_BYOK_CLOUDS_FEATURE_FLAG_ENV, "0") == "1"
+
 
 def _slugify_cloud_account_alias(alias: str) -> str:
     """Slugify an alias for use in the provider block name; raises on an empty result."""

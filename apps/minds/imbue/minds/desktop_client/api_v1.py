@@ -45,6 +45,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.bootstrap import delete_cloud_account_provider
+from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
 from imbue.minds.bootstrap import list_cloud_account_providers
 from imbue.minds.bootstrap import set_cloud_account_provider
 from imbue.minds.config.data_types import WorkspacePaths
@@ -1903,6 +1904,8 @@ def _handle_create_cloud_account() -> CloudAccountSummary | Response:
     half-registered account behind; the error body carries the prepare output
     so the UI can show the cloud's own message.
     """
+    if not is_bring_your_own_cloud_enabled():
+        return _json_error("Bring-your-own cloud accounts are not enabled.", 403)
     body = request.get_json(silent=True, force=True) or {}
     alias = str(body.get("alias", "")).strip()
     backend = str(body.get("backend", "")).strip().lower()
@@ -1996,6 +1999,8 @@ def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
     Refuses (409) while the account still has active workspaces -- deleting the
     provider block would drop them off discovery with no way to manage them.
     """
+    if not is_bring_your_own_cloud_enabled():
+        return _json_error("Bring-your-own cloud accounts are not enabled.", 403)
     active = desktop_control.list_active_workspaces_for_provider(get_state().backend_resolver, account_name)
     if active:
         return _json_error(
