@@ -3,8 +3,8 @@
 `minds-evals` — a harness for running persona-based evals against Minds.
 
 Launch a batch of persona cases as **self-completing** Modal workspaces: each sandbox drives its own
-multi-turn conversation, snapshots `/mngr` to S3 after each turn (restic), and uploads its
-transcript at the end. Results are read back from S3, so the launching machine does not need to
+multi-turn conversation, snapshots `/mngr` to R2 after each turn (restic), and uploads its
+transcript at the end. Results are read back from R2, so the launching machine does not need to
 stay on. Afterwards, `visit-batch` rebuilds the **exact computer** the batch ran on — a Modal
 sandbox running the real Minds desktop app, streamed to your browser — and you open the batch's
 workspaces as windows, natively. **Nothing runs on your machine**: no Docker, no local builds, no
@@ -21,18 +21,18 @@ port mappings — the CLI only makes API calls and prints https URLs.
   `visit-batch` finds the same computer again by tag, or reboots it. Boxes self-terminate after 8h
   (they bill while alive); `stop <name>` kills one early — the workspaces live on regardless.
 - **Workspaces** — always Modal sandboxes. Never run in the box.
-- **The eval name IS the batch** — unique, hard requirement. It names the S3 prefix and the
+- **The eval name IS the batch** — unique, hard requirement. It names the R2 prefix and the
   batch's own Modal env (`minds-staging-<name>`, via the Modal provider's `user_id`); `launch`
   preflights BOTH and fails out if either already exists. A box only ever discovers its own
   batch's workspaces, so discovery stays small and fast. The env, the mngr SHA, and the branch
-  are recorded in the batch's S3 config — which is what makes `visit-batch` exact.
+  are recorded in the batch's R2 config — which is what makes `visit-batch` exact.
 - **Shared SSH access** — every box pins one mngr profile (`evaluator`) and mounts one shared Modal
   SSH keypair (persisted at `~/.minds-eval/modal-profile/`, seeded by the first box), so a visit
   box can open workspaces a launch box created.
 
 ## Setup
 
-One-time: an S3 bucket and a bucket-scoped IAM key at `~/.minds-eval/aws.env`. See [SETUP.md](SETUP.md).
+One-time: an R2 bucket + scoped key (one `mngr imbue_cloud bucket create`) written to `~/.minds-eval/r2.env`. See [SETUP.md](SETUP.md).
 
 ## Commands
 
@@ -40,11 +40,11 @@ One-time: an S3 bucket and a bucket-scoped IAM key at `~/.minds-eval/aws.env`. S
 # run an eval batch (one self-completing workspace per case): a unique name + a config template
 ANTHROPIC_API_KEY=sk-ant-... minds-evals launch combined --config eval-config.json
 
-# status, straight from S3 -- no box, works any time from anywhere
+# status, straight from R2 -- no box, works any time from anywhere
 minds-evals list-batches
 minds-evals inspect combined
 
-# score a finished batch (S3 + Anthropic only, no box); writes results back to S3
+# score a finished batch (R2 + Anthropic only, no box); writes results back to R2
 ANTHROPIC_API_KEY=sk-ant-... minds-evals evaluate combined
 
 # the batch's exact Minds computer, in your browser
@@ -60,17 +60,17 @@ ANTHROPIC_API_KEY=... minds-evals box --mngr-branch main --user-id minh \
     --dwt-link https://github.com/imbue-ai/default-workspace-template.git --dwt-branch main
 ```
 
-`launch` first verifies the eval name is unused (no such S3 batch, no such Modal env — it fails
+`launch` first verifies the eval name is unused (no such R2 batch, no such Modal env — it fails
 out otherwise), then builds/boots the batch's computer (pinned to the branch tip SHA), creates the
 workspaces inside it, and prints its desktop URL — enter it to watch the batch run; the workspaces
-self-run on Modal and write to S3 regardless. `visit-batch` reuses that same computer by name if it
-is still up, or reads `(mngr_sha, modal env)` from S3 and reboots it exactly. `list-batches`/
-`inspect`/`evaluate` only read S3. Remove a box any time with `docker rm -f <box>`.
+self-run on Modal and write to R2 regardless. `visit-batch` reuses that same computer by name if it
+is still up, or reads `(mngr_sha, modal env)` from R2 and reboots it exactly. `list-batches`/
+`inspect`/`evaluate` only read R2. Remove a box any time with `docker rm -f <box>`.
 
 ## Eval config (`--config`)
 
 A reusable **template** — the batch name is given on the command line, not in the file. Stored
-verbatim in S3 as the batch config (plus `name`, `created_at`, `restic_password`, `mngr_sha`,
+verbatim in R2 as the batch config (plus `name`, `created_at`, `restic_password`, `mngr_sha`,
 `modal_user_id`, `modal_env`). See `eval-config.json`:
 
 ```json
@@ -93,7 +93,7 @@ different numbers of turns. Each entry is either:
   and sends back a short casual reply. It cannot be the first entry (nothing to decide from yet).
 
 The launch-time `name` must be lowercase letters/digits/dashes (max 40) and **globally unique** —
-it is the S3 prefix and the Modal env name. `fct_branch`/`fct_repo` are optional (default the
+it is the R2 prefix and the Modal env name. `fct_branch`/`fct_repo` are optional (default the
 workspace-template branch that carries the eval worker). `fct_branch` must carry the worker or the sandbox boots but never self-runs.
 `timeout_seconds` is optional (default 3600 = 1h): a per-case wall-clock budget — a run that
 exceeds it self-terminates.
@@ -110,11 +110,11 @@ Each turn writes `state.json` (`waits_done` / `num_turns` / `test_state` + timin
 `elapsed_seconds`, `timeout_seconds`, `timed_out`). `test_state` is `ongoing` while running,
 `finished` on success, or `timed_out` if the case exceeded its budget — distinct from `ongoing`, so
 a stalled/crashed run and a timed-out one are told apart. A timed-out case still uploads its
-**partial** transcript. Snapshots are captured to S3 per turn.
+**partial** transcript. Snapshots are captured to R2 per turn.
 
 ## Evaluating a finished batch (`evaluate`)
 
-`minds-evals evaluate <batch>` reads the batch from S3 (no box, no Modal), then scores every
+`minds-evals evaluate <batch>` reads the batch from R2 (no box, no Modal), then scores every
 **finished** case in parallel and writes results back, overwriting each case's result (a failed
 re-run leaves the prior good results intact — there is no destructive pre-delete). Cases that
 aren't finished (still running, **timed out**, or whose eval errors) show as `N/A` rows, called out
@@ -133,7 +133,7 @@ batch-average row) is printed. Add a new evaluation by appending a function to `
 
 `visit-batch <batch>` is "walk back into the machine that ran this batch":
 
-1. Reads the batch's `config.json` from S3 → the mngr branch, the **exact SHA**, and the batch's
+1. Reads the batch's `config.json` from R2 → the mngr branch, the **exact SHA**, and the batch's
    Modal env.
 2. Builds/boots the batch's box at that SHA with that env (reused if already running — the
    container name encodes env + SHA).
@@ -144,7 +144,7 @@ The Minds app inside the box reaches its workspaces itself (mngr forward on the 
 loopback) — nothing touches your machine. When you're done: `minds-evals stop <batch>` (or just let
 the 8h timeout reap it).
 
-## S3 layout
+## R2 layout
 
 ```
 <name>/                              batch (the unique eval name)
@@ -164,10 +164,10 @@ box.py             the box: a Modal sandbox (image built on Modal from docker/Do
 minds_client.py    the Minds create API (POST + poll) -- used by launch
 launch.py          batch: prep clone (+ vendor mngr + slot test_case_metadata.json), create per case
 workspace.py       create one Modal workspace (build_payload + create_workspace) -- the create path
-status.py          list-batches / inspect / case_report (S3 reads only)
-evaluate.py        evaluate: pull transcripts, score (avg_word_count + LLM scores), write to S3
+status.py          list-batches / inspect / case_report (R2 reads only)
+evaluate.py        evaluate: pull transcripts, score (avg_word_count + LLM scores), write to R2
 anthropic_call.py  one plain Anthropic Messages call (the LLM-graded evals)
-s3_store.py        S3 layout, creds file, batch/case prefixes
+s3_store.py        R2 layout, creds file, batch/case prefixes
 docker/            Dockerfile + entrypoint.sh -- the box IMAGE SOURCE, built on Modal's builders
 ```
 

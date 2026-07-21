@@ -13,7 +13,7 @@ watch; `visit-batch` finds or reboots the same computer later; `stop` kills it e
   minds-evals box --mngr-branch main                  (dev utility: a desktop box on a branch tip)
 
 Launched runs self-complete: the in-sandbox eval worker drives the conversation, snapshots /mngr
-per turn (restic -> S3), and uploads the transcript -- so results are retrieved from S3 and no box
+per turn (restic -> R2), and uploads the transcript -- so results are retrieved from R2 and no box
 needs to stay alive for them.
 """
 

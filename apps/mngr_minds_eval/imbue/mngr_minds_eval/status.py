@@ -1,4 +1,4 @@
-"""Read eval status straight from S3 -- no running box, no live sandboxes needed."""
+"""Read eval status straight from R2 -- no running box, no live sandboxes needed."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def list_batches() -> None:
     client = s3_store.make_client(env)
     batches = s3_store.list_batches(client, env["MINDS_EVAL_BUCKET"])
     if not batches:
-        print("no eval batches in s3://{}".format(env["MINDS_EVAL_BUCKET"]))
+        print("no eval batches in r2://{}".format(env["MINDS_EVAL_BUCKET"]))
         return
     print("{:<40} {:>6}  {}".format("BATCH (pass this to inspect)", "CASES", "CREATED"))
     for batch in batches:

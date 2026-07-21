@@ -1,4 +1,4 @@
-"""Offline unit checks for the pure CLI helpers (no box, no S3, no Modal)."""
+"""Offline unit checks for the pure CLI helpers (no box, no R2, no Modal)."""
 
 import json
 import tempfile
@@ -15,14 +15,18 @@ from imbue.mngr_minds_eval.launch import validate_name
 _ENV = {
     "AWS_ACCESS_KEY_ID": "AK",
     "AWS_SECRET_ACCESS_KEY": "SK",
-    "AWS_DEFAULT_REGION": "us-east-1",
+    "AWS_DEFAULT_REGION": "auto",
     "MINDS_EVAL_BUCKET": "b",
+    "MINDS_EVAL_S3_ENDPOINT": "https://acct.r2.cloudflarestorage.com",
 }
 
 
 def test_s3_prefixes() -> None:
     assert s3_store.case_prefix("web1", "web1", "todo") == "web1/web1_todo"
-    assert s3_store.restic_repo_url(_ENV, "web1/web1_todo") == "s3:s3.us-east-1.amazonaws.com/b/web1/web1_todo/restic"
+    assert (
+        s3_store.restic_repo_url(_ENV, "web1/web1_todo")
+        == "s3:https://acct.r2.cloudflarestorage.com/b/web1/web1_todo/restic"
+    )
 
 
 def test_launch_case_payload_is_modal_apikey_configure_later() -> None:

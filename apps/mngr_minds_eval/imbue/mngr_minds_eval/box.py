@@ -135,7 +135,7 @@ def _modal_token_env() -> dict[str, str]:
 
 def _box_env(user_id: str, ref: str, minds_env: str) -> dict[str, str | None]:
     """Everything the box needs, as plain env vars: its Modal scope, its identity, the Modal token
-    (for creating workspaces from inside), and the AWS creds (load_aws_env falls back to env vars
+    (for creating workspaces from inside), and the R2 creds (load_aws_env falls back to env vars
     in-box, so no file is needed)."""
     env: dict[str, str | None] = {
         "MINDS_ENV": minds_env,
@@ -145,7 +145,13 @@ def _box_env(user_id: str, ref: str, minds_env: str) -> dict[str, str | None]:
     }
     env.update(_modal_token_env())
     aws = s3_store.load_aws_env()
-    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION", "MINDS_EVAL_BUCKET"):
+    for key in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_DEFAULT_REGION",
+        "MINDS_EVAL_BUCKET",
+        "MINDS_EVAL_S3_ENDPOINT",
+    ):
         if aws.get(key):
             env[key] = aws[key]
     return env

@@ -1,8 +1,8 @@
 """Launch an eval batch: prepare one FCT clone per case, then create one workspace per case.
 
-Each case's clone carries a scripts/test_case_metadata.json with the S3 target, the case's restic repo +
+Each case's clone carries a scripts/test_case_metadata.json with the R2 target, the case's restic repo +
 password, and the scoped AWS creds; backup_provider is configure_later and the in-sandbox worker
-drives restic itself. The run self-completes and everything is retrievable from S3.
+drives restic itself. The run self-completes and everything is retrievable from R2.
 """
 
 from __future__ import annotations
@@ -115,14 +115,14 @@ def normalize_cases(personas: object) -> list[dict]:
     ids = [str(c["id"]) for c in out]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
     if dupes:
-        # Two cases with the same id collide on one S3 prefix and one Modal host name (one silently
+        # Two cases with the same id collide on one R2 prefix and one Modal host name (one silently
         # overwrites/destroys the other), so reject it up front.
         raise ValueError("duplicate case id(s): {}".format(", ".join(dupes)))
     return out
 
 
 def load_config(config_path: Path) -> dict:
-    """Read + validate the eval config json. This exact object is stored verbatim in S3 as the batch
+    """Read + validate the eval config json. This exact object is stored verbatim in R2 as the batch
     config (plus created_at / restic_password / mngr_sha added at launch). Each case's 'prompts' array
     defines that case's turns, so different cases can run different numbers of turns."""
     if not config_path.is_file():
@@ -141,13 +141,13 @@ def load_config(config_path: Path) -> dict:
 
 
 def validate_name(name: str) -> str:
-    """The batch name IS the batch identity: the S3 prefix and the Modal env (minds-staging-<name>)
+    """The batch name IS the batch identity: the R2 prefix and the Modal env (minds-staging-<name>)
     both key on it, and launch preflights that neither exists yet. Require it to already be a valid
     Modal user_id (lowercase alnum + dashes, <=40) so no sanitization can alias two names."""
     if name != box_mod.sanitize_user_id(name) or len(name) > 40:
         raise SystemExit(
             "batch name must be lowercase letters/digits/dashes, at most 40 chars (got {!r}) -- "
-            "it names the batch's S3 prefix and Modal env".format(name)
+            "it names the batch's R2 prefix and Modal env".format(name)
         )
     return name
 
@@ -234,7 +234,7 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
     fct_repo = config.get("fct_repo", DEFAULT_FCT_REPO)
     fct_branch = config.get("fct_branch", DEFAULT_FCT_BRANCH)
     cases = normalize_cases(config["personas"])
-    # The name IS the batch: S3 prefix and Modal env both key on it (uniqueness preflighted on the
+    # The name IS the batch: R2 prefix and Modal env both key on it (uniqueness preflighted on the
     # host before this runs).
     batch = eval_name
 
@@ -269,7 +269,7 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
 
     # Prepare every clone first (git clone + vendor mngr + slot test_case_metadata.json). Local and
     # fast; kept serial for simple output. Everything the in-sandbox worker needs is in the metadata
-    # file (S3 target, restic repo/password, scoped AWS creds) -- so the worker doesn't depend on
+    # file (R2 target, restic repo/password, scoped AWS creds) -- so the worker doesn't depend on
     # minds' backup provisioning (which doesn't land a restic.env in the sandbox).
     prepared = []
     for case in cases:
@@ -283,11 +283,12 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
             "timeout_seconds": config.get("timeout_seconds", 3600),
             "s3_bucket": bucket,
             "s3_prefix": case_pref,
+            "s3_endpoint": env["MINDS_EVAL_S3_ENDPOINT"],
             "restic_repository": s3_store.restic_repo_url(env, case_pref),
             "restic_password": restic_password,
             "aws_access_key_id": env["AWS_ACCESS_KEY_ID"],
             "aws_secret_access_key": env["AWS_SECRET_ACCESS_KEY"],
-            "aws_region": env.get("AWS_DEFAULT_REGION", "us-east-1"),
+            "aws_region": env.get("AWS_DEFAULT_REGION") or "auto",
             "anthropic_api_key": anthropic_key,  # so the worker can role-play the client on DECIDE_FROM_PERSONA turns
         }
         print("  preparing clone: {}".format(case["id"]), flush=True)
@@ -322,7 +323,7 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
 
     ok = sum(1 for r in results if r.get("ok"))
     print("\n" + "=" * 66, flush=True)
-    print("  {}/{} workspaces launched. They self-complete; results land in S3.".format(ok, len(results)), flush=True)
+    print("  {}/{} workspaces launched. They self-complete; results land in R2.".format(ok, len(results)), flush=True)
     print("  inspect:  minds-evals inspect {}".format(batch), flush=True)
     print("=" * 66, flush=True)
     if ok == 0:

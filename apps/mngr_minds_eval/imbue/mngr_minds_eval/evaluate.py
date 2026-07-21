@@ -1,11 +1,11 @@
-"""Evaluate a finished eval batch: pull each case's transcript from S3, score it, write results back.
+"""Evaluate a finished eval batch: pull each case's transcript from R2, score it, write results back.
 
 Add a new evaluation by writing a function that takes a `_Case` and returns a `{key: value}` dict,
 then appending it to `EVALUATIONS` (and its keys to `RESULT_KEYS`). `evaluate_single_case` runs them
 all and merges the dicts into `case_eval_results.json`; the batch aggregate averages every numeric
 key across cases into `batch_eval_results.json`.
 
-Host-native and S3-only (like inspect): no box, no Modal. The LLM-graded evals call the Anthropic
+Host-native and R2-only (like inspect): no box, no Modal. The LLM-graded evals call the Anthropic
 API, so ANTHROPIC_API_KEY must be set.
 """
 
