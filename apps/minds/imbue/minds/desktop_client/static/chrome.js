@@ -163,12 +163,16 @@
         applyModeSetup();
         window.scrollTo(0, 0);
         var u = new URL(url, window.location.href);
-        lastContentUrl = u.pathname + u.search;
-        applyTitlebarContext();
-        // Local pages derive their accent from their own path; the wrapper's
-        // accent is owned by the Electron main pushes (and was seeded
-        // server-side via the ?accent= param).
+        // Local pages stamp the titlebar from their own path. The WRAPPER must
+        // NOT: its titlebar context belongs to the workspace the content view
+        // displays (main pushes that URL at navigation-claim time), and
+        // '/_chrome' itself classifies as the bare home bar -- stamping it here
+        // wiped the workspace name + tabs the moment a wrapper arrived by swap,
+        // with nothing to restore them on a parked-workspace reveal (no fresh
+        // content commit follows). Same rule as the accent below.
         if (u.pathname !== '/_chrome') {
+          lastContentUrl = u.pathname + u.search;
+          applyTitlebarContext();
           applyTitleAccent(accentSourceFromPath(u.pathname));
         }
       });
