@@ -372,6 +372,16 @@ def test_queued_command_attachment_parsed() -> None:
     events = parse_claude_session_lines([line])
     assert events[0]["type"] == "user_message"
     assert events[0]["content"] == "queued msg"
+    # Flagged queued so the client styles it distinctly from a delivered turn.
+    assert events[0]["queued"] is True
+
+
+def test_delivered_user_message_is_not_flagged_queued() -> None:
+    line = _line(type="user", uuid="u1", timestamp="t1", message={"role": "user", "content": "hello there"})
+    events = parse_claude_session_lines([line])
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "hello there"
+    assert "queued" not in events[0]  # delivered turns carry no queued flag
 
 
 def test_slash_command_normalized() -> None:

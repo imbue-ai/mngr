@@ -377,10 +377,13 @@
     const composer = document.getElementById("composer");
     const toolBodies = new Map(); // tool_call_id -> {body, toolName, resolved}
     const pendingResults = new Map(); // tool_call_id -> result event (arrived early)
-    // Optimistic "queued" bubbles: a message sent while the agent is busy shows
-    // immediately in purple, then swaps to a normal user bubble once it lands in
-    // the transcript. Each entry: { text, node }.
-    const pendingQueued = [];
+    // No optimistic rendering: a sent message stays in the composer until the
+    // transcript itself echoes it (see send()/renderEvent). userBubbles maps a
+    // message's text to its rendered bubble so a queued_command (purple) can be
+    // flipped to a delivered user_message (green) in place instead of duplicated.
+    const userBubbles = new Map(); // content-key -> { node, queued }
+    let pendingSend = null; // text of a sent message awaiting its transcript echo
+    let pendingSendTimer = null; // safety re-enable if the echo never matches
     // The upload token: "[FILE: ./chat_uploads/<uuid>.<ext>]". Captured group 1
     // is the stored name. Used to render chips in the transcript and to delete a
     // whole token on backspace. Build a fresh RegExp per use to reset lastIndex.
@@ -569,27 +572,6 @@
       if (escBtn) escBtn.disabled = false; // always usable; Escape is harmless
     }
 
-    // ---- optimistic "queued" bubbles ----
-    // Claude's CLI queues input pasted mid-turn, and the paste lands even while
-    // it generates (mngr's send preflight only blocks on dialogs). So a send
-    // while busy is real -- we just show it purple until the transcript confirms
-    // delivery, then resolveQueued swaps it for the normal user bubble.
-    function addQueued(text) {
-      const node = el("div", "entry user queued");
-      renderUserContent(node, text);
-      tEl.appendChild(node);
-      pendingQueued.push({ text: text, node: node });
-      refreshWorking(); // keep the working dot pinned below the new bubble
-      scrollDown(true);
-    }
-    function resolveQueued(text) {
-      const key = (text || "").trim();
-      const i = pendingQueued.findIndex((q) => q.text.trim() === key);
-      if (i === -1) return;
-      const q = pendingQueued.splice(i, 1)[0];
-      if (q.node && q.node.parentNode) q.node.parentNode.removeChild(q.node);
-    }
-
     // A framework/meta record (a /command, its stdout, or an isMeta line):
     // a dim, collapsed one-liner -- never a user/assistant bubble.
     function frameworkEl(ev) {
@@ -661,14 +643,32 @@
     function renderEvent(ev) {
       const wasBottom = atBottom();
       if (ev.type === "user_message") {
-        // If we optimistically showed this as a "queued" bubble, drop the
-        // placeholder -- the real delivered message renders normally below.
-        resolveQueued(ev.content || "");
-        const e = el("div", "entry user");
-        renderUserContent(e, ev.content || "");
-        // Pasted / queued images ride along on the message.
-        if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
-        tEl.appendChild(e);
+        const key = (ev.content || "").trim();
+        // The transcript is the source of truth: this event confirms the message
+        // the user sent, so now (not on POST) clear the composer and re-enable send.
+        if (pendingSend !== null && key === pendingSend) {
+          pendingSend = null;
+          if (pendingSendTimer) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
+          input.value = "";
+          autoGrow();
+          clearUploads();
+          sendBtn.disabled = false;
+        }
+        const existing = userBubbles.get(key);
+        if (existing && existing.queued && !ev.queued) {
+          // A queued_command has now been delivered as a real turn: flip the
+          // existing purple bubble to green in place rather than duplicating it.
+          existing.node.classList.remove("queued");
+          existing.queued = false;
+        } else if (!existing) {
+          // queued_command -> purple ("queued" class); delivered -> normal.
+          const e = el("div", ev.queued ? "entry user queued" : "entry user");
+          renderUserContent(e, ev.content || "");
+          // Pasted / queued images ride along on the message.
+          if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
+          tEl.appendChild(e);
+          userBubbles.set(key, { node: e, queued: !!ev.queued });
+        }
       } else if (ev.type === "framework_message") {
         tEl.appendChild(frameworkEl(ev));
       } else if (ev.type === "assistant_message") {
@@ -800,12 +800,13 @@
     }
 
     function send() {
+      if (sendBtn.disabled) return; // a send is already in flight (guards Enter too)
       const msg = input.value.trim();
       if (!msg) return;
-      // Composer lock: disable the textarea + button while the POST is in flight
-      // so nothing is edited mid-send. Re-enabled in finally.
+      // No optimistic rendering: the text STAYS in the composer as the pending
+      // state. Disable only the send button (prevent dupes) -- the composer clears
+      // itself when renderEvent sees this message echoed in the transcript.
       sendBtn.disabled = true;
-      input.disabled = true;
       sendErr.hidden = true;
       fetch("/api/agents/" + encodeURIComponent(name) + "/message", {
         method: "POST",
@@ -815,27 +816,32 @@
         .then((r) => r.json().then((d) => ({ ok: r.ok, d: d })))
         .then(({ ok, d }) => {
           if (ok && d.ok) {
-            input.value = "";
-            autoGrow();
+            // Delivered to claude's input. Wait for the transcript echo (matched
+            // by content) to clear the composer and render the real bubble; keep
+            // the button disabled until then so the message can't be sent twice.
+            pendingSend = msg;
             clearBlocked();
-            // Burst the input-state poll so the working/blocked UI reacts fast.
-            statePoll.burst();
-            // Show it immediately as "queued" (purple); the transcript swaps it
-            // for a normal bubble when the delivered message arrives.
-            addQueued(msg);
-            // The [FILE: ...] tokens went out with the message; the uploaded
-            // files stay in the agent's workdir. Clear the strip (don't delete).
-            clearUploads();
+            statePoll.burst(); // fast input-state polling so working/blocked reacts
+            // Safety net: if the transcript echo never matches (e.g. the content
+            // got normalized), re-enable send after a grace period so the composer
+            // can't lock up. The echo normally arrives in well under a second.
+            if (pendingSendTimer) clearTimeout(pendingSendTimer);
+            pendingSendTimer = setTimeout(() => {
+              if (pendingSend === msg) { pendingSend = null; sendBtn.disabled = false; }
+            }, 15000);
           } else {
             const err = (d && d.error) || "send failed — open the terminal to resolve any prompt.";
             showError(err);
             // A failed send usually means a blocking dialog ate the paste; flip
             // to the greyed state immediately (the next poll re-confirms/clears).
             setBlocked();
+            sendBtn.disabled = false; // let the user retry (text is still there)
           }
         })
-        .catch((e) => showError("network error: " + e))
-        .finally(() => { sendBtn.disabled = false; input.disabled = false; input.focus(); });
+        .catch((e) => {
+          showError("network error: " + e);
+          sendBtn.disabled = false;
+        });
     }
 
     sendBtn.addEventListener("click", send);

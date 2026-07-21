@@ -20,13 +20,13 @@ from __future__ import annotations
 import threading
 import time
 
-FAST_POLL_SECONDS = 0.3
+FAST_POLL_SECONDS = 0.2
 STEADY_POLL_SECONDS = 1.0
 IDLE_POLL_SECONDS = 4.0
 # How long a send (or a RUNNING observation) keeps an agent in fast mode. Long
 # enough to span a send -> agent-starts-working -> first-tokens gap and to keep a
 # brief fast tail after work ends so the final message arrives promptly.
-FAST_WINDOW_SECONDS = 15.0
+FAST_WINDOW_SECONDS = 20.0
 
 _WAITING_STATE = "WAITING"
 

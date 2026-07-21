@@ -576,6 +576,11 @@ def _parse_queued_command_attachment(
         "role": "user",
         "content": prompt,
         "message_uuid": uuid,
+        # Distinguishes a message still sitting in claude's queue (typed while it
+        # was generating) from one it has actually accepted as a turn. The client
+        # styles queued messages differently and flips them when the delivered
+        # user_message for the same content arrives.
+        "queued": True,
     }
     if images:
         event["images"] = images
