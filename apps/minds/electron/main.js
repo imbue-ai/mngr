@@ -1882,8 +1882,12 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   for (const entry of state) {
     // Persisted urls are backend-relative; resolve to absolute so
     // ``parseWorkspaceId`` (``new URL``) can read the workspace id rather than
-    // throwing on the bare path.
-    const agentId = parseWorkspaceId(toAbsoluteUrl(entry.url));
+    // throwing on the bare path. A stale persisted recovery-page URL (written
+    // by a build that predates the recovery-aware ``toPersistedContentUrl``)
+    // names its workspace too; ``toRestoredContentUrl`` restores it AS that
+    // workspace, so it must be dead-workspace-filtered like the workspace.
+    const absolute = toAbsoluteUrl(entry.url);
+    const agentId = parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute);
     if (agentId && !knownAgentIdsSet.has(agentId)) {
       continue; // workspace no longer exists, skip silently
     }
