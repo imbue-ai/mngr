@@ -26,6 +26,7 @@ from imbue.mngr.api.observe import parse_observe_event_line
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr_foreman.harness import transcript_strategy_for
 from imbue.mngr_foreman.mngr_bin import resolve_mngr_binary
 
 # Bound each subscriber queue so a dead/slow SSE client cannot grow memory
@@ -194,5 +195,7 @@ def _agent_to_card(agent: AgentDetails) -> dict:
         "provider": str(agent.host.provider_name),
         "labels": dict(agent.labels),
         "activity_time": activity.isoformat() if activity else None,
-        "is_claude": agent.type == "claude",
+        # Chat (live transcript + composer) is available for any type foreman has a
+        # transcript strategy for (claude, codex, opencode); others are terminal-only.
+        "supports_chat": transcript_strategy_for(agent.type) is not None,
     }

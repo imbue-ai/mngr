@@ -1,0 +1,3 @@
+foreman now renders live chat (transcript + composer + working/needs-input status) for `codex` and `opencode` agents, not just `claude`.
+
+Both read the agent-agnostic common transcript at `events/<type>/common_transcript/events.jsonl` through a new thin normalizer, and surface a permission block via mngr's pane-less `waiting_reason` field (no tmux capture). Chat dispatch now flows through a single per-agent-type `TranscriptStrategy` registry (`harness.py`), so adding a harness is one row plus, for a new format, one parser module; claude's behavior is unchanged. The agent-list card now exposes `supports_chat` in place of `is_claude`.

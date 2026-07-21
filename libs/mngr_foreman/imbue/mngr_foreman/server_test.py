@@ -22,7 +22,7 @@ _CARD = {
     "provider": "ssh",
     "labels": {},
     "activity_time": None,
-    "is_claude": True,
+    "supports_chat": True,
 }
 
 
@@ -88,6 +88,36 @@ def test_input_state_unknown_agent_not_running() -> None:
     assert resp.status_code == 200
     d = resp.get_json()
     assert d["running"] is False and d["busy"] is False
+
+
+def _agent(agent_type: str, state: str, plugin: dict[str, Any] | None = None) -> Any:
+    return SimpleNamespace(type=agent_type, name="worker", state=state, plugin=plugin or {})
+
+
+def test_input_state_unsupported_type_not_running() -> None:
+    # A type foreman has no chat strategy for (no registry row) reports not-running
+    # -- it is gated out before any state/pane work.
+    reg = _FakeRegistry([_CARD], agents={"worker": _agent("antigravity", "RUNNING")})
+    d = _client(reg).get("/api/agents/worker/input-state").get_json()
+    assert d["running"] is False and d["busy"] is False
+
+
+def test_input_state_codex_permission_blocked_pane_less() -> None:
+    # codex surfaces a permission block via the waiting_reason field (state WAITING),
+    # with no tmux pane capture -- so this resolves with a fake pool that cannot
+    # capture panes.
+    plugin = {"codex": {"waiting_reason": "PERMISSIONS"}}
+    reg = _FakeRegistry([_CARD], agents={"worker": _agent("codex", "WAITING", plugin)})
+    d = _client(reg).get("/api/agents/worker/input-state").get_json()
+    assert d["blocked"] is True and d["reason"] == "permission prompt"
+    assert d["running"] is True and d["busy"] is False
+
+
+def test_input_state_opencode_running_not_blocked() -> None:
+    reg = _FakeRegistry([_CARD], agents={"worker": _agent("opencode", "RUNNING")})
+    d = _client(reg).get("/api/agents/worker/input-state").get_json()
+    assert d["blocked"] is False and d["reason"] is None
+    assert d["running"] is True and d["busy"] is True
 
 
 def test_message_empty_is_400() -> None:

@@ -12,9 +12,9 @@ from imbue.mngr_foreman.input_state import is_permissions_blocked
 from imbue.mngr_foreman.input_state import waiting_reason_of
 
 
-def _agent_with_plugin(plugin: object) -> AgentDetails:
-    """A stand-in exposing just ``.plugin`` (all the state helpers touch)."""
-    return cast(AgentDetails, SimpleNamespace(plugin=plugin))
+def _agent_with_plugin(plugin: object, agent_type: str = "claude") -> AgentDetails:
+    """A stand-in exposing ``.plugin`` + ``.type`` (all the state helpers touch)."""
+    return cast(AgentDetails, SimpleNamespace(plugin=plugin, type=agent_type))
 
 
 # A normal, ready claude prompt (not blocked). Mirrors a real capture: a finished
@@ -175,11 +175,23 @@ def test_end_of_turn_reason_is_not_blocked() -> None:
 
 
 def test_missing_waiting_reason_is_not_blocked() -> None:
-    # No claude plugin block, empty block, or absent field -> unknown -> not blocked.
+    # No plugin block for the agent's type, empty block, or absent field -> unknown.
     assert is_permissions_blocked(_agent_with_plugin({})) is False
     assert is_permissions_blocked(_agent_with_plugin({"claude": {}})) is False
-    assert is_permissions_blocked(_agent_with_plugin({"codex": {"x": 1}})) is False
+    # A claude-typed agent ignores another type's block.
+    assert is_permissions_blocked(_agent_with_plugin({"codex": {"waiting_reason": "PERMISSIONS"}})) is False
     assert waiting_reason_of(_agent_with_plugin({})) is None
+
+
+def test_waiting_reason_reads_the_agents_own_type_key() -> None:
+    # codex/opencode publish waiting_reason under their own plugin key; the helper
+    # keys off ``agent.type`` so their permission block is surfaced pane-lessly.
+    codex = _agent_with_plugin({"codex": {"waiting_reason": "PERMISSIONS"}}, agent_type="codex")
+    assert waiting_reason_of(codex) == "PERMISSIONS"
+    assert is_permissions_blocked(codex) is True
+    opencode_idle = _agent_with_plugin({"opencode": {"waiting_reason": "END_OF_TURN"}}, agent_type="opencode")
+    assert waiting_reason_of(opencode_idle) == "END_OF_TURN"
+    assert is_permissions_blocked(opencode_idle) is False
 
 
 def test_non_dict_plugin_is_safe() -> None:
