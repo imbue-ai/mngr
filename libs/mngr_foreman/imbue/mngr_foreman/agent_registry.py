@@ -29,6 +29,7 @@ from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr_foreman.harness import transcript_strategy_for
 
 # How often the discovery loop re-lists agents (the interval *between* passes).
@@ -136,6 +137,15 @@ class AgentRegistry:
 
     def _poll_provider(self, pname: str) -> None:
         """List one provider's agents and republish; never blocks the other providers."""
+        try:
+            self._poll_provider_inner(pname)
+        finally:
+            # This runs in a throwaway per-poll thread; discovery touches pyinfra,
+            # which leaves a thread-local gevent Hub whose wakeup pipe would leak
+            # when the thread exits. Destroy it (no-op if none was created).
+            cleanup_thread_local_resources()
+
+    def _poll_provider_inner(self, pname: str) -> None:
         try:
             result = list_agents(
                 self._mngr_ctx,
