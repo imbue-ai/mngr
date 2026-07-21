@@ -1272,8 +1272,8 @@ _BUNDLE_SCRIPT_TAG: Final[str] = '<script src="/_static/dist/chrome.bundle.js"><
 
 def test_chrome_shell_pages_load_the_frontend_bundle_once_outside_page_scripts() -> None:
     """ChromeShell pages load the mithril bundle exactly once, as a classic
-    (non-deferred) SHELL script -- never inside #local-page-scripts, where the
-    swap engine would re-execute the IIFE on every hub swap."""
+    (non-deferred) SHELL script -- never inside ``#local-page-scripts``, where
+    the swap engine would re-execute the IIFE on every hub swap."""
     html = render_landing_page(accessible_agent_ids=[])
     assert html.count(_BUNDLE_SCRIPT_TAG) == 1
     assert html.index(_BUNDLE_SCRIPT_TAG) < html.index('id="local-page-scripts"')
@@ -1288,7 +1288,7 @@ def test_overlay_surface_pages_load_the_frontend_bundle() -> None:
 
 def test_dev_styleguide_smoke_mount_follows_the_boot_island_protocol() -> None:
     """The styleguide's JS-components section exercises the full mount
-    protocol: a parseable #minds-boot-state JSON island carrying the smoke
+    protocol: a parseable ``#minds-boot-state`` JSON island carrying the smoke
     message, the mount container, and the inline mount call placed after the
     bundle tag so window.MindsUI exists when it runs."""
     html = render_dev_styleguide_page()
