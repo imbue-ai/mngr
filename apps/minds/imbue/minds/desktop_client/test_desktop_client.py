@@ -39,7 +39,6 @@ from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.dek_store import verify_master_password_for_account
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -2114,9 +2113,9 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     pre-filled with the agent's description, scoped to the caller's own workspace."""
     client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
     agent_id = AgentId()
-    request_queue: "queue.Queue[OpenHelpRequest]" = queue.Queue()
+    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
     wake_event = threading.Event()
-    get_state(client.application).help_modal_request_broker.subscribe(request_queue, wake_event)
+    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, wake_event)
     response = client.post(
         f"/api/v1/agents/{agent_id}/report",
         json={"description": "agent saw an error"},
@@ -2127,10 +2126,13 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     assert body["ok"] is True
     # No Sentry submission happens here, so there is no event_id to return.
     assert "event_id" not in body
-    # The route published an open-help request (scoped to the caller's workspace) instead of submitting.
-    received = request_queue.get_nowait()
-    assert received.description == "agent saw an error"
-    assert received.workspace_agent_id == str(agent_id)
+    # The route broadcast an open_help SSE payload (scoped to the caller's workspace) instead of submitting.
+    assert wake_event.is_set()
+    assert event_queue.get_nowait() == {
+        "type": "open_help",
+        "description": "agent saw an error",
+        "workspace_agent_id": str(agent_id),
+    }
 
 
 def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:

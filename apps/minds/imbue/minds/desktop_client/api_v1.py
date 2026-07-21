@@ -104,11 +104,11 @@ from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
+from imbue.minds.desktop_client.chrome_event_broadcast import build_open_help_payload
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -1654,8 +1654,8 @@ def _handle_bug_report(agent_id: str) -> OkResponse | Response:
     if not description:
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
-    get_state().help_modal_request_broker.request_open(
-        OpenHelpRequest(description=description, workspace_agent_id=agent_id)
+    get_state().chrome_event_broadcaster.broadcast(
+        build_open_help_payload(description=description, workspace_agent_id=agent_id)
     )
     # The agent never submits to Sentry itself, so no report event is written here (the
     # response carries no ``event_id``); the human-reviewed send flows through ``/help/report``.

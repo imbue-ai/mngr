@@ -58,7 +58,6 @@ from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -1359,7 +1358,6 @@ def _handle_chrome_events() -> Response:
     """
     authenticated = _is_request_authenticated()
     backend_resolver = get_state().backend_resolver
-    help_broker = get_state().help_modal_request_broker
 
     def _event_generator() -> Iterator[str]:
         if not authenticated:
@@ -1377,15 +1375,10 @@ def _handle_chrome_events() -> Response:
         # in the main generator loop so each subscriber sees every event.
         health_queue: queue.Queue[tuple[str, AgentHealth]] = queue.Queue()
 
-        # Agent-initiated "open the pre-filled report modal" requests arrive on a
-        # Flask request thread (the /api/v1 report route) via the broker. We
-        # accumulate them per-connection and drain them in the loop, the same
-        # way health transitions are handled.
-        open_help_queue: queue.Queue[OpenHelpRequest] = queue.Queue()
-
-        # One-shot broadcast payloads (e.g. ``workspace_stopped``) arrive on a
-        # Flask request thread via the broadcaster; same per-connection
-        # queue-and-drain arrangement.
+        # One-shot broadcast payloads (e.g. ``workspace_stopped``, ``open_help``)
+        # arrive on a Flask request thread via the broadcaster; we accumulate
+        # them per-connection and drain them in the loop, the same way health
+        # transitions are handled. Each payload is already the finished SSE frame.
         broadcast_queue: queue.Queue[dict[str, str]] = queue.Queue()
 
         def _on_change() -> None:
@@ -1395,9 +1388,8 @@ def _handle_chrome_events() -> Response:
             _enqueue_health_change(health_queue, change_event, agent_id, status)
 
         # Subscribe this connection's queue + wake event directly (no callback)
-        # so the broker fans open-help requests onto it the same way health
+        # so the broadcaster fans one-shot payloads onto it the same way health
         # transitions reach ``health_queue``.
-        help_broker.subscribe(open_help_queue, change_event)
         event_broadcaster = get_state().chrome_event_broadcaster
         event_broadcaster.subscribe(broadcast_queue, change_event)
 
@@ -1530,18 +1522,6 @@ def _handle_chrome_events() -> Response:
                 if shutdown_event.is_set():
                     break
 
-                while not open_help_queue.empty():
-                    help_request = open_help_queue.get_nowait()
-                    yield "data: {}\n\n".format(
-                        json.dumps(
-                            {
-                                "type": "open_help",
-                                "description": help_request.description,
-                                "workspace_agent_id": help_request.workspace_agent_id,
-                            }
-                        )
-                    )
-
                 while not broadcast_queue.empty():
                     yield "data: {}\n\n".format(json.dumps(broadcast_queue.get_nowait()))
 
@@ -1627,7 +1607,6 @@ def _handle_chrome_events() -> Response:
                         json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
-            help_broker.unsubscribe(open_help_queue, change_event)
             event_broadcaster.unsubscribe(broadcast_queue, change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)

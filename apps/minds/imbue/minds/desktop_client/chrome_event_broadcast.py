@@ -2,18 +2,24 @@
 
 The ``/_chrome/events`` stream mostly re-derives its payloads from resolver
 state each tick, but some events are edge-triggered facts that must reach every
-connected window exactly when they happen (e.g. ``workspace_stopped``: a
-workspace's host was stopped through an in-app action, so any window open to it
-should close rather than observe the dead interface and auto-restart it). This
-broker is the fan-out point between the producer (a Flask request thread) and
-the chrome-events SSE generators (one per connected window): each generator
+connected window exactly when they happen:
+
+- ``workspace_stopped``: a workspace's host was stopped through an in-app
+  action, so any window open to it should close rather than observe the dead
+  interface and auto-restart it.
+- ``open_help``: an in-workspace agent escalated a bug report, so every window
+  gets the chance to surface the report modal pre-filled with its diagnosis.
+
+This broker is the fan-out point between the producer (a Flask request thread)
+and the chrome-events SSE generators (one per connected window): each generator
 subscribes its per-connection queue + wake event, and ``broadcast`` pushes the
-payload onto every subscriber's queue and wakes its loop.
+payload onto every subscriber's queue and wakes its loop. Each payload is the
+finished SSE frame (a ``{"type": ...}`` dict), built by the helpers below.
 
 Events are fire-and-forget: with no subscriber the payload is dropped (there is
 no window to act on it). The broker pushes directly onto subscriber queues
 rather than invoking callbacks, mirroring the per-connection queue + ``Event``
-wake the SSE loop already uses for health transitions and open-help requests.
+wake the SSE loop already uses for health transitions.
 """
 
 import queue
@@ -70,3 +76,14 @@ def build_workspace_stopped_payload(workspace_agent_id: str) -> dict[str, str]:
     the stop) and by the browser-mode chrome (navigate the content frame home).
     """
     return {"type": "workspace_stopped", "agent_id": workspace_agent_id}
+
+
+def build_open_help_payload(description: str, workspace_agent_id: str) -> dict[str, str]:
+    """The ``open_help`` SSE payload: open the report-a-bug modal pre-filled for a human to submit.
+
+    Emitted when an in-workspace agent POSTs a bug report to
+    ``/api/v1/agents/<id>/report`` rather than submitting to Sentry itself.
+    ``description`` is the agent's diagnosis and ``workspace_agent_id`` scopes
+    the modal to the reporting workspace's window.
+    """
+    return {"type": "open_help", "description": description, "workspace_agent_id": workspace_agent_id}
