@@ -158,10 +158,12 @@ class DispatchTier(str, Enum):
     supervisord is already fixing it), or the exec probe was never attempted and
     the host state carries no trusted verdict: the discovery snapshot backing it
     predates the outage onset (a pre-outage snapshot still reads the stale host
-    state, e.g. a just-stopped container still shows RUNNING) or the snapshot
-    carries no observation of the container (host state UNKNOWN -- the host was
-    unobservable during discovery -- or a transitional/absent state, e.g.
-    STOPPING, which settles to STOPPED a moment later).
+    state, e.g. a just-stopped container still shows RUNNING; a stale
+    STOPPED/CRASHED is the exception -- it classifies HOST_OFFLINE, needing no
+    freshness) or the snapshot carries no observation of the container (host
+    state UNKNOWN -- the host was unobservable during discovery -- or a
+    transitional/absent state, e.g. STOPPING, which settles to STOPPED a moment
+    later).
     A negative verdict or an auto-dispatched restart off such non-evidence is
     exactly the misclassification this tier avoids. The recovery page renders a
     live "reconnecting" state and keeps checking: the cheap liveness poll returns
