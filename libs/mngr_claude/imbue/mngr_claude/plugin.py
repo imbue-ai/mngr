@@ -2218,6 +2218,18 @@ class ClaudeAgent(
         '| if type == "array" then (map(.text? // "") | join(" ")) else tostring end'
     )
 
+    # jq filter selecting the warning record Claude writes the instant it
+    # rejects an unrecognized slash command, e.g.
+    # {"type":"system","level":"warning","content":"Unknown command: /zzz"}.
+    # The content prefix is required alongside the structured fields so other
+    # system warnings can never register as a rejection.
+    _REJECTED_COMMAND_JQ_FILTER: ClassVar[str] = (
+        "fromjson? "
+        '| select(.type == "system" and .level == "warning") '
+        '| .content // "" | tostring '
+        '| select(startswith("Unknown command"))'
+    )
+
     # Content probes shorter than this (after normalization) match too easily to
     # carry identity, so such messages fall back to any-accepted-record probes.
     _MIN_CONTENT_PROBE_LENGTH: ClassVar[int] = 3
@@ -2290,6 +2302,26 @@ class ClaudeAgent(
             poll_command=poll_command,
         )
 
+    def _build_unknown_command_rejection_probe(self, name: str, file_path_expression: str) -> SubmissionEvidenceProbe:
+        """Probe firing when Claude records an unknown-command warning past the baseline.
+
+        Keyed on Claude's own runtime verdict, so it needs no knowledge of which
+        commands exist: built-in, plugin, and user-defined commands never write
+        this record, only input Claude itself failed to resolve.
+        """
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        poll_command = (
+            f"{env_command_prefix} tail -c +$(( ${{base:-0}} + 1 )) {file_path_expression} 2>/dev/null "
+            f"| jq -R -r {shlex.quote(self._REJECTED_COMMAND_JQ_FILTER)} 2>/dev/null "
+            "| grep -q . && echo rejected"
+        )
+        return SubmissionEvidenceProbe(
+            name=name,
+            baseline_command=self._build_transcript_size_baseline_command(file_path_expression),
+            poll_command=poll_command,
+            is_rejection=True,
+        )
+
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
     ) -> Sequence[SubmissionEvidenceProbe]:
@@ -2337,6 +2369,10 @@ class ClaudeAgent(
                     build_changed_token_probe("active-marker", active_marker_token_command),
                     self._build_any_accepted_record_probe("any-record-raw-transcript", raw_expression),
                     self._build_any_accepted_record_probe("any-record-native-transcript", native_expression),
+                    self._build_unknown_command_rejection_probe("unknown-command-raw-transcript", raw_expression),
+                    self._build_unknown_command_rejection_probe(
+                        "unknown-command-native-transcript", native_expression
+                    ),
                 ]
             case _ as unreachable:
                 assert_never(unreachable)

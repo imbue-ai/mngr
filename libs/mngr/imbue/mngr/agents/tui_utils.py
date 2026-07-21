@@ -106,6 +106,10 @@ class SubmissionEvidenceProbe(FrozenModel):
     poll_command: str = Field(
         description="Shell snippet printing the probe's current token; may reference the baseline as $base"
     )
+    is_rejection: bool = Field(
+        default=False,
+        description="Whether this probe's evidence proves the agent REJECTED the input (e.g. an unknown command) rather than accepted it",
+    )
 
 
 @pure
@@ -131,6 +135,10 @@ class SubmissionConfirmationOutcome(FrozenModel):
 
     is_confirmed: bool = Field(description="Whether any evidence probe confirmed the submission")
     confirming_probe_name: str | None = Field(description="Name of the probe that confirmed, if any")
+    is_rejection: bool = Field(
+        default=False,
+        description="Whether the confirming probe was a rejection probe (the agent refused the input)",
+    )
     enter_retry_offsets: tuple[int, ...] = Field(description="Elapsed seconds at which Enter was re-sent")
     probe_diagnostics: tuple[str, ...] = Field(description="Per-probe baseline/final tokens on timeout")
 
@@ -477,6 +485,9 @@ def submit_message_and_confirm(
 
     outcome = _parse_confirmation_output(result.stdout)
     if outcome.is_confirmed:
+        rejection_probe_names = {probe.name for probe in probes if probe.is_rejection}
+        if outcome.confirming_probe_name in rejection_probe_names:
+            outcome = outcome.model_copy(update={"is_rejection": True})
         logger.debug("Message submitted successfully (confirmed by {})", outcome.confirming_probe_name)
         return outcome
     if _TIMEOUT_MARKER not in result.stdout:

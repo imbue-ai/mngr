@@ -1405,9 +1405,70 @@ def test_relaxed_probes_cover_session_id_marker_and_records(
         "active-marker",
         "any-record-raw-transcript",
         "any-record-native-transcript",
+        "unknown-command-raw-transcript",
+        "unknown-command-native-transcript",
     ]
     session_probe = probes[0]
     assert "claude_session_id" in session_probe.poll_command
+    assert [probe.name for probe in probes if probe.is_rejection] == [
+        "unknown-command-raw-transcript",
+        "unknown-command-native-transcript",
+    ]
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None, reason="jq not installed; required by the Claude submission-evidence probes"
+)
+def test_unknown_command_rejection_probe_fires_only_on_post_baseline_warning(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The rejection probe fires on Claude's unknown-command warning, and only past the baseline.
+
+    A pre-baseline warning (an earlier typo) and accepted-message records must
+    not fire it; the warning record for THIS submission must.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    probes = agent._build_submission_evidence_probes("/zzztypo", SubmissionConfirmationPolicy.RELAXED)
+    rejection_probe = next(probe for probe in probes if probe.name == "unknown-command-raw-transcript")
+    assert rejection_probe.is_rejection is True
+
+    state_dir = tmp_path / "agent-state"
+    log_path = state_dir / "logs" / "claude_transcript" / "events.jsonl"
+    log_path.parent.mkdir(parents=True)
+    # An EARLIER typo's warning sits before the baseline: it must not fire.
+    log_path.write_text(
+        json.dumps(
+            {"type": "system", "subtype": "informational", "level": "warning", "content": "Unknown command: /older"}
+        )
+        + "\n"
+    )
+    baseline, poll_before_evidence = _run_content_probe(host, rejection_probe, state_dir)
+    assert baseline != ""
+    assert poll_before_evidence == ""
+
+    env = {"MNGR_AGENT_STATE_DIR": str(state_dir)}
+    poll_script = f"base={shlex.quote(baseline)}; {rejection_probe.poll_command}"
+
+    # Accepted records and non-warning system records do not fire it.
+    with log_path.open("a") as log_file:
+        log_file.write(json.dumps({"type": "queue-operation", "operation": "enqueue", "content": "/zzztypo"}) + "\n")
+        log_file.write(json.dumps({"type": "system", "level": "info", "content": "Unknown command: /decoy"}) + "\n")
+    assert host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip() == ""
+
+    # THIS submission's warning record fires it.
+    with log_path.open("a") as log_file:
+        log_file.write(
+            json.dumps(
+                {
+                    "type": "system",
+                    "subtype": "informational",
+                    "level": "warning",
+                    "content": "Unknown command: /zzztypo",
+                }
+            )
+            + "\n"
+        )
+    assert host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip() == "rejected"
 
 
 def test_native_transcript_path_expression_resolves_config_dir_and_session(
