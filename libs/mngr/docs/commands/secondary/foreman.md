@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr foreman [--host HOST] [--port PORT] [OPTIONS]
+mngr foreman [--host HOST] [--port PORT] [-d] [OPTIONS]
 ```
 
 Always-on web remote control for your mngr agents [experimental].
@@ -20,6 +20,11 @@ any agent type.
 No code is deployed to target boxes and there is no auth by design -- bind to a
 tailnet IP or firewall the port. Create agents with plain ``mngr create``;
 there is no foreman-specific create command or label filter.
+
+Pass ``-d``/``--background`` to run detached in the background: the command
+prints the server's PID and returns immediately while the server keeps serving.
+Stop it with ``kill <pid>`` (also written to ``--pid-file``); its stdout+stderr
+go to ``--foreman-log-file``.
 
 **Usage:**
 
@@ -50,6 +55,9 @@ mngr foreman [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--host` | text | Bind host (default from config, else 0.0.0.0). | None |
 | `--port` | integer | Bind port (default from config, else 8700). | None |
+| `--background`, `-d` | boolean | Run the server detached in the background (daemonize) and return immediately. | `False` |
+| `--foreman-log-file` | file | With --background: file the daemon's stdout+stderr are redirected to. | `~/.mngr/foreman.log` |
+| `--pid-file` | file | With --background: pid-file for the daemon (guards against a second copy). | `~/.mngr/foreman.pid` |
 
 ## Examples
 
@@ -63,4 +71,10 @@ $ mngr foreman --port 8700
 
 ```bash
 $ mngr foreman --host 100.64.0.1
+```
+
+**Run detached in the background**
+
+```bash
+$ mngr foreman -d --port 8700
 ```

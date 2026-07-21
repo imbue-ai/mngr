@@ -26,8 +26,10 @@ from imbue.mngr_foreman.server import run_server
 
 # ``--log-file`` is already a common mngr option (mngr's own structured JSON log),
 # so the backgrounded server's stdout+stderr capture uses ``--foreman-log-file``.
-_DEFAULT_LOG_FILE: Final[Path] = Path.home() / ".mngr" / "foreman.log"
-_DEFAULT_PID_FILE: Final[Path] = Path.home() / ".mngr" / "foreman.pid"
+# Keep the tilde literal (not Path.home()) so the value is machine-independent in
+# the generated CLI docs; it is expanded with .expanduser() at use time.
+_DEFAULT_LOG_FILE: Final[Path] = Path("~/.mngr/foreman.log")
+_DEFAULT_PID_FILE: Final[Path] = Path("~/.mngr/foreman.pid")
 
 
 class ForemanCliOptions(CommonCliOptions):
@@ -152,8 +154,8 @@ def foreman(ctx: click.Context, **kwargs: Any) -> None:
             mngr_ctx=mngr_ctx,
             host=host,
             port=port,
-            log_file=opts.foreman_log_file,
-            pid_file=opts.pid_file,
+            log_file=opts.foreman_log_file.expanduser(),
+            pid_file=opts.pid_file.expanduser(),
         )
         return
 
