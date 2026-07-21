@@ -11,3 +11,7 @@ The recovery page no longer dead-ends on "Reconnecting" when the discovery strea
 The recovery diagnostics list gains an "Is the system-services agent running?" row: the in-container probe scans `/proc/*/environ` for the agent's `MNGR_AGENT_ID` marker (the same marker mngr's own stop path uses to find agent processes), so a workspace whose system-services agent was stopped (`mngr stop system-services`) names that cause directly instead of showing only downstream supervisorctl connection errors.
 
 The recovery page now names what it is doing while a restart is in flight instead of reusing the generic "Loading workspace" spinner. The auto-dispatched `host_offline` cold-boot renders "Bringing your workspace back online" with a message that the workspace was offline and is being started back up; a manual "Restart workspace" click (and a page load that lands mid-restart) renders a generic "Restarting your workspace" state. Both still return the user to the workspace automatically the moment it comes back.
+
+The sidebar right-click menu no longer offers "Restart system interface": the services-scope restart tier it dispatched was removed in this PR (the API now rejects `scope: "services"` with 400), so the item had become a silent no-op. "Restart workspace" remains.
+
+The health-probe log line now includes the `unreachable_reason` when the verdict is `backend_unreachable`, so a provider-error verdict (e.g. a transient docker discovery failure at app startup) is diagnosable from the log instead of appearing only as an unexplained tier.

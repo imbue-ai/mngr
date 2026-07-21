@@ -874,7 +874,18 @@ def _handle_workspace_health(agent_id: str) -> Response:
         concurrency_group=parent_cg,
         envelope_stream_consumer=state.envelope_stream_consumer,
     )
-    logger.info("Workspace health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
+    # The reason is only populated on BACKEND_UNREACHABLE; logging it makes a
+    # transient provider error diagnosable after the fact (the tier alone says
+    # nothing about WHICH provider failure produced the verdict).
+    if response.unreachable_reason:
+        logger.info(
+            "Workspace health probe for {}: dispatch_tier={} (reason: {})",
+            parsed_id,
+            response.dispatch_tier.value,
+            response.unreachable_reason,
+        )
+    else:
+        logger.info("Workspace health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
     return make_response(content=response.model_dump_json(), media_type="application/json")
 
 

@@ -2198,9 +2198,10 @@ function ensureChromeSSELoopRunning() {
   }
 }
 
-// POST the v1 restart endpoint with a ``scope`` ('services' to restart just the
-// system-services agent, 'host' to restart the whole host) and resolve once the
-// server has acknowledged the 202 dispatch (or the request errors / times out).
+// POST the v1 restart endpoint with a ``scope`` (only 'host' -- restart the
+// whole host -- since the services-scope restart tier was removed) and resolve
+// once the server has acknowledged the 202 dispatch (or the request errors /
+// times out).
 // The route returns 202 immediately (with an ``{operation_id, kind}`` handle we
 // don't need here) and drives recovery asynchronously; the 202 also means the
 // health tracker is already RESTARTING, so callers navigate to the recovery
@@ -3592,16 +3593,6 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       );
     }
   };
-  template.push({
-    label: 'Restart system interface',
-    click: async () => {
-      // Close the sidebar first so the user gets immediate visual feedback
-      // while the restart dispatch is acknowledged.
-      closeModal(bundle);
-      await postRestart(agentId, 'services');
-      goToRecoveryView();
-    },
-  });
   template.push({
     label: 'Restart workspace…',
     click: async () => {
