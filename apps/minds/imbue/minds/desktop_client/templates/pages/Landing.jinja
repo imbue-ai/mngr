@@ -378,7 +378,7 @@
         row.appendChild(btn);
 
         if (entry.is_cloud_account) {
-          // Bring-your-own account: deletable here (the create page only adds).
+          // Bring-your-own-key account: deletable here (the create page only adds).
           // Disabled while workspaces exist -- render-time UX from the same
           // discovery snapshot; the DELETE route's 409 remains the authority.
           var delBtn = document.createElement('button');

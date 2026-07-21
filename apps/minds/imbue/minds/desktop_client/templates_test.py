@@ -302,12 +302,12 @@ def test_render_create_form_prefills_values() -> None:
 
 def test_render_create_form_contains_all_launch_modes() -> None:
     html = render_create_form()
-    # GCP / AZURE are bring-your-own-account-only modes: they are reachable
-    # solely through configured cloud-account options (``BYO:<block>``), never
+    # GCP / AZURE are bring-your-own-key-account-only modes: they are reachable
+    # solely through configured cloud-account options (``BYOK:<block>``), never
     # rendered as ambient compute options.
-    byo_only_modes = {LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE}
+    byok_only_modes = {LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE}
     for mode in LaunchMode:
-        if mode in byo_only_modes:
+        if mode in byok_only_modes:
             assert f'<option value="{mode.value}"' not in html
             continue
         # Assert on the option's ``value=`` attribute (the exact enum value),

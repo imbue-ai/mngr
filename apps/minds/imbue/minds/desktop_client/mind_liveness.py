@@ -40,7 +40,7 @@ from imbue.mngr.primitives import HostState
 # Local backends (docker / lima) consume the user's own machine while alive, and
 # the cloud-VM backends (aws / gcp / azure) support real VM-level stop/start via
 # ``mngr stop --stop-host`` (EC2 stop / GCE stop / Azure deallocate) -- for the
-# bring-your-own-account flow, stopping is what halts the user's own cloud
+# bring-your-own-key-account flow, stopping is what halts the user's own cloud
 # billing, and the provider's offline state bucket keeps a stopped workspace
 # visible in the UI. Remote backends without a real host-stop (Modal, OVH,
 # imbue_cloud leases) stay out. This is the *one* place that encodes that

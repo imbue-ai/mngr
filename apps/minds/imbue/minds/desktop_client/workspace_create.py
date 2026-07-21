@@ -48,7 +48,7 @@ def region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
 
     Only ``IMBUE_CLOUD`` and ``VULTR`` offer an ambient region choice at create
     time; ``DOCKER`` / ``LIMA`` run locally, and the cloud modes (AWS / GCP /
-    AZURE) are bring-your-own-account with placement pinned per account entry.
+    AZURE) are bring-your-own-key-account with placement pinned per account entry.
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY

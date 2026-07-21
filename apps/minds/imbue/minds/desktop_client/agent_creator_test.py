@@ -460,14 +460,14 @@ def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
 
 
 def test_build_mngr_create_command_aws_address_encodes_cloud_account() -> None:
-    """AWS is bring-your-own-account: the address selects the account's block."""
+    """AWS is bring-your-own-key-account: the address selects the account's block."""
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.AWS,
         host_name=HostName("hello"),
         region="us-west-2",
-        cloud_account="byo-aws-mine",
+        cloud_account="byok-aws-mine",
     )
-    assert "system-services@hello.byo-aws-mine" in command
+    assert "system-services@hello.byok-aws-mine" in command
     assert "aws" in command
     assert "--template" in command
 
@@ -477,7 +477,7 @@ def test_build_mngr_create_command_forwards_region_for_aws() -> None:
         launch_mode=LaunchMode.AWS,
         host_name=HostName("hello"),
         region="eu-west-1",
-        cloud_account="byo-aws-mine",
+        cloud_account="byok-aws-mine",
     )
     # AWS confirms the account's pinned placement with a matching build arg.
     assert "--aws-region=eu-west-1" in command
@@ -500,10 +500,10 @@ def test_provider_instance_name_for_launch_local_backends() -> None:
 
 
 def test_provider_instance_name_for_launch_aws_uses_cloud_account() -> None:
-    """AWS resolves only through a bring-your-own account block name."""
+    """AWS resolves only through a bring-your-own-key account block name."""
     assert (
-        provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2", cloud_account="byo-aws-mine")
-        == "byo-aws-mine"
+        provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2", cloud_account="byok-aws-mine")
+        == "byok-aws-mine"
     )
 
 

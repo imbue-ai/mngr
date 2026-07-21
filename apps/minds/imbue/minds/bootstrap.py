@@ -285,8 +285,8 @@ def _ensure_mngr_settings(root_name: str) -> bool:
     # Suppress the default ``[providers.gcp]`` / ``[providers.azure]`` instances
     # for the same reason: their registered backends would auto-create
     # credential-less default providers whose discovery fails every ``mngr
-    # list`` cycle. The usable instances are the bring-your-own
-    # ``byo-gcp-<slug>`` / ``byo-azure-<slug>`` account blocks.
+    # list`` cycle. The usable instances are the bring-your-own-key
+    # ``byok-gcp-<slug>`` / ``byok-azure-<slug>`` account blocks.
     for backend_name in (_GCP_BACKEND_NAME, _AZURE_BACKEND_NAME):
         suppressed_block = tomlkit.table()
         suppressed_block["backend"] = backend_name
@@ -299,8 +299,8 @@ def _ensure_mngr_settings(root_name: str) -> bool:
     # credentials exist: a credential-less region errors visibly in discovery
     # (and the providers panel) instead of being silently absent.
     # Remove any ambient ``[providers.aws-<region>]`` blocks earlier builds
-    # wrote (the machine-credential AWS path was a prototype; bring-your-own
-    # ``byo-aws-<slug>`` accounts are now the only AWS path in minds). Same
+    # wrote (the machine-credential AWS path was a prototype; bring-your-own-key
+    # ``byok-aws-<slug>`` accounts are now the only AWS path in minds). Same
     # legacy-cleanup shape as the ssh-provider removal above. mngr CLI users'
     # own settings are unaffected -- this is minds' profile settings file.
     for name in tuple(providers_section):
@@ -549,8 +549,8 @@ _IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
 _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
 
-# Backend name + container-hardening knobs written into each bring-your-own
-# ``[providers.byo-aws-<slug>]`` account block (the only AWS path in minds).
+# Backend name + container-hardening knobs written into each bring-your-own-key
+# ``[providers.byok-aws-<slug>]`` account block (the only AWS path in minds).
 # The gVisor/runsc settings mirror the default-workspace-template ``[providers.ovh]``
 # / ``[providers.vultr]`` bake settings so the EC2 outer host runs the agent in a
 # runsc-hardened container; the matching ``docker run`` start args live in the
@@ -873,17 +873,17 @@ def unset_imbue_cloud_provider_for_account(email: str, *, root_name: str | None 
     return True
 
 
-# -- Bring-your-own cloud accounts (pasted credentials) --
+# -- Bring-your-own-key cloud accounts (pasted credentials) --
 #
-# A "cloud account" is one ``[providers.byo-<backend>-<slug>]`` block in the
+# A "cloud account" is one ``[providers.byok-<backend>-<slug>]`` block in the
 # active settings.toml, holding the user's pasted credentials plus the same
-# hardening knobs the ambient per-region blocks get. The ``byo-`` prefix keeps
+# hardening knobs the ambient per-region blocks get. The ``byok-`` prefix keeps
 # these outside the boot reconciler's ``aws-*`` legacy cleanup (which deletes
 # that prefix on every boot), so accounts survive restarts. The display name is
 # derived from the block-name slug; no separate alias store exists
 # (``ProviderInstanceConfig`` forbids unknown fields on the block itself).
-_BYO_PROVIDER_NAME_PREFIX: Final[str] = "byo-"
-_BYO_SUPPORTED_BACKENDS: Final[tuple[str, ...]] = ("aws", "gcp", "azure")
+_BYOK_PROVIDER_NAME_PREFIX: Final[str] = "byok-"
+_BYOK_SUPPORTED_BACKENDS: Final[tuple[str, ...]] = ("aws", "gcp", "azure")
 
 
 def _slugify_cloud_account_alias(alias: str) -> str:
@@ -895,8 +895,8 @@ def _slugify_cloud_account_alias(alias: str) -> str:
 
 
 def cloud_account_provider_name(backend: str, alias: str) -> str:
-    """Return the provider block name for a new cloud account (``byo-<backend>-<slug>``)."""
-    return f"{_BYO_PROVIDER_NAME_PREFIX}{backend}-{_slugify_cloud_account_alias(alias)}"
+    """Return the provider block name for a new cloud account (``byok-<backend>-<slug>``)."""
+    return f"{_BYOK_PROVIDER_NAME_PREFIX}{backend}-{_slugify_cloud_account_alias(alias)}"
 
 
 def set_cloud_account_provider(
@@ -907,7 +907,7 @@ def set_cloud_account_provider(
     *,
     root_name: str | None = None,
 ) -> str:
-    """Register a bring-your-own cloud account as ``[providers.byo-<backend>-<slug>]``.
+    """Register a bring-your-own-key cloud account as ``[providers.byok-<backend>-<slug>]``.
 
     ``credentials`` are the backend's pasted-credential config fields verbatim
     (AWS: ``aws_access_key_id`` / ``aws_secret_access_key`` / optionally
@@ -920,8 +920,8 @@ def set_cloud_account_provider(
     Raises ``BootstrapError`` for an unsupported backend, an unusable alias, a
     duplicate account name, or an uninitialized mngr profile.
     """
-    if backend not in _BYO_SUPPORTED_BACKENDS:
-        raise BootstrapError(f"Unsupported cloud account backend {backend!r} (supported: {_BYO_SUPPORTED_BACKENDS})")
+    if backend not in _BYOK_SUPPORTED_BACKENDS:
+        raise BootstrapError(f"Unsupported cloud account backend {backend!r} (supported: {_BYOK_SUPPORTED_BACKENDS})")
     if root_name is None:
         root_name = resolve_minds_root_name()
     _ensure_mngr_settings(root_name)
@@ -988,14 +988,14 @@ def list_cloud_account_providers(*, root_name: str | None = None) -> list[dict[s
         # re-establish str keys / dict blocks for the type checker (tomllib
         # guarantees str keys at runtime).
         name = str(raw_name)
-        if not name.startswith(_BYO_PROVIDER_NAME_PREFIX) or not isinstance(raw_block, dict):
+        if not name.startswith(_BYOK_PROVIDER_NAME_PREFIX) or not isinstance(raw_block, dict):
             continue
         block: dict[str, object] = {str(key): value for key, value in raw_block.items()}
         accounts.append(
             {
                 "name": name,
                 # Display name = the slug of the user's chosen alias (the part
-                # after ``byo-<backend>-``); no separate alias store exists.
+                # after ``byok-<backend>-``); no separate alias store exists.
                 "alias": name.split("-", 2)[2] if name.count("-") >= 2 else name,
                 "backend": str(block.get("backend", "")),
                 # GCE is zonal: the GCP block pins default_zone, not default_region.
@@ -1032,12 +1032,12 @@ def _cloud_account_identifier(block: Mapping[str, object]) -> str:
 def delete_cloud_account_provider(provider_name: str, *, root_name: str | None = None) -> bool:
     """Remove a cloud account block (and its alias) from minds' settings.
 
-    Only deletes ``byo-*`` blocks -- never the ambient/reconciled providers.
+    Only deletes ``byok-*`` blocks -- never the ambient/reconciled providers.
     Cloud-side resources (security group, state bucket) are deliberately left
     in place; ``mngr <backend> cleanup`` is the explicit teardown for those.
     Returns ``True`` when the file was modified.
     """
-    if not provider_name.startswith(_BYO_PROVIDER_NAME_PREFIX):
+    if not provider_name.startswith(_BYOK_PROVIDER_NAME_PREFIX):
         return False
     if root_name is None:
         root_name = resolve_minds_root_name()

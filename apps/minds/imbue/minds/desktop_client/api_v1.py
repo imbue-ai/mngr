@@ -79,7 +79,6 @@ from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import CloudAccountCreateRequest
-from imbue.minds.desktop_client.api_models import CloudAccountPrepareResponse
 from imbue.minds.desktop_client.api_models import CloudAccountSummary
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
@@ -620,13 +619,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
             pass
     cloud_account = str(body.get("cloud_account", "")).strip()
     if launch_mode in (LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
-        # BYO-only modes (all three clouds): without an account the create
+        # BYOK-only modes (all three clouds): without an account the create
         # would fail minutes later in the background thread with an opaque
         # provider error. Ambient machine-credential AWS was removed from minds.
         return _json_field_error(f"{launch_mode.value} requires a configured cloud account.", "cloud_account")
     matching = None
     if cloud_account:
-        # A bring-your-own account must exist and match the submitted launch
+        # A bring-your-own-key account must exist and match the submitted launch
         # mode's backend, else the create would target a nonexistent provider.
         matching = next((a for a in list_cloud_account_providers() if a["name"] == cloud_account), None)
         if matching is None:
@@ -707,7 +706,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # and persists the chosen region -- exactly as the create form does.
     minds_config = get_state().minds_config
     if matching is not None:
-        # A BYO account's placement (region, or GCE zone) is pinned per entry --
+        # A BYOK account's placement (region, or GCE zone) is pinned per entry --
         # AWS/GCP discovery clients are region/zone-bound and Azure's scaffolding
         # is region-locked, so honoring a different submitted value would orphan
         # the entry's existing workspaces. The pin always rules; the form shows
@@ -1894,9 +1893,9 @@ def _cloud_account_summary(account: dict[str, str]) -> CloudAccountSummary:
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=CloudAccountCreateRequest, resp=json_response_model(CloudAccountPrepareResponse))
-def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
-    """Register a bring-your-own cloud account and run `mngr <backend> prepare` on it.
+@API_SPEC.validate(json=CloudAccountCreateRequest, resp=json_response_model(CloudAccountSummary))
+def _handle_create_cloud_account() -> CloudAccountSummary | Response:
+    """Register a bring-your-own-key cloud account and run `mngr <backend> prepare` on it.
 
     Prepare doubles as credential validation: it is the first privileged call
     against the pasted keys (security group + state bucket). On prepare failure
@@ -1986,7 +1985,7 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     # snapshots (no liveness, no Stop/Start controls). Mirrors
     # desktop_control.set_provider_enabled's bounce-on-change.
     bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
-    return CloudAccountPrepareResponse(account=_cloud_account_summary(matching))
+    return _cloud_account_summary(matching)
 
 
 @require_api_or_cookie_auth
@@ -2285,7 +2284,7 @@ def create_api_v1_blueprint() -> Blueprint:
 
     # Desktop namespace (cookie-or-bearer; no agent verb, so deny-all at the gateway).
     blueprint.add_url_rule("/desktop/providers/<provider_name>", view_func=_handle_patch_provider, methods=["PATCH"])
-    # Bring-your-own cloud accounts (pasted credentials + prepare).
+    # Bring-your-own-key cloud accounts (pasted credentials + prepare).
     blueprint.add_url_rule("/desktop/cloud-accounts", view_func=_handle_create_cloud_account, methods=["POST"])
     blueprint.add_url_rule(
         "/desktop/cloud-accounts/<account_name>",

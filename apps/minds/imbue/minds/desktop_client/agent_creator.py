@@ -670,8 +670,8 @@ def provider_instance_name_for_launch(
     never drift apart. ``imbue_cloud_account`` is the account *email* (slugified to
     match the provider block minds registers); ``region`` is required for AWS.
 
-    ``cloud_account`` is a bring-your-own account's provider block name
-    (``byo-<backend>-<slug>``, written by ``bootstrap.set_cloud_account_provider``).
+    ``cloud_account`` is a bring-your-own-key account's provider block name
+    (``byok-<backend>-<slug>``, written by ``bootstrap.set_cloud_account_provider``).
     When set it IS the provider instance name, so it short-circuits the
     per-mode mapping (the block already pins backend + credentials + region).
     """
@@ -685,7 +685,7 @@ def provider_instance_name_for_launch(
         case LaunchMode.VULTR:
             return "vultr"
         case LaunchMode.AWS:
-            # BYO-only (like GCP/AZURE): the ambient per-region ``aws-<region>``
+            # BYOK-only (like GCP/AZURE): the ambient per-region ``aws-<region>``
             # path was removed from minds; the ``cloud_account`` short-circuit
             # above is the only way to resolve an AWS provider instance.
             raise MngrCommandError("AWS mode requires a cloud account")
@@ -699,7 +699,7 @@ def provider_instance_name_for_launch(
             return "modal"
         case LaunchMode.GCP | LaunchMode.AZURE:
             # GCP / Azure have no ambient provider instances in minds -- they are
-            # reachable only through a bring-your-own account block, which the
+            # reachable only through a bring-your-own-key account block, which the
             # ``cloud_account`` short-circuit above already returned.
             raise MngrCommandError(f"{launch_mode.value} mode requires a cloud account")
         case _ as unreachable:
@@ -954,7 +954,7 @@ def _build_mngr_create_command(
             mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.GCP:
-            # Same shape as aws; the address already selects the ``byo-gcp-<slug>``
+            # Same shape as aws; the address already selects the ``byok-gcp-<slug>``
             # account block. GCE is zonal, so the placement flag is ``--gcp-zone``
             # (the form's "region" value for GCP is a zone).
             mngr_command.extend(["--new-host", "--template", "main", "--template", "gcp"])
@@ -965,7 +965,7 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"--gcp-machine-type={instance_type}"])
         case LaunchMode.AZURE:
             # Same shape as aws; the address already selects the
-            # ``byo-azure-<slug>`` account block.
+            # ``byok-azure-<slug>`` account block.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "azure"])
             mngr_command.extend(_remote_host_env_flags())
             if region:
@@ -1284,7 +1284,7 @@ def run_mngr_aws_prepare(
     if not region:
         raise MngrCommandError("AWS mode requires a region")
     # ``provider_name`` overrides the ambient per-region block for
-    # bring-your-own accounts (``byo-aws-<slug>``), whose block carries the
+    # bring-your-own-key accounts (``byok-aws-<slug>``), whose block carries the
     # pasted credentials prepare should authenticate with.
     if provider_name is None:
         provider_name = f"aws-{region}"
@@ -1305,7 +1305,7 @@ def run_mngr_provider_prepare(
 ) -> None:
     """Run ``mngr <backend> prepare --provider <provider_name>`` (gcp / azure).
 
-    Unlike the AWS path there is no ``--region`` flag: the bring-your-own
+    Unlike the AWS path there is no ``--region`` flag: the bring-your-own-key
     account block named by ``provider_name`` already pins the placement
     (``default_zone`` / ``default_region``), the credentials, and the project /
     subscription, and prepare reads all of them from the resolved provider
@@ -1362,7 +1362,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     repo_source: str | None
     branch_or_tag: str | None
     region: str | None
-    # Bring-your-own account provider block name (``byo-<backend>-<slug>``), or
+    # Bring-your-own-key account provider block name (``byok-<backend>-<slug>``), or
     # None for the ambient per-mode providers.
     cloud_account: str | None
     # Per-create EC2 machine size (AWS modes only), or None for the block default.
@@ -1971,7 +1971,7 @@ class AgentCreator(MutableModel):
                 # ``mngr create`` (the provider looks it up read-only and
                 # refuses to launch without it). prepare is read-only-first, so
                 # this is a no-op describe when the region is already prepared.
-                # For a bring-your-own account the account's block (which holds
+                # For a bring-your-own-key account the account's block (which holds
                 # the pasted credentials) is the prepare target. ``region`` is
                 # always the account's pinned placement (the create API resolves
                 # it from the block and never re-pins -- the discovery clients

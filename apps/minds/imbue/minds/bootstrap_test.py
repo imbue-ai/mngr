@@ -395,7 +395,7 @@ def test_ensure_mngr_settings_keeps_default_aws_disabled(monkeypatch: pytest.Mon
 
     Otherwise ``get_all_provider_instances`` auto-creates it and its discovery
     fails every ``mngr list`` cycle ("credentials not configured"); the usable
-    AWS providers are the bring-your-own ``byo-aws-<slug>`` account blocks.
+    AWS providers are the bring-your-own-key ``byok-aws-<slug>`` account blocks.
     """
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     _ensure_mngr_settings("minds-dev-tname")
@@ -408,16 +408,16 @@ def test_ensure_mngr_settings_removes_legacy_ambient_aws_region_blocks(
 ) -> None:
     """Ambient ``aws-<region>`` blocks written by earlier builds are actively
     deleted at boot (the machine-credential AWS path was removed from minds;
-    ``byo-aws-<slug>`` accounts are the only AWS path). BYO blocks survive."""
+    ``byok-aws-<slug>`` accounts are the only AWS path). BYOK blocks survive."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     settings_path.write_text(
         '[providers.aws-us-east-1]\nbackend = "aws"\ndefault_region = "us-east-1"\n\n'
-        '[providers.byo-aws-mine]\nbackend = "aws"\ndefault_region = "us-east-1"\n'
+        '[providers.byok-aws-mine]\nbackend = "aws"\ndefault_region = "us-east-1"\n'
     )
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
     assert "aws-us-east-1" not in parsed["providers"]
-    assert "byo-aws-mine" in parsed["providers"]
+    assert "byok-aws-mine" in parsed["providers"]
 
 
 def test_ensure_mngr_settings_returns_whether_file_was_modified(

@@ -202,7 +202,7 @@ class CreateWorkspaceRequest(ApiRequestModel):
     cloud_account: str | None = Field(
         default=None,
         description=(
-            "Bring-your-own cloud account to create on: the ``byo-<backend>-<slug>`` provider "
+            "Bring-your-own-key cloud account to create on: the ``byok-<backend>-<slug>`` provider "
             "block name from /desktop/cloud-accounts. When set, launch_mode must match the "
             "account's backend and the create targets that provider instance."
         ),
@@ -262,7 +262,7 @@ class BugReportRequest(ApiRequestModel):
 
 
 class CloudAccountCreateRequest(ApiRequestModel):
-    """Body for registering a bring-your-own cloud account (pasted credentials)."""
+    """Body for registering a bring-your-own-key cloud account (pasted credentials)."""
 
     alias: str = Field(min_length=1, description="Display name for the account (also seeds the block-name slug)")
     backend: str = Field(description="Cloud backend: 'aws', 'gcp', or 'azure'")
@@ -284,19 +284,13 @@ class CloudAccountCreateRequest(ApiRequestModel):
 
 
 class CloudAccountSummary(FrozenModel):
-    """One registered bring-your-own cloud account."""
+    """One registered bring-your-own-key cloud account."""
 
-    name: str = Field(description="Provider block name (byo-<backend>-<slug>) -- the stable id")
+    name: str = Field(description="Provider block name (byok-<backend>-<slug>) -- the stable id")
     alias: str = Field(description="Display alias")
     backend: str = Field(description="Cloud backend (e.g. 'aws')")
     region: str = Field(description="The account's current default region")
     identifier: str = Field(description="Masked credential hint (e.g. 'AKIA…F5X2'); never the secret")
-
-
-class CloudAccountPrepareResponse(FrozenModel):
-    """Result of registering + preparing a cloud account."""
-
-    account: CloudAccountSummary = Field(description="The registered account")
 
 
 class SetProviderEnabledRequest(ApiRequestModel):

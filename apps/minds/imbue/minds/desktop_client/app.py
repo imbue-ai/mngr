@@ -1674,7 +1674,7 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     last_event_at, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
 
     # Active (non-destroyed) workspace count per provider, for the panel's
-    # bring-your-own-account Delete buttons: an account in use renders its
+    # bring-your-own-key-account Delete buttons: an account in use renders its
     # button disabled ("in use by N"). Render-time UX only -- the DELETE route's
     # own active-workspace check (409) remains the authority.
     workspace_count_by_provider: dict[str, int] = {}
@@ -1723,10 +1723,10 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
             "status": "disabled",
             "is_enabled": False,
         }
-    # Bring-your-own account annotations, applied across every source bucket
-    # (a byo provider can be healthy, errored, or disabled and still deletable).
+    # Bring-your-own-key account annotations, applied across every source bucket
+    # (a byok provider can be healthy, errored, or disabled and still deletable).
     for name, entry in entry_by_name.items():
-        if name.startswith("byo-"):
+        if name.startswith("byok-"):
             entry["is_cloud_account"] = True
             entry["workspace_count"] = workspace_count_by_provider.get(name, 0)
     # Stable alphabetical order by name across all categories.

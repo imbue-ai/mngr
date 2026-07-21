@@ -85,7 +85,7 @@ CONFIGURED_AZURE_VM_SIZES: Final[tuple[tuple[str, str], ...]] = (
 )
 DEFAULT_AZURE_VM_SIZE: Final[str] = "Standard_B2ms"
 
-# Curated placement choices for bring-your-own GCP / Azure accounts (GCE is
+# Curated placement choices for bring-your-own-key GCP / Azure accounts (GCE is
 # zonal, so GCP offers zones; Azure offers regions). Small US-centric lists,
 # mirroring CONFIGURED_AWS_REGIONS; the account's pinned default comes first
 # in the create form via the option's data-default-region.
@@ -168,8 +168,8 @@ class LaunchMode(UpperCaseStrEnum):
     # sandboxes are ephemeral (~1 day max), so it is surfaced as "Modal (1-day
     # ephemeral)" and is testing-only.
     MODAL = auto()
-    # GCP / Azure are reachable ONLY through a bring-your-own cloud account
-    # (``byo-gcp-<slug>`` / ``byo-azure-<slug>`` provider blocks written by the
+    # GCP / Azure are reachable ONLY through a bring-your-own-key cloud account
+    # (``byok-gcp-<slug>`` / ``byok-azure-<slug>`` provider blocks written by the
     # accounts modal); the create form does not render them as ambient options,
     # so no ambient region tables / provider blocks exist for them.
     GCP = auto()

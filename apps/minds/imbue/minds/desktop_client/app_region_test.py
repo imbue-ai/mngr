@@ -18,7 +18,7 @@ def _config(tmp_path: Path) -> MindsConfig:
 def test_region_provider_key_maps_only_region_bearing_modes() -> None:
     assert region_provider_key_for_launch_mode(LaunchMode.IMBUE_CLOUD) == "imbue_cloud"
     assert region_provider_key_for_launch_mode(LaunchMode.VULTR) == "vultr"
-    # The cloud modes are bring-your-own-account with placement pinned per
+    # The cloud modes are bring-your-own-key-account with placement pinned per
     # account entry, so they carry no ambient region key.
     assert region_provider_key_for_launch_mode(LaunchMode.AWS) is None
     assert region_provider_key_for_launch_mode(LaunchMode.DOCKER) is None
@@ -51,8 +51,8 @@ def test_build_region_form_context_covers_all_region_bearing_providers(tmp_path:
     options, selected = _build_region_form_context(_config(tmp_path), GeoLocationCache())
     assert options[LaunchMode.IMBUE_CLOUD.value] == ["US-EAST-VA", "US-WEST-OR"]
     assert "ewr" in options[LaunchMode.VULTR.value]
-    # AWS is bring-your-own-account only: no ambient region row (the account's
-    # pinned placement rules; the BYO add-form has its own region list).
+    # AWS is bring-your-own-key-account only: no ambient region row (the account's
+    # pinned placement rules; the BYOK add-form has its own region list).
     assert LaunchMode.AWS.value not in options
     # With no stored value and no geo, defaults are the hardcoded per-provider values.
     assert selected[LaunchMode.IMBUE_CLOUD.value] == "US-EAST-VA"

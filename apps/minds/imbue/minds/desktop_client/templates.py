@@ -557,7 +557,7 @@ def render_create_form(
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
         cloud_accounts=[dict(account) for account in (cloud_accounts or [])],
         # Machine-size picker options per compute mode, and the curated
-        # placement lists for the BYO-only modes (GCP zones / Azure regions) --
+        # placement lists for the BYOK-only modes (GCP zones / Azure regions) --
         # merged into the region machinery client-side.
         instance_types_by_backend={
             "AWS": [list(pair) for pair in CONFIGURED_AWS_INSTANCE_TYPES],
@@ -569,12 +569,12 @@ def render_create_form(
             "GCP": DEFAULT_GCP_MACHINE_TYPE,
             "AZURE": DEFAULT_AZURE_VM_SIZE,
         },
-        byo_region_options={
+        byok_region_options={
             "AWS": list(CONFIGURED_AWS_REGIONS),
             "GCP": list(CONFIGURED_GCP_ZONES),
             "AZURE": list(CONFIGURED_AZURE_REGIONS),
         },
-        byo_region_selected={
+        byok_region_selected={
             "AWS": DEFAULT_AWS_REGION,
             "GCP": DEFAULT_GCP_ZONE,
             "AZURE": DEFAULT_AZURE_REGION,
