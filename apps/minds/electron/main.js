@@ -1143,9 +1143,15 @@ function createBundleOverlayView(bundle) {
   bundle.window.contentView.addChildView(modal);
   registerShortcutsFor(bundle, modal.webContents);
   // Escape closes the open overlay even if a hosted page's own key handling
-  // fails -- the same main-process backstop the modal overlay had before.
+  // fails -- the same main-process backstop the modal overlay had before. The
+  // help modal is the exception: it owns its Escape handling because it must run
+  // its close = discard cleanup (POST /help/report/dismiss for a queued agent
+  // report) before closing, so we let the key reach the page there rather than
+  // closing it directly -- otherwise the report is never discarded and the
+  // reopen-next check pops it straight back up.
   modal.webContents.on('before-input-event', (event, input) => {
     if (input.type === 'keyDown' && input.key === 'Escape') {
+      if (isHelpModalOpen(bundle)) return;
       event.preventDefault();
       closeModal(bundle);
     }
