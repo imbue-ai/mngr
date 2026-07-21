@@ -24,12 +24,12 @@ export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
 #
 # The plugin cache is deliberately left alone: `claude plugin update` refreshes
 # it on success (verified on claude 2.1.205, where update repopulates even a
-# deleted cache dir; the wipe this replaces predates that behavior), while
-# wiping it up front would strip every plugin skill from the session whenever
-# the update fails (offline, git auth). Failures are surfaced (but not fatal)
-# so a session missing /autofix and friends says why, instead of silently
-# losing them; the final warning goes to stdout because SessionStart stdout is
-# injected into the session context, where the agent can actually read it.
+# deleted cache dir), while wiping it up front would strip every plugin skill
+# from the session whenever the update fails (offline, git auth). Failures are
+# surfaced (but not fatal) so a session missing /autofix and friends says why,
+# instead of silently losing them; the final warning goes to stdout because
+# SessionStart stdout is injected into the session context, where the agent
+# can actually read it.
 for plugin_id in "${PLUGIN_IDS[@]}"; do
     if output=$(claude plugin update "$plugin_id" 2>&1); then
         printf '%s\n' "$output"
