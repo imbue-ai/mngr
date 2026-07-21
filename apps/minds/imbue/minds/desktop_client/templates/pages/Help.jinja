@@ -1,4 +1,4 @@
-{#def include_logs_setting=false, workspace_agent_id="", assist_available=false, description="", is_agent_report=false, workspace_name="" #}
+{#def include_logs_setting=false, workspace_agent_id="", assist_available=false, description="", is_agent_report=false, workspace_name="", report_id="" #}
 {#
   Get-help modal page. Loaded into the shared modal overlay view in Electron (and
   into the content frame as a fallback in browser mode), so the body is transparent
@@ -29,6 +29,11 @@
   (function () {
     var WORKSPACE_AGENT_ID = {{ workspace_agent_id | tojson }};
     var INCLUDE_LOGS_SETTING = {{ 'true' if include_logs_setting else 'false' }};
+    // The queued agent report this modal is reviewing ("" for a manual report). Sent with the
+    // report so the backend drops it from the pending queue on submit; discarded via
+    // /help/report/dismiss if the human closes without sending (close = discard).
+    var REPORT_ID = {{ report_id | tojson }};
+    var reportSubmitted = false;
 
     // Sticky checkbox state: persist each box's checked value across reports so a user
     // who files several reports does not have to re-tick the same diagnostics each time.
@@ -54,9 +59,26 @@
       box.addEventListener("change", function () { persistSticky(box); });
     });
 
-    function closeHelp() {
+    function dismissModal() {
       if (window.minds && window.minds.closeModal) window.minds.closeModal();
       else window.history.back();
+    }
+    function closeHelp() {
+      // Closing a queued agent report without sending it discards that report (close = discard), so
+      // it doesn't re-open. Wait for the discard to land before closing, so the app's reopen-next
+      // check sees this one already gone rather than popping it straight back up. A manual report,
+      // or one already submitted, has nothing to discard.
+      if (REPORT_ID && !reportSubmitted) {
+        fetch("/help/report/dismiss", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ report_id: REPORT_ID }),
+        }).catch(function () { /* ignore: the app also reconciles against the store on reopen */ })
+          .then(function () { dismissModal(); });
+        return;
+      }
+      dismissModal();
     }
     window.onHelpBackdropClick = function (event) {
       if (event.target && event.target.id === "help-backdrop") closeHelp();
@@ -163,6 +185,7 @@
         include_workspace_details: workspaceBox ? workspaceBox.checked : false,
         remote_access: document.getElementById("help-remote-access").checked,
         workspace_agent_id: WORKSPACE_AGENT_ID,
+        report_id: REPORT_ID,
       };
       submit.disabled = true;
       status.textContent = "Sending...";
@@ -176,6 +199,9 @@
         return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
       }).then(function (result) {
         if (result.ok) {
+          // The backend has now dropped this report from the pending queue (via report_id), so
+          // closing the confirmation must not also discard it.
+          reportSubmitted = true;
           showSent(result.data && result.data.event_id);
         } else {
           submit.disabled = false;

@@ -671,6 +671,7 @@ def render_help_page(
     description: str = "",
     is_agent_report: bool = False,
     workspace_name: str = "",
+    report_id: str = "",
 ) -> str:
     """Render the get-help modal page (report a bug + optional agent help).
 
@@ -684,7 +685,9 @@ def render_help_page(
     ``/assist`` agent asked the app to open the modal with its diagnosis already written in.
     ``is_agent_report`` is set for that agent-escalation flow: the modal then frames the pre-filled
     report as the agent's submission (titled with ``workspace_name``, when known) and hides the mode
-    choice, since a report is already underway.
+    choice, since a report is already underway. ``report_id`` identifies the queued report the modal is
+    reviewing (set only for that flow): the form submits it so the backend removes it from the pending
+    queue on send, and discards it via ``/help/report/dismiss`` if the human closes without sending.
     """
     return CATALOG.render(
         "pages.Help",
@@ -694,6 +697,7 @@ def render_help_page(
         description=description,
         is_agent_report=is_agent_report,
         workspace_name=workspace_name,
+        report_id=report_id,
     )
 
 

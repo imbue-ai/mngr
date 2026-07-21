@@ -30,11 +30,11 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
-from imbue.minds.desktop_client.help_modal_requests import HelpModalRequestBroker
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.pending_agent_reports import PendingAgentReportStore
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -82,9 +82,9 @@ class DesktopClientState(MutableModel):
     geo_location_cache: GeoLocationCache = Field(
         default_factory=GeoLocationCache, description="One-shot IP-geolocation cache for region defaults"
     )
-    help_modal_request_broker: HelpModalRequestBroker = Field(
-        default_factory=HelpModalRequestBroker,
-        description="Fans agent-initiated 'open the pre-filled help modal' requests out to chrome SSE connections",
+    pending_agent_report_store: PendingAgentReportStore = Field(
+        default_factory=PendingAgentReportStore,
+        description="Durable queue of agent-submitted bug reports awaiting human review, drained one at a time",
     )
     client_env_config: ClientEnvConfig | None = Field(
         default=None, frozen=True, description="Loaded per-env client config (connector URL, etc.)"
