@@ -418,10 +418,11 @@ html.no-scrollbar-gutter {
 
 /*
  * Inline ``<code>`` pill: light-gray rounded chip for service names,
- * file paths, etc. inline inside prose. The pill style is used by
- * Sharing.jinja's heading + sharing.js (which rebuilds that heading
- * via DOM methods after toggling the share state), so factoring the
- * recipe into one CSS class keeps the two sides from drifting.
+ * file paths, etc. inline inside prose. The pill style is used by the
+ * server-rendered sharing headings (Sharing.jinja / SharingModal.jinja,
+ * the pre-mount paint) + the mithril SharingHeading takeover
+ * (frontend/src/views/SharingEditor.ts), so factoring the recipe into
+ * one CSS class keeps the two sides from drifting.
  * Tailwind equivalents:
  *   bg-fill-subtle rounded-md px-1.5 py-0.5 font-mono text-[0.95em]
  */
