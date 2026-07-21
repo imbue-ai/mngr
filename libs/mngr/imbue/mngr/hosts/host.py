@@ -492,6 +492,13 @@ _DEFAULT_TMUX_HEIGHT: Final[int] = 50
 # invoked by the per-session tmux client-attached hook (see _build_start_agent_shell_command).
 _SIGWINCH_PANES_SCRIPT_NAME: Final[str] = "sigwinch_panes.sh"
 
+# Modes for the client-attached hook that drives sigwinch_panes.sh. In "fit" mode (the
+# default sizing policy) the script re-fits the manual-pinned window to the attaching
+# client before repainting; in "nudge" mode it only repaints (and skips truly-pinned,
+# explicitly-manual windows). See _build_start_agent_shell_command.
+_SIGWINCH_MODE_FIT: Final[str] = "fit"
+_SIGWINCH_MODE_NUDGE: Final[str] = "nudge"
+
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
@@ -3902,14 +3909,26 @@ def _build_start_agent_shell_command(
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=primary_window_name).as_shell_arg()
 
-    # Apply the requested resize policy (e.g. "manual" pins the window to the
-    # dimensions above so attaching clients never resize it). window-size is a
-    # window option, so it is set on the agent's primary window. When unset, tmux's
-    # own default ("latest") is left in place -- today's behavior.
-    if tmux_options.window_size is not None:
+    # Pin the agent window to a stable, usable geometry. tmux's default window-size
+    # policy ("latest") sizes a window to the most recent client -- and a brand-new
+    # detached session is born at the geometry of whatever client is already attached to
+    # the shared tmux server, even a degenerate one (e.g. a 2x1 unsized ttyd/web-shell
+    # client), regardless of the new-session -x/-y above. A 2x1 pane breaks Claude Code's
+    # Ink TUI and marker-based `mngr message` delivery. So by default we pin window-size
+    # to "manual" and resize to the intended dimensions, making birth deterministic and
+    # immune to stray clients; the client-attached hook below (in "fit" mode) then re-fits
+    # the pane to real attaching clients so interactive attach still works. An explicit
+    # window_size is honored verbatim -- the caller owns the policy (a client-following
+    # mode, or a truly-fixed manual pin the hook leaves untouched).
+    if tmux_options.window_size is None:
+        steps.append(f"tmux set-option -t {quoted_exact_agent_window} window-size manual")
+        steps.append(f"tmux resize-window -t {quoted_exact_agent_window} -x {tmux_width} -y {tmux_height}")
+        sigwinch_mode = _SIGWINCH_MODE_FIT
+    else:
         steps.append(
             f"tmux set-option -t {quoted_exact_agent_window} window-size {tmux_options.window_size.value.lower()}"
         )
+        sigwinch_mode = _SIGWINCH_MODE_NUDGE
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
@@ -3926,21 +3945,35 @@ def _build_start_agent_shell_command(
     steps.append(f"tmux set-option -t {quoted_exact_agent_window} default-command {shlex.quote(env_shell_cmd)}")
 
     # Set a persistent client-attached hook that repaints the agent on every attach
-    # (a plain `tmux attach`, the ttyd terminal, a web-shell, or `mngr connect`) by
-    # sending SIGWINCH to the pane processes. It runs the shipped sigwinch_panes.sh
-    # (installed at host level during provisioning); keeping the pipeline in a script
-    # avoids nesting tmux format tokens (pane-pid/window-index lookups) inside the
-    # hook string, which tmux would otherwise expand. `run-shell -b` backgrounds it so
-    # the attach is never blocked, and the script delays before signaling so the window
-    # has resized to the new client first. This uses a distinct hook slot ([98]) from
-    # the onboarding hook ([99]) and, unlike that one-shot hook, is persistent (no
-    # `set-hook -u` self-removal).
+    # (a plain `tmux attach`, the ttyd terminal, a web-shell, or `mngr connect`). It runs
+    # the shipped sigwinch_panes.sh (installed at host level during provisioning); keeping
+    # the per-window pane-pid/window-index lookups inside the script avoids tmux expanding
+    # those format tokens at hook-set time. In "fit" mode (the default sizing policy above)
+    # the script also resizes the manual-pinned window to the attaching client, so we pass
+    # #{client_width}/#{client_height} -- which tmux *does* expand at hook-fire time to the
+    # attaching client's geometry (verified) -- as trailing args. `run-shell -b` backgrounds
+    # it so the attach is never blocked, and the script delays before signaling so the
+    # window has settled first. This uses a distinct hook slot ([98]) from the onboarding
+    # hook ([99]) and, unlike that one-shot hook, is persistent (no `set-hook -u`).
     sigwinch_script_path = host_dir / "commands" / _SIGWINCH_PANES_SCRIPT_NAME
-    sigwinch_inner_command = shlex.join(["bash", str(sigwinch_script_path), session_name, primary_window_name])
-    sigwinch_hook_value = f'run-shell -b "{sigwinch_inner_command}"'
+    sigwinch_argv = shlex.join(["bash", str(sigwinch_script_path), session_name, primary_window_name, sigwinch_mode])
+    if sigwinch_mode == _SIGWINCH_MODE_FIT:
+        # Appended raw (not shlex-quoted) so tmux expands the format tokens at hook-fire.
+        sigwinch_argv += " #{client_width} #{client_height}"
+    sigwinch_hook_value = f'run-shell -b "{sigwinch_argv}"'
     steps.append(
         f"tmux set-hook -t {quoted_exact_agent_window} client-attached[98] {shlex.quote(sigwinch_hook_value)}"
     )
+    if sigwinch_mode == _SIGWINCH_MODE_FIT:
+        # Also re-fit on live terminal resizes. tmux's native "latest" policy follows the
+        # attached client continuously; because the default policy pins the window to "manual",
+        # the client-attached hook alone would only re-fit on attach and a mid-session terminal
+        # resize would be ignored until reattach. The client-resized hook fires with the resized
+        # client as the hook client, so the same fit argv (with #{client_width}/#{client_height})
+        # applies. Distinct slot ([97]) from the attach ([98]) and onboarding ([99]) hooks.
+        steps.append(
+            f"tmux set-hook -t {quoted_exact_agent_window} client-resized[97] {shlex.quote(sigwinch_hook_value)}"
+        )
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen

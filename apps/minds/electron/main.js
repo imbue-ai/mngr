@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -308,6 +308,34 @@ function rendererNameForWebContents(contents) {
     if (b.modalView && !b.modalView.webContents.isDestroyed() && b.modalView.webContents.id === id) return 'modal';
   }
   return undefined;
+}
+
+// After the machine wakes from sleep (or the screen unlocks), a WebContentsView's
+// renderer can survive but stop painting: Electron leaves its GPU/compositor
+// surface detached, so the view keeps showing its pinned-white background until
+// something forces a repaint (historically only a manual window move, focus
+// change, or Home-and-back navigation would). This is distinct from a renderer
+// *death* -- that fires `render-process-gone`, which wireContentViewEvents already
+// recovers with the crash page. Here the renderer is alive, no event fires, and
+// nothing recovers it (Sentry event fc1dc9eb: "came back from sleep and was on a
+// blank white screen"). `webContents.invalidate()` schedules a full repaint -- the
+// programmatic equivalent of that window-move nudge -- reattaching the surface
+// without a reload, so no scroll, websocket, or terminal state is lost. It is
+// non-destructive and idempotent, so firing it across every live view on each
+// wake (macOS emits resume AND unlock-screen for a single wake) is safe.
+function repaintAllBundleViewsAfterWake(trigger) {
+  let repainted = 0;
+  for (const b of bundles) {
+    if (b.window.isDestroyed()) continue;
+    for (const view of [b.chromeView, b.contentView, b.modalView]) {
+      if (!view || view.webContents.isDestroyed()) continue;
+      view.webContents.invalidate();
+      repainted += 1;
+    }
+  }
+  // Log unconditionally: wake events are rare, and this trail is what makes the
+  // otherwise-invisible blank-after-sleep failure diagnosable in electron.log.
+  console.log(`[wake-repaint] ${trigger}: forced repaint of ${repainted} view(s)`);
 }
 
 function getMostRecentWindow() {
@@ -2817,6 +2845,12 @@ async function onReady() {
   installApplicationMenu();
   installDockMenu();
   installDevDockIcon();
+  // Repaint views that survive sleep but stop painting (see
+  // repaintAllBundleViewsAfterWake). powerMonitor is only usable after the app is
+  // ready, which onReady guarantees. Both events can fire for one wake on macOS;
+  // the repaint is idempotent, so the redundant call is harmless.
+  powerMonitor.on('resume', () => repaintAllBundleViewsAfterWake('resume'));
+  powerMonitor.on('unlock-screen', () => repaintAllBundleViewsAfterWake('unlock-screen'));
   setupContentPartitionCookieSync();
   await syncContentCookiesToDefaultSession();
 
