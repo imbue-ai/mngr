@@ -146,6 +146,17 @@ class SharingController {
     }, COPY_LABEL_RESET_MS);
   }
 
+  // Stop the async transients when the mount is torn down (a swap-engine
+  // page swap leaves the document alive): invalidate any in-flight
+  // readiness poll loop and drop the pending copy-label reset.
+  dispose(): void {
+    this.pollSeq += 1;
+    if (this.copyResetTimer !== null) {
+      window.clearTimeout(this.copyResetTimer);
+      this.copyResetTimer = null;
+    }
+  }
+
   async fetchStatus(): Promise<SharingStatusResponse> {
     const response = await requestWithErrorCheck(this.statusUrl());
     return (await response.json()) as SharingStatusResponse;
@@ -191,6 +202,9 @@ class SharingController {
     const seq = ++this.pollSeq;
     let attempts = 0;
     const poll = async (): Promise<void> => {
+      // A pending retry may fire after the loop was invalidated (Disable, a
+      // restarted save, or the mount's dispose); stop before probing.
+      if (seq !== this.pollSeq) return;
       attempts += 1;
       const probeUrl = `${this.statusUrl()}/readiness?url=${encodeURIComponent(url)}`;
       let isReady = false;
@@ -521,7 +535,12 @@ export function mountSharingEditor(target: Element | null, options?: MountSharin
     throw new MindsUIError("sharing boot island is missing the sharing slice");
   }
   const controller = new SharingController(island.sharing, options?.onDismiss ?? ((): void => undefined));
-  mountWithTeardown(el, { view: () => m(SharingEditor, { controller }) });
+  mountWithTeardown(el, {
+    view: () => m(SharingEditor, { controller }),
+    // Released with the mount so a torn-down page's readiness poll loop
+    // stops probing (mirrors InboxList's subscription release).
+    onremove: () => controller.dispose(),
+  });
   const heading = document.getElementById("page-heading");
   if (heading !== null) {
     mountWithTeardown(heading, { view: () => m(SharingHeading, { controller }) });

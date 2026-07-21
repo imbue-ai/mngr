@@ -352,4 +352,27 @@ describe("SharingEditor readiness polling", () => {
     expect(root.querySelector("#url-section")).toBeNull();
     expect(root.querySelector("#url-ready")).toBeNull();
   });
+
+  it("stops probing when the page mount is torn down mid-provisioning", async () => {
+    vi.useFakeTimers();
+    let readinessCalls = 0;
+    stubFetch({
+      [`GET ${STATUS_URL}`]: () =>
+        jsonResponse({ enabled: true, url: "https://ws.example.com", policy: { emails: [] } }),
+      // The edge never answers ready, so the poll loop keeps rescheduling.
+      [`GET ${STATUS_URL}/readiness?url=${encodeURIComponent("https://ws.example.com")}`]: () => {
+        readinessCalls += 1;
+        return jsonResponse({ ready: false });
+      },
+    });
+    mountFixture(extras());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(readinessCalls).toBe(1);
+
+    // A swap-engine page swap tears the mount down while the 2s retry is
+    // pending; the released loop must not keep hitting the probe endpoint.
+    window.dispatchEvent(new Event("minds:page-teardown"));
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(readinessCalls).toBe(1);
+  });
 });
