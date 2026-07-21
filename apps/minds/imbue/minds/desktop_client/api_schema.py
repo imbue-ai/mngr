@@ -61,6 +61,7 @@ from imbue.minds.desktop_client.api_models import EstablishSshRequest
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import ResizeWorkspaceRequest
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
@@ -69,6 +70,8 @@ from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
+from imbue.minds.desktop_client.api_models import WorkspaceResizeResponse
+from imbue.minds.desktop_client.api_models import WorkspaceResourcesResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -130,6 +133,10 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ),
     ("POST", "/api/v1/workspaces/{agent_id}/restart"): _RouteModels(
         request_model=RestartWorkspaceRequest, response_model=OperationHandleResponse, success_status=202
+    ),
+    ("GET", "/api/v1/workspaces/{agent_id}/resources"): _RouteModels(response_model=WorkspaceResourcesResponse),
+    ("POST", "/api/v1/workspaces/{agent_id}/resize"): _RouteModels(
+        request_model=ResizeWorkspaceRequest, response_model=WorkspaceResizeResponse
     ),
     ("POST", "/api/v1/workspaces/{agent_id}/start"): _RouteModels(response_model=WorkspaceLifecycleResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/stop"): _RouteModels(response_model=WorkspaceLifecycleResponse),
