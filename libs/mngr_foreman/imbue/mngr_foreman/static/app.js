@@ -511,18 +511,12 @@
 
     // "Working" indicator: a pulsing dot that also anchors the queue -- accepted
     // messages sit ABOVE it, still-queued messages BELOW it (mirrors the terminal).
-    // Two signals drive whether it shows:
-    //  - transcript heuristic: instant ON only (a user_message / tool_result / an
-    //    assistant message with tool calls means more is coming). It NEVER turns
-    //    the dot off -- the tail is easy to misread (a mid-turn text chunk, or a
-    //    post-interrupt tool_result that stays last forever).
-    //  - mngr's live busy flag (the input-state tmux poll): AUTHORITATIVE for both
-    //    ON and OFF. If the poll says busy, show the dot even when the heuristic
-    //    missed it (fixes "it's working but the dot's gone"); busy=false (after a
-    //    short grace) hides it. This is the ground truth.
-    const MNGR_IDLE_GRACE_MS = 5000;
+    // Driven SOLELY by mngr's live state (RUNNING == working) -- the SAME
+    // authoritative signal the homescreen chips use (is_busy_state, set by claude's
+    // own UserPromptSubmit/Stop hooks). No transcript-tail guessing, so no "dot on
+    // when idle" / "dot stuck after interrupt" mismatches. `busy` arrives from the
+    // input-state poll (0.8s bursts after a send, 4s at rest).
     let working = false;
-    let workingSince = 0;
     const escBtn = document.getElementById("esc");
     const workingEl = el("div", "working");
     workingEl.hidden = true;
@@ -533,28 +527,13 @@
     // visibility; never move it.
     tEl.appendChild(workingEl);
 
-    function setWorking(v) {
-      if (v && !working) workingSince = Date.now();
-      working = v;
-    }
-    function updateWorkingFrom(ev) {
-      // Instant ON only. OFF is owned by the live poll (applyMngrBusy).
-      if (ev.type === "user_message") setWorking(true);
-      else if (ev.type === "tool_result") setWorking(true);
-      else if (ev.type === "assistant_message" && (ev.tool_calls || []).length > 0) setWorking(true);
-    }
-    // Authoritative busy flag from mngr's live tmux poll -- drives BOTH directions.
+    // mngr's busy flag is the whole story. null/undefined (no state yet) leaves it
+    // unchanged; true/false set it directly.
     function applyMngrBusy(busy) {
-      if (busy === true) {
-        if (!working) { setWorking(true); refreshWorking(); }
-      } else if (busy === false) {
-        // Ignore the pre-flip WAITING for a short grace after an ON (RUNNING takes
-        // ~1-3s to propagate after a prompt), else the dot blinks off immediately.
-        if (working && Date.now() - workingSince > MNGR_IDLE_GRACE_MS) {
-          setWorking(false);
-          refreshWorking();
-        }
-      }
+      if (busy !== true && busy !== false) return;
+      if (busy === working) return;
+      working = busy;
+      refreshWorking();
     }
     function refreshWorking() {
       // BLOCKED (a ❯ dialog / mngr PERMISSIONS) beats "working" -- never show the
@@ -701,8 +680,6 @@
         if (toolBodies.has(ev.tool_call_id)) attachResult(ev);
         else pendingResults.set(ev.tool_call_id, ev);
       }
-      updateWorkingFrom(ev);
-      refreshWorking();
       scrollDown();
     }
 
