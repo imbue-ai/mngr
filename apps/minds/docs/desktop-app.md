@@ -76,6 +76,17 @@ Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Unique
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
 - **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL, and each window's titlebar accent is re-derived from that restored URL (see below) -- the accent is not separately persisted. URLs pointing at workspaces that no longer exist are silently dropped. (Older files that still carry a per-window `lastWorkspaceAgentId` field are accepted and the field ignored.)
 
+### Deeplinks (minds://)
+
+The app registers the `minds://` URL scheme. Packaged macOS builds get the OS registration from `appProtocolScheme` in `todesktop.js` (ToDesktop emits the `CFBundleURLTypes` Info.plist entry); everywhere else `app.setAsDefaultProtocolClient` is called at startup, using the dev-mode form (electron binary + app path) under `electron .`. Dev-mode registration is a no-op on macOS -- LaunchServices only honors schemes declared in a bundle's Info.plist -- so to exercise deeplinks against a dev app, pass the URL as an argument instead: `electron . 'minds://create?git_url=...'` (the same code path Windows/Linux cold starts use).
+
+Every OS delivery channel -- macOS `open-url` events, Windows/Linux second-instance argv, and cold-start argv -- routes to a single `handleDeeplink` in `main.js`, which parses the URL with the pure `electron/deeplink.js` helpers (unit-tested in `test/unit/deeplink.test.js`). The URL's host names the action:
+
+- `minds://create?git_url=<repo>&branch=<ref>` focuses the most recent window and navigates it to the create-workspace page with the repository pre-filled under advanced settings. `branch` accepts anything the form's Branch input accepts (branch, tag, or commit); when absent, the field keeps the form's default. Values must be percent-encoded by the sender.
+- `minds://` bare, or any unrecognized or malformed URL, just opens/focuses the app. The post-login web page relies on this focus-only fallback.
+
+Deeplinks never force a sign-in: `/create` loads regardless of account state and the page's own remote-vs-local flow prompts for sign-in only when needed. A deeplink that arrives before startup navigation has settled (backend still starting, or an error takeover showing) is queued last-writer-wins and applied once startup succeeds -- except on a genuine first run, where the queued link is dropped in favor of the untouched onboarding flow. The navigated path is built from a fixed allowlist (`/create` plus re-encoded query params); raw deeplink text is never handed to `loadURL`.
+
 ### Titlebar accent and the neutral chrome
 
 The full-width titlebar (and the thin shell around the content view) adopt the active workspace's accent color while you're on a workspace-scoped screen, and fall back to a **neutral** chrome on every other minds screen. The neutral chrome background comes from the `--titlebar-bg` fallback in `Chrome.jinja` (`var(--c-surface-primary)`: white in light mode, black in dark); its foreground is not a stored value but is derived from the background in pure CSS by the `.titlebar-surface` recipe in `app.css` (an `lch(from …)` relative-color contrast), the same recipe that re-bases the foreground tokens under an active workspace accent. The same neutral surface is used by the startup/quitting/error loading screen (`shell.html`). Workspace accent swatches deliberately exclude pure black and white so a workspace's color can never collide with this neutral chrome (users can still type either into the settings hex input).
@@ -255,6 +266,7 @@ apps/minds/
   electron/
     main.js                 # Electron main process entry point
     preload.js              # Context bridge for renderer IPC
+    deeplink.js             # Pure minds:// URL parsing (electron-free, unit-tested)
     paths.js                # Platform-aware path resolution
     env-setup.js            # uv sync runner with progress reporting
     backend.js              # Python backend process manager
