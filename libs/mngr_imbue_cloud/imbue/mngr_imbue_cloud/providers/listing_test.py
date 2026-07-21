@@ -3,6 +3,7 @@
 import pytest
 
 from imbue.mngr.primitives import HostState
+from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
 from imbue.mngr_imbue_cloud.providers.listing import map_docker_status_to_host_state
 
 
@@ -28,9 +29,10 @@ from imbue.mngr_imbue_cloud.providers.listing import map_docker_status_to_host_s
         # Terminal-but-broken docker states surface as CRASHED.
         ("dead", 0, HostState.CRASHED),
         ("removing", 0, HostState.CRASHED),
-        # Unknown statuses default to CRASHED so we never silently misreport.
-        ("nonsense", 0, HostState.CRASHED),
-        ("", 0, HostState.CRASHED),
+        # Unrecognized statuses are a mapping gap, not crash evidence, so
+        # they surface as UNKNOWN (which consumers never auto-restart off).
+        ("nonsense", 0, HostState.UNKNOWN),
+        ("", 0, HostState.UNKNOWN),
     ],
 )
 def test_map_docker_status_to_host_state(status: str, exit_code: int, expected_state: HostState) -> None:
@@ -55,3 +57,10 @@ def test_map_docker_status_exited_nonzero_note_includes_exit_code() -> None:
     _state, note = map_docker_status_to_host_state("exited", 137)
     assert note is not None
     assert "137" in note
+
+
+def test_derive_host_state_empty_container_state_is_unknown() -> None:
+    """Outer SSH succeeded but produced no container state: a degraded observation,
+    not evidence the container is down, so UNKNOWN rather than CRASHED."""
+    assert derive_host_state_from_raw({}) == HostState.UNKNOWN
+    assert derive_host_state_from_raw({"container_state": ""}) == HostState.UNKNOWN

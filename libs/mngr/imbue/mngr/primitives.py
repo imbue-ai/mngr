@@ -254,6 +254,11 @@ class HostState(UpperCaseStrEnum):
     FAILED = auto()
     DESTROYED = auto()
     UNAUTHENTICATED = auto()
+    # The host answered but rejected our access: observation of the workspace is impossible and
+    # retrying through the same path cannot help (e.g. imbue_cloud's outer SSH rejected this
+    # machine's key). Distinct from UNKNOWN (transient / could not observe) and UNAUTHENTICATED
+    # (the workspace was observed running but its inner SSH is not accepting our key).
+    UNREACHABLE = auto()
     # The host could not be observed during the most recent discovery attempt, so its actual state
     # is unknown: either the provider that owns it could not be accessed (emitted by AgentObserver
     # when its provider errored), or the provider was reachable but could not reach this specific

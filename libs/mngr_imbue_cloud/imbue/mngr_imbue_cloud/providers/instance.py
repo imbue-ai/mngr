@@ -566,15 +566,20 @@ class ImbueCloudProvider(BaseProviderInstance):
             if raw is None:
                 # Outer SSH itself failed; fall back to a lease-only stub
                 # so the host doesn't disappear from `mngr list`. An auth
-                # mismatch means the host answered (it's reachable, our key
-                # is just wrong) -> UNAUTHENTICATED. Any other failure means
-                # we could not observe the host at all -- the box may be
-                # down, or the network path from this client may be broken --
-                # so the state is UNKNOWN, not CRASHED: an unreachable host
-                # is non-evidence about the container, and consumers (e.g.
-                # the minds recovery page) must not read it as a positive
-                # "container is down" verdict.
-                fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.UNKNOWN
+                # mismatch means the host answered but rejected this
+                # machine's key -> UNREACHABLE: observation of the container
+                # is impossible and a retry or restart routes through the
+                # same rejected credential, so consumers should treat it as
+                # terminal rather than restart-worthy. (Not UNAUTHENTICATED:
+                # that means the container was observed running with its
+                # inner SSH dead, where a restart is the engineered fix.)
+                # Any other failure means we could not observe the host at
+                # all -- the box may be down, or the network path from this
+                # client may be broken -- so the state is UNKNOWN, not
+                # CRASHED: an unreachable host is non-evidence about the
+                # container, and consumers (e.g. the minds recovery page)
+                # must not read it as a positive "container is down" verdict.
+                fallback_state = HostState.UNREACHABLE if is_auth_failure else HostState.UNKNOWN
                 host_ref = DiscoveredHost(
                     host_id=host_id,
                     host_name=HostName(entry.host_name),
@@ -587,7 +592,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 # through the unreachable window. Only when nothing was ever
                 # cached (first-ever discovery) do we fall back to the bare
                 # lease stub, preserving today's behavior for that case. The
-                # host state stays truthfully UNKNOWN/UNAUTHENTICATED: cached
+                # host state stays truthfully UNKNOWN/UNREACHABLE: cached
                 # data restores identity, not liveness.
                 agent_refs = self._load_last_known_agents(host_id) or [
                     DiscoveredAgent(
@@ -673,7 +678,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         reached. ``is_auth_failure`` is True iff the failure was an
         authentication error (``HostAuthenticationError``) -- in that case
         the host is reachable but our key was rejected, which is the
-        ``UNAUTHENTICATED`` state, not ``UNKNOWN``.
+        ``UNREACHABLE`` state, not ``UNKNOWN``.
         """
         host_id = HostId(lease.host_id)
         host_dir = str(self.host_dir)
@@ -867,7 +872,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         populated so the user can see the unreachable address;
         ``failure_reason`` carries the underlying error. The state comes
         from ``host_ref.host_state`` (which discovery set to
-        ``UNAUTHENTICATED`` for auth failures and ``UNKNOWN`` for other
+        ``UNREACHABLE`` for auth failures and ``UNKNOWN`` for other
         outer-SSH errors), with ``UNKNOWN`` as a safe default if it's
         unset.
         """
