@@ -12,14 +12,31 @@ if ! command -v claude &>/dev/null; then
     exit 0
 fi
 
-# Clear stale plugin cache for our marketplaces to avoid using outdated agents/skills
-CACHE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache"
-rm -rf "$CACHE_DIR/imbue-mngr" "$CACHE_DIR/imbue-code-guardian" 2>/dev/null || true
-
 # The plugins and marketplaces are configured at project scope in
-# .claude/settings.json (extraKnownMarketplaces + enabledPlugins),
-# so Claude Code handles installation automatically. Just update.
+# .claude/settings.json (extraKnownMarketplaces + enabledPlugins), so Claude
+# Code handles installation automatically; this hook only updates them.
+#
+# The plugin cache is deliberately left alone: `claude plugin update` refreshes
+# it on success, while wiping it up front would strip every plugin skill from
+# the session whenever the update fails (offline, git auth). Failures are
+# surfaced (but not fatal) so a session missing /autofix and friends says why,
+# instead of silently losing them.
 for plugin_id in "${PLUGIN_IDS[@]}"; do
-    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes' \
-      claude plugin update "$plugin_id" 2>/dev/null || true
+    if output=$(GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes' \
+        claude plugin update "$plugin_id" 2>&1); then
+        printf '%s\n' "$output"
+        continue
+    fi
+    printf '%s\n' "$output" >&2
+    # An update can fail because the plugin has never been installed for the
+    # current scope -- e.g. a fresh machine, or a Sculptor workspace whose
+    # project path has never seen an install. Converge by installing (which
+    # lands at user scope, so every future workspace inherits it).
+    if install_output=$(GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes' \
+        claude plugin install "$plugin_id" 2>&1); then
+        printf '%s\n' "$install_output"
+    else
+        printf '%s\n' "$install_output" >&2
+        echo "warning: failed to update or install plugin ${plugin_id}; sessions will use the previously cached version (or lack its skills if it was never installed)" >&2
+    fi
 done
