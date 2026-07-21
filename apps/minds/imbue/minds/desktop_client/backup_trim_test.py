@@ -4,6 +4,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
+from pydantic import AnyUrl
 from pydantic import Field
 
 from imbue.minds.config.data_types import WorkspacePaths
@@ -253,7 +254,7 @@ def test_backup_trim_manager_flips_unexpected_crash_to_failed(tmp_path: Path) ->
         manager._run(
             user_id="user-1",
             account_email="a@example.com",
-            cli=_CrashingImbueCloudCli(connector_url="http://connector.invalid"),
+            cli=_CrashingImbueCloudCli(connector_url=AnyUrl("http://connector.invalid")),
             paths=WorkspacePaths(data_dir=tmp_path),
             notification_dispatcher=None,
         )
