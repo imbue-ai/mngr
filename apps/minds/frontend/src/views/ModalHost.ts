@@ -138,6 +138,13 @@ export function mountModalHost(target: Element | null): ModalHostHandleForPage {
       close();
       return;
     }
+    // Help toggles the same way (the electron host maps it to main's
+    // toggleHelp, which closes an open help modal regardless of its
+    // ?workspace= / ?assist= query).
+    if (request.kind === "help" && currentRequest?.kind === "help") {
+      close();
+      return;
+    }
     const url = modalPageUrl(request);
     if (url === null) return;
     frameCallbacks = [];

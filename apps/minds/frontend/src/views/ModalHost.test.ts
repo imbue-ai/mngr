@@ -122,6 +122,23 @@ describe("ModalHost open/close", () => {
     expect(frameEl()?.getAttribute("src")).toBe("/inbox?keep_open=1");
   });
 
+  it("a help open toggles like the electron host's toggleHelp", () => {
+    mountFixture();
+    getHost().openModal({ kind: "help", workspaceAgentId: AGENT, isAssistAvailable: false });
+    m.redraw.sync();
+    expect(frameEl()?.getAttribute("src")).toBe(`/help?workspace=${AGENT}`);
+
+    // A second help open closes it -- even scoped to a different workspace,
+    // mirroring main.js's toggleHelp (path-only compare).
+    getHost().openModal({ kind: "help" });
+    m.redraw.sync();
+    expect(frameEl()).toBeNull();
+
+    getHost().openModal({ kind: "help" });
+    m.redraw.sync();
+    expect(frameEl()?.getAttribute("src")).toBe("/help");
+  });
+
   it("a whole-inbox open toggles like the electron host's requests button", () => {
     mountFixture();
     getHost().openModal({ kind: "inbox" });
