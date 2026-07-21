@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Final
@@ -24,6 +25,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.mngr.api.list import list_agents
+from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
@@ -31,6 +33,8 @@ from imbue.mngr_foreman.harness import transcript_strategy_for
 
 # How often the discovery loop re-lists agents (the interval *between* passes).
 POLL_INTERVAL_SECONDS: Final[float] = 3.0
+# How often to re-enumerate the configured providers (cheap, config-based).
+_PROVIDER_REFRESH_SECONDS: Final[float] = 30.0
 
 # The coding-harness agent types foreman shows -- the transcript-driven agents a
 # user actually chats with. Every other type (mngr system/worker types) is hidden.
@@ -62,6 +66,13 @@ class AgentRegistry:
         self._mngr_ctx = mngr_ctx
         self._lock = threading.Lock()
         self._agents: dict[str, AgentDetails] = {}
+        # Agents keyed by the provider that reported them, so each provider's set can
+        # be refreshed independently -- a hung provider only staleness-affects its
+        # own agents. ``_agents`` is the flattened, published view.
+        self._agents_by_provider: dict[str, dict[str, AgentDetails]] = {}
+        self._provider_inflight: dict[str, bool] = {}
+        self._provider_names: tuple[str, ...] = ()
+        self._provider_names_at: float = 0.0
         self._subscribers: set[queue.Queue[dict]] = set()
         # Fired whenever the live-agent *name set* changes, so the warm pool warms
         # newly-appeared agents and drops departed ones without waiting out its own
@@ -93,35 +104,77 @@ class AgentRegistry:
             self._poll_once()
             self._stop.wait(POLL_INTERVAL_SECONDS)
 
+    def _provider_names_cached(self) -> tuple[str, ...]:
+        """Configured provider names, re-enumerated occasionally (cheap, config-based)."""
+        now = time.monotonic()
+        if not self._provider_names or now - self._provider_names_at > _PROVIDER_REFRESH_SECONDS:
+            try:
+                self._provider_names = tuple(p.name for p in get_all_provider_instances(self._mngr_ctx))
+                self._provider_names_at = now
+            except Exception as e:  # noqa: BLE001 - keep the last list if enumeration fails
+                logger.debug("Could not enumerate providers (keeping last): {}", e)
+        return self._provider_names
+
     def _poll_once(self) -> None:
-        """List agents once, keep the live coding ones, and publish the new set."""
+        """Kick off an independent discovery for each provider that isn't mid-poll.
+
+        Each provider is listed in its OWN thread: a provider whose call blocks
+        (e.g. an unreachable host after an IP change -- mngr's discovery does not
+        self-abort on a hung provider) can no longer freeze the whole registry. A
+        per-provider in-flight guard stops a hung provider from piling up threads;
+        its agents simply stay last-known until it recovers, while every other
+        provider (notably ``local``) keeps refreshing every interval.
+        """
+        for pname in self._provider_names_cached():
+            with self._lock:
+                if self._provider_inflight.get(pname):
+                    continue
+                self._provider_inflight[pname] = True
+            threading.Thread(
+                target=self._poll_provider, args=(pname,), name=f"foreman-registry-{pname}", daemon=True
+            ).start()
+
+    def _poll_provider(self, pname: str) -> None:
+        """List one provider's agents and republish; never blocks the other providers."""
         try:
             result = list_agents(
                 self._mngr_ctx,
                 is_streaming=False,
+                provider_names=(pname,),
                 error_behavior=ErrorBehavior.CONTINUE,
                 reset_caches=True,
             )
-        except Exception as e:  # noqa: BLE001 - a bad provider must not kill the poll loop
-            logger.debug("Agent discovery poll failed (keeping last set): {}", e)
+            live = {str(a.id): a for a in result.agents if _is_live_coding(a)}
+        except Exception as e:  # noqa: BLE001 - a bad provider must not kill its slot
+            logger.debug("Discovery for provider {} failed (keeping last set): {}", pname, e)
+            with self._lock:
+                self._provider_inflight[pname] = False
             return
-        live = {str(a.id): a for a in result.agents if _is_live_coding(a)}
         with self._lock:
-            self._agents = live
-        self._publish(live)
+            self._agents_by_provider[pname] = live
+            merged: dict[str, AgentDetails] = {}
+            for prov in self._agents_by_provider.values():
+                merged.update(prov)
+            self._agents = merged
+            self._provider_inflight[pname] = False
+        self._publish()
 
-    def _publish(self, live: dict[str, AgentDetails]) -> None:
+    def _publish(self) -> None:
         """Broadcast a fresh snapshot if it changed, and wake the pool if membership did."""
-        cards = self.snapshot()
+        cards = self.snapshot()  # acquires the lock internally
         payload = json.dumps(cards, sort_keys=True)
-        if payload != self._last_broadcast:
-            self._last_broadcast = payload
+        with self._lock:
+            names = frozenset(str(a.name) for a in self._agents.values())
+            changed_payload = payload != self._last_broadcast
+            if changed_payload:
+                self._last_broadcast = payload
+            changed_names = names != self._live_names
+            if changed_names:
+                self._live_names = names
+        if changed_payload:
             self._broadcast({"type": "snapshot", "agents": cards})
-        names = frozenset(str(a.name) for a in live.values())
-        if names != self._live_names:
-            self._live_names = names
-            if self._on_change is not None:
-                self._on_change()
+        if changed_names and self._on_change is not None:
+            self._on_change()
 
     # --- read + subscribe ------------------------------------------------
 
