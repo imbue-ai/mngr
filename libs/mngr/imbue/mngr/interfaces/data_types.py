@@ -344,11 +344,6 @@ class HostResizeRequest(FrozenModel):
     cpu_count: HostResizeValue | None = Field(default=None, description="Requested CPU count change")
     memory_gib: HostResizeValue | None = Field(default=None, description="Requested memory (GiB) change")
 
-    @computed_field
-    @cached_property
-    def is_empty(self) -> bool:
-        return self.cpu_count is None and self.memory_gib is None
-
 
 class ActivityConfig(FrozenModel):
     """Configuration for host activity detection and idle timeout."""
