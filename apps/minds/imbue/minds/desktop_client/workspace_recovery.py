@@ -444,6 +444,9 @@ def probe_workspace_health(
     the probe returned direct evidence: a live GET / 200 is trusted regardless of
     freshness, and an exec that completed without reaching the container is
     likewise direct (fresh) evidence for the consent-gated HOST_UNRESPONSIVE.
+    The offline pair is also exempt: a STOPPED/CRASHED reading classifies
+    HOST_OFFLINE off any snapshot, stale or fresh -- the idempotent ``mngr
+    start`` dispatch needs no freshness gate (see ``_classify_dispatch_tier``).
 
     The host state that feeds the classifier is re-read after the exec, at the
     same instant the trustworthiness check runs, so the freshness gate always
