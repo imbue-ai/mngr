@@ -2021,14 +2021,45 @@ def _handle_accounts_page(plan_error: str | None = None) -> Response:
     enabled_by_user_id = {
         str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
     }
+    trim_manager = get_state().backup_trim_manager
+    trim_status_by_user_id = {
+        str(account.user_id): status
+        for account in accounts
+        if (status := trim_manager.get_status(str(account.user_id))) is not None
+    }
     html = render_accounts_page(
         accounts=accounts,
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
         plan_view_by_user_id=_fetch_plan_views_for_accounts(accounts),
         plan_error=plan_error,
+        trim_status_by_user_id=trim_status_by_user_id,
+        is_any_trim_running=trim_manager.is_any_running(),
     )
     return make_html_response(content=html)
+
+
+def _handle_account_trim_backups(user_id: str) -> Response:
+    """Start the over-quota backup trim flow for one account (idempotent while running)."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None or cli is None or paths is None:
+        return _handle_accounts_page(plan_error="Account not found or imbue_cloud CLI unavailable.")
+    get_state().backup_trim_manager.start_trim(
+        user_id=user_id,
+        account_email=str(account.email),
+        cli=cli,
+        paths=paths,
+        notification_dispatcher=get_state().notification_dispatcher,
+    )
+    return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
 def _handle_account_set_plan(user_id: str) -> Response:
@@ -2947,6 +2978,7 @@ def create_desktop_client(
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
+    app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 
     # Workspace settings page (the account-association and color writes it drives

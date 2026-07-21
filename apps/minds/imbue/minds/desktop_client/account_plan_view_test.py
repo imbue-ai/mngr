@@ -50,6 +50,17 @@ def test_build_account_plan_view_maps_every_quota_row() -> None:
     assert rows_by_label["Synced workspaces"]["used"] == "4"
 
 
+def test_build_account_plan_view_flags_over_storage_quota() -> None:
+    under = build_account_plan_view(_account_info())
+    assert under["is_over_storage_quota"] is False
+    over_info = _account_info()
+    usage = over_info["usage"]
+    assert isinstance(usage, dict)
+    usage["total_bucket_bytes"] = 51 * 1024**3
+    over = build_account_plan_view(over_info)
+    assert over["is_over_storage_quota"] is True
+
+
 def test_build_account_plan_view_tolerates_missing_fields() -> None:
     view = build_account_plan_view({})
     assert view["plan_name"] == ""

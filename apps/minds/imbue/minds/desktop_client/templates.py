@@ -1768,6 +1768,10 @@ def render_accounts_page(
     # None for an account whose info could not be fetched.
     plan_view_by_user_id: Mapping[str, Mapping[str, object] | None] | None = None,
     plan_error: str | None = None,
+    # Per-account backup-trim progress (BackupTrimStatus objects); the page
+    # auto-reloads while any trim is running so progress stays visible.
+    trim_status_by_user_id: Mapping[str, object] | None = None,
+    is_any_trim_running: bool = False,
 ) -> str:
     """Render the manage accounts page.
 
@@ -1784,6 +1788,8 @@ def render_accounts_page(
         enabled_by_user_id=dict(enabled_by_user_id or {}),
         plan_view_by_user_id=dict(plan_view_by_user_id or {}),
         plan_error=plan_error or "",
+        trim_status_by_user_id=dict(trim_status_by_user_id or {}),
+        is_any_trim_running=is_any_trim_running,
     )
 
 

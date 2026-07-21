@@ -1,4 +1,4 @@
-{#def accounts, default_account_id, enabled_by_user_id, plan_view_by_user_id={}, plan_error="" #}
+{#def accounts, default_account_id, enabled_by_user_id, plan_view_by_user_id={}, plan_error="", trim_status_by_user_id={}, is_any_trim_running=False #}
 {#
   Manage accounts page. Lists each signed-in account with its
   workspace count, default-account marker, per-account
@@ -24,6 +24,9 @@
 #}
 {% set _scripts %}
 <script src="/_static/sync_status_banner.js" defer></script>
+{% if is_any_trim_running %}
+<script>setTimeout(function () { window.location.reload(); }, 4000);</script>
+{% endif %}
 {% endset %}
 <Base title="Manage Accounts" scripts={{ _scripts }}>
   <PageContainer>
@@ -98,6 +101,22 @@
                   {% endfor %}
                 </tbody>
               </table>
+              {% set trim_status = trim_status_by_user_id.get(acct.user_id | string) %}
+              {% set is_trim_running = trim_status and trim_status.is_running %}
+              {% if plan_view.is_over_storage_quota or trim_status %}
+                <div class="mt-2 flex items-center gap-3">
+                  {% if plan_view.is_over_storage_quota and not is_trim_running %}
+                    <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/trim-backups" }}>
+                      <ButtonSubmit variant="secondary">Free up backup space</ButtonSubmit>
+                    </form>
+                  {% endif %}
+                  {% if trim_status %}
+                    <span class="type-helper text-tertiary">{{ trim_status.detail }}</span>
+                  {% elif plan_view.is_over_storage_quota %}
+                    <span class="type-helper text-tertiary">Removes the oldest backups (each workspace keeps its latest) until you are back under the limit.</span>
+                  {% endif %}
+                </div>
+              {% endif %}
             </div>
           {% else %}
             <div class="mt-3 pt-3 border-t border-default type-helper text-tertiary">

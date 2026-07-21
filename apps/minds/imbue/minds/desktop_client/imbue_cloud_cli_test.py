@@ -7,8 +7,10 @@ from pydantic import AnyUrl
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import _CONNECTOR_URL_SUBPROCESS_ENV
 from imbue.minds.desktop_client.imbue_cloud_cli import _parse_conflict_stored
+from imbue.minds.desktop_client.imbue_cloud_cli import _parse_stderr_error_message
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 
@@ -37,6 +39,30 @@ def test_expect_success_keeps_traceback_out_of_message_but_on_stderr() -> None:
     assert "tunnels list" in message
     # The full subprocess output is still available for server-side logging.
     assert "httpx.ConnectError" in exc_info.value.stderr
+
+
+def test_expect_success_raises_typed_quota_error_with_server_message() -> None:
+    """A structured quota refusal surfaces as the typed (terminal) error carrying the server's message."""
+    cli = make_fake_imbue_cloud_cli()
+    body = json.dumps(
+        {
+            "error": "Quota exceeded: this account allows 5 buckets and 5 are already in use.",
+            "error_class": "ImbueCloudQuotaExceededError",
+        },
+        indent=2,
+    )
+    result = MngrCallResult(returncode=1, stdout="", stderr="some log line\n" + body + "\n")
+    with pytest.raises(ImbueCloudQuotaExceededCliError) as exc_info:
+        cli._expect_success(result, "bucket create")  # noqa: SLF001 - exercising the private error-surfacing path
+    assert "allows 5 buckets" in str(exc_info.value)
+    assert "bucket create" in str(exc_info.value)
+
+
+def test_parse_stderr_error_message_survives_surrounding_log_lines() -> None:
+    body = json.dumps({"error": "the message", "error_class": "SomeError"}, indent=2)
+    stderr = "2026-07-12 10:00:00 | WARNING | noisy {braced} log line\n" + body + "\ntrailing\n"
+    assert _parse_stderr_error_message(stderr) == "the message"
+    assert _parse_stderr_error_message("no json here\n") is None
 
 
 def test_run_routes_through_mngr_caller_with_home_cwd_and_connector_env() -> None:

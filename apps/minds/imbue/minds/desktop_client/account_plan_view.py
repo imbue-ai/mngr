@@ -34,8 +34,9 @@ def _int_field(source: dict[str, Any], key: str) -> int:
 def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
     """Build the template view model from the connector's account-info JSON.
 
-    Returns ``{plan_name, plan_display_name, available_plans, usage_rows}``
-    where each usage row is ``{label, used, limit, note}`` (all strings).
+    Returns ``{plan_name, plan_display_name, available_plans, usage_rows,
+    is_over_storage_quota}`` where each usage row is ``{label, used, limit,
+    note}`` (all strings).
     """
     entitlements = info.get("entitlements") or {}
     usage = info.get("usage") or {}
@@ -85,4 +86,7 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
         "plan_display_name": _plan_display_name(plan_name),
         "available_plans": [str(p) for p in available if isinstance(p, str)],
         "usage_rows": usage_rows,
+        # Gates the "free up backup space" action on the Accounts page.
+        "is_over_storage_quota": _int_field(usage, "total_bucket_bytes")
+        > _int_field(entitlements, "max_total_bucket_bytes"),
     }

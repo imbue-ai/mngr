@@ -28,6 +28,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.help_modal_requests import HelpModalRequestBroker
@@ -145,6 +146,11 @@ class DesktopClientState(MutableModel):
     workspace_operation_registry: WorkspaceOperationRegistryInterface = Field(
         default_factory=InMemoryWorkspaceOperationRegistry,
         description="In-memory registry tracking in-process workspace operations (restart) + their logs",
+    )
+    backup_trim_manager: BackupTrimManager = Field(
+        default_factory=BackupTrimManager,
+        frozen=True,
+        description="Runs the over-quota backup trim flow on detached threads and tracks per-account progress",
     )
     ssh_tunnel_manager: SSHTunnelManager = Field(
         default_factory=SSHTunnelManager,

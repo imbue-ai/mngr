@@ -53,6 +53,11 @@ _CONNECTOR_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_UR
 # username prefix.
 _AGENT_ID_PREFIX_LENGTH = 16
 
+# The plugin's error_class marker for a structured quota refusal, as written
+# into its JSON stderr body by handle_imbue_cloud_errors. Substring-matched
+# (like the 503 unavailable_signal) because log lines may surround the body.
+_QUOTA_ERROR_CLASS_SIGNAL = "ImbueCloudQuotaExceededError"
+
 
 class ImbueCloudCliError(MindError):
     """Raised when a `mngr imbue_cloud ...` invocation returns a non-zero exit code.
@@ -70,6 +75,16 @@ class ImbueCloudCliError(MindError):
 
 class ImbueCloudUnavailableError(ImbueCloudCliError):
     """Subclass of CliError indicating the connector returned 503 (no matching pool host)."""
+
+
+class ImbueCloudQuotaExceededCliError(ImbueCloudCliError):
+    """Subclass of CliError indicating the connector refused the operation on a quota entitlement.
+
+    A quota refusal is deterministic -- retrying the same call cannot
+    succeed -- so callers (e.g. the backup-provisioning retry loop) treat it
+    as terminal and surface it immediately instead of burning their retry
+    budget.
+    """
 
 
 class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
@@ -241,6 +256,15 @@ class ImbueCloudCli(MutableModel):
             exc.stdout = result.stdout
             exc.stderr = result.stderr
             raise exc
+        if _QUOTA_ERROR_CLASS_SIGNAL in result.stderr:
+            quota_message = _parse_stderr_error_message(result.stderr)
+            quota_exc = ImbueCloudQuotaExceededCliError(
+                f"{command_repr}: {quota_message}" if quota_message else f"{command_repr}: quota exceeded"
+            )
+            quota_exc.exit_code = exit_code
+            quota_exc.stdout = result.stdout
+            quota_exc.stderr = result.stderr
+            raise quota_exc
         # Log the full subprocess output server-side -- it may be a multi-line
         # Python traceback (e.g. an httpx transport error inside the connector
         # subprocess) -- but keep the exception *message* clean and
@@ -669,6 +693,33 @@ class ImbueCloudCli(MutableModel):
         )
         return self._expect_success(result, "account set-plan")
 
+    def create_storage_cleanup_grant(self, account: str) -> dict[str, Any]:
+        """Temporarily restore storage-downgraded bucket keys so restic cleanup can run.
+
+        Returns the connector's grant body (``status``, ``expires_at``,
+        ``baseline_bytes``, ``keys``). Idempotent while a grant is active.
+        """
+        result = self._run(
+            ["account", "cleanup-grant", "--account", account],
+            cg_name="imbue-cloud-account-cleanup-grant",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._expect_success(result, "account cleanup-grant")
+
+    def recheck_storage(self, account: str) -> dict[str, Any]:
+        """Re-measure live storage usage and apply enforcement immediately.
+
+        Returns the connector's recheck body (``usage_bytes``, ``limit_bytes``,
+        ``is_over_quota``, ``is_grant_settled``, ``keys``); settles any
+        outstanding cleanup grant.
+        """
+        result = self._run(
+            ["account", "recheck-storage", "--account", account],
+            cg_name="imbue-cloud-account-recheck-storage",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._expect_success(result, "account recheck-storage")
+
     # ------------------------------------------------------------------
     # Workspace sync (records + key bundle)
     # ------------------------------------------------------------------
@@ -776,6 +827,27 @@ def _parse_conflict_stored(stderr: str) -> dict[str, Any] | None:
         offset += len(line)
     if not is_any_document_parsed:
         logger.warning("Could not locate a JSON error body on the sync-conflict stderr")
+    return None
+
+
+def _parse_stderr_error_message(stderr: str) -> str | None:
+    """Extract the ``error`` message from the plugin's JSON stderr body, if present.
+
+    Same scanning approach as ``_parse_conflict_stored``: the body is
+    indent-formatted JSON that may be surrounded by log lines.
+    """
+    decoder = _json.JSONDecoder()
+    offset = 0
+    for line in stderr.splitlines(keepends=True):
+        lstripped = line.lstrip()
+        if lstripped.startswith("{"):
+            try:
+                parsed, _consumed_until = decoder.raw_decode(stderr, offset + len(line) - len(lstripped))
+            except _json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+                return str(parsed["error"])
+        offset += len(line)
     return None
 
 

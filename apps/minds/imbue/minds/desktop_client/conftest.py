@@ -98,6 +98,28 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def remove_account(self, user_id: str) -> None:
         self.accounts_to_return = [a for a in self.accounts_to_return if a.user_id != user_id]
 
+    # -- In-memory storage-cleanup backend (drives the backup-trim tests) --
+
+    storage_recheck_results: list[dict[str, object]] = Field(
+        default_factory=list,
+        description="Queue of recheck_storage results, consumed in order (the last entry repeats)",
+    )
+    cleanup_grant_result: dict[str, object] = Field(
+        default_factory=dict, description="Result returned by create_storage_cleanup_grant"
+    )
+    cleanup_grant_call_count: int = Field(default=0, description="How many grants were requested")
+
+    def recheck_storage(self, account: str) -> dict[str, object]:
+        if not self.storage_recheck_results:
+            raise ImbueCloudCliError("recheck storage: no fake results configured on FakeImbueCloudCli")
+        if len(self.storage_recheck_results) > 1:
+            return dict(self.storage_recheck_results.pop(0))
+        return dict(self.storage_recheck_results[0])
+
+    def create_storage_cleanup_grant(self, account: str) -> dict[str, object]:
+        self.cleanup_grant_call_count += 1
+        return dict(self.cleanup_grant_result)
+
     # -- In-memory workspace-sync backend (mirrors the connector's semantics) --
 
     sync_records_by_email: dict[str, dict[str, dict[str, object]]] = Field(
