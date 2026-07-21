@@ -100,21 +100,25 @@
               </div>
             </div>
 
-            <div id="scene-tunnel" class="scene-node flex flex-col items-center gap-1 self-center pb-4">
-              {# Tunnel with an encryption lock. #}
+            <div id="scene-tunnel" class="scene-node flex flex-col items-center gap-1 self-center mt-6">
+              {# Tunnel: two gentle arcs with an encryption lock between them. #}
               <svg viewBox="0 0 120 48" class="w-28 h-12 text-tertiary" fill="none" stroke="currentColor" aria-label="encrypted tunnel">
-                <path d="M4 12 C 40 2, 80 2, 116 12" stroke-width="3" stroke-linecap="round"/>
-                <path d="M4 36 C 40 46, 80 46, 116 36" stroke-width="3" stroke-linecap="round"/>
-                <path d="M10 24 H 42 M 78 24 H 110" stroke-width="2.5" stroke-dasharray="2 7" stroke-linecap="round"/>
-                <rect x="50" y="20" width="20" height="15" rx="3" stroke-width="3"/>
-                <path d="M54 20 v-4 a6 6 0 0 1 12 0 v4" stroke-width="3"/>
+                <path d="M4 14 C 40 5, 80 5, 116 14" stroke-width="3" stroke-linecap="round"/>
+                <path d="M4 34 C 40 43, 80 43, 116 34" stroke-width="3" stroke-linecap="round"/>
+                <rect x="51" y="21" width="18" height="14" rx="3" stroke-width="3"/>
+                <path d="M55 21 v-3.5 a5 5 0 0 1 10 0 v3.5" stroke-width="3"/>
               </svg>
               <span class="type-helper text-tertiary">encrypted</span>
             </div>
 
             <div id="scene-workspace" class="scene-group flex flex-col items-center gap-2">
-              <div class="scene-label type-helper text-tertiary">
-                {{ "Workspace machine" if is_remote else "Workspace (on this computer)" }}
+              <div class="scene-label type-helper text-tertiary text-center">
+                {% if is_remote %}
+                Workspace machine
+                {% else %}
+                Workspace
+                <span class="block">(on this computer)</span>
+                {% endif %}
               </div>
               <div class="rounded-xl border border-subtle bg-fill-subtle px-4 py-4">
                 <div id="scene-server" class="scene-node flex flex-col items-center gap-1">
