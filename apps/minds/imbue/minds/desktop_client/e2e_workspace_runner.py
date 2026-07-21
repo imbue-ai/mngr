@@ -494,7 +494,9 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     )
 
 
-def _connect_and_pick_content_page(playwright: Playwright, debug_port: int, timeout_seconds: int) -> tuple[Browser, Page]:
+def _connect_and_pick_content_page(
+    playwright: Playwright, debug_port: int, timeout_seconds: int
+) -> tuple[Browser, Page]:
     """Attach to Electron's CDP endpoint and return ``(browser, content_page)``.
 
     Wraps ``connect_over_cdp`` + :func:`_pick_content_page` in short rounds
@@ -510,7 +512,9 @@ def _connect_and_pick_content_page(playwright: Playwright, debug_port: int, time
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS)
+        browser = playwright.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
+        )
         remaining = deadline - time.monotonic()
         round_seconds = min(_PICK_ROUND_SECONDS, max(1, int(remaining)))
         try:
