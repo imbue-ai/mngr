@@ -25,3 +25,14 @@ selection target that tmux emits. To rebuild it, run
 
 OSC 52 clipboard writes require a secure browser context (HTTPS or `localhost`)
 and a focused tab.
+
+## Refit on reconnect
+
+The stock client disposes all of its listeners (including its only refit
+trigger, window resize -> `fitAddon.fit`) on every websocket close and only
+re-registers them once the reconnect completes, so a resize that happens during
+a disconnect window is lost: the reconnect handshake then sizes the new PTY to
+the stale columns/rows and nothing re-measures afterwards. The vendored client
+carries a second patch (`scripts/ttyd_reconnect_refit.patch`, applied by the
+same build script) that re-measures on reconnect before sending the size
+handshake.
