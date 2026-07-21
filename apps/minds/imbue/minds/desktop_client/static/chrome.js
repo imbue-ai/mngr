@@ -500,10 +500,18 @@
   // shell boot (the menu lives outside #local-page-root, so hub swaps never
   // touch it); its row actions navigate through the swap-engine export and
   // dismiss via closeSidebar.
+  var modalHost = null;
   if (!isElectron) {
     window.MindsUI.mountWorkspaceMenu(document.getElementById('sidebar-menu'), {
       onDismiss: closeSidebar,
     });
+    // The in-document modal layer (browser-mode parity with Electron's
+    // overlay view). Mounting registers it as the host adapter's openModal
+    // target; the window export lets trusted local pages' inline entry
+    // points (welcome / create / workspace settings) open modals without
+    // the Electron bridge.
+    modalHost = window.MindsUI.mountModalHost(document.getElementById('minds-modal-host'));
+    window.__mindsOpenModal = function (request) { modalHost.open(request); };
   }
 
   // -- Open a permission request from workspace content (browser mode) -------
@@ -525,16 +533,16 @@
       if (data.type === 'minds:open-request-modal') {
         var requestId = data.requestId;
         if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-        navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+        modalHost.open({ kind: 'inbox', selectedRequestId: requestId });
         return;
       }
       // Error pages (e.g. the recovery page) ask to open the get-help / report-a-bug
-      // modal. There's no overlay in browser mode, so navigate the content frame to
-      // /help, scoped to the workspace when the page supplied a valid agent id.
+      // modal; open it over the workspace, scoped when the page supplied a
+      // valid agent id.
       if (data.type === 'minds:open-help') {
         var agentId = data.agentId;
         var scoped = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
-        navigateContent('/help' + (scoped ? '?workspace=' + encodeURIComponent(scoped) : ''));
+        modalHost.open({ kind: 'help', workspaceAgentId: scoped || undefined });
         return;
       }
     });

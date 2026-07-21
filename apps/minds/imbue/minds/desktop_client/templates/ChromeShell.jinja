@@ -215,6 +215,14 @@
          class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden"></div>
   </div>
 
+  {# Browser-mode modal layer: the mithril ModalHost mounts here (chrome.js,
+     shell boot) and shows each modal as a full-viewport iframe of the same
+     server overlay page Electron's modal view loads. Renders nothing while
+     no modal is open; Electron never mounts it (modals go through main's
+     overlay). Lives outside #local-page-root so hub swaps keep an open
+     modal's layer intact. #}
+  <div id="minds-modal-host"></div>
+
   {# The swappable page body. chrome.js's swap engine replaces this element
      (and #local-page-scripts) in place for hub-page navigation, leaving the
      titlebar + switcher + shell scripts untouched. ``display: contents`` keeps

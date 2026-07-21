@@ -886,6 +886,21 @@ def test_render_chrome_page_switcher_menu_is_an_empty_mount_container() -> None:
     assert "mountWorkspaceMenu" not in html
 
 
+def test_render_chrome_page_carries_the_modal_host_container() -> None:
+    """Browser-mode modal parity: every chrome-shell document carries the
+    empty, persistent ``#minds-modal-host`` container (outside
+    ``#local-page-root``, so hub swaps keep an open modal's layer intact)
+    that chrome.js mounts the ModalHost into at shell boot."""
+    html = render_chrome_page()
+    host_open = html.index('id="minds-modal-host"')
+    assert host_open < html.index('id="local-page-root"')
+    host_tag_end = html.index(">", host_open)
+    assert html[host_tag_end + 1 : host_tag_end + 7] == "</div>"
+    # A hub page renders it too (the container is shell chrome, not page content).
+    landing = render_landing_page(_landing_boot_fixture(()), _landing_extras_fixture())
+    assert 'id="minds-modal-host"' in landing
+
+
 def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
     # 12px radius (``rounded-[12px]``) matches Electron-side
     # ``contentView.setBorderRadius(12)`` (= ``CONTENT_CORNER_RADIUS`` in

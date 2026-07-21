@@ -47,8 +47,8 @@ declare global {
 }
 
 // A modal open request. Electron routes each kind to its overlay-view IPC;
-// browser mode navigates to the full-page fallback route until Phase 7's
-// in-document ModalHost lands.
+// browser mode shows it in the chrome shell's in-document ModalHost, falling
+// back to the full-page route in documents without one.
 export type ModalRequest =
   | { kind: "minds-settings" }
   | { kind: "accounts" }
@@ -147,8 +147,23 @@ export interface BrowserHostOptions {
 
 const CHROME_EVENTS_URL = "/_chrome/events";
 
-// The browser-mode full-page fallback for each modal kind (Electron shows
-// these as overlay modals; browser mode navigates until Phase 7).
+// The in-document modal layer (views/ModalHost.ts), registered by the mount
+// that chrome.js runs at browser-mode shell boot. Kept behind this seam so
+// host.ts does not import the view layer.
+export interface ModalHostHandle {
+  open(request: ModalRequest): void;
+  close(): void;
+  isOpen(): boolean;
+}
+
+let registeredModalHost: ModalHostHandle | null = null;
+
+export function registerModalHost(handle: ModalHostHandle): void {
+  registeredModalHost = handle;
+}
+
+// The browser-mode full-page fallback for each modal kind: used by documents
+// without a mounted ModalHost (modal full-page twins, deep links).
 function browserModalUrl(request: ModalRequest): string {
   switch (request.kind) {
     case "minds-settings":
@@ -247,11 +262,21 @@ export function createBrowserHost(options: BrowserHostOptions): Host {
     minimizeWindow: () => undefined,
     maximizeWindow: () => undefined,
     closeWindow: () => undefined,
-    openModal: (request) => navigate(browserModalUrl(request)),
+    openModal: (request) => {
+      // The chrome shell mounts an in-document ModalHost (an iframe of the
+      // same server modal pages Electron's overlay loads), so opening a
+      // modal keeps the workspace context. Documents without one (the
+      // full-page modal twins themselves) fall back to navigation.
+      if (registeredModalHost !== null) registeredModalHost.open(request);
+      else navigate(browserModalUrl(request));
+    },
     closeModal: () => {
-      // Browser-mode modals are full pages until Phase 7; dismissing one
-      // means leaving it, so navigate home (the pre-component inbox page's
-      // fallback behavior).
+      if (registeredModalHost !== null && registeredModalHost.isOpen()) {
+        registeredModalHost.close();
+        return;
+      }
+      // A full-page modal twin: dismissing it means leaving it, so navigate
+      // home (the pre-component inbox page's fallback behavior).
       navigate("/");
     },
   };
@@ -276,4 +301,5 @@ export function getHost(): Host {
 
 export function resetHostForTesting(): void {
   singletonHost = null;
+  registeredModalHost = null;
 }

@@ -219,17 +219,26 @@
 
   // -- Manage sharing -------------------------------------------------------
   //
-  // In the desktop shell the sharing editor opens as a centered overlay modal
-  // via the shell bridge -- the workspace-settings page is a trusted local page
-  // on the chrome surface; the links' hrefs stay as the browser-mode full-page
+  // The sharing editor opens as a centered overlay modal: via the shell
+  // bridge in Electron, or the chrome shell's in-document modal layer in
+  // browser mode -- the workspace-settings page is a trusted local page on
+  // the chrome surface. The links' hrefs stay as the standalone full-page
   // fallback.
+  var openSharing = null;
   if (window.minds && window.minds.openSharingModal) {
+    openSharing = function (service) { window.minds.openSharingModal(agentId, service); };
+  } else if (window.__mindsOpenModal) {
+    openSharing = function (service) {
+      window.__mindsOpenModal({ kind: 'sharing', agentId: agentId, serviceName: service });
+    };
+  }
+  if (openSharing) {
     var sharingLinks = document.querySelectorAll('a[data-sharing-service]');
     for (var j = 0; j < sharingLinks.length; j++) {
       (function (link) {
         link.addEventListener('click', function (event) {
           event.preventDefault();
-          window.minds.openSharingModal(agentId, link.getAttribute('data-sharing-service'));
+          openSharing(link.getAttribute('data-sharing-service'));
         });
       })(sharingLinks[j]);
     }

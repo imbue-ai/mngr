@@ -24,13 +24,20 @@
 {% set _scripts %}
 <script>
   (function () {
-    // Trusted local page on the chrome surface: open the shared sign-in modal
-    // via the shell bridge. In a plain browser (no bridge) the ButtonLinks
-    // navigate to the full-page /auth/* routes on their own.
+    // Trusted local page on the chrome surface: open the shared sign-in
+    // modal via the shell bridge (Electron) or the chrome shell's
+    // in-document modal layer (browser mode). Without either (a standalone
+    // page) the ButtonLinks navigate to the full-page /auth/* routes on
+    // their own.
+    var openModal = null;
     if (window.minds && window.minds.openSigninModal) {
-      var openModal = function (mode) {
-        window.minds.openSigninModal('/', mode);
+      openModal = function (mode) { window.minds.openSigninModal('/', mode); };
+    } else if (window.__mindsOpenModal) {
+      openModal = function (mode) {
+        window.__mindsOpenModal({ kind: 'signin', returnTo: '/', mode: mode });
       };
+    }
+    if (openModal) {
       var signup = document.getElementById('welcome-signup-btn');
       var login = document.getElementById('welcome-login-btn');
       if (signup) signup.addEventListener('click', function (e) { e.preventDefault(); openModal('signup'); });

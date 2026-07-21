@@ -9,6 +9,7 @@
 import { setAccentScopeAgentId, setContentUrl, setDisplayedWorkspaceAgentId } from "./store";
 import { mountInboxList } from "./views/InboxList";
 import { mountLanding } from "./views/LandingPage";
+import { adoptParentModalBridge, mountModalHost } from "./views/ModalHost";
 import { mountSharingEditor } from "./views/SharingEditor";
 import { mountStyleguidePrimitives, mountStyleguideWorkspaceRows } from "./views/StyleguideRows";
 import { mountStyleguideSmoke } from "./views/StyleguideSmoke";
@@ -18,6 +19,7 @@ import { mountWorkspaceMenu } from "./views/WorkspaceMenu";
 export interface MindsUINamespace {
   mountInboxList: typeof mountInboxList;
   mountLanding: typeof mountLanding;
+  mountModalHost: typeof mountModalHost;
   mountSharingEditor: typeof mountSharingEditor;
   mountStyleguideSmoke: typeof mountStyleguideSmoke;
   mountStyleguidePrimitives: typeof mountStyleguidePrimitives;
@@ -38,9 +40,15 @@ declare global {
   }
 }
 
+// When this bundle loads inside a browser-mode modal-host iframe, adopt the
+// parent's window.minds-compatible bridge BEFORE any page script runs, so the
+// modal pages' Electron code paths drive the in-document modal layer.
+adoptParentModalBridge();
+
 window.MindsUI = {
   mountInboxList,
   mountLanding,
+  mountModalHost,
   mountSharingEditor,
   mountStyleguideSmoke,
   mountStyleguidePrimitives,

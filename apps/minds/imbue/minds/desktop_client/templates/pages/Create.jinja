@@ -126,8 +126,12 @@
         // Trusted local page on the chrome surface: open the shared modal
         // overlay (loaded with /auth/signin-modal) via the shell bridge.
         window.minds.openSigninModal();
+      } else if (window.__mindsOpenModal) {
+        // Browser mode: the chrome shell's in-document modal layer. Empty
+        // return_to keeps the server's default (back to the create screen).
+        window.__mindsOpenModal({ kind: 'signin', returnTo: '', mode: 'signup' });
       } else {
-        // Plain browser: navigate to the standalone sign-in page.
+        // Standalone page without the shell: navigate to the sign-in page.
         window.location.href = '/auth/signin-modal';
       }
     }
