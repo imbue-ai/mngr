@@ -703,18 +703,24 @@
       else setTimeout(fn, 16);
     }
     function flushInitialBackfill() {
+      // Drop the "loading…" status line FIRST -- otherwise it's tEl.firstChild and
+      // would be captured as the insert-anchor, then removed, so the async older-
+      // fill's insertBefore(...) would throw against a detached node and stop
+      // (the "last 40, can't scroll further" bug).
+      clearStatus();
       const buf = backfillBuffer;
       backfillBuffer = [];
       const cut = Math.max(0, buf.length - TAIL_RENDER_COUNT);
       const older = buf.slice(0, cut);
       for (let i = cut; i < buf.length; i++) renderEvent(buf[i]); // tail -> instant paint
+      const anchor = tEl.firstChild; // first tail node -- stable (won't be removed)
       scrollDown(true);
-      if (older.length) fillOlder(older);
+      if (older.length && anchor) fillOlder(older, anchor);
     }
-    function fillOlder(older) {
-      const anchor = tEl.firstChild; // insert older content chronologically above the tail
+    function fillOlder(older, anchor) {
       let idx = 0;
       function chunk() {
+        if (!anchor.parentNode) return; // anchor detached -> nothing to anchor older content to
         const oldH = scroller.scrollHeight;
         const pinned = stick;
         for (let n = 0; idx < older.length && n < 15; n++, idx++) renderEvent(older[idx], anchor);
