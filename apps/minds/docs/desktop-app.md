@@ -80,6 +80,18 @@ Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Unique
 
 The app registers the `minds://` URL scheme. Packaged macOS builds get the OS registration from `appProtocolScheme` in `todesktop.js` (ToDesktop emits the `CFBundleURLTypes` Info.plist entry); `app.setAsDefaultProtocolClient` is also called at every startup, using the dev-mode form (electron binary + app path) under `electron .`. Dev-mode registration is a no-op on macOS -- LaunchServices only honors schemes declared in a bundle's Info.plist -- so to exercise deeplinks against a dev app, pass the URL as an argument instead: `electron . 'minds://create?git_url=...'` (the same code path Windows/Linux cold starts use).
 
+To test real OS-level delivery (browser link clicks, `open 'minds://...'`) against a dev app on macOS, patch the checkout's dev Electron bundle once so LaunchServices knows about it. The bundle id must also be made unique: every worktree's dev Electron ships as `com.github.Electron`, and LaunchServices resolves the scheme's handler by bundle id, so a shared id can route the URL to some other checkout's copy.
+
+```bash
+PLIST=apps/minds/node_modules/electron/dist/Electron.app/Contents/Info.plist
+plutil -insert CFBundleURLTypes -json '[{"CFBundleURLName":"Minds Deeplink","CFBundleURLSchemes":["minds"]}]' "$PLIST"
+plutil -replace CFBundleIdentifier -string com.imbue.minds.dev "$PLIST"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -f apps/minds/node_modules/electron/dist/Electron.app
+```
+
+Then start the dev app (its `setAsDefaultProtocolClient` call points the scheme at the patched bundle) and click minds:// links while it is running. The patch lives in `node_modules` (wiped on reinstall, never committed), and a link clicked while the dev app is *not* running launches bare Electron without the app code -- keep the dev app running. Packaged builds need none of this.
+
 Every OS delivery channel -- macOS `open-url` events, Windows/Linux second-instance argv, and cold-start argv -- routes to a single `handleDeeplink` in `main.js`, which parses the URL with the pure `electron/deeplink.js` helpers (unit-tested in `test/unit/deeplink.test.js`). The URL's host names the action:
 
 - `minds://create?git_url=<repo>&branch=<ref>` focuses the most recent window and navigates it to the create-workspace page with the repository pre-filled under advanced settings. `branch` accepts anything the form's Branch input accepts (branch, tag, or commit); when absent, the field keeps the form's default. Values must be percent-encoded by the sender.
