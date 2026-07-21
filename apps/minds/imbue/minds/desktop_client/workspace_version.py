@@ -122,8 +122,11 @@ def _exec_git_in_workspace(
     launch/exec failure as a non-zero ``returncode`` (rather than raising), so
     the best-effort None fallback covers every failure mode.
     """
+    # --no-start: ``mngr exec`` auto-starts a stopped host by default, and a
+    # best-effort version read must not cold-boot a container as a side effect.
+    # The flag precedes ``--``, after which everything is the git command.
     result = mngr_caller.call(
-        ["exec", str(agent_id), "--", *git_args],
+        ["exec", "--no-start", str(agent_id), "--", *git_args],
         timeout=_GIT_EXEC_TIMEOUT_SECONDS,
     )
     if result.is_timed_out or result.returncode != 0:

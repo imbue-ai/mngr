@@ -72,7 +72,10 @@ def build_assist_support_probe_args(workspace_agent_id: AgentId) -> list[str]:
         f"if [ -f {shlex.quote(_ASSIST_SKILL_PATH)} ]; "
         f"then echo {_ASSIST_PRESENT_SENTINEL}; else echo {_ASSIST_ABSENT_SENTINEL}; fi"
     )
-    return ["exec", "--agent", str(workspace_agent_id), check]
+    # --no-start: this probe runs eagerly when the get-help modal opens, and
+    # ``mngr exec`` auto-starts a stopped host by default -- a support check
+    # must never cold-boot a container as a side effect.
+    return ["exec", "--agent", str(workspace_agent_id), check, "--no-start"]
 
 
 def check_assist_support(mngr_caller: MngrCaller, workspace_agent_id: AgentId) -> AssistSupport:
@@ -144,7 +147,10 @@ def build_assist_chat_mngr_args(
     ]
     inner_parts += ["--message", f"/assist {description}"]
     inner_command = shlex.join(inner_parts)
-    return ["exec", "--agent", str(workspace_agent_id), inner_command]
+    # --no-start mirrors the support probe: the create is only reachable after
+    # that probe succeeded (host running), so this guards the stop-race rather
+    # than a real flow -- but a chat create must never cold-boot a host either.
+    return ["exec", "--agent", str(workspace_agent_id), inner_command, "--no-start"]
 
 
 def spawn_assist_chat(

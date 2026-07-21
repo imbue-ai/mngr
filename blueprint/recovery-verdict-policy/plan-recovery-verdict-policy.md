@@ -153,6 +153,14 @@ container):
   Verdict renders also reset each other's residual elements (Retry button,
   provider-error paragraph).
 
+- Background/diagnostic ``mngr exec`` calls in minds pass ``--no-start``
+  (exec auto-starts the host by default): the periodic backup verification
+  check was observed cold-booting a stopped container -- its online gate read
+  the stale replayed RUNNING state -- which invalidated the recovery page's
+  evidence mid-probe (the container came up behind the classifier's back and
+  the page never dispatched or showed the offline restart). Only the recovery
+  flow's dispatched restart and explicit user actions may start a host.
+
 - The STOPPED/CRASHED -> HOST_OFFLINE verdict lost its freshness gate (see
   "Expected behavior" above): requiring a post-onset snapshot made the startup
   sequence crawl through consent-gated and reconnecting states for ~30s when

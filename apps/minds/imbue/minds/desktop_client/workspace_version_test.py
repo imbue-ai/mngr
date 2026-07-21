@@ -1,5 +1,9 @@
 from imbue.minds.desktop_client.workspace_version import parse_git_describe
 from imbue.minds.desktop_client.workspace_version import parse_upgrade_merges
+from imbue.minds.desktop_client.workspace_version import read_workspace_git_version
+from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.mngr.primitives import AgentId
 
 
 def test_parse_git_describe_returns_tag() -> None:
@@ -60,3 +64,21 @@ def test_parse_upgrade_merges_handles_tabs_in_subject() -> None:
 
 def test_parse_upgrade_merges_empty_output_is_empty_tuple() -> None:
     assert parse_upgrade_merges("") == ()
+
+
+def test_version_read_exec_never_starts_a_stopped_host() -> None:
+    """The version read is best-effort diagnostics; its execs must pass --no-start.
+
+    ``mngr exec`` auto-starts a stopped host by default, so without the flag a
+    mere version read of an offline workspace cold-boots its container as a side
+    effect (observed live: a background exec silently started a container the
+    recovery flow believed was stopped). The flag must precede the ``--``
+    separator, after which everything is the in-container command.
+    """
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1))
+    read_workspace_git_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    assert len(caller.calls) == 2
+    for argv in caller.calls:
+        assert argv[0] == "exec"
+        assert "--no-start" in argv
+        assert argv.index("--no-start") < argv.index("--")

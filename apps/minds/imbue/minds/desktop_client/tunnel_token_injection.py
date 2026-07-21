@@ -60,8 +60,11 @@ def clear_tunnel_token_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) ->
     tunnel until the agent stops), which is logged but not fatal. Runs through
     the shared warm-process ``mngr_caller``.
     """
+    # --no-start: deleting the token file from a stopped container is pointless
+    # (the stale file is harmless while stopped, per above), and ``mngr exec``
+    # auto-starts the host by default -- cleanup must not cold-boot anything.
     result = mngr_caller.call(
-        ["exec", str(agent_id), f"rm -f {_TUNNEL_TOKEN_FILE}"],
+        ["exec", str(agent_id), f"rm -f {_TUNNEL_TOKEN_FILE}", "--no-start"],
         timeout=_TUNNEL_TOKEN_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
