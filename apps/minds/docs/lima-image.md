@@ -50,7 +50,7 @@ raw on disk  : 4.9G    # du -h  -- blocks actually allocated
 
 On the real 20 GiB image, the sparse raw occupies **4.9 GiB** on disk against **5.1 GiB** for the equivalent qcow2. qcow2's L1/L2 and refcount tables, plus its 64 KiB cluster granularity, cost more than the filesystem's 4 KiB-granular holes.
 
-Raw is also what desync chunks (qcow2's metadata churn would wreck chunk dedup) and what the signed manifest hashes, so the bytes the signature covers are exactly the bytes Lima boots.
+Raw is also what desync chunks and what the signed manifest hashes, so the bytes the signature covers are exactly the bytes Lima boots. Raw's byte layout is fixed by the guest's own offsets, so a small guest change touches few chunks by construction; a clean uncompressed qcow2 convert chunks about the same, but that property is contingent on the convert (compressed qcow2 or snapshots would churn more), whereas raw guarantees it.
 
 The apparent size is not what anyone downloads. desync stores chunks compressed, so the 20 GiB image (4.9 GiB of real data) becomes a **1.7 GiB** chunk store -- that is the cost of a first install. An upgrade transfers only the chunks that changed, seeded from the image already on disk.
 
