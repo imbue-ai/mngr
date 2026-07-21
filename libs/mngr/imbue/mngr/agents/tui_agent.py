@@ -83,6 +83,14 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         degrades the send to a best-effort Enter.
         """
 
+    def _validate_outgoing_message(self, message: str) -> None:
+        """Reject a message this agent type can never deliver, before anything is sent.
+
+        Default: accept everything. Subclasses may raise ``SendMessageError``
+        for input that is known undeliverable (e.g. a TUI command that opens an
+        interactive panel a headless send cannot drive).
+        """
+
     def _detect_preexisting_input_text(self, pane_content: str) -> str | None:
         """Return leftover input-box text visible in the pane before pasting, if detectable.
 
@@ -133,6 +141,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         warning and records an agent event instead of failing.
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
+            self._validate_outgoing_message(message)
             self._preflight_send_message(self.tmux_target)
             wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
             self._warn_if_preexisting_input_text(self.tmux_target)

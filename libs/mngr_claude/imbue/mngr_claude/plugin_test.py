@@ -84,6 +84,7 @@ from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import InteractivePanelIndicator
 from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
 from imbue.mngr_claude.plugin import ProvisioningContext
+from imbue.mngr_claude.plugin import UndeliverableCommandError
 from imbue.mngr_claude.plugin import _build_claude_install_command
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
@@ -3235,6 +3236,42 @@ def test_interactive_panel_indicator_no_match_ready_footer() -> None:
     """The ready input footer must not be mistaken for a panel."""
     indicator = InteractivePanelIndicator()
     assert indicator.matches(f"❯ \n{_READY_FOOTER}") is False
+
+
+# =============================================================================
+# Panel-command validation tests
+# =============================================================================
+
+
+def test_validate_outgoing_message_declines_panel_commands(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Commands that always open a panel are declined regardless of arguments."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    for message in ("/cost", "/login", "/add-dir /tmp", "  /status  "):
+        with pytest.raises(UndeliverableCommandError, match="interactive panel"):
+            agent._validate_outgoing_message(message)
+
+
+def test_validate_outgoing_message_declines_bare_panel_commands_only_when_bare(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """/model and /effort panel only without arguments; argument forms pass."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    for message in ("/model", "/effort"):
+        with pytest.raises(UndeliverableCommandError):
+            agent._validate_outgoing_message(message)
+    agent._validate_outgoing_message("/model opus")
+    agent._validate_outgoing_message("/effort high")
+
+
+def test_validate_outgoing_message_passes_other_input(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Normal prompts, unknown commands, and user-defined commands are not declined."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    for message in ("run the tests", "/zzznotacommand", "/vet", "/commit-commands:commit", "/clear", ""):
+        agent._validate_outgoing_message(message)
 
 
 # =============================================================================

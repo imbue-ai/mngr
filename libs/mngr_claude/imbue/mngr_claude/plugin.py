@@ -1444,6 +1444,18 @@ class DialogDetectedError(SendMessageError):
         )
 
 
+class UndeliverableCommandError(SendMessageError):
+    """A TUI command that opens an interactive panel a headless send cannot drive."""
+
+    def __init__(self, agent_name: str, command_word: str) -> None:
+        self.command_word = command_word
+        super().__init__(
+            agent_name,
+            f"{command_word!r} opens an interactive panel that cannot be driven over 'mngr message'. "
+            f"Connect to the agent with 'mngr connect {agent_name}' to run it.",
+        )
+
+
 class TrustDialogIndicator(DialogIndicator):
     """Detects the Claude Code workspace trust dialog shown on first launch in a directory."""
 
@@ -2254,6 +2266,42 @@ class ClaudeAgent(
         CostThresholdDialogIndicator(),
         InteractivePanelIndicator(),
     )
+
+    # TUI-local commands verified (Claude Code 2.1.214) to open an interactive
+    # panel over a headless send, regardless of arguments. /login is included
+    # for the unauthenticated case, where it opens an OAuth flow a headless
+    # agent can never complete.
+    _PANEL_COMMANDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "/login",
+            "/cost",
+            "/usage",
+            "/status",
+            "/mcp",
+            "/plugin",
+            "/add-dir",
+            "/config",
+            "/help",
+            "/theme",
+            "/permissions",
+            "/hooks",
+            "/resume",
+            "/memory",
+        }
+    )
+    # Commands that open a panel only when invoked bare; with arguments they
+    # apply directly (e.g. '/model opus', '/effort high') and must pass.
+    _BARE_PANEL_COMMANDS: ClassVar[frozenset[str]] = frozenset({"/model", "/effort"})
+
+    def _validate_outgoing_message(self, message: str) -> None:
+        """Decline TUI commands that open an interactive panel a headless send cannot drive."""
+        tokens = message.strip().split()
+        if len(tokens) == 0 or not tokens[0].startswith("/"):
+            return
+        command_word = tokens[0].lower()
+        has_arguments = len(tokens) > 1
+        if command_word in self._PANEL_COMMANDS or (command_word in self._BARE_PANEL_COMMANDS and not has_arguments):
+            raise UndeliverableCommandError(str(self.name), command_word)
 
     def _build_native_transcript_path_expression(self) -> str:
         """Shell path expression for Claude Code's own session JSONL.

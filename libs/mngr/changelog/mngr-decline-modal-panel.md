@@ -1,0 +1,1 @@
+`InteractiveTuiAgent` gains a `_validate_outgoing_message` hook, called before anything is sent, so an agent type can reject a message it can never deliver (e.g. a TUI command that opens an interactive panel a headless send cannot drive). The default accepts everything.
