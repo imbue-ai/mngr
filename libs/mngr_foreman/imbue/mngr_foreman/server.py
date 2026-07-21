@@ -35,6 +35,8 @@ from imbue.mngr_foreman.agent_registry import AgentRegistry
 from imbue.mngr_foreman.assets import ensure_assets
 from imbue.mngr_foreman.assets import get_asset_dir
 from imbue.mngr_foreman.connection_pool import ConnectionPool
+from imbue.mngr_foreman.harness import TranscriptStrategy
+from imbue.mngr_foreman.harness import transcript_strategy_for
 from imbue.mngr_foreman.input_state import detect_blocking_dialog
 from imbue.mngr_foreman.input_state import is_busy_state
 from imbue.mngr_foreman.input_state import is_permissions_blocked
@@ -47,10 +49,8 @@ from imbue.mngr_foreman.terminal import handle_orchestrator_ws
 from imbue.mngr_foreman.terminal import handle_terminal_ws
 from imbue.mngr_foreman.transcript_images import externalize_event_images
 from imbue.mngr_foreman.transcript_images import get_cached_image
-from imbue.mngr_foreman.transcript_parser import parse_claude_session_lines
 from imbue.mngr_foreman.transcript_tail import ReaderFn
 from imbue.mngr_foreman.transcript_tail import SizeFn
-from imbue.mngr_foreman.transcript_tail import TRANSCRIPT_SUBPATH
 from imbue.mngr_foreman.transcript_tail import TranscriptTailer
 from imbue.mngr_foreman.uploads import MAX_UPLOAD_BYTES
 from imbue.mngr_foreman.uploads import UploadError
@@ -231,7 +231,8 @@ def create_app(
                 mimetype="text/event-stream",
                 headers=_sse_headers(),
             )
-        if agent.type != "claude":
+        strategy = transcript_strategy_for(agent.type)
+        if strategy is None:
             return Response(
                 _sse({"type": "unsupported", "agent_type": agent.type}),
                 mimetype="text/event-stream",
@@ -239,7 +240,7 @@ def create_app(
             )
 
         return Response(
-            _transcript_stream(mngr_ctx, agent, max_tool_output_chars, pool),
+            _transcript_stream(mngr_ctx, agent, strategy, max_tool_output_chars, pool),
             mimetype="text/event-stream",
             headers=_sse_headers(),
         )
@@ -277,13 +278,15 @@ def create_app(
 
     @app.route("/api/agents/<name>/input-state")
     def api_input_state(name: str) -> ResponseReturnValue:
-        # Cheap gate first: only a running claude agent can show a dialog. The
-        # expensive tmux pane capture runs only past this gate.
+        # Cheap gate first: only a chat-supported agent has a meaningful blocking
+        # state. The expensive tmux pane capture runs only past this gate, and only
+        # for a harness that uses it.
         agent = registry.get_agent(name)
-        if agent is None or agent.type != "claude":
+        strategy = transcript_strategy_for(agent.type) if agent is not None else None
+        if agent is None or strategy is None:
             return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "state": None})
         state = str(agent.state.value if hasattr(agent.state, "value") else agent.state).upper()
-        # ``busy`` is mngr's authoritative "claude is generating" signal (RUNNING);
+        # ``busy`` is mngr's authoritative "agent is generating" signal (RUNNING);
         # the chat page uses it to clear a working dot the transcript tail misreads.
         busy = is_busy_state(state)
         if state not in ("RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"):
@@ -291,11 +294,15 @@ def create_app(
         # BLOCKED beats busy in the UI: a mid-turn choice dialog can leave the
         # 'active' marker set (state RUNNING) while a menu is up, so a dialog must
         # win. mngr's own PERMISSIONS signal is a free, pane-less OR with the tmux
-        # ❯ capture -- when it already says PERMISSIONS we skip the capture.
+        # ❯ capture -- when it already says PERMISSIONS we skip the capture. codex
+        # and opencode surface a permission block through that same field but drive
+        # no other run-time menus, so they never need the pane capture.
         if is_permissions_blocked(agent):
             reason: str | None = "permission prompt"
-        else:
+        elif strategy.uses_pane_dialog_detection:
             reason = detect_blocking_dialog(pool, name)
+        else:
+            reason = None
         return jsonify(
             {"blocked": reason is not None, "reason": reason, "running": True, "busy": busy, "state": state}
         )
@@ -395,15 +402,15 @@ def _sse_headers() -> dict[str, str]:
 
 
 def _build_transcript_reader(
-    mngr_ctx: MngrContext, agent: AgentDetails, pool: ConnectionPool
+    mngr_ctx: MngrContext, agent: AgentDetails, subpath: str, pool: ConnectionPool
 ) -> tuple[ReaderFn, SizeFn] | None:
     """Build ``(reader, size_fn)`` over the agent's mirrored transcript file.
 
-    ``reader() -> bytes`` reads the raw-transcript file beneath the resolved
-    ``EventsTarget``'s ``events_path`` parent; ``size_fn() -> int | None`` cheaply
-    stats its byte size over the warm connection pool so the poll can skip the read
-    when nothing changed. The target is refreshed periodically so both survive a
-    host stop/start.
+    ``reader() -> bytes`` reads the transcript file at ``subpath`` beneath the
+    resolved ``EventsTarget``'s ``events_path`` parent (the agent state dir);
+    ``size_fn() -> int | None`` cheaply stats its byte size over the warm
+    connection pool so the poll can skip the read when nothing changed. The target
+    is refreshed periodically so both survive a host stop/start.
     """
     initial_target = try_build_events_target_for_agent(
         mngr_ctx=mngr_ctx,
@@ -421,7 +428,7 @@ def _build_transcript_reader(
 
     def _transcript_path(t: EventsTarget) -> Path:
         assert t.events_path is not None
-        return t.events_path.parent / TRANSCRIPT_SUBPATH
+        return t.events_path.parent / subpath
 
     def reader() -> bytes:
         nonlocal target, refreshed_at
@@ -460,11 +467,12 @@ def _build_transcript_reader(
 def _transcript_stream(
     mngr_ctx: MngrContext,
     agent: AgentDetails,
+    strategy: TranscriptStrategy,
     max_tool_output_chars: int,
     pool: ConnectionPool,
 ) -> Iterator[str]:
     """SSE generator: full backfill, then live events, with periodic heartbeats."""
-    built = _build_transcript_reader(mngr_ctx, agent, pool)
+    built = _build_transcript_reader(mngr_ctx, agent, strategy.subpath, pool)
     if built is None:
         yield _sse({"type": "error", "message": "Agent host is not readable (offline and no volume)."})
         return
@@ -477,7 +485,7 @@ def _transcript_stream(
     def _emit(lines: list[str]) -> Iterator[str]:
         if not lines:
             return
-        events = parse_claude_session_lines(
+        events = strategy.parse(
             lines,
             existing_event_ids=existing_event_ids,
             tool_name_by_call_id=tool_name_by_call_id,

@@ -27,6 +27,7 @@ from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr_foreman.harness import transcript_strategy_for
 
 # How often the discovery loop re-lists agents (the interval *between* passes).
 POLL_INTERVAL_SECONDS: Final[float] = 3.0
@@ -179,5 +180,8 @@ def _agent_to_card(agent: AgentDetails) -> dict:
         "provider": str(agent.host.provider_name),
         "labels": dict(agent.labels),
         "activity_time": activity.isoformat() if activity else None,
-        "is_claude": agent.type == "claude",
+        # Chat (live transcript + composer) is available for any type foreman has a
+        # transcript strategy for (claude, codex, opencode, pi-coding); others are
+        # terminal-only.
+        "supports_chat": transcript_strategy_for(agent.type) is not None,
     }

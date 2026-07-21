@@ -62,28 +62,33 @@ def is_busy_state(state: str | None) -> bool:
 
 
 def waiting_reason_of(agent: AgentDetails) -> str | None:
-    """Read claude's ``waiting_reason`` off the AgentDetails plugin fields, if present.
+    """Read the agent's ``waiting_reason`` off the AgentDetails plugin fields, if present.
 
-    mngr's field generator publishes it under ``plugin.claude.waiting_reason`` (a
-    ``WaitingReason``: PERMISSIONS / END_OF_TURN), populated on the online
-    listing/observe path and absent (None) when the host wasn't probed online. The
-    stored value may be the enum or its serialized string, so normalize to an
-    upper-case string.
+    Each agent plugin's field generator publishes it under its own key --
+    ``plugin.claude.waiting_reason``, ``plugin.codex.waiting_reason``,
+    ``plugin.opencode.waiting_reason`` -- as a ``WaitingReason`` (PERMISSIONS /
+    END_OF_TURN), populated on the online listing/observe path and absent (None)
+    when the host wasn't probed online. The publishing key matches ``agent.type``,
+    so read that key. The stored value may be the enum or its serialized string,
+    so normalize to an upper-case string. A type with no such field simply has no
+    matching block -> None.
     """
     plugin = agent.plugin if isinstance(agent.plugin, dict) else {}
-    claude_fields = plugin.get("claude")
-    if not isinstance(claude_fields, dict):
+    plugin_fields = plugin.get(agent.type)
+    if not isinstance(plugin_fields, dict):
         return None
-    raw = claude_fields.get("waiting_reason")
+    raw = plugin_fields.get("waiting_reason")
     return None if raw is None else str(getattr(raw, "value", raw)).upper()
 
 
 def is_permissions_blocked(agent: AgentDetails) -> bool:
-    """True if mngr already knows claude is blocked on a permission dialog.
+    """True if mngr already knows the agent is blocked on a permission dialog.
 
     A free, pane-less signal (``waiting_reason == PERMISSIONS``): the
-    permissions_waiting marker is set during a live turn. OR'd with the pane ``❯``
-    rule so a permission prompt greys the composer even before / without a capture.
+    permissions_waiting marker is set during a live turn. For claude it is OR'd
+    with the pane ``❯`` rule so a permission prompt greys the composer even
+    before / without a capture; for codex and opencode (which run no other blocking
+    menus) it is the sole needs-input signal.
     """
     reason = waiting_reason_of(agent)
     return reason is not None and "PERMISSIONS" in reason

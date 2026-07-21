@@ -61,7 +61,10 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(2))
+    # +1 for common_transcript_parser.py: skipping a malformed/corrupt JSONL line at
+    # debug level is the same sanctioned pattern the claude parser uses -- a tailed
+    # transcript must not let one bad line abort the whole stream.
+    rc.check_silent_decode_error_catches(_DIR, snapshot(3))
 
 
 # --- Import style ---
