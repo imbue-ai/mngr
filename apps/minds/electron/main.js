@@ -246,6 +246,22 @@ function findBundleForWorkspace(agentId) {
   return null;
 }
 
+// The window whose CURRENT SCREEN is scoped to ``agentId`` -- the workspace
+// itself or its settings / sharing / destroying / recovery screens (tracked by
+// ``currentAccentAgentId``, which follows parseAccentSourceAgentId of the
+// current screen). Wider than findBundleForWorkspace: a window sitting on
+// workspace X's SETTINGS owns X's scope even though it displays no workspace.
+// One window owns a workspace's whole scope: opening the workspace while its
+// settings are open elsewhere (or vice versa) routes to that window instead of
+// splitting the scope across two windows.
+function findBundleForWorkspaceScope(agentId) {
+  if (!agentId) return null;
+  for (const b of bundles) {
+    if (!b.window.isDestroyed() && b.currentAccentAgentId === agentId) return b;
+  }
+  return null;
+}
+
 function getBundleFromEvent(event) {
   if (!event || !event.sender) return null;
   const senderId = event.sender.id;
@@ -1445,13 +1461,19 @@ function navigateBundle(bundle, url) {
   console.log(`[nav] ${selectSurfaceForUrl(absolute)} <- ${absolute}`);
   if (selectSurfaceForUrl(absolute) === SURFACE_CONTENT) {
     const targetAgentId = parseWorkspaceId(absolute);
-    const existing = findBundleForWorkspace(targetAgentId);
+    const existing = findBundleForWorkspace(targetAgentId) || findBundleForWorkspaceScope(targetAgentId);
     if (existing && existing !== bundle) {
-      // Another window owns this workspace: focus it rather than loading a
-      // duplicate. Enforces one-window-per-workspace for EVERY caller
-      // (sidebar/landing rows, notification + deep-link opens, ...).
+      // Another window owns this workspace's SCOPE (the workspace itself, or
+      // its settings / sharing / recovery screens): focus that window and, if
+      // it is not already displaying the workspace (e.g. it sits on the
+      // settings screen), open the workspace THERE. Enforces
+      // one-window-per-workspace-scope for EVERY caller (sidebar/landing
+      // rows, notification + deep-link opens, ...).
       focusBundle(existing);
       closeModal(bundle);
+      if (!isBundleDisplayingWorkspace(existing, targetAgentId)) {
+        navigateBundle(existing, absolute);
+      }
       return;
     }
     if (existing === bundle && isBundleDisplayingWorkspace(bundle, targetAgentId)) {
@@ -1556,6 +1578,21 @@ function navigateBundle(bundle, url) {
     }
     closeModal(bundle);
     return;
+  }
+  // A workspace-scoped local page (settings / sharing / destroying /
+  // recovery) belongs to the window that owns that workspace's scope: if
+  // another window is displaying the workspace (or already sits on one of its
+  // scoped screens), route this navigation there instead of splitting the
+  // scope across two windows (settings here, workspace there).
+  const localScopeAgentId = parseAccentSourceAgentId(absolute);
+  if (localScopeAgentId) {
+    const owner = findBundleForWorkspace(localScopeAgentId) || findBundleForWorkspaceScope(localScopeAgentId);
+    if (owner && owner !== bundle) {
+      focusBundle(owner);
+      closeModal(bundle);
+      navigateBundle(owner, absolute);
+      return;
+    }
   }
   // Trusted local page: the chrome view IS the content. A local page never
   // "displays" a workspace, so clear currentWorkspaceId (releasing the
@@ -2135,9 +2172,15 @@ function reloadCrashedChromeView(bundle) {
 }
 
 function openOrFocusWorkspace(agentId, url) {
-  const existing = findBundleForWorkspace(agentId);
+  // Scope-wide uniqueness: a window sitting on this workspace's settings /
+  // sharing / recovery screen owns the workspace too -- open it THERE rather
+  // than spawning a second window for the same workspace's scope.
+  const existing = findBundleForWorkspace(agentId) || findBundleForWorkspaceScope(agentId);
   if (existing) {
     focusBundle(existing);
+    if (!isBundleDisplayingWorkspace(existing, agentId)) {
+      navigateBundle(existing, toAbsoluteUrl(url || workspaceUrlForAgent(agentId)));
+    }
     return existing;
   }
   const absolute = toAbsoluteUrl(url || workspaceUrlForAgent(agentId));
