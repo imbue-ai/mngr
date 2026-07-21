@@ -7,14 +7,17 @@
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
   "scripts": {
-    "prestart": "node scripts/ensure-binaries.js && pnpm run build:css",
-    "start": "concurrently -k -n css,electron -c blue,green \"pnpm:watch:css\" \"MINDS_DISABLE_CRASHPAD=1 electron .\"",
+    "prestart": "node scripts/ensure-binaries.js && pnpm run build:css && pnpm run build:js",
+    "start": "concurrently -k -n css,js,electron -c blue,magenta,green \"pnpm:watch:css\" \"pnpm:watch:js\" \"MINDS_DISABLE_CRASHPAD=1 electron .\"",
     "build": "node scripts/build.js",
     "build:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --minify",
     "watch:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --watch",
+    "build:js": "esbuild frontend/src/index.ts --bundle --format=iife --target=es2020 --minify --sourcemap --outfile=imbue/minds/desktop_client/static/dist/chrome.bundle.js",
+    "watch:js": "esbuild frontend/src/index.ts --bundle --format=iife --target=es2020 --sourcemap --outfile=imbue/minds/desktop_client/static/dist/chrome.bundle.js --watch",
     "dist": "pnpm build && pnpm exec todesktop build",
     "todesktop:beforeInstall": "./scripts/download-binaries.js",
     "test:unit": "node --test test/unit/*.test.js",
+    "test:frontend": "tsc --noEmit -p frontend && vitest run --config frontend/vitest.config.ts",
     "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
@@ -27,10 +30,16 @@
     "@playwright/test": "1.60.0",
     "@tailwindcss/cli": "4.2.1",
     "@todesktop/cli": "^1.8.0",
+    "@types/mithril": "^2.2.8",
     "concurrently": "9.2.1",
     "electron": "40.10.1",
+    "esbuild": "^0.28.1",
+    "jsdom": "^29.1.1",
+    "mithril": "^2.3.8",
     "playwright": "1.60.0",
-    "tailwindcss": "4.2.1"
+    "tailwindcss": "4.2.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": "24.15.0",

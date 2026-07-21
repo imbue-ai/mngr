@@ -19,6 +19,15 @@
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/dev_styleguide.js" defer></script>
+{# The mithril component bundle + the JS-components smoke mount. This page
+   wraps Base (not ChromeShell), so it loads the bundle tag itself, exactly
+   like the overlay modal pages do. The bundle tag is classic (not deferred)
+   so the inline mount call below -- which runs during parse, mirroring how a
+   converted page's #local-page-scripts mount runs -- finds window.MindsUI. #}
+<script src="/_static/dist/chrome.bundle.js"></script>
+<script>
+  window.MindsUI.mountStyleguideSmoke(document.getElementById('styleguide-js-smoke'));
+</script>
 {% endset %}
 
 {# TOC entries, kept beside the sections they jump to. (id, label) pairs;
@@ -58,6 +67,7 @@
   ("section-header", "Section header"),
   ("dialog-close", "Dialog close button"),
   ("modal", "Modal"),
+  ("js-components", "JS components"),
 ] %}
 
 <Base title="Minds Styleguide" scripts={{ _scripts }}>
@@ -1118,6 +1128,20 @@
         </div>
       </div>
       <div class="mt-1 type-helper text-secondary font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
+    </section>
+
+    {# JS components: the mithril bundle exercised through the full mount
+       protocol (boot-state island + inline mount call + minds:page-teardown
+       listener) -- the live smoke check that window.MindsUI loads, parses the
+       island, and mounts with working event handlers. Later phases add each
+       converted component here as its live catalog. The island id is
+       #minds-boot-state, the one-per-document contract every converted page
+       follows; the mount call sits in this page's scripts block. #}
+    <section id="js-components" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">JS components</h2>
+      <script type="application/json" id="minds-boot-state">{"styleguide_smoke": {"message": "Mounted by window.MindsUI from the #minds-boot-state island."}}</script>
+      <div id="styleguide-js-smoke"></div>
+      <div class="mt-1 type-helper text-secondary font-mono">frontend/src/views/StyleguideSmoke.ts (window.MindsUI.mountStyleguideSmoke)</div>
     </section>
 
     </main>

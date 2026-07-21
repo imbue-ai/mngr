@@ -96,6 +96,12 @@
 {% endset %}
 {% set _body_attrs %}data-is-mac="{{ 'true' if _is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ _mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
+{# The mithril component bundle (window.MindsUI). SHELL script: loaded once
+   per document and never re-executed by the swap engine (a tag inside
+   #local-page-scripts would re-run the IIFE on every swap). Deliberately NOT
+   deferred: page mount calls are inline scripts in #local-page-scripts, which
+   execute during parse -- before any deferred script would run. #}
+<script src="/_static/dist/chrome.bundle.js"></script>
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/backup_health.js" defer></script>
 <script src="/_static/sidebar_workspace_row.js" defer></script>

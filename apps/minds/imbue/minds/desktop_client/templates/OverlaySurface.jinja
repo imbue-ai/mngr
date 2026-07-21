@@ -20,11 +20,20 @@
 
   Args mirror Base (title / body_style / body_attrs / head / scripts);
   ``body_class`` defaults to the shared transparent overlay body.
+
+  Every overlay surface also loads the mithril component bundle
+  (window.MindsUI) ahead of the page's own scripts: overlay modal pages are
+  separate documents, so they cannot rely on the chrome shell's copy of the
+  tag. Classic (not deferred) so inline page scripts can mount immediately.
 #}
+{% set _scripts %}
+<script src="/_static/dist/chrome.bundle.js"></script>
+{{ scripts }}
+{% endset %}
 <Base title={{ title }}
       html_class="no-scrollbar-gutter"
       body_class={{ body_class }}
       body_style={{ body_style }}
       body_attrs={{ body_attrs }}
       head={{ head }}
-      scripts={{ scripts }}>{{ content }}</Base>
+      scripts={{ _scripts }}>{{ content }}</Base>

@@ -285,15 +285,16 @@ minds-test-deployment-only *tests:
 # with a real display can run the underlying pytest directly without xvfb-run.
 # Requires apps/minds/node_modules/ (`cd apps/minds && pnpm install`) and a real
 # ANTHROPIC_API_KEY exported (the api_key path calls the official Anthropic API;
-# the test skips without it). Depends on `minds-css` because the test launches
-# `electron main.js` directly (not via `pnpm start`), so nothing else compiles
-# the gitignored stylesheet. The test lives in the snapshot-resume suite (it
+# the test skips without it). Depends on `minds-css` + `minds-js` because the
+# test launches `electron main.js` directly (not via `pnpm start`), so nothing
+# else compiles the gitignored stylesheet or the gitignored frontend bundle.
+# The test lives in the snapshot-resume suite (it
 # runs in CI in the snapshot offload stage, reusing that image's warm Electron
 # toolchain) but creates its own fresh workspace, so it runs fine locally too.
 # The test itself only consumes the DEFAULT_WORKSPACE_TEMPLATE worktree (erroring if absent), so this
 # recipe first materializes it (paired DEFAULT_WORKSPACE_TEMPLATE branch + vendored mngr) unless an
 # operator worktree is already present, mirroring the CI snapshot bake.
-minds-test-electron *args: minds-css
+minds-test-electron *args: minds-css minds-js
   uv run python -c 'from imbue.minds.desktop_client.default_workspace_template_worktree import materialize_paired_default_workspace_template_worktree; materialize_paired_default_workspace_template_worktree()'
   xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
@@ -310,7 +311,7 @@ minds-test-electron *args: minds-css
 # agent..."); run `just sync-vendor-mngr .external_worktrees/default-workspace-template`
 # first (the minds-dev-workflow does this on every startup).
 # Screenshots of each step land in /tmp/minds-electron-flow/.
-minds-test-electron-flow *args: minds-css
+minds-test-electron-flow *args: minds-css minds-js
   xvfb-run -a uv run --package minds python apps/minds/scripts/electron_full_flow_e2e.py {{args}}
 
 # Compile the minds desktop client's Tailwind v4 stylesheet
@@ -321,6 +322,14 @@ minds-test-electron-flow *args: minds-css
 # to invoke this recipe -- use it after nuking static/ or to force a rebuild.
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
+
+# Compile the minds desktop client's mithril frontend bundle
+# (frontend/src -> static/dist/chrome.bundle.js, minified IIFE) via the pinned
+# esbuild. Same lifecycle as `minds-css`: `just minds-start` builds + watches
+# it live (`prestart` / `watch:js`), and packaged builds compile it in
+# scripts/build.js -- use this to force a standalone rebuild.
+minds-js:
+  bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:js'
 
 alias dwt-worktree := default-workspace-template-worktree
 # Create an independent default-workspace-template checkout nested in the

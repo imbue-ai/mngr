@@ -587,17 +587,20 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
 
 
 def _build_css() -> None:
-    """Compile static/app.css -> static/app.min.css for the current branch.
+    """Compile the branch's static assets: the Tailwind sheet (static/app.css
+    -> static/app.min.css) and the mithril frontend bundle (frontend/src ->
+    static/dist/chrome.bundle.js).
 
     The chrome no longer ships a runtime Tailwind JIT; styles come from the
     compiled sheet, so a capture is only faithful if the sheet was just built
-    from this branch's source. Delegates to the same `build:css` pnpm script
-    used by `just minds-css`, with the pinned Node on PATH.
+    from this branch's source. Delegates to the same `build:css` / `build:js`
+    pnpm scripts used by `just minds-css` / `just minds-js`, with the pinned
+    Node on PATH.
     """
     minds_dir = REPO_ROOT / "apps" / "minds"
-    logger.info("[capture] building app.min.css (pnpm run build:css)")
+    logger.info("[capture] building app.min.css + chrome.bundle.js (pnpm run build:css / build:js)")
     subprocess.run(
-        ["bash", "-c", ". scripts/select_node_version.sh && pnpm run build:css"],
+        ["bash", "-c", ". scripts/select_node_version.sh && pnpm run build:css && pnpm run build:js"],
         cwd=str(minds_dir),
         check=True,
     )

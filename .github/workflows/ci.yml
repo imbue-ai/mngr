@@ -460,6 +460,43 @@ jobs:
         # Electron/Playwright/Xvfb toolchain instead of a dedicated cold job.
         run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release and not minds_snapshot_resume'
 
+  # Minds JS test surface: typecheck + vitest for the mithril frontend
+  # (apps/minds/frontend/), the esbuild bundle build, and the Electron
+  # main-process node unit tests (apps/minds/test/unit). Runs on the
+  # orchestrator, not offload: the offload sandboxes carry no Node/pnpm
+  # toolchain, and this needs only a pnpm install -- no Python venv.
+  test-minds-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.15.0'
+
+      - name: setup pnpm
+        run: |
+          npm install -g pnpm@10.33.4
+          pnpm --version
+
+      - name: pnpm install
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile
+
+      - name: build frontend bundle
+        working-directory: apps/minds
+        run: pnpm run build:js
+
+      - name: frontend typecheck + vitest
+        working-directory: apps/minds
+        run: pnpm run test:frontend
+
+      - name: electron main-process unit tests
+        working-directory: apps/minds
+        run: pnpm run test:unit
+
   # Build a fresh minds-workspace Modal snapshot image, then run the
   # `minds_snapshot_resume` suite against it. Two jobs so the expensive
   # vm_runtime image build (Docker-in-Docker + Electron workspace

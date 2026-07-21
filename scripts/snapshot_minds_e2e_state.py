@@ -405,6 +405,8 @@ def _build_snapshot_image(staged_repo: Path, default_workspace_template_worktree
         # detects a screen advancing via `wait_for_selector(state="hidden")` and
         # the `.hidden` rule lives in that stylesheet, a missing stylesheet makes
         # every onboarding screen look stuck. Mirrors the Electron e2e test setup.
+        # build:js likewise compiles the gitignored mithril frontend bundle
+        # (static/dist/chrome.bundle.js) that the chrome shell loads.
         #
         # The /app -> /code/mngr symlink (independent) works around offload
         # v0.9.7's create_from_image hardcoding workdir="/app": our project is at
@@ -414,7 +416,7 @@ def _build_snapshot_image(staged_repo: Path, default_workspace_template_worktree
             "( cd /code/mngr && uv sync --all-packages ) & UV_PID=$!; "
             "( cd /code/mngr/apps/minds && pnpm install --frozen-lockfile ) & PNPM_PID=$!; "
             "wait $UV_PID && wait $PNPM_PID && "
-            "( cd /code/mngr/apps/minds && pnpm run build:css ) && "
+            "( cd /code/mngr/apps/minds && pnpm run build:css && pnpm run build:js ) && "
             "ln -s /code/mngr /app",
         )
     )

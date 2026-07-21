@@ -90,6 +90,18 @@ function buildCss() {
   execSync('pnpm run build:css', { cwd: ROOT, stdio: 'inherit' });
 }
 
+/**
+ * Compile the desktop client's mithril bundle
+ * (frontend/src -> static/dist/chrome.bundle.js) before the minds wheel is
+ * built. Same story as buildCss(): the bundle is gitignored and force-included
+ * into the wheel via `[tool.hatch.build] artifacts`, so it MUST exist on disk
+ * before buildWorkspaceWheels() runs.
+ */
+function buildJs() {
+  console.log('Compiling frontend bundle (frontend/src -> static/dist/chrome.bundle.js)...');
+  execSync('pnpm run build:js', { cwd: ROOT, stdio: 'inherit' });
+}
+
 function buildWorkspaceWheels() {
   const wheelsDir = path.join(RESOURCES_DIR, 'wheels');
   fs.mkdirSync(wheelsDir, { recursive: true });
@@ -608,6 +620,7 @@ async function main() {
   ]);
 
   buildCss();
+  buildJs();
   bundleLatchkey();
   const wheelByPackage = buildWorkspaceWheels();
   stageRuntimePyproject(wheelByPackage);

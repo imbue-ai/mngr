@@ -9,8 +9,9 @@
  * minds-start`` runs the compiler in ``--watch`` mode for live dev rebuilds.
  *
  * Why explicit sources (``source(none)`` + ``@source`` below): the chrome's
- * Tailwind classes live in three places -- ``.jinja`` templates, the vanilla
- * ``static/*.js`` files, AND Python string constants in ``templates.py``
+ * Tailwind classes live in four places -- ``.jinja`` templates, the vanilla
+ * ``static/*.js`` files, the mithril components in ``apps/minds/frontend/src``,
+ * AND Python string constants in ``templates.py``
  * (``BTN_VARIANTS`` / ``INPUT_BASE`` / ``ICONS_*``). Enumerating them keeps the
  * scan deterministic and off the rest of the monorepo. Classes assembled by
  * string concatenation in JS are NOT detected -- safelist any such case with
@@ -21,6 +22,7 @@
 @source "../templates/**/*.jinja";
 @source "./*.js";
 @source "../templates.py";
+@source "../../../../frontend/src";
 
 /*
  * ---------------------------------------------------------------------------
