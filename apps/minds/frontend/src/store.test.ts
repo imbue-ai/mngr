@@ -11,6 +11,7 @@ import {
   getAccentCacheEntry,
   getEffectiveLiveness,
   getHasAccounts,
+  getRequestCards,
   getRequestIds,
   getRequestsCount,
   getSystemInterfaceStatus,
@@ -155,11 +156,13 @@ describe("provider toggle pending logic", () => {
 });
 
 describe("requests and status events", () => {
-  it("tracks the requests count and ids", () => {
-    applyChromeEvent({ type: "requests", count: 2, request_ids: ["evt-1", "evt-2"], auto_open: false });
+  it("tracks the requests count, ids and cards", () => {
+    const card = { id: "evt-1", kind_label: "permission", ws_name: "ws-a", display_name: "slack", accent: "#112233" };
+    applyChromeEvent({ type: "requests", count: 2, request_ids: ["evt-1", "evt-2"], cards: [card], auto_open: false });
 
     expect(getRequestsCount()).toBe(2);
     expect(getRequestIds()).toEqual(["evt-1", "evt-2"]);
+    expect(getRequestCards()).toEqual([card]);
   });
 
   it("stores non-healthy statuses and drops entries on healthy", () => {
@@ -185,7 +188,7 @@ describe("seed", () => {
         has_accounts: true,
       }),
       providers: providersEvent(null),
-      requests: { type: "requests", count: 1, request_ids: ["evt-1"], auto_open: true },
+      requests: { type: "requests", count: 1, request_ids: ["evt-1"], cards: [], auto_open: true },
       system_interface_statuses: [{ type: "system_interface_status", agent_id: "agent-1", status: "stuck" }],
     };
 
@@ -229,7 +232,7 @@ describe("connect", () => {
     connect(fake.host);
 
     expect(fake.subscriberCount()).toBe(1);
-    fake.emit({ type: "requests", count: 4, request_ids: ["a", "b", "c", "d"], auto_open: true });
+    fake.emit({ type: "requests", count: 4, request_ids: ["a", "b", "c", "d"], cards: [], auto_open: true });
     expect(getRequestsCount()).toBe(4);
   });
 
@@ -239,7 +242,7 @@ describe("connect", () => {
       notifiedCount += 1;
     });
 
-    applyChromeEvent({ type: "requests", count: 1, request_ids: ["evt-1"], auto_open: true });
+    applyChromeEvent({ type: "requests", count: 1, request_ids: ["evt-1"], cards: [], auto_open: true });
 
     expect(notifiedCount).toBe(1);
   });

@@ -56,10 +56,25 @@ export interface ChromeProvidersPayload {
   last_full_snapshot_at: string | null;
 }
 
+// One pending-request card in the inbox's left list.
+export interface ChromeRequestCard {
+  id: string;
+  // Handler-provided request kind (e.g. "permission request").
+  kind_label: string;
+  // The requesting workspace's display name.
+  ws_name: string;
+  // Handler-provided one-line summary of the request.
+  display_name: string;
+  // The workspace accent hex (mirrors the homepage tile's color).
+  accent: string;
+}
+
 export interface ChromeRequestsPayload {
   type: "requests";
   count: number;
   request_ids: string[];
+  // Card summaries, most-recent-first (same order as request_ids).
+  cards: ChromeRequestCard[];
   auto_open: boolean;
 }
 
@@ -129,4 +144,19 @@ export interface LandingBootExtras {
 export interface LandingBootIsland {
   chrome: ChromeBootState;
   landing: LandingBootExtras;
+}
+
+// Inbox-page-specific boot island data (the ``inbox`` sibling of the chrome
+// snapshot; mirror of InboxBootExtras in chrome_state.py).
+export interface InboxBootExtras {
+  // The initially-selected request id (empty for none).
+  selected_id: string;
+  // True only for an intentional whole-inbox open; false dismisses on
+  // resolution instead of advancing to the next pending request.
+  keep_open: boolean;
+}
+
+export interface InboxBootIsland {
+  chrome: ChromeBootState;
+  inbox: InboxBootExtras;
 }

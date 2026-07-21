@@ -249,8 +249,10 @@ export function createBrowserHost(options: BrowserHostOptions): Host {
     closeWindow: () => undefined,
     openModal: (request) => navigate(browserModalUrl(request)),
     closeModal: () => {
-      // Browser-mode modals are full pages until Phase 7; leaving one is a
-      // navigation, so there is nothing to close here.
+      // Browser-mode modals are full pages until Phase 7; dismissing one
+      // means leaving it, so navigate home (the pre-component inbox page's
+      // fallback behavior).
+      navigate("/");
     },
   };
 }

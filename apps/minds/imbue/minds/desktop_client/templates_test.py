@@ -12,9 +12,11 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
+from imbue.minds.desktop_client.chrome_state import ChromeRequestCard
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
@@ -58,6 +60,41 @@ _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 
 
+def _inbox_boot_fixture(cards: tuple[ChromeRequestCard, ...] = ()) -> ChromeBootState:
+    return ChromeBootState(
+        workspaces=ChromeWorkspacesPayload(
+            workspaces=(),
+            destroying_agent_ids=(),
+            destroying_status_by_agent_id={},
+            has_accounts=False,
+            restorable_workspace_ids=(),
+            remote_workspace_states={},
+        ),
+        providers=ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None),
+        requests=ChromeRequestsPayload(
+            count=len(cards),
+            request_ids=tuple(card.id for card in cards),
+            cards=cards,
+            auto_open=True,
+        ),
+        system_interface_statuses=(),
+    )
+
+
+def _inbox_extras_fixture(selected_id: str = "", keep_open: bool = False) -> InboxBootExtras:
+    return InboxBootExtras(selected_id=selected_id, keep_open=keep_open)
+
+
+def _inbox_card_fixture(request_id: str, display_name: str = "slack-api") -> ChromeRequestCard:
+    return ChromeRequestCard(
+        id=request_id,
+        kind_label="permission",
+        ws_name="ws-alpha",
+        display_name=display_name,
+        accent="#112233",
+    )
+
+
 def _landing_entry_fixture(agent_id: AgentId, liveness: str | None = None) -> ChromeWorkspaceEntry:
     return ChromeWorkspaceEntry(
         id=str(agent_id),
@@ -83,7 +120,7 @@ def _landing_boot_fixture(
             remote_workspace_states={},
         ),
         providers=ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None),
-        requests=ChromeRequestsPayload(count=0, request_ids=(), auto_open=True),
+        requests=ChromeRequestsPayload(count=0, request_ids=(), cards=(), auto_open=True),
         system_interface_statuses=(),
     )
 
@@ -899,10 +936,60 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     assert opted_out in render_overlay_host_page()
     assert opted_out in render_sidebar_page()
     assert opted_out in render_help_page(include_logs_setting=False, workspace_agent_id="")
-    assert opted_out in render_inbox_page(cards=())
+    assert opted_out in render_inbox_page(_inbox_boot_fixture(), _inbox_extras_fixture())
     # Normal scrolling content pages keep the reserved gutter so their layout
     # doesn't shift sideways when a classic scrollbar appears.
     assert '<html lang="en">' in render_landing_page(_landing_boot_fixture(()), _landing_extras_fixture())
+
+
+def test_render_inbox_page_island_and_mount() -> None:
+    """The inbox page renders the boot island (chrome cards + inbox extras)
+    before the inline script that mounts InboxList into the left column."""
+    card = _inbox_card_fixture("evt-1")
+    html = render_inbox_page(
+        _inbox_boot_fixture((card,)),
+        _inbox_extras_fixture(selected_id="evt-1", keep_open=True),
+        detail_html="<div>detail</div>",
+    )
+    island = parse_boot_island(html)
+    assert island["chrome"]["requests"]["cards"] == [
+        {
+            "id": "evt-1",
+            "kind_label": "permission",
+            "ws_name": "ws-alpha",
+            "display_name": "slack-api",
+            "accent": "#112233",
+        }
+    ]
+    assert island["inbox"] == {"selected_id": "evt-1", "keep_open": True}
+    assert 'window.MindsUI.mountInboxList(document.getElementById("inbox-left-column")' in html
+    assert html.index('id="minds-boot-state"') < html.index("mountInboxList")
+    # The left column is an empty mount container: no server-rendered cards,
+    # no server-rendered auto-open checkbox (the component renders both).
+    assert "inbox-card" not in html.replace(".inbox-card", "")
+    assert 'id="inbox-auto-open"' not in html
+    # The detail pane stays a server-rendered fragment.
+    assert "<div>detail</div>" in html
+    # The deleted list-refetch driver must not come back.
+    assert "/inbox/list" not in html
+
+
+def test_render_inbox_page_empty_presets_the_collapsed_layout() -> None:
+    """``is_empty`` puts ``is-empty`` on ``#inbox-body`` server-side so the
+    pre-mount layout is already collapsed (the component re-syncs after)."""
+    html = render_inbox_page(_inbox_boot_fixture(), _inbox_extras_fixture(), is_empty=True)
+    tag_start = html.find('id="inbox-body"')
+    tag_end = html.find(">", tag_start)
+    assert tag_start != -1
+    assert "is-empty" in html[tag_start:tag_end]
+    non_empty = render_inbox_page(
+        _inbox_boot_fixture((_inbox_card_fixture("evt-1"),)),
+        _inbox_extras_fixture(),
+        is_empty=False,
+    )
+    tag_start = non_empty.find('id="inbox-body"')
+    tag_end = non_empty.find(">", tag_start)
+    assert "is-empty" not in non_empty[tag_start:tag_end]
 
 
 def test_render_sidebar_page_is_a_positioning_shell_with_a_menu_mount() -> None:

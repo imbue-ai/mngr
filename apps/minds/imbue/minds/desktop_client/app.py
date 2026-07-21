@@ -8,6 +8,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -50,10 +51,12 @@ from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProviderEntry
 from imbue.minds.desktop_client.chrome_state import ChromeProviderStatus
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
+from imbue.minds.desktop_client.chrome_state import ChromeRequestCard
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeSystemInterfaceStatusPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
@@ -126,7 +129,6 @@ from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
-from imbue.minds.desktop_client.templates import render_inbox_list_fragment
 from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_landing_page
@@ -1495,6 +1497,7 @@ def _handle_chrome_events() -> Response:
                 inbox,
                 backend_resolver,
                 is_auto_open=minds_config.get_auto_open_requests_panel() if minds_config else True,
+                request_event_handlers=get_state().request_event_handlers,
             )
             yield "data: {}\n\n".format(json.dumps(last_requests_payload.to_payload_dict()))
 
@@ -1656,6 +1659,7 @@ def _handle_chrome_events() -> Response:
                     inbox,
                     backend_resolver,
                     is_auto_open=minds_config.get_auto_open_requests_panel() if minds_config else True,
+                    request_event_handlers=get_state().request_event_handlers,
                 )
                 # Diff the pending-set summary (count + ordered pending ids), not
                 # just the count, so a change to the pending *set* at constant
@@ -1900,6 +1904,7 @@ def _build_requests_payload(
     inbox: RequestInbox | None,
     backend_resolver: BackendResolverInterface,
     is_auto_open: bool,
+    request_event_handlers: tuple[RequestEventHandler, ...],
 ) -> ChromeRequestsPayload:
     """Build the content-based requests payload pushed over the chrome SSE.
 
@@ -1925,7 +1930,12 @@ def _build_requests_payload(
     """
     pending = _displayable_pending_requests(inbox, backend_resolver)
     request_ids = tuple(str(req.event_id) for req in pending)
-    return ChromeRequestsPayload(count=len(request_ids), request_ids=request_ids, auto_open=is_auto_open)
+    return ChromeRequestsPayload(
+        count=len(request_ids),
+        request_ids=request_ids,
+        cards=tuple(_build_inbox_cards(pending, backend_resolver, request_event_handlers)),
+        auto_open=is_auto_open,
+    )
 
 
 def build_chrome_boot_state() -> ChromeBootState:
@@ -1954,6 +1964,7 @@ def build_chrome_boot_state() -> ChromeBootState:
         state.request_inbox,
         backend_resolver,
         is_auto_open=minds_config.get_auto_open_requests_panel() if minds_config else True,
+        request_event_handlers=state.request_event_handlers,
     )
     tracker = state.system_interface_health_tracker
     status_by_agent_id = tracker.snapshot_all() if tracker is not None else {}
@@ -2481,18 +2492,17 @@ def _handle_workspace_settings(
 # -- Inbox routes --
 
 
-def _build_inbox_cards() -> list[Mapping[str, str]]:
-    """Build the inbox card dicts for the current pending requests.
+def _build_inbox_cards(
+    pending: Sequence[RequestEvent],
+    backend_resolver: BackendResolverInterface,
+    handlers: tuple[RequestEventHandler, ...],
+) -> list[ChromeRequestCard]:
+    """Build the inbox card models for the given pending requests.
 
-    Each card carries the fields the InboxList JinjaX component reads:
-    ``id``, ``kind_label``, ``ws_name``, ``display_name``, ``accent``.
-    Order matches ``RequestInbox.get_pending_requests`` --
-    most-recent-first.
+    Each card carries the fields the InboxList component renders: ``id``,
+    ``kind_label``, ``ws_name``, ``display_name``, ``accent``. Order matches
+    the input -- most-recent-first.
     """
-    inbox: RequestInbox | None = get_state().request_inbox
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    pending = _displayable_pending_requests(inbox, backend_resolver)
-    handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     # Map ws_name -> "homepage agent id" so the card accent matches the
     # color the homepage tile and the titlebar use for that workspace
     # name. Each minds workspace owns two sibling mngr agents -- a
@@ -2508,7 +2518,7 @@ def _build_inbox_cards() -> list[Mapping[str, str]]:
         wn = backend_resolver.get_workspace_name(aid)
         if wn and wn not in primary_agent_id_by_ws_name:
             primary_agent_id_by_ws_name[wn] = str(aid)
-    cards: list[Mapping[str, str]] = []
+    cards: list[ChromeRequestCard] = []
     for req in pending:
         handler = find_handler_for_event(handlers, req)
         if handler is not None:
@@ -2538,13 +2548,13 @@ def _build_inbox_cards() -> list[Mapping[str, str]]:
             else DEFAULT_WORKSPACE_COLOR
         )
         cards.append(
-            {
-                "id": str(req.event_id),
-                "kind_label": kind_label,
-                "ws_name": ws_name,
-                "display_name": display_name,
-                "accent": accent,
-            }
+            ChromeRequestCard(
+                id=str(req.event_id),
+                kind_label=kind_label,
+                ws_name=ws_name,
+                display_name=display_name,
+                accent=accent,
+            )
         )
     return cards
 
@@ -2606,34 +2616,22 @@ def _handle_inbox_page() -> Response:
     if not _is_request_authenticated():
         return make_html_response(content="<p>Not authenticated</p>")
     backend_resolver = get_state().backend_resolver
-    cards = _build_inbox_cards()
     selected_query = request.args.get("selected", "")
     selected_id, detail_html = _resolve_inbox_selection(selected_query, backend_resolver)
-    minds_config: MindsConfig | None = get_state().minds_config
-    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
     # ``keep_open=1`` is set only when the user intentionally opens the whole
     # inbox via the Requests button; without it (notification click, workspace
     # relay, or auto-open on a new request), resolving a request dismisses the
     # whole window rather than advancing to an unrelated stale request.
     keep_open = request.args.get("keep_open") == "1"
+    chrome_boot_state = build_chrome_boot_state()
     return make_html_response(
         content=render_inbox_page(
-            cards=cards,
-            selected_id=selected_id,
+            chrome_boot_state=chrome_boot_state,
+            inbox_extras=InboxBootExtras(selected_id=selected_id, keep_open=keep_open),
             detail_html=detail_html,
-            is_empty=len(cards) == 0,
-            auto_open=auto_open,
-            keep_open=keep_open,
+            is_empty=len(chrome_boot_state.requests.cards) == 0,
         )
     )
-
-
-def _handle_inbox_list_fragment() -> Response:
-    """Return the left-list fragment (``GET /inbox/list``)."""
-    if not _is_request_authenticated():
-        return make_html_response(content="<p>Not authenticated</p>")
-    cards = _build_inbox_cards()
-    return make_html_response(content=render_inbox_list_fragment(cards=cards, selected_id=""))
 
 
 def _handle_inbox_detail_fragment(
@@ -3086,7 +3084,6 @@ def create_desktop_client(
 
     # Request inbox routes
     app.add_url_rule("/inbox", view_func=_handle_inbox_page)
-    app.add_url_rule("/inbox/list", view_func=_handle_inbox_list_fragment)
     app.add_url_rule("/inbox/detail/<request_id>", view_func=_handle_inbox_detail_fragment)
     app.add_url_rule("/_chrome/requests-auto-open", view_func=_handle_requests_auto_open, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])

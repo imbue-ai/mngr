@@ -217,7 +217,7 @@ def _landing_boot(
             remote_workspace_states={},
         ),
         providers=ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None),
-        requests=ChromeRequestsPayload(count=0, request_ids=(), auto_open=True),
+        requests=ChromeRequestsPayload(count=0, request_ids=(), cards=(), auto_open=True),
         system_interface_statuses=(),
     )
 

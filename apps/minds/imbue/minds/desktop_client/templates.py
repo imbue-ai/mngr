@@ -34,6 +34,10 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.chrome_state import ChromeBootState
+from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
+from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
+from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -731,45 +735,31 @@ def render_auth_error_page(message: str) -> str:
 
 @pure
 def render_inbox_page(
-    cards: Sequence[Mapping[str, str]],
-    selected_id: str = "",
+    chrome_boot_state: ChromeBootState,
+    inbox_extras: InboxBootExtras,
     detail_html: str = "",
     is_empty: bool = False,
-    auto_open: bool = True,
-    keep_open: bool = False,
 ) -> str:
     """Render the full inbox modal page served by ``GET /inbox``.
 
-    ``cards`` is the initial left-list content (most-recent-first).
-    ``selected_id`` highlights one card; ``detail_html`` is the
-    pre-rendered right-pane fragment (handler detail, unavailable
-    fragment, or empty). ``is_empty`` is True when there are no
-    pending requests and the layout collapses to a centered message.
-    ``auto_open`` is the initial state of the "Auto-open on new
-    request" checkbox in the inbox header. ``keep_open`` is True only
-    when the user intentionally opened the whole inbox (via the
-    Requests button); when False, resolving a request via Approve/Deny
-    dismisses the whole window instead of advancing to the next
-    pending request.
+    The left list (cards + auto-open footer) is the mithril InboxList
+    component, mounted from the boot island (the chrome snapshot's
+    ``requests.cards`` + the ``inbox`` extras). ``detail_html`` is the
+    pre-rendered right-pane fragment (handler detail, unavailable fragment,
+    or empty) -- the detail pane stays a server-rendered fragment by design.
+    ``is_empty`` sets the pre-mount collapsed layout when there are no
+    pending requests.
     """
+    island = {
+        "chrome": chrome_boot_state.to_payload_dict(),
+        "inbox": inbox_extras.to_payload_dict(),
+    }
     return CATALOG.render(
         "pages.Inbox",
-        cards=cards,
-        selected_id=selected_id,
+        boot_state=island,
         detail_html=detail_html,
         is_empty=is_empty,
-        auto_open=auto_open,
-        keep_open=keep_open,
     )
-
-
-@pure
-def render_inbox_list_fragment(
-    cards: Sequence[Mapping[str, str]],
-    selected_id: str = "",
-) -> str:
-    """Render the inbox left-list fragment served by ``GET /inbox/list``."""
-    return CATALOG.render("InboxList", cards=cards, selected_id=selected_id)
 
 
 @pure
@@ -1726,6 +1716,24 @@ def render_sidebar_page(
 
 
 @pure
+def _empty_chrome_boot_state() -> ChromeBootState:
+    """A no-workspaces chrome snapshot, for warmup renders outside a request."""
+    return ChromeBootState(
+        workspaces=ChromeWorkspacesPayload(
+            workspaces=(),
+            destroying_agent_ids=(),
+            destroying_status_by_agent_id={},
+            has_accounts=False,
+            restorable_workspace_ids=(),
+            remote_workspace_states={},
+        ),
+        providers=ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None),
+        requests=ChromeRequestsPayload(count=0, request_ids=(), cards=(), auto_open=True),
+        system_interface_statuses=(),
+    )
+
+
+@pure
 def warm_template_caches() -> None:
     """Render the hot always-available pages once so their JinjaX compiles are paid at startup.
 
@@ -1742,7 +1750,11 @@ def warm_template_caches() -> None:
         render_sidebar_page,
         render_overlay_host_page,
         lambda: render_help_page(include_logs_setting=False, workspace_agent_id=""),
-        lambda: render_inbox_page(cards=()),
+        lambda: render_inbox_page(
+            chrome_boot_state=_empty_chrome_boot_state(),
+            inbox_extras=InboxBootExtras(selected_id="", keep_open=False),
+            is_empty=True,
+        ),
     ):
         try:
             render()

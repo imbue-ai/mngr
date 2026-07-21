@@ -113,7 +113,7 @@ test.describe('workspace recovery auto-redirect (chrome.js contract)', () => {
       // chrome reload: workspaces, auth, requests -- but NOT the stuck status.
       window.__cb.chromeEvent({ type: 'workspaces', workspaces: [{ id: agentId, name: 'queuetest', account: '' }] });
       window.__cb.chromeEvent({ type: 'auth_status', signedIn: true });
-      window.__cb.chromeEvent({ type: 'requests', count: 0, request_ids: [] });
+      window.__cb.chromeEvent({ type: 'requests', count: 0, request_ids: [], cards: [] });
       // The content view is parked on the stuck workspace's loader.
       window.__cb.currentWorkspace(agentId);
       // The tracker is still STUCK server-side, but its one-shot transition
@@ -128,7 +128,7 @@ test.describe('workspace recovery auto-redirect (chrome.js contract)', () => {
     const nav = await page.evaluate((agentId) => {
       window.__cb.chromeEvent({ type: 'workspaces', workspaces: [{ id: agentId, name: 'queuetest', account: '' }] });
       window.__cb.chromeEvent({ type: 'auth_status', signedIn: true });
-      window.__cb.chromeEvent({ type: 'requests', count: 0, request_ids: [] });
+      window.__cb.chromeEvent({ type: 'requests', count: 0, request_ids: [], cards: [] });
       // THE FIX: the prime now replays the non-healthy status (mirrors
       // primeViewWithCachedChromeState's system_interface_status replay loop).
       window.__cb.chromeEvent({ type: 'system_interface_status', agent_id: agentId, status: 'stuck' });

@@ -1,23 +1,24 @@
-{#def cards, selected_id="", detail_html="", is_empty=False, auto_open=True, keep_open=False #}
+{#def boot_state, detail_html="", is_empty=False #}
 {#
   Inbox modal page. Hosts:
     - Transparent body + dim backdrop (so the desktop client modal view
       reveals the workspace behind the inbox).
-    - Master/detail layout: a left list (#inbox-list) and a right detail
-      pane (#inbox-detail), both swappable via fragment fetches.
-    - The shell JS that owns selection, Approve/Deny + auto-advance,
-      SSE-driven list refresh, and escape/backdrop dismissal.
+    - Master/detail layout: the left pane (#inbox-left-column) is the
+      mithril InboxList component, mounted from the boot island and fed by
+      the chrome ``requests`` payload's card summaries; the right detail
+      pane (#inbox-detail) stays a server-rendered fragment swapped by the
+      component's detail fetches.
+    - The inline script that owns the server fragment's form logic:
+      Approve gating, share-path pickers, grant/deny submission, and
+      escape/backdrop dismissal.
 
-  ``cards`` is the initial pending-request list; ``selected_id`` the id
-  of the initially-selected card; ``detail_html`` is the pre-rendered
-  right-pane HTML (a handler fragment, the "no longer available"
-  fragment, or an empty placeholder). ``is_empty`` is True when there
-  are no pending requests and the layout collapses to a centered
-  message. ``auto_open`` is the initial state of the auto-open checkbox.
-  ``keep_open`` is True only when the user intentionally opened the whole
-  inbox (via the Requests button); when False, resolving a request via
-  Approve/Deny dismisses the whole window rather than advancing to the
-  next pending request (which could be an unrelated stale request).
+  ``boot_state`` is the page's #minds-boot-state island dict: the chrome
+  snapshot under ``chrome`` (its ``requests.cards`` is the initial list)
+  plus the ``inbox`` extras (initially-selected id, keep-open semantics).
+  ``detail_html`` is the pre-rendered right-pane HTML (a handler fragment,
+  the "no longer available" fragment, or an empty placeholder). ``is_empty``
+  is True when there are no pending requests; it sets the pre-mount
+  collapsed layout (the component re-syncs the class after every render).
 #}
 {% set _head %}
   <style>
@@ -98,51 +99,10 @@
   </style>
 {% endset %}
 {% set _scripts %}
+<script type="application/json" id="minds-boot-state">{{ boot_state | tojson }}</script>
 <script>
   (function () {
-    // Whether the user intentionally opened the whole inbox (Requests
-    // button) vs. landed on a single request (notification click,
-    // workspace relay, or auto-open on a new request). When false,
-    // resolving a request dismisses the whole window rather than
-    // advancing to the next pending request -- see advanceAfterResolution.
-    var keepInboxOpen = {% if keep_open %}true{% else %}false{% endif %};
-    var inboxBody = document.getElementById("inbox-body");
-    var inboxList = document.getElementById("inbox-list");
     var inboxDetail = document.getElementById("inbox-detail");
-
-    function closeInbox() {
-      if (window.minds && window.minds.closeModal) {
-        window.minds.closeModal();
-      } else {
-        window.location.href = "/";
-      }
-    }
-    window.closeInbox = closeInbox;
-
-    function onBackdropClick(event) {
-      if (event.target && event.target.id === "inbox-backdrop") closeInbox();
-    }
-    window.onBackdropClick = onBackdropClick;
-
-    // Auto-open toggle. Fire-and-forget POST: the server reads the value
-    // on the next SSE-driven auto-open decision, so the UI doesn't need
-    // to wait for the response. The Electron main process queries the
-    // setting via the chrome SSE ``auto_open`` field on ``requests``
-    // events, which it polls separately.
-    window.onAutoOpenToggle = function (event) {
-      var enabled = !!(event.target && event.target.checked);
-      fetch("/_chrome/requests-auto-open", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: enabled }),
-        keepalive: true,
-      }).catch(function () {});
-    };
-
-    document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") closeInbox();
-    });
 
     // The Adjust toggle (predefined-permission "simple vs editor" view)
     // is the only per-handler script we used to inject; with no per-handler
@@ -278,146 +238,30 @@
       }
     };
 
-    function applyEmptyState() {
-      var hasCards = !!inboxList.querySelector(".inbox-card");
-      if (hasCards) inboxBody.classList.remove("is-empty");
-      else inboxBody.classList.add("is-empty");
-    }
+    // Mount the left pane (cards + auto-open footer). The handle is the
+    // page's glue to selection state and post-resolution advancement; the
+    // component swaps the right pane on selection and calls back here so
+    // the freshly-inserted fragment gets its form logic wired.
+    var inboxList = window.MindsUI.mountInboxList(document.getElementById("inbox-left-column"), {
+      onDetailSwapped: function () {
+        updateApproveState();
+        wireSharePathControls();
+      },
+    });
 
-    function getSelectedId() {
-      var card = inboxList.querySelector(".inbox-card.is-selected");
-      return card ? card.getAttribute("data-request-id") : null;
+    function closeInbox() {
+      inboxList.close();
     }
+    window.closeInbox = closeInbox;
 
-    // Ids of cards whose deny POST is in flight. We mark them with
-    // ``is-denying`` so the user can see the action is in progress and
-    // re-clicks can't reopen the dialog. The set is reconciled with the
-    // DOM after every list refresh: ids that no longer appear are
-    // pruned (server processed the deny), and ids whose cards reappear
-    // have the class re-applied (innerHTML swap wiped it).
-    var denyingIds = new Set();
-
-    function isSelectableCard(el) {
-      return !!el
-        && el.classList
-        && el.classList.contains("inbox-card")
-        && !el.classList.contains("is-denying");
+    function onBackdropClick(event) {
+      if (event.target && event.target.id === "inbox-backdrop") closeInbox();
     }
+    window.onBackdropClick = onBackdropClick;
 
-    function syncDenyingClasses() {
-      var pruned = new Set();
-      denyingIds.forEach(function (id) {
-        var card = inboxList.querySelector('.inbox-card[data-request-id="' + id + '"]');
-        if (card) {
-          card.classList.add("is-denying");
-          pruned.add(id);
-        }
-      });
-      denyingIds = pruned;
-    }
-
-    function findNextPendingId(resolvedId) {
-      // Pick the next selectable card after the resolved one, falling
-      // back to the previous, falling back to any other selectable
-      // card. Operates on the rendered DOM order (most-recent-first,
-      // server-determined). Skips cards that are mid-deny so the user
-      // isn't auto-bounced back into a dialog that's about to vanish.
-      var current = inboxList.querySelector('.inbox-card[data-request-id="' + resolvedId + '"]');
-      if (!current) {
-        var any = inboxList.querySelector(".inbox-card:not(.is-denying)");
-        return any ? any.getAttribute("data-request-id") : null;
-      }
-      var sibling = current.nextElementSibling;
-      while (sibling && !isSelectableCard(sibling)) sibling = sibling.nextElementSibling;
-      if (!sibling) {
-        sibling = current.previousElementSibling;
-        while (sibling && !isSelectableCard(sibling)) sibling = sibling.previousElementSibling;
-      }
-      return sibling ? sibling.getAttribute("data-request-id") : null;
-    }
-
-    async function fetchListFragment() {
-      var resp = await fetch("/inbox/list", { credentials: "same-origin" });
-      if (!resp.ok) return;
-      var html = await resp.text();
-      inboxList.innerHTML = html;
-      syncDenyingClasses();
-      applyEmptyState();
-    }
-
-    async function fetchDetailFragment(id) {
-      var resp = await fetch("/inbox/detail/" + encodeURIComponent(id), { credentials: "same-origin" });
-      if (!resp.ok) {
-        // The server returns 200 with an "unavailable" fragment for stale ids;
-        // anything else is a real error, leave the pane untouched.
-        return;
-      }
-      var html = await resp.text();
-      inboxDetail.innerHTML = html;
-      updateApproveState();
-      wireSharePathControls();
-    }
-
-    function setSelectedCard(id) {
-      inboxList.querySelectorAll(".inbox-card.is-selected").forEach(function (c) {
-        c.classList.remove("is-selected");
-      });
-      if (!id) return;
-      var card = inboxList.querySelector('.inbox-card[data-request-id="' + id + '"]');
-      if (card) card.classList.add("is-selected");
-    }
-
-    function updateUrl(id) {
-      try {
-        // Preserve keep_open so a reload keeps the whole-inbox semantics.
-        var suffix = keepInboxOpen ? (id ? "&keep_open=1" : "?keep_open=1") : "";
-        var target = id ? "/inbox?selected=" + encodeURIComponent(id) + suffix : "/inbox" + suffix;
-        history.replaceState(null, "", target);
-      } catch (e) { /* noop in restricted contexts */ }
-    }
-
-    async function selectItem(id) {
-      setSelectedCard(id);
-      updateUrl(id);
-      if (id) await fetchDetailFragment(id);
-    }
-
-    async function advanceAfterResolution(resolvedId) {
-      if (!keepInboxOpen) {
-        // The inbox was opened for a single request rather than as the
-        // whole inbox, so resolving it dismisses the window instead of
-        // advancing to the next pending request. This avoids surprising
-        // the user with an unrelated stale request suddenly appearing
-        // after they approve/deny. Any in-flight deny POST carries
-        // keepalive:true, so it still completes after the window closes.
-        closeInbox();
-        return;
-      }
-      var nextId = findNextPendingId(resolvedId);
-      await fetchListFragment();
-      if (nextId) {
-        // The list refetch may have dropped the just-resolved card and
-        // shifted indices; re-resolve against the fresh DOM rather
-        // than the pre-fetch sibling guess. Skip denying cards so we
-        // don't auto-bounce into a dialog that's about to vanish.
-        var stillSelectable = inboxList.querySelector(
-          '.inbox-card[data-request-id="' + nextId + '"]:not(.is-denying)',
-        );
-        if (!stillSelectable) {
-          var fallback = inboxList.querySelector(".inbox-card:not(.is-denying)");
-          nextId = fallback ? fallback.getAttribute("data-request-id") : null;
-        }
-      }
-      if (nextId) {
-        await selectItem(nextId);
-      } else {
-        // The user just resolved the last pending request -- nothing
-        // left for them to act on, so dismiss the modal. ``is-denying``
-        // cards still in the list will resolve in the background via
-        // their keepalive POST + the next SSE update.
-        closeInbox();
-      }
-    }
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeInbox();
+    });
 
     // -- Approve / Deny submission --
 
@@ -455,7 +299,7 @@
         if (approveBtn) approveBtn.disabled = true;
         if (denyBtn) denyBtn.disabled = true;
         if (spinner) spinner.classList.remove("hidden");
-        if (label) label.textContent = "Approving\u2026";
+        if (label) label.textContent = "Approving…";
       } else {
         if (denyBtn) denyBtn.disabled = false;
         if (spinner) spinner.classList.add("hidden");
@@ -490,7 +334,7 @@
         }
         var data = await response.json();
         if (data.outcome === "GRANTED" || data.outcome === "DENIED") {
-          await advanceAfterResolution(resolvedId);
+          await inboxList.advanceAfterResolution(resolvedId);
           return;
         }
         if (progress) progress.classList.add("hidden");
@@ -540,16 +384,11 @@
     window.submitPermissionDeny = function () {
       var form = document.getElementById("permissions-form");
       if (!form) return;
-      var resolvedId = getSelectedId();
-      // Mark the card as denying immediately so the list refresh that
-      // follows -- and any re-render before the server has processed
-      // the deny -- shows it faded with a "(denying...)" label rather
-      // than letting the user click it back into the dialog.
-      if (resolvedId) {
-        denyingIds.add(resolvedId);
-        var card = inboxList.querySelector('.inbox-card[data-request-id="' + resolvedId + '"]');
-        if (card) card.classList.add("is-denying");
-      }
+      var resolvedId = inboxList.getSelectedId();
+      // Mark the card as denying immediately so any re-render before the
+      // server has processed the deny shows it faded with a "(denying...)"
+      // label rather than letting the user click it back into the dialog.
+      if (resolvedId) inboxList.markDenying(resolvedId);
       // Disable both buttons so the resolving card can't be re-actioned
       // while the deny POST is in flight and the inbox advances.
       var approveBtn = document.getElementById("permissions-approve-btn");
@@ -565,58 +404,24 @@
         credentials: "same-origin",
         keepalive: true,
       }).catch(function () {});
-      advanceAfterResolution(resolvedId);
+      inboxList.advanceAfterResolution(resolvedId);
     };
 
     // -- Event delegation --
-
-    inboxList.addEventListener("click", function (e) {
-      var card = e.target.closest(".inbox-card");
-      if (!card) return;
-      var id = card.getAttribute("data-request-id");
-      if (id) selectItem(id);
-    });
 
     inboxDetail.addEventListener("submit", function (e) {
       var form = e.target;
       if (!form || form.id !== "permissions-form") return;
       e.preventDefault();
-      submitGrant(form, getSelectedId());
+      submitGrant(form, inboxList.getSelectedId());
     });
 
     inboxDetail.addEventListener("change", function (e) {
       if (e.target && e.target.name === "permissions") updateApproveState();
     });
 
-    // -- SSE-driven list refresh (Electron forwards chrome events) --
-
-    if (window.minds && window.minds.onChromeEvent) {
-      window.minds.onChromeEvent(function (evt) {
-        if (!evt || evt.type !== "requests") return;
-        var currentId = getSelectedId();
-        var newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
-        fetchListFragment().then(function () {
-          if (!currentId) return;
-          if (newIds.indexOf(currentId) === -1) {
-            // The server returns the canonical unavailable fragment for
-            // resolved/unknown ids; let it own the copy rather than
-            // duplicating the message here.
-            fetchDetailFragment(currentId);
-            updateUrl(null);
-          } else {
-            // The selection is still pending, but fetchListFragment
-            // rebuilt the list innerHTML with no card highlighted (the
-            // /inbox/list endpoint is selection-agnostic). Re-apply the
-            // highlight so the user's selection survives the refresh.
-            setSelectedCard(currentId);
-          }
-        });
-      });
-    }
-
     // Initial state: set Approve-button availability for the server-rendered
-    // detail, and pick the right empty/non-empty body class.
-    applyEmptyState();
+    // detail and reveal the native pickers when the bridge offers them.
     updateApproveState();
     wireSharePathControls();
   })();
@@ -661,23 +466,12 @@
         </button>
       </div>
       <div id="inbox-body" class="flex flex-1 min-h-0 {% if is_empty %}is-empty{% endif %}">
-        {# Left column: scrollable cards (or empty placeholder) on top,
-           pinned auto-open footer at the bottom. The footer's horizontal
-           alignment flips based on ``#inbox-body.is-empty`` (centered
-           when empty, left-aligned otherwise). #}
-        <div id="inbox-left-column" class="flex flex-col w-72 border-r border-default bg-fill-subtle">
-          <div id="inbox-list" class="flex-1 overflow-y-auto">
-            <InboxList :cards="cards" :selected_id="selected_id" />
-          </div>
-          <div id="inbox-list-footer" class="border-t border-default px-3 py-2 flex items-center">
-            <label class="type-helper text-secondary cursor-pointer flex items-center gap-1.5">
-              <input type="checkbox" id="inbox-auto-open"
-                     {% if auto_open %}checked{% endif %}
-                     onchange="onAutoOpenToggle(event)">
-              Auto-open on new request
-            </label>
-          </div>
-        </div>
+        {# Left column: the InboxList mount container. The component renders
+           the scrollable card list (or empty placeholder) on top and the
+           pinned auto-open footer at the bottom; the footer's horizontal
+           alignment flips based on ``#inbox-body.is-empty`` (centered when
+           empty, left-aligned otherwise). #}
+        <div id="inbox-left-column" class="flex flex-col w-72 border-r border-default bg-fill-subtle"></div>
         <div id="inbox-detail" class="flex-1 overflow-y-auto p-6 sm:p-6">
           {{ detail_html|safe }}
         </div>

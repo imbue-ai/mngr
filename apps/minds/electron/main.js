@@ -112,9 +112,9 @@ const CHROME_CRASHED_PAGE_FILE = path.join(__dirname, 'chrome-crashed.html');
 
 // Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
 // burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
-// re-post the chrome-event multiple times in flight; the inbox shell would
-// queue several /inbox/list fetches and waste backend HTTP load by
-// (open windows) x (events).
+// re-post the chrome-event multiple times in flight; each post redraws the
+// store-fed inbox list, so coalescing keeps it to one redraw per burst per
+// open window.
 const INBOX_LIST_REFRESH_DEBOUNCE_MS = 50;
 
 // -- Per-window bundle registry --
@@ -146,10 +146,12 @@ let hasCompletedInitialStart = false;
 // chrome and modal webContents (which may host the sidebar, inbox, or any
 // future overlay page) can be primed without opening their own SSE connection.
 const latestChromeState = {
-  workspaces: null, // most recent workspaces payload
+  workspaces: null, // most recent workspaces array (main's own name/account lookups)
+  workspacesEvent: null, // most recent FULL workspaces payload, replayed verbatim into (re)loaded views
   authStatus: null, // most recent auth_status payload
   requestCount: 0,  // most recent pending-request count
   requestIds: [],   // most recent ordered list of pending request ids
+  requestsEvent: null, // most recent FULL requests payload (ids + cards + auto_open), replayed verbatim
 };
 
 const chromeSseAbortRef = { current: null };
@@ -1690,17 +1692,22 @@ function sendOverlayCommand(bundle, cmd) {
 // current state immediately rather than waiting for the next SSE push. Mirrors
 // primeViewWithCachedChromeState, but fans out per-frame (see sendToOverlayFrames).
 function primeOverlayFrames(bundle) {
-  if (latestChromeState.workspaces !== null) {
-    sendToOverlayFrames(bundle, 'chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
+  if (latestChromeState.workspacesEvent !== null) {
+    sendToOverlayFrames(bundle, 'chrome-event', latestChromeState.workspacesEvent);
   }
   if (latestChromeState.authStatus) {
     sendToOverlayFrames(bundle, 'chrome-event', latestChromeState.authStatus);
   }
-  sendToOverlayFrames(bundle, 'chrome-event', {
-    type: 'requests',
-    count: latestChromeState.requestCount,
-    request_ids: latestChromeState.requestIds,
-  });
+  // Replay the full cached payload (ids + cards + auto_open): the store-fed
+  // inbox list renders straight from ``cards``, so a partial reconstruction
+  // here would wipe the list an iframe just seeded from its boot island.
+  sendToOverlayFrames(
+    bundle,
+    'chrome-event',
+    latestChromeState.requestsEvent !== null
+      ? latestChromeState.requestsEvent
+      : { type: 'requests', count: 0, request_ids: [], cards: [], auto_open: true },
+  );
   for (const [agentId, status] of systemInterfaceStatusByAgent) {
     if (!status || status === 'healthy') continue;
     sendToOverlayFrames(bundle, 'chrome-event', { type: 'system_interface_status', agent_id: agentId, status });
@@ -2028,9 +2035,8 @@ function toggleHelp(bundle, agentId, assistAvailable) {
   else openHelp(bundle, agentId, undefined, assistAvailable);
 }
 
-// Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
-// doesn't queue several /inbox/list fetches when a burst of requests
-// events arrives in quick succession.
+// Coalesce rapid SSE-triggered chrome-event posts so the store-fed inbox
+// list redraws once per burst of requests events rather than once per event.
 function scheduleInboxListRefresh(bundle, evt) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (!isInboxModalOpen(bundle)) return;
@@ -2515,7 +2521,7 @@ function restoreWindowBounds(bundle, entry) {
 // Every chrome and (formerly) sidebar view used to open its own
 // EventSource to /_chrome/events. Chromium caps same-host HTTP/1.1
 // connections at 6, so with a couple of workspace windows + sidebars,
-// subsequent requests (/_chrome/sidebar, /inbox/list, home navigation)
+// subsequent requests (modal page loads, home navigation)
 // would queue behind the SSE streams -- load-finish latencies could
 // creep from 50ms to 8+ seconds. Running one SSE connection in the main
 // process and broadcasting events via IPC avoids the exhaustion entirely.
@@ -2531,6 +2537,7 @@ function handleChromeSSEEvent(evt) {
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
     const oldIds = new Set(workspaceList.map((w) => w.id));
     latestChromeState.workspaces = evt.workspaces;
+    latestChromeState.workspacesEvent = evt;
     workspaceList = evt.workspaces.map((w) => ({
       id: String(w.id),
       name: w.name ? String(w.name) : '',
@@ -2626,6 +2633,7 @@ function handleChromeSSEEvent(evt) {
     const idsChanged = newIds.length !== prevIds.length || hasNewRequest;
     latestChromeState.requestIds = newIds;
     latestChromeState.requestCount = newCount;
+    latestChromeState.requestsEvent = evt;
     const shouldAutoOpen = autoOpen && hasNewRequest;
     // When the inbox modal is already open in a bundle, forward the
     // chrome-event to its shell JS (debounced) so the master list
@@ -2703,17 +2711,20 @@ function broadcastChromeEvent(evt) {
 
 function primeViewWithCachedChromeState(bundle, wc) {
   if (!wc || wc.isDestroyed()) return;
-  if (latestChromeState.workspaces !== null) {
-    wc.send('chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
+  if (latestChromeState.workspacesEvent !== null) {
+    wc.send('chrome-event', latestChromeState.workspacesEvent);
   }
   if (latestChromeState.authStatus) {
     wc.send('chrome-event', latestChromeState.authStatus);
   }
-  wc.send('chrome-event', {
-    type: 'requests',
-    count: latestChromeState.requestCount,
-    request_ids: latestChromeState.requestIds,
-  });
+  // Full cached payload for the same reason as primeOverlayFrames: the
+  // store-fed views consume every field, not just count + ids.
+  wc.send(
+    'chrome-event',
+    latestChromeState.requestsEvent !== null
+      ? latestChromeState.requestsEvent
+      : { type: 'requests', count: 0, request_ids: [], cards: [], auto_open: true },
+  );
   // Replay the latest non-healthy system-interface status for each agent so a
   // freshly (re)loaded chrome/sidebar view re-learns which workspaces are
   // stuck / restarting. Unlike the events above, per-agent health is NOT held

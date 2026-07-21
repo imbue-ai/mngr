@@ -14,6 +14,7 @@ import type {
   ChromeBootState,
   ChromeEvent,
   ChromeProvidersPayload,
+  ChromeRequestCard,
   ChromeWorkspaceEntry,
 } from "./chrome_state";
 import type { Host } from "./host";
@@ -53,6 +54,7 @@ interface StoreState {
   pendingProviderToggleClickedAtByName: Record<string, number>;
   requestsCount: number;
   requestIds: string[];
+  requestCards: ChromeRequestCard[];
   isRequestsAutoOpen: boolean;
   // agent id -> non-healthy AgentHealth value; healthy agents carry no entry.
   systemInterfaceStatusByAgentId: Record<string, string>;
@@ -103,6 +105,7 @@ function initialState(): StoreState {
     pendingProviderToggleClickedAtByName: {},
     requestsCount: 0,
     requestIds: [],
+    requestCards: [],
     isRequestsAutoOpen: true,
     systemInterfaceStatusByAgentId: {},
     discoveryHealth: null,
@@ -178,6 +181,10 @@ export function getRequestsCount(): number {
 
 export function getRequestIds(): string[] {
   return state.requestIds;
+}
+
+export function getRequestCards(): ChromeRequestCard[] {
+  return state.requestCards;
 }
 
 export function isRequestsAutoOpen(): boolean {
@@ -356,6 +363,7 @@ export function applyChromeEvent(event: ChromeEvent): void {
     case "requests": {
       state.requestsCount = event.count;
       state.requestIds = event.request_ids;
+      state.requestCards = event.cards;
       state.isRequestsAutoOpen = event.auto_open;
       break;
     }

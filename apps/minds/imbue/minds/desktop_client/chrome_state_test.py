@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProviderEntry
 from imbue.minds.desktop_client.chrome_state import ChromeProviderStatus
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
+from imbue.minds.desktop_client.chrome_state import ChromeRequestCard
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeSystemInterfaceStatusPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
@@ -177,11 +178,42 @@ def test_providers_payload_empty_default_matches_legacy_bytes() -> None:
     )
 
 
-def test_requests_payload_matches_legacy_bytes() -> None:
-    payload = ChromeRequestsPayload(count=2, request_ids=("evt-1", "evt-2"), auto_open=False)
+def test_requests_payload_wire_shape() -> None:
+    payload = ChromeRequestsPayload(
+        count=2,
+        request_ids=("evt-1", "evt-2"),
+        cards=(
+            ChromeRequestCard(
+                id="evt-1", kind_label="permission", ws_name="ws-a", display_name="slack-api", accent="#112233"
+            ),
+            ChromeRequestCard(id="evt-2", kind_label="sharing", ws_name="ws-b", display_name="~/x", accent="#445566"),
+        ),
+        auto_open=False,
+    )
 
     assert _dumps(payload.to_payload_dict()) == _dumps(
-        {"type": "requests", "count": 2, "request_ids": ["evt-1", "evt-2"], "auto_open": False}
+        {
+            "type": "requests",
+            "count": 2,
+            "request_ids": ["evt-1", "evt-2"],
+            "cards": [
+                {
+                    "id": "evt-1",
+                    "kind_label": "permission",
+                    "ws_name": "ws-a",
+                    "display_name": "slack-api",
+                    "accent": "#112233",
+                },
+                {
+                    "id": "evt-2",
+                    "kind_label": "sharing",
+                    "ws_name": "ws-b",
+                    "display_name": "~/x",
+                    "accent": "#445566",
+                },
+            ],
+            "auto_open": False,
+        }
     )
 
 
@@ -212,7 +244,7 @@ def test_boot_state_bundles_the_event_payloads_by_name() -> None:
             remote_workspace_states={},
         ),
         providers=ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None),
-        requests=ChromeRequestsPayload(count=0, request_ids=(), auto_open=True),
+        requests=ChromeRequestsPayload(count=0, request_ids=(), cards=(), auto_open=True),
         system_interface_statuses=(ChromeSystemInterfaceStatusPayload(agent_id="agent-1", status="healthy"),),
     )
 

@@ -156,6 +156,20 @@ class ChromeProvidersPayload(FrozenModel):
         }
 
 
+class ChromeRequestCard(FrozenModel):
+    """One pending-request card in the inbox's left list."""
+
+    id: str = Field(description="The request event id")
+    kind_label: str = Field(description="Handler-provided request kind (e.g. 'permission request')")
+    ws_name: str = Field(description="The requesting workspace's display name")
+    display_name: str = Field(description="Handler-provided one-line summary of the request")
+    accent: str = Field(description="The workspace accent hex (mirrors the homepage tile's color)")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class ChromeRequestsPayload(FrozenModel):
     """The ``requests`` SSE event (pending permission-request inbox summary)."""
 
@@ -163,6 +177,9 @@ class ChromeRequestsPayload(FrozenModel):
     count: int = Field(description="Number of displayable pending requests (the badge number)")
     request_ids: tuple[str, ...] = Field(
         description="Pending request event ids in deterministic order (the panel-refresh diff signal)"
+    )
+    cards: tuple[ChromeRequestCard, ...] = Field(
+        description="Card summaries for the inbox's left list, most-recent-first (same order as request_ids)"
     )
     auto_open: bool = Field(description="Whether the shell should auto-open the panel on new requests")
 
@@ -202,6 +219,18 @@ class LandingBootExtras(FrozenModel):
     is_discovering: bool = Field(
         description="Initial discovery still running with no rows yet (the 'Discovering agents...' state)"
     )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class InboxBootExtras(FrozenModel):
+    """Inbox-page-specific boot island data (the ``inbox`` sibling of the
+    chrome snapshot)."""
+
+    selected_id: str = Field(description="The initially-selected request id (empty for none)")
+    keep_open: bool = Field(description="True only for an intentional whole-inbox open; false dismisses on resolution")
 
     @pure
     def to_payload_dict(self) -> dict[str, Any]:

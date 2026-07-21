@@ -7,6 +7,7 @@
 // section (never from #local-page-scripts, which would re-run it per swap);
 // the per-page mount calls live in #local-page-scripts.
 import { setAccentScopeAgentId, setContentUrl, setDisplayedWorkspaceAgentId } from "./store";
+import { mountInboxList } from "./views/InboxList";
 import { mountLanding } from "./views/LandingPage";
 import { mountStyleguidePrimitives, mountStyleguideWorkspaceRows } from "./views/StyleguideRows";
 import { mountStyleguideSmoke } from "./views/StyleguideSmoke";
@@ -14,6 +15,7 @@ import { mountTitleBar } from "./views/TitleBar";
 import { mountWorkspaceMenu } from "./views/WorkspaceMenu";
 
 export interface MindsUINamespace {
+  mountInboxList: typeof mountInboxList;
   mountLanding: typeof mountLanding;
   mountStyleguideSmoke: typeof mountStyleguideSmoke;
   mountStyleguidePrimitives: typeof mountStyleguidePrimitives;
@@ -35,6 +37,7 @@ declare global {
 }
 
 window.MindsUI = {
+  mountInboxList,
   mountLanding,
   mountStyleguideSmoke,
   mountStyleguidePrimitives,

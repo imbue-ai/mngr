@@ -139,7 +139,7 @@ describe("browser host", () => {
     host.onChromeEvent((event) => received.push(event));
     expect(sources).toHaveLength(1);
 
-    sources[0].emitMessage(JSON.stringify({ type: "requests", count: 1, request_ids: ["e"], auto_open: true }));
+    sources[0].emitMessage(JSON.stringify({ type: "requests", count: 1, request_ids: ["e"], cards: [], auto_open: true }));
 
     expect(received).toHaveLength(2);
     expect(received[0].type).toBe("requests");

@@ -107,7 +107,7 @@ describe("TitleBar", () => {
     const container = mountBar(recordingHost().host);
     expect(container.querySelector("#requests-badge")).toBeNull();
 
-    applyChromeEvent({ type: "requests", count: 150, request_ids: [], auto_open: true });
+    applyChromeEvent({ type: "requests", count: 150, request_ids: [], cards: [], auto_open: true });
     m.redraw.sync();
 
     expect(container.querySelector("#requests-badge")?.textContent).toBe("99+");

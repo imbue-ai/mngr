@@ -1014,9 +1014,9 @@ class _AllAgentsKnownStaticResolver(StaticBackendResolver):
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    expected = ChromeRequestsPayload(count=0, request_ids=(), auto_open=True)
-    assert _build_requests_payload(None, resolver, is_auto_open=True) == expected
-    assert _build_requests_payload(RequestInbox(), resolver, is_auto_open=True) == expected
+    expected = ChromeRequestsPayload(count=0, request_ids=(), cards=(), auto_open=True)
+    assert _build_requests_payload(None, resolver, is_auto_open=True, request_event_handlers=()) == expected
+    assert _build_requests_payload(RequestInbox(), resolver, is_auto_open=True, request_event_handlers=()) == expected
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1026,7 +1026,9 @@ def test_build_requests_payload_carries_pending_ids() -> None:
         agent_id=agent_id, scope="slack-api", rationale="post updates"
     )
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload = _build_requests_payload(RequestInbox().add_request(event), resolver, is_auto_open=True)
+    payload = _build_requests_payload(
+        RequestInbox().add_request(event), resolver, is_auto_open=True, request_event_handlers=()
+    )
     assert payload.count == 1
     assert payload.request_ids == (str(event.event_id),)
 
@@ -1058,8 +1060,8 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
     ).add_request(request_b)
 
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload_a = _build_requests_payload(inbox_with_a, resolver, is_auto_open=True)
-    payload_b = _build_requests_payload(inbox_with_b, resolver, is_auto_open=True)
+    payload_a = _build_requests_payload(inbox_with_a, resolver, is_auto_open=True, request_event_handlers=())
+    payload_b = _build_requests_payload(inbox_with_b, resolver, is_auto_open=True, request_event_handlers=())
     assert payload_a.count == payload_b.count == 1
     assert payload_a != payload_b
     assert payload_b.request_ids == (str(request_b.event_id),)
@@ -1435,16 +1437,21 @@ def test_inbox_empty_state(tmp_path: Path) -> None:
     response = client.get("/inbox")
     assert response.status_code == 200
     body = response.text
-    assert "No pending requests" in body
-    # The ``is-empty`` class must be on the ``inbox-body`` element itself.
-    # The substring appears unconditionally inside the page's <style> block
-    # (rules keyed on ``inbox-body.is-empty``), so target the opening tag's
-    # attribute span specifically.
+    # The list is client-rendered from the island; with nothing pending the
+    # chrome snapshot carries no cards (the component shows the placeholder).
+    island = parse_boot_island(body)
+    assert island["chrome"]["requests"]["cards"] == []
+    assert island["inbox"] == {"selected_id": "", "keep_open": False}
+    # The ``is-empty`` class must be on the ``inbox-body`` element itself so
+    # the pre-mount layout is already collapsed. The substring appears
+    # unconditionally inside the page's <style> block (rules keyed on
+    # ``inbox-body.is-empty``), so target the opening tag's attribute span
+    # specifically.
     tag_start = body.find('id="inbox-body"')
     tag_end = body.find(">", tag_start)
     assert tag_start != -1
     assert "is-empty" in body[tag_start:tag_end]
-    # Should not include any inbox-card markup when empty.
+    # Should not include any server-rendered inbox-card markup when empty.
     assert 'class="inbox-card' not in body
 
 
@@ -1531,11 +1538,11 @@ def test_inbox_master_detail_renders_first_pending_by_default(tmp_path: Path) ->
     assert response.status_code == 200
     body = response.text
 
-    # The list contains a card with the event's id as a data attribute.
-    assert f'data-request-id="{event.event_id}"' in body
-    # The empty-state placeholder must not be present when the inbox has
-    # pending items.
-    assert "No pending requests" not in body
+    # The island's card list contains the pending event, and the extras mark
+    # it as the initial selection.
+    island = parse_boot_island(body)
+    assert [card["id"] for card in island["chrome"]["requests"]["cards"]] == [str(event.event_id)]
+    assert island["inbox"]["selected_id"] == str(event.event_id)
     # The right-pane detail fragment was composed server-side and includes
     # the rationale.
     assert "Need to post status updates" in body
@@ -1557,9 +1564,11 @@ def test_inbox_preselects_query_param(tmp_path: Path) -> None:
     response = client.get(f"/inbox?selected={first.event_id}")
     assert response.status_code == 200
     body = response.text
-    # The selected card carries the ``is-selected`` class.
-    assert "is-selected" in body
-    assert f'data-request-id="{first.event_id}"' in body
+    island = parse_boot_island(body)
+    # Both pending cards ride the island; the extras select the requested one.
+    card_ids = {card["id"] for card in island["chrome"]["requests"]["cards"]}
+    assert card_ids == {str(first.event_id), str(second.event_id)}
+    assert island["inbox"]["selected_id"] == str(first.event_id)
     # The server-rendered detail shows the selected request's rationale, not
     # the default-first-pending one.
     assert "first request" in body
@@ -1581,39 +1590,20 @@ def test_inbox_stale_selected_renders_unavailable(tmp_path: Path) -> None:
     body = response.text
     # The right pane shows the "no longer available" message...
     assert "no longer available" in body
-    # ...but the list still includes the legitimate pending card so the
+    # ...but the island still carries the legitimate pending card so the
     # user can pick another item.
-    assert f'data-request-id="{event.event_id}"' in body
+    island = parse_boot_island(body)
+    assert [card["id"] for card in island["chrome"]["requests"]["cards"]] == [str(event.event_id)]
 
 
-def test_inbox_list_fragment_returns_just_the_list(tmp_path: Path) -> None:
-    """``GET /inbox/list`` returns the left-list fragment without a full HTML doc."""
-    agent_id = str(AgentId())
-    event = create_latchkey_predefined_permission_request_event(
-        agent_id=agent_id, scope="slack-api", rationale="for testing"
-    )
-    request_inbox = RequestInbox().add_request(event)
-    client, _ = _build_inbox_test_app(tmp_path, request_inbox)
-
-    response = client.get("/inbox/list")
-    assert response.status_code == 200
-    body = response.text
-    assert f'data-request-id="{event.event_id}"' in body
-    # Fragment-only: no <html>, no <body>, no backdrop.
-    assert "<html" not in body
-    assert "<body" not in body
-    assert "inbox-backdrop" not in body
-
-
-def test_inbox_list_fragment_empty_returns_placeholder(tmp_path: Path) -> None:
-    """``GET /inbox/list`` with no pending requests returns the placeholder."""
+def test_inbox_list_route_removed(tmp_path: Path) -> None:
+    """``GET /inbox/list`` is gone: the left list is client-rendered from the
+    chrome ``requests`` payload's card summaries, so there is no fragment
+    refetch endpoint anymore."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get("/inbox/list")
-    assert response.status_code == 200
-    body = response.text
-    assert "inbox-empty-placeholder" in body
-    assert "No pending requests" in body
+    assert response.status_code == 404
 
 
 def test_inbox_detail_fragment_returns_just_the_detail(tmp_path: Path) -> None:
@@ -1648,45 +1638,20 @@ def test_inbox_detail_fragment_for_unknown_id_returns_unavailable_200(tmp_path: 
     assert "no longer available" in response.text
 
 
-def test_inbox_auto_open_checkbox_reflects_config(tmp_path: Path) -> None:
-    """The header checkbox is pre-checked when the config has auto-open enabled."""
+def test_inbox_auto_open_setting_reflects_config_in_island(tmp_path: Path) -> None:
+    """The auto-open checkbox is client-rendered from the island's chrome
+    ``requests.auto_open``, which must reflect the config setting."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
-    # Default (no config write): auto-open is True, checkbox is checked.
+    # Default (no config write): auto-open is True.
     response = client.get("/inbox")
-    body = response.text
-    assert 'id="inbox-auto-open"' in body
-    assert "checked" in body[body.find('id="inbox-auto-open"') : body.find(">", body.find('id="inbox-auto-open"'))]
+    assert parse_boot_island(response.text)["chrome"]["requests"]["auto_open"] is True
 
-    # Flip the setting to False and confirm the checkbox renders unchecked.
+    # Flip the setting to False and confirm the island follows.
     config = MindsConfig(data_dir=tmp_path)
     config.set_auto_open_requests_panel(False)
     response = client.get("/inbox")
-    body = response.text
-    tag_start = body.find('id="inbox-auto-open"')
-    tag_end = body.find(">", tag_start)
-    assert "checked" not in body[tag_start:tag_end]
-
-
-def test_inbox_shell_reapplies_selection_after_list_refresh(tmp_path: Path) -> None:
-    """The inbox shell JS re-applies the highlight after an SSE-driven list refresh.
-
-    Regression guard: ``/inbox/list`` is selection-agnostic and always
-    renders with ``selected_id=""``. When an SSE ``requests`` event arrives
-    and ``fetchListFragment()`` rebuilds the list innerHTML, the previously
-    highlighted card loses its ``.is-selected`` class. If the selection is
-    still in the new pending set, the shell must call
-    ``setSelectedCard(currentId)`` to restore the highlight; otherwise the
-    user sees their selection visibly disappear despite not changing it.
-    """
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-    response = client.get("/inbox")
-    assert response.status_code == 200
-    body = response.text
-    # The SSE handler must call setSelectedCard(currentId) in the
-    # "selection still pending" branch.
-    assert "setSelectedCard(currentId)" in body
+    assert parse_boot_island(response.text)["chrome"]["requests"]["auto_open"] is False
 
 
 def test_inbox_shell_disables_both_buttons_and_spins_during_approval(tmp_path: Path) -> None:
