@@ -159,6 +159,8 @@ container):
   the replayed topology already read STOPPED, for no safety benefit the
   idempotent `mngr start` dispatch did not already provide.
 
+## Changes
+
 mngr layer (`libs/mngr`, `libs/mngr_imbue_cloud`, `libs/mngr_lima`):
 
 - `HostState` gains `UNREACHABLE`: "the host answered but rejected our access;
