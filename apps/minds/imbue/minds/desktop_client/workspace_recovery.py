@@ -526,7 +526,7 @@ def probe_workspace_health(
         host_state_enum = backend_resolver.get_host_state(HostId(display_info.host_id))
         host_state = host_state_enum.value if host_state_enum is not None else ""
     classification_is_trustworthy = is_recovery_classification_trustworthy(backend_resolver, tracker, agent_id)
-    return build_host_health_response(
+    response = build_host_health_response(
         host_state=host_state,
         services_agent_id=services_agent_id,
         in_container_stdout=in_container_stdout,
@@ -539,3 +539,18 @@ def probe_workspace_health(
         probe_exec_attempted=probe_exec_attempted,
         classification_is_trustworthy=classification_is_trustworthy,
     )
+    # One line per probe with the classifier's inputs: the tier alone (logged at
+    # the route) cannot explain WHY a verdict fired -- reconstructing a
+    # multi-probe sequence (e.g. unresponsive -> indeterminate -> offline at app
+    # startup) needs the host state, trust, and exec outcome that produced each.
+    logger.info(
+        "Host-health probe inputs for {}: host_state={!r} trusted={} exec_attempted={} timed_out={} provider_error={} -> {}",
+        agent_id,
+        host_state,
+        classification_is_trustworthy,
+        probe_exec_attempted,
+        probe_timed_out,
+        provider_error_message is not None,
+        response.dispatch_tier.value,
+    )
+    return response

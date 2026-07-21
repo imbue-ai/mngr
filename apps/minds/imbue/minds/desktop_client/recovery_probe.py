@@ -365,13 +365,16 @@ _OBSERVED_RUNNING_STATES: Final[frozenset[str]] = frozenset({_RUNNING_STATE, "UN
 # diverge in treatment (STOPPED/CRASHED auto-restart, FAILED is consent-gated,
 # STOPPING is transitional).
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
-# Host states that justify an *unattended* host restart when the observation is
-# trusted: the container was positively observed not running and is not in
-# transition, so there is no live work to interrupt. In-app stops close their
-# workspace windows first, so an open window observing STOPPED implies an
-# out-of-app stop, and reviving it is intended (this is also the path that
-# revives workspaces after a laptop reboot). FAILED is deliberately excluded:
-# an unattended ``mngr start`` on a failed-to-create host mostly re-fails.
+# Host states that justify an *unattended* host restart -- off any observation,
+# fresh or stale (the classifier applies no freshness gate to these): the
+# container was observed not running and not in transition, so there is no live
+# work to interrupt, and the dispatched ``mngr start`` targets only STOPPED
+# agents, so a stale reading whose container actually came back is a no-op.
+# In-app stops close their workspace windows first, so an open window observing
+# STOPPED implies an out-of-app stop, and reviving it is intended (this is also
+# the path that revives workspaces after a laptop reboot). FAILED is
+# deliberately excluded: an unattended ``mngr start`` on a failed-to-create
+# host mostly re-fails.
 _AUTO_RESTART_OFFLINE_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "CRASHED"})
 _FAILED_STATE: Final[str] = "FAILED"
 _UNREACHABLE_STATE: Final[str] = "UNREACHABLE"
@@ -722,17 +725,26 @@ def _classify_dispatch_tier(
       timeout is absence of evidence, not evidence of a down workspace -- e.g. a
       probe whose window spanned a laptop sleep). The page keeps checking and a
       later probe that *completes* resolves to a real tier.
+    * HOST_OFFLINE whenever the host state reads STOPPED / CRASHED -- stale or
+      fresh. This is the one host-state verdict with no freshness gate, because
+      the dispatched action is commit-time-checked rather than trust-dependent:
+      the auto path runs a pure ``mngr start``, which targets only STOPPED
+      agents, so a stale reading whose container actually came back degrades to
+      a no-op (and in-app stops close their windows first, so an open window
+      observing STOPPED implies an out-of-app stop whose revival is intended).
     * The trusted host-state verdicts, when a discovery snapshot taken at/after
       the outage onset backs the host state. These branch on the *raw* state
-      rather than the collapsed "is it running?" probe answer, because
-      observed-not-running states diverge in treatment: STOPPED / CRASHED ->
-      HOST_OFFLINE (nothing live to interrupt, restart runs unattended); FAILED
+      rather than the collapsed "is it running?" probe answer, because the
+      remaining states diverge in treatment: FAILED
       -> HOST_UNRESPONSIVE (an unattended start on a failed-to-create host
       mostly re-fails, so consent-gate it); UNREACHABLE -> BACKEND_UNREACHABLE
       (the host rejected this machine's access; a restart routes through the
       same rejected credential); RUNNING / UNAUTHENTICATED -> HOST_UNRESPONSIVE
       (observed running but the exec could not get inside). A trusted UNKNOWN /
       transitional / absent state says nothing either way and falls through.
+      Unlike the offline pair these verdicts stay freshness-gated: none of them
+      is backed by an idempotent action, so a stale reading could render a
+      wrong terminal page or consent-gate a workspace that merely slept.
     * HOST_UNRESPONSIVE when the exec probe was attempted and *completed*
       without ever reaching the in-container script (a nonzero exit or a clean
       exit with no sentinel -- e.g. the container's sshd is dead, or the
@@ -763,12 +775,24 @@ def _classify_dispatch_tier(
         return DispatchTier.HOST_UNRESPONSIVE
     if probe_timed_out:
         return DispatchTier.INDETERMINATE
+    upper_state = host_state.upper()
+    # An observed STOPPED / CRASHED dispatches the unattended restart even off a
+    # stale (pre-onset or replayed) snapshot -- unlike every other host-state
+    # verdict, no freshness gate applies. Commit-time idempotency, not snapshot
+    # freshness, is what makes this dispatch safe: the auto path is a pure
+    # ``mngr start`` (the stop step is skipped), which targets only STOPPED
+    # agents -- a stale reading whose container actually came back makes it a
+    # no-op, and the liveness poll sends the user home. In-app stops close
+    # their workspace windows first, so an open window observing STOPPED
+    # implies an out-of-app stop, and reviving it is intended. Freshness-gating
+    # this verdict parked a stopped workspace on the consent page at app
+    # startup, when only the replayed pre-start topology exists and the first
+    # trusted snapshot is a discovery cycle away.
+    if upper_state in _AUTO_RESTART_OFFLINE_STATES:
+        return DispatchTier.HOST_OFFLINE
     if classification_is_trustworthy:
-        upper_state = host_state.upper()
         if upper_state == _UNREACHABLE_STATE:
             return DispatchTier.BACKEND_UNREACHABLE
-        if upper_state in _AUTO_RESTART_OFFLINE_STATES:
-            return DispatchTier.HOST_OFFLINE
         if upper_state == _FAILED_STATE:
             return DispatchTier.HOST_UNRESPONSIVE
         if upper_state in _OBSERVED_RUNNING_STATES:
@@ -827,7 +851,10 @@ def build_host_health_response(
     unreachable and classifies HOST_UNRESPONSIVE regardless of snapshot
     freshness. ``classification_is_trustworthy`` is False when the host state
     read here comes from a discovery snapshot that predates the outage onset (so
-    it may be stale), which suppresses the host-state verdicts.
+    it may be stale), which suppresses the host-state verdicts -- except the
+    offline pair (STOPPED / CRASHED), whose unattended restart is safe off a
+    stale reading because the dispatched ``mngr start`` only targets STOPPED
+    agents.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"

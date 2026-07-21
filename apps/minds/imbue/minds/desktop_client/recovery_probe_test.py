@@ -511,15 +511,75 @@ def test_dispatch_tier_indeterminate_when_snapshot_is_stale() -> None:
     assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
-def test_dispatch_tier_stale_snapshot_does_not_downgrade_offline_verdict_to_a_restart() -> None:
-    """A stale STOPPED reading is not trusted enough to auto-dispatch a host restart.
+@pytest.mark.parametrize("host_state", ["STOPPED", "CRASHED"])
+def test_dispatch_tier_stale_offline_state_still_dispatches_unattended(host_state: str) -> None:
+    """An observed STOPPED/CRASHED dispatches HOST_OFFLINE even off a stale snapshot.
 
-    HOST_OFFLINE auto-dispatches an unattended restart, so it must only fire off a
-    trusted observation. With a stale snapshot the container-offline reading yields
-    INDETERMINATE instead.
+    Unlike every other host-state verdict, the offline states need no freshness
+    gate: the auto-dispatched action is a pure ``mngr start`` (the auto path
+    skips the stop step), which targets only STOPPED agents -- if the reading is
+    stale and the container actually came back, the start is a no-op and the
+    liveness poll sends the user home. In-app stops close their workspace
+    windows first, so an open window observing STOPPED implies an out-of-app
+    stop, and reviving it is intended. Gating this on a post-onset snapshot
+    (as the classifier once did) parked a stopped workspace on the consent page
+    at app startup, when only the replayed pre-start topology exists.
     """
-    response = _response(host_state="STOPPED", in_container_stdout=None, classification_is_trustworthy=False)
+    response = _response(host_state=host_state, in_container_stdout=None, classification_is_trustworthy=False)
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_dispatch_tier_stale_offline_state_beats_a_completed_exec_failure() -> None:
+    """A stale STOPPED plus a completed exec failure is still the unattended restart.
+
+    The app-startup shape: only the replayed pre-start snapshot exists (reading
+    STOPPED), discovery counts as stalled, so the exec is attempted and
+    completes without reaching the stopped container. The offline observation
+    wins over the consent-gated exec verdict for the same reason as the trusted
+    case: the exec failure is just the expected consequence of a stopped
+    container.
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_dispatch_tier_timeout_stays_indeterminate_even_with_a_stale_offline_state() -> None:
+    """A probe timeout keeps checking even when the (stale) state reads STOPPED.
+
+    The macOS-sleep protection keeps precedence: a timed-out exec observed
+    nothing, so no verdict fires off that probe -- the next completed probe (or
+    the stale STOPPED on a probe that skips the exec) resolves to the
+    unattended restart a cycle later.
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=None,
+        probe_timed_out=True,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
     assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_provider_error_beats_a_stale_offline_state() -> None:
+    """A provider error still wins over an observed-offline state.
+
+    With the provider unreachable no restart routed through it can help, and
+    the host-state reading it produced cannot be trusted either way.
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=None,
+        classification_is_trustworthy=False,
+        provider_error_message="Cannot connect to Docker daemon",
+        provider_label="Docker",
+    )
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
 
 
 def test_dispatch_tier_host_unresponsive_when_completed_exec_fails_despite_stale_snapshot() -> None:

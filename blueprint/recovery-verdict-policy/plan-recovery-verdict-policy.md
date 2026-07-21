@@ -49,10 +49,21 @@ report).
     user home the moment the interface self-heals, so no restart fires without
     a click.
 
+- Host observed as `STOPPED` / `CRASHED` -- off any snapshot, fresh or stale:
+  unattended host restart. This is the one host-state verdict with no
+  freshness gate, because the dispatched action is commit-time-checked rather
+  than trust-dependent: the auto path runs a pure `mngr start`
+  (`host_already_stopped` skips the stop step), which targets only STOPPED
+  agents, so a stale reading whose container actually came back degrades to a
+  no-op and the liveness poll returns the user home. In-app stops (landing
+  page and agent API) close open windows first, so an open window observing
+  STOPPED implies an out-of-app stop, and reviving it is intended. (Initially
+  this verdict was freshness-gated like the rest; live testing on 2026-07-21
+  showed that parked a stopped workspace on the consent page at app startup --
+  when only the replayed pre-start topology exists -- for a full discovery
+  cycle before converging, so the gate was dropped for the offline pair.)
+
 - Host observed (with a trusted, post-onset snapshot) as:
-  - `STOPPED` / `CRASHED`: unattended host restart, as today. In-app stops
-    (landing page and agent API) close open windows first, so an open window
-    observing STOPPED implies an out-of-app stop, and reviving it is intended.
   - `STOPPING`: transitional -- keep checking; the auto-restart fires a few
     seconds later off the settled STOPPED.
   - `FAILED`: consent-gated "Workspace unresponsive" page (a failed host is
@@ -99,7 +110,7 @@ could ever land and the freshness gate never opened):
   not actually running) is direct fresh evidence and classifies the
   consent-gated HOST_UNRESPONSIVE without waiting on the snapshot-freshness
   gate. A probe *timeout* still classifies INDETERMINATE (it observed nothing;
-  the macOS-sleep protection). A trusted post-onset `STOPPED`/`CRASHED`
+  the macOS-sleep protection). A `STOPPED`/`CRASHED`
   observation still wins over a completed exec failure, keeping the unattended
   HOST_OFFLINE restart.
 
@@ -118,7 +129,35 @@ could ever land and the freshness gate never opened):
   downstream supervisorctl connection errors. Purely diagnostic; the dispatch
   tier never branches on it.
 
-## Changes
+Refinements from live testing of the app-restart flow (2026-07-20/21, driving
+the staging build through quit/relaunch cycles with a stopped workspace
+container):
+
+- Provider errors carried by discovery snapshots that finished before the
+  minds backend started are dropped at ingest (the snapshot's topology still
+  merges as last-good). The detached `mngr latchkey forward` producer keeps
+  polling while the app is closed and the quit flow deliberately stops the
+  docker state container, so the pre-start backlog's last docker snapshot
+  reliably carries a manufactured "Docker state container is stopped" error --
+  which the startup replay then surfaced as a current BACKEND_UNREACHABLE at
+  every launch. A genuinely-broken provider re-asserts its error on the first
+  fresh cycle. (An age threshold does not work here: the gap error can be
+  seconds old at replay.)
+
+- No verdict page is a dead-end: the BACKEND_UNREACHABLE and HOST_UNRESPONSIVE
+  renders re-arm the same slow re-probe the INDETERMINATE state uses, so a
+  cleared provider error or a newly-landed STOPPED observation re-classifies
+  and the flow continues (including the unattended offline dispatch) without
+  user action. Dispatching a restart silences the re-probe chain, so a stale
+  in-flight probe result cannot overwrite the restarting state or double-POST.
+  Verdict renders also reset each other's residual elements (Retry button,
+  provider-error paragraph).
+
+- The STOPPED/CRASHED -> HOST_OFFLINE verdict lost its freshness gate (see
+  "Expected behavior" above): requiring a post-onset snapshot made the startup
+  sequence crawl through consent-gated and reconnecting states for ~30s when
+  the replayed topology already read STOPPED, for no safety benefit the
+  idempotent `mngr start` dispatch did not already provide.
 
 mngr layer (`libs/mngr`, `libs/mngr_imbue_cloud`, `libs/mngr_lima`):
 
@@ -223,10 +262,13 @@ minds policy layer (`apps/minds`):
     RUNNING/FATAL/EXITED/STOPPED/unparseable -> HOST_UNRESPONSIVE; exec OK +
     curl non-200 + supervisord STARTING or BACKOFF -> INDETERMINATE.
   - no tier value `interface_unresponsive` exists; no input produces it.
-  - trusted STOPPED / CRASHED -> HOST_OFFLINE; STOPPING -> INDETERMINATE;
+  - STOPPED / CRASHED -> HOST_OFFLINE off any snapshot, stale or fresh (the
+    offline pair carries no freshness gate; see the 2026-07-20/21
+    refinements); STOPPING -> INDETERMINATE;
     FAILED -> HOST_UNRESPONSIVE; UNREACHABLE -> BACKEND_UNREACHABLE with the
-    canned reason; UNKNOWN/absent -> INDETERMINATE; stale-snapshot and
-    probe-timeout gating unchanged (INDETERMINATE).
+    canned reason; UNKNOWN/absent -> INDETERMINATE; stale-snapshot gating for
+    the non-offline states and probe-timeout gating unchanged (INDETERMINATE,
+    including a timeout with a stale STOPPED reading).
 - Provider unit tests:
   - imbue_cloud: outer-SSH `HostAuthenticationError` -> host state UNREACHABLE
     (agents re-attached, failure_reason carried); non-auth outer failure still
