@@ -806,6 +806,89 @@ def test_ensure_running_reaps_orphan_forwards_children_too(tmp_path: Path) -> No
                 pass
 
 
+def test_stop_terminates_descendants_of_wedged_supervisor(tmp_path: Path) -> None:
+    """``stop()`` also terminates the supervisor's descendant subprocesses.
+
+    A healthy supervisor tears its own descendants (``mngr observe``, the
+    ``latchkey gateway``, reverse tunnels) down in its SIGTERM handler -- but a
+    wedged one that has to be SIGKILLed (or, as here, one that exits without
+    running its teardown) never does, and the detached gateway then outlives
+    every session. ``stop()`` must capture the descendants before signalling
+    and terminate them after, the same way ``_reap_duplicate_forwards`` does.
+    """
+    fake_binary = _make_fake_forward_spawning_child_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=latchkey_directory,
+    )
+    child_pid: int | None = None
+    info: LatchkeyForwardInfo | None = None
+    try:
+        info = supervisor.ensure_running()
+        data_dir = plugin_data_dir(latchkey_directory)
+        _wait_for_forward_record(data_dir)
+        child_pid = int((data_dir / "child_pid.txt").read_text())
+        assert psutil.pid_exists(child_pid)
+
+        supervisor.stop()
+        assert _wait_for_process_exit(info.pid)
+        assert _wait_for_process_exit(child_pid), "the supervisor's child was not reaped by stop()"
+    finally:
+        if info is not None:
+            _terminate_pid_if_alive(info.pid)
+        if child_pid is not None:
+            _terminate_pid_if_alive(child_pid)
+
+
+def test_stop_terminates_descendants_via_on_disk_record(tmp_path: Path) -> None:
+    """``stop()`` reaps descendants for the on-disk-record path too (fresh supervisor object).
+
+    A new minds session stops the previous session's supervisor through the
+    persisted record (no cached ``_last_known_pid``); an orphaned gateway must
+    not survive that path either.
+    """
+    fake_binary = _make_fake_forward_spawning_child_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    old_supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=latchkey_directory,
+    )
+    child_pid: int | None = None
+    info: LatchkeyForwardInfo | None = None
+    try:
+        info = old_supervisor.ensure_running()
+        data_dir = plugin_data_dir(latchkey_directory)
+        _wait_for_forward_record(data_dir)
+        child_pid = int((data_dir / "child_pid.txt").read_text())
+        assert psutil.pid_exists(child_pid)
+
+        # A fresh supervisor object (a new minds session) only has the record.
+        fresh_supervisor = LatchkeyForwardSupervisor(
+            mngr_binary=str(fake_binary),
+            latchkey_binary="/usr/bin/latchkey-unused",
+            latchkey_directory=latchkey_directory,
+        )
+        fresh_supervisor.stop()
+        assert _wait_for_process_exit(info.pid)
+        assert _wait_for_process_exit(child_pid), "the supervisor's child was not reaped by stop()"
+    finally:
+        if info is not None:
+            _terminate_pid_if_alive(info.pid)
+        if child_pid is not None:
+            _terminate_pid_if_alive(child_pid)
+
+
+def _terminate_pid_if_alive(pid: int) -> None:
+    """Test-teardown kill that tolerates an already-dead process."""
+    try:
+        psutil.Process(pid).kill()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
+
 def test_is_forward_pid_for_directory_matches_only_its_own_directory(tmp_path: Path) -> None:
     """The pre-terminate re-check accepts a forward for its directory and rejects others.
 
