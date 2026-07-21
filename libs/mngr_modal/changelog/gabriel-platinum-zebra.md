@@ -1,0 +1,1 @@
+No behavior change for the modal provider itself: its tests now assert that `get_host_resources` still reports concrete CPU and memory values, accompanying the core `HostResources` change (in `libs/mngr`) that made the cpu/memory dimensions optional to represent hosts with no limit.
