@@ -171,7 +171,11 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(11))
+    # The count includes regex misfires on JavaScript embedded in Python
+    # strings (browser-side `await fetch(...)` in scripts/launch_to_msg_e2e.py
+    # and the screencast frame sampler in
+    # scripts/titlebar_first_paint_check.py) -- not Python async/await.
+    rc.check_async_await(_DIR, snapshot(12))
 
 
 # --- Hardcoded paths ---

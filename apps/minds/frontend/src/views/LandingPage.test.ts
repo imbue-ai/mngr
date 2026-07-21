@@ -41,6 +41,9 @@ function recordingHost(): { host: Host; calls: string[]; confirmResult: { value:
     },
     openModal: (request) => calls.push(`openModal:${request.kind}`),
     closeModal: () => undefined,
+    minimizeWindow: () => undefined,
+    maximizeWindow: () => undefined,
+    closeWindow: () => undefined,
   };
   return { host, calls, confirmResult };
 }

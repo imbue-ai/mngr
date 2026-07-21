@@ -71,9 +71,23 @@ interface StoreState {
   // highlight. Electron pushes it over the accent-changed IPC; browser mode's
   // chrome.js pushes its breadcrumb workspace via the MindsUI hook.
   accentScopeAgentId: string | null;
+  // Whether any accent-scope push has arrived yet. The accent-to-document
+  // effect no-ops until then, so a server-seeded accent (body style +
+  // titlebar-surface class) survives the mount instead of being cleared by
+  // the store's untouched null scope.
+  isAccentScopeKnown: boolean;
   // The workspace whose CONTENT is displayed (narrow: null on its settings /
   // sharing screens). The highlight falls back to it when no scope is set.
   displayedWorkspaceAgentId: string | null;
+  // Whether the displayed workspace's content is actually reachable rather
+  // than the "Loading workspace" proxy loader. Electron pushes it over
+  // current-workspace-changed; browser mode has no such signal (the content
+  // frame is cross-origin), so it stays true there.
+  isDisplayedContentReady: boolean;
+  // The content view's current URL -- the input every titlebar-context
+  // selector derives from. Electron pushes it over content-url-changed;
+  // browser mode's chrome.js pushes it (URL poll, swaps, local-page boot).
+  lastContentUrl: string | null;
 }
 
 function initialState(): StoreState {
@@ -96,7 +110,10 @@ function initialState(): StoreState {
     pendingMindActionTargetByAgentId: {},
     transientLivenessByAgentId: {},
     accentScopeAgentId: null,
+    isAccentScopeKnown: false,
     displayedWorkspaceAgentId: null,
+    isDisplayedContentReady: true,
+    lastContentUrl: null,
   };
 }
 
@@ -198,12 +215,76 @@ export function getActiveRowAgentId(): string | null {
 
 export function setAccentScopeAgentId(agentId: string | null): void {
   state.accentScopeAgentId = agentId;
+  state.isAccentScopeKnown = true;
+  applyAccentToDocument();
   notify();
+}
+
+export function getDisplayedWorkspaceAgentId(): string | null {
+  return state.displayedWorkspaceAgentId;
 }
 
 export function setDisplayedWorkspaceAgentId(agentId: string | null): void {
   state.displayedWorkspaceAgentId = agentId;
   notify();
+}
+
+export function setDisplayedContentReady(isReady: boolean): void {
+  state.isDisplayedContentReady = isReady;
+  notify();
+}
+
+export function isDisplayedContentReady(): boolean {
+  return state.isDisplayedContentReady;
+}
+
+export function getLastContentUrl(): string | null {
+  return state.lastContentUrl;
+}
+
+export function setContentUrl(url: string | null): void {
+  state.lastContentUrl = url;
+  notify();
+}
+
+// Seed the accent/name cache from server-rendered hints (the titlebar
+// skeleton's crumb, an accent-seeded page) WITHOUT clobbering fresher
+// SSE-delivered data -- only gaps are filled.
+export function seedAccentCacheHint(agentId: string, name: string | null, accent: string | null): void {
+  const existing = state.accentByAgentId[agentId];
+  state.accentByAgentId[agentId] = {
+    accent: existing?.accent ?? accent,
+    name: existing?.name ?? name,
+  };
+  notify();
+}
+
+// -- Accent-to-document effect ----------------------------------------------
+//
+// The titlebar background is driven by two CSS variables on the document
+// root plus the ``titlebar-surface`` class on #minds-titlebar (the
+// contrasting foreground is derived from --titlebar-bg in pure CSS -- see
+// app.css). The accent is a pure function of the accent-scope workspace and
+// the accent cache; cleared back to the neutral chrome when no scope is set.
+// When the scope's accent is not cached yet (cold start, freshly-created
+// workspace), the bar is left as-is; the next ``workspaces`` tick replays
+// this effect with the now-populated cache.
+function applyAccentToDocument(): void {
+  if (!state.isAccentScopeKnown) return;
+  const root = document.documentElement;
+  const bar = document.getElementById("minds-titlebar");
+  const agentId = state.accentScopeAgentId;
+  if (agentId === null) {
+    root.style.removeProperty("--workspace-accent");
+    root.style.removeProperty("--titlebar-bg");
+    bar?.classList.remove("titlebar-surface");
+    return;
+  }
+  const cached = state.accentByAgentId[agentId];
+  if (cached === undefined || cached.accent === null) return;
+  root.style.setProperty("--workspace-accent", cached.accent);
+  root.style.setProperty("--titlebar-bg", cached.accent);
+  bar?.classList.add("titlebar-surface");
 }
 
 // -- Mutations -------------------------------------------------------------
@@ -254,6 +335,9 @@ export function applyChromeEvent(event: ChromeEvent): void {
       }
       rememberWorkspaceAccents(event.workspaces);
       applyAuthoritativeLiveness(event.workspaces);
+      // Replay the accent paint now that the cache has fresh data (cold
+      // start before any tick, or a settings-page color save).
+      applyAccentToDocument();
       break;
     }
     case "providers_state": {
@@ -297,6 +381,7 @@ export function applyChromeEvent(event: ChromeEvent): void {
         accent: event.accent,
         name: previous?.name ?? null,
       };
+      applyAccentToDocument();
       break;
     }
     case "open_help": {

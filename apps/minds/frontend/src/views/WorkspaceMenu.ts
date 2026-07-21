@@ -176,10 +176,3 @@ export function mountWorkspaceMenu(target: Element | null, options?: MountWorksp
       }),
   });
 }
-
-// Browser-mode hook: chrome.js's titlebar-context tracking calls this with
-// the breadcrumb workspace so the menu's current-row highlight follows the
-// active scope (a workspace's settings screen still highlights it).
-export function setWorkspaceMenuCurrentAgent(agentId: string | null): void {
-  setAccentScopeAgentId(agentId);
-}

@@ -163,13 +163,12 @@
         applyModeSetup();
         window.scrollTo(0, 0);
         var u = new URL(url, window.location.href);
-        lastContentUrl = u.pathname + u.search;
-        applyTitlebarContext();
+        window.MindsUI.setContentUrl(u.pathname + u.search);
         // Local pages derive their accent from their own path; the wrapper's
         // accent is owned by the Electron main pushes (and was seeded
         // server-side via the ?accent= param).
         if (u.pathname !== '/_chrome') {
-          applyTitleAccent(accentSourceFromPath(u.pathname));
+          window.MindsUI.setAccentScopeAgent(accentSourceFromPath(u.pathname));
         }
       });
     });
@@ -202,13 +201,12 @@
 
   // -- Navigation adapter ---------------------------------------------------
   function navigateContent(url) {
-    // Optimistically re-derive the titlebar context from the target URL so
-    // the breadcrumb/tabs update without waiting for the navigation to land
+    // Optimistically push the target URL into the titlebar store so the
+    // breadcrumb/tabs update without waiting for the navigation to land
     // (Electron re-pushes the authoritative URL on did-navigate; browser
     // mode has no push for cross-origin workspace URLs at all, so this is
     // also its only signal for those).
-    lastContentUrl = url;
-    applyTitlebarContext();
+    window.MindsUI.setContentUrl(url);
     if (isElectron) window.minds.navigateContent(url);
     else if (isLocalPage()) {
       if (canSwapTo(url)) {
@@ -219,11 +217,6 @@
     } else {
       document.getElementById('content-frame').src = url;
     }
-  }
-  function goBack() {
-    if (isElectron) window.minds.contentGoBack();
-    else if (isLocalPage()) window.history.back();
-    else { try { document.getElementById('content-frame').contentWindow.history.back(); } catch (e) {} }
   }
   // Exported for the mithril bundle's browser host (frontend/src/host.ts):
   // converted surfaces reuse this swap-engine-aware navigation instead of
@@ -298,246 +291,20 @@
     hideSidebarPanel();
   }
 
-  function selectWorkspace(agentId) {
-    navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
-    closeSidebar();
-  }
-
-  // -- Titlebar accent ------------------------------------------------------
+  // -- Displayed-workspace tracking -----------------------------------------
   //
-  // The titlebar background is driven by two CSS variables set on the
-  // document root, plus the ``.titlebar-surface`` class toggled on
-  // #minds-titlebar:
-  //   --workspace-accent  the workspace's #rrggbb accent (also consumed by
-  //                       sidebar spines etc.)
-  //   --titlebar-bg       the same color, used by the titlebar background
-  // The contrasting foreground is NOT a variable -- the ``.titlebar-surface``
-  // scope derives it from --titlebar-bg in pure CSS and re-bases the
-  // foreground tokens on it (see app.css). Cleared back to the neutral chrome
-  // (surface-primary bar via the Chrome.jinja fallback, app tokens for the
-  // foreground) on any non-workspace minds screen -- so a sign-out /
-  // workspace-delete / freshly-launched app, and plain navigation to Home /
-  // Create / accounts, all render the neutral chrome.
+  // Accent + breadcrumb painting live in the mithril TitleBar component and
+  // its store (mounted below); this script keeps only the
+  // displayed-workspace tracker that gates the recovery redirect.
   //
   // ``currentTitleAgentId`` tracks the workspace ACTUALLY DISPLAYED in this
   // window's content view -- it gates ``maybeRedirectToRecovery`` so a stuck
   // agent only redirects this window when this window is the one showing it.
   // It is intentionally separate from the ACCENT SOURCE (the persisted
   // last-opened workspace), which can differ when another window opens a
-  // workspace while this one is on Home, sign-in, etc. Accent application
-  // must never write to ``currentTitleAgentId`` or trigger recovery, or a
-  // stuck agent in another window will hijack this window's content view.
+  // workspace while this one is on Home, sign-in, etc.
   var currentTitleAgentId = null;
-  // Whether the displayed workspace's content is actually reachable (a real
-  // workspace) rather than the "Loading workspace" proxy loader that
-  // mngr_forward serves at the workspace URL while the backend is unreachable.
-  // Pushed by main.js over ``current-workspace-changed`` (from the content
-  // view's HTTP status) so the get-help modal keeps "have an agent help"
-  // disabled while a workspace is loading/stuck -- a state the health-tracker
-  // ``systemInterfaceStatusByAgent`` signal doesn't cover during startup. In
-  // browser mode there is no such signal (the content frame is cross-origin), so
-  // it defaults to true there, leaving that mode's behavior unchanged.
-  var currentWorkspaceContentReady = !isElectron;
-  // Per-agent {accent} map populated from each SSE ``workspaces`` payload.
-  // ``applyTitleAccent`` reads from this cache so accent application is
-  // synchronous.
-  // Workspaces missing from the cache (e.g. an agentId for which no SSE
-  // tick has arrived yet) leave the accent unset on this call; the next
-  // ``workspaces`` tick replays the paint with the now-populated cache.
-  var accentByAgentId = {};
-  // Tracks the agentId whose accent the chrome *wants* painted, regardless
-  // of whether the SSE cache has caught up yet. The ``onAccentChanged`` path
-  // (and, in browser mode, the URL poll) sets this even when the SSE
-  // workspaces payload hasn't arrived yet (cold start, freshly-created
-  // workspace); the next ``workspaces`` tick replays the paint with the
-  // now-populated cache. Independent of ``currentTitleAgentId`` so the
-  // accent path can update the titlebar without claiming to represent the
-  // displayed workspace.
-  var lastRequestedAccentAgentId = null;
-  function rememberWorkspaceAccents(workspaces) {
-    if (!workspaces) return;
-    workspaces.forEach(function (w) {
-      if (!w || !w.id) return;
-      accentByAgentId[w.id] = {
-        accent: typeof w.accent === 'string' ? w.accent : null,
-        name: typeof w.name === 'string' ? w.name : null,
-      };
-    });
-  }
 
-  // -- Titlebar context (breadcrumb / icon-tabs / contextual back) -----------
-  //
-  // The left cluster's shape is a pure function of the content view's current
-  // URL: a workspace-scoped screen shows the "/ workspace-name" breadcrumb
-  // plus the Workspace / Workspace Settings icon-tabs (with the
-  // tab for the visible screen highlighted); a non-workspace full page shows
-  // a "/ page-name" crumb and, for pages that opted in, the contextual back
-  // arrow; the home screen shows just the home button. Electron pushes the
-  // URL over ``content-url-changed``; browser mode reads the iframe's
-  // location in the 500ms poll (cross-origin workspace URLs throw there, so
-  // ``navigateContent`` seeds the context optimistically for those).
-  var lastContentUrl = null;
-  // The workspace named in the breadcrumb (null outside workspace context).
-  // Drives the switcher menu's target.
-  var currentCrumbAgentId = null;
-
-  function classifyContent(urlString) {
-    var parsed;
-    try {
-      parsed = new URL(urlString, window.location.origin);
-    } catch (e) {
-      return { kind: 'home' };
-    }
-    var host = parsed.hostname;
-    var path = parsed.pathname;
-    var m = host.match(/^(agent-[a-f0-9]+)\.localhost$/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'workspace' };
-    m = path.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'workspace' };
-    m = path.match(/^\/workspace\/(agent-[a-f0-9]+)(?:\/|$)/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'settings' };
-    // Sharing is reached from workspace settings, so it gets the back arrow.
-    m = path.match(/^\/sharing\/(agent-[a-f0-9]+)(?:\/|$)/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: null, showBack: true };
-    m = path.match(/^\/destroying\/(agent-[a-f0-9]+)(?:\/|$)/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
-    m = path.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
-    // No back arrow on the create form: the titlebar home button is the
-    // escape (back to the workspace list / welcome splash).
-    if (path === '/create') return { kind: 'page', pageLabel: 'New workspace' };
-    if (/^\/creating\//.test(path)) return { kind: 'page', pageLabel: 'New workspace' };
-    // Browser-mode full-page fallbacks (Electron shows these as modals).
-    if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
-    if (path === '/accounts') return { kind: 'page', pageLabel: 'Accounts', showBack: true };
-    // No back arrow on the auth pages (browser-mode fallbacks; Electron opens
-    // the sign-in modal instead): the titlebar home button is the escape, and
-    // the home route bounces back to the splash until an account option is
-    // chosen.
-    if (/^\/auth(?:\/|$)/.test(path)) return { kind: 'page', pageLabel: 'Sign in' };
-    // The welcome splash is the committed first screen: the user must pick
-    // sign up / log in / continue without an account, so the home button is
-    // hidden (there is nowhere else to go yet).
-    if (path === '/welcome') return { kind: 'welcome' };
-    if (path === '/help') return { kind: 'page', pageLabel: 'Get help', showBack: true };
-    return { kind: 'home' };
-  }
-
-  function updateRequestsBadge(count) {
-    var badge = document.getElementById('requests-badge');
-    if (!badge) return;
-    if (count > 0) {
-      // The badge is the Badge.jinja count pill; mirror its 99+ cap here.
-      badge.textContent = count > 99 ? '99+' : String(count);
-      badge.hidden = false;
-    } else {
-      // Hide via the native `hidden` attribute, not a `hidden` class: the pill
-      // bakes in `inline-flex`, which beats the `.hidden` utility in the
-      // cascade (so a `hidden` class would leave a stray "0" showing). The
-      // `[hidden]` base rule is `display: none !important`, which wins.
-      badge.hidden = true;
-    }
-  }
-
-  function applyTitlebarContext() {
-    var ctx = classifyContent(lastContentUrl || '/');
-    var wsCrumb = document.getElementById('ws-crumb');
-    var pageCrumb = document.getElementById('page-crumb');
-    var backBtn = document.getElementById('back-btn');
-    var homeBtn = document.getElementById('home-btn');
-    // The welcome splash hides the home button: the user must resolve the
-    // account choice (sign up / log in / continue without an account) before
-    // there is anywhere else to go.
-    if (homeBtn) {
-      homeBtn.hidden = ctx.kind === 'welcome';
-      // Selected (text-primary at rest) only on the landing page itself;
-      // everywhere else it rests muted and rises to primary on hover.
-      // Mirrors TitlebarButton's default/muted tones -- keep in sync.
-      var homeSelected = ctx.kind === 'home';
-      homeBtn.classList.toggle('text-primary', homeSelected);
-      homeBtn.classList.toggle('text-secondary', !homeSelected);
-      homeBtn.classList.toggle('hover:text-primary', !homeSelected);
-    }
-    var isWorkspace = ctx.kind === 'workspace';
-    var prevCrumbAgentId = currentCrumbAgentId;
-    currentCrumbAgentId = isWorkspace ? ctx.agentId : null;
-    // Browser mode: keep the inline switcher's current-row highlight in sync
-    // with the breadcrumb workspace (so a workspace's settings / sharing screen
-    // still marks that workspace current). Electron's sidebar is a separate
-    // view, primed over the accent-changed IPC.
-    if (!isElectron && currentCrumbAgentId !== prevCrumbAgentId) {
-      window.MindsUI.setWorkspaceMenuCurrentAgent(currentCrumbAgentId);
-    }
-    if (wsCrumb) wsCrumb.hidden = !isWorkspace;
-    if (isWorkspace) {
-      var cached = accentByAgentId[ctx.agentId];
-      var nameEl = document.getElementById('workspace-switcher-name');
-      // Never show the raw agent id in the breadcrumb. When the cache has no
-      // name yet (fresh workspace before the first SSE tick), keep whatever
-      // name is already displayed for this same agent; otherwise show a
-      // placeholder until the 'workspaces' handler re-runs this with the
-      // name.
-      if (nameEl) {
-        var knownName = cached && cached.name;
-        if (knownName) {
-          nameEl.textContent = knownName;
-        } else if (nameEl.dataset.agentId !== ctx.agentId || !nameEl.textContent) {
-          nameEl.textContent = '…';
-        }
-        nameEl.dataset.agentId = ctx.agentId;
-      }
-      ['workspace', 'settings'].forEach(function (tab) {
-        var btn = document.getElementById('ws-tab-' + tab);
-        if (!btn) return;
-        var isActive = ctx.activeTab === tab;
-        btn.classList.toggle('bg-fill-active', isActive);
-        // Active tab reads text-primary; a resting tab is muted (secondary,
-        // primary on hover). Mirrors TitlebarButton's tones -- keep in sync.
-        btn.classList.toggle('text-primary', isActive);
-        btn.classList.toggle('text-secondary', !isActive);
-        btn.classList.toggle('hover:text-primary', !isActive);
-        if (isActive) btn.setAttribute('aria-current', 'page');
-        else btn.removeAttribute('aria-current');
-      });
-    }
-    var isPage = ctx.kind === 'page';
-    if (pageCrumb) pageCrumb.hidden = !isPage;
-    if (isPage) {
-      var crumbName = document.getElementById('page-crumb-name');
-      if (crumbName) crumbName.textContent = ctx.pageLabel || '';
-    }
-    if (backBtn) backBtn.hidden = !ctx.showBack;
-  }
-
-  // Toggle the titlebar's self-theming scope. ``.titlebar-surface`` re-bases the
-  // foreground tokens off --titlebar-bg in pure CSS (see app.css); it must be
-  // present only while a workspace accent is set, so neutral chrome falls back
-  // to the app's own tokens (correct in both light and dark).
-  function setTitlebarSurface(on) {
-    var tb = document.getElementById('minds-titlebar');
-    if (tb) tb.classList.toggle('titlebar-surface', !!on);
-  }
-
-  function applyTitleAccent(agentId) {
-    lastRequestedAccentAgentId = agentId || null;
-    if (!agentId) {
-      document.documentElement.style.removeProperty('--workspace-accent');
-      document.documentElement.style.removeProperty('--titlebar-bg');
-      setTitlebarSurface(false);
-      return;
-    }
-    var cached = accentByAgentId[agentId];
-    if (!cached || !cached.accent) {
-      // No SSE entry for this agent yet (cold start, workspace just
-      // created, etc.). Leave the bar at whatever it was; the next
-      // ``workspaces`` tick will replay this call via
-      // ``lastRequestedAccentAgentId`` and paint it.
-      return;
-    }
-    document.documentElement.style.setProperty('--workspace-accent', cached.accent);
-    document.documentElement.style.setProperty('--titlebar-bg', cached.accent);
-    setTitlebarSurface(true);
-  }
   // Update the "displayed workspace" tracker and trigger the recovery
   // redirect when warranted. Called from the displayed-workspace sources
   // (``onCurrentWorkspaceChanged`` in Electron, the URL-poll in browser mode)
@@ -605,24 +372,16 @@
     maybeRedirectToRecovery();
   }
 
-  // -- Button wiring --------------------------------------------------------
-  document.getElementById('workspace-switcher-btn').onclick = toggleSidebar;
-  document.getElementById('home-btn').onclick = function () { navigateContent('/'); };
-  document.getElementById('back-btn').onclick = goBack;
-  document.getElementById('ws-tab-workspace').onclick = function () {
-    if (currentCrumbAgentId) selectWorkspace(currentCrumbAgentId);
-  };
-  document.getElementById('ws-tab-settings').onclick = function () {
-    if (currentCrumbAgentId) navigateContent('/workspace/' + currentCrumbAgentId + '/settings');
-  };
-
-  document.getElementById('requests-toggle').onclick = function () {
-    // ``keep_open=1`` marks this as an intentional open of the whole inbox,
-    // so resolving a request advances to the next pending one rather than
-    // dismissing the window (notification-driven opens omit it and close).
-    if (isElectron) window.minds.toggleInbox();
-    else navigateContent('/inbox?keep_open=1');
-  };
+  // -- Titlebar mount --------------------------------------------------------
+  //
+  // The titlebar interior (breadcrumb, icon-tabs, requests badge, window
+  // controls) is the mithril TitleBar component, mounted once into the
+  // server-rendered #minds-titlebar skeleton (a persistent shell mount --
+  // the bar lives outside #local-page-root). The switcher name button calls
+  // back into this script's toggle (anchor math + per-mode show).
+  window.MindsUI.mountTitleBar(document.getElementById('minds-titlebar'), {
+    onToggleSwitcher: toggleSidebar,
+  });
 
   // Electron-mode setup for the CURRENT page body: the agent-wrapper hides its
   // iframe (the content is a separate WebContentsView) and the browser-mode
@@ -642,13 +401,11 @@
     }
   }
 
-  if (isElectron) {
-    document.getElementById('min-btn').onclick = function () { window.minds.minimize(); };
-    document.getElementById('max-btn').onclick = function () { window.minds.maximize(); };
-    document.getElementById('close-btn').onclick = function () { window.minds.close(); };
-  } else {
+  if (!isElectron) {
     // Browser mode: backdrop click outside the panel + Escape close the
-    // sidebar, matching the Electron sidebar's behavior.
+    // sidebar, matching the Electron sidebar's behavior. (The titlebar's own
+    // buttons, window controls included, are wired inside the TitleBar
+    // component.)
     document.getElementById('sidebar-backdrop').addEventListener('click', function (e) {
       if (e.target.closest('#sidebar-menu')) return;
       closeSidebar();
@@ -669,33 +426,23 @@
   // -- Title + URL tracking -------------------------------------------------
   if (isLocalPage()) {
     // A trusted local page IS the chrome view/page's own document (there is no
-    // #content-frame and no separate content WebContentsView). Derive the
-    // titlebar breadcrumb + accent from OUR OWN location: main pushes
+    // #content-frame and no separate content WebContentsView). Seed the
+    // titlebar store from OUR OWN location: main pushes
     // ``content-url-changed`` only for the agent content surface, and a local
     // page never displays a workspace, so the displayed-workspace /
     // recovery-redirect lock stays null. Runs identically in Electron and the
-    // browser (the server may have pre-rendered the same context, in which
-    // case this is a no-op repaint); swapped-in pages get the equivalent from
-    // the swap engine, and (in Electron) the SSE ``workspaces`` tick replays
-    // the accent once its color cache is primed (see handleChromeEvent).
-    lastContentUrl = window.location.pathname;
-    applyTitlebarContext();
-    applyTitleAccent(accentSourceFromPath(window.location.pathname));
+    // browser (the server pre-rendered the same context into the skeleton, so
+    // the mounted component's first render is a no-op repaint); swapped-in
+    // pages get the equivalent from the swap engine, and the SSE
+    // ``workspaces`` tick replays the accent once the store's color cache is
+    // primed.
+    window.MindsUI.setContentUrl(window.location.pathname);
+    window.MindsUI.setAccentScopeAgent(accentSourceFromPath(window.location.pathname));
   }
   if (isElectron) {
-    // The titlebar's breadcrumb / icon-tabs / contextual back arrow track the
-    // content view's URL, which main pushes on every navigation (and replays
-    // when this chrome view (re)loads, via primeViewWithCachedChromeState).
-    // Subscribed regardless of the CURRENT body (local page vs wrapper): the
-    // persistent shell can swap between them, and main's intended-surface
-    // gating means pushes only arrive when the content surface owns the
-    // titlebar.
-    if (window.minds.onContentURLChange) {
-      window.minds.onContentURLChange(function (url) {
-        lastContentUrl = url || null;
-        applyTitlebarContext();
-      });
-    }
+    // The titlebar component subscribes to main's content-url / accent pushes
+    // itself (see mountTitleBar); this script keeps only the swap relay and
+    // the displayed-workspace recovery tracking.
     // Instant local navigation: main asks the shell to swap a hub page in
     // place instead of a full chrome-view load. Falls back to a real
     // navigation when the swap can't run (not a shell page, fetch failure).
@@ -723,36 +470,17 @@
     // while the content view is ACTUALLY displaying that workspace, and null on
     // every other screen (including the workspace's own settings / sharing
     // screens). It drives the recovery-redirect lock ONLY -- not the accent.
-    window.minds.onCurrentWorkspaceChanged(function (agentId, contentReady) {
-      currentWorkspaceContentReady = !!contentReady;
+    window.minds.onCurrentWorkspaceChanged(function (agentId) {
       setDisplayedWorkspaceAgentId(agentId || null);
-    });
-    // The titlebar accent is a pure function of the current screen, pushed by
-    // main on every navigation: the workspace id on any workspace-scoped screen
-    // (the workspace itself plus its settings / sharing / destroying / recovery
-    // screens) and null on a general screen, where the neutral chrome takes
-    // over. Apply it unconditionally -- main is the single source of truth, so
-    // there is nothing to remember, re-query, or gate here. Main also re-pushes
-    // the current value when this chrome view (re)loads (via
-    // ``primeViewWithCachedChromeState``), so a fresh / rebuilt view paints the
-    // right accent without a bootstrap round-trip.
-    window.minds.onAccentChanged(function (agentId) {
-      applyTitleAccent(agentId || null);
     });
   } else if (!isLocalPage()) {
     setInterval(function () {
       try {
         if (isLocalPage()) return;
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
-        if (lastContentUrl !== loc) {
-          lastContentUrl = loc;
-          applyTitlebarContext();
-        }
+        window.MindsUI.setContentUrl(loc);
         var m = loc.match(/^\/goto\/([^/]+)/);
         var derivedAgentId = m ? m[1] : null;
-        // The switcher menu's current-row highlight follows the breadcrumb,
-        // which applyTitlebarContext (above, on URL change) pushes through
-        // MindsUI.setWorkspaceMenuCurrentAgent.
         setDisplayedWorkspaceAgentId(derivedAgentId);
         // The titlebar accent tracks a WIDER set than the displayed
         // workspace: the workspace-scoped minds screens (settings,
@@ -760,14 +488,10 @@
         // not the workspace itself, while every general screen (Home,
         // Create, accounts, ...) resolves to null and paints the neutral
         // chrome. Mirrors ``parseAccentSourceAgentId`` in electron/main.js.
-        applyTitleAccent(accentSourceFromPath(loc));
+        window.MindsUI.setAccentScopeAgent(accentSourceFromPath(loc));
       } catch (e) {}
     }, 500);
   }
-
-  // Paint the initial titlebar context (home state until the first content
-  // URL push / poll tick lands).
-  applyTitlebarContext();
 
   // -- Switcher menu mount (browser mode only) -------------------------------
   //
@@ -781,27 +505,6 @@
       onDismiss: closeSidebar,
     });
   }
-
-  // The report-a-bug button opens the help modal (report a bug). Pass the currently-displayed
-  // workspace id along so the report can scope workspace context; in Electron the
-  // modal is the shared overlay view, in browser mode it loads into the content frame.
-  document.getElementById('help-toggle').onclick = function () {
-    var aid = currentTitleAgentId || '';
-    // Agent-help spawns an /assist chat *inside* the displayed workspace, so it is only usable when
-    // that workspace is actually reachable: on a loading/stuck workspace the new chat couldn't be
-    // seen or reached (and the spawn would fail). Gate the option on BOTH signals -- a truthy
-    // systemInterfaceStatusByAgent entry means stuck/restarting, and currentWorkspaceContentReady is
-    // false while the content view shows the "Loading workspace" proxy loader (which the stuck signal
-    // doesn't cover during startup) -- while still passing the workspace id so a bug report stays
-    // scoped to it even when it's down.
-    var assistAvailable = !!aid && !systemInterfaceStatusByAgent[aid] && currentWorkspaceContentReady;
-    if (isElectron) {
-      window.minds.toggleHelp(aid, assistAvailable);
-    } else {
-      var helpQuery = aid ? '?workspace=' + encodeURIComponent(aid) + (assistAvailable ? '&assist=1' : '') : '';
-      navigateContent('/help' + helpQuery);
-    }
-  };
 
   // -- Open a permission request from workspace content (browser mode) -------
   //
@@ -837,67 +540,12 @@
     });
   }
 
-  // The switcher menu's rows are rendered by the mithril WorkspaceMenu
-  // component (mounted above in browser mode; its own store subscribes to
-  // the chrome events + backup-health cache), so this script no longer
-  // renders workspace rows itself.
+  // The titlebar, switcher menu and requests badge are all store-fed mithril
+  // components with their own chrome-event subscription; this script's
+  // handler keeps only the system-interface statuses that gate the
+  // recovery-page redirect.
   function handleChromeEvent(data) {
     try {
-      if (data.type === 'workspace_accent_preview') {
-        // Optimistic single-workspace cache update + repaint, emitted by
-        // main.js when the settings page in this bundle picks a color.
-        // Lets the chrome titlebar update instantly without waiting for
-        // the POST -> mngr label -> SSE round-trip. The cross-machine
-        // sync still goes through the normal SSE path; this is just a
-        // local-window shortcut.
-        //
-        // Unconditional paint: the settings page sends this with its
-        // own agent id (the workspace whose color was just picked), so
-        // painting the bar for that workspace is always the right call
-        // in this window. Main has already validated the agent-id +
-        // hex shape and only fires this for the *sending bundle's*
-        // chrome view, so a stray sender can't paint someone else's
-        // titlebar. Paint unconditionally rather than gating on
-        // ``lastRequestedAccentAgentId``: even though /workspace/<id>/settings
-        // is itself an accent source (main already pushed this agent id over
-        // ``accent-changed``), this optimistic event carries the JUST-PICKED
-        // hex, which the ``accentByAgentId`` cache won't hold until the
-        // settings POST -> mngr label -> SSE round-trip lands -- so we update
-        // the cache entry here and repaint immediately.
-        if (data.agent_id && data.accent) {
-          // Update the accent WITHOUT dropping the cached name: replacing the
-          // whole entry left it name-less, so the next titlebar re-render fell
-          // back to the raw agent id until the following SSE tick.
-          var prevEntry = accentByAgentId[data.agent_id];
-          accentByAgentId[data.agent_id] = {
-            accent: data.accent,
-            name: (prevEntry && prevEntry.name) || null,
-          };
-          applyTitleAccent(data.agent_id);
-        }
-        return;
-      }
-      if (data.type === 'workspaces') {
-        rememberWorkspaceAccents(data.workspaces || []);
-        // Replay the most recent ``applyTitleAccent`` call now that the
-        // cache has fresh data. Catches two cases:
-        //   1. Cold start / freshly-created workspace: the ``accent-changed``
-        //      IPC (or, in browser mode, the URL poll) set
-        //      ``lastRequestedAccentAgentId`` before any SSE tick populated the
-        //      cache; this tick fills the cache and paints.
-        //   2. Settings-page color save: the settings POST updated the
-        //      resolver snapshot which triggered this tick; the cached
-        //      hex is now the newly-picked one, so the chrome repaints.
-        // Independent of ``currentTitleAgentId`` because the accent source
-        // (a workspace-scoped screen, which includes settings / sharing) is
-        // wider than the displayed workspace -- the accent rides
-        // ``lastRequestedAccentAgentId``, not the recovery-redirect lock.
-        if (lastRequestedAccentAgentId) applyTitleAccent(lastRequestedAccentAgentId);
-        // Re-derive the breadcrumb: the workspace name for the current crumb
-        // may only now be known (cold start, rename).
-        applyTitlebarContext();
-      }
-      if (data.type === 'requests') updateRequestsBadge(data.count);
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
     } catch (e) {}
   }

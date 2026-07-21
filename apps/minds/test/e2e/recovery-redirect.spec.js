@@ -30,6 +30,10 @@ const CHROME_JS_PATH = path.join(
   'static',
   'chrome.js',
 );
+// The compiled mithril bundle chrome.js expects (window.MindsUI: titlebar +
+// menu components) -- loaded before chrome.js, as in the production shell.
+const CHROME_BUNDLE_PATH = path.join(
+  __dirname, '..', '..', 'imbue', 'minds', 'desktop_client', 'static', 'dist', 'chrome.bundle.js');
 
 const AGENT_ID = 'agent-bb340d1c1d5a4c43b1396f277cfd6d81';
 
@@ -37,30 +41,33 @@ const AGENT_ID = 'agent-bb340d1c1d5a4c43b1396f277cfd6d81';
 // these ids/callbacks at init; the test fires the captured callbacks exactly as
 // main.js's broadcastChromeEvent / current-workspace-changed IPC do. Captured
 // navigateContent calls land in window.__nav.
+// The titlebar interior is the mithril TitleBar component (mounted into the
+// #minds-titlebar bar by chrome.js), so the harness DOM carries only the bar
+// container + the shell elements chrome.js touches. Every bridge callback
+// registry is an ARRAY fired in order -- the component and chrome.js both
+// subscribe, exactly like multiple ipcRenderer.on listeners in production.
 const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http://localhost:8421">
-  <button id="back-btn" hidden></button><button id="home-btn"></button>
-  <div id="ws-crumb" hidden>
-    <button id="workspace-switcher-btn"><span id="workspace-switcher-name"></span></button>
-    <button id="ws-tab-workspace"></button>
-    <button id="ws-tab-settings"></button>
-  </div>
-  <div id="page-crumb" hidden><span id="page-crumb-name"></span></div>
-  <button id="min-btn"></button><button id="max-btn"></button><button id="close-btn"></button>
-  <button id="requests-toggle"><span id="requests-badge" hidden></span></button>
-  <button id="help-toggle"></button>
+  <div id="minds-titlebar"></div>
   <iframe id="content-frame"></iframe>
-  <div id="sidebar-backdrop"></div><div id="sidebar-workspaces"></div>
+  <div id="sidebar-backdrop"><div id="sidebar-menu"></div></div>
   <script>
     window.__nav = [];
     window.__help = [];
-    window.__cb = {};
+    var registries = { chromeEvent: [], currentWorkspace: [], contentUrl: [], accent: [], modal: [] };
+    window.__cb = {
+      chromeEvent: function (data) { registries.chromeEvent.forEach(function (cb) { cb(data); }); },
+      currentWorkspace: function (agentId, ready) { registries.currentWorkspace.forEach(function (cb) { cb(agentId, ready); }); },
+      contentUrl: function (url) { registries.contentUrl.forEach(function (cb) { cb(url); }); },
+      accent: function (agentId) { registries.accent.forEach(function (cb) { cb(agentId); }); },
+    };
+    window.__registered = registries;
     window.mindsAccent = { get: function (id, cb) { cb('#ffffff'); }, pickForeground: function () { return '0 0 0'; } };
     window.minds = {
-      onChromeEvent: function (cb) { window.__cb.chromeEvent = cb; },
-      onCurrentWorkspaceChanged: function (cb) { window.__cb.currentWorkspace = cb; },
-      onContentURLChange: function (cb) { window.__cb.contentUrl = cb; },
-      onAccentChanged: function (cb) { window.__cb.accent = cb; },
-      onModalStateChanged: function (cb) { window.__cb.modal = cb; },
+      onChromeEvent: function (cb) { registries.chromeEvent.push(cb); },
+      onCurrentWorkspaceChanged: function (cb) { registries.currentWorkspace.push(cb); },
+      onContentURLChange: function (cb) { registries.contentUrl.push(cb); },
+      onAccentChanged: function (cb) { registries.accent.push(cb); },
+      onModalStateChanged: function (cb) { registries.modal.push(cb); },
       navigateContent: function (url) { window.__nav.push(url); },
       toggleHelp: function (agentId, assistAvailable) { window.__help.push({ agentId: agentId, assistAvailable: assistAvailable }); },
       toggleSidebar: function () {},
@@ -79,10 +86,12 @@ const EXPECTED_RECOVERY_URL =
 // empty in-memory health state, listeners freshly registered.
 async function loadChrome(page) {
   await page.setContent(HARNESS_HTML);
+  await page.addScriptTag({ path: CHROME_BUNDLE_PATH });
   await page.addScriptTag({ path: CHROME_JS_PATH });
-  // Sanity: chrome.js ran to completion and registered the bridge callbacks.
+  // Sanity: chrome.js + the titlebar mount ran to completion and registered
+  // the bridge callbacks (chrome.js's recovery handler + the component's).
   await expect
-    .poll(() => page.evaluate(() => typeof window.__cb.chromeEvent === 'function' && typeof window.__cb.currentWorkspace === 'function'))
+    .poll(() => page.evaluate(() => window.__registered.chromeEvent.length > 0 && window.__registered.currentWorkspace.length > 0))
     .toBe(true);
 }
 
@@ -152,7 +161,7 @@ test.describe('get-help agent-assist gating (chrome.js contract)', () => {
           window.__cb.chromeEvent({ type: 'system_interface_status', agent_id: args.agentId, status: step.status });
         }
       });
-      document.getElementById('help-toggle').onclick();
+      document.getElementById('help-toggle').click();
       return window.__help.slice();
     }, { agentId: AGENT_ID, steps });
   }

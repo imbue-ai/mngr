@@ -37,6 +37,9 @@ function recordingHost(): { host: Host; calls: string[] } {
     confirmStopMind: () => Promise.resolve(false),
     openModal: () => undefined,
     closeModal: () => calls.push("closeModal"),
+    minimizeWindow: () => undefined,
+    maximizeWindow: () => undefined,
+    closeWindow: () => undefined,
   };
   return { host, calls };
 }
@@ -222,6 +225,7 @@ describe("mountWorkspaceMenu overlay dismissal", () => {
       onChromeEvent: () => undefined,
       onAccentChanged: () => undefined,
       onCurrentWorkspaceChanged: () => undefined,
+      onContentURLChange: () => undefined,
       navigateContent: () => undefined,
       contentGoBack: () => undefined,
       openWorkspaceInNewWindow: () => undefined,
@@ -234,6 +238,9 @@ describe("mountWorkspaceMenu overlay dismissal", () => {
       toggleHelp: () => undefined,
       openSharingModal: () => undefined,
       closeModal: () => closeCalls.push("close"),
+      minimize: () => undefined,
+      maximize: () => undefined,
+      close: () => undefined,
     };
     const { mountWorkspaceMenu } = await import("./WorkspaceMenu");
     const { resetHostForTesting } = await import("../host");

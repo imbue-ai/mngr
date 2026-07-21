@@ -23,6 +23,7 @@ function fakeBridge(): { bridge: MindsBridge; calls: string[] } {
     onChromeEvent: record("onChromeEvent") as MindsBridge["onChromeEvent"],
     onAccentChanged: record("onAccentChanged") as MindsBridge["onAccentChanged"],
     onCurrentWorkspaceChanged: record("onCurrentWorkspaceChanged") as MindsBridge["onCurrentWorkspaceChanged"],
+    onContentURLChange: record("onContentURLChange") as MindsBridge["onContentURLChange"],
     navigateContent: record("navigateContent"),
     contentGoBack: record("contentGoBack"),
     openWorkspaceInNewWindow: record("openWorkspaceInNewWindow"),
@@ -35,6 +36,9 @@ function fakeBridge(): { bridge: MindsBridge; calls: string[] } {
     toggleHelp: record("toggleHelp"),
     openSharingModal: record("openSharingModal"),
     closeModal: record("closeModal"),
+    minimize: record("minimize"),
+    maximize: record("maximize"),
+    close: record("close"),
   };
   return { bridge, calls };
 }

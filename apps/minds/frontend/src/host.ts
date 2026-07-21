@@ -16,6 +16,9 @@ export interface MindsBridge {
   // The workspace ACTUALLY DISPLAYED in the content view (null on its
   // settings / sharing screens); narrower than the accent source.
   onCurrentWorkspaceChanged(callback: (agentId: string | null, isContentReady: boolean) => void): void;
+  // The content view's URL, pushed by main on every navigation (and replayed
+  // when a chrome view (re)loads).
+  onContentURLChange(callback: (url: string | null) => void): void;
   navigateContent(url: string): void;
   contentGoBack(): void;
   openWorkspaceInNewWindow(agentId: string): void;
@@ -28,6 +31,9 @@ export interface MindsBridge {
   toggleHelp(agentId: string, assistAvailable: boolean): void;
   openSharingModal(agentId: string, serviceName: string): void;
   closeModal(): void;
+  minimize(): void;
+  maximize(): void;
+  close(): void;
 }
 
 declare global {
@@ -68,6 +74,11 @@ export interface Host {
   confirmStopMind(agentId: string, name: string): Promise<boolean>;
   openModal(request: ModalRequest): void;
   closeModal(): void;
+  // Native window controls; no-ops in browser mode (the buttons render but
+  // are inert there, matching the pre-component behavior).
+  minimizeWindow(): void;
+  maximizeWindow(): void;
+  closeWindow(): void;
 }
 
 // Mirrors the confirm text Landing's inline script uses in browser mode.
@@ -90,6 +101,9 @@ export function createElectronHost(bridge: MindsBridge): Host {
       bridge.confirmStopMind(agentId, name);
       return Promise.resolve(false);
     },
+    minimizeWindow: () => bridge.minimize(),
+    maximizeWindow: () => bridge.maximize(),
+    closeWindow: () => bridge.close(),
     openModal: (request) => {
       switch (request.kind) {
         case "minds-settings":
@@ -205,7 +219,21 @@ export function createBrowserHost(options: BrowserHostOptions): Host {
       if (eventSource === null) connect();
     },
     navigate,
-    goBack: () => window.history.back(),
+    goBack: () => {
+      // On the agent-wrapper page the content lives in a child iframe; going
+      // back must traverse ITS history, not the shell document's. Trusted
+      // local pages (no #content-frame) are their own main frame.
+      const contentFrame = document.getElementById("content-frame") as HTMLIFrameElement | null;
+      if (contentFrame === null) {
+        window.history.back();
+        return;
+      }
+      try {
+        contentFrame.contentWindow?.history.back();
+      } catch {
+        // Cross-origin content: nothing to traverse from here.
+      }
+    },
     openWorkspaceInNewWindow: (agentId) => {
       // No multi-window concept in browser mode: open the workspace in a new
       // tab via the mngr-forward origin the shell stamped on the body.
@@ -216,6 +244,9 @@ export function createBrowserHost(options: BrowserHostOptions): Host {
       // Browser mode has no native context menus.
     },
     confirmStopMind: (agentId, name) => Promise.resolve(window.confirm(stopMindConfirmText(name))),
+    minimizeWindow: () => undefined,
+    maximizeWindow: () => undefined,
+    closeWindow: () => undefined,
     openModal: (request) => navigate(browserModalUrl(request)),
     closeModal: () => {
       // Browser-mode modals are full pages until Phase 7; leaving one is a

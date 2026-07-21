@@ -210,7 +210,10 @@ describe("connect", () => {
       showWorkspaceContextMenu: () => undefined,
       confirmStopMind: () => Promise.resolve(false),
       openModal: () => undefined,
-      closeModal: () => undefined,
+      minimizeWindow: () => undefined,
+    maximizeWindow: () => undefined,
+    closeWindow: () => undefined,
+    closeModal: () => undefined,
     };
     return {
       host,
