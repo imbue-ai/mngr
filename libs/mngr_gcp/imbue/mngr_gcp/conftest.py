@@ -91,9 +91,7 @@ def _mark_session_failed(session: pytest.Session) -> None:
     Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
     setting ``session.exitstatus`` is the supported way to signal failure.
     Only overwrite a successful (0) status: a non-zero status
-    (INTERRUPTED=2, INTERNAL_ERROR=3, USAGE_ERROR=4, NO_TESTS_COLLECTED=5)
-    carries strictly more diagnostic information than TESTS_FAILED=1, so
-    downgrading would hide the real reason CI failed.
+    carries more diagnostic information than TESTS_FAILED=1.
     """
     if session.exitstatus == 0:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
@@ -138,7 +136,6 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         client = make_gcp_reaper_client(project)
         instances = client.list_instances()
     except (VpsError, google_api_exceptions.GoogleAPICallError) as e:
-        # A scan that cannot run must fail the session, not silently report "no leaks".
         logger.error("Failed to scan for leaked GCE test instances: {}", e)
         _mark_session_failed(session)
         return

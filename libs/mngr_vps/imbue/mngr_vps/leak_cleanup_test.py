@@ -70,9 +70,6 @@ class _FakeReaperClient:
         self.destroyed_ids.append(as_str)
 
 
-# --- parsing helpers --------------------------------------------------------------------------
-
-
 def test_parse_tag_value_returns_value_or_none() -> None:
     tags = ["mngr-provider=aws", "mngr-created-at=2026-06-16T09:30:15+00:00"]
     assert parse_tag_value(tags, "mngr-created-at") == "2026-06-16T09:30:15+00:00"
@@ -81,7 +78,6 @@ def test_parse_tag_value_returns_value_or_none() -> None:
 
 def test_parse_iso_utc_handles_naive_and_aware_and_garbage() -> None:
     assert parse_iso_utc("2026-06-16T09:30:15+00:00") == datetime(2026, 6, 16, 9, 30, 15, tzinfo=timezone.utc)
-    # A naive timestamp is assumed UTC.
     assert parse_iso_utc("2026-06-16T09:30:15") == datetime(2026, 6, 16, 9, 30, 15, tzinfo=timezone.utc)
     assert parse_iso_utc("not-a-timestamp") is None
     assert parse_iso_utc(None) is None
@@ -95,16 +91,9 @@ def test_parse_strptime_utc_handles_format_and_garbage() -> None:
     assert parse_strptime_utc(None, _VULTR_FORMAT) is None
 
 
-# --- has_launched_marker ----------------------------------------------------------------------
-
-
 def test_has_launched_marker() -> None:
     assert has_launched_marker(_instance("t", [f"{_MARKER}=true", "mngr-provider=aws"]), _MARKER)
-    # A production instance carries no marker.
     assert not has_launched_marker(_instance("prod", ["mngr-provider=aws"]), _MARKER)
-
-
-# --- find_old_test_instances ------------------------------------------------------------------
 
 
 def _test_tags(created_at: datetime) -> list[str]:
@@ -128,9 +117,6 @@ def test_find_boundary_exactly_max_age_is_not_old() -> None:
     assert find_old_test_instances([edge], _extract, max_age=timedelta(hours=1), now=_NOW) == []
 
 
-# --- destroy / cleanup ------------------------------------------------------------------------
-
-
 def test_destroy_leaked_instances_404_counts_as_cleaned() -> None:
     client = _FakeReaperClient([_instance("gone", [])], missing_ids=["gone"])
     failed = destroy_leaked_instances(client, [_instance("gone", [])])
@@ -140,7 +126,6 @@ def test_destroy_leaked_instances_404_counts_as_cleaned() -> None:
 def test_destroy_leaked_instances_reports_real_failures() -> None:
     client = _FakeReaperClient([], fail_ids=["bad"])
     failed = destroy_leaked_instances(client, [_instance("good", []), _instance("bad", [])])
-    # Both attempted; only the 500 is reported, and "good" still got destroyed.
     assert failed == ["bad"]
     assert client.destroyed_ids == ["good"]
 
@@ -166,7 +151,6 @@ def test_cleanup_returns_zero_when_nothing_old() -> None:
 
 
 def test_cleanup_surfaces_scan_failure() -> None:
-    # A scan failure must propagate, not be swallowed into "nothing leaked".
     client = _FakeReaperClient([], list_error=VpsApiError(503, "unavailable"))
     with pytest.raises(VpsApiError):
         cleanup_old_test_instances(client, _extract, max_age=timedelta(hours=1), now=_NOW)
@@ -182,6 +166,5 @@ def test_cleanup_raises_on_destroy_failure_after_attempting_all() -> None:
     )
     with pytest.raises(VpsLeakCleanupError) as exc_info:
         cleanup_old_test_instances(client, _extract, max_age=timedelta(hours=1), now=_NOW)
-    # old2 was still destroyed even though old1 failed.
     assert client.destroyed_ids == ["old2"]
     assert exc_info.value.failed_instance_ids == ("old1",)

@@ -41,7 +41,6 @@ def test_extractor_round_trips_with_build_tag() -> None:
 
 
 def test_extractor_ignores_production_vps() -> None:
-    # A production VPS carries no test-created tag and must never be reaped.
     assert vultr_test_created_at(_instance("prod", ["mngr-provider=vultr", "minds_env=staging"])) is None
 
 

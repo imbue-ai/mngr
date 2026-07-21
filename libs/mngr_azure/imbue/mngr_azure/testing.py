@@ -68,14 +68,7 @@ AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 
 
 def make_azure_reaper_client(subscription_id: str) -> AzureVpsClient:
-    """Build an ``AzureVpsClient`` for the session-end hook / standalone reaper.
-
-    The reaper calls ``list_instances`` + ``destroy_instance`` + ``reclaim_orphaned_network_resources``,
-    none of which need a real image / VM size, so only the credential, subscription, region, and
-    resource group are supplied (the same ones the release tests and orphan scan operate in). Used
-    by both the conftest session-end leak detector and
-    ``scripts/cleanup_old_azure_test_instances.py`` so the two share one client-construction path.
-    """
+    """Build an ``AzureVpsClient`` for the session-end hook / standalone reaper."""
     return AzureVpsClient(
         credential=DefaultAzureCredential(),
         subscription_id=subscription_id,

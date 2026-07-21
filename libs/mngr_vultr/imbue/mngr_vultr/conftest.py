@@ -80,17 +80,7 @@ _CREATED_TAG: Final[str] = build_test_created_tag(datetime.now(timezone.utc))
 
 
 class _LeakDestroyOutcome(UpperCaseStrEnum):
-    """Outcome of attempting to destroy one survivor at session end.
-
-    DESTROYED -- destroy API call succeeded on a still-running instance.
-    ALREADY_GONE -- destroy returned 404; the instance disappeared between
-        ``list_instances`` and ``destroy_instance``. This is the
-        race-with-test-finally-block-destroy case and must not fail the
-        session.
-    DESTROY_FAILED -- any other failure (5xx, 429, 422, malformed dict).
-        Counted as a real leak because we found a tagged survivor AND
-        could not clean it up.
-    """
+    """Outcome of attempting to destroy one survivor at session end."""
 
     DESTROYED = auto()
     ALREADY_GONE = auto()
@@ -109,10 +99,8 @@ def _mark_session_failed(session: pytest.Session) -> None:
 
     Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
     setting ``session.exitstatus`` is the supported way to signal failure.
-    Only overwrite a successful (0) status: a non-zero status
-    (INTERRUPTED=2, INTERNAL_ERROR=3, USAGE_ERROR=4, NO_TESTS_COLLECTED=5)
-    carries strictly more diagnostic information than TESTS_FAILED=1, so
-    downgrading would hide the real reason CI failed.
+    Only overwrite a successful (0) status: a non-zero status carries more
+    diagnostic information than TESTS_FAILED=1.
     """
     if session.exitstatus == 0:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
@@ -121,18 +109,9 @@ def _mark_session_failed(session: pytest.Session) -> None:
 def pytest_configure(config: pytest.Config) -> None:
     """Inject the session and timestamp tags into ``MNGR_VPS_EXTRA_TAGS``.
 
-    Any VPS subsequently created via the mngr CLI (which runs as a
-    subprocess and inherits this env) will carry both tags: the session
-    tag makes the leak detection in ``pytest_sessionfinish`` precise, and
-    the timestamp tag lets an out-of-band reaper destroy orphans by age
-    when a session dies before ``pytest_sessionfinish`` can run. Uses
-    ``pytest.MonkeyPatch.setenv`` so the original value is restored
-    when ``_monkeypatch.undo()`` is called from ``pytest_sessionfinish``.
-
-    No-ops when ``MNGR_VULTR_RELEASE_TESTS`` is unset: without the opt-in no
-    release test runs, so nothing creates a VPS and there are no tags to
-    inject. ``pytest_sessionfinish`` still calls ``_monkeypatch.undo()``
-    unconditionally, which is a harmless no-op when nothing was set here.
+    No-ops when ``MNGR_VULTR_RELEASE_TESTS`` is unset. Uses
+    ``pytest.MonkeyPatch.setenv`` so the original value is restored when
+    ``_monkeypatch.undo()`` is called from ``pytest_sessionfinish``.
     """
     del config
     if not VULTR_RELEASE_TESTS_OPT_IN:
@@ -155,23 +134,7 @@ def _list_leaked_instances(client: VultrVpsClient) -> list[dict[str, Any]]:
 
 
 def _destroy_leaked_instance(client: VultrVpsClient, instance: dict[str, Any]) -> _LeakDestroyOutcome:
-    """Best-effort destroy of one leaked instance.
-
-    Returns the outcome as a ``_LeakDestroyOutcome``:
-
-    * ``DESTROYED`` -- destroy succeeded on a still-running instance.
-    * ``ALREADY_GONE`` -- destroy returned 404; the instance disappeared
-      between our list and our destroy. This is the race with the
-      test's own ``finally``-block ``mngr destroy --force`` and must
-      not fail the session (else every successful release run would
-      false-positive).
-    * ``DESTROY_FAILED`` -- any other failure. Logged at error level;
-      the session-end caller counts this as a real leak because we
-      have a confirmed tagged survivor that we could not clean up.
-
-    Does not raise: the goal is to attempt cleanup of every survivor
-    before the session exits, then surface the outcome to the caller.
-    """
+    """Best-effort destroy of one leaked instance; return the outcome."""
     instance_id = instance.get("id", "")
     try:
         client.destroy_instance(VpsInstanceId(instance_id))
@@ -185,15 +148,7 @@ def _destroy_leaked_instance(client: VultrVpsClient, instance: dict[str, Any]) -
 
 
 def _is_real_leak(outcome: _LeakDestroyOutcome) -> bool:
-    """Classify a destroy outcome as a real leak (should fail the session).
-
-    ``DESTROYED`` and ``DESTROY_FAILED`` are real leaks: in both cases a
-    survivor was alive at list time and either we destroyed it (test
-    bug: it should have been gone already) or we could not destroy it
-    (also a bug, with the additional badness that the instance stays
-    live). ``ALREADY_GONE`` is the benign race with the test's own
-    ``finally``-block destroy.
-    """
+    """Whether the outcome is a real leak (should fail the session)."""
     match outcome:
         case _LeakDestroyOutcome.DESTROYED | _LeakDestroyOutcome.DESTROY_FAILED:
             return True
@@ -206,31 +161,10 @@ def _is_real_leak(outcome: _LeakDestroyOutcome) -> bool:
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Find and destroy any Vultr instances leaked by this test session.
 
-    Implemented as a hook (not a fixture) so it runs after every fixture
-    teardown -- mirrors the Modal session-end leak check in
-    ``libs/mngr_modal/imbue/mngr_modal/conftest.py``. No-ops when
-    ``MNGR_VULTR_RELEASE_TESTS`` is unset (an ordinary unit-only run that
-    created no instances -> nothing to scan). When the opt-in *is* set but
-    ``VULTR_API_KEY`` is missing, the session is failed rather than skipped:
-    a release run with no key cannot have created or scanned for instances,
-    which is a misconfiguration worth surfacing loudly, not a benign skip.
-    A ``list_instances`` scan failure likewise fails the session rather than
-    silently reporting "no leaks" for a scan that never ran.
-
-    On finding a real leak -- a destroy that either succeeded on a
-    still-running instance (``DESTROYED``) or itself failed
-    (``DESTROY_FAILED``, meaning the survivor stays live) -- logs a
-    loud error, destroys each survivor, and sets ``session.exitstatus``
-    to ``TESTS_FAILED`` so CI surfaces the bug. The ``ALREADY_GONE``
-    case (404 race with the test's own ``finally``-block destroy) is
-    benign and does not fail the session. Only overwrites a successful
-    exit status -- preserves the more-specific non-zero codes
-    (INTERRUPTED, INTERNAL_ERROR, USAGE_ERROR, NO_TESTS_COLLECTED),
-    which carry strictly more diagnostic information than TESTS_FAILED.
-
-    Restores ``MNGR_VPS_EXTRA_TAGS`` to its pre-session value via
-    ``_monkeypatch.undo()`` so the env mutation does not outlive the
-    pytest run.
+    No-ops when ``MNGR_VULTR_RELEASE_TESTS`` is unset. When the opt-in is set
+    but ``VULTR_API_KEY`` is missing, or the scan fails, the session is failed.
+    On finding a real leak, destroys each survivor and fails the session.
+    Restores ``MNGR_VPS_EXTRA_TAGS`` via ``_monkeypatch.undo()``.
     """
     del exitstatus
     try:
@@ -251,7 +185,6 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         try:
             leaked = _list_leaked_instances(client)
         except VpsApiError as e:
-            # A scan that cannot run must fail the session, not silently report "no leaks".
             logger.error("Failed to scan for leaked Vultr test instances: {}", e)
             _mark_session_failed(session)
             return

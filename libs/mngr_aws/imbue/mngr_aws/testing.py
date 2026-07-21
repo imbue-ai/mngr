@@ -67,14 +67,7 @@ def clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def make_aws_reaper_client() -> AwsVpsClient:
-    """Build an ``AwsVpsClient`` for the session-end hook / standalone reaper.
-
-    The reaper only calls ``list_instances`` + ``destroy_instance``, which ignore the AMI /
-    security-group fields, so those are placeholders. Region comes from ``AWS_DEFAULT_REGION``
-    (the same region the release tests and orphan scan operate in). Used by both the conftest
-    session-end leak detector and ``scripts/cleanup_old_aws_test_instances.py`` so the two share
-    one client-construction path.
-    """
+    """Build an ``AwsVpsClient`` for the session-end hook / standalone reaper."""
     session = boto3.Session(region_name=AWS_DEFAULT_REGION)
     return AwsVpsClient(
         session=session,
