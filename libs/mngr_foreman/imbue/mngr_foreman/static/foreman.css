@@ -71,6 +71,31 @@ a:hover { text-decoration: underline; }
 /* full-bleed: the transcript fills the viewport width (no narrow column) */
 .wrap { max-width: none; margin: 0; padding: 14px; }
 
+/* ---- app shell: pinned top bar + composer, scrolling middle ----
+   Chat and home are a fixed-height flex column: the top bar and the composer
+   stay put and ONLY the middle (.wrap) scrolls. This pins both bars reliably on
+   every screen -- including mobile, where the soft keyboard resizes the column
+   (viewport meta interactive-widget=resizes-content) instead of floating a
+   fixed composer under the keyboard. The terminal page (body.term-body) keeps
+   its own fixed layout and is excluded. */
+body:not(.term-body) {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+body:not(.term-body) .topbar { position: static; flex: 0 0 auto; }
+body:not(.term-body) .wrap {
+  flex: 1 1 auto;
+  min-height: 0;               /* let the flex child actually shrink + scroll */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+body:not(.term-body) .composer { position: static; flex: 0 0 auto; }
+/* no fixed composer to clear anymore -- it's a sibling below the scroll area */
+body:not(.term-body) .transcript { padding-bottom: 16px; }
+
 /* ---- agent list ---- */
 .agent-list { display: flex; flex-direction: column; gap: 8px; }
 .agent-card {
@@ -116,10 +141,10 @@ a:hover { text-decoration: underline; }
   padding: 8px 12px;
   margin: 12px 0;
 }
-/* queued: sent while the agent was busy, awaiting delivery confirmation. */
+/* queued: typed while the agent was busy -- still sitting in claude's queue,
+   not yet seen by the model. Flips to the plain green block once claude accepts
+   it as a delivered turn (the transcript is the source of truth for the flip). */
 .entry.user.queued { background: var(--queued-bg); }
-/* pending: optimistically rendered on send, faded until the transcript confirms. */
-.entry.user.pending { opacity: 0.55; transition: opacity 0.15s ease-out; }
 
 .entry.assistant { margin: 8px 0; }
 .assistant-md { word-break: break-word; }
@@ -261,8 +286,9 @@ a:hover { text-decoration: underline; }
   font-family: var(--prose);
   font-size: 15px;
   line-height: 1.4;
-  max-height: 40vh;
+  max-height: calc(5 * 1.4em + 22px); /* ~5 lines (line-height 1.4em) + padding, then scroll */
   min-height: 42px;
+  overflow-y: auto;
 }
 .composer textarea:focus { outline: none; border-color: var(--border-strong); }
 .composer textarea:disabled { opacity: 0.6; }
@@ -307,6 +333,20 @@ a:hover { text-decoration: underline; }
 
 /* composer greyed when a blocking dialog occupies the agent's TUI */
 .composer.blocked .inner { opacity: 0.4; pointer-events: none; }
+/* awaiting: message sent, still in flight -- the text stays in the box and the
+   whole input region is locked until the transcript confirms it landed. */
+.composer.awaiting .inner { opacity: 0.5; pointer-events: none; }
+
+/* Small screens: the textarea takes the full width on its own row and the
+   buttons drop to a row below it (+ and Esc on the left, send on the right) --
+   bigger tap targets, no cramped single line. */
+@media (max-width: 560px) {
+  .composer .inner { flex-wrap: wrap; }
+  .composer textarea { flex: 1 1 100%; order: 1; }
+  .composer .attach-btn { order: 2; }
+  .composer .esc-btn { order: 3; }
+  #send { order: 4; margin-left: auto; }
+}
 .composer-blocked {
   max-width: none;
   margin: 0 0 8px;

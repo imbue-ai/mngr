@@ -357,11 +357,28 @@
     const FILE_TOKEN_SRC = "\\[FILE:\\s*\\./chat_uploads/([A-Za-z0-9._-]+)\\]";
     const IMAGE_EXTS = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1, svg: 1 };
 
+    // The middle column (.wrap) is the scroll container now (the shell is a
+    // fixed-height flex column), so scrolling is measured on it, not the window.
+    const scroller = document.querySelector(".wrap") || document.scrollingElement || document.documentElement;
+    // Stick-to-bottom: follow new content ONLY while the user is at the bottom.
+    // Scrolling up detaches (they're reading history); scrolling back down to the
+    // bottom re-attaches. Starts attached, so a freshly opened chat lands on the
+    // newest message.
+    let stick = true;
     function atBottom() {
-      return window.innerHeight + window.scrollY >= document.body.offsetHeight - 80;
+      return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
     }
+    function scrollToBottom() { scroller.scrollTop = scroller.scrollHeight; }
     function scrollDown(force) {
-      if (force || atBottom()) window.scrollTo(0, document.body.scrollHeight);
+      if (force) stick = true;
+      if (stick) scrollToBottom();
+    }
+    scroller.addEventListener("scroll", () => { stick = atBottom(); }, { passive: true });
+    // Follow late-growing content too -- streaming assistant text, and images /
+    // mermaid / katex that finish loading after their event first rendered --
+    // whenever we're still attached to the bottom.
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(() => { if (stick) scrollToBottom(); }).observe(tEl);
     }
 
     // ---- diff rendering (client-side, no lib) ----
@@ -608,28 +625,23 @@
     }
 
     function renderEvent(ev) {
-      const wasBottom = atBottom();
       if (ev.type === "user_message") {
         const key = (ev.content || "").trim();
-        // The transcript is the source of truth: this event confirms the message
-        // the user sent, so now (not on POST) clear + unlock the composer.
+        // The transcript is the single source of truth. The instant the message
+        // we sent shows up here (queued OR delivered) it has "landed" -- clear the
+        // box and unlock the input region for the next one.
         if (pendingSend !== null && key === pendingSend) {
-          finishPendingSend();
+          confirmSend();
         }
         const existing = userBubbles.get(key);
-        if (existing && existing.pending) {
-          // The optimistic bubble we rendered on send is now confirmed by the
-          // transcript: drop the "pending" look in place (no duplicate).
-          existing.node.classList.remove("pending");
-          existing.pending = false;
-          if (existing.queued && !ev.queued) { existing.node.classList.remove("queued"); existing.queued = false; }
-        } else if (existing && existing.queued && !ev.queued) {
-          // A queued_command has now been delivered as a real turn: flip the
-          // existing purple bubble to green in place rather than duplicating it.
-          existing.node.classList.remove("queued");
-          existing.queued = false;
-        } else if (!existing) {
-          // queued_command -> purple ("queued" class); delivered -> normal.
+        if (existing) {
+          // Same message, new state: sync its colour to what claude recorded.
+          // queued_command -> purple; the later delivered turn -> green, in place.
+          existing.node.classList.toggle("queued", !!ev.queued);
+          existing.queued = !!ev.queued;
+        } else {
+          // queued (typed while busy, still in claude's queue, not yet seen by the
+          // model) -> purple; delivered (claude has accepted it as a turn) -> green.
           const e = el("div", ev.queued ? "entry user queued" : "entry user");
           renderUserContent(e, ev.content || "");
           // Pasted / queued images ride along on the message.
@@ -655,7 +667,7 @@
       }
       updateWorkingFrom(ev);
       refreshWorking();
-      scrollDown(wasBottom);
+      scrollDown();
     }
 
     function setStatus(text) {
@@ -745,9 +757,16 @@
       applyMngrBusy(d.busy);
     });
 
+    // Grow with the text up to ~5 lines, then stop and let the textarea scroll --
+    // on both desktop and phone (line-count cap, not a viewport fraction).
     function autoGrow() {
       input.style.height = "auto";
-      input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px";
+      const cs = getComputedStyle(input);
+      const line = parseFloat(cs.lineHeight) || 21;
+      const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+      const maxH = line * 5 + pad;
+      input.style.height = Math.min(input.scrollHeight, maxH) + "px";
+      input.style.overflowY = input.scrollHeight > maxH ? "auto" : "hidden";
     }
     input.addEventListener("input", autoGrow);
 
@@ -758,59 +777,46 @@
       if (r) r.onclick = (e) => { e.preventDefault(); sendErr.hidden = true; };
     }
 
-    // Clear the composer immediately (optimistic send). The message is already
-    // rendered as a pending bubble, so there's nothing to lose by emptying now.
-    function clearComposer() {
+    // ---- send lifecycle (the transcript is the source of truth) ----
+    // We do NOT optimistically draw a bubble. On send the message stays in the
+    // textbox and the whole input region locks ("awaiting") until the transcript
+    // echoes it back -- queued (purple) or delivered (green). Only then do we
+    // clear the box. So a bubble exists only once claude has actually recorded the
+    // message: no guessing, no colour flip-flop.
+    function setAwaiting(on) {
+      composer.classList.toggle("awaiting", on);
+      input.disabled = on;
+      sendBtn.disabled = on;
+    }
+    // Message landed in the transcript: clear the box + unlock for the next one.
+    function confirmSend() {
+      if (pendingSendTimer) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
+      pendingSend = null;
       input.value = "";
-      input.disabled = false;
-      sendBtn.disabled = false;
+      setAwaiting(false);
       autoGrow();
       clearUploads();
       input.focus();
     }
-    // Bookkeeping only: the composer was already cleared on send; here we just
-    // stop the safety timer once the transcript confirms (or the timer fires).
-    function finishPendingSend() {
+    // Give the input back WITHOUT clearing (failed POST): keep the typed text so
+    // the user can fix and retry, and restore usability.
+    function releaseSend() {
       if (pendingSendTimer) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
       pendingSend = null;
-    }
-
-    // Render the just-sent message as a pending bubble, right now.
-    function renderPendingUser(text) {
-      const key = text.trim();
-      const wasBottom = atBottom();
-      const e = el("div", "entry user pending");
-      renderUserContent(e, text);
-      tEl.appendChild(e);
-      userBubbles.set(key, { node: e, queued: false, pending: true });
-      scrollDown(wasBottom);
-      return { node: e, key: key };
-    }
-    // Roll a pending bubble back (failed POST): remove it and restore the text so
-    // the user can edit/retry without losing what they typed.
-    function rollbackPending(pend, msg) {
-      finishPendingSend();
-      if (pend && pend.node) pend.node.remove();
-      if (pend) userBubbles.delete(pend.key);
-      if (!input.value.trim()) { input.value = msg; autoGrow(); }
+      setAwaiting(false);
+      input.focus();
     }
 
     function send() {
-      if (sendBtn.disabled) return; // guard double-fire (Enter + click)
+      if (composer.classList.contains("awaiting")) return; // already waiting on one
       const msg = input.value.trim();
       if (!msg) return;
       sendErr.hidden = true;
-      // Optimistic: show the bubble and empty the composer NOW so send feels
-      // instant. The transcript echo confirms it in place; a failed POST rolls back.
-      const pend = renderPendingUser(msg);
-      clearComposer();
+      // Lock the input region and keep the text visible while we wait for the
+      // transcript to confirm the message actually landed (confirmSend, above).
       pendingSend = msg;
+      setAwaiting(true);
       if (pendingSendTimer) clearTimeout(pendingSendTimer);
-      // Safety: if the echo never matches (content normalized), drop the pending
-      // look after a grace period so the bubble doesn't stay greyed forever.
-      pendingSendTimer = setTimeout(() => {
-        if (pendingSend === msg) { finishPendingSend(); if (pend.node) pend.node.classList.remove("pending"); }
-      }, 15000);
       fetch("/api/agents/" + encodeURIComponent(name) + "/message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -821,9 +827,14 @@
           if (ok && d.ok) {
             clearBlocked();
             statePoll.burst(); // fast input-state polling so working/blocked reacts
+            // Keep waiting for the transcript echo. Safety net: if it never matches
+            // (content normalized, or an agent type with no live transcript), clear
+            // anyway after a grace period so we don't stay locked forever.
+            if (pendingSendTimer) clearTimeout(pendingSendTimer);
+            pendingSendTimer = setTimeout(() => { if (pendingSend === msg) confirmSend(); }, 15000);
           } else {
             const err = (d && d.error) || "send failed — open the terminal to resolve any prompt.";
-            rollbackPending(pend, msg);
+            releaseSend();
             showError(err);
             // A failed send usually means a blocking dialog ate the paste; flip
             // to the greyed state immediately (the next poll re-confirms/clears).
@@ -831,7 +842,7 @@
           }
         })
         .catch((e) => {
-          rollbackPending(pend, msg);
+          releaseSend();
           showError("network error: " + e);
         });
     }
@@ -1144,15 +1155,21 @@
     const bar = document.getElementById("ctrlbar");
     if (bar) {
       bar.querySelectorAll("button").forEach((btn) => {
-        btn.addEventListener("mousedown", (e) => e.preventDefault());
-        btn.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
-        btn.addEventListener("click", (e) => {
+        // One pointer handler covers mouse, touch, and pen. The old code called
+        // preventDefault on touchstart -- which on phones cancels the emulated
+        // click, so the button did nothing. preventDefault on pointerdown keeps
+        // the terminal focused without swallowing the tap; the action fires on
+        // pointerup (which fires once for every input type).
+        btn.addEventListener("pointerdown", (e) => e.preventDefault());
+        btn.addEventListener("pointerup", (e) => {
           e.preventDefault();
           const key = btn.getAttribute("data-seq");
           if (key === "paste") { doPaste(); return; }
           const seq = CTRL_SEQ[key];
           if (seq) wsSend(seq);
-          term.focus();
+          // Don't yank focus back to the hidden xterm textarea on touch -- that
+          // pops the soft keyboard up over the screen after every key tap.
+          if (e.pointerType !== "touch") term.focus();
         });
       });
     }
