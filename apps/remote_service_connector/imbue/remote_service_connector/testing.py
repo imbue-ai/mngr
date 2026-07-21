@@ -1,9 +1,11 @@
 """Test utilities for remote_service_connector."""
 
 import base64
+import contextlib
 import json
 import secrets
 import uuid
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 from typing import Final
@@ -71,15 +73,23 @@ class FakeCloudflareOps:
         self.bucket_objects: dict[str, list[str]] = {}
         self.account_tokens: dict[str, dict[str, Any]] = {}
         self._next_r2_token_id = 1
-        # Stored bytes per bucket, served by both the per-bucket REST usage
-        # fake and the GraphQL sweep fake; tests set entries directly.
+        # Stored bytes per bucket, served by the per-bucket REST usage fake
+        # (and by the GraphQL sweep fake unless the knob below diverges them);
+        # tests set entries directly.
         self.usage_bytes_by_bucket: dict[str, int] = {}
+        # When set, the GraphQL sweep fake serves THIS map instead of
+        # usage_bytes_by_bucket, so tests can model the analytics window peak
+        # diverging from live REST usage (the confirm-before-downgrade path).
+        self.graphql_usage_bytes_by_bucket: dict[str, int] | None = None
         # Failure-injection knobs: the next create_access_app /
         # create_access_policy / delete_bucket_token call raises, exercising
-        # the add-service rollback and sweep revoke-retry paths.
+        # the add-service rollback and sweep revoke-retry paths. While
+        # fail_bucket_usage_reads is set, every per-bucket REST usage read
+        # raises (the sweep/gate fail-open paths).
         self.fail_next_create_access_app = False
         self.fail_next_create_access_policy = False
         self.fail_next_delete_bucket_token = False
+        self.fail_bucket_usage_reads = False
 
     def create_tunnel(self, name: str) -> dict[str, Any]:
         tunnel_id = f"tunnel-{self._next_tunnel_id}"
@@ -267,9 +277,13 @@ class FakeCloudflareOps:
         return {"value": f"token-value-{token_id}-roll{roll_count}"}
 
     def get_bucket_usage_bytes(self, bucket_name: str) -> int:
+        if self.fail_bucket_usage_reads:
+            raise CloudflareApiError(status_code=500, errors=[{"message": "simulated usage read failure"}])
         return int(self.usage_bytes_by_bucket.get(bucket_name, 0))
 
     def query_r2_storage_by_bucket(self) -> dict[str, int]:
+        if self.graphql_usage_bytes_by_bucket is not None:
+            return dict(self.graphql_usage_bytes_by_bucket)
         return dict(self.usage_bytes_by_bucket)
 
 
@@ -1854,6 +1868,93 @@ def make_fake_entitlements_store() -> InMemoryEntitlementsStore:
     store.seed_plan("explorer", EXPLORER_PLAN_VALUES)
     store.seed_plan("ally", ALLY_PLAN_VALUES)
     return store
+
+
+# ---------------------------------------------------------------------------
+# R2 cleanup-grant fakes
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def noop_enforcement_lock(owner_user_id: str) -> Iterator[None]:
+    """Lock stand-in for direct run_r2_quota_sweep calls (no DB in unit tests)."""
+    del owner_user_id
+    yield
+
+
+class InMemoryGrantStore:
+    """In-memory GrantStore for testing cleanup grants.
+
+    Time is a bare minute counter (``now_minutes``): tests advance it to
+    expire grants, and timestamps in stored rows are plain integers rendered
+    to strings by the endpoints.
+    """
+
+    def __init__(self) -> None:
+        self.grants_by_id: dict[int, dict[str, Any]] = {}
+        self.now_minutes = 0
+        self._next_grant_id = 1
+
+    def create_grant(
+        self, user_id: str, username_prefix: str, baseline_bytes: int, expiry_minutes: int
+    ) -> dict[str, Any]:
+        grant = {
+            "grant_id": self._next_grant_id,
+            "user_id": user_id,
+            "username_prefix": username_prefix,
+            "baseline_bytes": baseline_bytes,
+            "granted_at": self.now_minutes,
+            "expires_at": self.now_minutes + expiry_minutes,
+            "settled_at": None,
+            "settled_bytes": None,
+            "is_decreased": None,
+        }
+        self.grants_by_id[self._next_grant_id] = grant
+        self._next_grant_id += 1
+        return dict(grant)
+
+    def get_active_grant(self, user_id: str) -> dict[str, Any] | None:
+        for grant in sorted(self.grants_by_id.values(), key=lambda g: -int(g["granted_at"])):
+            if grant["user_id"] == user_id and grant["settled_at"] is None and grant["expires_at"] > self.now_minutes:
+                return dict(grant)
+        return None
+
+    def list_unsettled_grants(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(grant)
+            for grant in sorted(self.grants_by_id.values(), key=lambda g: int(g["granted_at"]))
+            if grant["user_id"] == user_id and grant["settled_at"] is None
+        ]
+
+    def list_expired_unsettled_grants(self) -> list[dict[str, Any]]:
+        return [
+            dict(grant)
+            for grant in sorted(self.grants_by_id.values(), key=lambda g: int(g["granted_at"]))
+            if grant["settled_at"] is None and grant["expires_at"] <= self.now_minutes
+        ]
+
+    def settle_grant(self, grant_id: int, settled_bytes: int, is_decreased: bool) -> None:
+        grant = self.grants_by_id.get(grant_id)
+        if grant is not None and grant["settled_at"] is None:
+            grant["settled_at"] = self.now_minutes
+            grant["settled_bytes"] = settled_bytes
+            grant["is_decreased"] = is_decreased
+
+    def count_failed_grants_in_window(self, user_id: str, window_hours: int) -> int:
+        window_start = self.now_minutes - window_hours * 60
+        return sum(
+            1
+            for grant in self.grants_by_id.values()
+            if grant["user_id"] == user_id
+            and grant["settled_at"] is not None
+            and grant["is_decreased"] is False
+            and grant["granted_at"] > window_start
+        )
+
+
+def make_fake_grant_store() -> InMemoryGrantStore:
+    """Construct an empty in-memory GrantStore for tests."""
+    return InMemoryGrantStore()
 
 
 # ---------------------------------------------------------------------------

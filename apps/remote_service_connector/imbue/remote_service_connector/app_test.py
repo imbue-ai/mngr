@@ -1,7 +1,6 @@
 import base64
 import hashlib
 import json
-import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,7 @@ from imbue.remote_service_connector.app import InvalidR2BucketNameError
 from imbue.remote_service_connector.app import InvalidTunnelComponentError
 from imbue.remote_service_connector.app import PostgresSyncStore
 from imbue.remote_service_connector.app import R2BucketOwnershipError
+from imbue.remote_service_connector.app import R2StorageResultTruncatedError
 from imbue.remote_service_connector.app import ServiceNotFoundError
 from imbue.remote_service_connector.app import SyncActiveAgentConflictError
 from imbue.remote_service_connector.app import SyncRevisionConflictError
@@ -58,16 +58,19 @@ from imbue.remote_service_connector.testing import FakeLiteLLMBackend
 from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
 from imbue.remote_service_connector.testing import InMemoryEntitlementsStore
+from imbue.remote_service_connector.testing import InMemoryGrantStore
 from imbue.remote_service_connector.testing import InMemoryKeyStore
 from imbue.remote_service_connector.testing import InMemorySyncStore
 from imbue.remote_service_connector.testing import make_fake_entitlements_store
 from imbue.remote_service_connector.testing import make_fake_forwarding_ctx
+from imbue.remote_service_connector.testing import make_fake_grant_store
 from imbue.remote_service_connector.testing import make_fake_key_store
 from imbue.remote_service_connector.testing import make_fake_litellm_backend
 from imbue.remote_service_connector.testing import make_fake_pool_backend
 from imbue.remote_service_connector.testing import make_fake_supertokens_backend
 from imbue.remote_service_connector.testing import make_fake_sync_store
 from imbue.remote_service_connector.testing import make_fake_tunnel_token
+from imbue.remote_service_connector.testing import noop_enforcement_lock
 
 _ADMIN_STUB_TOKEN = "admin-stub-jwt"
 _ADMIN_STUB_USERNAME = "testuser"
@@ -2622,30 +2625,32 @@ def test_add_paid_email_rejects_invalid(monkeypatch: pytest.MonkeyPatch, bad_val
 
 def _make_bucket_quota_test_client(
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[TestClient, FakeCloudflareOps, InMemoryKeyStore, InMemoryEntitlementsStore]:
-    """Create a TestClient with the R2 fakes installed (Cloudflare ops + key store + entitlements)."""
+) -> tuple[TestClient, FakeCloudflareOps, InMemoryKeyStore, InMemoryEntitlementsStore, InMemoryGrantStore]:
+    """Create a TestClient with the R2 fakes installed (Cloudflare ops + key/grant stores + entitlements)."""
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     # Build our own fake ctx so the fake is typed as FakeForwardingCtx (which
     # exposes ``.fake``); re-patching get_ctx overrides the one the quota
     # client installed.
     fake_ctx = make_fake_forwarding_ctx()
     store = make_fake_key_store()
+    grant_store = make_fake_grant_store()
     # Single-loop patching (same pattern as the Fake*Backend.install_on_app_module
     # helpers) so the monkeypatch ratchet only counts one occurrence.
     bucket_fakes: dict[str, object] = {
         "get_ctx": lambda: fake_ctx,
         "get_key_store": lambda: store,
+        "get_grant_store": lambda: grant_store,
     }
     for name, fake_impl in bucket_fakes.items():
         monkeypatch.setattr(app_mod, name, fake_impl)
-    return client, fake_ctx.fake, store, entitlements_store
+    return client, fake_ctx.fake, store, entitlements_store, grant_store
 
 
 def _make_bucket_test_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[TestClient, FakeCloudflareOps, InMemoryKeyStore]:
-    """Bucket test client without the entitlements handle (see ``_make_bucket_quota_test_client``)."""
-    client, fake, store, _entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    """Bucket test client without the entitlements/grant handles (see ``_make_bucket_quota_test_client``)."""
+    client, fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     return client, fake, store
 
 
@@ -2737,7 +2742,7 @@ def test_create_bucket_duplicate_returns_409(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_create_bucket_at_quota_returns_403(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bucket creation past the account's max_buckets entitlement is refused."""
-    client, fake, _store, entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    client, fake, _store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_buckets=1)
     assert client.post("/buckets", json={"name": "first"}, headers=_admin_headers()).status_code == 200
     resp = client.post("/buckets", json={"name": "one-more"}, headers=_admin_headers())
@@ -2802,7 +2807,7 @@ def test_destroy_bucket_empty_cascades_keys(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_roll_key_returns_same_access_key_id_with_fresh_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rolling keeps the Access Key ID (and token policies) while re-deriving the secret."""
-    client, _fake, store, _entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    client, _fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
     original_key = created["key"]
     resp = client.post("/buckets/data/roll-key", headers=_admin_headers())
@@ -2816,7 +2821,7 @@ def test_roll_key_returns_same_access_key_id_with_fresh_secret(monkeypatch: pyte
 
 def test_roll_key_reports_enforced_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
     """A key downgraded by the storage sweep reports read access through a roll (no bypass)."""
-    client, _fake, store, _entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    client, _fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
     store.set_enforced_access(created["key"]["access_key_id"], "read")
     resp = client.post("/buckets/data/roll-key", headers=_admin_headers())
@@ -2826,7 +2831,7 @@ def test_roll_key_reports_enforced_downgrade(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_roll_key_mints_fresh_key_when_none_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rolling a bucket with no recorded key (e.g. after a revoke) mints one."""
-    client, _fake, store, _entitlements_store = _make_bucket_quota_test_client(monkeypatch)
+    client, _fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
     client.delete(f"/bucket-keys/{created['key']['access_key_id']}", headers=_admin_headers())
     assert store.list_keys(_ADMIN_STUB_USER_ID, "testuser--data") == []
@@ -3781,6 +3786,26 @@ def _sweep_fixtures() -> tuple[FakeCloudflareOps, InMemoryKeyStore, InMemoryEnti
     return FakeCloudflareOps(), make_fake_key_store(), make_fake_entitlements_store()
 
 
+def _run_sweep(
+    ops: FakeCloudflareOps,
+    store: InMemoryKeyStore,
+    entitlements_store: InMemoryEntitlementsStore,
+    grant_store: InMemoryGrantStore | None = None,
+    email_getter: Callable[[str], str | None] = lambda uid: None,
+    only_user_id: str | None = None,
+) -> dict[str, int]:
+    """Call run_r2_quota_sweep with test defaults (fresh grant store, no-op lock)."""
+    return app_mod.run_r2_quota_sweep(
+        ops,
+        store,
+        entitlements_store,
+        grant_store if grant_store is not None else make_fake_grant_store(),
+        email_getter=email_getter,
+        enforcement_lock=noop_enforcement_lock,
+        only_user_id=only_user_id,
+    )
+
+
 def _add_bucket_with_key(
     ops: FakeCloudflareOps,
     store: InMemoryKeyStore,
@@ -3811,7 +3836,7 @@ def test_sweep_enforces_single_key_per_bucket() -> None:
     _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 10**12)
     first = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
     second = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data", alias="extra")
-    counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    counters = _run_sweep(ops, store, entitlements_store)
     assert counters["extra_keys_revoked"] == 1
     remaining = store.list_keys("user-1", "u1prefix--data")
     # The newest key survives; the older one is revoked and dropped.
@@ -3830,14 +3855,14 @@ def test_sweep_keeps_extra_key_row_when_revoke_fails() -> None:
     first = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
     second = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data", alias="extra")
     ops.fail_next_delete_bucket_token = True
-    failed = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    failed = _run_sweep(ops, store, entitlements_store)
     assert failed["extra_keys_revoked"] == 0
     assert failed["key_update_failures"] == 1
     # Both the row and the live token survive the failed revoke.
     assert {r["access_key_id"] for r in store.list_keys("user-1", "u1prefix--data")} == {first, second}
     assert first in ops.account_tokens
     # The next (healthy) sweep completes the revoke.
-    retried = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    retried = _run_sweep(ops, store, entitlements_store)
     assert retried["extra_keys_revoked"] == 1
     assert [r["access_key_id"] for r in store.list_keys("user-1", "u1prefix--data")] == [second]
     assert first not in ops.account_tokens
@@ -3849,7 +3874,7 @@ def test_sweep_downgrades_and_restores_keys_around_quota() -> None:
     key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
     ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
 
-    over = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    over = _run_sweep(ops, store, entitlements_store)
     assert over["users_over_quota"] == 1
     assert over["keys_downgraded"] == 1
     assert ops.account_tokens[key_id]["access"] == "read"
@@ -3858,12 +3883,12 @@ def test_sweep_downgrades_and_restores_keys_around_quota() -> None:
     assert downgraded_row["enforced_access"] == "read"
 
     # Repeated over-quota sweeps are no-ops (already downgraded).
-    again = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    again = _run_sweep(ops, store, entitlements_store)
     assert again["keys_downgraded"] == 0
 
     # Back under quota: the key's intended access is restored.
     ops.usage_bytes_by_bucket["u1prefix--data"] = 50
-    restored = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    restored = _run_sweep(ops, store, entitlements_store)
     assert restored["keys_restored"] == 1
     assert ops.account_tokens[key_id]["access"] == "readwrite"
     restored_row = store.get_key(key_id)
@@ -3876,7 +3901,7 @@ def test_sweep_never_downgrades_intentionally_read_only_keys() -> None:
     _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
     key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data", access="read")
     ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
-    counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    counters = _run_sweep(ops, store, entitlements_store)
     assert counters["keys_downgraded"] == 0
     untouched_row = store.get_key(key_id)
     assert untouched_row is not None
@@ -3890,7 +3915,7 @@ def test_sweep_sums_usage_across_all_owner_buckets() -> None:
     key_b = _add_bucket_with_key(ops, store, "user-1", "u1prefix--b")
     ops.usage_bytes_by_bucket["u1prefix--a"] = 100
     ops.usage_bytes_by_bucket["u1prefix--b"] = 100
-    counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    counters = _run_sweep(ops, store, entitlements_store)
     assert counters["users_over_quota"] == 1
     assert counters["keys_downgraded"] == 2
     assert ops.account_tokens[key_a]["access"] == "read"
@@ -3902,7 +3927,7 @@ def test_sweep_skips_unknown_owner_without_downgrading() -> None:
     ops, store, entitlements_store = _sweep_fixtures()
     key_id = _add_bucket_with_key(ops, store, "user-unknown", "uxprefix--data")
     ops.usage_bytes_by_bucket["uxprefix--data"] = 10**15
-    counters = app_mod.run_r2_quota_sweep(ops, store, entitlements_store, email_getter=lambda uid: None)
+    counters = _run_sweep(ops, store, entitlements_store)
     assert counters["users_skipped"] == 1
     assert counters["keys_downgraded"] == 0
     assert ops.account_tokens[key_id]["access"] == "readwrite"
@@ -3922,7 +3947,9 @@ def test_sweep_lazily_creates_row_for_resolvable_owner(monkeypatch: pytest.Monke
         ops,
         store,
         entitlements_store,
+        make_fake_grant_store(),
         email_getter=lambda uid: "nobody@gmail.com",
+        enforcement_lock=noop_enforcement_lock,
     )
     assert counters["users_skipped"] == 0
     row = entitlements_store.get_entitlements("user-1")
@@ -3931,7 +3958,115 @@ def test_sweep_lazily_creates_row_for_resolvable_owner(monkeypatch: pytest.Monke
     assert ops.account_tokens[key_id]["access"] == "readwrite"
 
 
-def test_parse_r2_storage_graphql_response_takes_newest_snapshot_per_bucket() -> None:
+def test_sweep_confirms_downgrade_against_live_usage() -> None:
+    """A stale analytics window peak alone never downgrades: live REST usage is re-checked first.
+
+    This is the anti-flap guarantee: a user who just pruned under quota (peak
+    still over, live under) must not have their restored keys re-broken.
+    """
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 50
+    ops.graphql_usage_bytes_by_bucket = {"u1prefix--data": 1000}
+    counters = _run_sweep(ops, store, entitlements_store)
+    assert counters["downgrades_cancelled_by_live_usage"] == 1
+    assert counters["keys_downgraded"] == 0
+    assert counters["users_over_quota"] == 0
+    assert ops.account_tokens[key_id]["access"] == "readwrite"
+
+
+def test_sweep_restores_downgraded_key_when_live_usage_dropped() -> None:
+    """A downgraded key is restored as soon as live usage is under quota, even while the peak lags."""
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
+    over = _run_sweep(ops, store, entitlements_store)
+    assert over["keys_downgraded"] == 1
+    # The user cleans up: live usage drops but the window peak still shows the old high-water mark.
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 40
+    ops.graphql_usage_bytes_by_bucket = {"u1prefix--data": 1000}
+    restored = _run_sweep(ops, store, entitlements_store)
+    assert restored["keys_restored"] == 1
+    assert ops.account_tokens[key_id]["access"] == "readwrite"
+
+
+def test_sweep_fails_open_when_live_usage_read_fails() -> None:
+    """A failed REST confirmation skips the owner (no downgrade), never enforces on the peak alone."""
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
+    ops.fail_bucket_usage_reads = True
+    counters = _run_sweep(ops, store, entitlements_store)
+    assert counters["live_usage_read_failures"] == 1
+    assert counters["keys_downgraded"] == 0
+    assert ops.account_tokens[key_id]["access"] == "readwrite"
+
+
+def test_sweep_skips_owner_with_active_grant() -> None:
+    """An owner mid-cleanup (active grant) is left alone even when measurably over quota."""
+    ops, store, entitlements_store = _sweep_fixtures()
+    grant_store = make_fake_grant_store()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
+    grant_store.create_grant("user-1", "u1prefix", 1000, 60)
+    counters = _run_sweep(ops, store, entitlements_store, grant_store=grant_store)
+    assert counters["users_skipped_for_grant"] == 1
+    assert counters["keys_downgraded"] == 0
+    assert ops.account_tokens[key_id]["access"] == "readwrite"
+
+
+def test_sweep_settles_expired_grants() -> None:
+    """A grant whose expiry passed is settled from live usage; decreased usage marks it successful."""
+    ops, store, entitlements_store = _sweep_fixtures()
+    grant_store = make_fake_grant_store()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    grant = grant_store.create_grant("user-1", "u1prefix", 1000, 60)
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 400
+    grant_store.now_minutes = 61
+    counters = _run_sweep(ops, store, entitlements_store, grant_store=grant_store)
+    assert counters["grants_settled"] == 1
+    settled = grant_store.grants_by_id[int(grant["grant_id"])]
+    assert settled["settled_bytes"] == 400
+    assert settled["is_decreased"] is True
+    # Once settled, the owner is enforced normally again (400 > 100 -> downgraded).
+    assert counters["keys_downgraded"] == 1
+
+
+def test_sweep_settles_expired_grant_as_failed_when_usage_did_not_drop() -> None:
+    ops, store, entitlements_store = _sweep_fixtures()
+    grant_store = make_fake_grant_store()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    grant = grant_store.create_grant("user-1", "u1prefix", 1000, 60)
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
+    grant_store.now_minutes = 61
+    _run_sweep(ops, store, entitlements_store, grant_store=grant_store)
+    settled = grant_store.grants_by_id[int(grant["grant_id"])]
+    assert settled["is_decreased"] is False
+    assert grant_store.count_failed_grants_in_window("user-1", 24) == 1
+
+
+def test_sweep_scoped_to_one_user_leaves_others_untouched() -> None:
+    """The email-scoped admin sweep only enforces (and revokes extras) for the named owner."""
+    ops, store, entitlements_store = _sweep_fixtures()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    _seed_sweep_row(entitlements_store, "user-2", "u2prefix", 100)
+    key_one = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    key_two = _add_bucket_with_key(ops, store, "user-2", "u2prefix--data")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
+    ops.usage_bytes_by_bucket["u2prefix--data"] = 1000
+    counters = _run_sweep(ops, store, entitlements_store, only_user_id="user-1")
+    assert counters["keys_downgraded"] == 1
+    assert ops.account_tokens[key_one]["access"] == "read"
+    assert ops.account_tokens[key_two]["access"] == "readwrite"
+
+
+def test_parse_r2_storage_graphql_response_maps_one_row_per_bucket() -> None:
     response = {
         "data": {
             "viewer": {
@@ -3940,15 +4075,11 @@ def test_parse_r2_storage_graphql_response_takes_newest_snapshot_per_bucket() ->
                         "r2StorageAdaptiveGroups": [
                             {
                                 "max": {"payloadSize": 100, "metadataSize": 5},
-                                "dimensions": {"bucketName": "u1--a", "datetime": "2026-07-20T10:00:00Z"},
-                            },
-                            {
-                                "max": {"payloadSize": 900, "metadataSize": 50},
-                                "dimensions": {"bucketName": "u1--a", "datetime": "2026-07-20T09:00:00Z"},
+                                "dimensions": {"bucketName": "u1--a"},
                             },
                             {
                                 "max": {"payloadSize": 7, "metadataSize": 0},
-                                "dimensions": {"bucketName": "u2--b", "datetime": "2026-07-20T10:00:00Z"},
+                                "dimensions": {"bucketName": "u2--b"},
                             },
                         ]
                     }
@@ -3957,12 +4088,11 @@ def test_parse_r2_storage_graphql_response_takes_newest_snapshot_per_bucket() ->
         }
     }
     usage = app_mod.parse_r2_storage_graphql_response(response)
-    # Rows arrive newest-first; the first row per bucket wins.
     assert usage == {"u1--a": 105, "u2--b": 7}
 
 
-def test_parse_r2_storage_graphql_response_warns_when_row_budget_is_hit(caplog: pytest.LogCaptureFixture) -> None:
-    """A response filling the query's row budget may be truncated and must not pass silently."""
+def test_parse_r2_storage_graphql_response_raises_when_row_budget_is_hit() -> None:
+    """A response filling the query's row budget may be truncated and must fail the sweep loudly."""
     full_page = {
         "data": {
             "viewer": {
@@ -3971,7 +4101,7 @@ def test_parse_r2_storage_graphql_response_warns_when_row_budget_is_hit(caplog: 
                         "r2StorageAdaptiveGroups": [
                             {
                                 "max": {"payloadSize": 1, "metadataSize": 0},
-                                "dimensions": {"bucketName": "u1--a", "datetime": "2026-07-20T10:00:00Z"},
+                                "dimensions": {"bucketName": "u1--a"},
                             }
                         ]
                         * app_mod._R2_STORAGE_GRAPHQL_ROW_LIMIT
@@ -3980,15 +4110,231 @@ def test_parse_r2_storage_graphql_response_warns_when_row_budget_is_hit(caplog: 
             }
         }
     }
-    with caplog.at_level(logging.WARNING, logger=app_mod.__name__):
-        usage = app_mod.parse_r2_storage_graphql_response(full_page)
-    assert usage == {"u1--a": 1}
-    assert any("may be truncated" in record.getMessage() for record in caplog.records)
-    # A small (untruncated) response stays quiet.
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger=app_mod.__name__):
-        app_mod.parse_r2_storage_graphql_response({"data": {"viewer": {"accounts": []}}})
-    assert caplog.records == []
+    with pytest.raises(R2StorageResultTruncatedError):
+        app_mod.parse_r2_storage_graphql_response(full_page)
+    # A small (untruncated) response parses normally.
+    assert app_mod.parse_r2_storage_graphql_response({"data": {"viewer": {"accounts": []}}}) == {}
+
+
+# ---------------------------------------------------------------------------
+# Storage creation gate + enforced-at-mint + cleanup grant/recheck endpoints
+# ---------------------------------------------------------------------------
+
+
+def _downgrade_key(fake: FakeCloudflareOps, store: InMemoryKeyStore, access_key_id: str) -> None:
+    """Put a key into the sweep's downgraded state (read-only token policy + enforced marker)."""
+    fake.account_tokens[access_key_id]["access"] = "read"
+    store.set_enforced_access(access_key_id, "read")
+
+
+def test_create_bucket_over_storage_quota_returns_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, _store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
+    assert client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).status_code == 200
+    fake.usage_bytes_by_bucket["testuser--a"] = 1000
+    resp = client.post("/buckets", json={"name": "b"}, headers=_admin_headers())
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "quota_exceeded"
+    assert detail["entitlement"] == "max_total_bucket_bytes"
+
+
+def test_create_bucket_storage_check_fails_open_on_usage_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreadable usage number never blocks creation (missing data never denies)."""
+    client, fake, _store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
+    assert client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).status_code == 200
+    fake.usage_bytes_by_bucket["testuser--a"] = 1000
+    fake.fail_bucket_usage_reads = True
+    resp = client.post("/buckets", json={"name": "b"}, headers=_admin_headers())
+    assert resp.status_code == 200
+
+
+def test_create_bucket_while_enforced_mints_read_only_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh mint must not hand a writable key to an owner the sweep already downgraded."""
+    client, fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
+    first = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    _downgrade_key(fake, store, first["key"]["access_key_id"])
+    resp = client.post("/buckets", json={"name": "b"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"]["access"] == "read"
+    assert fake.account_tokens[body["key"]["access_key_id"]]["access"] == "read"
+    new_row = store.get_key(body["key"]["access_key_id"])
+    assert new_row is not None
+    # Intended access stays readwrite so the sweep restores it once under quota.
+    assert new_row["access"] == "readwrite"
+    assert new_row["enforced_access"] == "read"
+
+
+def test_roll_key_fresh_mint_respects_enforcement(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
+    first = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    second = client.post("/buckets", json={"name": "b"}, headers=_admin_headers()).json()
+    _downgrade_key(fake, store, first["key"]["access_key_id"])
+    # Revoke b's key so roll-key has to mint a fresh one.
+    revoke = client.delete(f"/bucket-keys/{second['key']['access_key_id']}", headers=_admin_headers())
+    assert revoke.status_code == 200
+    rolled = client.post("/buckets/b/roll-key", headers=_admin_headers())
+    assert rolled.status_code == 200
+    assert rolled.json()["access"] == "read"
+
+
+def test_cleanup_grant_not_needed_when_nothing_downgraded(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store, _entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
+    assert client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).status_code == 200
+    resp = client.post("/account/storage-cleanup-grant", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "not_needed"
+    assert grant_store.grants_by_id == {}
+
+
+def test_cleanup_grant_restores_keys_and_records_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store, entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
+    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    key_id = created["key"]["access_key_id"]
+    fake.usage_bytes_by_bucket["testuser--a"] = 1000
+    _downgrade_key(fake, store, key_id)
+
+    resp = client.post("/account/storage-cleanup-grant", headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "granted"
+    assert body["baseline_bytes"] == 1000
+    # The downgraded key is writable again; its intended access is unchanged.
+    assert fake.account_tokens[key_id]["access"] == "readwrite"
+    restored_row = store.get_key(key_id)
+    assert restored_row is not None
+    assert restored_row["enforced_access"] is None
+    assert len(grant_store.grants_by_id) == 1
+
+    # Idempotent while active: no second grant row is minted.
+    again = client.post("/account/storage-cleanup-grant", headers=_admin_headers())
+    assert again.status_code == 200
+    assert again.json()["status"] == "granted"
+    assert len(grant_store.grants_by_id) == 1
+
+
+def test_cleanup_grant_budget_exhausted_returns_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store, entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
+    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    _downgrade_key(fake, store, created["key"]["access_key_id"])
+    # Burn the failed-grant budget: five grants settled without any decrease.
+    for _ in range(5):
+        burned = grant_store.create_grant(_ADMIN_STUB_USER_ID, "testuser", 1000, 60)
+        grant_store.settle_grant(int(burned["grant_id"]), 1000, False)
+    resp = client.post("/account/storage-cleanup-grant", headers=_admin_headers())
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "cleanup_grant_budget_exhausted"
+    assert detail["limit"] == 5
+    assert detail["current"] == 5
+
+
+def test_storage_recheck_settles_grant_success_and_keeps_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store, entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
+    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    key_id = created["key"]["access_key_id"]
+    fake.usage_bytes_by_bucket["testuser--a"] = 1000
+    _downgrade_key(fake, store, key_id)
+    assert client.post("/account/storage-cleanup-grant", headers=_admin_headers()).status_code == 200
+    # The client prunes: usage drops under both the baseline and the limit.
+    fake.usage_bytes_by_bucket["testuser--a"] = 40
+
+    resp = client.post("/account/storage-recheck", headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["usage_bytes"] == 40
+    assert body["is_over_quota"] is False
+    assert body["is_grant_settled"] is True
+    assert fake.account_tokens[key_id]["access"] == "readwrite"
+    settled = list(grant_store.grants_by_id.values())[0]
+    assert settled["is_decreased"] is True
+    assert grant_store.count_failed_grants_in_window(_ADMIN_STUB_USER_ID, 24) == 0
+
+
+def test_storage_recheck_redowngrades_and_burns_budget_when_usage_did_not_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, fake, store, entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
+    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    key_id = created["key"]["access_key_id"]
+    fake.usage_bytes_by_bucket["testuser--a"] = 1000
+    _downgrade_key(fake, store, key_id)
+    assert client.post("/account/storage-cleanup-grant", headers=_admin_headers()).status_code == 200
+
+    resp = client.post("/account/storage-recheck", headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_over_quota"] is True
+    assert body["is_grant_settled"] is True
+    assert fake.account_tokens[key_id]["access"] == "read"
+    assert grant_store.count_failed_grants_in_window(_ADMIN_STUB_USER_ID, 24) == 1
+
+
+def test_storage_recheck_standalone_restores_without_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user who freed space any other way gets restored immediately, no grant involved."""
+    client, fake, store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
+    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    key_id = created["key"]["access_key_id"]
+    _downgrade_key(fake, store, key_id)
+    fake.usage_bytes_by_bucket["testuser--a"] = 40
+
+    resp = client.post("/account/storage-recheck", headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_grant_settled"] is False
+    assert body["is_over_quota"] is False
+    assert fake.account_tokens[key_id]["access"] == "readwrite"
+
+
+# ---------------------------------------------------------------------------
+# Admin sweep endpoint tests (admin-key authenticated)
+# ---------------------------------------------------------------------------
+
+
+def test_admin_sweep_endpoint_runs_scoped_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
+    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
+    st_backend = make_fake_supertokens_backend()
+    st_backend.install_on_app_module(app_mod, monkeypatch)
+    st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
+    account_user_id = st_backend.accounts_by_email["somebody@example.com"].user_id
+    _seed_entitlements_row(
+        entitlements_store, user_id=account_user_id, username_prefix="sbprefix", max_total_bucket_bytes=100
+    )
+    fake.buckets["sbprefix--data"] = {"name": "sbprefix--data"}
+    token = fake.create_bucket_token("sbprefix--data", "readwrite", "mngr-r2:sbprefix--data:default")
+    store.add_key(str(token["id"]), account_user_id, "sbprefix--data", "readwrite", "default")
+    fake.usage_bytes_by_bucket["sbprefix--data"] = 1000
+
+    resp = client.post("/admin/sweep/r2?email=somebody@example.com", headers=_paid_admin_headers())
+    assert resp.status_code == 200
+    counters = resp.json()["counters"]
+    assert counters["keys_downgraded"] == 1
+    assert fake.account_tokens[str(token["id"])]["access"] == "read"
+
+
+def test_admin_sweep_endpoint_rejects_supertokens_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep trigger is operator-key gated; a SuperTokens session must not pass."""
+    client, _fake, _store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
+    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
+    resp = client.post("/admin/sweep/r2", headers=_admin_headers())
+    assert resp.status_code == 401
+
+
+def test_cleanup_grants_migration_matches_grant_columns() -> None:
+    """Guard against the r2_cleanup_grants schema and the store's column list drifting apart."""
+    migration_path = Path(__file__).parent.parent.parent / "migrations" / "015_r2_cleanup_grants.sql"
+    migration_sql = migration_path.read_text().lower()
+    assert "create table r2_cleanup_grants" in migration_sql
+    for column in (name.strip() for name in app_mod._R2_GRANT_COLUMNS.split(",")):
+        assert column in migration_sql, f"grant column {column!r} missing from the migration"
 
 
 def test_plans_migration_declares_all_quota_columns() -> None:

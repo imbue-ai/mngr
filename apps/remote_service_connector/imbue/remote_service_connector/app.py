@@ -310,6 +310,37 @@ class QuotaExceededError(RuntimeError):
         super().__init__(message)
 
 
+class R2StorageResultTruncatedError(RuntimeError):
+    """Raised when the sweep's GraphQL usage response fills its row budget and may be truncated."""
+
+    def __init__(self, row_count: int, row_limit: int) -> None:
+        self.row_count = row_count
+        self.row_limit = row_limit
+        super().__init__(
+            f"R2 storage GraphQL response returned {row_count} rows, filling the {row_limit}-row budget; "
+            "the result may be truncated so the sweep must not enforce from it. The query returns one row "
+            "per bucket -- shard it into bucketName_in chunks to raise the ceiling."
+        )
+
+
+class CleanupGrantBudgetExhaustedError(RuntimeError):
+    """Raised when an account has burned its failed-cleanup-grant budget for the rolling window.
+
+    Mapped to a structured 403 (``code: cleanup_grant_budget_exhausted``) so
+    clients can message it separately from quota errors.
+    """
+
+    def __init__(self, limit: int, current: int, window_hours: int) -> None:
+        self.limit = limit
+        self.current = current
+        self.window_hours = window_hours
+        super().__init__(
+            f"Cleanup-grant budget exhausted: {current} grants in the last {window_hours} hours ended "
+            f"without any usage decrease (limit {limit}). The budget frees up as those grants age out "
+            "of the window; grants that actually reduce usage never count against it."
+        )
+
+
 class PlanNotFoundError(KeyError):
     """Raised when a referenced plan has no row in the plans table."""
 
@@ -620,6 +651,25 @@ class R2KeyInfo(BaseModel):
             "owner is over their storage quota; None when the live token policy matches ``access``."
         ),
     )
+
+
+class CleanupGrantResponse(BaseModel):
+    """Result of a storage-cleanup-grant request."""
+
+    status: str = Field(description="'granted' when a grant is active (new or pre-existing), 'not_needed' otherwise")
+    expires_at: str | None = Field(default=None, description="When the active grant expires (settlement fallback)")
+    baseline_bytes: int | None = Field(default=None, description="Live usage recorded at grant time")
+    keys: list[R2KeyInfo] = Field(description="The caller's bucket keys after the grant was applied")
+
+
+class StorageRecheckResponse(BaseModel):
+    """Result of an on-demand storage-enforcement recheck."""
+
+    usage_bytes: int = Field(description="Live total bucket bytes (real-time REST usage)")
+    limit_bytes: int = Field(description="The account's max_total_bucket_bytes entitlement")
+    is_over_quota: bool = Field(description="Whether live usage exceeds the limit")
+    is_grant_settled: bool = Field(description="Whether this recheck settled an outstanding cleanup grant")
+    keys: list[R2KeyInfo] = Field(description="The caller's bucket keys after enforcement was applied")
 
 
 # -- Plans + account entitlements models --
@@ -1013,16 +1063,21 @@ def cf_get_bucket_usage(client: httpx.Client, account_id: str, bucket_name: str)
     return cf_check(response)["result"]
 
 
-# Row budget for the sweep's GraphQL query. A response that fills the budget
-# may be truncated: buckets whose rows all fall past the limit are absent from
-# the usage map and count as zero, so the parser warns when the budget is hit.
+# Row budget for the sweep's GraphQL query. The query groups by bucketName
+# alone, so one row is one bucket and this budget is effectively a
+# bucket-count ceiling (Cloudflare accepts limits up to 10000; past that,
+# shard the query into bucketName_in chunks). A response that fills the
+# budget may be truncated and raises rather than enforcing from partial data.
 _R2_STORAGE_GRAPHQL_ROW_LIMIT: Final = 5000
 
 # GraphQL analytics query used by the storage-quota sweep: one request covers
 # every bucket in the account, regardless of bucket count, so the sweep never
-# scales its REST-API usage with the number of users. The dataset is
-# snapshot-based (lags by minutes), which is fine for an hourly sweep; the
-# real-time per-bucket REST endpoint above serves the display path instead.
+# scales its REST-API usage with the number of users. Grouping by bucketName
+# only (no datetime dimension) yields exactly one row per bucket: the max
+# snapshot inside the lookback window. That is the window *peak*, not the
+# latest value -- peak >= live, so it can only delay a restore, never justify
+# a downgrade on its own; downgrades are re-confirmed against the real-time
+# per-bucket REST endpoint (which also serves the display path).
 _R2_STORAGE_GRAPHQL_QUERY = (
     """
 query R2StorageByBucket($accountTag: string!, $since: Time!) {
@@ -1031,7 +1086,6 @@ query R2StorageByBucket($accountTag: string!, $since: Time!) {
       r2StorageAdaptiveGroups(
         limit: %d
         filter: {datetime_geq: $since}
-        orderBy: [datetime_DESC]
       ) {
         max {
           payloadSize
@@ -1039,7 +1093,6 @@ query R2StorageByBucket($accountTag: string!, $since: Time!) {
         }
         dimensions {
           bucketName
-          datetime
         }
       }
     }
@@ -1049,21 +1102,23 @@ query R2StorageByBucket($accountTag: string!, $since: Time!) {
     % _R2_STORAGE_GRAPHQL_ROW_LIMIT
 )
 
-# How far back the sweep's GraphQL query looks for storage snapshots. Wide
-# enough to always contain at least one snapshot per bucket; the newest
-# snapshot per bucket wins.
-_R2_STORAGE_LOOKBACK_HOURS = 48
+# How far back the sweep's GraphQL query looks for storage snapshots. Only
+# needs to contain at least one snapshot per bucket: measured production
+# cadence is one snapshot per 10-70 minutes (median 30, newest-snapshot age
+# up to ~76 min), so 3 hours holds comfortable margin. A longer window costs
+# peak staleness (delayed automatic restores after a cleanup), not rows.
+_R2_STORAGE_LOOKBACK_HOURS = 3
 
 
 def parse_r2_storage_graphql_response(data: dict[str, Any]) -> dict[str, int]:
-    """Extract {bucket_name: total_bytes} from the r2StorageAdaptiveGroups response.
+    """Extract {bucket_name: peak_bytes_in_window} from the r2StorageAdaptiveGroups response.
 
-    Rows arrive newest-first; the first row seen per bucket is its latest
-    snapshot and wins. ``payloadSize`` + ``metadataSize`` together are the
-    bucket's stored bytes. A response that fills the query's row budget may be
-    truncated (buckets past the limit count as zero usage, which can only
-    restore keys, never downgrade), so that case is logged as a warning
-    rather than passing silently.
+    One row per bucket (bucketName-only grouping); ``payloadSize`` +
+    ``metadataSize`` together are the bucket's stored bytes. A response that
+    fills the query's row budget may be truncated -- buckets past the limit
+    would silently count as zero usage -- so that case raises
+    :class:`R2StorageResultTruncatedError` and fails the sweep loudly instead
+    of enforcing from partial data.
     """
     usage_by_bucket: dict[str, int] = {}
     row_count = 0
@@ -1073,27 +1128,24 @@ def parse_r2_storage_graphql_response(data: dict[str, Any]) -> dict[str, int]:
             row_count += 1
             dimensions = group.get("dimensions", {})
             bucket_name = dimensions.get("bucketName")
-            if not bucket_name or bucket_name in usage_by_bucket:
+            if not bucket_name:
                 continue
             max_values = group.get("max", {}) or {}
             payload = int(max_values.get("payloadSize") or 0)
             metadata = int(max_values.get("metadataSize") or 0)
-            usage_by_bucket[bucket_name] = payload + metadata
+            usage_by_bucket[bucket_name] = max(usage_by_bucket.get(bucket_name, 0), payload + metadata)
     if row_count >= _R2_STORAGE_GRAPHQL_ROW_LIMIT:
-        logger.warning(
-            "R2 storage GraphQL response hit the %d-row budget and may be truncated; "
-            "buckets past the limit count as zero usage (restore-only) this sweep. "
-            "Shorten the lookback window or shard the query if this persists.",
-            _R2_STORAGE_GRAPHQL_ROW_LIMIT,
-        )
+        raise R2StorageResultTruncatedError(row_count=row_count, row_limit=_R2_STORAGE_GRAPHQL_ROW_LIMIT)
     return usage_by_bucket
 
 
 def cf_query_r2_storage_by_bucket(client: httpx.Client, account_id: str) -> dict[str, int]:
-    """Query the GraphQL analytics dataset for every bucket's stored bytes.
+    """Query the GraphQL analytics dataset for every bucket's peak stored bytes in the lookback window.
 
     Requires the API token to carry ``Account Analytics: Read``. Raises
-    :class:`CloudflareApiError` when the GraphQL layer reports errors.
+    :class:`CloudflareApiError` when the GraphQL layer reports errors and
+    :class:`R2StorageResultTruncatedError` when the response fills the row
+    budget (possible truncation).
     """
     since = (datetime.now(timezone.utc) - timedelta(hours=_R2_STORAGE_LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     response = client.post(
@@ -2592,6 +2644,19 @@ def raise_as_http(exc: Exception) -> NoReturn:
                 "message": exc.message,
             },
         ) from exc
+    if isinstance(exc, CleanupGrantBudgetExhaustedError):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "cleanup_grant_budget_exhausted",
+                "limit": exc.limit,
+                "current": exc.current,
+                "window_hours": exc.window_hours,
+                "message": str(exc),
+            },
+        ) from exc
+    if isinstance(exc, R2StorageResultTruncatedError):
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     if isinstance(exc, PlanNotFoundError):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if isinstance(exc, InvalidAuthPolicyError):
@@ -4118,6 +4183,173 @@ def get_key_store() -> KeyStore:
 
 
 # ---------------------------------------------------------------------------
+# R2 cleanup grants (r2_cleanup_grants table)
+#
+# A cleanup grant temporarily restores an over-quota account's downgraded
+# bucket keys to readwrite so client-side restic cleanup (forget + prune,
+# which needs full write -- prune repacks) can run. The grant settles at an
+# explicit recheck or, as a fallback, when the sweep finds it expired; a
+# grant that settles without any usage decrease counts against a rolling
+# failed-grant budget, so genuine cleanup is unlimited while write-under-
+# cover-of-cleanup abuse is bounded.
+# ---------------------------------------------------------------------------
+
+
+# How long a cleanup grant stays active before the sweep settles it as the
+# fallback (the client's recheck normally settles it much sooner).
+_R2_CLEANUP_GRANT_EXPIRY_MINUTES: Final = 60
+# How many settled-without-decrease grants an account may burn per window.
+_R2_CLEANUP_GRANT_FAILED_BUDGET: Final = 5
+_R2_CLEANUP_GRANT_WINDOW_HOURS: Final = 24
+
+_R2_GRANT_COLUMNS = "grant_id, user_id, username_prefix, baseline_bytes, granted_at, expires_at, settled_at, settled_bytes, is_decreased"
+
+
+def _r2_grant_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "grant_id": int(row[0]),
+        "user_id": row[1],
+        "username_prefix": row[2],
+        "baseline_bytes": int(row[3]),
+        "granted_at": str(row[4]),
+        "expires_at": str(row[5]),
+        "settled_at": str(row[6]) if row[6] is not None else None,
+        "settled_bytes": int(row[7]) if row[7] is not None else None,
+        "is_decreased": row[8],
+    }
+
+
+class GrantStore(Protocol):
+    """Abstraction over the r2_cleanup_grants table so endpoints are unit-testable."""
+
+    def create_grant(
+        self, user_id: str, username_prefix: str, baseline_bytes: int, expiry_minutes: int
+    ) -> dict[str, Any]: ...
+    def get_active_grant(self, user_id: str) -> dict[str, Any] | None: ...
+    def list_unsettled_grants(self, user_id: str) -> list[dict[str, Any]]: ...
+    def list_expired_unsettled_grants(self) -> list[dict[str, Any]]: ...
+    def settle_grant(self, grant_id: int, settled_bytes: int, is_decreased: bool) -> None: ...
+    def count_failed_grants_in_window(self, user_id: str, window_hours: int) -> int: ...
+
+
+class PostgresGrantStore:
+    """GrantStore backed by the connector's existing Neon DB (all timestamps are DB NOW())."""
+
+    def create_grant(
+        self, user_id: str, username_prefix: str, baseline_bytes: int, expiry_minutes: int
+    ) -> dict[str, Any]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO r2_cleanup_grants (user_id, username_prefix, baseline_bytes, expires_at) "
+                        f"VALUES (%s, %s, %s, NOW() + make_interval(mins => %s)) RETURNING {_R2_GRANT_COLUMNS}",
+                        (user_id, username_prefix, baseline_bytes, expiry_minutes),
+                    )
+                    row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise HTTPException(status_code=500, detail="Failed to record the cleanup grant")
+        return _r2_grant_row_to_dict(row)
+
+    def get_active_grant(self, user_id: str) -> dict[str, Any] | None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_R2_GRANT_COLUMNS} FROM r2_cleanup_grants "
+                    "WHERE user_id = %s AND settled_at IS NULL AND expires_at > NOW() "
+                    "ORDER BY granted_at DESC LIMIT 1",
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return _r2_grant_row_to_dict(row) if row is not None else None
+
+    def list_unsettled_grants(self, user_id: str) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_R2_GRANT_COLUMNS} FROM r2_cleanup_grants "
+                    "WHERE user_id = %s AND settled_at IS NULL ORDER BY granted_at",
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [_r2_grant_row_to_dict(row) for row in rows]
+
+    def list_expired_unsettled_grants(self) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_R2_GRANT_COLUMNS} FROM r2_cleanup_grants "
+                    "WHERE settled_at IS NULL AND expires_at <= NOW() ORDER BY granted_at",
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [_r2_grant_row_to_dict(row) for row in rows]
+
+    def settle_grant(self, grant_id: int, settled_bytes: int, is_decreased: bool) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE r2_cleanup_grants SET settled_at = NOW(), settled_bytes = %s, is_decreased = %s "
+                        "WHERE grant_id = %s AND settled_at IS NULL",
+                        (settled_bytes, is_decreased, grant_id),
+                    )
+        finally:
+            conn.close()
+
+    def count_failed_grants_in_window(self, user_id: str, window_hours: int) -> int:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM r2_cleanup_grants "
+                    "WHERE user_id = %s AND settled_at IS NOT NULL AND is_decreased = FALSE "
+                    "AND granted_at > NOW() - make_interval(hours => %s)",
+                    (user_id, window_hours),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return int(row[0]) if row is not None else 0
+
+
+@functools.cache
+def get_grant_store() -> GrantStore:
+    return PostgresGrantStore()
+
+
+@contextlib.contextmanager
+def _r2_enforcement_lock(owner_user_id: str) -> Iterator[None]:
+    """Hold a per-owner advisory lock while flipping bucket-key token policies.
+
+    Serializes the sweep, cleanup grants, and rechecks for one owner so
+    overlapping runs cannot interleave Cloudflare policy writes with the
+    ``enforced_access`` bookkeeping (same xact-lock pattern as the lease
+    path's per-user serialization).
+    """
+    conn = _get_pool_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"r2-enforce:{owner_user_id}",))
+            yield
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # R2 bucket endpoints
 # ---------------------------------------------------------------------------
 
@@ -4130,6 +4362,42 @@ def _list_owned_buckets(ops: CloudflareOps, username: str) -> list[dict[str, Any
 
 def _owned_bucket_exists(ops: CloudflareOps, username: str, full_name: str) -> bool:
     return any(b.get("name") == full_name for b in _list_owned_buckets(ops, username))
+
+
+def _measure_live_owner_usage_bytes(ops: CloudflareOps, username_prefix: str) -> int:
+    """Sum the owner's bucket bytes via the real-time REST usage endpoint.
+
+    Raises :class:`CloudflareApiError` / ``httpx.HTTPError`` on any failed
+    read -- callers decide whether that fails open (sweep, creation gate) or
+    fails the request (grant baseline, recheck).
+    """
+    return sum(
+        ops.get_bucket_usage_bytes(str(bucket.get("name", ""))) for bucket in _list_owned_buckets(ops, username_prefix)
+    )
+
+
+def _is_owner_enforced_over_quota(store: KeyStore, owner_user_id: str) -> bool:
+    """True when any of the owner's keys is currently sweep-downgraded (enforced read-only)."""
+    return any(row.get("enforced_access") == "read" for row in store.list_keys(owner_user_id, None))
+
+
+def _check_storage_quota_for_new_bucket(
+    ops: CloudflareOps, username: str, entitlements: "AccountEntitlements"
+) -> None:
+    """Refuse bucket creation when the owner's live storage usage is already over quota.
+
+    A failed usage read fails open (creation proceeds with a warning),
+    consistent with the sweep's missing-data-never-downgrades rule.
+    """
+    try:
+        live_bytes = _measure_live_owner_usage_bytes(ops, username)
+    except (CloudflareApiError, httpx.HTTPError) as exc:
+        logger.warning("Skipped the storage-quota check for bucket creation (usage read failed): %s", exc)
+        return
+    if live_bytes > entitlements.max_total_bucket_bytes:
+        raise_quota_exceeded(
+            "max_total_bucket_bytes", entitlements.max_total_bucket_bytes, live_bytes, "bytes of bucket storage"
+        )
 
 
 def _best_effort_revoke_token(ops: CloudflareOps, token_id: str) -> None:
@@ -4165,6 +4433,10 @@ def _mint_and_record_key(
     access: str,
     alias: str | None,
     rollback_bucket: bool,
+    # When the owner is currently enforced-over-quota, a readwrite key is
+    # minted with a read-only token policy and recorded as enforced -- a
+    # fresh mint must not hand out a writable key the sweep already denies.
+    is_enforced_read: bool,
 ) -> R2KeyMaterial:
     """Mint a bucket-scoped Cloudflare token, record its metadata, and return the S3 material.
 
@@ -4172,19 +4444,22 @@ def _mint_and_record_key(
     ``rollback_bucket``) deletes the just-created bucket so ``bucket create``
     stays atomic.
     """
+    minted_access = "read" if is_enforced_read and access == "readwrite" else access
     created_token_id: str | None = None
     try:
-        token_result = ops.create_bucket_token(bucket_name, access, _r2_token_name(bucket_name, alias))
+        token_result = ops.create_bucket_token(bucket_name, minted_access, _r2_token_name(bucket_name, alias))
         access_key_id = str(token_result["id"])
         created_token_id = access_key_id
         secret_access_key = derive_s3_secret_access_key(str(token_result["value"]))
         store.add_key(access_key_id, owner_user_id, bucket_name, access, alias)
+        if minted_access != access:
+            store.set_enforced_access(access_key_id, "read")
         return R2KeyMaterial(
             access_key_id=access_key_id,
             secret_access_key=secret_access_key,
             s3_endpoint=r2_s3_endpoint(ops.account_id),
             bucket_name=bucket_name,
-            access=access,
+            access=minted_access,
         )
     except (CloudflareApiError, httpx.HTTPError, psycopg2.Error) as exc:
         if created_token_id is not None:
@@ -4209,9 +4484,18 @@ def create_bucket_endpoint(request: Request, body: CreateBucketRequest) -> dict[
             raise R2BucketExistsError(full_name)
         if len(owned) >= entitlements.max_buckets:
             raise_quota_exceeded("max_buckets", entitlements.max_buckets, len(owned), "buckets")
+        _check_storage_quota_for_new_bucket(ops, admin.username, entitlements)
+        store = get_key_store()
         ops.create_bucket(full_name)
         material = _mint_and_record_key(
-            ops, get_key_store(), owner_user_id, full_name, body.access, _DEFAULT_R2_KEY_ALIAS, rollback_bucket=True
+            ops,
+            store,
+            owner_user_id,
+            full_name,
+            body.access,
+            _DEFAULT_R2_KEY_ALIAS,
+            rollback_bucket=True,
+            is_enforced_read=_is_owner_enforced_over_quota(store, owner_user_id),
         )
         return CreateBucketResponse(
             bucket=BucketInfo(bucket_name=full_name, s3_endpoint=r2_s3_endpoint(ops.account_id)),
@@ -4287,7 +4571,14 @@ def roll_bucket_key_endpoint(request: Request, name: str) -> dict[str, object]:
         rows = store.list_keys(owner_user_id, full_name)
         if not rows:
             material = _mint_and_record_key(
-                ops, store, owner_user_id, full_name, "readwrite", _DEFAULT_R2_KEY_ALIAS, rollback_bucket=False
+                ops,
+                store,
+                owner_user_id,
+                full_name,
+                "readwrite",
+                _DEFAULT_R2_KEY_ALIAS,
+                rollback_bucket=False,
+                is_enforced_read=_is_owner_enforced_over_quota(store, owner_user_id),
             )
             return material.model_dump()
         # The sweep enforces single-key-per-bucket; if extras still exist
@@ -4345,14 +4636,117 @@ def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str
 
 
 # ---------------------------------------------------------------------------
+# R2 storage-cleanup grants + recheck endpoints
+# ---------------------------------------------------------------------------
+
+
+@web_app.post("/account/storage-cleanup-grant")
+def create_storage_cleanup_grant(request: Request) -> dict[str, object]:
+    """Temporarily restore the caller's sweep-downgraded bucket keys for client-side cleanup.
+
+    restic cleanup (forget + prune) needs full write access -- prune repacks
+    data, so no permission level allows delete-but-not-put. The grant flips
+    the downgraded keys back to readwrite; it settles at the caller's
+    /account/storage-recheck (or at expiry via the sweep), and only grants
+    that settle without ANY usage decrease burn the rolling failed-grant
+    budget. Idempotent: an active grant is returned as-is (flipping any keys
+    still downgraded), and an account with nothing downgraded gets a
+    'not_needed' no-op.
+    """
+    with handle_endpoint_errors():
+        ops = get_ctx().ops
+        auth = authenticate_request(request, ops)
+        admin = require_admin(auth)
+        entitlements = resolve_entitlements_for_admin(request, admin)
+        key_store = get_key_store()
+        grant_store = get_grant_store()
+        counters = {"keys_downgraded": 0, "keys_restored": 0, "key_update_failures": 0}
+        with _r2_enforcement_lock(entitlements.user_id):
+            rows = key_store.list_keys(entitlements.user_id, None)
+            active_grant = grant_store.get_active_grant(entitlements.user_id)
+            is_any_key_downgraded = any(row.get("enforced_access") == "read" for row in rows)
+            if active_grant is None and not is_any_key_downgraded:
+                return CleanupGrantResponse(
+                    status="not_needed", keys=[_key_info_from_row(row) for row in rows]
+                ).model_dump()
+            if active_grant is None:
+                failed_count = grant_store.count_failed_grants_in_window(
+                    entitlements.user_id, _R2_CLEANUP_GRANT_WINDOW_HOURS
+                )
+                if failed_count >= _R2_CLEANUP_GRANT_FAILED_BUDGET:
+                    raise CleanupGrantBudgetExhaustedError(
+                        limit=_R2_CLEANUP_GRANT_FAILED_BUDGET,
+                        current=failed_count,
+                        window_hours=_R2_CLEANUP_GRANT_WINDOW_HOURS,
+                    )
+                baseline_bytes = _measure_live_owner_usage_bytes(ops, admin.username)
+                active_grant = grant_store.create_grant(
+                    entitlements.user_id, admin.username, baseline_bytes, _R2_CLEANUP_GRANT_EXPIRY_MINUTES
+                )
+            # Restore every still-downgraded key (is_over_quota=False path).
+            _enforce_owner_key_access(ops, key_store, rows, False, counters)
+            refreshed_rows = key_store.list_keys(entitlements.user_id, None)
+        return CleanupGrantResponse(
+            status="granted",
+            expires_at=str(active_grant["expires_at"]),
+            baseline_bytes=int(active_grant["baseline_bytes"]),
+            keys=[_key_info_from_row(row) for row in refreshed_rows],
+        ).model_dump()
+
+
+@web_app.post("/account/storage-recheck")
+def recheck_storage_enforcement(request: Request) -> dict[str, object]:
+    """Re-measure the caller's live storage usage and apply enforcement immediately.
+
+    Works standalone (a user who freed space any other way gets their keys
+    restored without waiting for the hourly sweep) and doubles as the
+    settlement point for an outstanding cleanup grant: settled usage below
+    the grant's baseline -- any decrease -- marks the grant successful.
+    Reads the same real-time REST usage the sweep's downgrade confirmation
+    uses, so this endpoint and the sweep can never disagree about the same
+    measurement.
+    """
+    with handle_endpoint_errors():
+        ops = get_ctx().ops
+        auth = authenticate_request(request, ops)
+        admin = require_admin(auth)
+        entitlements = resolve_entitlements_for_admin(request, admin)
+        key_store = get_key_store()
+        grant_store = get_grant_store()
+        counters = {"keys_downgraded": 0, "keys_restored": 0, "key_update_failures": 0}
+        with _r2_enforcement_lock(entitlements.user_id):
+            live_bytes = _measure_live_owner_usage_bytes(ops, admin.username)
+            is_over_quota = live_bytes > entitlements.max_total_bucket_bytes
+            unsettled_grants = grant_store.list_unsettled_grants(entitlements.user_id)
+            for grant in unsettled_grants:
+                grant_store.settle_grant(int(grant["grant_id"]), live_bytes, live_bytes < int(grant["baseline_bytes"]))
+            rows = key_store.list_keys(entitlements.user_id, None)
+            _enforce_owner_key_access(ops, key_store, rows, is_over_quota, counters)
+            refreshed_rows = key_store.list_keys(entitlements.user_id, None)
+        return StorageRecheckResponse(
+            usage_bytes=live_bytes,
+            limit_bytes=entitlements.max_total_bucket_bytes,
+            is_over_quota=is_over_quota,
+            is_grant_settled=bool(unsettled_grants),
+            keys=[_key_info_from_row(row) for row in refreshed_rows],
+        ).model_dump()
+
+
+# ---------------------------------------------------------------------------
 # R2 storage-quota sweep
 #
-# Hourly cron: reads every bucket's stored bytes from the GraphQL analytics
-# dataset (one query per sweep regardless of bucket count), sums per owner,
-# and flips bucket-key token policies in place -- readwrite keys of an
-# over-quota owner become read-only (same S3 credentials, so restores keep
-# working while writes fail), and are restored automatically once the owner
-# is back under quota. The sweep also permanently enforces the
+# Hourly cron: reads every bucket's peak stored bytes from the GraphQL
+# analytics dataset (one query per sweep regardless of bucket count, one row
+# per bucket), sums per owner, and flips bucket-key token policies in place --
+# readwrite keys of an over-quota owner become read-only (same S3
+# credentials, so reads keep working while writes fail), and are restored
+# automatically once the owner is back under quota. The GraphQL number is a
+# lookback-window *peak*, so it is only a screening filter: before any
+# downgrade the owner is re-measured with the real-time REST usage endpoint
+# (the same source the grant/recheck endpoints read), which makes the sweep
+# and an out-of-band restore unable to disagree. The sweep also settles
+# expired cleanup grants, skips owners with an active grant (so a mid-prune
+# measurement never re-locks them), and permanently enforces the
 # single-key-per-bucket invariant: any bucket with more than one recorded key
 # has the extras revoked (newest wins), which doubles as the one-time cleanup
 # of multi-key buckets minted before this model.
@@ -4369,7 +4763,11 @@ def _sweep_owner_email(user_id: str, email_getter: Callable[[str], str | None]) 
 
 
 def _revoke_extra_bucket_keys(
-    ops: CloudflareOps, key_store: KeyStore, counters: dict[str, int]
+    ops: CloudflareOps,
+    key_store: KeyStore,
+    counters: dict[str, int],
+    # When set, only this owner's keys are considered (the email-scoped admin sweep).
+    only_user_id: str | None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Enforce the single-key-per-bucket invariant; returns the surviving keys grouped by owner.
 
@@ -4384,6 +4782,8 @@ def _revoke_extra_bucket_keys(
     keys_by_owner: dict[str, list[dict[str, Any]]] = {}
     keys_by_owner_bucket: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in key_store.list_all_keys():
+        if only_user_id is not None and str(row["owner_user_id"]) != only_user_id:
+            continue
         keys_by_owner_bucket.setdefault((str(row["owner_user_id"]), str(row["bucket_name"])), []).append(row)
     for (owner_user_id, _bucket_name), rows in keys_by_owner_bucket.items():
         ordered = sorted(rows, key=lambda r: str(r["created_at"]))
@@ -4459,21 +4859,50 @@ def _enforce_owner_key_access(
             counters["key_update_failures"] += 1
 
 
+def _settle_expired_grants(
+    ops: CloudflareOps,
+    grant_store: GrantStore,
+    counters: dict[str, int],
+    only_user_id: str | None,
+) -> None:
+    """Settle cleanup grants whose expiry passed without an explicit recheck.
+
+    Settlement measures live usage via the REST endpoint (the same source the
+    grant's baseline came from); a failed read skips only that grant, which
+    stays unsettled and is retried next pass.
+    """
+    for grant in grant_store.list_expired_unsettled_grants():
+        if only_user_id is not None and str(grant["user_id"]) != only_user_id:
+            continue
+        try:
+            live_bytes = _measure_live_owner_usage_bytes(ops, str(grant["username_prefix"]))
+        except (CloudflareApiError, httpx.HTTPError) as exc:
+            logger.error("Sweep failed to settle grant %s (usage read failed): %s", grant["grant_id"], exc)
+            counters["grant_settle_failures"] += 1
+            continue
+        grant_store.settle_grant(int(grant["grant_id"]), live_bytes, live_bytes < int(grant["baseline_bytes"]))
+        counters["grants_settled"] += 1
+
+
 def run_r2_quota_sweep(
     ops: CloudflareOps,
     key_store: KeyStore,
     entitlements_store: EntitlementsStore,
+    grant_store: GrantStore,
     email_getter: Callable[[str], str | None] = _default_email_getter,
+    enforcement_lock: Callable[[str], contextlib.AbstractContextManager[None]] = _r2_enforcement_lock,
+    only_user_id: str | None = None,
 ) -> dict[str, int]:
     """Run one storage-quota sweep pass; returns counters for the cron log.
 
-    Fails loudly (raises) when the account-wide usage query fails -- a sweep
-    that cannot see usage must not look like a clean pass. Per-user failures
-    (email lookup, a Cloudflare token update) are logged and skip only that
-    user/key, and an unknown limit skips the user entirely. Missing data never
-    *downgrades* a key: a bucket absent from the analytics snapshot counts as
-    zero usage, which can only restore (a wrong restore self-corrects on the
-    next pass, once the bucket's snapshot lands).
+    Fails loudly (raises) when the account-wide usage query fails or fills
+    its row budget -- a sweep that cannot see usage must not look like a
+    clean pass. Per-user failures (email lookup, a Cloudflare token update)
+    are logged and skip only that user/key, and an unknown limit skips the
+    user entirely. Missing data never *downgrades* a key: a bucket absent
+    from the analytics window counts as zero usage, and a downgrade is only
+    applied after the real-time REST usage confirms the account is over its
+    limit (the GraphQL peak alone can only restore or screen).
     """
     counters = {
         "extra_keys_revoked": 0,
@@ -4481,23 +4910,40 @@ def run_r2_quota_sweep(
         "keys_downgraded": 0,
         "keys_restored": 0,
         "users_skipped": 0,
+        "users_skipped_for_grant": 0,
         "key_update_failures": 0,
+        "grants_settled": 0,
+        "grant_settle_failures": 0,
+        "downgrades_cancelled_by_live_usage": 0,
+        "live_usage_read_failures": 0,
     }
 
     # Enforce the single-key-per-bucket invariant first: newest key per
     # (owner, bucket) survives, extras are revoked + dropped.
-    keys_by_owner = _revoke_extra_bucket_keys(ops, key_store, counters)
+    keys_by_owner = _revoke_extra_bucket_keys(ops, key_store, counters, only_user_id)
 
-    # One GraphQL query covers every bucket's stored bytes; a failure here
-    # aborts the sweep (raising) rather than being mistaken for zero usage.
+    # Settle grants whose expiry passed without a recheck (the fallback path;
+    # a live client normally settles via /account/storage-recheck).
+    _settle_expired_grants(ops, grant_store, counters, only_user_id)
+
+    # One GraphQL query covers every bucket's peak stored bytes; a failure
+    # (or a possibly-truncated full page) aborts the sweep by raising rather
+    # than being mistaken for zero usage.
     usage_by_bucket = ops.query_r2_storage_by_bucket()
     all_buckets = [str(b.get("name", "")) for b in ops.list_buckets()]
 
     for owner_user_id, rows in keys_by_owner.items():
+        # An active grant means client-side cleanup may be mid-prune (which
+        # transiently *increases* usage); leave the owner alone until the
+        # grant settles.
+        if grant_store.get_active_grant(owner_user_id) is not None:
+            counters["users_skipped_for_grant"] += 1
+            continue
+
         owner_prefix = str(rows[0]["bucket_name"]).split(_R2_BUCKET_NAME_SEP, 1)[0]
         bucket_prefix = f"{owner_prefix}{_R2_BUCKET_NAME_SEP}"
         owner_buckets = [name for name in all_buckets if name.startswith(bucket_prefix)]
-        owner_usage_bytes = sum(usage_by_bucket.get(name, 0) for name in owner_buckets)
+        owner_peak_bytes = sum(usage_by_bucket.get(name, 0) for name in owner_buckets)
 
         limit_bytes = _resolve_owner_storage_limit_bytes(owner_user_id, owner_prefix, entitlements_store, email_getter)
         if limit_bytes is None:
@@ -4507,10 +4953,27 @@ def run_r2_quota_sweep(
             counters["users_skipped"] += 1
             continue
 
-        is_over_quota = owner_usage_bytes > limit_bytes
+        # The peak over the lookback window screens candidates; peak under
+        # the limit proves live usage is under (restores need no confirm).
+        # Over-peak owners are re-measured with the real-time REST endpoint
+        # so a user who just cleaned up is never re-downgraded on stale data.
+        is_over_quota = owner_peak_bytes > limit_bytes
+        if is_over_quota:
+            try:
+                live_bytes = _measure_live_owner_usage_bytes(ops, owner_prefix)
+            except (CloudflareApiError, httpx.HTTPError) as exc:
+                logger.error("Sweep skipping user %s: live usage read failed: %s", owner_user_id[:8], exc)
+                counters["live_usage_read_failures"] += 1
+                counters["users_skipped"] += 1
+                continue
+            if live_bytes <= limit_bytes:
+                counters["downgrades_cancelled_by_live_usage"] += 1
+            is_over_quota = live_bytes > limit_bytes
+
         if is_over_quota:
             counters["users_over_quota"] += 1
-        _enforce_owner_key_access(ops, key_store, rows, is_over_quota, counters)
+        with enforcement_lock(owner_user_id):
+            _enforce_owner_key_access(ops, key_store, rows, is_over_quota, counters)
     return counters
 
 
@@ -5187,6 +5650,28 @@ def admin_set_account_quota(request: Request, email: str, body: AdminSetQuotaReq
             upsert_litellm_user_budget(entitlements.user_id, float(value))
         get_entitlements_store().update_entitlements(entitlements.user_id, {body.entitlement: value})
         return {"status": "updated", "entitlement": body.entitlement, "value": value}
+
+
+@web_app.post("/admin/sweep/r2")
+def admin_run_r2_sweep(request: Request, email: str | None = None) -> dict[str, object]:
+    """Run one R2 storage-quota sweep pass on demand (operator tool + deployment tests).
+
+    Authenticated by the fixed operator admin key (``MINDS_PAID_ADMIN_KEY``),
+    NOT the SuperTokens auth path. An optional ``email`` query parameter
+    scopes the pass to one account (resolved via SuperTokens); without it the
+    pass covers every account, exactly like the hourly cron.
+    """
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        only_user_id = _resolve_user_id_by_email(email) if email else None
+        counters = run_r2_quota_sweep(
+            get_ctx().ops,
+            get_key_store(),
+            get_entitlements_store(),
+            get_grant_store(),
+            only_user_id=only_user_id,
+        )
+        return {"status": "completed", "counters": counters}
 
 
 # ---------------------------------------------------------------------------
@@ -5962,6 +6447,6 @@ def _init_supertokens_once() -> None:
 )
 def r2_quota_sweep() -> dict[str, int]:
     _init_supertokens_once()
-    counters = run_r2_quota_sweep(get_ctx().ops, get_key_store(), get_entitlements_store())
+    counters = run_r2_quota_sweep(get_ctx().ops, get_key_store(), get_entitlements_store(), get_grant_store())
     logger.info("R2 quota sweep done: %s", counters)
     return counters
