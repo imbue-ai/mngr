@@ -520,10 +520,11 @@
   // a permission request by posting `{type:'minds:open-request-modal',
   // requestId}` to `window.parent`. In Electron this is handled by the content
   // view's relay preload + main process (which opens the inbox modal pre-
-  // selected on the target); in browser mode there is no overlay, so we
-  // navigate the content iframe to the inbox page instead. Only honour
+  // selected on the target); in browser mode the in-document modal layer
+  // (ModalHost, mounted above) opens the inbox the same way. Only honour
   // messages from the content iframe itself, and only well-formed server-
-  // issued ids (`evt-<uuid hex>`), so arbitrary pages cannot drive navigation.
+  // issued ids (`evt-<uuid hex>`), so arbitrary pages cannot drive the
+  // modal layer.
   if (!isElectron) {
     window.addEventListener('message', function (e) {
       var frame = document.getElementById('content-frame');
