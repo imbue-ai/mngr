@@ -58,6 +58,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 
 T = TypeVar("T")
 
@@ -103,6 +104,14 @@ class ConnectionPool:
         # keepalive interval (shrinks the user's cold-send window right after boot).
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
+        # One persistent keepalive fan-out executor for the pool's whole life.
+        # Re-creating a ThreadPoolExecutor per tick spawned (and reaped) worker
+        # threads every interval; each such thread that touched pyinfra/gevent left
+        # its thread-local gevent Hub -- and that Hub's OS-level wakeup pipe (an
+        # epoll+eventfd pair) -- to leak on exit. A single long-lived executor keeps
+        # a bounded set of reused workers, and each task destroys its thread's Hub
+        # when it finishes (see _warm_one), so nothing accumulates.
+        self._executor: ThreadPoolExecutor | None = None
 
     def _handle_for(self, agent_name: str) -> _Handle:
         with self._lock:
@@ -111,6 +120,19 @@ class ConnectionPool:
                 handle = _Handle()
                 self._handles[agent_name] = handle
             return handle
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Return the pool's persistent keepalive executor, creating it on first use.
+
+        Lazily built (rather than in ``__init__``) so a pool that never warms --
+        e.g. a unit test that only exercises resolution -- spawns no threads.
+        """
+        with self._lock:
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=_KEEPALIVE_MAX_WORKERS, thread_name_prefix="foreman-warm"
+                )
+            return self._executor
 
     def _host_lock_for(self, host: OnlineHostInterface) -> threading.Lock:
         """Return the lock that serializes all commands to ``host``'s connection."""
@@ -207,10 +229,18 @@ class ConnectionPool:
         on this same tick rather than at the next send.
         """
         try:
-            self._touch(name)
-        except Exception:  # noqa: BLE001 - reconnect on any keepalive failure
-            self.invalidate(name)
-            self._touch(name)
+            try:
+                self._touch(name)
+            except Exception:  # noqa: BLE001 - reconnect on any keepalive failure
+                self.invalidate(name)
+                self._touch(name)
+        finally:
+            # This task ran pyinfra/paramiko work, which spins up a thread-local
+            # gevent Hub with an OS-level wakeup pipe. Destroy it now so the pooled
+            # worker thread carries nothing over between ticks -- otherwise those
+            # epoll+eventfd fds accumulate for the life of the process. No-op on a
+            # thread that never touched gevent. (mngr/utils/thread_cleanup.py)
+            cleanup_thread_local_resources()
 
     def _touch(self, name: str) -> None:
         # Lazy import: terminal.py imports this module (ConnectionPool), so importing
@@ -237,15 +267,13 @@ class ConnectionPool:
                     self._handles.pop(name, None)
         if not live_names:
             return
-        # Warm agents concurrently: each SSH touch is bounded by
-        # _KEEPALIVE_TIMEOUT_SECONDS, and the fan-out means one hung host neither
-        # blocks the others nor stalls the loop (worst case ~ one timeout, not N).
-        futures = {}
-        with ThreadPoolExecutor(
-            max_workers=min(_KEEPALIVE_MAX_WORKERS, len(live_names)), thread_name_prefix="foreman-warm"
-        ) as executor:
-            for name in live_names:
-                futures[name] = executor.submit(self._warm_one, name)
+        # Warm agents concurrently on the persistent executor: each SSH touch is
+        # bounded by _KEEPALIVE_TIMEOUT_SECONDS, and the fan-out means one hung host
+        # neither blocks the others nor stalls the loop (worst case ~ one timeout,
+        # not N). We submit and then wait on every future so the tick still barriers
+        # on the whole fleet, exactly as the per-tick executor's `with` block did.
+        executor = self._get_executor()
+        futures = {name: executor.submit(self._warm_one, name) for name in live_names}
         for name, future in futures.items():
             error = future.exception()
             if error is not None:
@@ -255,6 +283,11 @@ class ConnectionPool:
         self._stop.set()
         # Unblock the maintainer's interval wait so it observes _stop at once.
         self._wake.set()
+        # Tear down the keepalive workers (and let their gevent Hubs go with them).
+        with self._lock:
+            executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False)
 
 
 def _ping_host(_agent: AgentInterface, host: OnlineHostInterface) -> None:
