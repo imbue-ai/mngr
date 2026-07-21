@@ -89,7 +89,7 @@ class SharingError(RuntimeError):
     """Raised by :func:`enable_sharing_via_cloudflare` on a soft failure.
 
     Carries a single user-presentable message; the route handler turns it
-    into a 502 + JSON body that ``static/sharing.js`` displays inline
+    into a 502 + JSON body that the SharingEditor component displays inline
     instead of silently navigating away.
     """
 

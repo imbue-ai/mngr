@@ -1,20 +1,31 @@
-{#def title, agent_id, service_name, mngr_forward_origin, initial_emails, has_account, accounts, redirect_url, ws_name, account_email #}
+{#def title, agent_id, service_name, mngr_forward_origin, has_account, accounts, redirect_url, ws_name, account_email, boot_state=None #}
 {#
   Full-page sharing editor: the browser-mode fallback for the centered
   sharing modal (pages.SharingModal), reached from Workspace Settings'
   "Manage sharing" buttons. The body is the shared editor component
-  (templates/SharingEditor.jinja); only the linked heading and the
-  Cancel-to-workspace-settings affordance are page-specific.
+  (templates/SharingEditor.jinja: the mithril SharingEditor's mount
+  container + island); the server renders the linked heading for the
+  pre-mount paint, then the component takes #page-heading over.
 
   mngr_forward_origin is the bare origin of the mngr forward plugin;
   the workspace link in the page title points at
   {mngr_forward_origin}/goto/<agent>/.
 #}
+{% set _scripts %}
+<script>
+  (function () {
+    var root = document.getElementById("sharing-editor-root");
+    // Absent in the Associate (no-account) state -- nothing to mount.
+    if (root) window.MindsUI.mountSharingEditor(root);
+  })();
+</script>
+{% endset %}
 <ChromeShell :title="title"
       :crumb_workspace_name="ws_name"
       :crumb_agent_id="agent_id"
       :show_back="True"
-      body_class="bg-surface-primary text-primary font-sans antialiased">
+      body_class="bg-surface-primary text-primary font-sans antialiased"
+      scripts={{ _scripts }}>
   <PageContainer>
     <h1 id="page-heading" class="type-heading-lg text-primary">
       Share <code class="code-pill">{{ service_name }}</code>
@@ -24,12 +35,9 @@
 
     <SharingEditor
       :agent_id="agent_id"
-      :service_name="service_name"
-      :ws_name="ws_name"
-      :account_email="account_email"
-      :initial_emails="initial_emails"
       :has_account="has_account"
       :accounts="accounts"
-      :redirect_url="redirect_url" />
+      :redirect_url="redirect_url"
+      :boot_state="boot_state" />
   </PageContainer>
 </ChromeShell>

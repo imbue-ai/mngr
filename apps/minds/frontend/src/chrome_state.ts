@@ -160,3 +160,27 @@ export interface InboxBootIsland {
   chrome: ChromeBootState;
   inbox: InboxBootExtras;
 }
+
+// Sharing-editor boot island data (mirror of SharingBootExtras in
+// chrome_state.py). No ``chrome`` sibling: the editor's state comes from its
+// own JSON status endpoint, not the chrome SSE stream.
+export interface SharingBootExtras {
+  agent_id: string;
+  service_name: string;
+  // Workspace display name for the heading (falls back to the agent id).
+  ws_name: string;
+  // The bound account's email for the heading; empty hides it.
+  account_email: string;
+  // URL-proposed draft emails folded into the first load only.
+  initial_emails: string[];
+  // True in the Electron overlay modal: plain-links heading + dismissing
+  // Cancel (nothing may navigate the overlay iframe).
+  is_modal: boolean;
+  // Bare origin of the mngr forward plugin for the page heading's workspace
+  // link; empty in the modal.
+  mngr_forward_origin: string;
+}
+
+export interface SharingBootIsland {
+  sharing: SharingBootExtras;
+}

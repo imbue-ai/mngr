@@ -23,6 +23,7 @@ import {
 } from "../landing_service";
 import { getHost } from "../host";
 import { MindsUIError, mountWithTeardown, readBootState, requireElement } from "../mount";
+import { buttonClasses } from "../ui";
 import {
   connect,
   getDestroyingStatus,
@@ -49,11 +50,7 @@ const REMOTE_CARD_CLASSES = "minds-card flex items-center gap-1.5 p-4 accent-spi
 
 const CHIP_CLASSES = "inline-flex items-center px-2 py-0.5 rounded-md type-label";
 // Button.jinja's ghost icon recipe (BTN_BASE + icon size + ghost variant).
-const GHOST_ICON_BUTTON_CLASSES =
-  "inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out " +
-  "disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] " +
-  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent p-1.5 rounded-md type-label " +
-  "bg-transparent text-primary border border-transparent hover:bg-fill-hover";
+const GHOST_ICON_BUTTON_CLASSES = buttonClasses("ghost", "icon");
 
 function icon16(name: string, extraClass?: string): m.Children {
   return m(

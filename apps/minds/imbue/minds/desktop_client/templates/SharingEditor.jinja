@@ -1,93 +1,24 @@
-{#def agent_id, service_name, ws_name="", account_email="", initial_emails=[], has_account=True, accounts=[], redirect_url="", is_modal=False #}
+{#def agent_id, accounts=[], redirect_url="", has_account=True, boot_state=None #}
 {#
-  The sharing editor body, shared verbatim between the full /sharing page
+  The sharing editor body, shared between the full /sharing page
   (pages.Sharing, the browser-mode fallback) and the centered sharing modal
-  (pages.SharingModal, the Electron overlay surface). The heading is NOT part
-  of this component -- each wrapper renders its own (the page's carries links,
-  the modal's is plain text so nothing can navigate the overlay iframe).
+  (pages.SharingModal, the Electron overlay surface).
 
   Shows the Associate prompt when the workspace has no account yet; otherwise
-  the shared-URL section + the three-state access list. Interactivity lives in
-  /_static/sharing.js, which reads the #sharing-config JSON data island below,
-  so this component must appear at most once per page.
+  a mount container + the page's boot island for the mithril SharingEditor
+  component (frontend/src/views/SharingEditor.ts), which owns the heading
+  takeover, the shared-URL section, the three-state access list, and the
+  Update/Disable submission flow. The mount call itself lives in each
+  wrapper page's scripts block -- it must run after the component bundle
+  (and, in the modal, after dismissSharingModal is defined).
 
-  ``is_modal`` swaps the Cancel affordance: the page links back to workspace
-  settings, the modal dismisses itself (dismissSharingModal is defined by
-  pages.SharingModal). ``redirect_url`` is where the Associate flow lands
-  after binding an account (empty reloads in place, which is the modal-safe
-  behavior).
+  ``boot_state`` is the island dict ({"sharing": SharingBootExtras}); it is
+  required whenever ``has_account`` is true and must appear at most once per
+  page (the island id is the one-per-document #minds-boot-state).
 #}
 {% if not has_account %}
   <Associate :agent_id="agent_id" :accounts="accounts" :redirect_url="redirect_url" />
 {% else %}
-
-  {# Same structure as the page always had: a loading line while sharing.js
-     fetches the status, then the editor is revealed. After that, saves gray
-     the editor out and refresh it in place (never a reload -- that would
-     blank the modal's overlay iframe). #}
-  <div id="sharing-editor">
-    <p id="loading-state" class="text-secondary py-4">Loading...</p>
-  </div>
-
-  <div id="editor-content" class="hidden">
-    <div id="url-section" class="hidden mb-4">
-      <p class="font-semibold mb-1">Shared URL</p>
-      <div id="url-provisioning" class="hidden flex gap-2 items-center type-body text-secondary my-2">
-        <Spinner size="sm" />
-        <span>Provisioning share&hellip;</span>
-      </div>
-      <div id="url-ready" class="hidden">
-        <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 my-2">
-          <input type="text" id="share-url" readonly
-                 class="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none"
-                 onclick="this.select()">
-          <Button variant="secondary" id="copy-btn" onclick="copyUrl()">Copy</Button>
-        </div>
-        <p id="url-fallback-note" class="hidden type-helper text-tertiary mt-1">
-          This link may take a moment to become reachable.
-        </p>
-      </div>
-    </div>
-
-    <h2 class="type-label text-secondary mt-6 mb-3">Access List</h2>
-    <div id="email-list"></div>
-    <div class="flex gap-2 items-center mt-2">
-      <TextInput type="email" name="new_email" id="new-email" placeholder="Add email address" extra="flex-1"
-                 onkeydown="if (event.key === 'Enter') { event.preventDefault(); addEmail(); }" />
-      <Button variant="secondary" onclick="addEmail()">Add</Button>
-    </div>
-
-    <div class="flex gap-2 mt-4 justify-between" id="action-buttons">
-      <div class="flex gap-2">
-        {% if is_modal %}
-          <Button variant="secondary" onclick="dismissSharingModal()">Cancel</Button>
-        {% else %}
-          <ButtonLink href={{ "/workspace/" ~ agent_id ~ "/settings" }} variant="secondary">Cancel</ButtonLink>
-        {% endif %}
-        <Button variant="danger" id="disable-btn" onclick="submitDisable()" extra="hidden">Disable Sharing</Button>
-      </div>
-      <Button variant="success" id="action-btn" onclick="submitUpdate()">Update</Button>
-    </div>
-    <div id="submit-spinner" class="hidden py-4">
-      <span class="text-secondary">Saving changes...</span>
-    </div>
-  </div>
-
-  {#
-    Page-specific data goes in a JSON-serialized data island so sharing.js
-    can pick it up without us having to template JS. Safe because we use
-    Jinja's tojson filter -- the emitted payload is valid JSON and
-    cannot break out into active code.
-  #}
-  <script id="sharing-config" type="application/json">
-{
-  "agentId": {{ agent_id | tojson }},
-  "serviceName": {{ service_name | tojson }},
-  "wsName": {{ (ws_name or agent_id) | tojson }},
-  "accountEmail": {{ (account_email or '') | tojson }},
-  "initialEmails": {{ initial_emails | tojson }}
-}
-  </script>
-  <script src="/_static/api_errors.js" defer></script>
-  <script src="/_static/sharing.js" defer></script>
+  <div id="sharing-editor-root"></div>
+  <script type="application/json" id="minds-boot-state">{{ boot_state | tojson }}</script>
 {% endif %}

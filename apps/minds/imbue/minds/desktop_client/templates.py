@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
+from imbue.minds.desktop_client.chrome_state import SharingBootExtras
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -1778,6 +1779,28 @@ def render_overlay_host_page() -> str:
 # -- Workspace/settings/sharing/accounts --
 
 
+def _sharing_boot_island(
+    agent_id: str,
+    service_name: str,
+    ws_name: str,
+    account_email: str,
+    initial_emails: list[str],
+    is_modal: bool,
+    mngr_forward_origin: str,
+) -> dict:
+    """Build the ``#minds-boot-state`` island dict for the sharing editor pages."""
+    extras = SharingBootExtras(
+        agent_id=agent_id,
+        service_name=service_name,
+        ws_name=ws_name,
+        account_email=account_email,
+        initial_emails=tuple(initial_emails),
+        is_modal=is_modal,
+        mngr_forward_origin=mngr_forward_origin,
+    )
+    return {"sharing": extras.to_payload_dict()}
+
+
 @pure
 def render_sharing_editor(
     agent_id: str,
@@ -1795,6 +1818,8 @@ def render_sharing_editor(
 
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the page title points at ``{mngr_forward_origin}/goto/<agent>/``.
+    The editor body is the mithril SharingEditor component, mounted from the
+    page's boot island.
     """
     return CATALOG.render(
         "pages.Sharing",
@@ -1802,12 +1827,20 @@ def render_sharing_editor(
         agent_id=agent_id,
         service_name=service_name,
         mngr_forward_origin=mngr_forward_origin,
-        initial_emails=initial_emails or [],
         has_account=has_account,
         accounts=accounts or [],
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
+        boot_state=_sharing_boot_island(
+            agent_id=agent_id,
+            service_name=service_name,
+            ws_name=ws_name,
+            account_email=account_email,
+            initial_emails=initial_emails or [],
+            is_modal=False,
+            mngr_forward_origin=mngr_forward_origin,
+        ),
     )
 
 
@@ -1826,17 +1859,26 @@ def render_sharing_modal_page(
     Hosted in the shared modal WebContentsView; shows the same editor body as
     :func:`render_sharing_editor` (the full-page browser fallback), minus the
     linked heading and the Cancel-to-workspace-settings link (the modal is
-    dismissed via Cancel, its X, or a backdrop click).
+    dismissed via Cancel, its X, or a backdrop click). The island's
+    ``is_modal`` keeps the component's heading takeover link-free.
     """
     return CATALOG.render(
         "pages.SharingModal",
         agent_id=agent_id,
         service_name=service_name,
-        initial_emails=initial_emails or [],
         has_account=has_account,
         accounts=accounts or [],
         ws_name=ws_name,
         account_email=account_email,
+        boot_state=_sharing_boot_island(
+            agent_id=agent_id,
+            service_name=service_name,
+            ws_name=ws_name,
+            account_email=account_email,
+            initial_emails=initial_emails or [],
+            is_modal=True,
+            mngr_forward_origin="",
+        ),
     )
 
 

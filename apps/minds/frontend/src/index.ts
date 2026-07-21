@@ -9,6 +9,7 @@
 import { setAccentScopeAgentId, setContentUrl, setDisplayedWorkspaceAgentId } from "./store";
 import { mountInboxList } from "./views/InboxList";
 import { mountLanding } from "./views/LandingPage";
+import { mountSharingEditor } from "./views/SharingEditor";
 import { mountStyleguidePrimitives, mountStyleguideWorkspaceRows } from "./views/StyleguideRows";
 import { mountStyleguideSmoke } from "./views/StyleguideSmoke";
 import { mountTitleBar } from "./views/TitleBar";
@@ -17,6 +18,7 @@ import { mountWorkspaceMenu } from "./views/WorkspaceMenu";
 export interface MindsUINamespace {
   mountInboxList: typeof mountInboxList;
   mountLanding: typeof mountLanding;
+  mountSharingEditor: typeof mountSharingEditor;
   mountStyleguideSmoke: typeof mountStyleguideSmoke;
   mountStyleguidePrimitives: typeof mountStyleguidePrimitives;
   mountStyleguideWorkspaceRows: typeof mountStyleguideWorkspaceRows;
@@ -39,6 +41,7 @@ declare global {
 window.MindsUI = {
   mountInboxList,
   mountLanding,
+  mountSharingEditor,
   mountStyleguideSmoke,
   mountStyleguidePrimitives,
   mountStyleguideWorkspaceRows,

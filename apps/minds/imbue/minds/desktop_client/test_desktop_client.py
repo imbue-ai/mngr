@@ -1362,45 +1362,59 @@ def test_sharing_modal_requires_auth(tmp_path: Path) -> None:
 
 
 def test_sharing_modal_renders_editor_in_overlay(tmp_path: Path) -> None:
-    """GET /sharing/<id>/<svc>/modal renders the shared sharing-editor body
-    inside the centered overlay chrome (backdrop + closeModal-based dismissal).
-    Nothing in the modal may navigate the overlay iframe to a full page: the
-    heading names are plain text (no /goto or /accounts links) and Cancel
-    dismisses the modal instead of linking back to workspace settings."""
+    """GET /sharing/<id>/<svc>/modal renders the sharing editor's mount
+    container + island inside the centered overlay chrome (backdrop +
+    closeModal-based dismissal). Nothing in the modal may navigate the
+    overlay iframe to a full page: the heading names are plain text (no
+    /goto or /accounts links) and Cancel dismisses the modal instead of
+    linking back to workspace settings."""
     client, auth_store, agent_id = _create_sharing_test_client(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get(f"/sharing/{agent_id}/web/modal")
     assert response.status_code == 200
     body = response.text
-    # The shared editor body (SharingEditor.jinja) and its external JS.
-    assert 'id="sharing-config"' in body
-    assert "/_static/sharing.js" in body
+    # The editor is the mithril SharingEditor: mount container + boot island,
+    # mounted with the modal's dismiss callback.
+    island = parse_boot_island(body)
+    assert island["sharing"]["agent_id"] == str(agent_id)
+    assert island["sharing"]["service_name"] == "web"
+    assert island["sharing"]["is_modal"] is True
+    assert 'id="sharing-editor-root"' in body
+    assert "window.MindsUI.mountSharingEditor" in body
+    assert "onDismiss: window.dismissSharingModal" in body
     # Modal chrome: dim backdrop over a transparent body, dismissed through
     # the Electron modal host (with a plain-page fallback).
     assert 'id="sharing-modal-backdrop"' in body
     assert "window.minds.closeModal" in body
     # The heading is plain text -- no workspace /goto link, no /accounts link --
-    # and sharing.js keeps its rebuilt heading link-free via data-plain-links.
+    # and the island's is_modal + empty mngr_forward_origin keep the
+    # component's heading takeover link-free.
     assert "/goto/" not in body
     assert 'href="/accounts"' not in body
-    assert 'data-plain-links="true"' in body
+    assert island["sharing"]["mngr_forward_origin"] == ""
     # Cancel dismisses the modal; there is no ButtonLink back to settings.
     assert f'href="/workspace/{agent_id}/settings"' not in body
-    assert "dismissSharingModal()" in body
+    assert "dismissSharingModal" in body
 
 
 def test_sharing_page_renders_full_page_fallback(tmp_path: Path) -> None:
-    """The full /sharing page (the browser-mode fallback) still renders the
-    editor with its linked heading and the Cancel link to workspace settings."""
+    """The full /sharing page (the browser-mode fallback) renders the same
+    mount container + island with its linked server heading; the component's
+    Cancel renders as a link back to workspace settings client-side."""
     client, auth_store, agent_id = _create_sharing_test_client(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get(f"/sharing/{agent_id}/web")
     assert response.status_code == 200
     body = response.text
-    assert 'id="sharing-config"' in body
-    assert "/_static/sharing.js" in body
+    island = parse_boot_island(body)
+    assert island["sharing"]["is_modal"] is False
+    # The full page's island carries the forward origin so the component's
+    # heading takeover keeps the workspace link.
+    assert island["sharing"]["mngr_forward_origin"].startswith("http")
+    assert 'id="sharing-editor-root"' in body
+    assert "window.MindsUI.mountSharingEditor" in body
+    # The server-rendered heading keeps its links for the pre-mount paint.
     assert f"/goto/{agent_id}/" in body
-    assert f'href="/workspace/{agent_id}/settings"' in body
     assert 'id="sharing-modal-backdrop"' not in body
 
 

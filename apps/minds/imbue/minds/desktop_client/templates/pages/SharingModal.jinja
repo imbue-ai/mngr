@@ -1,4 +1,4 @@
-{#def agent_id, service_name, ws_name="", account_email="", initial_emails=[], has_account=True, accounts=[] #}
+{#def agent_id, service_name, ws_name="", account_email="", has_account=True, accounts=[], boot_state=None #}
 {#
   Centered sharing-editor modal page, hosted in the desktop client's shared
   modal WebContentsView (the same overlay layer as the Minds Settings modal)
@@ -6,14 +6,15 @@
   Workspace Settings' "Manage sharing" buttons; the full /sharing page stays
   as the browser-mode fallback.
 
-  Shows the same editor body as the full page (templates/SharingEditor.jinja).
-  The heading renders the workspace / account names as PLAIN TEXT -- never
-  links: a link here would navigate this overlay iframe to a full page and
-  strand the app inside the modal (the heading carries data-plain-links so
-  sharing.js keeps its rebuilt heading link-free too). There is no
-  Cancel-to-workspace-settings link -- Cancel, the X (top right), and a
-  backdrop click all dismiss the modal. Escape is handled by the Electron
-  main process for any modal-view page.
+  Shows the same editor body as the full page (templates/SharingEditor.jinja:
+  the mithril SharingEditor's mount container + island, mounted below with
+  is_modal riding the island). The heading renders the workspace / account
+  names as PLAIN TEXT -- never links: a link here would navigate this overlay
+  iframe to a full page and strand the app inside the modal (the component's
+  heading takeover keeps the same plain-links rule from the island's
+  ``is_modal``). There is no Cancel-to-workspace-settings link -- Cancel, the
+  X (top right), and a backdrop click all dismiss the modal. Escape is
+  handled by the Electron main process for any modal-view page.
 #}
 {% set _scripts %}
 <script>
@@ -43,6 +44,9 @@
         else window.location.href = "/auth/login";
       });
     }
+    var root = document.getElementById("sharing-editor-root");
+    // Absent in the Associate (no-account) state -- nothing to mount.
+    if (root) window.MindsUI.mountSharingEditor(root, { onDismiss: window.dismissSharingModal });
   })();
 </script>
 {% endset %}
@@ -56,7 +60,7 @@
        heading is pinned; the body scrolls inside. #}
     <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-2xl w-full p-8 h-[70vh] flex flex-col text-left">
       <DialogCloseButton onclick="dismissSharingModal()" />
-      <h1 id="page-heading" data-plain-links="true" class="type-heading-lg text-primary shrink-0">
+      <h1 id="page-heading" class="type-heading-lg text-primary shrink-0">
         Share <code class="code-pill">{{ service_name }}</code>
         in {{ ws_name or agent_id }}
         {%- if account_email %} ({{ account_email }}){% endif %}?
@@ -65,13 +69,9 @@
       <div class="flex-1 min-h-0 overflow-y-auto">
         <SharingEditor
           :agent_id="agent_id"
-          :service_name="service_name"
-          :ws_name="ws_name"
-          :account_email="account_email"
-          :initial_emails="initial_emails"
           :has_account="has_account"
           :accounts="accounts"
-          :is_modal="True" />
+          :boot_state="boot_state" />
       </div>
     </div>
   </div>

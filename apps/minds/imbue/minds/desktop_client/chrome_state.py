@@ -225,6 +225,31 @@ class LandingBootExtras(FrozenModel):
         return self.model_dump(mode="json")
 
 
+class SharingBootExtras(FrozenModel):
+    """Sharing-editor boot island data (the ``sharing`` island key).
+
+    Unlike the landing/inbox islands there is no ``chrome`` sibling: the
+    editor's state comes from its own JSON status endpoint
+    (``GET /api/v1/workspaces/<id>/sharing/<service>``), not the chrome SSE
+    stream. Shared by the full /sharing page and the Electron sharing modal;
+    ``is_modal`` selects the plain-text heading (nothing may navigate the
+    overlay iframe) and the dismiss-style Cancel affordance."""
+
+    agent_id: str = Field(description="The workspace agent id the editor manages sharing for")
+    service_name: str = Field(description="The shared service (URL path segment + display code pill)")
+    ws_name: str = Field(description="Workspace display name for the heading (falls back to the agent id)")
+    account_email: str = Field(description="The bound account's email for the heading; empty hides it")
+    initial_emails: tuple[str, ...] = Field(description="URL-proposed draft emails folded into the first load only")
+    is_modal: bool = Field(description="True in the Electron overlay modal: plain-links heading + dismissing Cancel")
+    mngr_forward_origin: str = Field(
+        description="Bare origin of the mngr forward plugin for the page heading's workspace link; empty in the modal"
+    )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class InboxBootExtras(FrozenModel):
     """Inbox-page-specific boot island data (the ``inbox`` sibling of the
     chrome snapshot)."""
