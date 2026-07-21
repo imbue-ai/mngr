@@ -30,6 +30,7 @@ import select
 import shlex
 import signal
 import struct
+import subprocess
 import termios
 import threading
 import time
@@ -59,6 +60,9 @@ _SELECT_TIMEOUT_SECONDS: Final[float] = 0.5
 # it, so the handshake is paid once. %C is a short per-connection hash.
 _CTL_DIR: Final[Path] = Path.home() / ".mngr" / "foreman-ctl"
 _CONTROL_PERSIST: Final[str] = "10m"
+# Bound the keepalive's ControlMaster pre-warm so a slow/unreachable host can't
+# wedge the warm-pool tick that spawns it.
+_CONTROL_PREWARM_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 def _control_master_opts() -> list[str]:
@@ -113,6 +117,49 @@ def build_agent_terminal_argv(pool: ConnectionPool, agent_name: str) -> tuple[li
         logger.info("direct-ssh terminal build failed for {} (falling back to mngr connect): {}", agent_name, e)
         return None
     return argv, _ssh_env()
+
+
+def prewarm_agent_control_master(pool: ConnectionPool, agent_name: str) -> None:
+    """Open or refresh the ssh ControlMaster socket the agent terminal reuses.
+
+    The terminal attaches over a *system-ssh* ControlMaster socket, which the pool's
+    paramiko keepalive does not touch. The warm pool calls this each tick so the
+    master socket is already live: the first terminal open then reuses it instead of
+    paying the ssh handshake, making it as fast as every later open. A no-op for
+    local hosts (no ssh), and best-effort -- if it fails, the next terminal open
+    just opens the master itself.
+    """
+
+    def _build(_agent: AgentInterface, host: OnlineHostInterface) -> list[str] | None:
+        if host.is_local:
+            return None
+        ssh_args = build_ssh_base_args(host)
+        ssh_args[1:1] = _control_master_opts()  # after "ssh", before user@host
+        ssh_args.append("true")  # cheapest possible remote command; opens the master
+        return ssh_args
+
+    try:
+        argv = pool.run_on_host(agent_name, _build)
+    except Exception as e:  # noqa: BLE001 - best effort; a terminal open will warm it otherwise
+        logger.trace("control-master prewarm build failed for {}: {}", agent_name, e)
+        return
+    if argv is None:
+        return
+    try:
+        # Direct ssh (not a ConcurrencyGroup) so it opens the SAME multiplexing master
+        # that handle_terminal_ws's ssh subprocess reuses; bounded so a hung host
+        # can't wedge the keepalive tick.
+        subprocess.run(  # noqa: S603 - fixed ssh argv built from the resolved host
+            argv,
+            env=_ssh_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_CONTROL_PREWARM_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.trace("control-master prewarm ssh failed for {}: {}", agent_name, e)
 
 
 def build_host_shell_argv(pool: ConnectionPool, agent_on_host: str) -> tuple[list[str], dict[str, str]] | None:

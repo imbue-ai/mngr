@@ -49,7 +49,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(19))
+    rc.check_broad_exception_catch(_DIR, snapshot(20))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -68,7 +68,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(2))
+    rc.check_inline_imports(_DIR, snapshot(3))
 
 
 def test_prevent_relative_imports() -> None:
@@ -159,7 +159,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(81))
+    rc.check_trailing_comments(_DIR, snapshot(87))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -225,7 +225,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(19))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(24))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -248,11 +248,14 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    # 4: daemon.py's `mngr foreman -d` re-execs the server as a *detached* child
-    # (its own session, meant to outlive this command). A ConcurrencyGroup can't
-    # own it -- the group reaps its processes on exit, which is exactly what a
-    # daemon must avoid -- so this one spawn is a deliberate direct subprocess.
-    rc.check_direct_subprocess(_DIR, snapshot(4))
+    # daemon.py's `mngr foreman -d` re-execs the server as a *detached* child (its
+    # own session, meant to outlive this command). A ConcurrencyGroup can't own it
+    # -- the group reaps its processes on exit, which is exactly what a daemon must
+    # avoid -- so that spawn is a deliberate direct subprocess. The 5th is the
+    # warm-pool's ControlMaster pre-warm (terminal.py): a bounded `ssh ... true`
+    # that must open the *same* system-ssh multiplexing master the terminal reuses,
+    # which a ConcurrencyGroup (paramiko) connection cannot do.
+    rc.check_direct_subprocess(_DIR, snapshot(5))
 
 
 def test_prevent_bare_tmux_targets() -> None:
@@ -267,7 +270,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(34))
+    rc.check_inline_functions(_DIR, snapshot(35))
 
 
 def test_prevent_underscore_imports() -> None:

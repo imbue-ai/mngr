@@ -213,8 +213,16 @@ class ConnectionPool:
             self._touch(name)
 
     def _touch(self, name: str) -> None:
+        # Lazy import: terminal.py imports this module (ConnectionPool), so importing
+        # it at module load would be circular. Mirrors send_via_pool's lazy import.
+        from imbue.mngr_foreman.terminal import prewarm_agent_control_master
+
+        # Send path (paramiko): keep matches fresh and the mngr connection hot.
         self.get_send_matches(name)
         self.run_on_host(name, _ping_host)
+        # Terminal path (system-ssh): keep the ControlMaster socket hot too, so the
+        # first terminal open is warm -- not just repeat opens.
+        prewarm_agent_control_master(self, name)
 
     def _tick(self) -> None:
         if self._registry is None:
