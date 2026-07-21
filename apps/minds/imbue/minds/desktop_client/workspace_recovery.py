@@ -127,7 +127,10 @@ def is_recovery_classification_trustworthy(
     (``get_failure_run_started_wall_at``) has landed: a snapshot that predates the
     outage still carries the pre-outage host state (a just-stopped container still
     reads RUNNING), which would misclassify the tier. Until then the verdict path
-    treats the classification as untrustworthy and surfaces INDETERMINATE.
+    treats the classification as untrustworthy and surfaces INDETERMINATE -- for
+    every host-state verdict except the offline pair: a STOPPED/CRASHED reading
+    dispatches HOST_OFFLINE off any snapshot, because the idempotent ``mngr
+    start`` needs no freshness gate (see ``_classify_dispatch_tier``).
 
     When no onset is recorded (only the force-``mark_stuck`` path, used in tests,
     lacks one) fall back to the absolute-age freshness gate. Only the
