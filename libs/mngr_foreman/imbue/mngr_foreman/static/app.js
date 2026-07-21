@@ -209,9 +209,12 @@
   function statusTitle(d, base) {
     let prefix = "";
     if (d && d.running) {
-      if (d.blocked) prefix = "[NEEDS INPUT] ";
-      else if (d.busy) prefix = "[WORKING] ";
-      else prefix = "[WAITING] ";
+      // Three clean states from the backend's live-pane read (status), with a
+      // blocked/busy fallback for older responses.
+      const s = d.status;
+      if (s === "NEEDS_INPUT" || (!s && d.blocked)) prefix = "[NEEDS INPUT] ";
+      else if (s === "WORKING" || (!s && d.busy)) prefix = "[WORKING] ";
+      else prefix = "[READY] ";
     }
     return prefix + base;
   }

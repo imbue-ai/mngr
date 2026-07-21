@@ -32,6 +32,7 @@ each probe is cheap).
 from __future__ import annotations
 
 import re
+import shlex
 
 from loguru import logger
 
@@ -153,3 +154,56 @@ def detect_blocking_dialog(pool: ConnectionPool, agent_name: str) -> str | None:
     except Exception as e:  # noqa: BLE001 - a failed probe is "unknown", not "blocked"
         logger.trace("input-state probe for {} failed: {}", agent_name, e)
         return None
+
+
+def is_working_title(title: str) -> bool | None:
+    """True if the tmux pane title's leading glyph is Claude's animated spinner.
+
+    Claude renders its terminal title as ``<spinner-glyph> <what it's doing>``,
+    animating braille dots (U+2800-U+28FF) while generating and switching to a
+    static glyph (e.g. ✳) once idle. Because the title is metadata (not screen
+    content) it is immune to the user scrolling the pane, and it reflects the real
+    generating/idle state -- unlike mngr's turn-boundary marker, which goes stale
+    on an interrupt. Returns ``None`` for an empty title (indeterminate).
+    """
+    stripped = title.strip()
+    if not stripped:
+        return None
+    return 0x2800 <= ord(stripped[0]) <= 0x28FF
+
+
+_PANE_PROBE_SEP = "@@MNGR_PANE_SEP@@"
+
+
+def probe_pane_state(pool: ConnectionPool, agent_name: str) -> tuple[bool | None, str | None]:
+    """One warm-pool round-trip returning ``(is_working, blocking_dialog_reason)``.
+
+    Reads the tmux pane **title** (the spinner glyph -> working/idle) AND the pane
+    **content** (the ``❯`` blocking-dialog classifier) in a single command, so the
+    three UI states -- WORKING, NEEDS INPUT, READY -- are all derived from the live
+    pane, fresh every poll. Any failure returns ``(None, None)``: an indeterminate
+    probe must neither claim a state nor grey the composer.
+    """
+    window = pool.mngr_ctx.config.tmux.primary_window_name
+
+    def _probe(agent: AgentInterface, host: OnlineHostInterface) -> tuple[bool | None, str | None]:
+        tgt = TmuxWindowTarget(session_name=agent.session_name, window=window).as_shell_arg()
+        command = (
+            f"tmux display-message -p -t {tgt} '#{{pane_title}}'; "
+            f"printf '%s\\n' {shlex.quote(_PANE_PROBE_SEP)}; "
+            f"tmux capture-pane -p -t {tgt}"
+        )
+        result = host.execute_stateful_command(command, timeout_seconds=_HOST_COMMAND_TIMEOUT_SECONDS)
+        if not result.success:
+            logger.trace("input-state pane probe for {} failed: {}", agent_name, result.stderr or result.stdout)
+            return None, None
+        title, sep, pane = result.stdout.partition(_PANE_PROBE_SEP + "\n")
+        if not sep:  # separator missing -> partial/garbled output; indeterminate
+            return None, None
+        return is_working_title(title), classify_blocking_pane(pane)
+
+    try:
+        return pool.run_on_host(agent_name, _probe)
+    except Exception as e:  # noqa: BLE001 - a failed probe is "unknown", not a state
+        logger.trace("input-state pane probe for {} failed: {}", agent_name, e)
+        return None, None

@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterator
 from importlib import resources
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from flask import Flask
@@ -38,9 +39,9 @@ from imbue.mngr_foreman.assets import get_asset_dir
 from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.harness import TranscriptStrategy
 from imbue.mngr_foreman.harness import transcript_strategy_for
-from imbue.mngr_foreman.input_state import detect_blocking_dialog
 from imbue.mngr_foreman.input_state import is_busy_state
 from imbue.mngr_foreman.input_state import is_permissions_blocked
+from imbue.mngr_foreman.input_state import probe_pane_state
 from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
@@ -303,27 +304,33 @@ def create_app(
         agent = registry.get_agent(name)
         strategy = transcript_strategy_for(agent.type) if agent is not None else None
         if agent is None or strategy is None:
-            return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "state": None})
+            return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "status": "READY", "state": None})
         state = str(agent.state.value if hasattr(agent.state, "value") else agent.state).upper()
-        # ``busy`` is mngr's authoritative "agent is generating" signal (RUNNING);
-        # the chat page uses it to clear a working dot the transcript tail misreads.
-        busy = is_busy_state(state)
         if state not in ("RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"):
-            return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "state": state})
-        # BLOCKED beats busy in the UI: a mid-turn choice dialog can leave the
-        # 'active' marker set (state RUNNING) while a menu is up, so a dialog must
-        # win. mngr's own PERMISSIONS signal is a free, pane-less OR with the tmux
-        # ❯ capture -- when it already says PERMISSIONS we skip the capture. codex
-        # and opencode surface a permission block through that same field but drive
-        # no other run-time menus, so they never need the pane capture.
-        if is_permissions_blocked(agent):
-            reason: str | None = "permission prompt"
-        elif strategy.uses_pane_dialog_detection:
-            reason = detect_blocking_dialog(pool, name)
+            return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "status": "READY", "state": state})
+        # Three clean states, read from the LIVE pane for a pane-driven harness
+        # (claude): NEEDS INPUT (a ❯ dialog on screen) beats WORKING (the title's
+        # spinner glyph), else READY. Both come from ONE pane read, fresh every
+        # poll -- so NEEDS INPUT clears the instant the dialog leaves the screen
+        # (fixing the stuck-blocked bug from mngr's stale permissions marker), and
+        # WORKING tracks the real generating state (not the interrupt-stale marker).
+        if strategy.uses_pane_dialog_detection:
+            working, reason = probe_pane_state(pool, name)
+            if working is None and reason is None:
+                # Pane unreadable -> fall back to mngr's markers (no worse than before).
+                reason = "permission prompt" if is_permissions_blocked(agent) else None
+                busy = is_busy_state(state)
+            else:
+                busy = bool(working) and reason is None
         else:
-            reason = None
+            # codex/opencode/pi surface a permission block via mngr's field and
+            # drive no run-time dialogs; use the marker signals for them.
+            reason = "permission prompt" if is_permissions_blocked(agent) else None
+            busy = is_busy_state(state)
+        blocked = reason is not None
+        status = "NEEDS_INPUT" if blocked else ("WORKING" if busy else "READY")
         return jsonify(
-            {"blocked": reason is not None, "reason": reason, "running": True, "busy": busy, "state": state}
+            {"blocked": blocked, "reason": reason, "running": True, "busy": busy, "status": status, "state": state}
         )
 
     @app.route("/api/agents/<name>/interrupt", methods=["POST"])
