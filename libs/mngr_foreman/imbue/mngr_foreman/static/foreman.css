@@ -366,6 +366,11 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
 /* awaiting: message sent, still in flight -- the text stays in the box and the
    whole input region is locked until the transcript confirms it landed. */
 .composer.awaiting .inner { opacity: 0.5; pointer-events: none; }
+/* attaching: send is waiting on an attachment that is still transferring to the
+   host (the upload strip shows the live progress). */
+.composer.attaching .inner { opacity: 0.6; pointer-events: none; }
+/* drag-and-drop target: a file is hovering over the composer. */
+.composer.dragover { outline: 1px dashed var(--border-strong); outline-offset: -3px; }
 
 /* Small screens: the textarea takes the full width on its own row and the
    buttons drop to a row below it (+ and Esc on the left, send on the right) --
@@ -475,39 +480,42 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
   padding: 1px 0;
 }
 
-/* file chips: [FILE: ...] tokens rendered inside transcript user messages */
-.file-chip { vertical-align: bottom; }
-.file-chip.img-chip { display: inline-block; }
-.file-chip.img-chip img {
-  max-width: 240px;
-  max-height: 240px;
-  border: 1px solid var(--border);
-  cursor: zoom-in;
-  display: inline-block;
-  margin: 2px 4px 2px 0;
-}
-.file-chip.file-doc {
+/* file chips: [FILE: ...] tokens (and pasted images) shown as compact, clickable
+   pills -- icon + label, never a big inline image. Click previews the file. */
+.file-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  max-width: 100%;
   border: 1px solid var(--border);
   background: var(--bg-inset);
-  padding: 2px 8px;
+  color: var(--fg-dim);
+  padding: 3px 9px 3px 4px;
   margin: 2px 4px 2px 0;
   vertical-align: middle;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  border-radius: 2px;
 }
-.file-chip.file-doc:hover { border-color: var(--border-strong); text-decoration: none; }
+.file-chip:hover { border-color: var(--border-strong); color: var(--fg); text-decoration: none; }
 .file-chip .fc-icon {
+  flex: 0 0 auto;
+  font-family: var(--mono);
   font-size: 9px;
   letter-spacing: 0.5px;
   border: 1px solid var(--border);
-  padding: 0 4px;
+  background: var(--bg-raised);
+  padding: 1px 4px;
   color: var(--fg-dim);
 }
-.file-chip .fc-name { color: var(--fg-dim); font-size: 12px; word-break: break-all; }
-.file-chip.missing { color: var(--fg-faint); font-style: italic; font-size: 12px; }
+.file-chip.chip-image .fc-icon { color: var(--add-fg); border-color: var(--add-fg); }
+.file-chip.chip-pdf .fc-icon { color: var(--chip-wait); border-color: var(--chip-wait); }
+.file-chip .fc-name { color: var(--fg-dim); word-break: break-all; }
+.file-chip.missing { color: var(--fg-faint); font-style: italic; }
 
-/* full-screen image overlay (tap a transcript thumbnail to expand) */
+/* full-screen overlay: image preview (tap a chip to expand) or a pdf viewer. */
 .lightbox {
   position: fixed;
   inset: 0;
@@ -520,6 +528,29 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
   padding: 16px;
 }
 .lightbox img { max-width: 94vw; max-height: 94vh; }
+.lightbox .lb-missing { color: var(--fg-dim); font-size: 14px; }
+/* in-page pdf preview */
+.pdf-viewer { cursor: default; }
+.pdf-viewer .pdf-frame {
+  width: 94vw;
+  height: 94vh;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+.pdf-viewer .lb-close {
+  position: fixed;
+  top: 12px;
+  right: 16px;
+  width: 34px;
+  height: 34px;
+  line-height: 30px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 20px;
+}
 
 .status-line { color: var(--fg-faint); font-size: 12px; padding: 8px 0; text-align: center; }
 .unsupported { color: var(--fg-dim); padding: 30px 14px; text-align: center; }

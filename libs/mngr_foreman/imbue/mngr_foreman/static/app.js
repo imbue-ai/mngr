@@ -561,42 +561,76 @@
       return details;
     }
 
-    // Full-screen image overlay (tap a transcript image thumbnail to expand).
+    // Full-screen image overlay (tap a chip to preview). Shows a text fallback if
+    // the file is gone (a deleted upload) rather than a broken-image glyph.
     function openLightbox(url) {
       const ov = el("div", "lightbox");
       const img = el("img");
       img.src = url;
+      img.addEventListener("error", function () {
+        ov.textContent = "";
+        ov.appendChild(el("div", "lb-missing", "file unavailable"));
+      });
       ov.appendChild(img);
       ov.addEventListener("click", function () { ov.remove(); });
       document.body.appendChild(ov);
     }
 
-    // A [FILE: ...] token rendered as a chip: image -> inline thumbnail (tap to
-    // expand); other files -> an icon+name link to the serve endpoint.
+    // In-page PDF preview: an <iframe> of the served file inside the same dim
+    // overlay. A close button and a backdrop click (outside the document) dismiss.
+    function openPdfViewer(url) {
+      const ov = el("div", "lightbox pdf-viewer");
+      const frame = el("iframe", "pdf-frame");
+      frame.src = url;
+      const close = el("button", "lb-close", "×");
+      close.type = "button";
+      close.addEventListener("click", function () { ov.remove(); });
+      ov.appendChild(frame);
+      ov.appendChild(close);
+      ov.addEventListener("click", function (e) { if (e.target === ov) ov.remove(); });
+      document.body.appendChild(ov);
+    }
+
+    // Kind of a stored upload from its extension: "image" | "pdf" | "file".
+    function uploadKind(storedName) {
+      const ext = (storedName.split(".").pop() || "").toLowerCase();
+      if (IMAGE_EXTS[ext]) return "image";
+      if (ext === "pdf") return "pdf";
+      return "file";
+    }
+
+    // A [FILE: ...] token rendered as a compact, clickable chip (icon + label) --
+    // NOT an inline image, so the transcript stays clean. Click previews: image ->
+    // lightbox, pdf -> pdf viewer, anything else -> open/download in a new tab.
     function fileChip(storedName) {
       const url = "/api/agents/" + encodeURIComponent(name) + "/upload/" + encodeURIComponent(storedName);
       const ext = (storedName.split(".").pop() || "").toLowerCase();
-      if (IMAGE_EXTS[ext]) {
-        const wrap = el("span", "file-chip img-chip");
-        const img = el("img");
-        img.src = url;
-        img.alt = storedName;
-        img.loading = "lazy";
-        img.addEventListener("click", function () { openLightbox(url); });
-        img.addEventListener("error", function () {
-          wrap.className = "file-chip missing";
-          wrap.textContent = "[missing file]";
-        });
-        wrap.appendChild(img);
-        return wrap;
-      }
-      const a = el("a", "file-chip file-doc");
-      a.href = url;
-      a.target = "_blank";
-      a.rel = "noopener";
-      a.appendChild(el("span", "fc-icon", "FILE"));
-      a.appendChild(el("span", "fc-name", storedName));
-      return a;
+      const kind = uploadKind(storedName);
+      const chip = el("button", "file-chip chip-" + kind);
+      chip.type = "button";
+      chip.title = storedName;
+      chip.appendChild(el("span", "fc-icon", (ext || "file").toUpperCase().slice(0, 4)));
+      const label = kind === "image" ? "image" : kind === "pdf" ? "PDF" : (ext ? ext.toUpperCase() + " file" : "file");
+      chip.appendChild(el("span", "fc-name", label));
+      chip.addEventListener("click", function () {
+        if (kind === "image") openLightbox(url);
+        else if (kind === "pdf") openPdfViewer(url);
+        else window.open(url, "_blank", "noopener");
+      });
+      return chip;
+    }
+
+    // A pasted/transcript image carried as base64 (or a /timage reference) shown as
+    // the same compact chip instead of a big inline thumbnail; click opens it.
+    function imageEventChip(img) {
+      const src = imageSrc(img);
+      const chip = el("button", "file-chip chip-image");
+      chip.type = "button";
+      chip.title = "image";
+      chip.appendChild(el("span", "fc-icon", "IMG"));
+      chip.appendChild(el("span", "fc-name", "image"));
+      chip.addEventListener("click", function () { openLightbox(src); });
+      return chip;
     }
 
     // Render user text, replacing [FILE: ...] tokens with chips (text in between
@@ -649,12 +683,12 @@
           // Still in claude's queue -> dark-green bubble BELOW the dot.
           if (existing) {
             if (existing.queued && ev.images && ev.images.length) {
-              ev.images.forEach((img) => existing.node.appendChild(toolImageEl(img)));
+              ev.images.forEach((img) => existing.node.appendChild(imageEventChip(img)));
             }
           } else {
             const e = el("div", "entry user queued");
             renderUserContent(e, ev.content || "");
-            if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
+            if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(imageEventChip(img)));
             addQueued(e, before);
             userBubbles.set(key, { node: e, queued: true });
           }
@@ -663,7 +697,7 @@
         } else {
           const e = el("div", "entry user");
           renderUserContent(e, ev.content || "");
-          if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(toolImageEl(img)));
+          if (ev.images && ev.images.length) ev.images.forEach((img) => e.appendChild(imageEventChip(img)));
           addMain(e, before);
           userBubbles.set(key, { node: e, queued: false });
         }
@@ -910,19 +944,33 @@
       input.focus();
     }
 
-    function send() {
-      if (composer.classList.contains("awaiting")) return; // already waiting on one
-      if (!connLive) { showError("not connected — waiting to reconnect…"); return; }
-      const raw = input.value.trim();
-      // A message starting with "1." gets misread as an ordered-list / menu choice;
-      // escape it to "#1." so it's sent as plain text.
-      const msg = raw.startsWith("1.") ? "#" + raw : raw;
-      if (!msg) return;
-      sendErr.hidden = true;
-      // Lock the input region and keep the text visible while we wait for the
-      // transcript to confirm the message actually landed (confirmSend, above).
-      pendingSend = msg;
-      setAwaiting(true);
+    // Attachments still transferring to the host when the user hits send: wait for
+    // exactly those (never re-upload a finished one), so a send is instant once its
+    // images have landed and blocks only for whatever transfer is still running.
+    // Resolves false if a referenced attachment failed -> we refuse to deliver a
+    // message that points at a file that never made it onto the host.
+    function waitForUploadsIn(msg) {
+      const re = new RegExp(FILE_TOKEN_SRC, "g");
+      const waits = [];
+      let failed = false;
+      let m;
+      while ((m = re.exec(msg)) !== null) {
+        const entry = uploads.get(m[1]);
+        if (!entry) continue; // already confirmed/cleared, or a hand-typed token
+        if (entry.status === "done") continue; // transfer already landed -> no wait
+        if (entry.status === "error") { failed = true; continue; }
+        waits.push(entry.ready); // still in flight -> await just this transfer
+      }
+      if (!waits.length) return Promise.resolve(!failed);
+      composer.classList.add("attaching");
+      return Promise.all(waits).then(function (results) {
+        composer.classList.remove("attaching");
+        return !failed && results.every(function (r) { return r !== false; });
+      });
+    }
+
+    // POST the (already attachment-resolved) message; the transcript echo confirms.
+    function postMessage(msg) {
       if (pendingSendTimer) clearTimeout(pendingSendTimer);
       fetch("/api/agents/" + encodeURIComponent(name) + "/message", {
         method: "POST",
@@ -952,6 +1000,35 @@
           releaseSend();
           showError("not connected — your message wasn't sent. try again once reconnected.");
         });
+    }
+
+    function send() {
+      if (composer.classList.contains("awaiting")) return; // already waiting on one
+      if (!connLive) { showError("not connected — waiting to reconnect…"); return; }
+      const raw = input.value.trim();
+      // A message starting with "1." gets misread as an ordered-list / menu choice;
+      // escape it to "#1." so it's sent as plain text.
+      const msg = raw.startsWith("1.") ? "#" + raw : raw;
+      if (!msg) return;
+      sendErr.hidden = true;
+      // Lock the input region and keep the text visible while we wait for the
+      // transcript to confirm the message actually landed (confirmSend, above).
+      pendingSend = msg;
+      setAwaiting(true);
+      if (pendingSendTimer) clearTimeout(pendingSendTimer);
+      // Block ONLY on attachments in this message that are still transferring to the
+      // host (started at paste time, not now), then deliver. An attachment-free or
+      // already-transferred message posts immediately.
+      waitForUploadsIn(msg).then(function (ready) {
+        if (pendingSend !== msg) return; // superseded/cleared while we waited
+        if (!ready) {
+          composer.classList.remove("attaching");
+          releaseSend();
+          showError("an attachment didn't finish uploading — remove it (×) and retry.");
+          return;
+        }
+        postMessage(msg);
+      });
     }
 
     sendBtn.addEventListener("click", send);
@@ -1069,11 +1146,24 @@
       fd.append("filename", storedName);
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/agents/" + encodeURIComponent(name) + "/upload");
+      // The whole point: the browser->foreman upload AND the foreman->agent-host
+      // transfer both run NOW, in the background, the instant a file is attached --
+      // not at send time. `ready` resolves true once that host transfer has landed
+      // (false if it failed/aborted); a send awaits only the ones still in flight,
+      // so an already-transferred attachment sends instantly and is never re-sent.
+      let settle;
+      const entry = {
+        chip: chip, token: token, objectUrl: objectUrl, xhr: xhr, status: "uploading",
+        ready: new Promise(function (res) { settle = res; }),
+      };
+      entry.settle = settle;
       xhr.upload.onprogress = function (e) {
         if (!e.lengthComputable) return;
         const p = Math.round((e.loaded / e.total) * 100);
         bar.style.width = p + "%";
-        if (p >= 100) { pct.textContent = "finalizing…"; chip.classList.add("finalizing"); }
+        // <100% is the browser->foreman leg; at 100% the slow leg is the
+        // foreman->host transfer we're still waiting on the response for.
+        if (p >= 100) { pct.textContent = "transferring…"; chip.classList.add("finalizing"); }
         else { pct.textContent = p + "%"; }
       };
       xhr.onload = function () {
@@ -1083,12 +1173,20 @@
           chip.classList.remove("uploading", "finalizing");
           chip.classList.add("done");
           if (prog.parentNode) prog.parentNode.removeChild(prog);
+          entry.status = "done";
+          entry.settle(true);
         } else {
           markUploadError(chip, (d && d.error) || ("HTTP " + xhr.status));
+          entry.status = "error";
+          entry.settle(false);
         }
       };
-      xhr.onerror = function () { markUploadError(chip, "network error"); };
-      uploads.set(storedName, { chip: chip, token: token, objectUrl: objectUrl, xhr: xhr });
+      xhr.onerror = function () {
+        markUploadError(chip, "network error");
+        entry.status = "error";
+        entry.settle(false);
+      };
+      uploads.set(storedName, entry);
       showStrip();
       xhr.send(fd);
     }
@@ -1107,6 +1205,8 @@
       const entry = uploads.get(storedName);
       if (entry) {
         if (entry.xhr && entry.xhr.readyState !== 4) { try { entry.xhr.abort(); } catch (_e) {} }
+        // Unblock any send that is mid-wait on this now-removed attachment.
+        if (entry.settle) { entry.status = "error"; entry.settle(false); }
         if (entry.chip && entry.chip.parentNode) entry.chip.parentNode.removeChild(entry.chip);
         if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
         uploads.delete(storedName);
@@ -1165,6 +1265,26 @@
         if (items[i].kind === "file") { const f = items[i].getAsFile(); if (f) files.push(f); }
       }
       if (files.length) { e.preventDefault(); files.forEach(uploadFile); }
+    });
+
+    // Drag-and-drop onto the composer: same immediate background upload as paste.
+    // Without these handlers the browser would just navigate to the dropped file.
+    function hasFiles(e) {
+      const types = e.dataTransfer && e.dataTransfer.types;
+      return !!types && Array.prototype.indexOf.call(types, "Files") !== -1;
+    }
+    composer.addEventListener("dragover", function (e) {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      composer.classList.add("dragover");
+    });
+    composer.addEventListener("dragleave", function (e) {
+      if (e.target === composer) composer.classList.remove("dragover");
+    });
+    composer.addEventListener("drop", function (e) {
+      composer.classList.remove("dragover");
+      const files = (e.dataTransfer && e.dataTransfer.files) || [];
+      if (files.length) { e.preventDefault(); Array.prototype.forEach.call(files, uploadFile); }
     });
   }
 
