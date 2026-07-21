@@ -837,6 +837,54 @@ function wireContentViewEvents(bundle, contentView) {
     });
   });
 
+  // A failed top-level load of a workspace URL (ERR_CONNECTION_REFUSED on a
+  // stale forward port from a restored session, ERR_NETWORK_CHANGED over a
+  // network flap, ...) otherwise leaves the view permanently blank -- Electron
+  // renders nothing on a failed navigation and no other handler fires. Route
+  // the window to the workspace's recovery page instead: its probes classify
+  // the outage, its healthy-poll returns the user to the workspace (via a
+  // return_to rebuilt against the CURRENT forward origin) the moment it
+  // answers, and its restart tiers handle a genuinely-down workspace.
+  contentView.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    // ERR_ABORTED: the navigation was superseded (another loadURL, a redirect
+    // taken over by the page) -- not a failure to recover from.
+    if (errorCode === -3) return;
+    if (isShuttingDown || bundle.window.isDestroyed()) return;
+    // The full-app error takeover owns the screen; don't fight it.
+    if (bundle.isErrorState) return;
+    if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
+    if (!backendBaseUrl) return;
+    // If the recovery page itself failed to load, the minds backend is gone;
+    // re-navigating would loop. Leave it to the app-level error handling.
+    if (validatedURL && validatedURL.startsWith(backendBaseUrl + '/agents/')) return;
+    // Scope to workspace loads: the failed URL names the agent (a /goto/
+    // bridge or an agent-subdomain URL), or the bundle was already stamped
+    // with the workspace it is navigating to. Non-workspace screens (Home,
+    // settings, ...) are served by the minds backend directly and are the
+    // app-level error handling's concern.
+    const agentId = parseWorkspaceId(validatedURL) || bundle.currentWorkspaceId;
+    if (!agentId) return;
+    console.error(
+      `[content-load-failed] workspace content load failed ` +
+        `(errorCode=${errorCode}, error=${errorDescription || 'unknown'}, url=${validatedURL || 'unknown'}); ` +
+        `routing to the recovery page for ${agentId}`
+    );
+    // Never navigate synchronously inside a webContents event handler
+    // (electron#19887); defer like the render-process-gone handler above.
+    setImmediate(() => {
+      if (isShuttingDown || bundle.window.isDestroyed() || bundle.isErrorState) return;
+      if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
+      const workspaceUrl = workspaceUrlForAgent(agentId) || '';
+      contentView.webContents.loadURL(
+        backendBaseUrl + '/agents/' + encodeURIComponent(agentId)
+        + '/recovery?return_to=' + encodeURIComponent(workspaceUrl),
+      ).catch((err) => {
+        console.error('[content-load-failed] failed to load recovery page:', err && err.message);
+      });
+    });
+  });
+
   // Enforce workspace uniqueness at the Electron level so it applies to EVERY
   // path that can drive the content view to a /forwarding/X/ URL (landing-page
   // row clicks, in-page anchors, pushState, etc.), not just sidebar-driven
