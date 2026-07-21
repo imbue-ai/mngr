@@ -7,17 +7,20 @@
   expected_duration_seconds drives the client-side time-based progress
   bar (eases toward ~80% over this duration).
 
-  Layout: a slim progress strip pinned to the top (bar + stage caption +
-  collapsible logs), with the rest of the screen given to a three-step
-  onboarding walkthrough (see onboarding.js) that explains how the system
-  works while the workspace loads. When creation finishes AND the user has
-  clicked through all steps, a Begin button replaces Next and enters the
-  workspace (there is no automatic redirect).
+  Layout: the screen is a nine-micro-step onboarding walkthrough (see
+  onboarding.js), one short sentence per step, over a shared scene graphic
+  that zooms out as the steps advance. The progress strip (bar + stage
+  caption + collapsible logs) and any creation failure stay hidden until
+  the user reaches the LAST step -- only there do the bar, the rotating
+  tips, and the setting-up/Ready state surface. When creation finishes AND
+  the user is on the last step, a Begin button replaces Next and enters
+  the workspace (there is no automatic redirect). Clicking any scene icon
+  jumps to the first step that explains it.
 
   palette is the server-side workspace color mapping (name -> #rrggbb) for
-  the step-1 theme demo; the pick only restyles the in-page demo, it is not
-  persisted to the workspace. onboarding_services is the step-2 carousel
-  list (OnboardingService rows). is_remote picks the step-3 copy: whether
+  the theme-demo step; the pick only restyles the in-page demo, it is not
+  persisted to the workspace. onboarding_services is the carousel list
+  (OnboardingService rows). is_remote picks the final-step copy: whether
   the workspace machine is a remote cloud host or this computer.
 #}
 {% set _scripts %}
@@ -40,7 +43,9 @@
     <section class="screen w-full flex-1 flex flex-col" data-screen="loading">
 
       {# Top strip: progress bar + stage caption + collapsible logs. #}
-      <div class="w-full px-6 pt-4">
+      {# Hidden until the user reaches the last walkthrough step -- #}
+      {# onboarding.js reveals it there (see the page docstring). #}
+      <div id="top-strip" class="w-full px-6 pt-4 hidden">
         <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
           <div id="bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>
         </div>
@@ -69,7 +74,7 @@
             <div id="scene-computer" class="scene-group flex flex-col items-center gap-2">
               <div class="scene-label type-helper text-tertiary">Your computer, your credentials</div>
               <div class="flex items-end gap-3 rounded-xl border border-subtle bg-fill-subtle px-4 py-4">
-                <div id="scene-laptop" class="scene-node flex flex-col items-center gap-1">
+                <div id="scene-laptop" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="1" title="What is minds?">
                   {# Imbue minds icon (simplified from electron/assets/icon.svg, grain filters dropped). #}
                   <svg viewBox="0 0 1024 1024" class="w-20 h-20 rounded-xl" aria-label="minds">
                     <rect width="1024" height="1024" rx="200" fill="#492222"/>
@@ -80,7 +85,7 @@
                   </svg>
                   <span class="type-helper text-tertiary">minds</span>
                 </div>
-                <div id="scene-key" class="scene-node flex flex-col items-center gap-1">
+                <div id="scene-key" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="6" title="What is latchkey?">
                   {# Imbue latchkey logo, redrawn as SVG from the imbue.com #}
                   {# product-page mark (olive tile, pink vintage key + tag). #}
                   <svg viewBox="0 0 64 64" class="w-14 h-14 rounded-xl" aria-label="latchkey">
@@ -100,7 +105,7 @@
               </div>
             </div>
 
-            <div id="scene-tunnel" class="scene-node flex flex-col items-center gap-1 self-center mt-6">
+            <div id="scene-tunnel" class="scene-node flex flex-col items-center gap-1 self-center mt-6 cursor-pointer" data-goto-step="8" title="What is the tunnel?">
               {# Tunnel: two gentle arcs with an encryption lock between them. #}
               <svg viewBox="0 0 120 48" class="w-28 h-12 text-tertiary" fill="none" stroke="currentColor" aria-label="encrypted tunnel">
                 <path d="M4 14 C 40 5, 80 5, 116 14" stroke-width="3" stroke-linecap="round"/>
@@ -121,7 +126,7 @@
                 {% endif %}
               </div>
               <div class="rounded-xl border border-subtle bg-fill-subtle px-4 py-4">
-                <div id="scene-server" class="scene-node flex flex-col items-center gap-1">
+                <div id="scene-server" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="9" title="What is the workspace?">
                   {# Server with an AI sparkle, drawn as a brand-style tile #}
                   {# matching the minds / latchkey icons (palette colors: #}
                   {# confusion tile, peace glyph, comfort sparkle). The inner #}
@@ -143,23 +148,76 @@
                     <path d="M47 5.5 l2.3 5.7 5.7 2.3 -5.7 2.3 -2.3 5.7 -2.3 -5.7 -5.7 -2.3 5.7 -2.3 z"
                           fill="#f5d6a0"/>
                   </svg>
-                  <span id="server-caption" class="type-helper text-tertiary">loading...</span>
+                  <span id="server-caption" class="type-helper text-tertiary">setting up...</span>
                 </div>
               </div>
             </div>
           </div>
 
-          {# Step 1: the laptop / access-terminal explanation + theme demo. #}
-          <div class="onboarding-step text-center flex flex-col items-center gap-4" data-step="1">
+          {# Micro-step text panels: one short sentence each (onboarding.js #}
+          {# shows the one matching the current step). Steps 1-5 are the #}
+          {# minds phase, 6-7 latchkey, 8-9 the full picture. #}
+          <div class="onboarding-step text-center" data-step="1">
             <p class="type-body text-secondary max-w-xl">
-              Your laptop runs tabs for your workspace, where you can chat with
-              agents, run apps, and even access the web. You can think of this
-              like an access terminal for an AI operating system.
+              This is <b>minds</b>: your access terminal for an AI operating system.
             </p>
-            {# Interactive demo tab-space: a miniature workspace window whose #}
-            {# accent follows the picked theme color (demo only; the real #}
-            {# workspace color was chosen on the create form). #}
-            <span class="type-helper text-tertiary">Try it: click the tabs below</span>
+          </div>
+          <div class="onboarding-step hidden text-center" data-step="2">
+            <p class="type-body text-secondary max-w-xl">
+              Your workspace runs in tabs. Chat with your agents in the Chat tab.
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center" data-step="3">
+            <p class="type-body text-secondary max-w-xl">
+              Agents build and run apps for you. Those show up as tabs too.
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center" data-step="4">
+            <p class="type-body text-secondary max-w-xl">
+              You can also browse the web, right alongside your agents.
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center" data-step="5">
+            <p class="type-body text-secondary max-w-xl">
+              Pick a theme color for this workspace.
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center" data-step="6">
+            <p class="type-body text-secondary max-w-xl">
+              This is <b>latchkey</b>: your credentials stay encrypted on your
+              computer, never visible to agents.
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center" data-step="7">
+            <p class="type-body text-secondary max-w-xl">
+              latchkey can connect your agents to the tools you already use.
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center" data-step="8">
+            <p class="type-body text-secondary max-w-xl">
+              Your computer talks to your workspace over an encrypted tunnel.
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-3" data-step="9">
+            <p class="type-body text-secondary max-w-xl">
+              Your workspace is where your agents run.
+              {% if is_remote %}
+              This one runs 24/7 in the cloud, even when your laptop is closed.
+              {% else %}
+              This one runs directly on your own computer.
+              {% endif %}
+            </p>
+            {# Rotating tips while the user waits for the workspace to be #}
+            {# ready (onboarding.js cycles them). #}
+            <p id="tip" class="type-helper text-tertiary min-h-[18px] transition-opacity"></p>
+          </div>
+
+          {# Demo tab-space, shared by steps 2-5. NOT freely interactive: the #}
+          {# Next button walks through the tabs (chat -> app -> web); only the #}
+          {# theme swatches (step 5) take clicks. The accent follows the #}
+          {# picked color (demo only; the real workspace color came from the #}
+          {# create form). #}
+          <div id="demo-wrap" class="hidden w-full flex flex-col items-center gap-3">
             <div id="theme-demo" class="w-full max-w-md rounded-xl overflow-hidden border border-subtle shadow-overlay text-left">
               <div id="demo-titlebar" class="flex items-center gap-1.5 px-3 pt-2" style="background-color: var(--demo-accent);">
                 <div class="flex gap-1.5 pr-2 py-2">
@@ -167,16 +225,16 @@
                   <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
                   <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
                 </div>
-                <button type="button" class="demo-tab demo-tab-active" data-tab="chat">Chat</button>
-                <button type="button" class="demo-tab" data-tab="app">My app</button>
-                <button type="button" class="demo-tab" data-tab="web">Web</button>
+                <span class="demo-tab demo-tab-active" data-tab="chat">Chat</span>
+                <span class="demo-tab" data-tab="app">My app</span>
+                <span class="demo-tab" data-tab="web">Web</span>
               </div>
               {# Fixed height so switching demo tabs never reflows the page. #}
               <div class="bg-surface-primary p-3 h-[120px] overflow-hidden">
                 <div class="demo-pane" data-pane="chat">
                   <div class="type-helper text-tertiary mb-1.5">Chat with your agent</div>
-                  <div class="rounded-lg bg-surface-primary border border-subtle px-3 py-2 type-helper text-secondary mb-1.5 max-w-[85%]">Build me a website for my bakery</div>
-                  <div class="demo-accent-bubble rounded-lg px-3 py-2 type-helper max-w-[85%] ml-auto" style="background-color: var(--demo-accent);">On it -- starting with the menu page.</div>
+                  <div class="demo-accent-bubble rounded-lg px-3 py-2 type-helper max-w-[85%] ml-auto mb-1.5" style="background-color: var(--demo-accent);">Build me a website for my bakery</div>
+                  <div class="rounded-lg bg-surface-primary border border-subtle px-3 py-2 type-helper text-secondary max-w-[85%] mr-auto">On it -- starting with the menu page.</div>
                 </div>
                 <div class="demo-pane hidden" data-pane="app">
                   <div class="type-helper text-tertiary mb-1.5">Apps your agent runs appear as tabs</div>
@@ -192,8 +250,8 @@
                 </div>
               </div>
             </div>
-            <div class="flex flex-col items-center gap-2">
-              <span class="type-helper text-tertiary">Pick your theme color</span>
+            {# Theme swatches: revealed on the pick-a-color step only. #}
+            <div id="color-picker-wrap" class="hidden">
               <div id="onboarding-color-picker" role="radiogroup" aria-label="Theme color" class="flex items-center gap-2 flex-wrap justify-center">
                 {% for name, hex_value in palette.items() %}
                   <ColorSwatch :hex="hex_value" :name="name" size="sm" :selected="loop.first" />
@@ -202,61 +260,35 @@
             </div>
           </div>
 
-          {# Step 2: latchkey / credentials + connectable-services carousel. #}
-          <div class="onboarding-step hidden text-center flex flex-col items-center gap-4" data-step="2">
-            <p class="type-body text-secondary max-w-xl">
-              Your credentials are encrypted and stored on your computer, never
-              visible to agents. You can connect to...
-            </p>
-            {% if onboarding_services %}
-            <div class="service-marquee w-full max-w-lg overflow-hidden" aria-label="Connectable services">
-              <div class="service-marquee-track flex items-center gap-2 w-max">
-                {% for _repeat in range(2) %}
-                  {% for service in onboarding_services %}
-                    <span class="flex items-center gap-1.5 rounded-full border border-subtle bg-fill-subtle px-3 py-1.5 type-helper text-secondary whitespace-nowrap"
-                          {% if _repeat == 1 %}aria-hidden="true"{% endif %}>
-                      {% if service.icon_url %}
-                        <img src="{{ service.icon_url }}" alt="" class="service-icon w-3.5 h-3.5">
-                      {% else %}
-                        <span class="w-4 h-4 rounded-full bg-fill-subtle text-tertiary inline-flex items-center justify-center type-helper font-semibold">{{ service.display_name[0] }}</span>
-                      {% endif %}
-                      {{ service.display_name }}
-                    </span>
-                  {% endfor %}
+          {# Connectable-services carousel, shown on its own step. #}
+          {% if onboarding_services %}
+          <div id="carousel-wrap" class="hidden service-marquee w-full max-w-lg overflow-hidden" aria-label="Connectable services">
+            <div class="service-marquee-track flex items-center gap-2 w-max">
+              {% for _repeat in range(2) %}
+                {% for service in onboarding_services %}
+                  <span class="flex items-center gap-1.5 rounded-full border border-subtle bg-fill-subtle px-3 py-1.5 type-helper text-secondary whitespace-nowrap"
+                        {% if _repeat == 1 %}aria-hidden="true"{% endif %}>
+                    {% if service.icon_url %}
+                      <img src="{{ service.icon_url }}" alt="" class="service-icon w-3.5 h-3.5">
+                    {% else %}
+                      <span class="w-4 h-4 rounded-full bg-fill-subtle text-tertiary inline-flex items-center justify-center type-helper font-semibold">{{ service.display_name[0] }}</span>
+                    {% endif %}
+                    {{ service.display_name }}
+                  </span>
                 {% endfor %}
-              </div>
+              {% endfor %}
             </div>
-            {% endif %}
           </div>
-
-          {# Step 3: the full picture -- secure tunnel to the workspace machine. #}
-          <div class="onboarding-step hidden text-center flex flex-col items-center gap-3" data-step="3">
-            <p class="type-body text-secondary max-w-xl">
-              Your computer connects securely to your workspace, where your
-              agents run.
-              {% if is_remote %}
-              This workspace runs 24/7 in the cloud, so your agents keep
-              working even when your laptop is closed. Workspaces can also run
-              directly on your own computer.
-              {% else %}
-              This workspace runs directly on your own computer. Workspaces can
-              also run 24/7 in the cloud, so agents keep working even when your
-              laptop is closed.
-              {% endif %}
-            </p>
-            {# Rotating tips while the user waits for the workspace to be #}
-            {# ready (onboarding.js cycles them). #}
-            <p id="tip" class="type-helper text-tertiary min-h-[18px] transition-opacity"></p>
-          </div>
+          {% endif %}
 
           {# Walkthrough nav: Previous / dots / Next, and Begin once both the #}
-          {# workspace is ready and the user has seen every step. #}
+          {# workspace is ready and the user is on the last step. #}
           <nav class="flex items-center gap-4" aria-label="Walkthrough">
             <Button variant="ghost" id="onboarding-prev" disabled>Previous</Button>
             <div class="flex items-center gap-1.5" id="onboarding-dots" aria-hidden="true">
-              <span class="onboarding-dot" data-dot="1"></span>
-              <span class="onboarding-dot" data-dot="2"></span>
-              <span class="onboarding-dot" data-dot="3"></span>
+              {% for _step in range(1, 10) %}
+                <span class="onboarding-dot" data-dot="{{ _step }}"></span>
+              {% endfor %}
             </div>
             {# Next/Begin visibility is inline display (not the ``hidden`` #}
             {# utility): the button base's inline-flex would win the CSS #}

@@ -37,9 +37,19 @@
   // the loading screen's walkthrough sub-view for the failure sub-view, and
   // fills in the error message. Idempotent: safe to call from both the
   // status poll and the SSE 'done' handler.
+  //
+  // Deliberately deferred: failures stay invisible until the user reaches
+  // the walkthrough's last step (onboarding.js sets data-surface-errors on
+  // #creating there and dispatches 'minds:surface-errors'), so the
+  // explainer isn't interrupted mid-read.
   var failureShown = false;
   function showFailure() {
     if (failureShown) return;
+    if (root.getAttribute('data-surface-errors') !== 'true') {
+      // Not on the last step yet; the 'minds:surface-errors' listener
+      // below re-invokes us once the user gets there.
+      return;
+    }
     failureShown = true;
     var progressView = document.getElementById('progress-view');
     var failureView = document.getElementById('failure-view');
@@ -185,6 +195,12 @@
   source.onerror = function () {
     source.close();
   };
+
+  // When the user reaches the last walkthrough step, any failure recorded
+  // while the explainer was in the way can finally surface.
+  root.addEventListener('minds:surface-errors', function () {
+    if (creationFailed) showFailure();
+  });
 
   // Kick off the loading UI immediately -- there are no questions to answer
   // first.

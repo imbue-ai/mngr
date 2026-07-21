@@ -682,11 +682,9 @@ html.no-scrollbar-gutter {
   color: rgb(from var(--_demo-contrast) r g b / 0.8);
   background: rgb(from var(--_demo-contrast) r g b / 0.1);
   margin-right: 3px;
-  cursor: pointer;
-  transition: background-color 150ms ease, color 150ms ease;
-}
-.demo-tab:hover {
-  background: rgb(from var(--_demo-contrast) r g b / 0.18);
+  /* The Next button drives the tabs (the demo is not freely clickable). */
+  cursor: default;
+  transition: background-color 300ms ease, color 300ms ease;
 }
 .demo-tab.demo-tab-active {
   background: var(--c-surface-primary);
@@ -759,4 +757,21 @@ html.no-scrollbar-gutter {
 /* Grow the step-1 laptop upward so it doesn't overlap its caption. */
 .onboarding.step-1 #scene-laptop svg {
   transform-origin: center bottom;
+}
+
+
+/*
+ * Ready state: once creation is done (onboarding.js toggles is-ready on
+ * #onboarding), the workspace tile glows and the Begin button pulses so
+ * there is no missing it.
+ */
+.onboarding.is-ready #scene-server svg {
+  box-shadow: 0 0 0 3px var(--c-success-surface, rgb(12 129 6 / 0.25)), 0 0 18px rgb(12 129 6 / 0.35);
+}
+@keyframes onboarding-begin-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+#onboarding-begin {
+  animation: onboarding-begin-pulse 1.6s ease-in-out infinite;
 }
