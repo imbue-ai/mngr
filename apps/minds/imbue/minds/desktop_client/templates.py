@@ -19,6 +19,7 @@ from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from flask import has_app_context
@@ -1787,7 +1788,7 @@ def _sharing_boot_island(
     initial_emails: list[str],
     is_modal: bool,
     mngr_forward_origin: str,
-) -> dict:
+) -> dict[str, Any]:
     """Build the ``#minds-boot-state`` island dict for the sharing editor pages."""
     extras = SharingBootExtras(
         agent_id=agent_id,
