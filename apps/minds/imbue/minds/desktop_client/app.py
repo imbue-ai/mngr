@@ -2916,14 +2916,18 @@ def create_desktop_client(
     additionally requires ``notification_dispatcher`` to be provided;
     without it that endpoint returns 501.
     """
-    # Static assets: the compiled Tailwind v4 stylesheet (app.min.css) + per-page
+    # Static assets: the compiled Tailwind v4 stylesheet (app.min.css), the
+    # compiled mithril frontend bundle (dist/chrome.bundle.js), and per-page
     # JS, served by Flask's built-in static handler at the ``/_static`` URL.
     # app.min.css is built from static/app.css by `just minds-css`
-    # (pnpm run build:css) and is gitignored; if it's missing the route still
-    # works and the server logs a hint at startup.
+    # (pnpm run build:css) and the bundle from frontend/src by `just minds-js`
+    # (pnpm run build:js); both are gitignored, and if either is missing the
+    # route still works and the server logs a hint at startup.
     _static_dir = Path(__file__).resolve().parent / "static"
     if not (_static_dir / "app.min.css").exists():
         logger.warning("Missing static/app.min.css. Run `just minds-css` from the repo root to build it.")
+    if not (_static_dir / "dist" / "chrome.bundle.js").exists():
+        logger.warning("Missing static/dist/chrome.bundle.js. Run `just minds-js` from the repo root to build it.")
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
 
     @app.errorhandler(Exception)

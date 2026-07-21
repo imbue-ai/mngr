@@ -6,4 +6,4 @@ New `apps/minds/frontend/` TypeScript package (mithril 2.x, strict tsc, vitest +
 
 The dev styleguide (`/_dev/styleguide`) gained a "JS components" section mounting a smoke component through the full mount protocol -- the live catalog slot for later converted components.
 
-Build wiring: `build:js` / `watch:js` pnpm scripts run everywhere `build:css` does (`prestart`, `pnpm start` watch, `scripts/build.js`, the visual-diff harness); the bundle is force-included in the minds wheel via `[tool.hatch.build] artifacts`; `static/app.css` declares `frontend/src` as a Tailwind `@source` so component-only utilities are generated.
+Build wiring: `build:js` / `watch:js` pnpm scripts run everywhere `build:css` does (`prestart`, `pnpm start` watch, `scripts/build.js`, the visual-diff harness); the bundle is force-included in the minds wheel via `[tool.hatch.build] artifacts`; `static/app.css` declares `frontend/src` as a Tailwind `@source` so component-only utilities are generated. Like the compiled stylesheet, a missing (unbuilt) bundle makes the server log a `just minds-js` hint at startup.
