@@ -558,6 +558,22 @@ mngr imbue_cloud tunnels list [OPTIONS]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud tunnels find-by-agent
+
+**Usage:**
+
+```text
+mngr imbue_cloud tunnels find-by-agent [OPTIONS] AGENT_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud tunnels delete
 
 **Usage:**
