@@ -29,6 +29,7 @@ from pydantic import Field
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.errors import SendMessageError
@@ -487,7 +488,7 @@ def submit_message_and_confirm(
     if outcome.is_confirmed:
         rejection_probe_names = {probe.name for probe in probes if probe.is_rejection}
         if outcome.confirming_probe_name in rejection_probe_names:
-            outcome = outcome.model_copy(update={"is_rejection": True})
+            outcome = outcome.model_copy_update(to_update(outcome.field_ref().is_rejection, True))
         logger.debug("Message submitted successfully (confirmed by {})", outcome.confirming_probe_name)
         return outcome
     if _TIMEOUT_MARKER not in result.stdout:
