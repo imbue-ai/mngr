@@ -2709,7 +2709,7 @@ if (!gotLock) {
 } else {
   app.on('second-instance', (_event, argv) => {
     // Windows/Linux deliver deeplink re-invocations through the second
-    // instance's argv. Without a URL this stays the old focus-only behavior.
+    // instance's argv. Without a URL, just focus the most recent window.
     const url = extractDeeplinkUrlFromArgv(argv || []);
     if (url) {
       handleDeeplink(url);
