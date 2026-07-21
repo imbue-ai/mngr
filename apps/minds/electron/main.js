@@ -855,15 +855,19 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.isErrorState) return;
     if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
     if (!backendBaseUrl) return;
-    // If the recovery page itself failed to load, the minds backend is gone;
-    // re-navigating would loop. Leave it to the app-level error handling.
-    if (validatedURL && validatedURL.startsWith(backendBaseUrl + '/agents/')) return;
     // Scope to workspace loads: the failed URL names the agent (a /goto/
-    // bridge or an agent-subdomain URL), or the bundle was already stamped
-    // with the workspace it is navigating to. Non-workspace screens (Home,
-    // settings, ...) are served by the minds backend directly and are the
-    // app-level error handling's concern.
-    const agentId = parseWorkspaceId(validatedURL) || bundle.currentWorkspaceId;
+    // bridge or an agent-subdomain URL), or -- when the URL is unparseable or
+    // empty -- the bundle was already stamped with the workspace it is
+    // navigating to. A failed minds-backend URL that names no workspace is
+    // excluded BEFORE that fallback: the recovery page itself failing means
+    // the backend is gone and re-navigating would loop, and a non-workspace
+    // screen (Home, settings, ...) failing must not be misattributed to the
+    // still-stamped currentWorkspaceId of the workspace the user is leaving --
+    // both are the app-level error handling's concern. (/goto/ bridge URLs can
+    // be built on backendBaseUrl during the startup window, but those parse.)
+    const parsedAgentId = parseWorkspaceId(validatedURL);
+    if (!parsedAgentId && validatedURL && validatedURL.startsWith(backendBaseUrl + '/')) return;
+    const agentId = parsedAgentId || bundle.currentWorkspaceId;
     if (!agentId) return;
     console.error(
       `[content-load-failed] workspace content load failed ` +
