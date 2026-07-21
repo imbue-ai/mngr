@@ -196,8 +196,14 @@ export function mountModalHost(target: Element | null): ModalHostHandleForPage {
   window.__mindsModalHostBridge = frameBridge;
 
   // Escape dismisses any modal. In Electron main's before-input-event does
-  // this for every modal-view page; here the keydown lands in the IFRAME's
-  // document once it has focus, so listen there on every load (same-origin).
+  // this for every modal-view page; here the keydown lands wherever focus
+  // is -- THIS document right after an open (the titlebar button keeps
+  // focus), or the IFRAME's document once the user interacts with the
+  // modal -- so listen in both. The parent-side listener is inert while no
+  // modal is open; the frame side is wired on every load (same-origin).
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && currentRequest !== null) close();
+  });
   const wireFrameEscape = (frame: HTMLIFrameElement): void => {
     const contentDocument = frame.contentDocument;
     if (contentDocument === null) return;

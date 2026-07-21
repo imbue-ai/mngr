@@ -190,6 +190,23 @@ describe("ModalHost open/close", () => {
 
     expect(frameEl()).toBeNull();
   });
+
+  it("dismisses on Escape pressed in the parent document (focus never entered the frame)", () => {
+    const handle = mountFixture();
+    // No modal open: the parent-side listener is inert.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(handle.isOpen()).toBe(false);
+
+    // Opening via a titlebar button leaves focus in the parent document, so
+    // the keydown lands there -- never in the (unfocused) iframe.
+    handle.open({ kind: "minds-settings" });
+    m.redraw.sync();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    m.redraw.sync();
+
+    expect(frameEl()).toBeNull();
+    expect(handle.isOpen()).toBe(false);
+  });
 });
 
 describe("ModalHost frame bridge", () => {
