@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from imbue.mngr_foreman.codex_transcript import parse_codex_common_lines
 from imbue.mngr_foreman.harness import transcript_strategy_for
 from imbue.mngr_foreman.pi_transcript import parse_pi_common_lines
 from imbue.mngr_foreman.transcript_parser import parse_claude_session_lines
@@ -22,6 +23,15 @@ def test_pi_strategy() -> None:
     assert strategy.subpath == "events/pi-coding/common_transcript/events.jsonl"
     assert strategy.parse is parse_pi_common_lines
     # pi runs every tool unattended, so it never blocks the composer.
+    assert strategy.uses_pane_dialog_detection is False
+
+
+def test_codex_strategy() -> None:
+    strategy = transcript_strategy_for("codex")
+    assert strategy is not None
+    assert strategy.subpath == "events/codex/common_transcript/events.jsonl"
+    assert strategy.parse is parse_codex_common_lines
+    # codex has no ❯-dialogs; a permission block promotes its state to WAITING instead.
     assert strategy.uses_pane_dialog_detection is False
 
 

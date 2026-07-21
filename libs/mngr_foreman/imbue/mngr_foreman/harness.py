@@ -26,6 +26,7 @@ from collections.abc import Callable
 from typing import Any
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr_foreman.codex_transcript import parse_codex_common_lines
 from imbue.mngr_foreman.pi_transcript import parse_pi_common_lines
 from imbue.mngr_foreman.transcript_parser import parse_claude_session_lines
 from imbue.mngr_foreman.transcript_tail import TRANSCRIPT_SUBPATH
@@ -39,6 +40,9 @@ ParseFn = Callable[..., list[dict[str, Any]]]
 # pi's mngr lifecycle extension emits the agent-agnostic common transcript here
 # (``events/<type>/common_transcript/events.jsonl`` with ``<type>`` = ``pi-coding``).
 _PI_SUBPATH = "events/pi-coding/common_transcript/events.jsonl"
+# codex's mngr plugin emits the same common transcript under its own type dir
+# (``mngr_codex``'s ``COMMON_TRANSCRIPT_OUTPUT_RELATIVE``).
+_CODEX_SUBPATH = "events/codex/common_transcript/events.jsonl"
 
 
 class TranscriptStrategy(FrozenModel):
@@ -60,6 +64,14 @@ _STRATEGIES: dict[str, TranscriptStrategy] = {
     "pi-coding": TranscriptStrategy(
         subpath=_PI_SUBPATH,
         parse=parse_pi_common_lines,
+        uses_pane_dialog_detection=False,
+    ),
+    # codex: follow the pre-normalized common transcript. codex has no numbered-choice
+    # TUI dialogs; a tool-approval block promotes its lifecycle state RUNNING->WAITING,
+    # so the working/waiting dot rides the generic ``active`` marker with no pane scrape.
+    "codex": TranscriptStrategy(
+        subpath=_CODEX_SUBPATH,
+        parse=parse_codex_common_lines,
         uses_pane_dialog_detection=False,
     ),
 }
