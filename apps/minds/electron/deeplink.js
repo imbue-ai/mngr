@@ -10,7 +10,8 @@
 //   minds://create?git_url=<repo>&branch=<ref>  -> open the create-workspace
 //     page with the repo pre-filled under advanced settings; `branch` accepts
 //     anything the form's Branch input accepts (branch, tag, or commit) and
-//     falls back to the form's default when absent.
+//     the field stays blank when absent (submit then resolves the repo's
+//     latest version).
 //   minds:// (or any unrecognized/malformed URL) -> just focus the app.
 
 // Generous for a git URL plus ref, tight enough to bound log spam and

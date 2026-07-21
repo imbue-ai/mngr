@@ -489,7 +489,15 @@ def render_create_form(
     callers that don't care about color (e.g. some tests) can omit it.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
-    effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
+    # The env/operator branch default pairs with the default template repo, so
+    # it only applies when the repository was NOT explicitly supplied. With an
+    # explicit repository (e.g. an inspiration deeplink's git_url) the branch
+    # is kept exactly as given: blank means "the repo's latest version", which
+    # is what submit resolves it to (``resolve_template_version``).
+    if git_url:
+        effective_branch = branch
+    else:
+        effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
     # The selected preset card drives the provider defaults so the highlighted
     # card always matches what a plain submit would create. A fresh form
     # (no explicit selection, no submitted launch mode) defaults to the remote
