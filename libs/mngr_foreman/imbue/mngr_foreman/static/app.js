@@ -645,14 +645,9 @@
       if (ev.type === "user_message") {
         const key = (ev.content || "").trim();
         // The transcript is the source of truth: this event confirms the message
-        // the user sent, so now (not on POST) clear the composer and re-enable send.
+        // the user sent, so now (not on POST) clear + unlock the composer.
         if (pendingSend !== null && key === pendingSend) {
-          pendingSend = null;
-          if (pendingSendTimer) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
-          input.value = "";
-          autoGrow();
-          clearUploads();
-          sendBtn.disabled = false;
+          finishPendingSend();
         }
         const existing = userBubbles.get(key);
         if (existing && existing.queued && !ev.queued) {
@@ -799,14 +794,34 @@
       if (r) r.onclick = (e) => { e.preventDefault(); sendErr.hidden = true; };
     }
 
+    // Unlock the composer and clear the sent text. Called when the transcript
+    // confirms the message (renderEvent) or, as a fallback, from the safety timer.
+    function finishPendingSend() {
+      if (pendingSendTimer) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
+      pendingSend = null;
+      input.value = "";
+      input.disabled = false;
+      sendBtn.disabled = false;
+      autoGrow();
+      clearUploads();
+      input.focus();
+    }
+    // Re-open the composer for editing/retry without clearing (a failed send).
+    function unlockComposer() {
+      input.disabled = false;
+      sendBtn.disabled = false;
+    }
+
     function send() {
       if (sendBtn.disabled) return; // a send is already in flight (guards Enter too)
       const msg = input.value.trim();
       if (!msg) return;
       // No optimistic rendering: the text STAYS in the composer as the pending
-      // state. Disable only the send button (prevent dupes) -- the composer clears
-      // itself when renderEvent sees this message echoed in the transcript.
+      // state, but the WHOLE composer is locked (button + textarea uneditable)
+      // until the transcript echoes the message -- then finishPendingSend clears
+      // and unlocks it. renderEvent does the confirm match by content.
       sendBtn.disabled = true;
+      input.disabled = true;
       sendErr.hidden = true;
       fetch("/api/agents/" + encodeURIComponent(name) + "/message", {
         method: "POST",
@@ -817,17 +832,16 @@
         .then(({ ok, d }) => {
           if (ok && d.ok) {
             // Delivered to claude's input. Wait for the transcript echo (matched
-            // by content) to clear the composer and render the real bubble; keep
-            // the button disabled until then so the message can't be sent twice.
+            // by content) to clear + unlock the composer and render the real bubble.
             pendingSend = msg;
             clearBlocked();
             statePoll.burst(); // fast input-state polling so working/blocked reacts
             // Safety net: if the transcript echo never matches (e.g. the content
-            // got normalized), re-enable send after a grace period so the composer
+            // got normalized), clear + unlock after a grace period so the composer
             // can't lock up. The echo normally arrives in well under a second.
             if (pendingSendTimer) clearTimeout(pendingSendTimer);
             pendingSendTimer = setTimeout(() => {
-              if (pendingSend === msg) { pendingSend = null; sendBtn.disabled = false; }
+              if (pendingSend === msg) finishPendingSend();
             }, 15000);
           } else {
             const err = (d && d.error) || "send failed — open the terminal to resolve any prompt.";
@@ -835,12 +849,12 @@
             // A failed send usually means a blocking dialog ate the paste; flip
             // to the greyed state immediately (the next poll re-confirms/clears).
             setBlocked();
-            sendBtn.disabled = false; // let the user retry (text is still there)
+            unlockComposer(); // let the user edit/retry (text is still there)
           }
         })
         .catch((e) => {
           showError("network error: " + e);
-          sendBtn.disabled = false;
+          unlockComposer();
         });
     }
 
