@@ -65,6 +65,13 @@
       "description": "Check the selected workspace's health and restart its services or host."
     },
     {
+      "permission": "minds-workspaces-resize",
+      "method": "POST",
+      "path": { "kind": "targeted", "suffix": "/resize$" },
+      "display_name": "Resize a workspace's resources",
+      "description": "Set the selected workspace's CPU and memory allotment. Set-only: values that cannot apply live take effect on the workspace's next restart, and restarting requires its own permission."
+    },
+    {
       "permission": "minds-workspaces-sharing",
       "method": ["GET", "PUT", "DELETE"],
       "path": { "kind": "targeted", "suffix": "/sharing/[^/]+(/readiness)?$" },

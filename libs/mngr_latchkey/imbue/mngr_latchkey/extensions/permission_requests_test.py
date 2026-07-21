@@ -745,6 +745,40 @@ def test_post_creates_workspace_request_multi_method_verb(
     assert not path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/health")
 
 
+def test_post_creates_workspace_request_resize_verb_is_target_scoped(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    # The ``minds-workspaces-resize`` verb is targeted and POST-only: the minted
+    # per-target schema admits exactly the target's ``/resize`` path and nothing
+    # else (in particular not the restart path, which stays behind the separate
+    # ``minds-workspaces-recover`` grant).
+    base_url, *_ = node_extension
+    target_id = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs more memory for its workspace",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-resize"],
+                "target_workspace_id": target_id,
+            },
+        },
+    )
+    assert status == 201, body
+    effect = json.loads(body)["effect"]
+    per_target_name = f"minds-workspaces-resize-{target_id}"
+    perm_schema = effect["schemas"][per_target_name]
+    assert perm_schema["properties"]["method"] == {"const": "POST"}
+    path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
+    prefix = "/minds-api-proxy/api/v1/workspaces"
+    assert path_pattern.fullmatch(f"{prefix}/{target_id}/resize")
+    # Resize does not grant restart, and other workspaces are not covered.
+    assert not path_pattern.fullmatch(f"{prefix}/{target_id}/restart")
+    assert not path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/resize")
+
+
 def test_approve_workspace_override_recomputes_and_accumulates(
     node_extension: tuple[str, Path, Path],
 ) -> None:

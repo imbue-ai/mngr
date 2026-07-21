@@ -197,12 +197,13 @@ Minds exposes a cross-workspace management API (`/api/v1/workspaces/...`)
 that lets an agent in one workspace act on *other* workspaces -- listing,
 reading detail/version/backups, creating, destroying, starting/stopping,
 exporting and managing backups, establishing SSH access, updating settings,
-recovering (health check / restart), and managing service sharing. It is
+recovering (health check / restart), resizing CPU/memory allotments, and
+managing service sharing. It is
 reached through the same `minds-api-proxy` extension and gated by a single
 `minds-workspaces` detent scope with one named permission per verb
 (`minds-workspaces-read`, `-create`, `-destroy`, `-lifecycle`,
 `-backups-export`, `-backups-manage`, `-ssh`, `-update`, `-recover`,
-`-sharing`). Nothing is
+`-resize`, `-sharing`). Nothing is
 pre-granted, so an agent's first cross-workspace call gets a 403 until the
 user approves; the scope and verb schemas are not part of the agent baseline
 at all -- they arrive, fully self-described, with the grant (see below).
@@ -221,7 +222,9 @@ The verbs split on a **target axis**:
   workspace (listing does not leak per-target data, and create takes no
   target).
 * `destroy`, `lifecycle`, `backups-export`, `backups-manage`, `ssh`,
-  `update`, `recover`, and `sharing` are *target-scoped*.
+  `update`, `recover`, `resize`, and `sharing` are *target-scoped*.
+  (`resize` is set-only: applying values that need a restart goes through
+  the restart endpoint, which stays behind the separate `recover` grant.)
   A "selected" grant for one of these verbs mints a **uniquely-named
   per-target permission schema** (`minds-workspaces-<verb>-<target_id>`)
   whose path pins that single workspace; an "all workspaces" grant uses

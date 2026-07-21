@@ -38,6 +38,7 @@ def test_verb_catalog_covers_expected_verbs() -> None:
         "minds-workspaces-ssh",
         "minds-workspaces-update",
         "minds-workspaces-recover",
+        "minds-workspaces-resize",
         "minds-workspaces-sharing",
     }
 
@@ -52,5 +53,6 @@ def test_targeted_verbs_are_the_mutating_and_ssh_verbs() -> None:
         "minds-workspaces-ssh",
         "minds-workspaces-update",
         "minds-workspaces-recover",
+        "minds-workspaces-resize",
         "minds-workspaces-sharing",
     }
