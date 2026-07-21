@@ -214,8 +214,8 @@ def test_resolve_api_key_requires_repository() -> None:
 
 
 def test_backup_exec_argv_never_starts_a_stopped_host() -> None:
-    """Every backup-stack exec (verification check, env injection, update
-    scripts) must pass --no-start: ``mngr exec`` auto-starts the host by
+    """Every backup-stack exec -- verification check, env injection, update
+    scripts -- must pass --no-start: ``mngr exec`` auto-starts the host by
     default, and the periodic backup checker was observed cold-booting a
     stopped container it believed online off a stale RUNNING snapshot.
     """
