@@ -598,7 +598,10 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         LaunchMode.DOCKER,
         LaunchMode.LIMA,
     ):
-        return _json_field_error("CPU/memory allotments are only supported for docker and lima workspaces.", "cpus")
+        return _json_field_error(
+            "CPU/memory allotments are only supported for docker and lima workspaces.",
+            "cpus" if requested_cpus is not None else "memory_gib",
+        )
 
     # The workspace name is chosen automatically unless one was submitted (the
     # advanced view's optional "Name" field): a submitted value, else the next
