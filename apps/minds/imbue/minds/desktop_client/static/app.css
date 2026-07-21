@@ -664,7 +664,9 @@ html.no-scrollbar-gutter {
   border-radius: 8px 8px 0 0;
   font-size: 12px;
   line-height: 1.4;
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.14);
+  margin-right: 2px;
   cursor: pointer;
 }
 .demo-tab:hover {
@@ -688,7 +690,7 @@ html.no-scrollbar-gutter {
   mask-image: linear-gradient(to right, transparent, black 8%, black 92%, transparent);
 }
 .service-marquee-track {
-  animation: service-marquee-scroll 40s linear infinite;
+  animation: service-marquee-scroll 90s linear infinite;
 }
 .service-marquee:hover .service-marquee-track {
   animation-play-state: paused;

@@ -67,6 +67,31 @@
   // Begin appears the moment both conditions hold.
   root.addEventListener('minds:create-ready', render);
 
+  // ---- Rotating tips (last step) ----
+  // The #tip element lives in the step-3 panel, so the rotation is only
+  // visible there -- it keeps the wait interesting once the walkthrough
+  // is read but the workspace is still loading.
+  var TIPS = [
+    'Tip: your workspace is backed up automatically so your work survives a restart.',
+    'Did you know: in <b>privacy mode</b>, the data we gather stays on your own computer.',
+    'Tip: switch accounts anytime from the workspace menu.',
+    'Tip: share a running app with a teammate from the workspace’s Share menu.',
+    'Did you know: you can revisit permissions and compute settings later.'
+  ];
+  var tipEl = document.getElementById('tip');
+  if (tipEl) {
+    var tipIdx = 0;
+    tipEl.innerHTML = TIPS[0];
+    setInterval(function () {
+      tipIdx = (tipIdx + 1) % TIPS.length;
+      tipEl.style.opacity = '0';
+      setTimeout(function () {
+        tipEl.innerHTML = TIPS[tipIdx];
+        tipEl.style.opacity = '1';
+      }, 250);
+    }, 4000);
+  }
+
   // ---- Begin: zoom into the workspace, then navigate ----
   var entering = false;
   if (beginBtn) {

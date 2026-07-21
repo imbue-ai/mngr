@@ -118,23 +118,26 @@
               </div>
               <div class="rounded-xl border border-subtle bg-fill-subtle px-4 py-4">
                 <div id="scene-server" class="scene-node flex flex-col items-center gap-1">
-                  {# Server with an AI sparkle. The inner fill rect scales #}
-                  {# with --create-progress so the machine visually fills up #}
-                  {# in lockstep with the top progress bar. #}
-                  <svg viewBox="0 0 64 80" class="w-16 h-20 text-tertiary" aria-label="workspace machine">
+                  {# Server with an AI sparkle, drawn as a brand-style tile #}
+                  {# matching the minds / latchkey icons (palette colors: #}
+                  {# confusion tile, peace glyph, comfort sparkle). The inner #}
+                  {# fill rect scales with --create-progress so the machine #}
+                  {# visually fills up in lockstep with the top progress bar. #}
+                  <svg viewBox="0 0 64 64" class="w-14 h-14 rounded-xl" aria-label="workspace machine">
                     <defs>
-                      <clipPath id="server-clip"><rect x="8" y="8" width="48" height="64" rx="8"/></clipPath>
+                      <clipPath id="server-clip"><rect width="64" height="64" rx="14"/></clipPath>
                     </defs>
+                    <rect width="64" height="64" rx="14" fill="#0b292b"/>
                     <g clip-path="url(#server-clip)">
-                      <rect id="server-fill" x="8" y="8" width="48" height="64" class="fill-accent/30 server-fill-rect"/>
+                      <rect id="server-fill" width="64" height="64" fill="#9fbbd3" opacity="0.35" class="server-fill-rect"/>
                     </g>
-                    <rect x="8" y="8" width="48" height="64" rx="8" fill="none" stroke="currentColor" stroke-width="3"/>
-                    <path d="M8 29 H 56 M 8 50 H 56" stroke="currentColor" stroke-width="2.5"/>
-                    <circle cx="17" cy="18.5" r="2.5" fill="currentColor"/>
-                    <circle cx="17" cy="39.5" r="2.5" fill="currentColor"/>
-                    <circle cx="17" cy="60.5" r="2.5" fill="currentColor"/>
-                    <path d="M47 55 l2.6 6.4 6.4 2.6 -6.4 2.6 -2.6 6.4 -2.6 -6.4 -6.4 -2.6 6.4 -2.6 z"
-                          fill="currentColor" class="text-accent" transform="translate(2 -42)"/>
+                    <rect x="15" y="13" width="34" height="38" rx="5" fill="none" stroke="#9fbbd3" stroke-width="3.5"/>
+                    <path d="M15 25.5 H 49 M 15 38 H 49" stroke="#9fbbd3" stroke-width="3"/>
+                    <circle cx="21.5" cy="19" r="2" fill="#9fbbd3"/>
+                    <circle cx="21.5" cy="31.75" r="2" fill="#9fbbd3"/>
+                    <circle cx="21.5" cy="44.5" r="2" fill="#9fbbd3"/>
+                    <path d="M47 5.5 l2.3 5.7 5.7 2.3 -5.7 2.3 -2.3 5.7 -2.3 -5.7 -5.7 -2.3 5.7 -2.3 z"
+                          fill="#f5d6a0"/>
                   </svg>
                   <span id="server-caption" class="type-helper text-tertiary">loading...</span>
                 </div>
@@ -152,6 +155,7 @@
             {# Interactive demo tab-space: a miniature workspace window whose #}
             {# accent follows the picked theme color (demo only; the real #}
             {# workspace color was chosen on the create form). #}
+            <span class="type-helper text-tertiary">Try it: click the tabs below</span>
             <div id="theme-demo" class="w-full max-w-md rounded-xl overflow-hidden border border-subtle shadow-overlay text-left">
               <div id="demo-titlebar" class="flex items-center gap-1.5 px-3 pt-2" style="background-color: var(--demo-accent);">
                 <div class="flex gap-1.5 pr-2 py-2">
@@ -163,7 +167,8 @@
                 <button type="button" class="demo-tab" data-tab="app">My app</button>
                 <button type="button" class="demo-tab" data-tab="web">Web</button>
               </div>
-              <div class="bg-surface-primary p-3 min-h-[96px]">
+              {# Fixed height so switching demo tabs never reflows the page. #}
+              <div class="bg-surface-primary p-3 h-[120px] overflow-hidden">
                 <div class="demo-pane" data-pane="chat">
                   <div class="type-helper text-tertiary mb-1.5">Chat with your agent</div>
                   <div class="rounded-lg bg-surface-primary border border-subtle px-3 py-2 type-helper text-secondary mb-1.5 max-w-[85%]">Build me a website for my bakery</div>
@@ -207,7 +212,7 @@
                     <span class="flex items-center gap-1.5 rounded-full border border-subtle bg-fill-subtle px-3 py-1.5 type-helper text-secondary whitespace-nowrap"
                           {% if _repeat == 1 %}aria-hidden="true"{% endif %}>
                       {% if service.icon_url %}
-                        <img src="{{ service.icon_url }}" alt="" class="w-3.5 h-3.5 opacity-70 dark:invert">
+                        <img src="{{ service.icon_url }}" alt="" class="w-3.5 h-3.5 dark:invert">
                       {% else %}
                         <span class="w-4 h-4 rounded-full bg-fill-subtle text-tertiary inline-flex items-center justify-center type-helper font-semibold">{{ service.display_name[0] }}</span>
                       {% endif %}
@@ -235,6 +240,9 @@
               laptop is closed.
               {% endif %}
             </p>
+            {# Rotating tips while the user waits for the workspace to be #}
+            {# ready (onboarding.js cycles them). #}
+            <p id="tip" class="type-helper text-tertiary min-h-[18px] transition-opacity"></p>
           </div>
 
           {# Walkthrough nav: Previous / dots / Next, and Begin once both the #}
