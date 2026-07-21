@@ -1908,16 +1908,18 @@ def _build_requests_payload(
 ) -> ChromeRequestsPayload:
     """Build the content-based requests payload pushed over the chrome SSE.
 
-    The chrome's live request UI (badge, panel refresh, auto-open) must react
+    The chrome's live request UI (badge, inbox list, auto-open) must react
     to any change in the *set* of pending requests, not merely its size. A
     bare count is a lossy summary: if one request is resolved while another
     arrives, the count is unchanged even though the inbox contents are not.
     Keying updates off the count therefore silently drops those transitions.
 
     To make change detection sound, we surface the actual pending request
-    ids (in a deterministic order) alongside the count. Consumers diff
-    ``request_ids`` to decide whether to refresh the panel and which ids are
-    newly arrived (for auto-open); the count remains for the badge.
+    ids (in a deterministic order) alongside the count. The SSE loop diffs
+    ``request_ids`` to decide when to push an event, and Electron main diffs
+    them to spot genuinely new ids (for auto-open); the count remains for
+    the badge. ``cards`` carries the per-request summaries the store-fed
+    InboxList component renders, in the same order as ``request_ids``.
 
     ``auto_open`` is bundled here (rather than its own SSE event) so the
     Electron shell sees both atomically when deciding whether to auto-open
