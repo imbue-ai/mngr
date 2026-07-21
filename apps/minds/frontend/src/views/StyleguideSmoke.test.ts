@@ -66,6 +66,12 @@ describe("mountStyleguideSmoke", () => {
     expect(() => mountStyleguideSmoke(container)).toThrow(MindsUIError);
   });
 
+  it("throws when the boot island holds invalid JSON", () => {
+    installBootStateIsland("{not json");
+    const container = installMountContainer();
+    expect(() => mountStyleguideSmoke(container)).toThrow(MindsUIError);
+  });
+
   it("throws when the boot island lacks the smoke message", () => {
     installBootStateIsland(JSON.stringify({ styleguide_smoke: {} }));
     const container = installMountContainer();
