@@ -154,32 +154,25 @@ def _format_user_message(record: Any) -> str:
     level_name = record["level"].name
     use_color = should_use_color()
     if level_name == "WARNING":
-        if use_color:
-            return f"{WARNING_COLOR}WARNING: {{message}}{RESET_COLOR}\n"
-        else:
-            return "WARNING: {message}\n"
+        body = f"{WARNING_COLOR}WARNING: {{message}}{RESET_COLOR}" if use_color else "WARNING: {message}"
     elif level_name == "ERROR":
-        if use_color:
-            return f"{ERROR_COLOR}ERROR: {{message}}{RESET_COLOR}\n"
-        else:
-            return "ERROR: {message}\n"
+        body = f"{ERROR_COLOR}ERROR: {{message}}{RESET_COLOR}" if use_color else "ERROR: {message}"
     elif level_name == "BUILD":
-        if use_color:
-            return f"{BUILD_COLOR}{{message}}{RESET_COLOR}\n"
-        else:
-            return "{message}\n"
+        body = f"{BUILD_COLOR}{{message}}{RESET_COLOR}" if use_color else "{message}"
     elif level_name == "DEBUG":
-        if use_color:
-            return f"{DEBUG_COLOR}{{message}}{RESET_COLOR}\n"
-        else:
-            return "{message}\n"
+        body = f"{DEBUG_COLOR}{{message}}{RESET_COLOR}" if use_color else "{message}"
     elif level_name == "TRACE":
-        if use_color:
-            return f"{TRACE_COLOR}{{message}}{RESET_COLOR}\n"
-        else:
-            return "{message}\n"
+        body = f"{TRACE_COLOR}{{message}}{RESET_COLOR}" if use_color else "{message}"
     else:
-        return "{message}\n"
+        body = "{message}"
+    # Append "{exception}" so exception tracebacks actually render on this sink.
+    # loguru auto-appends the exception block only when `format` is a *string*;
+    # for a callable format like this one it uses the returned template verbatim,
+    # so without an explicit "{exception}" every traceback -- including unhandled
+    # thread exceptions routed here via _threading_excepthook -- is silently
+    # dropped. It expands to "" when the record carries no exception, so the
+    # normal (no-exception) output is unchanged.
+    return body + "\n{exception}"
 
 
 _PYINFRA_NOISE_RE: Final[re.Pattern[str]] = re.compile(
