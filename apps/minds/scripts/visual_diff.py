@@ -586,7 +586,7 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
             browser.close()
 
 
-def _build_css() -> None:
+def _build_static_assets() -> None:
     """Compile the branch's static assets: the Tailwind sheet (static/app.css
     -> static/app.min.css) and the mithril frontend bundle (frontend/src ->
     static/dist/chrome.bundle.js).
@@ -615,10 +615,11 @@ def _do_capture(label: str) -> Path:
     html_dir.mkdir(parents=True)
     png_dir.mkdir(parents=True)
 
-    # The chrome's styles come from the compiled Tailwind sheet (app.min.css),
-    # which is gitignored and only exists after a build -- and must reflect the
-    # CURRENT branch's source so the diff is meaningful. Rebuild it here.
-    _build_css()
+    # The chrome's styles come from the compiled Tailwind sheet (app.min.css)
+    # and its components from the compiled frontend bundle (chrome.bundle.js),
+    # both gitignored and only existing after a build -- and they must reflect
+    # the CURRENT branch's source so the diff is meaningful. Rebuild them here.
+    _build_static_assets()
 
     # Symlink static into the served root so /_static/app.min.css (+ the
     # per-page JS) resolve. Symlink (not copy) so we always pick up the live
