@@ -339,6 +339,21 @@ class _OAuthCaptureBox:
             return None if self._params is None else dict(self._params)
 
 
+# Inline styles for the OAuth success page: it is served from a localhost
+# listener with no other assets, so everything must be self-contained.
+_OAUTH_SUCCESS_PAGE_STYLE = (
+    "html,body{height:100%;margin:0}"
+    "body{display:flex;align-items:center;justify-content:center;text-align:center;"
+    'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;'
+    "background:#fafaf7;color:#1a1a1a}"
+    "main{padding:2rem;max-width:26rem}"
+    "h1{font-size:1.6rem;font-weight:600;margin:0 0 0.6rem}"
+    "p{margin:0;color:#6b6b6b;line-height:1.6}"
+    "a{color:inherit}"
+    "@media (prefers-color-scheme:dark){body{background:#161616;color:#f2f2f2}p{color:#9a9a9a}}"
+)
+
+
 def _oauth_success_page(success_redirect_url: str | None) -> bytes:
     """Build the HTML the callback listener serves to the browser.
 
@@ -359,7 +374,12 @@ def _oauth_success_page(success_redirect_url: str | None) -> bytes:
             "and close this tab.</p>"
             f"<script>window.location.href = {target};</script>"
         )
-    page = f"<html><head><title>Imbue Cloud sign-in</title></head><body><h1>You are signed in</h1>{tail}</body></html>"
+    page = (
+        "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<style>{_OAUTH_SUCCESS_PAGE_STYLE}</style></head>"
+        f"<body><main><h1>You are signed in</h1>{tail}</main></body></html>"
+    )
     return page.encode("utf-8")
 
 
