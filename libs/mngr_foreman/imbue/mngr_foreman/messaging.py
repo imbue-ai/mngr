@@ -15,10 +15,11 @@ def send_message_to_agent(pool: ConnectionPool, agent_name: str, message: str) -
 
     The pool caches the resolved match list so repeat sends skip mngr's ~3s
     discovery and reuse the host's live SSH connection; only the tmux paste
-    remains. Auto-starts a stopped agent (``is_start_desired=True``). A blocking
-    TUI dialog (unanswered permission / ``/login``) makes the send fail; that
-    error string is surfaced verbatim so the UI can point at the terminal page.
-    Raises :class:`MessageSendError` on any failure.
+    remains. Never auto-starts a stopped agent (``is_start_desired=False``) --
+    foreman only ever shows and targets running agents. A blocking TUI dialog
+    (unanswered permission / ``/login``) makes the send fail; that error string is
+    surfaced verbatim so the UI can point at the terminal page. Raises
+    :class:`MessageSendError` on any failure.
     """
     try:
         failed = send_via_pool(pool, agent_name, message)

@@ -45,6 +45,23 @@ def test_send_matches_ttl_reresolves(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls["n"] == 2  # TTL forced a re-resolve
 
 
+def test_send_via_pool_never_auto_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Foreman must never resurrect a stopped agent: the send passes is_start_desired=False.
+    captured: dict[str, Any] = {}
+
+    def _send(**kw: Any) -> object:
+        captured.update(kw)
+        return SimpleNamespace(failed_agents=[])
+
+    monkeypatch.setattr("imbue.mngr.api.message.send_message_to_agents", _send)
+    pool = _pool()
+    handle = pool._handle_for("a")
+    handle.matches = ["m"]  # seed cached matches so no resolution runs
+    handle.matches_at = time.monotonic()
+    assert cp.send_via_pool(pool, "a", "hello") == []
+    assert captured["is_start_desired"] is False
+
+
 def test_run_on_host_caches_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"r": 0}
     monkeypatch.setattr(cp, "parse_agent_address", lambda name: name)
@@ -61,7 +78,10 @@ def test_run_on_host_caches_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls["r"] == 1  # resolved once, reused
 
 
-def test_run_on_host_invalidates_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_on_host_keeps_handle_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A transient command failure must NOT tear down the cached connection: the
+    # handle is reused (no re-resolve) and the error just propagates. Reconnection
+    # is the keepalive's job alone (see test_warm_one_reconnects_on_ping_failure).
     calls = {"r": 0}
     monkeypatch.setattr(cp, "parse_agent_address", lambda name: name)
     monkeypatch.setattr(cp, "find_one_agent", lambda addr, ctx: ("hr", "ar"))
@@ -74,13 +94,42 @@ def test_run_on_host_invalidates_on_error(monkeypatch: pytest.MonkeyPatch) -> No
     pool = _pool()
 
     def _boom(_ag: object, _h: object) -> None:
-        raise RuntimeError("host died")
+        raise RuntimeError("transient hiccup")
 
     with pytest.raises(RuntimeError):
         pool.run_on_host("a", _boom)
-    # after the failure the handle was dropped, so a good call re-resolves
+    # The handle survived, so the next call reuses the cached resolution.
     pool.run_on_host("a", lambda _ag, _h: None)
-    assert calls["r"] == 2
+    assert calls["r"] == 1
+
+
+def test_warm_one_reconnects_on_ping_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A failed keepalive ping means the connection dropped: _warm_one must forget
+    # the handle and re-resolve once so it reconnects on the same tick.
+    calls = {"r": 0}
+    monkeypatch.setattr(cp, "parse_agent_address", lambda name: name)
+    monkeypatch.setattr(cp, "find_all_agents", lambda **_kw: ["m"])
+    monkeypatch.setattr(cp, "find_one_agent", lambda addr, ctx: ("hr", "ar"))
+    pings = {"n": 0}
+
+    class _FlakyHost:
+        is_local = False
+
+        def execute_stateful_command(self, command: str, timeout_seconds: float | None = None) -> object:
+            pings["n"] += 1
+            if pings["n"] == 1:
+                raise RuntimeError("connection reset")  # first ping: the drop
+            return SimpleNamespace(success=True)
+
+    def _resolve(**_kw: object) -> tuple[object, object]:
+        calls["r"] += 1
+        return SimpleNamespace(), _FlakyHost()
+
+    monkeypatch.setattr(cp, "resolve_to_started_host_and_agent", _resolve)
+    pool = _pool()
+    pool._warm_one("a")  # ping fails -> invalidate -> re-resolve -> ping ok
+    assert calls["r"] == 2  # re-resolved after the drop (reconnected)
+    assert pings["n"] == 2
 
 
 def test_ping_host_skips_local() -> None:
@@ -189,7 +238,7 @@ def test_maintainer_registers_wake_and_warms_immediately(monkeypatch: pytest.Mon
         Any,
         SimpleNamespace(
             snapshot=lambda: [{"name": "a", "state": "RUNNING"}],
-            set_on_agents_changed=lambda cb: captured.append(cb),
+            set_on_change=lambda cb: captured.append(cb),
         ),
     )
     pool = _pool()

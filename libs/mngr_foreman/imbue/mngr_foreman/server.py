@@ -42,7 +42,6 @@ from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
 from imbue.mngr_foreman.messaging import send_message_to_agent
-from imbue.mngr_foreman.poll_schedule import ActivityTracker
 from imbue.mngr_foreman.terminal import handle_host_shell_ws
 from imbue.mngr_foreman.terminal import handle_orchestrator_ws
 from imbue.mngr_foreman.terminal import handle_terminal_ws
@@ -68,6 +67,10 @@ _SAFE_IMAGE_ID_CHARS: Final[frozenset[str]] = frozenset(
 )
 _TARGET_REFRESH_SECONDS: Final[float] = 30.0
 _HEARTBEAT_SECONDS: Final[float] = 15.0
+# The transcript SSE loop polls at this fixed, consistent rate -- warm, never
+# adaptive-idle. Cheap because a stat-before-read skips the read when the file
+# hasn't grown (see TranscriptTailer), and the connection is always warm.
+_TRANSCRIPT_POLL_SECONDS: Final[float] = 0.5
 # Bound every foreground host command (stat/probe) so an unresponsive host can't
 # wedge an SSE poll or request thread indefinitely.
 _HOST_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -148,9 +151,6 @@ def create_app(
     # 25MB file cap for multipart overhead); write_upload re-checks the raw bytes.
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + 1024 * 1024
     sock = Sock(app)
-    # Shared across requests: the send route pokes an agent into fast-poll mode,
-    # the transcript SSE loops read it to pick their cadence.
-    activity = ActivityTracker()
 
     # ---- pages ------------------------------------------------------------
 
@@ -239,7 +239,7 @@ def create_app(
             )
 
         return Response(
-            _transcript_stream(mngr_ctx, agent, max_tool_output_chars, pool, registry, activity),
+            _transcript_stream(mngr_ctx, agent, max_tool_output_chars, pool),
             mimetype="text/event-stream",
             headers=_sse_headers(),
         )
@@ -273,9 +273,6 @@ def create_app(
             # so the UI can hint at the terminal page (phase 2).
             logger.info("Message to {} failed: {}", name, e)
             return jsonify({"ok": False, "error": str(e)}), 502
-        # Poke the transcript tailer(s) for this agent into fast-poll mode so the
-        # user's own message (and the reply that follows) surface with minimal lag.
-        activity.poke(name)
         return jsonify({"ok": True})
 
     @app.route("/api/agents/<name>/input-state")
@@ -460,22 +457,11 @@ def _build_transcript_reader(
     return reader, size_fn
 
 
-def _agent_state(registry: AgentRegistry, agent_name: str) -> str | None:
-    """Current state of ``agent_name`` from the live registry, or None if gone."""
-    card = registry.get_agent(agent_name)
-    if card is None:
-        return None
-    state = card.state.value if hasattr(card.state, "value") else card.state
-    return str(state).upper()
-
-
 def _transcript_stream(
     mngr_ctx: MngrContext,
     agent: AgentDetails,
     max_tool_output_chars: int,
     pool: ConnectionPool,
-    registry: AgentRegistry,
-    activity: ActivityTracker,
 ) -> Iterator[str]:
     """SSE generator: full backfill, then live events, with periodic heartbeats."""
     built = _build_transcript_reader(mngr_ctx, agent, pool)
@@ -512,20 +498,11 @@ def _transcript_stream(
     yield from _emit(backfill_lines)
     yield _sse({"type": "backfill_complete"})
 
-    # Live follow at an adaptive cadence: fast right after a send and while the
-    # agent is RUNNING, idle-slow while it's WAITING (see poll_schedule).
-    agent_name = str(agent.name)
+    # Live follow at a fixed, consistent fast rate -- the connection is always warm
+    # and a stat-before-read keeps a poll cheap when the file hasn't grown.
     last_heartbeat = time.monotonic()
     while True:
-        state = _agent_state(registry, agent_name)
-        # A working agent is emitting events; keep it in fast mode (and leave a
-        # short fast tail after it stops, so the final message lands promptly).
-        # mark_running (not poke) so we don't wake the very loop about to wait.
-        if state == "RUNNING":
-            activity.mark_running(agent_name)
-        # Interruptible sleep: a send poke returns us early so the user's message
-        # surfaces without waiting out a (possibly multi-second) idle interval.
-        activity.wait_for_next_poll(agent_name, state)
+        time.sleep(_TRANSCRIPT_POLL_SECONDS)
         try:
             new_lines = tailer.poll()
         except Exception as e:  # noqa: BLE001
@@ -553,9 +530,9 @@ def run_server(
     registry = AgentRegistry(mngr_ctx)
     pool = ConnectionPool(mngr_ctx)
     # Start the warm pool first so its change-callback is registered before the
-    # registry starts populating; then start the registry (observe + a background
-    # seed thread -- neither blocks). The port binds immediately below; the seed
-    # fills the list a few seconds later and wakes the pool to warm the "on" agents.
+    # registry's first poll; then start the registry (a background discovery poll
+    # loop -- does not block the port bind below). The first poll fills the list a
+    # few seconds later and wakes the pool to warm the live agents.
     pool.start_maintainer(registry)
     registry.start()
     app = create_app(mngr_ctx, registry, pool, max_tool_output_chars, asset_dir=asset_dir)

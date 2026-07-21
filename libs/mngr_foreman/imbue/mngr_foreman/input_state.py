@@ -25,7 +25,8 @@ OR it with the pane rule, so a permission prompt greys the composer even without
 tmux capture.
 
 Detection is a single ``tmux capture-pane`` over the agent's host per poll; the
-page polls lazily (only while visible + agent running), which the team approved.
+page polls it at a steady rate while the agent is running (over the warm pool, so
+each probe is cheap).
 """
 
 from __future__ import annotations

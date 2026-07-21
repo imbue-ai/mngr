@@ -208,8 +208,8 @@
     return prefix + base;
   }
 
-  // Poll an agent's input-state and call onState(d) each tick. Keeps polling
-  // while the tab is hidden (slower) so the title stays live in background tabs.
+  // Poll an agent's input-state and call onState(d) each tick, at a steady rate
+  // (faster in a short burst right after a send).
   function installStatePolling(agentName, onState) {
     let timer = null;
     let burstUntil = 0;
@@ -220,7 +220,6 @@
         .catch(() => {});
     }
     function interval() {
-      if (document.hidden) return 15000;
       return Date.now() < burstUntil ? 800 : 4000;
     }
     function schedule() {
@@ -235,7 +234,6 @@
       schedule();
       setTimeout(schedule, 12000);
     }
-    document.addEventListener("visibilitychange", () => { tick(); schedule(); });
     tick();
     schedule();
     return { burst: burst };
@@ -247,7 +245,6 @@
   function initIndex() {
     document.title = "foreman — home";
     const listEl = document.getElementById("list");
-    const cards = new Map(); // id -> element
 
     function stateClass(state) {
       return String(state || "").toLowerCase();
@@ -285,34 +282,12 @@
       return card;
     }
     function renderAll(agents) {
-      cards.clear();
       listEl.innerHTML = "";
       if (!agents.length) {
         listEl.appendChild(el("div", "empty", "no agents"));
         return;
       }
-      agents.forEach((a) => {
-        const c = cardEl(a);
-        cards.set(a.id, c);
-        listEl.appendChild(c);
-      });
-    }
-    function upsert(a) {
-      const fresh = cardEl(a);
-      if (cards.has(a.id)) {
-        cards.get(a.id).replaceWith(fresh);
-      } else {
-        const empty = listEl.querySelector(".empty");
-        if (empty) empty.remove();
-        listEl.appendChild(fresh);
-      }
-      cards.set(a.id, fresh);
-    }
-    function remove(id) {
-      if (cards.has(id)) {
-        cards.get(id).remove();
-        cards.delete(id);
-      }
+      agents.forEach((a) => listEl.appendChild(cardEl(a)));
     }
 
     let pollTimer = null;
@@ -331,8 +306,8 @@
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     }
 
-    // Drop the list SSE when the tab is hidden (frees a browser connection);
-    // reconnect re-sends a full snapshot, so no state is lost.
+    // One long-lived SSE that stays open; each message is a full snapshot the
+    // registry pushes whenever the live-agent set changes.
     let es = null;
     function connect() {
       if (typeof EventSource === "undefined") { startPolling(); return; }
@@ -343,19 +318,9 @@
         let msg;
         try { msg = JSON.parse(ev.data); } catch (_e) { return; }
         if (msg.type === "snapshot") renderAll(msg.agents || []);
-        else if (msg.type === "upsert") upsert(msg.agent);
-        else if (msg.type === "remove") remove(msg.agent_id);
       };
       es.onerror = () => { setConn("reconnecting"); startPolling(); };
     }
-    function disconnect() {
-      if (es) { es.close(); es = null; }
-      stopPolling();
-    }
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) disconnect();
-      else connect();
-    });
     connect();
   }
 
@@ -696,11 +661,9 @@
     }
 
     // ---- transcript SSE ----
-    // The transcript SSE is a long-lived connection; with many open tabs the
-    // browser's ~6-connections-per-host limit would starve asset/API fetches. So
-    // a hidden tab DROPS its transcript SSE and re-backfills on focus. Every
-    // event carries an event_id, so we dedup client-side -- the re-backfill after
-    // a reconnect only renders events that arrived while we were disconnected.
+    // A long-lived connection that stays open. On an automatic EventSource
+    // reconnect the server re-backfills from the start; every event carries an
+    // event_id, so we dedup client-side and only render what we haven't seen.
     const seenEventIds = new Set();
     let es = null;
 
@@ -738,13 +701,6 @@
       };
       es.onerror = () => setConn("reconnecting");
     }
-    function disconnect() {
-      if (es) { es.close(); es = null; setConn("paused"); }
-    }
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) disconnect();
-      else connect();
-    });
     connect();
     schedulePrefetch(); // warm highlight/katex/mermaid during idle
 

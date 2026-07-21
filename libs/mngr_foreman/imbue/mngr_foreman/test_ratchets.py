@@ -30,7 +30,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(5))
+    rc.check_time_sleep(_DIR, snapshot(4))
 
 
 def test_prevent_global_keyword() -> None:
@@ -49,7 +49,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(20))
+    rc.check_broad_exception_catch(_DIR, snapshot(19))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -159,7 +159,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(76))
+    rc.check_trailing_comments(_DIR, snapshot(81))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -225,7 +225,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(16))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(19))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -263,7 +263,7 @@ def test_prevent_bare_tmux_targets() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(5))
+    rc.check_if_elif_without_else(_DIR, snapshot(4))
 
 
 def test_prevent_inline_functions() -> None:
@@ -280,7 +280,7 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # the per-instance in-memory SSLContext. It cannot be a pydantic model, and
     # setting the context from outside the class would evade this ratchet while
     # doing the same thing, so the __init__ stays.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(4))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(3))
 
 
 def test_prevent_cast_usage() -> None:

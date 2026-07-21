@@ -1,25 +1,20 @@
-"""Live registry of mngr agents: fast in-process seed + follow ``mngr observe``.
+"""Live registry of running coding agents, kept fresh by a discovery poll loop.
 
-The registry holds the current ``dict[agent_id, AgentDetails]`` and fans changes
-out to per-connection subscriber queues (the SSE ``/api/agents/stream`` endpoint
-drains one). It is kept live by an ``mngr observe --stream-events`` subprocess
-whose agents-stream lines we parse with ``parse_observe_event_line`` (AGENT_STATE
-/ AGENTS_FULL_STATE / AGENT_REMOVED). The subprocess is run on the shared
-concurrency group, mirroring mngr's own observe-consumer pattern.
+Every ``POLL_INTERVAL_SECONDS`` a background thread calls ``list_agents``
+in-process -- the same discovery ``mngr list`` runs, no subprocess -- keeps only
+the *live coding* agents (a coding-harness type in a RUNNING or WAITING state),
+and publishes that set to the SSE subscribers and the warm pool. Dead, stopped,
+done, and non-coding agents never appear.
 
-Crucially the initial ``list_agents`` seed runs on a *background thread*, not on
-the startup critical path: it used to run before the Flask port bound and could
-take 20-30s against slow/dead hosts. The port now binds immediately; the seed
-fills the map a few seconds later. We seed in-process (rather than just waiting
-for observe's own first snapshot) because observe is a *separate* ``mngr``
-subprocess that pays the same multi-second CLI cold-start before it can emit --
-the in-process seed populates the list far sooner. The seed merges without
-clobbering any observe entry that already landed (``setdefault``), and observe
-remains the source of truth for all live updates thereafter.
+There are no per-agent deltas: each poll whose projected result changed
+broadcasts one full snapshot, which the browser re-renders. The loop is
+sequential (list, then wait the interval, then list again), so a slow list just
+delays the next pass and never overlaps itself.
 """
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 from collections.abc import Callable
@@ -29,63 +24,76 @@ from typing import Final
 from loguru import logger
 
 from imbue.mngr.api.list import list_agents
-from imbue.mngr.api.observe import AgentRemovedEvent
-from imbue.mngr.api.observe import AgentStateEvent
-from imbue.mngr.api.observe import FullAgentStateEvent
-from imbue.mngr.api.observe import parse_observe_event_line
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr_foreman.mngr_bin import resolve_mngr_binary
+
+# How often the discovery loop re-lists agents (the interval *between* passes).
+POLL_INTERVAL_SECONDS: Final[float] = 3.0
+
+# The coding-harness agent types foreman shows -- the transcript-driven agents a
+# user actually chats with. Every other type (mngr system/worker types) is hidden.
+CODING_AGENT_TYPES: Final[frozenset[str]] = frozenset({"claude", "codex", "opencode", "pi-coding"})
+
+# Only actively-running agents are shown. Every other lifecycle state
+# (STOPPED / DONE / REPLACED / UNKNOWN / RUNNING_UNKNOWN_AGENT_TYPE and any
+# tombstone) is hidden -- you cannot open, warm, or message a dead agent.
+LIVE_STATES: Final[frozenset[str]] = frozenset({"RUNNING", "WAITING"})
 
 # Bound each subscriber queue so a dead/slow SSE client cannot grow memory
 # without limit; on overflow we drop the client (it reconnects and re-seeds).
 _SUBSCRIBER_QUEUE_MAXSIZE: Final[int] = 256
 
 
-class AgentRegistry:
-    """Thread-safe live map of agent_id -> AgentDetails with change fan-out.
+def _state_of(agent: AgentDetails) -> str:
+    return str(agent.state.value if hasattr(agent.state, "value") else agent.state).upper()
 
-    Tracks every agent in mngr's view -- foreman has no label filter.
-    """
+
+def _is_live_coding(agent: AgentDetails) -> bool:
+    """True for a coding-harness agent that is currently running or waiting."""
+    return agent.type in CODING_AGENT_TYPES and _state_of(agent) in LIVE_STATES
+
+
+class AgentRegistry:
+    """Thread-safe set of live coding agents, refreshed by a discovery poll loop."""
 
     def __init__(self, mngr_ctx: MngrContext) -> None:
         self._mngr_ctx = mngr_ctx
         self._lock = threading.Lock()
         self._agents: dict[str, AgentDetails] = {}
         self._subscribers: set[queue.Queue[dict]] = set()
-        # Fired whenever the known-agent set may have changed (full-state snapshot
-        # or per-agent upsert) so the warm pool can warm new "on" agents promptly
-        # instead of waiting out its keepalive interval.
-        self._on_agents_changed: Callable[[], None] | None = None
-        self._started = False
+        # Fired whenever the live-agent *name set* changes, so the warm pool warms
+        # newly-appeared agents and drops departed ones without waiting out its own
+        # keepalive interval.
+        self._on_change: Callable[[], None] | None = None
+        self._live_names: frozenset[str] = frozenset()
+        self._last_broadcast: str | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     # --- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
-        """Start observe (live) and kick the seed on a background thread (idempotent).
-
-        Neither call blocks: ``app.run()`` binds the port immediately after this
-        returns. The seed used to run here synchronously and could take 20-30s
-        against slow/dead hosts, delaying the bind that whole time.
-        """
-        if self._started:
+        """Start the background discovery poll loop (idempotent, does not block)."""
+        if self._thread is not None:
             return
-        self._started = True
-        self._start_observe_stream()
-        self._start_background_seed()
+        self._thread = threading.Thread(target=self._poll_loop, name="foreman-registry-poll", daemon=True)
+        self._thread.start()
 
-    def _start_background_seed(self) -> None:
-        thread = threading.Thread(target=self._seed_snapshot, name="foreman-registry-seed", daemon=True)
-        thread.start()
+    def stop(self) -> None:
+        self._stop.set()
 
-    def _seed_snapshot(self) -> None:
-        """One-shot in-process ``list_agents`` to fill the map before observe emits.
+    def set_on_change(self, callback: Callable[[], None]) -> None:
+        """Register a callback fired when the live-agent name set changes."""
+        self._on_change = callback
 
-        Runs off the critical path (background thread). Merges with ``setdefault``
-        so any observe entry that already arrived wins; a bad provider degrades to
-        an empty seed rather than sinking the server.
-        """
+    def _poll_loop(self) -> None:
+        while not self._stop.is_set():
+            self._poll_once()
+            self._stop.wait(POLL_INTERVAL_SECONDS)
+
+    def _poll_once(self) -> None:
+        """List agents once, keep the live coding ones, and publish the new set."""
         try:
             result = list_agents(
                 self._mngr_ctx,
@@ -93,76 +101,26 @@ class AgentRegistry:
                 error_behavior=ErrorBehavior.CONTINUE,
                 reset_caches=True,
             )
-        except Exception as e:  # noqa: BLE001 - a bad provider must not sink the seed thread
-            logger.debug("Background agent seed failed (observe will populate): {}", e)
+        except Exception as e:  # noqa: BLE001 - a bad provider must not kill the poll loop
+            logger.debug("Agent discovery poll failed (keeping last set): {}", e)
             return
-        added = 0
+        live = {str(a.id): a for a in result.agents if _is_live_coding(a)}
         with self._lock:
-            for agent in result.agents:
-                if str(agent.id) not in self._agents:
-                    self._agents[str(agent.id)] = agent
-                    added += 1
-        if added:
-            logger.info("Background-seeded {} agent(s) before observe caught up", added)
-            self._broadcast({"type": "snapshot", "agents": self.snapshot()})
-            self._notify_agents_changed()
+            self._agents = live
+        self._publish(live)
 
-    def set_on_agents_changed(self, callback: Callable[[], None]) -> None:
-        """Register a callback fired when the known-agent set may have changed."""
-        self._on_agents_changed = callback
-
-    def _notify_agents_changed(self) -> None:
-        callback = self._on_agents_changed
-        if callback is not None:
-            callback()
-
-    def _start_observe_stream(self) -> None:
-        self._mngr_ctx.concurrency_group.run_process_in_background(
-            command=[resolve_mngr_binary(), "observe", "--stream-events", "--quiet"],
-            on_output=self._on_observe_line,
-            is_checked_by_group=False,
-        )
-
-    # --- observe stream --------------------------------------------------
-
-    def _on_observe_line(self, line: str, is_stdout: bool) -> None:
-        if not is_stdout:
-            return
-        stripped = line.strip()
-        if not stripped:
-            return
-        try:
-            event = parse_observe_event_line(stripped)
-        except Exception as e:  # noqa: BLE001 - never let one bad line kill the reader thread
-            logger.trace("Skipping unparseable observe line: {}", e)
-            return
-        if event is None:
-            return
-
-        if isinstance(event, FullAgentStateEvent):
-            self._apply_full_state(event.agents)
-        elif isinstance(event, AgentStateEvent):
-            self._apply_upsert(event.agent)
-        elif isinstance(event, AgentRemovedEvent):
-            self._apply_remove(str(event.agent_id))
-
-    def _apply_full_state(self, agents: tuple[AgentDetails, ...]) -> None:
-        with self._lock:
-            self._agents = {str(a.id): a for a in agents}
-        self._broadcast({"type": "snapshot", "agents": self.snapshot()})
-        self._notify_agents_changed()
-
-    def _apply_upsert(self, agent: AgentDetails) -> None:
-        with self._lock:
-            self._agents[str(agent.id)] = agent
-        self._broadcast({"type": "upsert", "agent": _agent_to_card(agent)})
-        self._notify_agents_changed()
-
-    def _apply_remove(self, agent_id: str) -> None:
-        with self._lock:
-            existed = self._agents.pop(agent_id, None) is not None
-        if existed:
-            self._broadcast({"type": "remove", "agent_id": agent_id})
+    def _publish(self, live: dict[str, AgentDetails]) -> None:
+        """Broadcast a fresh snapshot if it changed, and wake the pool if membership did."""
+        cards = self.snapshot()
+        payload = json.dumps(cards, sort_keys=True)
+        if payload != self._last_broadcast:
+            self._last_broadcast = payload
+            self._broadcast({"type": "snapshot", "agents": cards})
+        names = frozenset(str(a.name) for a in live.values())
+        if names != self._live_names:
+            self._live_names = names
+            if self._on_change is not None:
+                self._on_change()
 
     # --- read + subscribe ------------------------------------------------
 
@@ -179,7 +137,7 @@ class AgentRegistry:
         return None
 
     def subscribe(self) -> Iterator[dict]:
-        """Yield an initial snapshot then live deltas until the client leaves."""
+        """Yield an initial snapshot then live snapshots until the client leaves."""
         q: queue.Queue[dict] = queue.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
         with self._lock:
             self._subscribers.add(q)
@@ -216,7 +174,7 @@ def _agent_to_card(agent: AgentDetails) -> dict:
         "id": str(agent.id),
         "name": str(agent.name),
         "type": agent.type,
-        "state": str(agent.state.value if hasattr(agent.state, "value") else agent.state),
+        "state": _state_of(agent),
         "host_name": agent.host.name,
         "provider": str(agent.host.provider_name),
         "labels": dict(agent.labels),
