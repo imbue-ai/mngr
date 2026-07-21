@@ -104,7 +104,6 @@
 <script src="/_static/dist/chrome.bundle.js"></script>
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/backup_health.js" defer></script>
-<script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/chrome.js" defer></script>
 {%- if scripts %}
 {# The page's OWN scripts, containered so the swap engine can replace and
@@ -202,17 +201,18 @@
      the backdrop and Escape close the menu (handled by chrome.js). In
      Electron this whole block is hidden via JS; the switcher page
      (Sidebar.jinja) is loaded into the shared modal WebContentsView and
-     uses the same #sidebar-backdrop / #sidebar-menu shape with the
-     /_static/sidebar.js renderer. Both modes share the position model:
-     menu.top-left = trigger.bottom-left + offset, with a uniform 4px panel
-     pad (p-1) and 2px between entries (gap-0.5); each row adds its own
-     px-2 for the hover highlight's inset. #}
+     uses the same #sidebar-backdrop / #sidebar-menu positioning shell.
+     Both modes share the position model: menu.top-left = trigger.bottom-left
+     + offset, with a uniform 4px panel pad (p-1) and 2px between entries
+     (gap-0.5); each row adds its own px-2 for the hover highlight's inset.
+
+     The menu INTERIOR (grouped rows + New workspace) is the mithril
+     WorkspaceMenu component; chrome.js mounts it into #sidebar-menu once at
+     shell boot (a persistent mount -- this block lives outside
+     #local-page-root, so hub swaps never tear it down). #}
   <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
     <div id="sidebar-menu"
-         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden">
-      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
-      <SidebarBottom />
-    </div>
+         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden"></div>
   </div>
 
   {# The swappable page body. chrome.js's swap engine replaces this element

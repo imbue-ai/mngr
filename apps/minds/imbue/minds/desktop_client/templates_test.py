@@ -798,16 +798,19 @@ def test_render_chrome_page_crumbs_use_type_label_tokens() -> None:
     assert 'id="page-crumb-name" class="type-label text-primary' in html
 
 
-def test_render_chrome_page_switcher_menu_has_only_new_workspace() -> None:
+def test_render_chrome_page_switcher_menu_is_an_empty_mount_container() -> None:
     # The titlebar carries no account button (``id="user-btn"``). The floating
-    # switcher menu's bottom section was trimmed to just the "New workspace"
-    # CTA: the "Minds Settings" and "Manage account(s)" / "Log in" entries were
-    # removed (Minds Settings is still reachable from the home screen).
+    # switcher menu's interior (grouped rows + the "New workspace" CTA) is the
+    # mithril WorkspaceMenu component now; the shell renders only the
+    # positioned, empty ``#sidebar-menu`` container chrome.js mounts into.
     html = render_chrome_page()
     assert 'id="user-btn"' not in html
-    assert 'id="sidebar-new-workspace"' in html
-    assert 'id="sidebar-settings"' not in html
-    assert 'id="sidebar-account"' not in html
+    assert 'id="sidebar-menu"' in html
+    menu_open = html.index('id="sidebar-menu"')
+    menu_tag_end = html.index(">", menu_open)
+    assert html[menu_tag_end + 1 : menu_tag_end + 7] == "</div>"
+    # The mount happens from chrome.js at shell boot, not from inline markup.
+    assert "mountWorkspaceMenu" not in html
 
 
 def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
@@ -866,28 +869,27 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     assert '<html lang="en">' in render_landing_page(accessible_agent_ids=())
 
 
-def test_render_sidebar_page_contains_workspace_list() -> None:
+def test_render_sidebar_page_is_a_positioning_shell_with_a_menu_mount() -> None:
     html = render_sidebar_page()
-    assert "sidebar-workspaces" in html
-    # The interactivity (including the SSE EventSource fallback) now lives
-    # in the external /_static/sidebar.js file; the template should pull it in.
-    assert "/_static/sidebar.js" in html
+    # The interior (grouped rows + "New workspace") is the mithril
+    # WorkspaceMenu component, mounted by the page's inline script with the
+    # overlay-modal dismissal wiring (clicks outside ``#sidebar-menu`` close the
+    # modal via host.closeModal(); Escape stays main-owned).
+    assert "window.MindsUI.mountWorkspaceMenu(document.getElementById('sidebar-menu')" in html
+    assert "isOverlayModal: true" in html
     # The floating-menu wrapper id. The sidebar runs inside the shared
     # modal WebContentsView, which covers the full window content area and
-    # acts as a modal: sidebar.js compares click targets against
-    # ``#sidebar-menu`` to distinguish clicks inside the floating panel
-    # (let the menu's own handlers run) from clicks on the transparent
-    # backdrop outside it (dismiss the modal). Renaming or dropping this id
-    # breaks the click-outside-to-close behavior.
+    # acts as a modal: the mount's dismissal wiring compares click targets
+    # against ``#sidebar-menu`` to distinguish clicks inside the floating
+    # panel from clicks on the transparent backdrop outside it. Renaming or
+    # dropping this id breaks the click-outside-to-close behavior.
     assert 'id="sidebar-menu"' in html
-    # SidebarBottom.jinja is rendered inside the floating menu in both
-    # Chrome.jinja (browser mode) and Sidebar.jinja (the switcher page loaded
-    # into the shared modal WebContentsView in Electron). It now carries only
-    # the "New workspace" CTA; the "Minds Settings" and "Manage account(s)" /
-    # "Log in" entries were removed.
-    assert 'id="sidebar-new-workspace"' in html
-    assert 'id="sidebar-settings"' not in html
-    assert 'id="sidebar-account"' not in html
+    # The old drivers are gone: no sidebar.js, no server-rendered bottom CTA.
+    assert "/_static/sidebar.js" not in html
+    assert 'id="sidebar-new-workspace"' not in html
+    # The backup-health cache loads CLASSIC (not deferred) before the inline
+    # mount call so the store's bridge subscription finds it.
+    assert '<script src="/_static/backup_health.js"></script>' in html
 
 
 def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
@@ -1302,6 +1304,24 @@ def test_chrome_shell_boot_state_prop_renders_island_inside_local_page_root() ->
 def test_chrome_shell_without_boot_state_renders_no_island() -> None:
     html = CATALOG.render("ChromeShell", _content="<p>body</p>")
     assert "minds-boot-state" not in html
+
+
+def test_icons_ts_matches_python_icon_dicts() -> None:
+    """Drift guard for the two icon copies: ``frontend/src/icons.ts`` is the
+    canonical source; the templates.py dicts are the shrinking copy for the
+    remaining Jinja pages. Every glyph must be byte-identical in both."""
+    icons_ts = (Path(__file__).resolve().parents[3] / "frontend" / "src" / "icons.ts").read_text()
+    icons_16 = CATALOG.jinja_env.globals["ICONS_16"]
+    icons_12 = CATALOG.jinja_env.globals["ICONS_12"]
+    # ``close`` exists in both sets, so parse each TS record separately.
+    icons_16_section = icons_ts[icons_ts.index("export const ICONS_16") : icons_ts.index("export const ICONS_12")]
+    icons_12_section = icons_ts[icons_ts.index("export const ICONS_12") :]
+    ts_16_entries = dict(re.findall(r'^  "([a-z0-9-]+)": `(.*)`,$', icons_16_section, re.MULTILINE))
+    ts_12_entries = dict(re.findall(r'^  "([a-z0-9-]+)": `(.*)`,$', icons_12_section, re.MULTILINE))
+    for name, svg in icons_16.items():
+        assert ts_16_entries.get(name) == svg, f"ICONS_16[{name!r}] drifted between icons.ts and templates.py"
+    for name, svg in icons_12.items():
+        assert ts_12_entries.get(name) == svg, f"ICONS_12[{name!r}] drifted between icons.ts and templates.py"
 
 
 def test_dev_styleguide_smoke_mount_follows_the_boot_island_protocol() -> None:

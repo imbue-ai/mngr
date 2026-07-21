@@ -787,9 +787,11 @@ def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
 
     response = client.get("/_chrome/sidebar")
     assert response.status_code == 200
-    assert "sidebar-workspaces" in response.text
-    # Interactivity including the SSE fallback has moved to the external JS.
-    assert "/_static/sidebar.js" in response.text
+    # The page is a positioning shell; the menu interior is the mithril
+    # WorkspaceMenu component mounted from the JS bundle.
+    assert 'id="sidebar-menu"' in response.text
+    assert "window.MindsUI.mountWorkspaceMenu" in response.text
+    assert "/_static/dist/chrome.bundle.js" in response.text
 
 
 def test_chrome_overlay_page_renders(tmp_path: Path) -> None:

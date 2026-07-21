@@ -65,6 +65,14 @@ interface StoreState {
   // agent id -> the client-only optimistic transient (STARTING / STOPPING)
   // shown while the action is in flight.
   transientLivenessByAgentId: Record<string, string>;
+  // The accent-source workspace (the active scope, INCLUDING a workspace's
+  // settings / sharing screens). Drives the switcher menu's current-row
+  // highlight. Electron pushes it over the accent-changed IPC; browser mode's
+  // chrome.js pushes its breadcrumb workspace via the MindsUI hook.
+  accentScopeAgentId: string | null;
+  // The workspace whose CONTENT is displayed (narrow: null on its settings /
+  // sharing screens). The highlight falls back to it when no scope is set.
+  displayedWorkspaceAgentId: string | null;
 }
 
 function initialState(): StoreState {
@@ -85,6 +93,8 @@ function initialState(): StoreState {
     isAuthRequired: false,
     pendingMindActionTargetByAgentId: {},
     transientLivenessByAgentId: {},
+    accentScopeAgentId: null,
+    displayedWorkspaceAgentId: null,
   };
 }
 
@@ -170,6 +180,23 @@ export function getEffectiveLiveness(entry: ChromeWorkspaceEntry): string | null
 
 export function getBackupWarning(agentId: string): string | null {
   return window.mindsBackupHealth !== undefined ? window.mindsBackupHealth.get(agentId) : null;
+}
+
+// The workspace the switcher menu should mark current: the accent-source
+// scope when set (a workspace's settings / sharing screens still highlight
+// that workspace), else the displayed workspace.
+export function getActiveRowAgentId(): string | null {
+  return state.accentScopeAgentId ?? state.displayedWorkspaceAgentId;
+}
+
+export function setAccentScopeAgentId(agentId: string | null): void {
+  state.accentScopeAgentId = agentId;
+  notify();
+}
+
+export function setDisplayedWorkspaceAgentId(agentId: string | null): void {
+  state.displayedWorkspaceAgentId = agentId;
+  notify();
 }
 
 // -- Mutations -------------------------------------------------------------

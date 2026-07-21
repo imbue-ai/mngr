@@ -79,8 +79,8 @@ generated exactly as they are in a template. Rule of thumb:
 
 - **Used in a single place** (a one-off element built in one JS file):
   write the utilities inline on the element. No CSS class -- see the
-  workspace-accent dot colored per row in `sidebar_workspace_row.js` for
-  an example.
+  workspace-accent dot colored per row in
+  `frontend/src/views/WorkspaceRow.ts` for an example.
 - **A shape repeated across files** (or that must stay in sync with a
   JinjaX component): give it a named class in `static/app.css` and define
   it with `@apply` on the same utilities, then reference the class from
@@ -102,7 +102,7 @@ instead (e.g. `.minds-tooltip`):
 | `.spinner` / `.spinner-accent` / `.spinner-inverse` | Animated circular spinner (token-driven ring/top; `-accent` uses the accent token; `-inverse` derives from `currentColor`). Match `Spinner.jinja`. |
 | `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing workspace rows + Destroying. |
-| `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by `sidebar.js` / `chrome.js`. Not an app.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a JS selector hook + `is-current` / `is-stale` state marker; it has no app.css styling.) |
+| `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by the mithril `WorkspaceRow` component (`frontend/src/views/WorkspaceRow.ts`). Not an app.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a selector hook + `is-current` / `is-stale` state marker; it has no app.css styling.) |
 | `.titlebar-surface` / `.titlebar-btn-danger` | Titlebar self-theming. `.titlebar-surface` (toggled on the bar by `chrome.js` while a workspace accent is active) derives a black/white contrast from `--titlebar-bg` in pure CSS (lch relative color) and re-bases the foreground text tokens on it, so the title + buttons read on any accent -- no JS luminance. `-danger` keeps the destructive red hover regardless of accent. |
 
 ## Where the shared tokens live

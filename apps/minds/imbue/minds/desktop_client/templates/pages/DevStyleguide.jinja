@@ -17,7 +17,6 @@
 #}
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
-<script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/dev_styleguide.js" defer></script>
 {# The mithril component bundle + the JS-components smoke mount. This page
    wraps Base (not ChromeShell), so it loads the bundle tag itself, exactly
@@ -27,6 +26,8 @@
 <script src="/_static/dist/chrome.bundle.js"></script>
 <script>
   window.MindsUI.mountStyleguideSmoke(document.getElementById('styleguide-js-smoke'));
+  window.MindsUI.mountStyleguidePrimitives(document.getElementById('styleguide-js-primitives'));
+  window.MindsUI.mountStyleguideWorkspaceRows(document.getElementById('styleguide-sidebar-rows'));
 </script>
 {% endset %}
 
@@ -841,16 +842,16 @@
     </section>
 
     {# Sidebar items. The sidebar is a floating menu (shared modal
-       WebContentsView in Electron, inline overlay in browser). Each row
-       is built by the shared window.mindsSidebarRow.buildRow helper; the
-       styleguide renders its samples through that exact builder (see
-       dev_styleguide.js) so this catalog can't drift from the live menu.
-       The empty container below is filled in on load. #}
+       WebContentsView in Electron, inline overlay in the browser); its rows
+       are the mithril WorkspaceRow component, and the styleguide renders its
+       samples through that exact component (mounted from the JS bundle) so
+       this catalog can't drift from the live menu. The empty container below
+       is filled in on load. #}
     <section id="sidebar-items" class="scroll-mt-8 mb-6">
       <h2 class="type-heading text-primary mb-2">Sidebar items</h2>
       <div id="styleguide-sidebar-rows"
            class="dark w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary overflow-hidden"></div>
-      <div class="mt-1 type-helper text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
+      <div class="mt-1 type-helper text-secondary font-mono">frontend/src/views/WorkspaceRow.ts (window.MindsUI.mountStyleguideWorkspaceRows) -- the one row component shared by the workspace menu in both hosts.</div>
     </section>
 
     {# Accent spine. The left stripe is the only surface in the catalog that
@@ -1142,6 +1143,8 @@
       <script type="application/json" id="minds-boot-state">{"styleguide_smoke": {"message": "Mounted by window.MindsUI from the #minds-boot-state island."}}</script>
       <div id="styleguide-js-smoke"></div>
       <div class="mt-1 type-helper text-secondary font-mono">frontend/src/views/StyleguideSmoke.ts (window.MindsUI.mountStyleguideSmoke)</div>
+      <div id="styleguide-js-primitives" class="mt-3"></div>
+      <div class="mt-1 type-helper text-secondary font-mono">frontend/src/views/{Icon,Badge,Spinner}.ts (window.MindsUI.mountStyleguidePrimitives)</div>
     </section>
 
     </main>

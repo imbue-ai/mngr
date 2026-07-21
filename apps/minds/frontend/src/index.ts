@@ -6,10 +6,16 @@
 // not. The bundle itself is loaded once per document from the SHELL scripts
 // section (never from #local-page-scripts, which would re-run it per swap);
 // the per-page mount calls live in #local-page-scripts.
+import { mountStyleguidePrimitives, mountStyleguideWorkspaceRows } from "./views/StyleguideRows";
 import { mountStyleguideSmoke } from "./views/StyleguideSmoke";
+import { mountWorkspaceMenu, setWorkspaceMenuCurrentAgent } from "./views/WorkspaceMenu";
 
 export interface MindsUINamespace {
   mountStyleguideSmoke: typeof mountStyleguideSmoke;
+  mountStyleguidePrimitives: typeof mountStyleguidePrimitives;
+  mountStyleguideWorkspaceRows: typeof mountStyleguideWorkspaceRows;
+  mountWorkspaceMenu: typeof mountWorkspaceMenu;
+  setWorkspaceMenuCurrentAgent: typeof setWorkspaceMenuCurrentAgent;
 }
 
 declare global {
@@ -20,4 +26,8 @@ declare global {
 
 window.MindsUI = {
   mountStyleguideSmoke,
+  mountStyleguidePrimitives,
+  mountStyleguideWorkspaceRows,
+  mountWorkspaceMenu,
+  setWorkspaceMenuCurrentAgent,
 };

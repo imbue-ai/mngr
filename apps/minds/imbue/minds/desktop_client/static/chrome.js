@@ -342,8 +342,8 @@
   // ``applyTitleAccent`` reads from this cache so accent application is
   // synchronous.
   // Workspaces missing from the cache (e.g. an agentId for which no SSE
-  // tick has arrived yet) leave the accent unset on this call and get
-  // painted by ``renderWorkspaces`` on the next tick.
+  // tick has arrived yet) leave the accent unset on this call; the next
+  // ``workspaces`` tick replays the paint with the now-populated cache.
   var accentByAgentId = {};
   // Tracks the agentId whose accent the chrome *wants* painted, regardless
   // of whether the SSE cache has caught up yet. The ``onAccentChanged`` path
@@ -464,9 +464,9 @@
     // Browser mode: keep the inline switcher's current-row highlight in sync
     // with the breadcrumb workspace (so a workspace's settings / sharing screen
     // still marks that workspace current). Electron's sidebar is a separate
-    // view, primed over the accent-changed IPC. Re-render only on change.
-    if (!isElectron && currentCrumbAgentId !== prevCrumbAgentId && lastWorkspaces) {
-      renderWorkspaces(lastWorkspaces);
+    // view, primed over the accent-changed IPC.
+    if (!isElectron && currentCrumbAgentId !== prevCrumbAgentId) {
+      window.MindsUI.setWorkspaceMenuCurrentAgent(currentCrumbAgentId);
     }
     if (wsCrumb) wsCrumb.hidden = !isWorkspace;
     if (isWorkspace) {
@@ -750,12 +750,9 @@
         }
         var m = loc.match(/^\/goto\/([^/]+)/);
         var derivedAgentId = m ? m[1] : null;
-        // Re-render the inline workspace list only when the displayed
-        // workspace actually changes; otherwise the 500ms tick would
-        // tear down and rebuild every row twice per second forever.
-        // SSE-driven workspace add/remove/rename still flows through
-        // handleChromeEvent -> renderWorkspaces.
-        var workspaceChanged = currentTitleAgentId !== derivedAgentId;
+        // The switcher menu's current-row highlight follows the breadcrumb,
+        // which applyTitlebarContext (above, on URL change) pushes through
+        // MindsUI.setWorkspaceMenuCurrentAgent.
         setDisplayedWorkspaceAgentId(derivedAgentId);
         // The titlebar accent tracks a WIDER set than the displayed
         // workspace: the workspace-scoped minds screens (settings,
@@ -764,7 +761,6 @@
         // Create, accounts, ...) resolves to null and paints the neutral
         // chrome. Mirrors ``parseAccentSourceAgentId`` in electron/main.js.
         applyTitleAccent(accentSourceFromPath(loc));
-        if (workspaceChanged) renderWorkspaces(lastWorkspaces);
       } catch (e) {}
     }, 500);
   }
@@ -773,10 +769,17 @@
   // URL push / poll tick lands).
   applyTitlebarContext();
 
-  // -- Switcher menu action wiring (browser mode only) -----------------------
+  // -- Switcher menu mount (browser mode only) -------------------------------
+  //
+  // The menu interior is the mithril WorkspaceMenu component; this shell owns
+  // only the toggle/anchor math and the backdrop show/hide. Mounted once at
+  // shell boot (the menu lives outside #local-page-root, so hub swaps never
+  // touch it); its row actions navigate through the swap-engine export and
+  // dismiss via closeSidebar.
   if (!isElectron) {
-    var newWsBtn = document.getElementById('sidebar-new-workspace');
-    if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
+    window.MindsUI.mountWorkspaceMenu(document.getElementById('sidebar-menu'), {
+      onDismiss: closeSidebar,
+    });
   }
 
   // The report-a-bug button opens the help modal (report a bug). Pass the currently-displayed
@@ -834,56 +837,10 @@
     });
   }
 
-  // -- SSE-driven sidebar (browser mode only) -------------------------------
-  var lastWorkspaces = [];
-
-  // Repaint rows when the shared backup-health cache updates so the backup
-  // warning badge appears/disappears without a workspace-list event.
-  if (window.mindsBackupHealth) {
-    window.mindsBackupHealth.onUpdate(function () { renderWorkspaces(lastWorkspaces); });
-  }
-
-  function renderWorkspaces(workspaces) {
-    var container = document.getElementById('sidebar-workspaces');
-    if (!container) return;
-    container.textContent = '';
-    if (!workspaces || workspaces.length === 0) return;
-    var groups = {};
-    workspaces.forEach(function (w) {
-      var key = w.account || 'Private';
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(w);
-    });
-    var keys = Object.keys(groups).sort(function (a, b) {
-      if (a === 'Private') return -1;
-      if (b === 'Private') return 1;
-      return a.localeCompare(b);
-    });
-    keys.forEach(function (key, keyIdx) {
-      if (keyIdx > 0 || keys.length > 1) {
-        var header = document.createElement('div');
-        header.className = 'px-2 pt-2 pb-1 type-section text-tertiary';
-        header.textContent = key === 'Private' ? 'Private' : key;
-        container.appendChild(header);
-      }
-      groups[key].forEach(function (w) {
-        // Shared row builder. Browser mode has no multi-window concept, so
-        // no withOpenNew (rows carry no action buttons here). Unlike the
-        // Electron sidebar (delegated listeners) this view wires the click
-        // per-row, so attach it to the built element.
-        var row = window.mindsSidebarRow.buildRow(w, {
-          isCurrent: w.id === currentCrumbAgentId,
-        });
-        row.addEventListener('click', function () {
-          // Rows for workspaces on another device are informational only.
-          if (w.is_remote) return;
-          selectWorkspace(w.id);
-        });
-        container.appendChild(row);
-      });
-    });
-  }
-
+  // The switcher menu's rows are rendered by the mithril WorkspaceMenu
+  // component (mounted above in browser mode; its own store subscribes to
+  // the chrome events + backup-health cache), so this script no longer
+  // renders workspace rows itself.
   function handleChromeEvent(data) {
     try {
       if (data.type === 'workspace_accent_preview') {
@@ -921,9 +878,7 @@
         return;
       }
       if (data.type === 'workspaces') {
-        lastWorkspaces = data.workspaces || [];
-        rememberWorkspaceAccents(lastWorkspaces);
-        renderWorkspaces(lastWorkspaces);
+        rememberWorkspaceAccents(data.workspaces || []);
         // Replay the most recent ``applyTitleAccent`` call now that the
         // cache has fresh data. Catches two cases:
         //   1. Cold start / freshly-created workspace: the ``accent-changed``

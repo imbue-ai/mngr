@@ -4,8 +4,11 @@
   when the user opens the sidebar. The modal view covers the full window
   content area, the body is the transparent backdrop, and the floating
   panel is pinned at a position derived from the caller's trigger
-  geometry. Clicks on the backdrop (anywhere outside the panel) dismiss
-  the modal via /_static/sidebar.js; the Escape key is handled by
+  geometry. This template is a pure POSITIONING SHELL: the menu interior
+  (grouped workspace rows + "New workspace") is the mithril WorkspaceMenu
+  component, mounted by the inline script below. Clicks on the backdrop
+  (anywhere outside the panel) dismiss the modal via the component's
+  overlay-modal wiring (host.closeModal()); the Escape key is handled by
   main.js's modal before-input-event listener (see openModal in
   electron/main.js), so this page does not install its own Escape
   handler. The panel's height comes from its own flex content -- no JS
@@ -30,15 +33,17 @@
   of the window, nudged 24px left and 2px below it. That's the right shape
   for the titlebar's first button without any caller customization.
 
-  mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
+  mngr_forward_origin is exposed via data-mngr-forward-origin so the menu
   can build the cross-origin /goto/<agent>/ URL the plugin serves.
+  backup_health.js supplies the shared backup-warning cache the row badges
+  read through the store bridge.
 #}
 {% set _body_attrs %}data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
-<script src="/_static/workspace_accent.js" defer></script>
-<script src="/_static/backup_health.js" defer></script>
-<script src="/_static/sidebar_workspace_row.js" defer></script>
-<script src="/_static/sidebar.js" defer></script>
+<script src="/_static/backup_health.js"></script>
+<script>
+  window.MindsUI.mountWorkspaceMenu(document.getElementById('sidebar-menu'), { isOverlayModal: true });
+</script>
 {% endset %}
 {% set _menu_left = trigger_x + offset_x %}
 {% set _menu_top = trigger_y + trigger_h + offset_y %}
@@ -48,9 +53,6 @@
   <div id="sidebar-backdrop" class="fixed inset-0">
     <div id="sidebar-menu"
          style="left:{{ _menu_left }}px; top:{{ _menu_top }}px;"
-         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden">
-      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
-      <SidebarBottom />
-    </div>
+         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden"></div>
   </div>
 </OverlaySurface>

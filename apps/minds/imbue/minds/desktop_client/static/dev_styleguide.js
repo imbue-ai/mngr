@@ -41,28 +41,6 @@
   apply();
 })();
 
-// "Sidebar items" sample rows. Rendered through the same
-// window.mindsSidebarRow.buildRow the live menu uses (static/sidebar.js +
-// static/chrome.js), so the catalog can't drift from production. We pass
-// explicit accents so the samples don't depend on the async accent lookup,
-// and withOpenNew:true to show the richest (Electron) treatment: the current
-// row carries no arrow, the other rows do. No event wiring -- these are
-// visual only.
-(function () {
-  var panel = document.getElementById('styleguide-sidebar-rows');
-  if (!panel || !window.mindsSidebarRow) return;
-  var samples = [
-    { id: 'agent-styleguide-current', name: 'current-workspace', accent: '#0b292b' },
-    { id: 'agent-styleguide-other', name: 'another-workspace', accent: '#9fbbd3' },
-    { id: 'agent-styleguide-stopped', name: 'stopped-workspace', accent: '#492222', liveness: 'STOPPED' },
-    { id: 'agent-styleguide-stale', name: 'stale-workspace', accent: '#cecd0c', is_stale: true },
-  ];
-  panel.appendChild(window.mindsSidebarRow.buildRow(samples[0], { isCurrent: true, withOpenNew: true }));
-  panel.appendChild(window.mindsSidebarRow.buildRow(samples[1], { withOpenNew: true }));
-  panel.appendChild(window.mindsSidebarRow.buildRow(samples[2], { withOpenNew: true }));
-  panel.appendChild(window.mindsSidebarRow.buildRow(samples[3], { withOpenNew: true }));
-})();
-
 // Table-of-contents scrollspy. Highlights the TOC link whose section is
 // currently nearest the top of the viewport by toggling aria-current="page"
 // (styled in app.css :: .styleguide-toc-link[aria-current="page"]). The jump

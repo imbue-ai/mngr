@@ -54,3 +54,13 @@ export function mountWithTeardown(el: Element, component: m.ComponentTypes): voi
     { once: true },
   );
 }
+
+// Mounts a component that belongs to the persistent SHELL (e.g. the
+// browser-mode workspace menu living outside #local-page-root): it must
+// survive hub-page swaps, so no teardown listener is registered. Only use
+// this for containers outside the swappable page root -- a page-scoped mount
+// that skipped teardown would leak across swaps.
+export function mountPersistent(el: Element, component: m.ComponentTypes): void {
+  m.mount(el, component);
+  el.setAttribute("data-minds-mounted", "true");
+}

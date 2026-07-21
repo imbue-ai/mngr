@@ -6,9 +6,16 @@
 import type { ChromeEvent } from "./chrome_state";
 
 // The subset of the Electron preload bridge (electron/preload.js) the host
-// adapter consumes. All members exist whenever window.minds exists.
+// adapter and mount glue consume. All members exist whenever window.minds
+// exists.
 export interface MindsBridge {
   onChromeEvent(callback: (event: ChromeEvent) => void): void;
+  // The accent-source workspace (the active scope incl. settings / sharing
+  // screens), pushed by main on every navigation and replayed on view load.
+  onAccentChanged(callback: (agentId: string | null) => void): void;
+  // The workspace ACTUALLY DISPLAYED in the content view (null on its
+  // settings / sharing screens); narrower than the accent source.
+  onCurrentWorkspaceChanged(callback: (agentId: string | null, isContentReady: boolean) => void): void;
   navigateContent(url: string): void;
   contentGoBack(): void;
   openWorkspaceInNewWindow(agentId: string): void;
