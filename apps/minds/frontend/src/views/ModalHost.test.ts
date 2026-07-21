@@ -139,6 +139,24 @@ describe("ModalHost open/close", () => {
     expect(frameEl()?.getAttribute("src")).toBe("/inbox?selected=evt-9");
   });
 
+  it("reopening the same URL loads a fresh frame (its subscribers were dropped)", () => {
+    const handle = mountFixture();
+    handle.open({ kind: "inbox", selectedRequestId: "evt-1" });
+    m.redraw.sync();
+    const firstFrame = frameEl();
+    expect(firstFrame?.getAttribute("src")).toBe("/inbox?selected=evt-1");
+
+    // A repeat of the same targeted open (e.g. the content relay firing
+    // again) clears the frame's bridge subscribers, so the frame must be
+    // recreated -- a fresh load re-subscribes; the old element staying put
+    // would leave the hosted page's chrome-event feed dead.
+    handle.open({ kind: "inbox", selectedRequestId: "evt-1" });
+    m.redraw.sync();
+    const secondFrame = frameEl();
+    expect(secondFrame?.getAttribute("src")).toBe("/inbox?selected=evt-1");
+    expect(secondFrame).not.toBe(firstFrame);
+  });
+
   it("dismisses on Escape pressed inside the hosted frame", () => {
     const handle = mountFixture();
     handle.open({ kind: "minds-settings" });

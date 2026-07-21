@@ -100,6 +100,12 @@ export function mountModalHost(target: Element | null): ModalHostHandleForPage {
 
   let currentRequest: ModalRequest | null = null;
   let currentUrl: string | null = null;
+  // Bumped on every open; keys the iframe vnode so a reopen of the SAME URL
+  // still recreates the element (a fresh load, like Electron's loadURL-per-
+  // open). Without it a same-URL reopen would clear frameCallbacks below
+  // while mithril leaves the already-loaded frame in place, silently killing
+  // the hosted page's chrome-event feed (it never re-subscribes).
+  let openSeq = 0;
   // The open frame's chrome-event subscribers (the hosted inbox page's store
   // connect). Cleared on close so a dead frame's callbacks are dropped.
   let frameCallbacks: Array<(event: ChromeEvent) => void> = [];
@@ -137,6 +143,7 @@ export function mountModalHost(target: Element | null): ModalHostHandleForPage {
     frameCallbacks = [];
     currentRequest = request;
     currentUrl = url;
+    openSeq += 1;
     m.redraw();
   };
 
@@ -196,16 +203,23 @@ export function mountModalHost(target: Element | null): ModalHostHandleForPage {
     view: () =>
       currentUrl === null
         ? null
-        : m("iframe", {
-            id: "minds-modal-frame",
-            src: currentUrl,
-            // Above the titlebar (z-[100]) and the switcher backdrop (z-50):
-            // the Electron modal view covers the whole window including the
-            // titlebar, and this layer mirrors it. The hosted OverlaySurface
-            // page is transparent and paints its own dim backdrop.
-            class: "fixed inset-0 w-full h-full border-0 z-[200]",
-            onload: (event: Event) => wireFrameEscape(event.target as HTMLIFrameElement),
-          }),
+        : [
+            // Keyed (inside a fragment, where mithril's keyed diff applies)
+            // per open: every open() loads the page fresh, even at an
+            // unchanged URL (see openSeq above).
+            m("iframe", {
+              key: openSeq,
+              id: "minds-modal-frame",
+              src: currentUrl,
+              // Above the titlebar (z-[100]) and the switcher backdrop
+              // (z-50): the Electron modal view covers the whole window
+              // including the titlebar, and this layer mirrors it. The
+              // hosted OverlaySurface page is transparent and paints its
+              // own dim backdrop.
+              class: "fixed inset-0 w-full h-full border-0 z-[200]",
+              onload: (event: Event) => wireFrameEscape(event.target as HTMLIFrameElement),
+            }),
+          ],
   });
 
   const handle: ModalHostHandleForPage = { open, close, isOpen, toggleInbox };
