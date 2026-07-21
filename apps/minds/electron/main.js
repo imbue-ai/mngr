@@ -3139,13 +3139,6 @@ async function startBackendWithRetry() {
         restorableCount: restorable.length,
       });
 
-      // A deeplink that arrived during a genuine first run loses to the
-      // untouched onboarding flow: the user signs in first and the deeplink
-      // degrades to "the app opened". If deeplinks ever need to survive
-      // onboarding, the backend's ``/post-login?return_to=`` redirect
-      // (validated same-origin paths) is the hook to thread them through.
-      if (startupRoute === 'welcome') pendingDeeplinkUrl = null;
-
       const loadInitialContent = (relativePath) => {
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + relativePath);
@@ -3251,10 +3244,9 @@ function handleDeeplink(rawUrl) {
 }
 
 // Apply a deeplink queued during startup. Called once startup navigation has
-// settled (first start: the chosen route is loading; retry: windows
-// reloaded). On a genuine first run the queued deeplink was already dropped
-// in favor of the untouched onboarding flow (see the 'welcome' branch in
-// startBackendWithRetry).
+// settled (first start: the chosen route is loading, including the first-run
+// welcome route -- an explicit deeplink wins over the startup screen;
+// retry: windows reloaded).
 function flushPendingDeeplink() {
   canApplyDeeplinks = true;
   if (!pendingDeeplinkUrl) return;
