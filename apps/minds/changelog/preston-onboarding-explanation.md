@@ -1,9 +1,9 @@
-The workspace-creation loading page now shows a three-step onboarding walkthrough while the workspace is created. The progress bar moved to a slim strip at the top of the screen (with the stage caption and collapsible logs), and the rest of the page explains how the system works:
+The workspace-creation loading page now shows an onboarding walkthrough while the workspace is created: nine one-sentence steps with Previous/Next, over a shared scene graphic that zooms out from the minds icon to the full computer-tunnel-workspace picture.
 
-- Step 1 (minds): your laptop as an access terminal for an AI operating system, with an interactive demo tab-space and a theme-color picker that restyles the demo live (the pick is a learning toy only; it does not change the workspace's actual color).
+- minds phase: what minds is, how workspace tabs work (a demo tab-space that the Next button walks through: chat, apps, web -- with the user's message on the right and the agent's on the left), and a theme-color picker that restyles the demo live (a learning toy only; it does not change the workspace's actual color).
 
-- Step 2 (latchkey): credentials are encrypted and stored locally, never visible to agents, with a scrolling carousel of the services latchkey can connect to (sourced from the bundled latchkey services catalog, with vendored simple-icons brand icons).
+- latchkey phase: credentials are encrypted and stored locally, never visible to agents, plus a scrolling carousel of the services latchkey can connect to (sourced from the bundled latchkey services catalog, with vendored simple-icons brand icons). The latchkey tile is a redraw of the real brand mark.
 
-- Step 3: the full picture -- your computer connecting over an encrypted tunnel to the workspace machine, with copy that adapts to whether the workspace runs locally or in the cloud. The workspace-machine graphic fills up in lockstep with the top progress bar.
+- full picture: your computer connecting over an encrypted tunnel to the workspace machine, with copy adapting to local vs cloud workspaces.
 
-The page no longer auto-redirects into the workspace when creation finishes: once the workspace is ready and the user has clicked through the steps, a Begin button appears, which plays a zoom-in animation and enters the workspace. The rotating tips on the old loading screen were removed in favor of the walkthrough.
+The progress bar, stage caption, logs, rotating tips, and any creation failure stay hidden until the user reaches the last step. There, the workspace tile fills in lockstep with the progress bar, its caption reads "setting up..." and flips to a glowing green "Ready" when creation finishes, and a pulsing Begin button (replacing the old auto-redirect) plays a zoom-in animation and enters the workspace. Clicking any scene icon jumps back to the step that explains it.
