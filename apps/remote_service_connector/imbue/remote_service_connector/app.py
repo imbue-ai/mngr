@@ -4381,9 +4381,7 @@ def _is_owner_enforced_over_quota(store: KeyStore, owner_user_id: str) -> bool:
     return any(row.get("enforced_access") == "read" for row in store.list_keys(owner_user_id, None))
 
 
-def _check_storage_quota_for_new_bucket(
-    ops: CloudflareOps, username: str, entitlements: "AccountEntitlements"
-) -> None:
+def _check_storage_quota_for_new_bucket(ops: CloudflareOps, username: str, entitlements: AccountEntitlements) -> None:
     """Refuse bucket creation when the owner's live storage usage is already over quota.
 
     A failed usage read fails open (creation proceeds with a warning),
