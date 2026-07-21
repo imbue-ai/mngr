@@ -147,7 +147,11 @@ def install_service(host: str, port: int) -> str:
     # prefix, and re-running just overwrites it (idempotent).
     _run_privileged(["tee", str(UNIT_PATH)], input_text=unit_text)
     _run_privileged(["systemctl", "daemon-reload"])
-    _run_privileged(["systemctl", "enable", "--now", SERVICE_NAME])
+    # ``enable`` persists the boot symlink; ``restart`` applies the (possibly updated)
+    # unit now, starting it if it was stopped -- so a re-install always takes effect
+    # (``enable --now`` would no-op the start of an already-running service).
+    _run_privileged(["systemctl", "enable", SERVICE_NAME])
+    _run_privileged(["systemctl", "restart", SERVICE_NAME])
     logger.info("Installed foreman systemd service at {}", UNIT_PATH)
     return unit_text
 

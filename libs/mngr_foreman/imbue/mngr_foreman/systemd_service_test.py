@@ -114,11 +114,14 @@ def test_install_service_writes_unit_then_reloads_and_enables(monkeypatch: pytes
     assert calls[0][0] == ["tee", str(ss.UNIT_PATH)]
     assert calls[0][1] == unit_text
     assert "ExecStart=/opt/venv/bin/mngr foreman --host 0.0.0.0 --port 8700" in unit_text
-    # 2) + 3) reload + enable --now, in order.
+    # 2) reload, 3) enable (persist boot symlink), 4) restart (apply now), in order.
     argvs = [c[0] for c in calls]
-    assert ["systemctl", "daemon-reload"] in argvs
-    assert ["systemctl", "enable", "--now", "foreman"] in argvs
-    assert argvs.index(["systemctl", "enable", "--now", "foreman"]) == len(argvs) - 1
+    assert argvs == [
+        ["tee", str(ss.UNIT_PATH)],
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "enable", "foreman"],
+        ["systemctl", "restart", "foreman"],
+    ]
 
 
 def test_uninstall_service_absent_is_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
