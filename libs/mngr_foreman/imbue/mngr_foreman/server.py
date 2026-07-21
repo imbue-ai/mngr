@@ -297,9 +297,9 @@ def create_app(
         # BLOCKED beats busy in the UI: a mid-turn choice dialog can leave the
         # 'active' marker set (state RUNNING) while a menu is up, so a dialog must
         # win. mngr's own PERMISSIONS signal is a free, pane-less OR with the tmux
-        # ❯ capture -- when it already says PERMISSIONS we skip the capture. codex
-        # and opencode surface a permission block through that same field but drive
-        # no other run-time menus, so they never need the pane capture.
+        # ❯ capture -- when it already says PERMISSIONS we skip the capture. opencode
+        # surfaces a permission block through that same field but drives no other
+        # run-time menus, so it never needs the pane capture.
         if is_permissions_blocked(agent):
             reason: str | None = "permission prompt"
         elif strategy.uses_pane_dialog_detection:

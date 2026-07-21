@@ -64,13 +64,12 @@ def waiting_reason_of(agent: AgentDetails) -> str | None:
     """Read the agent's ``waiting_reason`` off the AgentDetails plugin fields, if present.
 
     Each agent plugin's field generator publishes it under its own key --
-    ``plugin.claude.waiting_reason``, ``plugin.codex.waiting_reason``,
-    ``plugin.opencode.waiting_reason`` -- as a ``WaitingReason`` (PERMISSIONS /
-    END_OF_TURN), populated on the online listing/observe path and absent (None)
-    when the host wasn't probed online. The publishing key matches ``agent.type``,
-    so read that key. The stored value may be the enum or its serialized string,
-    so normalize to an upper-case string. A type with no such field (e.g.
-    pi-coding) simply has no matching block -> None.
+    ``plugin.claude.waiting_reason``, ``plugin.opencode.waiting_reason`` -- as a
+    ``WaitingReason`` (PERMISSIONS / END_OF_TURN), populated on the online
+    listing/observe path and absent (None) when the host wasn't probed online. The
+    publishing key matches ``agent.type``, so read that key. The stored value may
+    be the enum or its serialized string, so normalize to an upper-case string. A
+    type with no such field (e.g. pi-coding) simply has no matching block -> None.
     """
     plugin = agent.plugin if isinstance(agent.plugin, dict) else {}
     plugin_fields = plugin.get(agent.type)
@@ -86,8 +85,8 @@ def is_permissions_blocked(agent: AgentDetails) -> bool:
     A free, pane-less signal (``waiting_reason == PERMISSIONS``): the
     permissions_waiting marker is set during a live turn. For claude it is OR'd
     with the pane ``❯`` rule so a permission prompt greys the composer even
-    before / without a capture; for codex/opencode (which run no other blocking
-    menus) it is the sole needs-input signal.
+    before / without a capture; for opencode (which runs no other blocking menus)
+    it is the sole needs-input signal.
     """
     reason = waiting_reason_of(agent)
     return reason is not None and "PERMISSIONS" in reason

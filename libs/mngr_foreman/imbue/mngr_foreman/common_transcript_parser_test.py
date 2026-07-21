@@ -1,4 +1,4 @@
-"""Tests for the common-transcript normalizer (codex / opencode / pi-coding)."""
+"""Tests for the common-transcript normalizer (opencode / pi-coding)."""
 
 from __future__ import annotations
 
@@ -15,23 +15,23 @@ def _line(record: dict[str, Any]) -> str:
 _USER = {
     "type": "user_message",
     "timestamp": "2026-07-20T00:00:01Z",
-    "event_id": "cx-1",
-    "source": "codex/common_transcript",
+    "event_id": "oc-1",
+    "source": "opencode/common_transcript",
     "role": "user",
     "content": "fix the bug",
 }
 _ASSISTANT = {
     "type": "assistant_message",
     "timestamp": "2026-07-20T00:00:02Z",
-    "event_id": "cx-2",
-    "source": "codex/common_transcript",
+    "event_id": "oc-2",
+    "source": "opencode/common_transcript",
     "role": "assistant",
-    "model": "gpt-5.5",
+    "model": "anthropic/claude-sonnet-4-5",
     "text": "On it.",
-    "tool_calls": [{"tool_call_id": "call-1", "tool_name": "shell", "input_preview": "ls -la"}],
+    "tool_calls": [{"tool_call_id": "call-1", "tool_name": "bash", "input_preview": "ls -la"}],
     "parts": [
         {"type": "text", "content": "On it."},
-        {"type": "tool_call", "tool_call_id": "call-1", "tool_name": "shell", "input_preview": "ls -la"},
+        {"type": "tool_call", "tool_call_id": "call-1", "tool_name": "bash", "input_preview": "ls -la"},
     ],
     "parts_ordered": True,
     "finish_reason": "tool_use",
@@ -40,10 +40,10 @@ _ASSISTANT = {
 _TOOL_RESULT = {
     "type": "tool_result",
     "timestamp": "2026-07-20T00:00:03Z",
-    "event_id": "cx-3",
-    "source": "codex/common_transcript",
+    "event_id": "oc-3",
+    "source": "opencode/common_transcript",
     "tool_call_id": "call-1",
-    "tool_name": "shell",
+    "tool_name": "bash",
     "output": "a.py\nb.py",
     "is_error": False,
 }
@@ -53,7 +53,7 @@ def test_passes_through_the_three_record_types() -> None:
     events = parse_common_transcript_lines([_line(_USER), _line(_ASSISTANT), _line(_TOOL_RESULT)])
     assert [e["type"] for e in events] == ["user_message", "assistant_message", "tool_result"]
     assert events[0]["content"] == "fix the bug"
-    assert events[2]["tool_name"] == "shell" and events[2]["output"] == "a.py\nb.py"
+    assert events[2]["tool_name"] == "bash" and events[2]["output"] == "a.py\nb.py"
 
 
 def test_finish_reason_renamed_to_stop_reason() -> None:
@@ -76,7 +76,7 @@ def test_assistant_without_finish_reason_gets_null_stop_reason() -> None:
 def test_dedup_on_event_id_across_calls() -> None:
     seen: set[str] = set()
     first = parse_common_transcript_lines([_line(_USER)], existing_event_ids=seen)
-    assert len(first) == 1 and seen == {"cx-1"}
+    assert len(first) == 1 and seen == {"oc-1"}
     # Re-presenting the same line (rotation / backfill overlap) emits nothing.
     second = parse_common_transcript_lines([_line(_USER)], existing_event_ids=seen)
     assert second == []
@@ -84,7 +84,7 @@ def test_dedup_on_event_id_across_calls() -> None:
 
 def test_events_sorted_by_timestamp() -> None:
     events = parse_common_transcript_lines([_line(_TOOL_RESULT), _line(_USER), _line(_ASSISTANT)])
-    assert [e["event_id"] for e in events] == ["cx-1", "cx-2", "cx-3"]
+    assert [e["event_id"] for e in events] == ["oc-1", "oc-2", "oc-3"]
 
 
 def test_tool_result_output_recapped() -> None:
@@ -104,12 +104,12 @@ def test_malformed_and_unknown_lines_skipped() -> None:
         _line(_USER),
     ]
     events = parse_common_transcript_lines(lines)
-    assert [e["event_id"] for e in events] == ["cx-1"]
+    assert [e["event_id"] for e in events] == ["oc-1"]
 
 
 def test_tool_name_by_call_id_accepted_but_ignored() -> None:
     # Signature parity with the claude parser; common records are self-describing.
     mapping: dict[str, str] = {}
     events = parse_common_transcript_lines([_line(_TOOL_RESULT)], tool_name_by_call_id=mapping)
-    assert events[0]["tool_name"] == "shell"
+    assert events[0]["tool_name"] == "bash"
     assert mapping == {}

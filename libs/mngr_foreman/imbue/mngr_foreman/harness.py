@@ -8,14 +8,14 @@ knobs live together in one :class:`TranscriptStrategy` keyed on ``agent.type``:
 
 1. **``subpath``** -- where the agent's mirrored transcript file sits under its
    state dir. claude mirrors its *raw* session JSONL at
-   ``logs/claude_transcript/events.jsonl``; the common-transcript agents (codex,
-   opencode, pi-coding, ...) emit the shared normalized envelope at
+   ``logs/claude_transcript/events.jsonl``; a common-transcript agent (opencode,
+   pi-coding, ...) emits the shared normalized envelope at
    ``events/<type>/common_transcript/events.jsonl``.
 
 2. **``parse``** -- the function turning that file's lines into foreman UI event
    dicts. claude needs its bespoke raw parser
    (:func:`~imbue.mngr_foreman.transcript_parser.parse_claude_session_lines`);
-   the common-transcript agents share the thin
+   a common-transcript agent uses the thin
    :func:`~imbue.mngr_foreman.common_transcript_parser.parse_common_transcript_lines`
    normalizer. Both take the same keyword arguments so the caller dispatches
    uniformly.
@@ -23,11 +23,11 @@ knobs live together in one :class:`TranscriptStrategy` keyed on ``agent.type``:
 3. **``uses_pane_dialog_detection``** -- whether "needs-input" is found by
    capturing the agent's tmux pane and matching claude's numbered-choice ``❯``
    dialog shape. Only claude drives blocking menus (trust / plan / model picker /
-   ``/login``) at run time that lack a marker signal. codex and opencode surface
-   a tool-approval block through mngr's own ``waiting_reason == PERMISSIONS``
-   field (a free, pane-less signal read off ``AgentDetails``), and their other
-   dialogs are pre-dismissed at provisioning -- so they set this False and rely on
-   the field alone. (pi-coding has no needs-input state at all; also False.)
+   ``/login``) at run time that lack a marker signal. opencode surfaces a
+   tool-approval block through mngr's own ``waiting_reason == PERMISSIONS`` field
+   (a free, pane-less signal read off ``AgentDetails``), and has no blocking
+   first-run dialog -- so it sets this False and relies on the field alone.
+   (pi-coding has no needs-input state at all; also False.)
 
 Adding a harness is one row here plus, for a new format, one parser module. A
 literal dict keyed on ``agent.type`` is the whole registry -- no plugin-style
@@ -58,8 +58,8 @@ class TranscriptStrategy(FrozenModel):
     ``parse`` maps that file's lines to foreman UI event dicts.
     ``uses_pane_dialog_detection`` is True to also capture the tmux pane and match
     claude's numbered-choice dialog shape for the needs-input state; False to rely
-    solely on mngr's pane-less ``waiting_reason`` field (codex/opencode) or to have
-    no needs-input state at all (pi-coding).
+    solely on mngr's pane-less ``waiting_reason`` field (opencode) or to have no
+    needs-input state at all (pi-coding).
     """
 
     subpath: str
@@ -81,11 +81,6 @@ _STRATEGIES: Final[dict[str, TranscriptStrategy]] = {
         subpath=TRANSCRIPT_SUBPATH,
         parse=parse_claude_session_lines,
         uses_pane_dialog_detection=True,
-    ),
-    "codex": TranscriptStrategy(
-        subpath=_common_transcript_subpath("codex"),
-        parse=parse_common_transcript_lines,
-        uses_pane_dialog_detection=False,
     ),
     "opencode": TranscriptStrategy(
         subpath=_common_transcript_subpath("opencode"),

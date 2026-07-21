@@ -102,12 +102,12 @@ def test_input_state_unsupported_type_not_running() -> None:
     assert d["running"] is False and d["busy"] is False
 
 
-def test_input_state_codex_permission_blocked_pane_less() -> None:
-    # codex surfaces a permission block via the waiting_reason field (state WAITING),
-    # with no tmux pane capture -- so this resolves with a fake pool that cannot
-    # capture panes.
-    plugin = {"codex": {"waiting_reason": "PERMISSIONS"}}
-    reg = _FakeRegistry([_CARD], agents={"worker": _agent("codex", "WAITING", plugin)})
+def test_input_state_opencode_permission_blocked_pane_less() -> None:
+    # opencode surfaces a permission block via the waiting_reason field (state
+    # WAITING), with no tmux pane capture -- so this resolves with a fake pool that
+    # cannot capture panes.
+    plugin = {"opencode": {"waiting_reason": "PERMISSIONS"}}
+    reg = _FakeRegistry([_CARD], agents={"worker": _agent("opencode", "WAITING", plugin)})
     d = _client(reg).get("/api/agents/worker/input-state").get_json()
     assert d["blocked"] is True and d["reason"] == "permission prompt"
     assert d["running"] is True and d["busy"] is False

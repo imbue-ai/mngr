@@ -196,6 +196,6 @@ def _agent_to_card(agent: AgentDetails) -> dict:
         "labels": dict(agent.labels),
         "activity_time": activity.isoformat() if activity else None,
         # Chat (live transcript + composer) is available for any type foreman has a
-        # transcript strategy for (claude, codex, opencode); others are terminal-only.
+        # transcript strategy for (claude, opencode); others are terminal-only.
         "supports_chat": transcript_strategy_for(agent.type) is not None,
     }

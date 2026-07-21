@@ -1,8 +1,8 @@
 """Normalize a mngr *common-transcript* JSONL stream into foreman UI events.
 
-Several agent types (codex, opencode, pi-coding, antigravity, ...) do not hand
-foreman a raw, agent-native session log the way claude does. Instead their mngr
-plugin emits the shared, agent-agnostic **common transcript** -- the canonical
+Several agent types (opencode, pi-coding, antigravity, ...) do not hand foreman a
+raw, agent-native session log the way claude does. Instead their mngr plugin
+emits the shared, agent-agnostic **common transcript** -- the canonical
 envelope defined in :mod:`imbue.mngr.agents.common_transcript_records`
 (``user_message`` / ``assistant_message`` / ``tool_result`` records, each already
 carrying ``type`` / ``event_id`` / ``source`` plus the flat ``text`` /

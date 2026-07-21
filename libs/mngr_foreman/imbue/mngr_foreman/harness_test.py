@@ -15,23 +15,16 @@ def test_claude_uses_raw_parser_and_pane_detection() -> None:
     assert strategy.uses_pane_dialog_detection is True
 
 
-def test_codex_uses_common_transcript_without_pane_detection() -> None:
-    strategy = transcript_strategy_for("codex")
-    assert strategy is not None
-    assert strategy.subpath == "events/codex/common_transcript/events.jsonl"
-    assert strategy.parse is parse_common_transcript_lines
-    # codex surfaces permission blocks via the waiting_reason field, not a pane.
-    assert strategy.uses_pane_dialog_detection is False
-
-
 def test_opencode_uses_common_transcript_without_pane_detection() -> None:
     strategy = transcript_strategy_for("opencode")
     assert strategy is not None
     assert strategy.subpath == "events/opencode/common_transcript/events.jsonl"
     assert strategy.parse is parse_common_transcript_lines
+    # opencode surfaces permission blocks via the waiting_reason field, not a pane.
     assert strategy.uses_pane_dialog_detection is False
 
 
 def test_unknown_agent_type_has_no_strategy() -> None:
+    assert transcript_strategy_for("codex") is None
     assert transcript_strategy_for("antigravity") is None
     assert transcript_strategy_for("") is None

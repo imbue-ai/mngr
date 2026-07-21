@@ -179,19 +179,19 @@ def test_missing_waiting_reason_is_not_blocked() -> None:
     assert is_permissions_blocked(_agent_with_plugin({})) is False
     assert is_permissions_blocked(_agent_with_plugin({"claude": {}})) is False
     # A claude-typed agent ignores another type's block.
-    assert is_permissions_blocked(_agent_with_plugin({"codex": {"waiting_reason": "PERMISSIONS"}})) is False
+    assert is_permissions_blocked(_agent_with_plugin({"opencode": {"waiting_reason": "PERMISSIONS"}})) is False
     assert waiting_reason_of(_agent_with_plugin({})) is None
 
 
 def test_waiting_reason_reads_the_agents_own_type_key() -> None:
-    # codex/opencode publish waiting_reason under their own plugin key; the helper
-    # keys off ``agent.type`` so their permission block is surfaced pane-lessly.
-    codex = _agent_with_plugin({"codex": {"waiting_reason": "PERMISSIONS"}}, agent_type="codex")
-    assert waiting_reason_of(codex) == "PERMISSIONS"
-    assert is_permissions_blocked(codex) is True
-    opencode_idle = _agent_with_plugin({"opencode": {"waiting_reason": "END_OF_TURN"}}, agent_type="opencode")
-    assert waiting_reason_of(opencode_idle) == "END_OF_TURN"
-    assert is_permissions_blocked(opencode_idle) is False
+    # opencode publishes waiting_reason under its own plugin key; the helper keys
+    # off ``agent.type`` so its permission block is surfaced pane-lessly.
+    blocked = _agent_with_plugin({"opencode": {"waiting_reason": "PERMISSIONS"}}, agent_type="opencode")
+    assert waiting_reason_of(blocked) == "PERMISSIONS"
+    assert is_permissions_blocked(blocked) is True
+    idle = _agent_with_plugin({"opencode": {"waiting_reason": "END_OF_TURN"}}, agent_type="opencode")
+    assert waiting_reason_of(idle) == "END_OF_TURN"
+    assert is_permissions_blocked(idle) is False
 
 
 def test_non_dict_plugin_is_safe() -> None:
