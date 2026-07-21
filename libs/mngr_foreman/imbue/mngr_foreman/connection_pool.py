@@ -92,6 +92,10 @@ class ConnectionPool:
         self._host_locks: dict[int, threading.Lock] = {}
         self._registry: Any = None
         self._stop = threading.Event()
+        # Set by the registry when the known-agent set may have changed, so the
+        # maintainer warms newly-"on" agents at once instead of after a full
+        # keepalive interval (shrinks the user's cold-send window right after boot).
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
 
     def _handle_for(self, agent_name: str) -> _Handle:
@@ -168,15 +172,29 @@ class ConnectionPool:
     def start_maintainer(self, registry: Any) -> None:
         """Start the 24/7 warm-pool thread, driven by the agent registry."""
         self._registry = registry
+        # Warm as soon as agents appear (the registry fills from observe a beat
+        # after boot) rather than waiting out the first keepalive interval.
+        registry.set_on_agents_changed(self._wake.set)
         self._thread = threading.Thread(target=self._maintain, name="foreman-warm-pool", daemon=True)
         self._thread.start()
 
     def _maintain(self) -> None:
-        while not self._stop.wait(_KEEPALIVE_INTERVAL_SECONDS):
-            try:
-                self._tick()
-            except Exception as e:  # noqa: BLE001 - a bad tick must not kill the maintainer
-                logger.trace("warm-pool tick error: {}", e)
+        # Tick once up front (registry may still be empty -- a no-op then), then on
+        # every registry change and at least once per keepalive interval.
+        self._safe_tick()
+        while not self._stop.is_set():
+            woken = self._wake.wait(_KEEPALIVE_INTERVAL_SECONDS)
+            if self._stop.is_set():
+                return
+            if woken:
+                self._wake.clear()
+            self._safe_tick()
+
+    def _safe_tick(self) -> None:
+        try:
+            self._tick()
+        except Exception as e:  # noqa: BLE001 - a bad tick must not kill the maintainer
+            logger.trace("warm-pool tick error: {}", e)
 
     def _warm_one(self, name: str) -> None:
         """Keep one agent's send match-list fresh and its SSH connection alive."""
@@ -212,6 +230,8 @@ class ConnectionPool:
 
     def stop(self) -> None:
         self._stop.set()
+        # Unblock the maintainer's interval wait so it observes _stop at once.
+        self._wake.set()
 
 
 def _ping_host(_agent: AgentInterface, host: OnlineHostInterface) -> None:

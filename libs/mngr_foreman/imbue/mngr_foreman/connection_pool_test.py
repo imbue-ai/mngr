@@ -170,6 +170,43 @@ def test_run_on_host_allows_distinct_hosts_concurrently() -> None:
     assert tracker["max_live"] == 2  # ran in parallel on their separate hosts
 
 
+def _wait_until(predicate: Any, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_maintainer_registers_wake_and_warms_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The maintainer must register its wake with the registry and warm "on" agents
+    # right away (immediate first tick), not after a full keepalive interval.
+    monkeypatch.setattr(cp, "_KEEPALIVE_INTERVAL_SECONDS", 100.0)  # so any tick is immediate/wake-driven
+    tracker: dict[str, Any] = {"lock": threading.Lock(), "live": 0, "max_live": 0, "pinged": set()}
+    captured: list[Any] = []
+    registry = cast(
+        Any,
+        SimpleNamespace(
+            snapshot=lambda: [{"name": "a", "state": "RUNNING"}],
+            set_on_agents_changed=lambda cb: captured.append(cb),
+        ),
+    )
+    pool = _pool()
+    _seed_handle(pool, "a", _RecordingHost("a", 0.0, tracker))
+    pool.start_maintainer(registry)
+    try:
+        assert _wait_until(lambda: "a" in tracker["pinged"])  # warmed without the 100s wait
+        assert captured == [pool._wake.set]  # registered its wake callback
+        # A change notification triggers another tick promptly.
+        with tracker["lock"]:
+            tracker["pinged"].clear()
+        captured[0]()  # simulate the registry firing on a new agent
+        assert _wait_until(lambda: "a" in tracker["pinged"])
+    finally:
+        pool.stop()
+
+
 def test_tick_warms_all_hosts_concurrently_despite_lag() -> None:
     # A slow host must not serialize the keepalive: two ~0.4s hosts warmed in
     # parallel finish in ~0.4s, not ~0.8s, and both get pinged.

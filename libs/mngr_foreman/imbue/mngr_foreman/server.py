@@ -551,9 +551,13 @@ def run_server(
     asset_dir = get_asset_dir(mngr_ctx)
     ensure_assets(asset_dir)
     registry = AgentRegistry(mngr_ctx)
-    registry.start()
     pool = ConnectionPool(mngr_ctx)
+    # Start the warm pool first so its change-callback is registered before the
+    # registry starts populating; then start the registry (observe + a background
+    # seed thread -- neither blocks). The port binds immediately below; the seed
+    # fills the list a few seconds later and wakes the pool to warm the "on" agents.
     pool.start_maintainer(registry)
+    registry.start()
     app = create_app(mngr_ctx, registry, pool, max_tool_output_chars, asset_dir=asset_dir)
     # threaded=True so SSE connections (one long-lived generator each) don't
     # block the list/message endpoints; use_reloader=False (single process).

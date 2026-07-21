@@ -1,18 +1,28 @@
-"""Live registry of mngr agents: seed via ``list_agents`` + follow ``mngr observe``.
+"""Live registry of mngr agents: fast in-process seed + follow ``mngr observe``.
 
 The registry holds the current ``dict[agent_id, AgentDetails]`` and fans changes
 out to per-connection subscriber queues (the SSE ``/api/agents/stream`` endpoint
-drains one). It is seeded once from a full ``list_agents`` snapshot, then kept
-live by an ``mngr observe --stream-events`` subprocess whose agents-stream lines
-we parse with ``parse_observe_event_line`` (AGENT_STATE / AGENTS_FULL_STATE /
-AGENT_REMOVED). The subprocess is run on the shared concurrency group, mirroring
-mngr's own observe-consumer pattern.
+drains one). It is kept live by an ``mngr observe --stream-events`` subprocess
+whose agents-stream lines we parse with ``parse_observe_event_line`` (AGENT_STATE
+/ AGENTS_FULL_STATE / AGENT_REMOVED). The subprocess is run on the shared
+concurrency group, mirroring mngr's own observe-consumer pattern.
+
+Crucially the initial ``list_agents`` seed runs on a *background thread*, not on
+the startup critical path: it used to run before the Flask port bound and could
+take 20-30s against slow/dead hosts. The port now binds immediately; the seed
+fills the map a few seconds later. We seed in-process (rather than just waiting
+for observe's own first snapshot) because observe is a *separate* ``mngr``
+subprocess that pays the same multi-second CLI cold-start before it can emit --
+the in-process seed populates the list far sooner. The seed merges without
+clobbering any observe entry that already landed (``setdefault``), and observe
+remains the source of truth for all live updates thereafter.
 """
 
 from __future__ import annotations
 
 import queue
 import threading
+from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Final
 
@@ -44,33 +54,67 @@ class AgentRegistry:
         self._lock = threading.Lock()
         self._agents: dict[str, AgentDetails] = {}
         self._subscribers: set[queue.Queue[dict]] = set()
+        # Fired whenever the known-agent set may have changed (full-state snapshot
+        # or per-agent upsert) so the warm pool can warm new "on" agents promptly
+        # instead of waiting out its keepalive interval.
+        self._on_agents_changed: Callable[[], None] | None = None
         self._started = False
 
     # --- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
-        """Seed the snapshot and start the observe subprocess (idempotent)."""
+        """Start observe (live) and kick the seed on a background thread (idempotent).
+
+        Neither call blocks: ``app.run()`` binds the port immediately after this
+        returns. The seed used to run here synchronously and could take 20-30s
+        against slow/dead hosts, delaying the bind that whole time.
+        """
         if self._started:
             return
         self._started = True
-        self._seed_snapshot()
         self._start_observe_stream()
+        self._start_background_seed()
+
+    def _start_background_seed(self) -> None:
+        thread = threading.Thread(target=self._seed_snapshot, name="foreman-registry-seed", daemon=True)
+        thread.start()
 
     def _seed_snapshot(self) -> None:
-        with self._lock_agents_reset() as sink:
-            try:
-                result = list_agents(
-                    self._mngr_ctx,
-                    is_streaming=False,
-                    error_behavior=ErrorBehavior.CONTINUE,
-                    reset_caches=True,
-                )
-            except Exception as e:  # noqa: BLE001 - a bad provider must not sink the whole server
-                logger.warning("Initial agent snapshot failed (starting empty): {}", e)
-                return
+        """One-shot in-process ``list_agents`` to fill the map before observe emits.
+
+        Runs off the critical path (background thread). Merges with ``setdefault``
+        so any observe entry that already arrived wins; a bad provider degrades to
+        an empty seed rather than sinking the server.
+        """
+        try:
+            result = list_agents(
+                self._mngr_ctx,
+                is_streaming=False,
+                error_behavior=ErrorBehavior.CONTINUE,
+                reset_caches=True,
+            )
+        except Exception as e:  # noqa: BLE001 - a bad provider must not sink the seed thread
+            logger.debug("Background agent seed failed (observe will populate): {}", e)
+            return
+        added = 0
+        with self._lock:
             for agent in result.agents:
-                sink[str(agent.id)] = agent
-            logger.info("Seeded foreman registry with {} agent(s)", len(sink))
+                if str(agent.id) not in self._agents:
+                    self._agents[str(agent.id)] = agent
+                    added += 1
+        if added:
+            logger.info("Background-seeded {} agent(s) before observe caught up", added)
+            self._broadcast({"type": "snapshot", "agents": self.snapshot()})
+            self._notify_agents_changed()
+
+    def set_on_agents_changed(self, callback: Callable[[], None]) -> None:
+        """Register a callback fired when the known-agent set may have changed."""
+        self._on_agents_changed = callback
+
+    def _notify_agents_changed(self) -> None:
+        callback = self._on_agents_changed
+        if callback is not None:
+            callback()
 
     def _start_observe_stream(self) -> None:
         self._mngr_ctx.concurrency_group.run_process_in_background(
@@ -106,11 +150,13 @@ class AgentRegistry:
         with self._lock:
             self._agents = {str(a.id): a for a in agents}
         self._broadcast({"type": "snapshot", "agents": self.snapshot()})
+        self._notify_agents_changed()
 
     def _apply_upsert(self, agent: AgentDetails) -> None:
         with self._lock:
             self._agents[str(agent.id)] = agent
         self._broadcast({"type": "upsert", "agent": _agent_to_card(agent)})
+        self._notify_agents_changed()
 
     def _apply_remove(self, agent_id: str) -> None:
         with self._lock:
@@ -155,25 +201,6 @@ class AgentRegistry:
                 logger.debug("Dropping a slow foreman list-stream subscriber (queue full)")
                 with self._lock:
                     self._subscribers.discard(q)
-
-    # --- helpers ---------------------------------------------------------
-
-    class _AgentsReset:
-        """Context manager: build a fresh agent map, then swap it in atomically."""
-
-        def __init__(self, registry: "AgentRegistry") -> None:
-            self._registry = registry
-            self._sink: dict[str, AgentDetails] = {}
-
-        def __enter__(self) -> dict[str, AgentDetails]:
-            return self._sink
-
-        def __exit__(self, *exc: object) -> None:
-            with self._registry._lock:
-                self._registry._agents = self._sink
-
-    def _lock_agents_reset(self) -> "AgentRegistry._AgentsReset":
-        return AgentRegistry._AgentsReset(self)
 
 
 def _sort_key(agent: AgentDetails) -> tuple:
