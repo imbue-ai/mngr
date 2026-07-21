@@ -201,6 +201,20 @@ def _framework_label_and_detail(raw: dict[str, Any], text: str) -> tuple[str, st
     re-deriving in JS: the ``<command-name>`` / ``<local-command-stdout>`` wrappers
     Claude Code emits, and the ``isMeta`` flag it sets on injected messages.
     """
+    stripped = text.strip()
+    # A control marker Claude writes into a user record when a turn is interrupted
+    # (the bare "[Request interrupted by user]" and the "...for tool use" variant)
+    # -> a chip, never a user bubble.
+    if stripped.startswith("[Request interrupted by user"):
+        return "interrupted", stripped
+    # Framework wrappers injected AROUND a user record (subagent/task notices,
+    # ephemeral system reminders). Match only when the record STARTS with the tag,
+    # so a user merely mentioning the tag in prose isn't swallowed.
+    for _wrap_tag in ("system-reminder", "task-notification", "task_notification"):
+        if stripped.startswith("<" + _wrap_tag + ">"):
+            m = re.match(r"<" + _wrap_tag + r">\s*(.*?)\s*(?:</" + _wrap_tag + r">)?\s*\Z", stripped, re.DOTALL)
+            inner = (m.group(1).strip() if m else "")
+            return _wrap_tag.replace("_", "-"), (inner or _wrap_tag)
     # A slash-command invocation: "<command-name>login</command-name>...".
     if _COMMAND_NAME_PATTERN.search(text):
         command = _normalize_slash_command(text)
@@ -459,7 +473,10 @@ def _parse_user_message(
             paste_images = _extract_images_from_content(content, f"{uuid}-u")
             # Fully hidden: the interrupt sentinel and Claude Code's resume marker
             # (its own UI hides the latter, so we do too).
-            is_hidden = stripped == _INTERRUPT_SENTINEL_TEXT or _is_resume_continuation_marker(raw)
+            # The interrupt marker is no longer hidden -- it now renders as an
+            # "interrupted" chip (see _framework_label_and_detail). Only Claude
+            # Code's synthetic resume-continuation marker stays fully hidden.
+            is_hidden = _is_resume_continuation_marker(raw)
             if (stripped or paste_images) and not is_hidden:
                 # Framework detection applies only to text-bearing messages.
                 framework = _framework_label_and_detail(raw, raw_text) if stripped else None

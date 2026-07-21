@@ -127,13 +127,30 @@ def test_meta_and_resume_markers_dropped() -> None:
             timestamp="t2",
             message={"model": "<synthetic>", "content": [{"type": "text", "text": "No response requested."}]},
         ),
-        # interrupt sentinel -> dropped
-        _line(type="user", uuid="u2", timestamp="t3", message={"content": "[Request interrupted by user]"}),
         # a real message survives
         _line(type="user", uuid="u3", timestamp="t4", message={"content": "real"}),
     ]
     events = parse_claude_session_lines(lines)
     assert [e.get("content") for e in events] == ["real"]
+
+
+def test_interrupt_and_wrappers_render_as_framework_chips() -> None:
+    lines = [
+        _line(type="user", uuid="i1", timestamp="t1", message={"content": "[Request interrupted by user]"}),
+        _line(type="user", uuid="i2", timestamp="t2", message={"content": "[Request interrupted by user for tool use]"}),
+        _line(type="user", uuid="i3", timestamp="t3", message={"content": "<task_notification>agent X finished</task_notification>"}),
+        _line(type="user", uuid="i4", timestamp="t4", message={"content": "<system-reminder>be concise</system-reminder>"}),
+        _line(type="user", uuid="i5", timestamp="t5", message={"content": "here is 1. my real message"}),
+    ]
+    events = parse_claude_session_lines(lines)
+    kinds = [(e["type"], e.get("label") or e.get("content")) for e in events]
+    assert kinds == [
+        ("framework_message", "interrupted"),
+        ("framework_message", "interrupted"),
+        ("framework_message", "task-notification"),
+        ("framework_message", "system-reminder"),
+        ("user_message", "here is 1. my real message"),  # a real message with an inline number is NOT chipped
+    ]
 
 
 def test_slash_command_invocation_is_framework() -> None:
