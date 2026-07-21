@@ -142,6 +142,19 @@ class LockNotHeldError(HostError):
     """Raised when attempting to use a lock that is not held."""
 
 
+class LockLostError(HostError):
+    """Raised when a held cooperative host lock was lost and could not be safely recovered.
+
+    A remote cooperative lock is bound to SSH connection liveness. If the
+    connection drops mid-critical-section the flock silently releases; on
+    reconnect we re-acquire and verify that no other actor acquired the lock in
+    the interval. When another actor did intervene (or the lock cannot be
+    re-established), we raise this instead of silently continuing unlocked.
+    As a MngrError subclass it is already isolated per-host by callers that
+    catch MngrError (e.g. the mngr_mapreduce launch loop).
+    """
+
+
 class AgentError(MngrError):
     """Base class for agent-related errors.
 

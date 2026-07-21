@@ -4,6 +4,72 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-18
+
+### Added
+
+- Added: `scripts/current_branch.sh` — shared jj-robust current-branch helper reused by `just default-workspace-template-worktree`, `just sync-vendor-mngr`, `just minds-start`, and the Claude Code status line, replacing open-coded `git rev-parse --abbrev-ref HEAD` (which yields `HEAD` under jj colocated checkouts).
+
+### Changed
+
+- Changed: `minds-dev-workflow` skill's first-time bootstrap now activates with `--create --deploy` (was `--create`, which failed the documented `minds env deploy` one-liner), spells out the `vault login` + `~/.modal.toml` prerequisites, and Quick start points to the new `apps/minds/docs/dev-setup.md`.
+
+### Fixed
+
+- Fixed: `just default-workspace-template-worktree` no longer fails with `fatal: 'HEAD' is not a valid branch name` under jj colocated checkouts (falls back to jj's nearest bookmark to `@` when git HEAD is detached).
+- Fixed: `just minds-start` now fails fast with an actionable message when `rsync` is Apple's openrsync (recent macOS `/usr/bin/rsync`, which lacks the `--filter=':- .gitignore'` GNU feature the vendor/mngr sync needs), and its "no minds env activated" error suggests the correct env name form `dev-<user>` (was `<user>-dev`, which the env-name regex rejects).
+
+## 2026-07-16
+
+### Added
+
+- Added: `uv.lock` pins `urwid-readline`, a new dependency the kanpan board uses for readline-style editing in its agent-reply input.
+
+### Changed
+
+- Changed: `ci.yml`'s `test-minds-release` job installs `openssh-server` and sets `MNGR_LATCHKEY_E2E_TESTS=1` before the plain-minds-release step, opting in the new `apps/minds/test_latchkey_e2e.py` release test (which runs a throwaway root sshd on the runner to fake a VPS outer host; gated behind an explicit opt-in that only this throwaway-runner job sets).
+
+## 2026-07-15
+
+### Added
+
+- Added: `specs/workspace-sync/spec.md` — design record for end-to-end-encrypted cross-device sync of workspace metadata and secrets (workspace records on the connector, per-account DEKs wrapped by the master password, metadata-only tier for empty passwords, and the one-shot migration off the legacy local files). Plus `specs/workspace-sync/remote-access.md` (how synced SSH material is materialized so cloud workspaces are fully accessible from any unlocked installation) and the planning blueprint at `blueprint/remote-workspace-ssh-access/`.
+
+### Changed
+
+- Changed: `test-minds-snapshot` CI job (on `run_minds_release_tests` runs) now resolves the per-run CI env's coordinates and SuperTokens admin secrets and forwards them into the offload sandbox as `MINDS_SYNC_E2E_*` env vars so the new workspace-sync e2e tests can target the real connector.
+
+## 2026-07-14
+
+### Added
+
+- Added: `just default-workspace-template-worktree` (short alias `just dwt-worktree`) creates an independent default-workspace-template checkout at `.external_worktrees/default-workspace-template` on the current mngr branch, needing no configuration. Errors if a checkout is already there or if the branch already exists on default-workspace-template. Optional `DEFAULT_WORKSPACE_TEMPLATE_DIR` (from a gitignored `apps/minds/.env` or shell) accelerates the clone via `git clone --reference-if-able --dissociate`. Removes the hardcoded `~/project/default-workspace-template` guidance elsewhere: the `minds-start` recipe and `minds-dev-workflow` skill point at the new recipe, and `bake-slice-dev` resolves its workspace dir from the arg, else `DEFAULT_WORKSPACE_TEMPLATE_DIR`, else the `.external_worktrees/default-workspace-template` checkout.
+- Added: `.mngr/settings.toml` copies the gitignored `apps/minds/.env` into each mngr agent worktree (via `work_dir_extra_paths`), so agents inherit the operator's `DEFAULT_WORKSPACE_TEMPLATE_DIR` speed hint. Skipped silently when the file is absent.
+- Added: Portable-shell section in `style_guide.md` — commands passed to a host's `execute_*` methods run under the host's own userland (BSD on macOS local, GNU on Linux remotes), with validated portable forms for the cases mngr has hit: `du -sk` over `du -sb`, `stat -c … || stat -f …`, a forward scan over `tac`/`tail -r`, and a perl `alarm` form (with its two pitfalls) for bounding a sub-command where `timeout(1)` is unavailable.
+- Added: Blueprints for `electron-log-and-crash-page/`, `observe-pid-watch/`, `dockview-named-layouts/`, `robust-message-delivery/`, and `minds-inspirations/`.
+
+### Changed
+
+- Changed: The `mngr` dev shim (`scripts/mngr`) now runs `uv run --all-packages`, so pulling a commit that adds a dependency to an mngr plugin no longer breaks the `mngr` command until `uv sync --all-packages` is run by hand. Plugins are editable workspace installs, so a previously-registered entry point survived across pulls while a newly-declared dependency stayed missing — breaking *every* subcommand (since mngr imports every entry point at startup), not just the plugin's own. No measurable startup cost when the venv is already up to date.
+- Changed: Bumped the pinned Claude Code CLI version from 2.1.160 to 2.1.207 in CI workflows (`release-tests.yml`, `tmr-setup` action) and the minds e2e snapshot script, matching the new workspace pin that supports Claude Fable 5.
+- Changed: Added `claude-fable-5` with inline pricing ($10 / $50 per 1M input / output tokens, cache write 1.25e-5, cache read 1e-6) to the repo-root local-dev LiteLLM proxy config (`litellm_proxy/config.yaml`), kept in sync with `apps/modal_litellm/app.py` by a drift test.
+
+### Fixed
+
+- Fixed: Corrected `specs/common-transcript-standard/spec.md` — marked it implemented (Tier 1 + Tier 2 landed in `90ef7a979`, 2026-06-15) and rewrote the Compatibility section, which wrongly claimed common transcripts are "continuously re-derived from the raw stream." They are not — `convert()` dedups by `event_id` and only appends, so assistant lines from a pre-`parts[]` emitter render `(no content)` under the `parts[]`-only reader. The flat-field reader fallback is a back-compat shim, not a fix for a broken emitter.
+
+## 2026-07-13
+
+### Added
+
+- Added: `blueprint/mngr-forward-http2/` — implementation plan for terminating TLS and negotiating HTTP/2 at the `mngr forward` proxy so the workspace UI is no longer capped by Chromium's per-origin HTTP/1.1 connection limit.
+- Added: `blueprint/imbue-cloud-sticky-agent-labels/plan-imbue-cloud-sticky-agent-labels.md` — design plan for the imbue_cloud "husk" fix (persisting and re-attaching last-known agent identity so a transiently-unreachable leased workspace keeps its labels instead of collapsing to a label-less stub). Implementation lands in `libs/mngr_imbue_cloud`.
+- Added: `blueprint/forward-services-cache/` — spec for the `mngr_forward` fast-first-load fix (persist the resolver's per-agent service map to disk and seed from it at startup so a restored remote-mind window resolves at ~3s instead of the measured ~50s cold-stream wait, with the live `mngr event` stream as the correction path). Implementation ships on the same branch under `libs/mngr_forward/`.
+
+### Changed
+
+- Changed: The minds e2e snapshot build (`scripts/snapshot_minds_e2e_state.py`) now pins the create default to runc via `MINDS_DOCKER_RUNTIME_DEFAULT=RUNC`. The Modal snapshot sandbox has no gVisor, and the per-create runtime feature otherwise defaults the Linux create form to runsc and stacks the `docker_runsc` template, so the build's workspace creation failed with "unknown or invalid runtime name: runsc". The previous `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` override could not fix this (an explicitly stacked template's docker_runtime outranks a provider-config env var in mngr's create-settings precedence) and was removed as redundant.
+
 ## 2026-07-11
 
 ### Added

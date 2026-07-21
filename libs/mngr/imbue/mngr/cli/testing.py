@@ -1,5 +1,6 @@
 import json
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -198,3 +199,24 @@ def create_agent_with_sample_transcript(
     )
     write_common_transcript_events(events_dir, events if events is not None else SAMPLE_TRANSCRIPT_EVENTS)
     return agent_id, events_dir
+
+
+def write_stub_claude_cli(bin_dir: Path, installed_plugin_ids: Sequence[str]) -> Path:
+    """Write a fast stub ``claude`` executable into ``bin_dir`` and return its path.
+
+    ``claude plugin list --json`` reports exactly ``installed_plugin_ids`` as
+    installed; every other invocation succeeds silently. Extras CLI tests
+    prepend ``bin_dir`` to PATH so the real command path is exercised end to
+    end (subprocess spawn, JSON parsing) without paying the real ``claude``
+    CLI's Node startup -- which on a contended CI sandbox can cross the global
+    10s offload pytest-timeout -- and without depending on whether (and with
+    which plugins) claude happens to be installed on the machine.
+    """
+    listing = json.dumps([{"id": plugin_id, "scope": "user", "enabled": True} for plugin_id in installed_plugin_ids])
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stub_path = bin_dir / "claude"
+    stub_path.write_text(
+        f'#!/usr/bin/env bash\nif [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n  echo \'{listing}\'\nfi\nexit 0\n'
+    )
+    stub_path.chmod(0o755)
+    return stub_path

@@ -75,6 +75,12 @@ from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.paths import secrets_file
 from imbue.minds.envs.primitives import DevEnvName
+from imbue.minds.envs.r2_cleanup import CloudflareR2Credentials
+from imbue.minds.envs.r2_cleanup import R2CleanupError
+from imbue.minds.envs.r2_cleanup import SuperTokensCoreCredentials
+from imbue.minds.envs.r2_cleanup import sweep_orphaned_r2_buckets
+from imbue.minds.envs.vault_reader import VaultPath
+from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
 from imbue.minds.utils.output import write_stdout_line
 from imbue.mngr.utils.testing import get_short_random_string
@@ -518,6 +524,14 @@ def _reconstruct_env_secrets_file(name: DevEnvName) -> None:
 
 
 _CI_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^ci-(\d{8}t\d{6}z)")
+# The bucket sweep reads both of its inputs from the ci tier's own Vault
+# prefix, which is all the cleanup job's Vault role (minds_ci_env_gh) is
+# scoped to. That works because the ci and dev tiers share one Cloudflare
+# account AND one SuperTokens core (the ci tier's SUPERTOKENS_CONNECTION_URI
+# is the same core the dev-* apps live on) -- so the ci secrets can see every
+# account that is able to create a bucket in that Cloudflare account, which is
+# exactly what the "no live owner" rule needs. See imbue.minds.envs.r2_cleanup.
+_CI_VAULT_PREFIX: Final[str] = "secrets/minds/ci"
 
 
 def _parse_ci_env_timestamp(stamp: str) -> datetime:
@@ -770,8 +784,51 @@ def sweep(max_age_hours: int) -> None:
     fired because its job hard-crashed / was cancelled). Run on its own CI
     runner, so it relies on the Modal-side enumeration rather than local
     state.
+
+    Then sweep the R2 buckets imbue-cloud backups provisioned for accounts
+    that no longer exist -- env destroy never deleted them, so every CI run
+    that exercised backups leaked one (see :mod:`imbue.minds.envs.r2_cleanup`
+    for why "no live owner" is the only safe rule on an account the dev tier
+    shares).
     """
     _sweep_stale_envs(max_age_hours=max_age_hours)
+    _sweep_orphaned_buckets()
+
+
+def _sweep_orphaned_buckets(*, is_dry_run: bool = False) -> tuple[str, ...]:
+    """Delete R2 buckets whose owning account is gone; never fails the caller."""
+    try:
+        cloudflare_secrets = read_vault_kv(VaultPath(f"{_CI_VAULT_PREFIX}/cloudflare"))
+        supertokens_secrets = read_vault_kv(VaultPath(f"{_CI_VAULT_PREFIX}/supertokens"))
+    except MindError as exc:
+        logger.error("R2 sweep skipped: could not read the Cloudflare / SuperTokens secrets: {}", exc)
+        return ()
+    try:
+        return sweep_orphaned_r2_buckets(
+            CloudflareR2Credentials(
+                account_id=cloudflare_secrets["CLOUDFLARE_ACCOUNT_ID"],
+                api_token=SecretStr(cloudflare_secrets["CLOUDFLARE_API_TOKEN"]),
+            ),
+            SuperTokensCoreCredentials(
+                connection_uri=supertokens_secrets["SUPERTOKENS_CONNECTION_URI"],
+                api_key=SecretStr(supertokens_secrets["SUPERTOKENS_API_KEY"]),
+            ),
+            is_dry_run=is_dry_run,
+        )
+    except (R2CleanupError, KeyError) as exc:
+        # The bucket sweep is a backstop; a failure here must not fail the
+        # cleanup job (whose primary duty is destroying leaked envs).
+        logger.error("R2 sweep failed: {}", exc)
+        return ()
+
+
+@cli.command(name="sweep-buckets")
+@click.option("--dry-run", is_flag=True, help="List the ownerless buckets without deleting anything.")
+def sweep_buckets(dry_run: bool) -> None:
+    """Sweep R2 buckets whose owning account no longer exists (backups leak them)."""
+    swept = _sweep_orphaned_buckets(is_dry_run=dry_run)
+    verb = "Would delete" if dry_run else "Deleted"
+    write_stdout_line(f"{verb} {len(swept)} ownerless R2 bucket(s).")
 
 
 @cli.command()

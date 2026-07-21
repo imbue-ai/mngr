@@ -8,13 +8,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: `secret_wrapping` module — pure envelope-encryption helpers (argon2id key derivation, AES-256-GCM DEK wrap/unwrap and secrets encrypt/decrypt) used by the minds workspace-sync feature. New dependencies: `argon2-cffi`, `cryptography`.
+- Added: `LogAttachmentGroup.base_dir` — a group with `base_dir` set sweeps that directory instead of the process's log folder, so error reports can attach log files that live outside it (e.g. minds attaching the detached `mngr latchkey forward` daemon's logs). A missing directory matches nothing.
+- Added: `get_or_create_anonymous_user_id` (persists a random id to a file, race-safe across processes) plus a required `user_id` argument on `setup_sentry` (attached to every event via `sentry_sdk.set_user`), so Sentry can report the number of distinct installs affected by each issue. No PII is sent; only the opaque id.
 - Added: Shared Sentry error-reporting library `imbue.imbue_common.sentry`, packaging the generic pieces previously duplicated in the minds backend: loguru-to-Sentry event/breadcrumb handlers, an unsigned-S3 attachment uploader, a per-exception rate limiter, an oversized-event (HTTP 413) transport, a `before_send` chain (automatic-reporting consent gate and interrupt/clean-shutdown filtering), manual bug-report submission, and a parameterized `setup_sentry`. Callers supply concrete `dsn` / `environment_name` / `s3_attachment_bucket` (plus service name, integrations, and log-attachment groups); no Sentry project/environment/bucket knowledge lives in the library. Adds `sentry-sdk`, `boto3`, and `traceback-with-variables` as `imbue-common` dependencies.
+- Added: `setup_sentry` accepts an `ignored_loggers` argument — glob patterns for stdlib logger names whose records must never become Sentry events or breadcrumbs. Sentry's default logging integration patches `logging.Logger.callHandlers` at the class level and captures a logger's ERROR records as events even when the logger has `propagate=False`, so callers that already route a noisy third-party logger's output elsewhere (e.g. into loguru) can now drop the raw records instead of flooding on already-handled noise.
 - Added: Shared `PREVENT_ASYNC_AWAIT` ratchet rule (`common_ratchets.py`) and `check_async_await` wrapper (`standard_ratchet_checks.py`) that power a per-project `test_prevent_async_await` ratchet freezing `async def` / `await` usage across the monorepo.
 - Added: `LowerCaseStrEnum` in `imbue.imbue_common.enums` — lowercase sibling of `UpperCaseStrEnum`, for enums whose values are an externally visible already-lowercase wire format.
 
 ### Changed
 
 - Changed: `find_bash_scripts_without_strict_mode` (the helper behind the repo-wide bash strict-mode ratchet) now skips `*.sh` files under `.minds/template/`. Those are declarative secret-schema templates sourced by the deploy tooling, not runnable scripts, so `set -euo pipefail` is meaningless for them.
+
+### Fixed
+
+- Fixed: `PREVENT_TRAILING_COMMENTS` ratchet no longer misfires on `PR #NNNN` references inside comment or docstring prose. The unanchored pattern treated the `#` of a PR number as a trailing comment; a negative lookbehind now exempts a `#` immediately preceded by `PR `, alongside the existing hex-color and `ty: ignore` exemptions.
+- Fixed: Inline-function ratchet (`find_inline_functions`) double-counted a function nested two or more levels deep — it walked every `FunctionDef` and descended into all descendants, emitting a doubly-nested function once per ancestor. Nested defs are now keyed by source position and counted once (across the monorepo only `apps/minds` sees a change, from 9 to 7).
 
 ## [v0.1.20] - 2026-06-13
 

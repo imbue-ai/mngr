@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -9,9 +11,9 @@ class LogAttachmentGroup(FrozenModel):
     Each calling process supplies its own set of groups describing its log
     layout (e.g. minds' flat ``~/.minds/logs`` directory, or the
     ``mngr latchkey forward`` plugin data dir). The Sentry error pipeline globs
-    ``glob`` under the process's log folder, keeps the ``max_file_count`` newest
-    matches, optionally gzip-compresses them, and uploads them under
-    ``group_name`` in the event's ``extra``.
+    ``glob`` under the process's log folder (or the group's ``base_dir``), keeps
+    the ``max_file_count`` newest matches, optionally gzip-compresses them, and
+    uploads them under ``group_name`` in the event's ``extra``.
     """
 
     group_name: str = Field(
@@ -26,4 +28,12 @@ class LogAttachmentGroup(FrozenModel):
             "uploaded once and the S3 key is cached and reused on later reports; mutable files (e.g. the live "
             "log) are re-uploaded every report."
         )
+    )
+    base_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Directory to glob under instead of the process's log folder, for attaching files that live "
+            "outside it (e.g. minds attaching the detached ``mngr latchkey forward`` daemon's logs). A "
+            "missing directory simply matches nothing."
+        ),
     )

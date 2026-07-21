@@ -33,6 +33,7 @@ from imbue.mngr.providers.docker.instance import LABEL_HOST_NAME
 from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import build_container_labels
+from imbue.mngr.providers.docker.volume import host_container_name
 from imbue.mngr.utils.testing import get_short_random_string
 
 pytestmark = [pytest.mark.acceptance]
@@ -51,21 +52,31 @@ def _create_test_container(
     host_id: HostId | None = None,
     name: str = "test-host",
     tags: dict[str, str] | None = None,
+    container_name: str | None = None,
 ) -> tuple[docker.models.containers.Container, HostId]:
     """Create a bare container with labels (no SSH setup).
 
-    The container name uses the provider's MNGR prefix so that
-    ``_list_containers`` (which filters by prefix) can find it during
-    cleanup.
+    By default the container name uses the provider's MNGR prefix (plus a
+    random suffix, so unrelated tests never collide on Docker's name
+    uniqueness) and the ``docker_provider`` fixture's prefix-based teardown
+    cleans it up.
+
+    Pass ``container_name`` to control the name exactly -- production
+    containers are always named ``<prefix><host-name>``, which the name-scoped
+    lookups depend on. A ``container_name`` outside the provider's prefix (e.g.
+    to stand in for another environment's container) is invisible to that
+    teardown, so the caller must remove such a container itself.
     """
     if host_id is None:
         host_id = HostId.generate()
     labels = build_container_labels(host_id, HostName(name), str(provider.name), tags)
     prefix = provider.mngr_ctx.config.prefix
-    container_name = f"{prefix}integ-{get_short_random_string()}"
+    resolved_container_name = (
+        container_name if container_name is not None else f"{prefix}integ-{get_short_random_string()}"
+    )
     container = provider._docker_client.containers.run(
         image=TEST_IMAGE,
-        name=container_name,
+        name=resolved_container_name,
         command=CONTAINER_ENTRYPOINT,
         detach=True,
         labels=labels,
@@ -128,9 +139,34 @@ def test_find_container_by_host_id_returns_none_for_unknown(docker_provider: Doc
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
 @pytest.mark.docker_sdk
 def test_find_container_by_name(docker_provider: DockerProviderInstance) -> None:
-    _create_test_container(docker_provider, name="discoverable")
+    # Production containers are always named by ``host_container_name``; the
+    # name-scoped lookup requires that shape, so mirror it here.
+    container_name = host_container_name(docker_provider.mngr_ctx.config.prefix, HostName("discoverable"))
+    _create_test_container(docker_provider, name="discoverable", container_name=container_name)
     found = docker_provider._find_container_by_name(HostName("discoverable"))
     assert found is not None
+
+
+@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
+def test_find_container_by_name_ignores_other_environments(docker_provider: DockerProviderInstance) -> None:
+    """A container from another env (same labels, different MNGR prefix) must not match.
+
+    The host-name/provider labels carry no environment discriminator, so two
+    environments that differ only in ``MNGR_PREFIX`` (e.g. two minds envs)
+    label their containers identically. Regression test for the create-time
+    collision check wrongly rejecting a host name that only existed in a
+    different environment's prefix namespace.
+    """
+    other_env_container_name = f"other-env-{get_short_random_string()}-shared-name"
+    container, _ = _create_test_container(docker_provider, name="shared-name", container_name=other_env_container_name)
+    try:
+        found = docker_provider._find_container_by_name(HostName("shared-name"))
+        assert found is None
+    finally:
+        # The prefix-mismatched name means ``_list_containers`` cleanup skips
+        # this container; remove it explicitly.
+        container.remove(force=True)
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)

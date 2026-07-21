@@ -809,3 +809,29 @@ def test_setup_command_context_without_plugin_params_has_empty_plugin_cli_params
 
     assert result.exit_code == 0
     assert captured_plugin_params == {}
+
+
+def test_setup_command_context_max_log_size_override_reaches_logging_config(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """An explicit max_log_size_mb override should reach the resolved LoggingConfig stored on ctx."""
+    captured_max_log_size_mb: int | None = None
+
+    @click.command("test-gc")
+    @add_common_options
+    @click.pass_context
+    def test_cmd(ctx: click.Context, **kwargs: Any) -> None:
+        nonlocal captured_max_log_size_mb
+        setup_command_context(
+            ctx=ctx,
+            command_name="gc",
+            command_class=CommonCliOptions,
+            max_log_size_mb=10,
+        )
+        captured_max_log_size_mb = ctx.meta["logging_config"].max_log_size_mb
+
+    runner = CliRunner()
+    result = runner.invoke(test_cmd, [], obj=plugin_manager, catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert captured_max_log_size_mb == 10

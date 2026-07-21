@@ -16,8 +16,10 @@ from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStateInconsistencyError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import HostInterface
@@ -356,6 +358,11 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
 
     If the agent is stopped and is_start_desired is True, starts the agent.
     If the agent is stopped and is_start_desired is False, raises UserInputError.
+
+    Purely additive: ``start_agents`` no-ops on an existing tmux session, so a DONE
+    agent's lingering session (and its pane content) is left exactly as it was.
+    Callers that need a DONE agent actually relaunched (e.g. to deliver a message)
+    must use ``revive_done_agent`` instead.
     """
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state not in (
@@ -376,6 +383,56 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
                 f"Agent '{agent.name}' is stopped and automatic starting is disabled. "
                 "Enable automatic agent starting to proceed."
             )
+
+
+def start_agents_locked(host: OnlineHostInterface, agent_ids: Sequence[AgentId], is_restart: bool) -> None:
+    """Start (optionally stop-then-start) agents under the host's cooperative lock.
+
+    The lock serializes the (re)launch against any other operation on this host --
+    e.g. the minds desktop client (remote, over SSH) racing a VM/container boot
+    hook (local), or a concurrent ``mngr gc``. The lock blocks indefinitely; gc
+    shares it, so a gc that tore down an agent is serialized before us, and the
+    state-dir check below makes a doomed (re)launch fail with a clear error instead
+    of trying to boot an agent gc already removed.
+
+    When ``is_restart`` is False the launch is purely additive: an already-running
+    agent's start is a no-op (the start command exits early when its tmux session
+    exists), so a racing loser cleanly does nothing. When True, agents are stopped
+    first -- destructive: each agent's lingering session and every window in it are
+    killed.
+    """
+    with host.lock_cooperatively(timeout_seconds=None):
+        for agent_id in agent_ids:
+            agent_state_dir = get_agent_state_dir_path(host.host_dir, agent_id)
+            if not host.path_exists(agent_state_dir):
+                raise AgentNotFoundOnHostError(agent_id, host.id)
+
+        if is_restart:
+            with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
+                host.stop_agents(agent_ids)
+
+        with log_span("Starting {} agent(s)", len(agent_ids)):
+            host.start_agents(agent_ids)
+
+
+def revive_done_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
+    """Tear down a DONE agent's lingering tmux session and relaunch it, waiting for readiness.
+
+    A DONE agent's main process has exited but tmux still holds the session open
+    (e.g. after a ctrl-c, a crash, or an OOM shed). ``start_agents``
+    short-circuits on an existing session, so truly reviving the agent requires
+    tearing the husk down first -- the same locked stop-then-start that
+    ``mngr start --restart`` performs. The teardown is destructive (it kills the
+    lingering session and every window in it), so callers that only need the
+    husk's pane content (e.g. ``capture``) must use ``ensure_agent_started``
+    instead, which leaves an existing session untouched.
+    """
+    logger.info("Agent {} is DONE with a lingering tmux session; restarting it", agent.name)
+    agent.wait_for_ready_signal(
+        is_creating=False,
+        start_action=lambda: start_agents_locked(host, [agent.id], is_restart=True),
+        timeout=agent.get_ready_timeout_seconds(),
+    )
 
 
 class AgentMatch(FrozenModel):

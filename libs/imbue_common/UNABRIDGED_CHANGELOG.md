@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-15
+
+`LogAttachmentGroup` gained an optional `base_dir` field: a group with `base_dir` set sweeps that directory instead of the process's log folder, so error reports can attach log files that live outside it (e.g. minds attaching the detached `mngr latchkey forward` daemon's logs). A missing directory simply matches nothing.
+
+Sentry error reports now carry a stable, randomly-generated anonymous user id (no PII) so Sentry can report the number of distinct installs affected by each issue. Added `get_or_create_anonymous_user_id` (persists a random id to a file, race-safe across processes) and a required `user_id` argument to `setup_sentry`, which is attached to every event via `sentry_sdk.set_user`. `send_default_pii` stays disabled; only this opaque id is sent.
+
+Added `secret_wrapping`: pure envelope-encryption helpers (argon2id key derivation, AES-256-GCM DEK wrap/unwrap and secrets encrypt/decrypt) used by the minds workspace-sync feature. New dependencies: `argon2-cffi`, `cryptography`.
+
+## 2026-07-14
+
+Fixed the inline-function ratchet (`find_inline_functions`) double-counting a function nested two or more levels deep. It walked every `FunctionDef` in a file, including nested ones, and descended into all of each one's descendants, so a function with two enclosing functions was emitted once per ancestor. The recorded count therefore overstated the real number of inline functions. Nested defs are now collected keyed by source position and counted once. Only projects that actually nest functions two deep are affected; across the whole monorepo the sole recorded count that changes is `apps/minds` (from 9 to 7 before any code change).
+
+## 2026-07-13
+
+The trailing-comments ratchet (PREVENT_TRAILING_COMMENTS) no longer misfires on `PR #NNNN` references inside comment or docstring prose. The unanchored pattern treated the `#` of a PR number as a trailing comment (even on comment-only lines, since a match can start mid-line); a negative lookbehind now exempts a `#` immediately preceded by `PR `, alongside the existing hex-color and `ty: ignore` exemptions.
+
+`setup_sentry` now accepts an `ignored_loggers` argument: glob patterns for stdlib logger names whose records must never become Sentry events or breadcrumbs. This is needed because Sentry's default logging integration patches `logging.Logger.callHandlers` at the class level, so it captures a logger's ERROR records as events even when that logger has `propagate=False`. Callers that already route a noisy third-party logger's output elsewhere (e.g. into loguru) can now pass those logger names so Sentry drops the raw records instead of flooding on already-handled noise.
+
 ## 2026-07-09
 
 - Added: `LowerCaseStrEnum` in `imbue.imbue_common.enums` -- the lowercase sibling of `UpperCaseStrEnum`, for enums whose values are an externally visible, already-lowercase wire format (first used by the pool bake / destroy outcome statuses in `mngr_imbue_cloud`).

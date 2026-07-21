@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.primitives import AgentId
 
 # Leased imbue_cloud hosts surface under a per-account provider instance named
@@ -238,7 +239,7 @@ def associate_workspace_account(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
 ) -> AccountSession:
-    """Bind ``agent_id`` to a signed-in account in the session store; wake the chrome SSE.
+    """Bind ``agent_id`` to a signed-in account by creating its workspace record; wake the chrome SSE.
 
     ``account_id`` may be either the account's user id *or* its email -- it is
     resolved against the currently signed-in accounts, and the canonical
@@ -247,10 +248,9 @@ def associate_workspace_account(
 
     Raises :class:`WorkspaceAssociationError`: 403 for a leased imbue_cloud host
     (permanently bound to its leasing account), 409 when no session store is
-    configured, or 404 when no signed-in account matches the given id/email.
-    Validating here is what stops a bogus value (e.g. an email for an account
-    that isn't signed in) from being written and silently garbage-collected
-    later -- the caller gets a real error instead of a false success.
+    configured, 404 when no signed-in account matches the given id/email, or
+    502 when the record push fails (association requires connectivity -- the
+    record is the association, and it lives on the connector).
     """
     if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
         raise WorkspaceAssociationError("Cannot change the account association of a host leased from imbue_cloud", 403)
@@ -265,7 +265,10 @@ def associate_workspace_account(
             f"No signed-in account matches {account_id!r}; pass the id or email of a signed-in account.",
             404,
         )
-    session_store.associate_workspace(matched.user_id, str(agent_id))
+    try:
+        session_store.associate_workspace(matched.user_id, str(agent_id), backend_resolver)
+    except WorkspaceSyncError as exc:
+        raise WorkspaceAssociationError(f"Could not associate the workspace: {exc}", 502) from exc
     # Wake the chrome SSE so the tile picks up its new 'account' field
     # immediately rather than at the next discovery heartbeat.
     if isinstance(backend_resolver, MngrCliBackendResolver):
@@ -282,8 +285,9 @@ def disassociate_workspace_account(
     """Unbind ``agent_id`` from its account and tear down its Cloudflare tunnel.
 
     A no-op if no session store is configured or the workspace has no associated
-    account. Raises :class:`WorkspaceAssociationError` (403) for a leased
-    imbue_cloud host.
+    account. Raises :class:`WorkspaceAssociationError`: 403 for a leased
+    imbue_cloud host, 502 when the record removal fails (disassociation
+    requires connectivity).
     """
     if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
         raise WorkspaceAssociationError("Cannot disassociate a host leased from imbue_cloud", 403)
@@ -303,6 +307,9 @@ def disassociate_workspace_account(
                 clear_tunnel_token_from_agent(agent_id, imbue_cloud_cli.mngr_caller)
         except ImbueCloudCliError as exc:
             logger.warning("Failed to delete tunnel during disassociation: {}", exc)
-    session_store.disassociate_workspace(str(account.user_id), str(agent_id))
+    try:
+        session_store.disassociate_workspace(str(account.user_id), str(agent_id))
+    except WorkspaceSyncError as exc:
+        raise WorkspaceAssociationError(f"Could not disassociate the workspace: {exc}", 502) from exc
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.notify_change()

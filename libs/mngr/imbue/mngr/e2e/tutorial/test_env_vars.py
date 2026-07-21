@@ -8,9 +8,11 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# The create plus the follow-up `mngr exec` exceed the default 10s per-test
+# timeout, so override it (mirrors test_create_with_pass_env).
+@pytest.mark.timeout(180)
 def test_create_with_env_vars(e2e: E2eSession) -> None:
     """Tutorial block:
         # set environment variables for the agent at creation time
@@ -32,6 +34,7 @@ def test_create_with_env_vars(e2e: E2eSession) -> None:
     env_result = e2e.run(
         "mngr exec my-task 'printenv DEBUG LOG_LEVEL'",
         comment="confirm the agent received the env vars",
+        timeout=120.0,
     )
     expect(env_result).to_succeed()
     expect(env_result.stdout).to_contain("true")
@@ -41,6 +44,11 @@ def test_create_with_env_vars(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# Creating a (local) command agent -- agent-state setup, git worktree, tmux
+# and command-agent startup -- takes longer than the default 10s per-test
+# timeout, so override it (mirrors test_control_mngr_via_env, another
+# local-provider create).
+@pytest.mark.timeout(120)
 def test_create_with_env_file(e2e: E2eSession) -> None:
     """Tutorial block:
         # load environment variables from a file (recommended for sensitive values, eg, secrets/api keys/tokens/etc)
@@ -77,6 +85,10 @@ def test_create_with_env_file(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The rejected create plus the follow-up `mngr list` each pay mngr's startup
+# cost and together exceed the default 10s per-test timeout, so override it
+# (mirrors test_control_mngr_via_env, which also does create + list).
+@pytest.mark.timeout(120)
 def test_create_with_missing_env_file_is_rejected(e2e: E2eSession) -> None:
     """Tutorial block:
         # load environment variables from a file (recommended for sensitive values, eg, secrets/api keys/tokens/etc)
@@ -105,7 +117,6 @@ def test_create_with_missing_env_file_is_rejected(e2e: E2eSession) -> None:
     assert not any(a["name"] == "my-task" for a in agents), f"Expected no 'my-task' agent, got: {agents}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -141,7 +152,6 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
     expect(env_result.stdout).to_contain("sk-ant-test")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -204,12 +214,30 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
             timeout=240.0,
         )
     ).to_succeed()
+    # Locate the agent's modal host. Scoping the list to the modal provider keeps
+    # the unavailable ``aws`` provider (enabled by default, but without
+    # credentials here) from aborting a full cross-provider discovery scan.
+    list_result = e2e.run(
+        "mngr list --provider modal --format json",
+        comment="locate the modal host to exec against",
+        timeout=120.0,
+    )
+    expect(list_result).to_succeed()
+    modal_agents = json.loads(list_result.stdout)["agents"]
+    assert len(modal_agents) == 1, f"Expected exactly one modal agent named 'my-task', got: {modal_agents}"
+    host_name = modal_agents[0]["host"]["name"]
+
     # Verify the host-level env vars actually propagated to the host: a command
     # exec'd on the agent's host should see them (they are sourced for every
     # agent on the host, which is the whole point of --pass-host-env). We assert
     # the var is present without ever printing its (secret) value.
+    #
+    # The exec is addressed as ``my-task@<host>.modal`` (rather than a bare
+    # ``my-task``) so exec's own discovery is scoped to the modal provider,
+    # mirroring the create's ``--provider modal``; a bare name would trigger the
+    # same aws-breaking full scan.
     host_env_check = e2e.run(
-        'mngr exec my-task \'test -n "$MODAL_TOKEN_ID" && test -n "$MODAL_TOKEN_SECRET" && echo HOST_ENV_PRESENT\'',
+        f'mngr exec my-task@{host_name}.modal \'test -n "$MODAL_TOKEN_ID" && test -n "$MODAL_TOKEN_SECRET" && echo HOST_ENV_PRESENT\'',
         comment="confirm host-level env vars are visible to agents on the host",
         timeout=120.0,
     )
@@ -217,12 +245,13 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
     expect(host_env_check.stdout).to_contain("HOST_ENV_PRESENT")
 
 
-# NOTE: no @pytest.mark.modal here. Unlike the sibling tests (which use the
-# default provider and therefore query Modal during host discovery), this test
-# pins the create provider to "local" via MNGR__COMMANDS__CREATE__PROVIDER, so
-# Modal is never invoked and the resource guard would flag the mark as
+# NOTE: no @pytest.mark.modal or @pytest.mark.rsync here. Unlike the sibling
+# tests (which use the default provider and therefore query Modal during host
+# discovery and rsync the workspace to a remote host), this test pins the create
+# provider to "local" via MNGR__COMMANDS__CREATE__PROVIDER. Modal is never
+# invoked and, because a local agent's workspace is on the same machine, no
+# rsync happens either -- so the resource guard would flag both marks as
 # superfluous.
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # The create plus the follow-up `mngr list` exceed the default 10s per-test

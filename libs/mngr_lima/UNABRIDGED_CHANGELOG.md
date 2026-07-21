@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Fixed: a `limactl` invocation that fails at runtime (e.g. crashes at startup) is now reported correctly instead of leaking an opaque error. Every `limactl` wrapper helper (`list`, `stop`, `delete`, `disk create`, `disk delete`, `show-ssh`, `shell`, `start`, and `--version`) funnels through a single runner that translates the process runner's raw `ProcessError` into the intended `LimaCommandError` -- previously each helper disabled the runner's exit-code check and re-tested the return code by hand, which was dead code because the runner had already raised, so the error slipped past callers that catch `LimaCommandError`. Consolidating the translation makes it impossible for a new helper to reintroduce that leak, and the wrapped error now preserves the failed command's stdout as well as its stderr. As part of this, `limactl shell` (used to wait for cloud-init during host creation) now raises `LimaCommandError` when limactl itself cannot run the command, rather than silently returning a non-zero exit code that the caller ignored -- so a broken VM fails host creation with a clear error instead of proceeding.
+
+Changed: when `limactl` is installed and new enough but an invocation fails at runtime, Lima discovery now reports the provider as unavailable (`Provider 'lima' is not available: ...`), matching how other providers report an unreachable backend, and gets the same retry/backoff -- instead of silently marking every Lima host offline. A genuinely absent or too-old `limactl` still degrades gracefully to a local, all-offline host view.
+
+## 2026-07-13
+
+Creating a Lima VM no longer fails with a `UNIX_PATH_MAX=104 characters` error when your home path and mngr prefix are long. Lima names each VM's SSH socket after the instance name and rejects names that push that socket path over the OS limit; the instance name (`<prefix>host-<32-char id>`) could exceed it for longer usernames on longer-prefixed environments (e.g. `minds-staging-`). The random id portion is now shortened just enough to keep the socket path within the limit, leaving the name unchanged when it already fits. If the prefix plus `LIMA_HOME` leave no room at all, creation now fails early with a clear message instead of a cryptic limactl fatal error.
+
 ## 2026-07-10
 
 Fixed a Lima workspace-creation failure that surfaced as a confusing `SSH host key error (Host key for 127.0.0.1 does not match.)`.

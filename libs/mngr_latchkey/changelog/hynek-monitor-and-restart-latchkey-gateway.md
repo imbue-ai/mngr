@@ -1,3 +1,0 @@
-`mngr latchkey forward` now supervises the shared `latchkey gateway` subprocess: a background health check detects when the gateway has died mid-session and respawns it on its original port (so agent reverse tunnels and the published gateway port stay valid across the restart). Previously a crashed gateway went unnoticed -- discovery and reverse tunnels stayed up, so nothing restarted it -- and agents could no longer reach the gateway until the whole app was restarted.
-
-`Latchkey.is_gateway_running` and `Latchkey.start_gateway` are now liveness-aware: they check the gateway subprocess's actual status (via `poll()`) rather than merely whether a record is tracked, so a dead gateway reads as not-running and is respawned instead of returning a stale port.

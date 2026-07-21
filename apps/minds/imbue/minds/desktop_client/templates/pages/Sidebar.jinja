@@ -39,10 +39,9 @@
 {% endset %}
 {% set _menu_left = trigger_x + offset_x %}
 {% set _menu_top = trigger_y + trigger_h + offset_y %}
-<Base title="Main Menu"
-      body_class="font-sans antialiased bg-transparent"
-      body_attrs={{ _body_attrs }}
-      scripts={{ _scripts }}>
+<OverlaySurface title="Main Menu"
+                body_attrs={{ _body_attrs }}
+                scripts={{ _scripts }}>
   <div id="sidebar-backdrop" class="fixed inset-0">
     <div id="sidebar-menu"
          style="left:{{ _menu_left }}px; top:{{ _menu_top }}px;"
@@ -51,4 +50,4 @@
       <SidebarBottom />
     </div>
   </div>
-</Base>
+</OverlaySurface>

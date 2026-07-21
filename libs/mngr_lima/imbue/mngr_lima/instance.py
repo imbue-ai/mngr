@@ -15,7 +15,6 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
@@ -72,6 +71,7 @@ from imbue.mngr_lima.constants import DEFAULT_LIMA_DISK_GIB
 from imbue.mngr_lima.constants import DEFAULT_LIMA_MEMORY_GIB
 from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.errors import LimaCommandError
+from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.errors import LimaHostCreationError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
@@ -412,33 +412,37 @@ sudo poweroff
         """Best-effort teardown of a half-created Lima VM and its btrfs disk.
 
         Tolerates already-absent resources so it is safe to call from a `finally`
-        on any failure path. Also swallows concurrency-group ``ProcessError``s
-        (e.g. a limactl timeout) so a slow cleanup never masks the original
+        on any failure path. Also swallows any limactl failure (e.g. a timeout,
+        surfaced as LimaCommandError) so a slow cleanup never masks the original
         creation failure that triggered it.
         """
         try:
             limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
-        except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+        except (LimaCommandError, OSError) as cleanup_err:
             logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
         if host_data_disk_name is not None:
             try:
                 limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
-            except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+            except (LimaCommandError, OSError) as cleanup_err:
                 logger.debug(
                     "Failed to clean up Lima disk {} during error recovery: {}", host_data_disk_name, cleanup_err
                 )
 
     def _wait_for_cloud_init(self, instance_name: str) -> None:
-        """Wait for cloud-init to complete inside the VM."""
+        """Wait for cloud-init to complete inside the VM.
+
+        The command swallows its own failure (``|| true``) so a VM without
+        cloud-init is tolerated; a LimaCommandError here therefore means limactl
+        could not run the command at all (e.g. it cannot reach the instance),
+        which aborts creation via the caller's error handling.
+        """
         with log_span("Waiting for cloud-init to complete in {}", instance_name):
-            exit_code, stdout, stderr = limactl_shell(
+            limactl_shell(
                 self.mngr_ctx.concurrency_group,
                 instance_name,
                 "cloud-init status --wait 2>/dev/null || true",
                 timeout=CLOUD_INIT_TIMEOUT_SECONDS,
             )
-            if exit_code != 0:
-                logger.debug("cloud-init wait returned non-zero (may not be installed): {}", stderr)
 
     # =========================================================================
     # Run-as-root SSH helpers
@@ -1056,9 +1060,14 @@ sudo poweroff
     ) -> list[DiscoveredHost]:
         """Discover all Lima hosts managed by this provider instance.
 
-        If limactl is not installed, returns host records from local state only
-        (all marked as offline). This allows discovery to succeed gracefully
-        in environments without Lima.
+        If limactl is not installed (or too old), returns host records from local
+        state only (all marked as offline). This allows discovery to succeed
+        gracefully in environments without Lima.
+
+        If limactl *is* installed and correctly versioned but the invocation
+        fails at runtime (e.g. it crashes at startup), raises
+        LimaCommandUnavailableError -- no Lima host can be enumerated, so the
+        provider is reported unavailable rather than silently all-offline.
         """
         prefix = self.mngr_ctx.config.prefix
 
@@ -1067,10 +1076,17 @@ sudo poweroff
         try:
             self._ensure_lima_available()
             instances = limactl_list(cg)
-        except (LimaCommandError, OSError) as e:
-            logger.warning("Failed to list Lima instances: {}", e)
         except ProviderUnavailableError as e:
+            # limactl is absent or too old: degrade to local host records (all
+            # marked offline) so discovery still succeeds where Lima isn't set up.
             logger.debug("Lima provider not available for discovery: {}", e)
+        except (LimaCommandError, OSError) as e:
+            # limactl is present and new enough but the invocation itself failed
+            # (e.g. it crashed before listing). No Lima host can be reached this
+            # cycle, so surface provider unavailability -- matching how other
+            # providers report an unreachable backend -- instead of reporting
+            # every host offline.
+            raise LimaCommandUnavailableError(self.name, f"limactl could not be run: {e}") from e
 
         # Build a map of instance_name -> status
         instance_status: dict[str, str] = {}

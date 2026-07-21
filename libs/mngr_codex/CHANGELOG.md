@@ -13,6 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: Codex agent lifecycle detection now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index`.
+- Changed: `mngr message` to a codex agent now confirms submission by polling the `active` marker (set by the `set_active_marker.sh` UserPromptSubmit hook) advancing past its pre-Enter state, instead of the tmux `wait-for` signal — which latched a signal fired with no waiter and could instantly false-confirm a later send. The marker exists on agents created by older mngr versions, so no reprovisioning is needed.
 
 ## [v0.1.4] - 2026-06-18
 

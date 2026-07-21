@@ -36,6 +36,7 @@ import pytest
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
@@ -176,3 +177,20 @@ def test_antigravity_agent_full_lifecycle(tmp_path: Path) -> None:
     transcript not decoded, resume/adopt not carrying conversation state forward).
     """
     run_agent_release_lifecycle(_AntigravityReleaseProfile(), tmp_path)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.flaky
+@pytest.mark.timeout(900)
+def test_antigravity_message_delivery_journey(tmp_path: Path) -> None:
+    """Drive the evidence-confirmed send pipeline through its racey delivery scenarios.
+
+    agy confirms sends via its ``active`` marker (maintained by the statusLine
+    on every busy sample), so this proves the marker-probe path: idle delivery,
+    send-while-busy, rapid sequential sends, and a long buffer-pasted message
+    -- each delivered exactly once. Marked flaky like the lifecycle test: agy
+    shares its infrastructure-level startup variance.
+    """
+    run_message_delivery_journey(_AntigravityReleaseProfile(), tmp_path)

@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 
 def test_is_share_ready_from_edge_response_true_for_access_login_redirect() -> None:
@@ -119,7 +120,14 @@ def test_disable_sharing_is_idempotent_when_service_already_absent(tmp_path: Pat
     )
     cli.add_account(user_id="u-1", email="owner@example.com")
     store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
-    store.associate_workspace("u-1", str(agent_id))
+    store.associate_created_workspace(
+        user_id="u-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
 
     disable_sharing(agent_id, ServiceName("web"), cli, store)
 

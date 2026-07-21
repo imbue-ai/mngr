@@ -24,6 +24,7 @@ from imbue.imbue_common.sentry.core import _make_automatic_reporting_gate
 from imbue.imbue_common.sentry.core import _register_ignored_loggers
 from imbue.imbue_common.sentry.core import add_extra_info_hook
 from imbue.imbue_common.sentry.core import fixup_release_id
+from imbue.imbue_common.sentry.core import get_or_create_anonymous_user_id
 from imbue.imbue_common.sentry.core import register_attachments_uploader
 from imbue.imbue_common.sentry.core import submit_manual_bug_report
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
@@ -45,6 +46,35 @@ def test_fixup_release_id_normalizes_release_candidates(release_id: str, expecte
     assert fixup_release_id(release_id) == expected
 
 
+def test_get_or_create_anonymous_user_id_creates_and_persists_a_hex_id(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    # A 32-char lowercase hex string (uuid4().hex), persisted verbatim to the file.
+    assert len(user_id) == 32 and all(char in "0123456789abcdef" for char in user_id)
+    assert id_file_path.read_text() == user_id
+
+
+def test_get_or_create_anonymous_user_id_is_stable_across_calls(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    first = get_or_create_anonymous_user_id(id_file_path)
+    second = get_or_create_anonymous_user_id(id_file_path)
+    assert first == second
+
+
+def test_get_or_create_anonymous_user_id_regenerates_a_malformed_file(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    id_file_path.write_text("not-a-valid-id")
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    assert len(user_id) == 32 and all(char in "0123456789abcdef" for char in user_id)
+    assert id_file_path.read_text() == user_id
+
+
+def test_get_or_create_anonymous_user_id_creates_parent_directory(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "nested" / "dir" / "anonymous_user_id"
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    assert id_file_path.read_text() == user_id
+
+
 def test_collect_external_attachments_groups_logs_by_configured_glob(tmp_path: Path) -> None:
     # Each configured group's glob must land in its own group and not cross-match.
     logs_folder = tmp_path / "logs"
@@ -64,6 +94,50 @@ def test_collect_external_attachments_groups_logs_by_configured_glob(tmp_path: P
     # one callback per upload: traceback + the two log files (the immutable rotated
     # file is cached only after its first upload, so it still produces a callback here).
     assert len(callbacks) == 3
+
+
+def test_collect_external_attachments_globs_group_base_dir_over_logs_folder(tmp_path: Path) -> None:
+    # A group with a base_dir sweeps that directory (even with no process log folder);
+    # groups without one keep sweeping the log folder. A missing base_dir matches nothing.
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    (logs_folder / "events.jsonl").write_text("live\n")
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    (external_dir / "daemon.log").write_text("daemon\n")
+    external_group = LogAttachmentGroup(
+        group_name="daemon_logs",
+        glob="*.log",
+        max_file_count=10,
+        is_compressed=True,
+        is_immutable=False,
+        base_dir=external_dir,
+    )
+    missing_dir_group = LogAttachmentGroup(
+        group_name="absent_logs",
+        glob="*.log",
+        max_file_count=10,
+        is_compressed=True,
+        is_immutable=False,
+        base_dir=tmp_path / "does-not-exist",
+    )
+
+    uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=(_LIVE_LOG_GROUP, external_group, missing_dir_group))
+    try:
+        raise ValueError("boom")
+    except ValueError as exception:
+        groups, callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
+
+    assert set(groups) == {"", "live_logs", "daemon_logs"}
+    assert len(groups["daemon_logs"]) == 1
+    assert len(callbacks) == 3
+
+    # base_dir groups are swept even when the process has no log folder at all.
+    try:
+        raise ValueError("boom again")
+    except ValueError as exception:
+        groups, _callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=None)
+    assert set(groups) == {"", "daemon_logs"}
 
 
 def test_collect_external_attachments_without_logs_folder_only_uploads_traceback() -> None:
@@ -217,6 +291,36 @@ def test_add_extra_info_hook_collects_traceback_when_log_inclusion_enabled() -> 
     event: Event = {"extra": {}}
     _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: True)
     assert len(callbacks) == 1
+
+
+def test_scope_user_id_is_attached_to_events_even_with_send_default_pii_off() -> None:
+    # The feature relies on an explicitly-set anonymous user id being sent to Sentry even though
+    # send_default_pii is False (which only suppresses auto-collected PII like IP addresses). Verify
+    # the id set on the scope (exactly what setup_sentry does) lands on a captured event's user.
+    captured_events: list[Event] = []
+
+    class _CapturingTransport(Transport):
+        def capture_envelope(self, envelope: Envelope) -> None:
+            event = envelope.get_event()
+            if event is not None:
+                captured_events.append(event)
+
+    client = Client(
+        dsn="https://public@example.com/1",
+        transport=_CapturingTransport(),
+        default_integrations=False,
+        auto_enabling_integrations=False,
+        send_default_pii=False,
+    )
+    with isolation_scope() as scope:
+        scope.set_client(client)
+        scope.set_user({"id": "0123456789abcdef0123456789abcdef"})
+        sentry_sdk.capture_event({"message": "boom"})
+        client.flush()
+
+    assert len(captured_events) == 1
+    user = cast(dict, captured_events[0]["user"])
+    assert user["id"] == "0123456789abcdef0123456789abcdef"
 
 
 def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disabled() -> None:

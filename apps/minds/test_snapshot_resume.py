@@ -69,9 +69,6 @@ from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import get_short_random_string
 
-_START_DOCKERD_SCRIPT: Final[Path] = Path("/code/mngr/libs/mngr/imbue/mngr/resources/start-dockerd.sh")
-_DOCKERD_STARTUP_TIMEOUT_SECONDS: Final[int] = 180
-
 # The minds workspace container name prefix (mngr names docker hosts
 # ``{mngr_prefix}-{host_name}`` and minds defaults to the ``minds-staging``
 # prefix at snapshot time). The docker provider also keeps a singleton
@@ -250,38 +247,14 @@ def running_workspace() -> Iterator[_ResumedWorkspace]:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _ensure_dockerd_after_snapshot_resume() -> None:
-    """Bring ``dockerd`` back up in a snapshot-resumed sandbox.
+def _ensure_dockerd_after_snapshot_resume(snapshot_sandbox_dockerd: None) -> None:
+    """Every test in this module needs the snapshot sandbox's dockerd back up.
 
-    ``sandbox.snapshot_filesystem`` only captures the disk, not running
-    processes -- so a sandbox booted from the minds-workspace snapshot
-    has ``/var/lib/docker`` populated (with the stopped workspace
-    container's image layers + on-disk state) but no ``dockerd`` running.
-    Re-run the same script the snapshot itself used to bring dockerd up,
-    so subsequent ``docker`` invocations in these tests can talk to the
-    daemon.
-
-    Mirrors ``_ensure_dockerd_for_release`` in
-    ``libs/mngr/imbue/mngr/conftest.py`` but for our snapshot's script
-    location (the release image lives at ``/start-dockerd.sh``; the
-    snapshot tree puts the same script at its in-tree path).
+    The actual bring-up lives in the shared ``snapshot_sandbox_dockerd``
+    session fixture in ``conftest.py`` (also used by ``test_sync_e2e.py``);
+    this module-autouse wrapper preserves the original apply-to-all behavior
+    for the resume sanity tests.
     """
-    docker_info = subprocess.run(["docker", "info"], capture_output=True)
-    if docker_info.returncode == 0:
-        return
-
-    if not _START_DOCKERD_SCRIPT.is_file():
-        raise FileNotFoundError(
-            f"start-dockerd.sh not found at {_START_DOCKERD_SCRIPT}; this fixture is "
-            "only useful inside a sandbox booted from scripts/snapshot_minds_e2e_state.py."
-        )
-
-    subprocess.run(["chmod", "+x", str(_START_DOCKERD_SCRIPT)], check=True, timeout=5)
-    subprocess.run(
-        [str(_START_DOCKERD_SCRIPT)],
-        check=True,
-        timeout=_DOCKERD_STARTUP_TIMEOUT_SECONDS,
-    )
 
 
 # @pytest.mark.docker tells the host-side pytest resource guard that this
@@ -385,12 +358,19 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
     """After resume, the bootstrap re-registered the core services in applications.toml.
 
     The app-watcher / bootstrap respawns the standard services on restart and
-    each registers its port into ``runtime/applications.toml``; the core set
-    (system_interface, web, terminal) must be present.
+    each registers its port into ``runtime/applications.toml``; the always-on
+    core services (``system_interface`` and ``terminal``) must be present.
+
+    ``web`` was intentionally dropped: default-workspace-template removed the
+    blank example web service (its ``[program:web]`` supervisord entry and the
+    ``libs/web_server`` scaffold), so it no longer registers. ``browser`` does
+    autostart now, but it is memory-heavy and expendable (earlyoom can shed it
+    under pressure), so requiring it would make this test flaky -- we only
+    assert the services guaranteed to survive a resume.
     """
     result = _exec_in_container(running_workspace.container_name, "cat /code/runtime/applications.toml", timeout=30)
     assert result.returncode == 0, f"Could not read runtime/applications.toml: {result.stderr}"
-    for service_name in ("system_interface", "web", "terminal"):
+    for service_name in ("system_interface", "terminal"):
         assert service_name in result.stdout, (
             f"Service {service_name!r} not registered in applications.toml after resume:\n{result.stdout}"
         )
@@ -839,7 +819,8 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     """Enable backups, repair a corrupted env, and change the destination -- minds-side, for real.
 
     Drives the actual provisioning entry points from the sandbox host: real
-    `restic init` + `restic key add` against local repositories, and real
+    `restic init` against local repositories (keyed by the per-workspace
+    password), and real
     `mngr exec` injection/rotation of `runtime/secrets/restic.env` inside the
     resumed workspace container.
     """

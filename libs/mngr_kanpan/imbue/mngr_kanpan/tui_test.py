@@ -1,5 +1,6 @@
 """Unit tests for the kanpan TUI."""
 
+import io
 import subprocess
 import threading
 from concurrent.futures import Future
@@ -15,6 +16,7 @@ from typing import cast
 import pytest
 from pydantic import TypeAdapter
 from pydantic import ValidationError
+from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.filler import Filler
@@ -46,7 +48,9 @@ from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
+from imbue.mngr_kanpan.tui import PEEK_BODY_HEIGHT
 from imbue.mngr_kanpan.tui import _BUILTIN_COLUMN_DEFS
+from imbue.mngr_kanpan.tui import _BUILTIN_COMMANDS
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_DELETE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_EXECUTE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_PUSH
@@ -66,40 +70,65 @@ from imbue.mngr_kanpan.tui import _build_board_widgets
 from imbue.mngr_kanpan.tui import _build_command_map
 from imbue.mngr_kanpan.tui import _build_data_source_column_defs
 from imbue.mngr_kanpan.tui import _build_field_color_palette
+from imbue.mngr_kanpan.tui import _build_legend_bindings
 from imbue.mngr_kanpan.tui import _build_mark_palette
+from imbue.mngr_kanpan.tui import _build_peek_panel
+from imbue.mngr_kanpan.tui import _cancel_peek_alarm
 from imbue.mngr_kanpan.tui import _carry_forward_fields
 from imbue.mngr_kanpan.tui import _clear_focus
+from imbue.mngr_kanpan.tui import _close_peek
 from imbue.mngr_kanpan.tui import _compute_board_column_widths
 from imbue.mngr_kanpan.tui import _compute_footer_display
 from imbue.mngr_kanpan.tui import _dispatch_command
+from imbue.mngr_kanpan.tui import _ensure_peek_executor
+from imbue.mngr_kanpan.tui import _ensure_peek_reply_executor
 from imbue.mngr_kanpan.tui import _execute_marks
 from imbue.mngr_kanpan.tui import _execute_next_in_batch
 from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
+from imbue.mngr_kanpan.tui import _find_entry_by_name
 from imbue.mngr_kanpan.tui import _finish_batch_execution
 from imbue.mngr_kanpan.tui import _flatten_markup_to_attr
+from imbue.mngr_kanpan.tui import _focus_row_by_name
 from imbue.mngr_kanpan.tui import _format_section_heading
 from imbue.mngr_kanpan.tui import _get_focused_entry
 from imbue.mngr_kanpan.tui import _get_name_cell_markup
 from imbue.mngr_kanpan.tui import _get_state_attr
+from imbue.mngr_kanpan.tui import _handle_peek_key
 from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
+from imbue.mngr_kanpan.tui import _is_transcript_header
+from imbue.mngr_kanpan.tui import _last_nonempty_line
+from imbue.mngr_kanpan.tui import _legend_markup
 from imbue.mngr_kanpan.tui import _load_user_commands
+from imbue.mngr_kanpan.tui import _make_reply_edit
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
+from imbue.mngr_kanpan.tui import _on_peek_capture_poll
+from imbue.mngr_kanpan.tui import _on_peek_reply_poll
+from imbue.mngr_kanpan.tui import _on_stamp_tick
 from imbue.mngr_kanpan.tui import _on_transient_expire
+from imbue.mngr_kanpan.tui import _peek_body_lines
+from imbue.mngr_kanpan.tui import _peek_body_markup
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
+from imbue.mngr_kanpan.tui import _refresh_stamp
 from imbue.mngr_kanpan.tui import _render_footer
 from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
+from imbue.mngr_kanpan.tui import _short_header
 from imbue.mngr_kanpan.tui import _show_transient_message
 from imbue.mngr_kanpan.tui import _submit_batch_item
+from imbue.mngr_kanpan.tui import _submit_peek_reply
 from imbue.mngr_kanpan.tui import _toggle_mark
+from imbue.mngr_kanpan.tui import _toggle_peek
 from imbue.mngr_kanpan.tui import _unmark_all
 from imbue.mngr_kanpan.tui import _unmark_focused
 from imbue.mngr_kanpan.tui import _update_mark_count_footer
+from imbue.mngr_kanpan.tui import _update_peek_header
+from imbue.mngr_kanpan.tui import _update_refresh_stamp
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
+from imbue.mngr_kanpan.tui import _write_terminal_title
 from imbue.mngr_kanpan.tui import resolve_board_layout
 
 # =============================================================================
@@ -1822,3 +1851,480 @@ def test_resolve_section_order_custom_list() -> None:
     custom = [BoardSection.STILL_COOKING, BoardSection.MUTED]
     result = _resolve_section_order(custom)
     assert result == (BoardSection.STILL_COOKING, BoardSection.MUTED)
+
+
+# =============================================================================
+# Peek panel
+# =============================================================================
+
+
+def test_last_nonempty_line_returns_last_meaningful_line() -> None:
+    assert _last_nonempty_line("first\nsecond\n\n") == "second"
+
+
+def test_last_nonempty_line_all_blank_returns_empty() -> None:
+    assert _last_nonempty_line("   \n\n") == ""
+
+
+def test_peek_body_lines_tails_to_window_with_marker() -> None:
+    transcript = "\n".join(f"line{i}" for i in range(30)) + "\n\n\n"
+    lines = _peek_body_lines(transcript, [])
+    # Trailing blanks dropped; only the newest PEEK_BODY_HEIGHT lines show, under a ⋯ marker.
+    assert lines[0] == "⋯"
+    assert lines[-1] == "line29"
+    assert len(lines) == PEEK_BODY_HEIGHT + 1
+
+
+def test_peek_body_lines_short_message_has_no_marker() -> None:
+    transcript = "[2026-07-07T00:14:35Z] assistant:\nall done, tests pass\n"
+    lines = _peek_body_lines(transcript, [])
+    assert "⋯" not in lines
+    assert lines[-1] == "all done, tests pass"
+
+
+def test_peek_body_lines_empty_transcript_is_empty() -> None:
+    assert _peek_body_lines("\n\n", []) == []
+
+
+def test_peek_body_lines_appends_pending_reply() -> None:
+    lines = _peek_body_lines("[..] assistant:\nhi", ["my reply"])
+    # A sent-but-not-yet-echoed reply is appended as a `›` line so it shows immediately.
+    assert lines[-1] == "› my reply"
+
+
+def test_peek_body_markup_empty_says_no_messages() -> None:
+    assert _peek_body_markup("", []) == [("peek_hint", "(no messages yet)")]
+
+
+def test_peek_body_markup_dims_headers_and_accents_replies() -> None:
+    markup = _peek_body_markup("[2026-07-07T00:14:35Z] user:\nhello", ["a reply"])
+    # Header shortened + dimmed, content plain, pending reply accented.
+    assert ("peek_hint", "user:") in markup
+    assert "hello" in markup
+    assert ("peek_user", "› a reply") in markup
+
+
+def test_short_header_drops_timestamp() -> None:
+    assert _short_header("[2026-07-07T00:14:35Z] assistant:") == "assistant:"
+    assert _short_header("no-bracket line") == "no-bracket line"
+
+
+def test_is_transcript_header_matches_only_headers() -> None:
+    assert _is_transcript_header("[2026-07-07T00:14:35Z] user:")
+    assert not _is_transcript_header("just some text")
+    assert not _is_transcript_header("  -> Bash(ls)")
+
+
+def test_peek_reply_executor_serializes_in_order() -> None:
+    state = _make_state()
+    executor = _ensure_peek_reply_executor(state)
+    # A single worker guarantees FIFO, so several queued replies reach the agent in
+    # the order they were typed rather than their pastes interleaving.
+    assert executor._max_workers == 1
+    order: list[int] = []
+    futures = [executor.submit(order.append, i) for i in range(6)]
+    for future in futures:
+        future.result()
+    assert order == [0, 1, 2, 3, 4, 5]
+    # The same executor is reused across submits (not recreated per reply).
+    assert _ensure_peek_reply_executor(state) is executor
+    executor.shutdown(wait=True)
+
+
+def test_close_peek_restores_footer_and_clears_state() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    original_footer = Text("keybinding-bar")
+    state.frame.footer = original_footer
+    # Simulate an open panel.
+    state.peek_agent_name = AgentName("agent-a")
+    state.saved_footer = original_footer
+    state.frame.footer = Text("peek-panel")
+    state.peek_body_text = Text("body")
+    state.peek_input = Text("reply")
+
+    _close_peek(state)
+
+    assert state.peek_agent_name is None
+    assert state.frame.footer is original_footer
+    assert state.peek_body_text is None
+
+
+def test_close_peek_when_not_open_is_noop() -> None:
+    state = _make_state()
+    _close_peek(state)
+    assert state.peek_agent_name is None
+
+
+def test_find_entry_by_name_found_and_missing() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    assert _find_entry_by_name(state, AgentName("agent-a")) is not None
+    assert _find_entry_by_name(state, AgentName("nope")) is None
+    assert _find_entry_by_name(state, None) is None
+
+
+def test_focus_row_by_name_moves_walker_focus() -> None:
+    entries = (_make_entry(name="agent-a"), _make_entry(name="agent-b"))
+    state = _make_state_with_walker(entries)
+    _focus_row_by_name(state, AgentName("agent-b"))
+    _, focus_idx = state.list_walker.get_focus()
+    assert state.index_to_entry[focus_idx].name == AgentName("agent-b")
+
+
+def test_ensure_peek_executor_is_created_once() -> None:
+    state = _make_state()
+    first = _ensure_peek_executor(state)
+    second = _ensure_peek_executor(state)
+    assert first is second
+    first.shutdown(wait=False)
+
+
+def test_build_peek_panel_populates_parts() -> None:
+    state = _make_state()
+    _build_peek_panel(state)
+    assert state.peek_input is not None
+    assert state.peek_input.get_edit_text() == ""
+    assert state.peek_body_text is not None
+    assert state.peek_box is not None
+
+
+def test_legend_markup_styles_keys_and_keeps_units_unwrappable() -> None:
+    markup = _legend_markup([("p", "push"), ("U", "unmark all")], "footer_key", "footer", "  ")
+    assert markup == [
+        ("footer_key", "p"),
+        ("footer", ":\u00a0push"),
+        ("footer", "  "),
+        ("footer_key", "U"),
+        ("footer", ":\u00a0unmark\u00a0all"),
+    ]
+
+
+def test_legend_markup_single_binding_has_no_separator() -> None:
+    assert _legend_markup([("q", "quit")], "k", "t", " · ") == [("k", "q"), ("t", ":\u00a0quit")]
+
+
+def test_write_terminal_title_emits_osc_zero() -> None:
+    out = io.StringIO()
+    _write_terminal_title(Screen(output=out), "kanpan")
+    assert out.getvalue() == "\x1b]0;kanpan\x07"
+
+
+def test_legend_bindings_overlay_includes_user_custom_commands() -> None:
+    commands: dict[str, KanpanCommand] = {
+        **_BUILTIN_COMMANDS,
+        "z": CustomCommand(name="zap logs"),
+        "b": CustomCommand(name="backup", markable="light red"),
+    }
+    overlay_bindings, footer_legend = _build_legend_bindings(commands)
+    assert ("z", "zap logs") in overlay_bindings
+    assert ("b", "backup") in overlay_bindings
+    overlay_keys = [key for key, _ in overlay_bindings]
+    assert overlay_keys[:2] == ["space", "enter"]
+    assert overlay_keys[-2:] == ["q", "?"]
+    footer_keys = [key for key, _ in footer_legend]
+    assert footer_keys == ["r", "m", "d", "x", "q", "?"]
+
+
+def test_legend_bindings_footer_follows_command_overrides() -> None:
+    commands: dict[str, KanpanCommand] = {**_BUILTIN_COMMANDS, "m": CustomCommand(name="silence")}
+    _, footer_legend = _build_legend_bindings(commands)
+    assert ("m", "silence") in footer_legend
+
+
+def test_refresh_stamp_just_now_includes_fetch_duration() -> None:
+    assert _refresh_stamp(3.0, 2.84) == "  Refreshed just now \u00b7 2.8s"
+
+
+def test_refresh_stamp_just_now_without_duration() -> None:
+    assert _refresh_stamp(3.0, None) == "  Refreshed just now"
+
+
+def test_refresh_stamp_ages_and_drops_duration() -> None:
+    assert _refresh_stamp(32.0, 2.8) == "  Refreshed 32s ago"
+    assert _refresh_stamp(300.0, 2.8) == "  Refreshed 5m ago"
+    assert _refresh_stamp(7300.0, 2.8) == "  Refreshed 2h ago"
+
+
+def test_update_refresh_stamp_noop_before_first_refresh() -> None:
+    state = _make_state()
+    state.steady_footer_text = "  Loading..."
+    _update_refresh_stamp(state)
+    assert state.steady_footer_text == "  Loading..."
+
+
+def test_stamp_tick_updates_footer_and_reschedules() -> None:
+    state = _make_state()
+    state.last_refresh_time = 1.0
+    scheduled: list[float] = []
+    loop = SimpleNamespace(set_alarm_in=lambda delay, cb, data: scheduled.append(delay))
+    _on_stamp_tick(cast(Any, loop), state)
+    assert state.steady_footer_text.startswith("  Refreshed ")
+    assert state.steady_footer_text.endswith(" ago")
+    assert scheduled == [10.0]
+
+
+def test_question_mark_opens_help_overlay_and_any_close_key_restores_board() -> None:
+    state = _make_state()
+    state.legend_bindings = [("space", "peek"), ("q", "quit"), ("?", "help")]
+    state.loop = SimpleNamespace(widget=state.frame)
+    handler = _KanpanInputHandler(state=state)
+    assert handler("?") is True
+    assert state.help_overlay is not None
+    assert state.loop.widget is state.help_overlay
+    assert handler("x") is True
+    assert state.help_overlay is not None
+    assert handler("esc") is True
+    assert state.help_overlay is None
+    assert state.loop.widget is state.frame
+
+
+def test_update_peek_header_names_agent() -> None:
+    entry = _make_entry(name="agent-a", state=AgentLifecycleState.WAITING)
+    state = _make_state_with_walker((entry,))
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    _update_peek_header(state)
+    assert "agent-a" in state.peek_box.title_widget.text
+
+
+def test_update_peek_header_missing_agent_falls_back() -> None:
+    state = _make_state_with_walker((_make_entry(name="agent-a"),))
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("gone")
+    _update_peek_header(state)
+    assert state.peek_box.title_widget.text.strip() == "Peek"
+
+
+def test_refresh_display_updates_open_peek_header() -> None:
+    entry = _make_entry(name="agent-a", state=AgentLifecycleState.WAITING)
+    state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    # A completed board refresh re-renders the open panel's title from the new entries.
+    _refresh_display(state)
+    title = state.peek_box.title_widget.text
+    assert "agent-a" in title
+    assert str(AgentLifecycleState.WAITING) in title
+
+
+def test_cancel_peek_alarm_removes_pending_alarm() -> None:
+    state = _make_state()
+    loop = _RecordingLoop()
+    state.loop = cast(Any, loop)
+    state.peek_alarm = 7
+    _cancel_peek_alarm(state)
+    assert state.peek_alarm is None
+    assert loop.removed == [7]
+
+
+def test_on_peek_capture_poll_renders_body_when_done() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_body_text = Text("")
+    future: Future[subprocess.CompletedProcess[str]] = Future()
+    future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="alpha\nbeta\n", stderr=""))
+    state.peek_capture_future = future
+    _on_peek_capture_poll(state.loop, state)
+    assert state.peek_capture_future is None
+    assert "beta" in str(state.peek_body_text.text)
+
+
+def test_on_peek_capture_poll_reschedules_while_running() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_body_text = Text("unchanged")
+    # A future that never resolves stays "not done".
+    state.peek_capture_future = Future()
+    _on_peek_capture_poll(state.loop, state)
+    # A running capture is left in place and the body is not overwritten.
+    assert state.peek_capture_future is not None
+    assert str(state.peek_body_text.text) == "unchanged"
+
+
+def test_handle_peek_key_esc_closes_panel() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    original_footer = Text("bar")
+    state.frame.footer = original_footer
+    state.peek_agent_name = AgentName("agent-a")
+    state.saved_footer = original_footer
+    state.frame.footer = Text("panel")
+    assert _handle_peek_key(state, "esc") is True
+    assert state.peek_agent_name is None
+
+
+def test_handle_peek_key_arrows_are_not_handled() -> None:
+    state = _make_state()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    # Arrows are not panel actions: the reply Edit already handled in-line cursor
+    # movement before this handler runs, so the handler leaves them alone (None)
+    # and never attaches or switches the peeked agent.
+    for key in ("up", "down", "left", "right"):
+        assert _handle_peek_key(state, key) is None
+    assert state.peek_agent_name == AgentName("agent-a")
+
+
+def test_handle_peek_key_unknown_passes_through() -> None:
+    state = _make_state()
+    state.peek_agent_name = AgentName("agent-a")
+    assert _handle_peek_key(state, "z") is None
+
+
+def test_toggle_peek_opens_panel_for_focused_agent() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    original_footer = Text("keybinding-bar")
+    state.frame.footer = original_footer
+    agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
+    state.list_walker.set_focus(agent_idx)
+    _toggle_peek(state)
+    # The panel replaces the footer (saved for restore-on-close) and takes key focus.
+    assert state.peek_agent_name == AgentName("agent-a")
+    assert state.focused_agent_name == AgentName("agent-a")
+    assert state.saved_footer is original_footer
+    assert state.frame.footer is state.peek_box
+    assert state.frame.focus_position == "footer"
+    assert str(state.peek_body_text.text) == "(loading...)"
+
+
+def test_toggle_peek_closes_when_already_open() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    original_footer = Text("bar")
+    state.frame.footer = original_footer
+    state.peek_agent_name = AgentName("agent-a")
+    state.saved_footer = original_footer
+    state.frame.footer = Text("panel")
+    _toggle_peek(state)
+    assert state.peek_agent_name is None
+
+
+def test_submit_peek_reply_empty_input_is_noop() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    _build_peek_panel(state)
+    state.frame.footer = Text("panel")
+    state.peek_agent_name = AgentName("agent-a")
+    # An empty reply sends nothing and leaves the panel open (attach is a board action).
+    _submit_peek_reply(state)
+    assert state.peek_agent_name == AgentName("agent-a")
+    assert state.peek_reply_future is None
+
+
+def _make_reply_result(returncode: int, stderr: str = "") -> Future[subprocess.CompletedProcess[str]]:
+    future: Future[subprocess.CompletedProcess[str]] = Future()
+    future.set_result(subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr))
+    return future
+
+
+def test_on_peek_reply_poll_failure_drops_echo_and_shows_error() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_pending_replies = ["my reply"]
+    future = _make_reply_result(returncode=1, stderr="agent not running\n")
+    _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
+    # The optimistic echo is dropped (it will never appear in the transcript) and the
+    # failure renders in the panel instead of vanishing silently.
+    assert state.peek_pending_replies == []
+    assert "reply failed" in str(state.peek_body_text.text)
+    assert "agent not running" in str(state.peek_body_text.text)
+
+
+def test_on_peek_reply_poll_success_keeps_echo() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_pending_replies = ["my reply"]
+    future = _make_reply_result(returncode=0)
+    _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
+    # A delivered reply keeps its echo until the transcript refresh prunes it.
+    assert state.peek_pending_replies == ["my reply"]
+    assert state.peek_reply_error == ""
+
+
+def test_on_peek_reply_poll_failure_after_close_shows_transient() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    future = _make_reply_result(returncode=1, stderr="delivery timed out\n")
+    _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
+    # Panel closed: the failure goes to the (now visible) footer as a transient message.
+    assert state.transient_message is not None
+    assert "delivery timed out" in state.transient_message
+
+
+def test_on_peek_reply_poll_failure_with_other_agent_peeked_renders_in_panel() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-b")
+    state.peek_pending_replies = ["draft to b"]
+    future = _make_reply_result(returncode=1, stderr="agent not running\n")
+    _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
+    # agent-b's panel hides the footer, so the failure renders in the panel body,
+    # named so it cannot be misread as agent-b's failure.
+    body = str(state.peek_body_text.text)
+    assert "reply failed" in body
+    assert "agent-a" in body
+    assert "agent not running" in body
+    assert state.transient_message is None
+    # agent-b's own pending echoes are untouched.
+    assert state.peek_pending_replies == ["draft to b"]
+
+
+def test_submit_then_transcript_refresh_keeps_reply_error_visible() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_reply_error = "agent not running"
+    # A successful transcript refresh re-renders the body through _set_peek_body, which
+    # must keep the failure notice visible rather than wiping it.
+    future: Future[subprocess.CompletedProcess[str]] = Future()
+    future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="alpha\n", stderr=""))
+    state.peek_capture_future = future
+    _on_peek_capture_poll(state.loop, state)
+    assert "alpha" in str(state.peek_body_text.text)
+    assert "reply failed" in str(state.peek_body_text.text)
+
+
+def test_make_reply_edit_binds_arrow_word_chords() -> None:
+    edit = _make_reply_edit(("peek_hint", "reply> "))
+    # The library binds Meta+letter word ops; we add the Option/Ctrl+arrow chords.
+    assert edit.keymap["meta left"] == edit.backward_word
+    assert edit.keymap["ctrl left"] == edit.backward_word
+    assert edit.keymap["meta right"] == edit.forward_word
+    assert edit.keymap["ctrl right"] == edit.forward_word
+
+
+def test_make_reply_edit_word_move_and_delete() -> None:
+    edit = _make_reply_edit(("peek_hint", "reply> "))
+    edit.set_edit_text("hello world foo")
+    edit.set_edit_pos(len("hello world foo"))
+    edit.keypress((40,), "meta left")
+    assert edit.edit_pos == len("hello world ")
+    edit.keypress((40,), "ctrl w")
+    assert edit.edit_text == "hello foo"
+
+
+def test_make_reply_edit_defers_enter_and_boundary_left() -> None:
+    edit = _make_reply_edit(("peek_hint", "reply> "))
+    # Enter and Left-at-column-0 are unhandled, so they bubble to the panel.
+    assert edit.keypress((40,), "enter") == "enter"
+    assert edit.keypress((40,), "left") == "left"
+
+
+def test_handle_peek_key_left_falls_through_to_reply_edit() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    # Left is cursor movement in the reply Edit, never a board return.
+    assert _handle_peek_key(state, "left") is None
+    assert state.peek_agent_name == AgentName("agent-a")
