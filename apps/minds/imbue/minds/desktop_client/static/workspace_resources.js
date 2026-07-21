@@ -29,7 +29,6 @@
   var restartDialog = document.getElementById('resources-restart-dialog');
   var restartLaterBtn = document.getElementById('resources-restart-later-btn');
   var restartNowBtn = document.getElementById('resources-restart-now-btn');
-  var restartErrorEl = document.getElementById('resources-restart-error');
   var restartProgressEl = document.getElementById('resources-restart-progress');
   if (!block || !section || !cpusInput || !memoryInput || !saveBtn || !resetBtn) return;
 
@@ -181,7 +180,6 @@
         var isPending = valuesDiffer(configured, actual);
         setPendingNoteVisible(isPending);
         if (isPending && restartDialog) {
-          if (restartErrorEl) restartErrorEl.classList.add('hidden');
           restartDialog.classList.remove('hidden');
         }
       })
