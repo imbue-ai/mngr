@@ -1,0 +1,3 @@
+Added `specs/host-scoped-agent-identity/spec.md`: the design for removing all reliance on global `agent_id` uniqueness. It defines the `(host_id, agent_id)` identity model and three phases of work -- re-keying mngr core discovery/observation/resolution state, propagating host-scoped keys through the plugins (forward, latchkey, usage, notifications, subagent proxy, mapreduce), and a full migration of minds workspace identity (URLs, routes, registries, sync constraints, tunnel names) to `host_id`, with backup/restore lineage flowing through `restored_from_host_id`.
+
+Recorded the conflict with `specs/workspace-sync/spec.md`'s agent_id-as-logical-id model (the `(user_id, agent_id)` active-unique index) in `specs/uncertainties.md`.
