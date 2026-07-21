@@ -19,6 +19,10 @@ def test_get_signing_key_generates_key_on_first_access(tmp_path: Path) -> None:
     assert len(key.get_secret_value()) > 32
 
 
+@pytest.mark.witnesses(
+    "authentication.signing-key-minted-once",
+    partial="the 'minted once, not re-minted on subsequent need' clause",
+)
 def test_get_signing_key_returns_same_key_on_subsequent_access(tmp_path: Path) -> None:
     store = _make_auth_store(tmp_path)
     key_first = store.get_signing_key()
@@ -26,6 +30,10 @@ def test_get_signing_key_returns_same_key_on_subsequent_access(tmp_path: Path) -
     assert key_first.get_secret_value() == key_second.get_secret_value()
 
 
+@pytest.mark.witnesses(
+    "authentication.signing-key-minted-once",
+    partial="the 'stable identity lets valid sessions keep working across restarts' clause; the key persists across store instances",
+)
 def test_get_signing_key_persists_across_instances(tmp_path: Path) -> None:
     auth_dir = tmp_path / "auth"
     store_a = FileAuthStore(data_directory=auth_dir)
@@ -37,6 +45,10 @@ def test_get_signing_key_persists_across_instances(tmp_path: Path) -> None:
     assert key_a.get_secret_value() == key_b.get_secret_value()
 
 
+@pytest.mark.witnesses(
+    "authentication.signing-key-minted-once",
+    partial="the 'concurrent first uses agree on a single identity' clause (one interleaving of 32 threads)",
+)
 def test_get_signing_key_is_consistent_under_concurrent_first_access(tmp_path: Path) -> None:
     """Concurrent first-time callers must all converge on a single signing key.
 
@@ -68,6 +80,10 @@ def test_get_signing_key_is_consistent_under_concurrent_first_access(tmp_path: P
     assert keys == {on_disk_key}, "in-memory signing key diverged from the persisted one"
 
 
+@pytest.mark.witnesses(
+    "authentication.signing-key-minted-once",
+    partial="the 'corrupted (empty) identity is a hard failure, never silently re-minted' clause, at the get_signing_key boundary rather than app startup",
+)
 def test_get_signing_key_raises_for_empty_key_file(tmp_path: Path) -> None:
     auth_dir = tmp_path / "auth"
     auth_dir.mkdir(parents=True)
@@ -88,6 +104,10 @@ def test_add_and_validate_one_time_code(tmp_path: Path) -> None:
     assert is_valid is True
 
 
+@pytest.mark.witnesses(
+    "authentication.unknown-code",
+    partial="unit-level: the store rejects an unknown code; not the HTTP refusal, explanation text, or absence of a session",
+)
 def test_validate_rejects_unknown_code(tmp_path: Path) -> None:
     store = _make_auth_store(tmp_path)
 
@@ -97,6 +117,14 @@ def test_validate_rejects_unknown_code(tmp_path: Path) -> None:
     assert is_valid is False
 
 
+@pytest.mark.witnesses(
+    "authentication.used-code",
+    partial="unit-level: the store rejects a spent code; not the HTTP refusal, explanation text, or absence of a session",
+)
+@pytest.mark.witnesses(
+    "authentication.single-use-codes",
+    partial="unit-level: sequential reuse rejected at the store; not concurrent interleavings",
+)
 def test_validate_rejects_already_used_code(tmp_path: Path) -> None:
     store = _make_auth_store(tmp_path)
     code = OneTimeCode("single-use-code-19283")
@@ -141,6 +169,10 @@ def test_get_signing_key_reads_existing_key(tmp_path: Path) -> None:
     assert key.get_secret_value() == "my-custom-key-82734"
 
 
+@pytest.mark.witnesses(
+    "authentication.signing-key-minted-once",
+    partial="the 'unreadable identity is a hard failure, never silently re-minted' clause, at the get_signing_key boundary rather than app startup",
+)
 def test_get_signing_key_raises_on_read_error(tmp_path: Path) -> None:
     """If an existing signing key file is not readable, SigningKeyError is raised."""
     auth_dir = tmp_path / "auth"

@@ -1,3 +1,5 @@
+import pytest
+
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -8,6 +10,10 @@ def test_session_cookie_name_is_stable() -> None:
     assert SESSION_COOKIE_NAME == "minds_session"
 
 
+@pytest.mark.witnesses(
+    "authentication.sessions-unforgeable",
+    partial="unit-level positive case of 'only tokens issued by this installation are accepted'; not the HTTP surface",
+)
 def test_create_and_verify_session_cookie_round_trip() -> None:
     key = CookieSigningKey("test-secret-key-83742")
 
@@ -17,6 +23,14 @@ def test_create_and_verify_session_cookie_round_trip() -> None:
     assert is_valid is True
 
 
+@pytest.mark.witnesses(
+    "authentication.foreign-token",
+    partial="unit-level: verification under a different key fails; does not use two data directories or exercise the HTTP signed-out treatment",
+)
+@pytest.mark.witnesses(
+    "authentication.sessions-unforgeable",
+    partial="unit-level: the 'tokens from another installation are invalid' clause via the predicate, not at the HTTP surface",
+)
 def test_verify_session_cookie_returns_false_for_wrong_key() -> None:
     correct_key = CookieSigningKey("correct-key-19283")
     wrong_key = CookieSigningKey("wrong-key-84729")
@@ -27,6 +41,14 @@ def test_verify_session_cookie_returns_false_for_wrong_key() -> None:
     assert result is False
 
 
+@pytest.mark.witnesses(
+    "authentication.tampered-token",
+    partial="unit-level: the cookie predicate rejects a non-verifiable value (garbage, not a mutated valid token); not the HTTP signed-out treatment",
+)
+@pytest.mark.witnesses(
+    "authentication.sessions-unforgeable",
+    partial="unit-level: the 'any alteration invalidates' clause via the predicate, not at the HTTP surface",
+)
 def test_verify_session_cookie_returns_false_for_tampered_value() -> None:
     key = CookieSigningKey("test-key-38472")
     result = verify_session_cookie(
