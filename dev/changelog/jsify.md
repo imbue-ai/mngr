@@ -1,0 +1,3 @@
+Added `specs/minds-chrome-mithril-migration/spec.md`: a phased execution plan for migrating the minds desktop client's chrome and modal layers from dual Jinja/JS rendering to client-rendered mithril components (host adapter + chrome-state store + per-page mount protocol compatible with the existing swap engine), including per-phase deletions, acceptance criteria, testing/packaging strategy, and open decisions.
+
+Logged a spec conflict in `specs/uncertainties.md`: `specs/minds-webcontentsview-refactor/spec.md` describes a superseded sidebar/forwarding architecture; the code is treated as authoritative.
