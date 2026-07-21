@@ -4,6 +4,21 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-18
+
+### Added
+
+- Added: `scripts/current_branch.sh` — shared jj-robust current-branch helper reused by `just default-workspace-template-worktree`, `just sync-vendor-mngr`, `just minds-start`, and the Claude Code status line, replacing open-coded `git rev-parse --abbrev-ref HEAD` (which yields `HEAD` under jj colocated checkouts).
+
+### Changed
+
+- Changed: `minds-dev-workflow` skill's first-time bootstrap now activates with `--create --deploy` (was `--create`, which failed the documented `minds env deploy` one-liner), spells out the `vault login` + `~/.modal.toml` prerequisites, and Quick start points to the new `apps/minds/docs/dev-setup.md`.
+
+### Fixed
+
+- Fixed: `just default-workspace-template-worktree` no longer fails with `fatal: 'HEAD' is not a valid branch name` under jj colocated checkouts (falls back to jj's nearest bookmark to `@` when git HEAD is detached).
+- Fixed: `just minds-start` now fails fast with an actionable message when `rsync` is Apple's openrsync (recent macOS `/usr/bin/rsync`, which lacks the `--filter=':- .gitignore'` GNU feature the vendor/mngr sync needs), and its "no minds env activated" error suggests the correct env name form `dev-<user>` (was `<user>-dev`, which the env-name regex rejects).
+
 ## 2026-07-16
 
 ### Added
