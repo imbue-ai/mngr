@@ -416,9 +416,7 @@ def test_find_git_common_dir_returns_none_when_not_in_git(tmp_path: Path, cg: Co
     assert result is None
 
 
-def test_find_git_common_dir_returns_none_when_path_does_not_exist(
-    tmp_path: Path, cg: ConcurrencyGroup
-) -> None:
+def test_find_git_common_dir_returns_none_when_path_does_not_exist(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """A path that does not exist is not a git repo -> None, not a crash.
 
     Running git with a nonexistent cwd fails at process setup (ProcessSetupError),

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr foreman [--host HOST] [--port PORT] [-d] [OPTIONS]
+mngr foreman [--host HOST] [--port PORT] [-d] [OPTIONS] | mngr foreman install|uninstall
 ```
 
 Always-on web remote control for your mngr agents [experimental].
@@ -29,7 +29,7 @@ go to ``--foreman-log-file``.
 **Usage:**
 
 ```text
-mngr foreman [OPTIONS]
+mngr foreman [OPTIONS] COMMAND [ARGS]...
 ```
 **Options:**
 
@@ -58,6 +58,61 @@ mngr foreman [OPTIONS]
 | `--background`, `-d` | boolean | Run the server detached in the background (daemonize) and return immediately. | `False` |
 | `--foreman-log-file` | file | With --background: file the daemon's stdout+stderr are redirected to. | `~/.mngr/foreman.log` |
 | `--pid-file` | file | With --background: pid-file for the daemon (guards against a second copy). | `~/.mngr/foreman.pid` |
+
+## mngr foreman install
+
+**Usage:**
+
+```text
+mngr foreman install [OPTIONS]
+```
+**Options:**
+
+## Common
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--format` | text | Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields. | `human` |
+| `-q`, `--quiet` | boolean | Suppress all console output | `False` |
+| `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
+| `--log-file` | path | Path to log file (overrides default ~/.mngr/events/logs/<timestamp>-<pid>.json) | None |
+| `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
+| `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
+| `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
+| `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
+| `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--host` | text | Bind host for the service (default from config, else 0.0.0.0). | None |
+| `--port` | integer | Bind port for the service (default from config, else 8700). | None |
+
+## mngr foreman uninstall
+
+**Usage:**
+
+```text
+mngr foreman uninstall [OPTIONS]
+```
+**Options:**
+
+## Common
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--format` | text | Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields. | `human` |
+| `-q`, `--quiet` | boolean | Suppress all console output | `False` |
+| `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
+| `--log-file` | path | Path to log file (overrides default ~/.mngr/events/logs/<timestamp>-<pid>.json) | None |
+| `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
+| `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
+| `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
+| `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
+| `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 
 ## Examples
 
