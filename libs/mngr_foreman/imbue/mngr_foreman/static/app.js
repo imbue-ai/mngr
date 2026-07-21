@@ -904,7 +904,10 @@
     function send() {
       if (composer.classList.contains("awaiting")) return; // already waiting on one
       if (!connLive) { showError("not connected — waiting to reconnect…"); return; }
-      const msg = input.value.trim();
+      const raw = input.value.trim();
+      // A message starting with "1." gets misread as an ordered-list / menu choice;
+      // escape it to "#1." so it's sent as plain text.
+      const msg = raw.startsWith("1.") ? "#" + raw : raw;
       if (!msg) return;
       sendErr.hidden = true;
       // Lock the input region and keep the text visible while we wait for the
