@@ -1266,6 +1266,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.textContent = 'Restart workspace';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          // Reset the backend-unreachable state's elements: the page can move
+          // between verdicts (a transient provider error resolves into this
+          // one), and a leftover Retry button or provider-error paragraph from
+          // the previous render would mislead.
+          show(retryBtn, false);
+          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           show(reportBtn, true);
           // Keep watching for self-recovery: the workspace may come back on its own
           // (a slow cold boot, a healed network) while this consent page is shown,
@@ -1304,6 +1310,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.textContent = 'Restart workspace';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          // Same residual-state reset as renderUnresponsive: this state can
+          // follow a backend-unreachable render via its Retry button.
+          show(retryBtn, false);
+          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           show(reportBtn, true);
           armHealthyPoll();
         }
@@ -1425,7 +1435,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
             // restart_failed entry: render unresponsive so the failure reason and
             // the diagnostics list both stay visible (renderUnresponsive keeps the
             // healthy-poll running so a self-recovery still returns the user home).
+            // The slow re-probe keeps the verdict and diagnostics live
+            // (autoDispatch stays false, so no restart is ever dispatched here).
             renderUnresponsive();
+            scheduleIndeterminateReprobe(autoDispatch);
             return;
           }
           if (tier === 'host_offline') {
@@ -1438,8 +1451,16 @@ _RECOVERY_SCRIPT: Final[str] = """\
             postRestart({ scope: 'host', host_already_stopped: true }, renderRestartingOffline);
             return;
           }
-          // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
+          // 'host_unresponsive' or anything else: require explicit user consent
+          // for a host restart. Not a dead-end: the slow re-probe keeps the
+          // verdict live, so when better evidence lands the page moves on its
+          // own -- e.g. a workspace whose container is stopped can classify
+          // here first (a completed exec failure under absent/stalled
+          // discovery cannot tell "stopped" from "broken ssh"), and the first
+          // trusted STOPPED snapshot then re-classifies to host_offline and
+          // dispatches the unattended cold boot.
           renderUnresponsive();
+          scheduleIndeterminateReprobe(autoDispatch);
         }
 
         // Fetch the host-health probe and populate the diagnostic. When

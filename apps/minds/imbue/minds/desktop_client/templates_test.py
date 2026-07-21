@@ -1158,6 +1158,40 @@ def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> 
     assert "if (reprobePending) return" in reprobe_block
 
 
+def test_render_recovery_page_unresponsive_verdict_stays_live_and_resets_state() -> None:
+    """The unresponsive verdict is not a dead-end, and verdict renders reset each other's elements.
+
+    A workspace whose container is stopped can classify host_unresponsive first
+    (a completed exec failure under absent discovery cannot tell "stopped" from
+    "broken ssh"), so the unresponsive branches must keep re-probing -- the
+    first trusted STOPPED snapshot then re-classifies to host_offline and the
+    unattended restart dispatches. And because the page can move between
+    verdicts (backend_unreachable -> host_unresponsive), renderUnresponsive and
+    renderDispatchError must hide the Retry button and clear the provider-error
+    paragraph that renderBackendUnreachable showed -- otherwise the page shows
+    Retry AND Restart together with a stale provider error.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    # Both unresponsive-verdict paths (restart_failed entry and the
+    # host_unresponsive fallthrough) schedule the slow re-probe.
+    no_dispatch_branch = apply_block[apply_block.find("if (!autoDispatch)") : apply_block.find("'host_offline'")]
+    assert "scheduleIndeterminateReprobe(autoDispatch)" in no_dispatch_branch
+    fallthrough = apply_block[apply_block.find("'host_offline'") :]
+    assert "scheduleIndeterminateReprobe(autoDispatch)" in fallthrough
+    for fn in ("renderUnresponsive", "renderDispatchError"):
+        start = html.find("function " + fn)
+        block = html[start : html.find("function ", start + 1)]
+        assert "show(retryBtn, false)" in block, f"{fn} must hide the backend-unreachable Retry button"
+        assert "providerReasonEl.textContent = ''" in block, f"{fn} must clear the provider error text"
+
+
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
     """renderLoading must hide the diagnostic dropdown so a stale prior diagnostic
     does not linger on the page while a fresh check is in flight (issue: user
