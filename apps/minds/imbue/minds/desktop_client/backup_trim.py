@@ -219,15 +219,18 @@ class BackupTrimManager(MutableModel):
     status_by_user_id: dict[str, BackupTrimStatus] = Field(
         default_factory=dict, description="Latest trim status per account user id"
     )
-    start_lock: threading.Lock = Field(
-        default_factory=threading.Lock, description="Serializes concurrent start requests"
+    status_lock: threading.Lock = Field(
+        default_factory=threading.Lock,
+        description="Guards status_by_user_id (written by worker threads, read by request threads)",
     )
 
     def get_status(self, user_id: str) -> BackupTrimStatus | None:
-        return self.status_by_user_id.get(user_id)
+        with self.status_lock:
+            return self.status_by_user_id.get(user_id)
 
     def is_any_running(self) -> bool:
-        return any(status.is_running for status in self.status_by_user_id.values())
+        with self.status_lock:
+            return any(status.is_running for status in self.status_by_user_id.values())
 
     def start_trim(
         self,
@@ -239,7 +242,7 @@ class BackupTrimManager(MutableModel):
         notification_dispatcher: NotificationDispatcher | None,
     ) -> bool:
         """Start a trim run on a detached thread; returns False when one is already running."""
-        with self.start_lock:
+        with self.status_lock:
             existing = self.status_by_user_id.get(user_id)
             if existing is not None and existing.is_running:
                 return False
@@ -260,7 +263,8 @@ class BackupTrimManager(MutableModel):
         return True
 
     def _set_status(self, user_id: str, state: str, detail: str) -> None:
-        self.status_by_user_id[user_id] = BackupTrimStatus(state=state, detail=detail)
+        with self.status_lock:
+            self.status_by_user_id[user_id] = BackupTrimStatus(state=state, detail=detail)
 
     def _run(
         self,
@@ -286,10 +290,13 @@ class BackupTrimManager(MutableModel):
             # A crash from an unexpected exception type must not leave the
             # status stuck on "running" (the page would show a live cleanup
             # forever); flip it to failed before the thread dies.
-            current = self.status_by_user_id.get(user_id)
-            if current is not None and current.is_running:
-                self._set_status(user_id, _FAILED, "Backup cleanup stopped unexpectedly; see the logs.")
-        outcome = self.status_by_user_id.get(user_id)
+            with self.status_lock:
+                current = self.status_by_user_id.get(user_id)
+                if current is not None and current.is_running:
+                    self.status_by_user_id[user_id] = BackupTrimStatus(
+                        state=_FAILED, detail="Backup cleanup stopped unexpectedly; see the logs."
+                    )
+        outcome = self.get_status(user_id)
         if notification_dispatcher is not None and outcome is not None:
             notification_dispatcher.dispatch(
                 NotificationRequest(
