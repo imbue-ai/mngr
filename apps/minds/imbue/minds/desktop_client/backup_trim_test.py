@@ -1,15 +1,25 @@
+import time
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import pytest
+from pydantic import Field
+
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
+from imbue.minds.desktop_client.backup_trim import BackupTrimManager
+from imbue.minds.desktop_client.backup_trim import BackupTrimState
+from imbue.minds.desktop_client.backup_trim import BackupTrimStatus
 from imbue.minds.desktop_client.backup_trim import bucket_name_from_repository
 from imbue.minds.desktop_client.backup_trim import collect_trimmable_repos
 from imbue.minds.desktop_client.backup_trim import run_backup_trim
 from imbue.minds.desktop_client.backup_trim import select_snapshot_ids_to_forget
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.restic_cli import ResticSnapshot
 from imbue.minds.desktop_client.restic_cli import forget_snapshots
 from imbue.minds.desktop_client.restic_cli import list_snapshots
@@ -150,3 +160,100 @@ def test_run_backup_trim_reports_untrimmable_buckets_when_still_over(tmp_path: P
     assert "u1--host-elsewhere" in detail
     # One grant round is enough to learn nothing is trimmable.
     assert cli.cleanup_grant_call_count == 1
+
+
+class _RecordingNotificationDispatcher(NotificationDispatcher):
+    """Dispatcher stand-in that records (title, message) pairs instead of showing anything."""
+
+    dispatched: list[tuple[str, str]] = Field(default_factory=list, description="(title, message) per dispatch call")
+
+    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
+        self.dispatched.append((request.title, request.message))
+
+
+class _CrashingImbueCloudCli(FakeImbueCloudCli):
+    """Fake whose recheck_storage raises an exception type the trim run does not expect."""
+
+    def recheck_storage(self, account: str) -> dict[str, object]:
+        raise RuntimeError("boom")
+
+
+def _wait_until_not_running(manager: BackupTrimManager, user_id: str) -> BackupTrimStatus:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        status = manager.get_status(user_id)
+        if status is not None and not status.is_running:
+            return status
+        time.sleep(0.01)
+    raise AssertionError("trim run did not finish within the deadline")
+
+
+def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: Path) -> None:
+    manager = BackupTrimManager()
+    dispatcher = _RecordingNotificationDispatcher(is_electron=False)
+    cli = make_fake_imbue_cloud_cli()
+    cli.storage_recheck_results = [{"is_over_quota": False, "usage_bytes": 10, "limit_bytes": 100}]
+    started = manager.start_trim(
+        user_id="user-1",
+        account_email="a@example.com",
+        cli=cli,
+        paths=WorkspacePaths(data_dir=tmp_path),
+        notification_dispatcher=dispatcher,
+    )
+    assert started is True
+    outcome = _wait_until_not_running(manager, "user-1")
+    assert outcome.state == BackupTrimState.SUCCEEDED
+    assert dispatcher.dispatched == [("Backup cleanup finished", outcome.detail)]
+
+
+def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) -> None:
+    manager = BackupTrimManager()
+    manager.status_by_user_id["user-1"] = BackupTrimStatus(state=BackupTrimState.RUNNING, detail="in flight")
+    started = manager.start_trim(
+        user_id="user-1",
+        account_email="a@example.com",
+        cli=make_fake_imbue_cloud_cli(),
+        paths=WorkspacePaths(data_dir=tmp_path),
+        notification_dispatcher=None,
+    )
+    assert started is False
+    status = manager.get_status("user-1")
+    assert status is not None
+    assert status.detail == "in flight"
+
+
+def test_backup_trim_manager_records_failure_and_notifies(tmp_path: Path) -> None:
+    """A typed CLI failure lands as a failed status plus the failure notification."""
+    manager = BackupTrimManager()
+    dispatcher = _RecordingNotificationDispatcher(is_electron=False)
+    # No fake recheck results configured -> the CLI raises ImbueCloudCliError.
+    manager._run(
+        user_id="user-1",
+        account_email="a@example.com",
+        cli=make_fake_imbue_cloud_cli(),
+        paths=WorkspacePaths(data_dir=tmp_path),
+        notification_dispatcher=dispatcher,
+    )
+    status = manager.get_status("user-1")
+    assert status is not None
+    assert status.state == BackupTrimState.FAILED
+    assert "Backup cleanup failed" in status.detail
+    assert dispatcher.dispatched == [("Backup cleanup failed", status.detail)]
+
+
+def test_backup_trim_manager_flips_unexpected_crash_to_failed(tmp_path: Path) -> None:
+    """An exception type the run does not expect must not leave the status stuck on running."""
+    manager = BackupTrimManager()
+    manager.status_by_user_id["user-1"] = BackupTrimStatus(state=BackupTrimState.RUNNING, detail="starting")
+    with pytest.raises(RuntimeError, match="boom"):
+        manager._run(
+            user_id="user-1",
+            account_email="a@example.com",
+            cli=_CrashingImbueCloudCli(connector_url="http://connector.invalid"),
+            paths=WorkspacePaths(data_dir=tmp_path),
+            notification_dispatcher=None,
+        )
+    status = manager.get_status("user-1")
+    assert status is not None
+    assert status.state == BackupTrimState.FAILED
+    assert "stopped unexpectedly" in status.detail
