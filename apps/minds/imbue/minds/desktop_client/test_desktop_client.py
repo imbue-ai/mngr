@@ -173,10 +173,6 @@ def test_authenticate_without_one_time_code_returns_422(tmp_path: Path) -> None:
     assert response.status_code == 422
 
 
-@pytest.mark.witnesses(
-    "authentication.fresh-code",
-    partial="drives /authenticate directly rather than opening the login URL; asserts a session cookie is set but not the landing target or that the code is now spent",
-)
 def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) -> None:
     client, auth_store, _ = _setup_test_server(tmp_path)
     code = OneTimeCode("auth-code-{}".format(AgentId()))
@@ -192,10 +188,6 @@ def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) 
     assert any(SESSION_COOKIE_NAME in header for header in response.headers.getlist("Set-Cookie"))
 
 
-@pytest.mark.witnesses(
-    "authentication.fresh-code",
-    partial="asserts only the 307 redirect to /; not that a session is established or the code is now spent",
-)
 def test_authenticate_redirects_to_landing_page(tmp_path: Path) -> None:
     client, auth_store, _ = _setup_test_server(tmp_path)
     code = OneTimeCode("auth-code-{}".format(AgentId()))
@@ -254,6 +246,94 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
         follow_redirects=False,
     )
     assert second_response.status_code == 403
+
+
+@pytest.mark.witnesses("authentication.fresh-code")
+def test_opening_a_fresh_login_url_signs_in_lands_home_and_spends_the_code(tmp_path: Path) -> None:
+    """End-to-end witness for the fresh-code flow: open the login URL, land on
+    "/", be signed in, and leave the code spent."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    code = OneTimeCode("fresh-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
+
+    # Opening the login URL renders the inert JS redirect to /authenticate.
+    login_response = client.get("/login", query_string={"one_time_code": str(code)}, follow_redirects=False)
+    assert login_response.status_code == 200
+    assert "/authenticate" in login_response.text
+
+    # The browser follows the script to /authenticate, which establishes the
+    # session and redirects to the home page "/".
+    authenticate_response = client.get(
+        "/authenticate", query_string={"one_time_code": str(code)}, follow_redirects=False
+    )
+    assert authenticate_response.status_code == 307
+    assert authenticate_response.headers["location"] == "/"
+    assert any(SESSION_COOKIE_NAME in header for header in authenticate_response.headers.getlist("Set-Cookie"))
+
+    # The now-authenticated session (the client jar carries the Set-Cookie)
+    # reaches signed-in content: the user's workspace is listed.
+    landing_response = client.get("/")
+    assert landing_response.status_code == 200
+    assert str(agent_id) in landing_response.text
+
+    # The one-time code is now spent: presenting it again is refused.
+    replay_response = client.get("/authenticate", query_string={"one_time_code": str(code)}, follow_redirects=False)
+    assert replay_response.status_code == 403
+
+
+@pytest.mark.witnesses("authentication.prefetch")
+@pytest.mark.witnesses(
+    "authentication.fetch-never-spends",
+    partial="witnesses that a scriptless fetch of the printed login URL leaves the code spendable; not exhaustive over every URL the system hands out",
+)
+def test_scriptless_fetch_of_login_url_does_not_spend_the_code(tmp_path: Path) -> None:
+    """A preloader/unfurler that fetches the login URL without executing its
+    script must not consume the code; the user can still sign in afterward."""
+    client, auth_store, _ = _setup_test_server(tmp_path)
+    code = OneTimeCode("prefetch-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
+
+    # A scriptless fetch of the login URL returns the inert JS-redirect page and
+    # establishes no session -- it must not spend the code.
+    prefetch_response = client.get("/login", query_string={"one_time_code": str(code)}, follow_redirects=False)
+    assert prefetch_response.status_code == 200
+    assert not any(SESSION_COOKIE_NAME in header for header in prefetch_response.headers.getlist("Set-Cookie"))
+
+    # The code is still spendable: opening it in a real browser (running the
+    # script -> /authenticate) still signs the user in.
+    authenticate_response = client.get(
+        "/authenticate", query_string={"one_time_code": str(code)}, follow_redirects=False
+    )
+    assert authenticate_response.status_code == 307
+    assert any(SESSION_COOKIE_NAME in header for header in authenticate_response.headers.getlist("Set-Cookie"))
+
+
+@pytest.mark.witnesses("authentication.survives-restart")
+def test_session_survives_a_desktop_client_restart(tmp_path: Path) -> None:
+    """A session cookie minted before a restart still authenticates against a
+    fresh app instance on the same data directory, needing no new login code."""
+    auth_dir = tmp_path / "auth"
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {"web": "http://test-backend"}})
+
+    # First run: mint a session cookie and confirm it reaches signed-in content.
+    auth_store_before = FileAuthStore(data_directory=auth_dir)
+    app_before = create_desktop_client(auth_store=auth_store_before, backend_resolver=resolver, http_client=None)
+    cookie_value = create_session_cookie(signing_key=auth_store_before.get_signing_key())
+    client_before = app_before.test_client()
+    client_before.set_cookie(SESSION_COOKIE_NAME, cookie_value)
+    assert str(agent_id) in client_before.get("/").text
+
+    # Restart: a brand-new app instance on the same data directory. The user
+    # reloads the home page carrying the same cookie -- no new login code.
+    auth_store_after = FileAuthStore(data_directory=auth_dir)
+    app_after = create_desktop_client(auth_store=auth_store_after, backend_resolver=resolver, http_client=None)
+    client_after = app_after.test_client()
+    client_after.set_cookie(SESSION_COOKIE_NAME, cookie_value)
+
+    response = client_after.get("/")
+    assert response.status_code == 200
+    assert str(agent_id) in response.text
 
 
 def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
