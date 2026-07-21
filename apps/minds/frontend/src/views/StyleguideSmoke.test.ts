@@ -19,6 +19,10 @@ function installMountContainer(): HTMLElement {
 }
 
 afterEach(() => {
+  // Run any teardown listener the test's mount registered (a no-op when the
+  // test mounted nothing), so mithril roots and once-only window listeners
+  // never leak into the next test.
+  window.dispatchEvent(new Event("minds:page-teardown"));
   document.body.innerHTML = "";
 });
 
