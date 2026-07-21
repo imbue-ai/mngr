@@ -110,13 +110,6 @@ const CRASHED_PAGE_FILE = path.join(__dirname, 'crashed.html');
 // anchors its message + Reload button to that titlebar-height band.
 const CHROME_CRASHED_PAGE_FILE = path.join(__dirname, 'chrome-crashed.html');
 
-// Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
-// burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
-// re-post the chrome-event multiple times in flight; each post redraws the
-// store-fed inbox list, so coalescing keeps it to one redraw per burst per
-// open window.
-const INBOX_LIST_REFRESH_DEBOUNCE_MS = 50;
-
 // -- Per-window bundle registry --
 const bundles = new Set();
 const mruWindows = []; // most recently focused first
@@ -557,10 +550,6 @@ function wireBundleWindowEvents(bundle) {
     // set and we must not overwrite it with a progressively shrinking snapshot
     // as the teardown closes each window.
     if (!isShuttingDown) saveSessionState();
-    if (bundle.inboxListReloadTimer) {
-      clearTimeout(bundle.inboxListReloadTimer);
-      bundle.inboxListReloadTimer = null;
-    }
     const views = [bundle.chromeView, bundle.contentView, bundle.modalView];
     for (const view of views) {
       if (!view) continue;
@@ -614,7 +603,6 @@ function createBundle() {
     // rect). Gates updateBundleBounds so a resize doesn't clobber that rect with
     // the full-window modal bounds.
     tooltipVisible: false,
-    inboxListReloadTimer: null,
     // Which surface the LATEST navigateBundle call targeted ('chrome' |
     // 'content'). The surfaces' did-navigate handlers only apply their state
     // bookkeeping when their surface is the intended one, so a slow load from
@@ -1897,10 +1885,6 @@ function closeModal(bundle) {
   // Tell the warm overlay host to hide its overlays. The host page itself stays
   // loaded (warm) so the next open is instant; only the hosted iframes hide.
   sendOverlayCommand(bundle, { type: 'hide-all' });
-  if (bundle.inboxListReloadTimer) {
-    clearTimeout(bundle.inboxListReloadTimer);
-    bundle.inboxListReloadTimer = null;
-  }
 }
 
 function inboxUrlFor(query) {
@@ -2033,24 +2017,6 @@ function toggleHelp(bundle, agentId, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isHelpModalOpen(bundle)) closeModal(bundle);
   else openHelp(bundle, agentId, undefined, assistAvailable);
-}
-
-// Coalesce rapid SSE-triggered chrome-event posts so the store-fed inbox
-// list redraws once per burst of requests events rather than once per event.
-function scheduleInboxListRefresh(bundle, evt) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!isInboxModalOpen(bundle)) return;
-  if (bundle.inboxListReloadTimer) {
-    clearTimeout(bundle.inboxListReloadTimer);
-  }
-  bundle.inboxListReloadTimer = setTimeout(() => {
-    bundle.inboxListReloadTimer = null;
-    if (!bundle || bundle.window.isDestroyed()) return;
-    if (!bundle.modalView || !bundle.modalVisible) return;
-    if (bundle.modalView.webContents.isDestroyed()) return;
-    // Per-frame so the event reaches the inbox iframe, not just the host frame.
-    sendToOverlayFrames(bundle, 'chrome-event', evt);
-  }, INBOX_LIST_REFRESH_DEBOUNCE_MS);
 }
 
 function sendCurrentWorkspaceToBundleViews(bundle) {
@@ -2623,21 +2589,18 @@ function handleChromeSSEEvent(evt) {
     const newCount = evt.count || 0;
     // Backend defaults auto_open to true; treat a missing field the same way.
     const autoOpen = evt.auto_open !== false;
-    // Diff the pending *set* (ordered ids), not the count, so a swap at
-    // constant size still refreshes the inbox list. Auto-open keys off a
-    // genuinely new id appearing (not a count increase, which is blind to
-    // replacements), so approving/denying never reopens an inbox the user
-    // closed.
+    // Auto-open keys off a genuinely new id appearing in the pending set
+    // (not a count increase, which is blind to replacements), so
+    // approving/denying never reopens an inbox the user closed.
     const prevSet = new Set(prevIds);
     const hasNewRequest = newIds.some((id) => !prevSet.has(id));
-    const idsChanged = newIds.length !== prevIds.length || hasNewRequest;
     latestChromeState.requestIds = newIds;
     latestChromeState.requestCount = newCount;
     latestChromeState.requestsEvent = evt;
     const shouldAutoOpen = autoOpen && hasNewRequest;
-    // When the inbox modal is already open in a bundle, forward the
-    // chrome-event to its shell JS (debounced) so the master list
-    // re-fetches its fragment; otherwise, on a genuinely new id, open it.
+    // On a genuinely new request, open the inbox. An already-open inbox
+    // needs nothing here: the broadcastChromeEvent below reaches its hosted
+    // iframe, and the store-fed list re-renders from the event.
     //
     // The auto-open is gated on ``!b.modalVisible`` (not just
     // ``!isInboxModalOpen``) because the sidebar now shares ``modalView``:
@@ -2647,13 +2610,9 @@ function handleChromeSSEEvent(evt) {
     // alone; the titlebar requests badge still updates live (via the
     // broadcastChromeEvent below), and the next genuinely-new request (or
     // the user closing the modal and clicking the bell) surfaces the inbox.
-    if (idsChanged || shouldAutoOpen) {
+    if (shouldAutoOpen) {
       for (const b of bundles) {
-        if (shouldAutoOpen && !b.modalVisible) {
-          openInbox(b, '');
-        } else if (isInboxModalOpen(b)) {
-          scheduleInboxListRefresh(b, evt);
-        }
+        if (!b.modalVisible) openInbox(b, '');
       }
     }
   } else if (evt.type === 'open_help') {
