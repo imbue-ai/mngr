@@ -1,0 +1,1 @@
+Hardened the `test_list_filter_by_state` e2e test to scope its `mngr list` calls to `--provider local`, matching the sibling `test_multiple_agents_coexist`. This removes a latent failure mode where an unqualified `mngr list` scans every enabled backend and exits non-zero when a cloud provider lacks credentials, which is unrelated to the state-filtering behavior under test.

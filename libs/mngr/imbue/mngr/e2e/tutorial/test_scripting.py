@@ -78,7 +78,7 @@ def test_config_set_headless_globally(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(180)
 def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
     """Tutorial block:
         # or set headless globally
@@ -92,15 +92,23 @@ def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
     is accepted -- because validation goes through `model_construct`, which only
     rejects unknown fields.
     """
+    # The `mngr` subprocess cold-start can exceed the 10s global pytest timeout,
+    # so this test overrides that marker (@pytest.mark.timeout above) and gives
+    # each of its three subprocesses matching headroom past the 30s default.
+    #
     # The e2e fixture pre-seeds the project config file with the pytest opt-in
     # key, so the file already exists. Capture its contents before the rejected
     # write so we can prove the write left the file untouched.
-    path_result = e2e.run("mngr config path --scope project", comment="locate the project config file")
+    path_result = e2e.run(
+        "mngr config path --scope project", comment="locate the project config file", timeout=120.0
+    )
     expect(path_result).to_succeed()
     project_config_path = Path(path_result.stdout.strip())
     contents_before = project_config_path.read_text() if project_config_path.exists() else None
 
-    bad_result = e2e.run("mngr config set definitely_not_a_real_setting true", comment="reject an unknown config key")
+    bad_result = e2e.run(
+        "mngr config set definitely_not_a_real_setting true", comment="reject an unknown config key", timeout=120.0
+    )
     expect(bad_result).to_fail()
     expect(bad_result.stderr).to_contain("Unknown configuration fields")
 
@@ -116,7 +124,7 @@ def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
     # since it goes through model_construct. So setting a known key to a value of
     # the wrong type (a bool field to a non-bool string) is accepted and exits 0.
     wrong_type_result = e2e.run(
-        "mngr config set headless notabool", comment="a wrong-type value for a known key is accepted"
+        "mngr config set headless notabool", comment="a wrong-type value for a known key is accepted", timeout=120.0
     )
     expect(wrong_type_result).to_succeed()
 
@@ -190,7 +198,7 @@ def test_get_json_into_var(e2e: E2eSession) -> None:
 # Marking this @pytest.mark.modal would therefore always fail the "marked but
 # never invoked modal" guard check.
 @pytest.mark.release
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(150)
 def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
     """Tutorial block:
         # use discovery stream for streaming results into other tools
@@ -205,23 +213,30 @@ def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
     snapshot flowed end to end through the pipe (observe -> JSONL -> python),
     not merely that the timeout-wrapped command exited 0.
     """
-    # Warm the discovery cache first. `mngr list` runs an unfiltered listing,
-    # which writes a full discovery snapshot to disk; that lets the `observe`
-    # below emit the cached snapshot instantly on its fast path instead of
-    # racing the (provider-querying) initial sync against the timeout. The raw
-    # snapshot is real discovery JSONL: it carries the DISCOVERY_FULL event type.
-    expect(e2e.run("mngr list", comment="warm the discovery cache")).to_succeed()
+    # `mngr observe --discovery-only` is a discovery *producer*: on startup it runs
+    # one bounded discovery poll per enabled provider and appends each provider's
+    # snapshot to the shared discovery log, then its own tail echoes those appended
+    # lines to stdout as JSONL. It tails from the current end of the file, so it does
+    # not replay any pre-existing cached snapshot -- the stream carries the snapshots
+    # its own startup poll writes. The docstring names the legacy whole-world
+    # DISCOVERY_FULL snapshot, but that event is deprecated and no longer produced
+    # (superseded by the per-provider DISCOVERY_PROVIDER snapshot), so the raw stream
+    # carries DISCOVERY_PROVIDER events instead.
+    #
+    # observe blocks forever, so wrap it in `timeout` + `|| true` to bound the
+    # capture. The window must clear the mngr subprocess cold-start (heavy imports
+    # dominate the time-to-first-event; the local/ssh poll itself is sub-second)
+    # before the startup poll's first snapshot is emitted.
     raw = e2e.run(
-        "timeout 5 mngr observe --discovery-only || true",
+        "timeout 30 mngr observe --discovery-only || true",
         comment="capture the raw discovery stream",
-        timeout=45.0,
+        timeout=60.0,
     )
-    expect(raw.stdout).to_contain("DISCOVERY_FULL")
-    # observe blocks indefinitely; wrap with timeout so the while-loop exits.
+    expect(raw.stdout).to_contain("DISCOVERY_PROVIDER")
     result = e2e.run(
-        'timeout 5 bash -c \'mngr observe --discovery-only | while read -r line; do echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get(\\"name\\", \\"unknown\\"))"; done\' || true',
+        'timeout 30 bash -c \'mngr observe --discovery-only | while read -r line; do echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get(\\"name\\", \\"unknown\\"))"; done\' || true',
         comment="pipe discovery stream into python (timeout-capped)",
-        timeout=45.0,
+        timeout=60.0,
     )
     expect(result).to_succeed()
     # Each discovery event is valid JSON the one-liner parses with json.load;

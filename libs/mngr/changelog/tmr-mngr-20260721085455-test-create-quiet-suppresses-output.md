@@ -1,0 +1,1 @@
+Tightened the `test_create_quiet_suppresses_output` e2e test to verify exactly its documented scope: it now confirms only that a `--quiet` create produces no output and that the agent appears in `mngr list`, dropping the redundant type/command assertions that duplicate the counterpart JSON-output test.

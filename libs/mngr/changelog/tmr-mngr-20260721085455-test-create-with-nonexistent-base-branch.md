@@ -1,0 +1,1 @@
+Added a `@pytest.mark.timeout(120)` marker to the `test_create_with_nonexistent_base_branch` e2e tutorial test so it matches its sibling tests. Without the override it inherited the 10s default timeout and failed spuriously, since `mngr create` takes longer than 10s to reach and report the missing-base-branch error.

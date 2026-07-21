@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` marker from the `test_destroy_dry_run` e2e test. The test previews a destroy and aborts at the confirmation prompt, so it never invokes rsync; the resource guard was failing the otherwise-passing test.

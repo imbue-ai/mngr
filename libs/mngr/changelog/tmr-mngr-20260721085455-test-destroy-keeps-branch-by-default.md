@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` marker from the `test_destroy_keeps_branch_by_default` e2e test. The test never invokes rsync (like its companion `test_destroy_remove_branch`), so the resource guard was failing the otherwise-passing test.

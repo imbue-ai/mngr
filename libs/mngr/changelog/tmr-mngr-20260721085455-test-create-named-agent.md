@@ -1,0 +1,1 @@
+Strengthened the `test_create_named_agent` e2e tutorial test to verify that the created agent's worktree is actually name-derived (named `my-task-<hash>`), closing a gap where the test observed the reported worktree path without confirming the given name flowed through to the directory name.

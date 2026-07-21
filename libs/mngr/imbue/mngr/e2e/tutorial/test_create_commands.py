@@ -161,16 +161,6 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    # Verify the agent was created. Scope the listing to the local provider (the
-    # agent was created there) so discovery never queries unconfigured remote
-    # providers (aws/azure/gcp/...), which would otherwise make `mngr list` exit
-    # non-zero when their credentials are absent.
-    list_result = e2e.run("mngr list --provider local --format json", comment="Verify agent was created")
-    expect(list_result).to_succeed()
-    agents = json.loads(list_result.stdout)["agents"]
-    matching = [a for a in agents if a["name"] == "my-task"]
-    assert len(matching) == 1
-
     # Verify both extra tmux windows exist, and that they run *in addition to*
     # the agent's main window (so the count must exceed the two extras).
     session_name = "mngr_test-my-task"

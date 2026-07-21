@@ -196,9 +196,13 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
     )
     # Expect failure because the modal provider is disabled
     expect(result).to_fail()
-    # The error should reference the modal provider being unavailable
+    # The error must reference the modal provider specifically: that is what
+    # proves the template's provider=modal option took effect (a create without
+    # the template would default to the local provider and succeed). Matching
+    # only the generic word "provider" would not distinguish this from an
+    # unrelated failure, so require "modal".
     combined = result.stdout + result.stderr
-    expect(combined).to_match(r"(?i)modal|provider")
+    expect(combined).to_match(r"(?i)modal")
 
     # The failed create must not leave a partial agent behind: the disabled
     # provider should abort before anything is registered.
@@ -239,7 +243,6 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -424,7 +427,6 @@ def test_config_set_default_provider(e2e: E2eSession, project_config_dir: Path) 
     expect(get_result.stdout).to_contain("modal")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -492,7 +494,8 @@ def test_create_with_invalid_label_format(e2e: E2eSession) -> None:
         comment="labels must be in KEY=VALUE format",
     )
     expect(result).to_fail()
-    expect(result.stderr + result.stdout).to_contain("KEY=VALUE")
+    # The scope requires the KEY=VALUE guidance on stderr specifically.
+    expect(result.stderr).to_contain("KEY=VALUE")
 
     # The agent must not have been created when label parsing fails.
     list_result = e2e.run("mngr list --format json", comment="Verify no agent was created")

@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` mark from the `test_create_with_real_plugin_flags` e2e tutorial test. The test creates a local `--type command` agent in a git worktree and never invokes rsync, so the resource guard was failing the otherwise-passing test.

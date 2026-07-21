@@ -1,0 +1,1 @@
+- Tightened the `test_create_with_template_modal_disabled` e2e test to require the create failure to reference the `modal` provider specifically (rather than the generic word "provider"), so the assertion proves the template's `provider=modal` option actually took effect.

@@ -4,6 +4,8 @@ Each test corresponds 1:1 to a tutorial script block. Each test creates real
 agents with the names the block references so the exec command has a target.
 """
 
+import time
+
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
@@ -214,7 +216,7 @@ def test_exec_timeout(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)
 def test_exec_timeout_enforced(e2e: E2eSession) -> None:
     """Tutorial block:
         # set a timeout (in seconds) for the command
@@ -231,14 +233,32 @@ def test_exec_timeout_enforced(e2e: E2eSession) -> None:
     # longer than its --timeout must be terminated, causing exec to fail. The
     # inner --timeout (3s) is well below the sleep (120s), so if the timeout is
     # enforced the command returns quickly with a non-zero exit; if it were
-    # ignored, the sleep would outlast e2e.run's own 30s budget and raise.
+    # ignored, the sleep would run until e2e.run's own (90s) budget expired.
+    #
+    # Give e2e.run an explicit 90s budget (well above the enforced return time
+    # but still below the 120s sleep) so an ignored --timeout would be caught by
+    # that budget -- run_command returns exit 124 at 90s -- rather than by the
+    # inner timeout. This widens the gap between the "enforced" and "ignored"
+    # outcomes so the timing check below can tell them apart robustly.
+    started_at = time.monotonic()
     result = e2e.run(
         'mngr exec my-task --timeout 3 "sleep 120"',
         comment="a command that exceeds its timeout is terminated and fails",
+        timeout=90.0,
     )
+    elapsed = time.monotonic() - started_at
     expect(result).to_fail()
     # The successful "echo done" path reports success; the terminated command must not.
     expect(result.stdout).not_to_contain("Command succeeded")
+    # Observe that the timeout was actually *enforced by exec*, not merely masked
+    # by e2e.run's own budget killing the sleep. Exit-code and stdout checks alone
+    # cannot distinguish these: an ignored --timeout would let `sleep 120` run
+    # until the 90s budget expired, and run_command then returns exit 124 with no
+    # "Command succeeded" -- satisfying both checks above. So assert the command
+    # returned well within that budget: an enforced 3s timeout returns in a
+    # handful of seconds (mngr startup plus the 3s budget, ~15s observed), far
+    # below the 45s bar, whereas an ignored timeout could not return before 90s.
+    assert elapsed < 45.0, f"exec did not return quickly ({elapsed:.1f}s); --timeout was likely not enforced"
 
 
 @pytest.mark.release
@@ -296,6 +316,7 @@ def test_exec_no_start(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_exec_on_error_continue(e2e: E2eSession) -> None:
     """Tutorial block:
         # control error handling when running on multiple agents

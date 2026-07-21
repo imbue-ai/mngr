@@ -1,0 +1,1 @@
+Added an explicit `@pytest.mark.timeout(60)` to the `test_list_unknown_provider_filter` e2e test. Filtering `mngr list` by an unknown provider still pays mngr's ~12s CLI cold-start cost, which exceeded the default 10s per-test timeout and made the test fail locally. This matches the timeout override already used by the sibling filter tests.

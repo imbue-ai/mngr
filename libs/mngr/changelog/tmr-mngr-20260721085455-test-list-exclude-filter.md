@@ -1,0 +1,1 @@
+- Fixed the `test_list_exclude_filter` e2e tutorial test so it no longer times out: added the `@pytest.mark.timeout(180)` marker (matching its sibling tests) since it was falling back to the 10s default, and removed a superfluous `@pytest.mark.rsync` mark that the resource guard rejected because the local-only list/exclude test never invokes rsync.

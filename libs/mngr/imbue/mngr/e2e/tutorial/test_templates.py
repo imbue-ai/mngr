@@ -20,12 +20,18 @@ def _write_modal_big_template(e2e: E2eSession) -> None:
 
 
 def _write_with_tests_template(e2e: E2eSession) -> None:
+    # Besides ensure_clean (subsumed by the command's --no-ensure-clean), give
+    # with-tests an env var. create writes explicit env vars to the agent's env
+    # file, which `mngr exec` sources, so this gives with-tests an independently
+    # observable effect -- letting the stacking test confirm the second template
+    # was actually applied, not just resolved.
     cfg = ".$MNGR_ROOT_NAME/settings.local.toml"
     expect(
         e2e.run(
             f"echo '' >> {cfg}"
             f" && echo '[create_templates.with-tests]' >> {cfg}"
-            f" && echo 'ensure_clean = false' >> {cfg}",
+            f" && echo 'ensure_clean = false' >> {cfg}"
+            f" && echo 'env = [\"MNGR_E2E_WITH_TESTS_MARKER=applied\"]' >> {cfg}",
             comment="define with-tests template stub",
         )
     ).to_succeed()
@@ -148,14 +154,14 @@ def test_create_stack_templates(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    # Confirm the stacked templates were actually applied, not just that the
-    # command exited 0. modal-big is substituted with transfer=none for this
-    # local test, so applying it means the agent runs in-place: its work
-    # directory is the session cwd rather than a generated worktree. Verify with
-    # `mngr exec`, which targets the local agent directly, mirroring the
-    # short-form test. (with-tests only sets ensure_clean=false, which the
-    # command's --no-ensure-clean already forces, so its stacked value is a
-    # benign no-op here and has no independently observable effect.)
+    # Confirm BOTH stacked templates were actually applied, not just that the
+    # command exited 0. Each template contributes a distinct, independently
+    # observable effect, so we can attribute each observation to one template.
+    #
+    # modal-big is substituted with transfer=none for this local test, so
+    # applying it means the agent runs in-place: its work directory is the
+    # session cwd rather than a generated worktree. Verify with `mngr exec`,
+    # which targets the local agent directly, mirroring the short-form test.
     session_pwd = e2e.run("pwd", comment="get the session cwd for comparison")
     expect(session_pwd).to_succeed()
     agent_pwd = e2e.run("mngr exec my-task pwd", comment="confirm the agent was created and runs in-place")
@@ -167,6 +173,20 @@ def test_create_stack_templates(e2e: E2eSession) -> None:
         f"  agent pwd:   {agent_work_dir}\n"
         f"  session cwd: {session_pwd.stdout.strip()}"
     )
+
+    # with-tests sets an env var that create writes to the agent's env file;
+    # `mngr exec` sources that file, so seeing the variable confirms the second
+    # stacked template was applied too -- ensure_clean=false alone is subsumed by
+    # --no-ensure-clean and would otherwise leave with-tests's application
+    # unobservable, indistinguishable from it being silently ignored.
+    # exec takes all-but-last positional as agents and the last as a single
+    # COMMAND, so the command is quoted to reach the agent as one shell string.
+    with_tests_env = e2e.run(
+        "mngr exec my-task 'printenv MNGR_E2E_WITH_TESTS_MARKER'",
+        comment="confirm the second stacked template (with-tests) was applied",
+    )
+    expect(with_tests_env).to_succeed()
+    expect(with_tests_env.stdout).to_contain("applied")
 
 
 @pytest.mark.release

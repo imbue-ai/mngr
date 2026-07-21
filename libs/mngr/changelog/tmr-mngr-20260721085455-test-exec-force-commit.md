@@ -1,0 +1,1 @@
+Fixed the `test_exec_force_commit` git tutorial e2e test, which was hitting the default 10s pytest timeout. Added a `@pytest.mark.timeout(120)` override (matching the other heavier tests in the suite) so the test has enough time to create an agent and run its four `mngr exec` commands.

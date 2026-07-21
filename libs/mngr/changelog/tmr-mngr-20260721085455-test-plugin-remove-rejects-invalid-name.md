@@ -1,0 +1,1 @@
+Fixed the `test_plugin_remove_rejects_invalid_name` e2e test so it no longer spuriously fails on the default 10s per-test timeout: it now carries the same `@pytest.mark.timeout(60)` budget as the other subprocess-driven plugin e2e tests, which each pay a ~10s mngr cold-start cost.

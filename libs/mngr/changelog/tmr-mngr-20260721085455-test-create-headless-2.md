@@ -1,0 +1,1 @@
+Removed the spurious `@pytest.mark.rsync` mark from the `test_create_headless` e2e tutorial test. The test creates a worktree agent from a clean source repo, so `mngr create` never invokes rsync, and the mark tripped the rsync resource guard's NEVER_INVOKED check.

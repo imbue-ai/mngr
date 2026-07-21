@@ -168,6 +168,11 @@ def test_connect_explicit_host(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The provider-qualified `host.provider` spec drives Modal provider setup
+# (app-context init) which, together with mngr's subprocess startup cost,
+# exceeds the default 10s per-test timeout even though the lookup ultimately
+# fails fast -- matching test_connect_explicit_host in this file.
+@pytest.mark.timeout(120)
 def test_connect_explicit_host_and_provider(e2e: E2eSession) -> None:
     """Tutorial block:
         # or if you're really unlucky and have multiple *hosts* with the same name (across different providers),

@@ -1,0 +1,1 @@
+- Fixed the `test_command_agent_dev_server_extra_windows` e2e release test, which was hitting the suite-default 10s pytest timeout mid-`mngr create`. Added a `@pytest.mark.timeout(300)` budget and generous per-command timeouts, matching the sibling command-agent tests.

@@ -1,0 +1,1 @@
+Strengthened the `test_tips_exec_filtered_hosts` e2e tutorial test so it independently verifies both effects the tutorial demonstrates: the piped `mngr exec -` command echoes the modal host's `$MNGR_AGENT_ID` on its own line and dumps that host's env. Previously the echo check was subsumed by the env-dump check, so a missing echo could go undetected.

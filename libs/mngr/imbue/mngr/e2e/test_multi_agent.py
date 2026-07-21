@@ -107,9 +107,17 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Stop one agent
     expect(e2e.run("mngr stop stopped-agent", comment="Stop one agent")).to_succeed()
 
+    # Scope every discovery to the local provider (where these agents live). An
+    # unqualified `mngr list` scans every enabled backend, and any cloud backend
+    # without credentials in the environment makes the command exit non-zero with
+    # EXIT_CODE_PROVIDER_INACCESSIBLE even though the local agents are all listed
+    # -- noise unrelated to state filtering. The sibling test_multiple_agents_coexist
+    # scopes local-agent checks the same way. The provider scope is orthogonal to
+    # the state filter under test: it returns the identical set for these local agents.
+
     # --stopped should show only the stopped agent
     stopped_result = e2e.run(
-        "mngr list --stopped --format json",
+        "mngr list --provider local --stopped --format json",
         comment="List only stopped agents",
     )
     expect(stopped_result).to_succeed()
@@ -125,7 +133,7 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     # --include 'state == "STOPPED"'. Verify the alias is faithful: the
     # explicit CEL form must return exactly the same set of agents.
     cel_result = e2e.run(
-        "mngr list --include 'state == \"STOPPED\"' --format json",
+        "mngr list --provider local --include 'state == \"STOPPED\"' --format json",
         comment="List stopped agents via explicit CEL filter (alias for --stopped)",
     )
     expect(cel_result).to_succeed()
@@ -135,7 +143,7 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Without --stopped, both agents should appear (the non-stopped one may
     # be RUNNING or WAITING depending on timing)
     all_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider local --format json",
         comment="List all agents (no state filter)",
     )
     expect(all_result).to_succeed()

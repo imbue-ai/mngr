@@ -201,6 +201,16 @@ def test_start_dry_run(e2e: E2eSession) -> None:
     lifecycle state is identical before and after (nothing was actually started).
     """
     _create_my_task(e2e, 100506)
+    # Stop the agent first so the dry-run's "nothing was actually started" claim
+    # is genuinely observable. `mngr start` is idempotent on an already-running
+    # agent (see test_start_idempotent), so if my-task were left running the
+    # before/after state comparison below would be vacuous -- a real start would
+    # leave a running agent running too. Starting from a *stopped* agent, the
+    # state stays STOPPED iff the dry-run truly refrained from starting it; an
+    # erroneous real start would flip it out of the stopped state and fail the
+    # equality check. This matches the tutorial's "start all stopped agents"
+    # intent (a dry-run over agents that would actually be started).
+    expect(e2e.run("mngr stop my-task", comment="stop my-task so the dry-run has something to start")).to_succeed()
 
     # Capture every agent's lifecycle state before the dry-run so we can prove
     # the dry-run leaves all of them untouched. Scope the query to the local

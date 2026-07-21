@@ -98,10 +98,9 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
     expect(e2e.run("mngr exec fix-bug pwd", comment="verify the destroyed agent can no longer be reached")).to_fail()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(420)
 def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
     """Tutorial block:
         # launch multiple agents in parallel, each working on a different task
@@ -131,6 +130,15 @@ def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
     destroy --remove-created-branch cleans up all three at once (3 agent(s),
     none remaining in the listing).
     """
+    # Every `mngr` invocation pays a fixed ~15-20s startup cost in the
+    # all-packages dev/test venv (the CLI eagerly imports every installed
+    # provider plugin, pulling in heavy cloud SDKs). Commands that also do real
+    # work -- create (provisioning + worktree + tmux), the two-process fan-out
+    # pipes, and destroy (which runs post-cleanup garbage collection) -- can
+    # therefore exceed the 30s default per-command timeout. Give them the same
+    # generous headroom the other multi-step e2e recipes use for their slow
+    # commands so a startup spike does not spuriously fail the recipe under test.
+    slow_command_timeout = 120.0
     for name, sleep_value in [
         ("agent-auth", 100971),
         ("agent-tests", 100972),
@@ -140,6 +148,7 @@ def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
             e2e.run(
                 f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep {sleep_value}",
                 comment=f"create {name}",
+                timeout=slow_command_timeout,
             )
         ).to_succeed()
     expect(e2e.run("mngr list --running", comment="check on all of them at once")).to_succeed()
@@ -166,6 +175,7 @@ def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
     diff_result = e2e.run(
         'mngr list --ids | mngr exec - "git diff --stat"',
         comment="run git status on all agents",
+        timeout=slow_command_timeout,
     )
     expect(diff_result).to_succeed()
     for name in ("agent-auth", "agent-tests", "agent-docs"):
@@ -174,6 +184,7 @@ def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
     msg_result = e2e.run(
         'mngr list --ids | mngr msg - -m "Reminder: commit and push your changes when done"',
         comment="send a coordination message to all agents",
+        timeout=slow_command_timeout,
     )
     expect(msg_result).to_succeed()
     expect(msg_result.stdout).to_contain("3 agent(s)")
@@ -182,6 +193,7 @@ def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
     destroy_result = e2e.run(
         "mngr destroy --force --remove-created-branch agent-auth agent-tests agent-docs",
         comment="clean up all three agents",
+        timeout=slow_command_timeout,
     )
     expect(destroy_result).to_succeed()
     expect(destroy_result.stdout).to_contain("3 agent(s)")

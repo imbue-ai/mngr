@@ -1,0 +1,1 @@
+Removed the spurious `@pytest.mark.rsync` mark from the `test_list_limit` e2e tutorial test. The test creates local command agents in a git repo, which transfer via a git worktree rather than rsync, so the resource guard flagged the mark as never invoked.

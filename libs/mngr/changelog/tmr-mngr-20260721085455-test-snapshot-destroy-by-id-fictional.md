@@ -1,0 +1,1 @@
+Fixed the `test_snapshot_destroy_by_id_fictional` e2e test, which was timing out under the 10-second default pytest timeout. A cold `mngr` invocation (uv startup plus plugin/modal imports) can exceed 10 seconds, so the test now carries an explicit `@pytest.mark.timeout(120)` like its sibling snapshot tests. No user-facing behavior changed.

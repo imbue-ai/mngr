@@ -1,0 +1,1 @@
+Added an explicit `@pytest.mark.timeout(60)` to the `mngr list --project` e2e tutorial test so it passes locally under the default 10s per-test timeout, matching the sibling `mngr list` filter tests whose provider-discovery path routinely takes ~10s.

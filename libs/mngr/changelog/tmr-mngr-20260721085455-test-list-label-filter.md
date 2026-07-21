@@ -1,0 +1,1 @@
+Added an explicit 60-second per-test timeout to the `mngr list --label` e2e tutorial test (`test_list_label_filter`) so it passes locally under the default 10-second timeout, matching the sibling filter tests that run the full provider-discovery path.

@@ -133,7 +133,12 @@ def test_list_filter_invalid_cel(e2e: E2eSession) -> None:
         comment="reject a syntactically invalid CEL expression",
     )
     expect(result).to_fail()
-    expect(result.stdout + result.stderr).to_contain("Invalid include filter expression")
+    output = result.stdout + result.stderr
+    expect(output).to_contain("Invalid include filter expression")
+    # The scope requires a clean error "rather than ... crashing with a
+    # traceback": the invalid expression must be reported as a handled error,
+    # not surface an unhandled Python exception traceback.
+    expect(output).not_to_contain("Traceback")
 
 
 @pytest.mark.release
@@ -184,7 +189,9 @@ def test_list_project_field(e2e: E2eSession) -> None:
     # see which projects have agents by looking at the project field
     result = e2e.run('mngr list --fields "name,project,state"', comment="see which projects have agents")
     expect(result).to_succeed()
-    # the listing must show the agent under its project, i.e. the project field
-    # is populated from the agent's project label rather than rendered empty.
-    expect(result.stdout).to_contain("my-task")
-    expect(result.stdout).to_contain("my-project")
+    # the listing must show the agent under its project on the same row, i.e. the
+    # project column is populated from the agent's project label rather than
+    # rendered empty. Matching name and project value on one line (rather than as
+    # two independent substrings) confirms the project field belongs to this
+    # agent's row.
+    expect(result.stdout).to_match(r"my-task[^\n]+my-project")

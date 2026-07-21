@@ -208,6 +208,10 @@ def test_plugin_remove(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# Every mngr invocation pays a ~10s cold-start cost (importing and registering
+# all plugins), which alone exceeds the 10s default per-test timeout, so this
+# e2e test needs a higher budget like the other subprocess-driven e2e tests.
+@pytest.mark.timeout(60)
 def test_plugin_remove_rejects_invalid_name(e2e: E2eSession) -> None:
     """Tutorial block:
         # remove a plugin
@@ -227,6 +231,10 @@ def test_plugin_remove_rejects_invalid_name(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# Every mngr invocation pays a ~10s cold-start cost (importing and registering
+# all plugins), which alone exceeds the 10s default per-test timeout, so this
+# e2e test needs a higher budget like the other subprocess-driven e2e tests.
+@pytest.mark.timeout(60)
 def test_plugin_enable_project_scope(e2e: E2eSession) -> None:
     """Tutorial block:
         # enable a plugin at the project scope

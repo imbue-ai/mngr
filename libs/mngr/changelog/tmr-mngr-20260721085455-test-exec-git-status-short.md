@@ -1,0 +1,1 @@
+Added an explicit `@pytest.mark.timeout(120)` to the `test_exec_git_status_short` e2e tutorial test so it no longer hits the default 10s pytest timeout while creating the agent and running `mngr exec` commands.

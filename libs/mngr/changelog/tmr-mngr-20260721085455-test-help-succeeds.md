@@ -1,0 +1,1 @@
+Fixed the `test_help_succeeds` e2e tutorial test, which timed out under the global 10s pytest timeout because the `mngr --help` subprocess loads every plugin/backend/provider at import time (~20s). Added a `@pytest.mark.timeout(90)` override and raised the subprocess timeout to 60s, mirroring the sibling `test_unknown_command_fails` that shares the same tutorial block.

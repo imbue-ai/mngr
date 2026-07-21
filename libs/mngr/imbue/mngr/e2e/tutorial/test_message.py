@@ -177,12 +177,22 @@ def test_message_filtered_via_stdin(e2e: E2eSession) -> None:
     # and the message becomes a no-op. First confirm the filter half really does
     # produce an empty id list -- otherwise the no-op path would not be the one
     # under test.
+    #
+    # We deliberately do NOT assert this standalone list command exits 0. `mngr
+    # list` runs the full provider-discovery path across every enabled backend
+    # regardless of the `--include` filter, and an enabled-but-unreachable
+    # provider (e.g. modal when no credentials are configured) raises a
+    # provider-unavailable error that makes the whole command exit non-zero (exit
+    # code 6, EXIT_CODE_PROVIDER_INACCESSIBLE). That exit code reflects provider
+    # reachability, which is outside this test's scope: the `--include` filter
+    # still emits an empty id list on stdout (its stderr carries the error), and
+    # that empty list is the only precondition the no-op path needs. The sibling
+    # delivery-half test drops the same assertion for the same reason.
     list_result = e2e.run(
         "mngr list --include 'host.provider == \"modal\"' --ids",
         comment="the filter matches no agents, so the id list is empty",
         timeout=60.0,
     )
-    expect(list_result).to_succeed()
     expect(list_result.stdout.strip()).to_be_empty()
 
     # Piping the empty list into msg must exit cleanly without claiming that any

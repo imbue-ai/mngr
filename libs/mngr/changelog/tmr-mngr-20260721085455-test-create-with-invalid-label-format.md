@@ -1,0 +1,1 @@
+Tightened the `test_create_with_invalid_label_format` e2e test so it asserts the `KEY=VALUE` guidance appears on stderr specifically (matching the documented behavior) rather than in the combined stdout+stderr stream.

@@ -144,6 +144,11 @@ def test_gc_provider_modal(e2e: E2eSession) -> None:
         timeout=90.0,
     )
     expect(result).to_succeed()
+    # gc must actually scan the Modal provider, not silently skip it: it
+    # announces its scan with a "Garbage Collection Results" summary (the same
+    # marker the sibling gc tests assert on), confirming the full Modal gc path
+    # ran rather than a no-op.
+    expect(result.stdout).to_contain("Garbage Collection Results")
     # The running agent's machine is active, so gc must not tear it down: it
     # should still be listed after garbage collection. Scope the listing to the
     # Modal provider (matching the sibling create-modal tests): an unfiltered
@@ -174,17 +179,24 @@ def test_gc_background_watch(e2e: E2eSession) -> None:
     `watch -n60 mngr gc` can start to run gc in the background (capped with
     `timeout 1` since watch would otherwise block indefinitely).
     """
-    expect(
-        e2e.run(
-            "mngr config set commands.destroy.gc false",
-            comment="disable automatic gc on destroy",
-        )
-    ).to_succeed()
-    # `watch -n60 mngr gc` would block indefinitely; cap it with `timeout 1`
-    # so the test only confirms watch can start.
-    expect(
-        e2e.run(
-            "timeout 1 watch -n60 mngr gc || true",
-            comment="run gc in the background via watch",
-        )
-    ).to_succeed()
+    set_result = e2e.run(
+        "mngr config set commands.destroy.gc false",
+        comment="disable automatic gc on destroy",
+    )
+    expect(set_result).to_succeed()
+    # Observe the real effect the scope calls for -- automatic gc on destroy is
+    # disabled -- rather than only that the command exited 0: the config write
+    # must have set commands.destroy.gc to false.
+    expect(set_result.stdout).to_contain("commands.destroy.gc = false")
+
+    # `watch -n60 mngr gc` would block indefinitely; cap it with `timeout 1` so
+    # the test only confirms watch can start. Assert exit code 124 -- the code
+    # `timeout` returns when it has to kill a still-running command -- which
+    # observes that watch actually started and was running gc in the background
+    # until the cap fired. (A plain `... || true` + to_succeed() would pass even
+    # if `watch` were missing, which exits 127; 124 confirms watch really ran.)
+    watch_result = e2e.run(
+        "timeout 1 watch -n60 mngr gc",
+        comment="run gc in the background via watch",
+    )
+    expect(watch_result).to_have_exit_code(124)

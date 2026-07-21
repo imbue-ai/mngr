@@ -252,6 +252,7 @@ def test_snapshot_list_limit(e2e: E2eSession) -> None:
 # marking it @pytest.mark.modal would trip the guard's "marked but never invoked
 # modal" check.
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_snapshot_destroy_by_id_fictional(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy a specific snapshot

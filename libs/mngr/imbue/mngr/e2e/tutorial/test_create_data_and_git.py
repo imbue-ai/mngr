@@ -84,7 +84,6 @@ def test_create_with_project_label(e2e: E2eSession) -> None:
     assert matching[0]["labels"]["project"] == "my-project"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -146,10 +145,6 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
             comment="mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder",
         )
     ).to_succeed()
-
-    list_result = e2e.run("mngr list", comment="Verify agent appears in list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("my-task")
 
     # Verify the source file was actually transferred to the agent's work directory
     cat_result = e2e.run(
@@ -398,6 +393,7 @@ def test_create_with_base_branch(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_create_with_nonexistent_base_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also specify a different base branch (instead of the current branch):
@@ -476,7 +472,7 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.rsync
+@pytest.mark.timeout(180)
 def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can disable new branch creation entirely by omitting the :NEW part:

@@ -1,0 +1,1 @@
+Strengthened the `test_exec_timeout_enforced` e2e test so it verifies the `mngr exec --timeout` is actually enforced (the command returns quickly) rather than merely failing because the test harness's own budget killed the long-running command.

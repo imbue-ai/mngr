@@ -1,0 +1,1 @@
+Added an explicit `@pytest.mark.timeout(60)` to the `test_list_fields_original_branch` e2e tutorial test so the `mngr list --fields` command has enough time to run (the cold command exceeds the default 10s pytest timeout), matching the timeout marks already present on its sibling git tutorial tests.

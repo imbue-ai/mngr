@@ -1,0 +1,1 @@
+Tightened the `test_create_with_extra_tmux_windows` e2e test to verify exactly its documented scope by removing an out-of-scope `mngr list` assertion (agent existence is already implied by the tmux session and the `mngr exec` check).

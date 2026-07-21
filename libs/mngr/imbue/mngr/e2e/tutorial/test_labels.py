@@ -155,9 +155,9 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
     assert combined_stopped_names == {"backend-stopped"}, combined_stopped_names
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(180)
 def test_list_exclude_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # exclude agents matching a filter
@@ -459,6 +459,19 @@ def test_list_jq_filter(e2e: E2eSession) -> None:
     select(.labels.priority == "high")'` pipeline exits 0 (jq parses the output
     without error).
     """
+    # First scope clause: `mngr list --format json` emits valid JSON whose
+    # `.agents[]` can be filtered. Parse the raw output (not the piped one) so we
+    # actually observe well-formed JSON with an iterable `agents` array -- without
+    # this, the pipeline below could pass vacuously, since jq exits 0 on empty
+    # input. Do NOT assert the exit code here: a bare `mngr list` queries every
+    # enabled provider and exits non-zero when one is merely unreachable (e.g. AWS
+    # with no credentials in the e2e env), which is orthogonal to the JSON being
+    # valid. This mirrors the exit-code caveat in test_destroy_filtered_dry_run.
+    list_result = e2e.run("mngr list --format json", comment="verify list emits valid JSON")
+    agents = json.loads(list_result.stdout)["agents"]
+    assert isinstance(agents, list), f"expected `.agents` to be a JSON array, got {type(agents)}"
+
+    # Second scope clause: the jq pipeline parses that output and exits 0.
     expect(
         e2e.run(
             "mngr list --format json | jq '.agents[] | select(.labels.priority == \"high\")'",
@@ -469,7 +482,6 @@ def test_list_jq_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_jsonl_jq_stream(e2e: E2eSession) -> None:

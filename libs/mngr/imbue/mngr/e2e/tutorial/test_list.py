@@ -5,9 +5,11 @@ each one has a 1:1 correspondence with a tutorial script block.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
+from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.e2e.conftest import E2eSession
 from imbue.resource_guards.resource_guards import enforce_sdk_guard
 from imbue.skitwright.expect import expect
@@ -30,6 +32,12 @@ def _record_subprocess_modal_usage() -> None:
 
 
 @pytest.mark.release
+# `mngr list` runs the full provider-discovery path (including an authenticated
+# Modal environment lookup), which routinely takes ~10s -- past the default 10s
+# per-test timeout. The release CI lane already overrides this globally to 90s;
+# set an explicit per-test timeout so the test is robust locally too, matching
+# the sibling filter tests (test_list_local_filter/test_list_active_filter).
+@pytest.mark.timeout(60)
 def test_list_with_no_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # list all agents
@@ -44,7 +52,18 @@ def test_list_with_no_agents(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.modal
+# No @pytest.mark.modal: like the sibling bare-`mngr list` tests
+# (test_list_with_no_agents, test_list_active_filter, etc.), this runs in a
+# fresh environment where the Modal environment does not exist yet, so
+# discovery skips the modal provider (ProviderEmptyError) and never shells out
+# to the `modal` CLI -- the only Modal usage the resource guard can observe
+# across the e2e subprocess boundary. Marking it @pytest.mark.modal would trip
+# the guard's "marked but never invoked" check.
+# `mngr list --format json` still runs the full provider-discovery path, which
+# routinely takes ~10s -- past the default 10s per-test timeout. The release CI
+# lane already overrides this globally to 90s; set an explicit per-test timeout
+# so the test also passes locally under the default timeout.
+@pytest.mark.timeout(60)
 def test_list_json_with_no_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # output all objects as one big JSON array when complete  (useful for scripting)
@@ -64,7 +83,11 @@ def test_list_json_with_no_agents(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.modal
+# `mngr ls` is the alias of `mngr list`, so it runs the full provider-discovery
+# path, which routinely takes ~10s -- past the default 10s per-test timeout. The
+# release CI lane already overrides this globally to 90s; set an explicit
+# per-test timeout so this passes locally too, matching the sibling filter tests.
+@pytest.mark.timeout(60)
 def test_list_short_form(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -72,12 +95,25 @@ def test_list_short_form(e2e: E2eSession) -> None:
 
     Scope: `mngr ls` is accepted as the short alias of `mngr list` and exits 0.
     """
+    # Intentionally NOT marked @pytest.mark.modal: in an isolated, empty
+    # environment `mngr ls` (the alias of `mngr list`) discovers via the provider
+    # SDKs (Modal gRPC) and never shells out to the `modal` CLI binary, which is
+    # the only Modal usage the resource guard can observe across the mngr
+    # subprocess boundary. With the mark, the guard flags it as a never-invoked
+    # resource.
     expect(e2e.run("mngr ls", comment="short form")).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# This test makes five sequential `mngr` invocations (two creates, an exec, a
+# stop, and a `list`), each paying mngr's ~10s CLI cold-start plus
+# provider-discovery cost, so the whole test runs well past the default 10s
+# per-test timeout. The release CI lane overrides this globally to 90s; set an
+# explicit per-test timeout so the test is robust locally too, matching the
+# sibling filter tests that also create agents (test_list_limit,
+# test_list_remote_filter).
+@pytest.mark.timeout(180)
 def test_list_running_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only running agents
@@ -117,6 +153,13 @@ def test_list_running_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# `mngr list` runs the full provider-discovery path (an authenticated Modal
+# lookup plus Docker/Vultr probes), which routinely takes ~10s -- past the
+# default 10s per-test timeout. The release CI lane already overrides this
+# globally to 90s; match the sibling filter tests (test_list_active_filter,
+# test_list_local_filter) so the test also passes locally under the default
+# timeout.
+@pytest.mark.timeout(60)
 def test_list_stopped_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only stopped agents (not running, still exists and can be restarted)
@@ -196,8 +239,21 @@ def test_list_active_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.modal
-def test_config_set_list_active_default(e2e: E2eSession) -> None:
+# No @pytest.mark.modal: the only command here that touches providers is the
+# final `MNGR__COMMANDS__LIST__ACTIVE=false mngr list`, and in this fresh
+# environment the Modal environment does not exist yet, so `mngr list`
+# deliberately skips the modal provider (ProviderEmptyError) instead of creating
+# one. It therefore never invokes the `modal` CLI -- the only Modal usage the
+# resource guard can observe across the e2e subprocess boundary -- so marking the
+# test @pytest.mark.modal would trip the guard's "marked but never invoked" check
+# (mirrors test_list_active_filter).
+# This test runs three back-to-back `mngr` invocations (config set, config get,
+# and that `mngr list`). Each mngr CLI cold-start alone takes ~10s, and the final
+# `mngr list` runs the full provider-discovery path, so the whole test far exceeds
+# the default 10s per-test timeout. The release CI lane already overrides this
+# globally to 90s; set an explicit per-test timeout so the test is robust locally.
+@pytest.mark.timeout(120)
+def test_config_set_list_active_default(e2e: E2eSession, project_config_dir: Path) -> None:
     """Tutorial block:
         # you can make any of those filters the default for "mngr list" by setting it in your config.
         # for example, to hide agents from dead/destroyed hosts by default:
@@ -210,6 +266,15 @@ def test_config_set_list_active_default(e2e: E2eSession) -> None:
     documented `MNGR__COMMANDS__LIST__ACTIVE=false` env-var override is accepted
     for a single call.
     """
+    # The read-back (`mngr config get --scope project`) and the final `mngr list`
+    # are follow-up mngr commands that reload the project settings file. A project
+    # file written from scratch by `mngr config set` does not carry the
+    # `is_allowed_in_pytest` opt-in (the e2e fixture deliberately seeds only the
+    # local-scope file -- see conftest), so those reloads would be rejected before
+    # they could run. Seed the opt-in into the project scope up front so the
+    # follow-up reads are valid; `config set` then adds the key alongside it.
+    # (This mirrors test_config_unset in test_config.py.)
+    (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
     expect(
         e2e.run(
             "mngr config set commands.list.active true",
@@ -329,6 +394,12 @@ def test_list_provider_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# An unknown provider name matches no backend, so `mngr list` skips discovery
+# entirely -- but invoking `mngr` at all still pays the ~12s Python import/startup
+# cost, which exceeds the default 10s per-test timeout. The release CI lane
+# overrides the timeout globally to 90s; set an explicit per-test timeout so this
+# fast path is robust locally too (matching the sibling filter tests).
+@pytest.mark.timeout(60)
 def test_list_unknown_provider_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by provider
@@ -348,6 +419,12 @@ def test_list_unknown_provider_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# `mngr list` runs the provider-discovery path (including an authenticated Modal
+# environment lookup), which routinely takes ~10s -- past the default 10s
+# per-test timeout. The release CI lane already overrides this globally to 90s;
+# match the sibling filter tests (test_list_active_filter/test_list_local_filter)
+# so the test also passes locally under the default timeout.
+@pytest.mark.timeout(60)
 def test_list_project_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by project
@@ -367,6 +444,12 @@ def test_list_project_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# `mngr list` runs the full provider-discovery path (including an authenticated
+# Modal environment lookup), which routinely takes ~10s -- past the default 10s
+# per-test timeout. The release CI lane already overrides this globally to 90s;
+# match the sibling filter tests (test_list_local_filter/test_list_provider_filter)
+# so this test also passes locally under the default timeout.
+@pytest.mark.timeout(60)
 def test_list_label_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by agent label
@@ -404,6 +487,13 @@ def test_list_label_filter_invalid_format(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The happy-path `mngr list --host-label` runs the full provider-discovery path
+# (an authenticated Modal lookup plus Docker/Vultr probes), which routinely takes
+# ~10s -- past the default 10s per-test timeout. The release CI lane already
+# overrides this globally to 90s; match the sibling filter tests
+# (test_list_provider_filter/test_list_local_filter) so the test also passes
+# locally under the default timeout.
+@pytest.mark.timeout(60)
 def test_list_host_label_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by host label
@@ -497,7 +587,11 @@ def test_list_fields_and_sort(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.rsync
+# No @pytest.mark.rsync: the agents below are created in a git repo on the local
+# host, so `mngr create` transfers via a git worktree (TransferMode.GIT_WORKTREE),
+# never rsync. rsync is only used for non-git projects. Marking the test
+# @pytest.mark.rsync would trip the resource guard's "marked but never invoked"
+# check. Command agents run under tmux, hence @pytest.mark.tmux.
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_list_limit(e2e: E2eSession) -> None:
@@ -578,6 +672,13 @@ def test_list_watch_mode(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+# This test creates two command agents and then runs `mngr list`, each of which
+# runs the full provider-discovery path (routinely ~10s in a fresh environment)
+# -- well past the default 10s per-test timeout. The release CI lane already
+# overrides this globally to 90s; set an explicit per-test timeout so the test
+# is robust locally too, matching the sibling create-then-list tests
+# (test_list_limit/test_list_remote_filter).
+@pytest.mark.timeout(120)
 def test_list_format_jsonl(e2e: E2eSession) -> None:
     """Tutorial block:
         # output each entry as a JSON object (useful for scripting)
@@ -623,6 +724,13 @@ def test_list_format_jsonl(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# `mngr observe --discovery-only` runs the full provider-discovery path (an
+# authenticated Modal lookup plus a local-host scan) and then streams
+# indefinitely, so it is wrapped in a ~30s `timeout`. That window plus mngr's
+# ~10s CLI cold start comfortably exceeds the default 10s per-test timeout. The
+# release CI lane already overrides this globally to 90s; set it explicitly so
+# the test is robust locally too (matching the sibling filter tests).
+@pytest.mark.timeout(90)
 def test_observe_discovery_only(e2e: E2eSession) -> None:
     """Tutorial block:
         # continually stream discovery events as JSONL (useful for piping to jq to turn this data into an event stream)
@@ -644,14 +752,25 @@ def test_observe_discovery_only(e2e: E2eSession) -> None:
     # test doesn't hang. The stream never self-exits, so a healthy run is always
     # terminated by the timeout (exit 124). Masking *only* 124 to a clean exit --
     # rather than a blanket `|| true` -- means the assertion still fails if observe
-    # crashes early with any other exit code, which is what verifies the command
-    # "starts and streams discovery events without error" instead of merely that a
-    # `|| true` pipeline exited 0.
+    # crashes early with any other exit code, which verifies the "without error"
+    # half of the scope. The window must be long enough for the stream to actually
+    # emit an event (mngr's ~10s cold start dominates; the first per-provider
+    # snapshot lands a couple seconds later), so 30s captures it comfortably.
     result = e2e.run(
-        'timeout 1 mngr observe --discovery-only; test "$?" -eq 124',
+        'timeout 30 mngr observe --discovery-only; test "$?" -eq 124',
         comment="continually stream discovery events as JSONL",
+        timeout=60.0,
     )
     expect(result).to_succeed()
+    # Verify the other half of the scope -- that it actually *streams discovery
+    # events* -- rather than merely starting and being killed by the timeout. In a
+    # fresh environment each provider's discovery poller emits a per-provider
+    # snapshot as JSONL to stdout. Every non-empty line must parse as a genuine
+    # DiscoveryEvent (parse_discovery_event_line raises on any malformed or
+    # off-schema line), and at least one real event must have streamed.
+    events = [parse_discovery_event_line(line) for line in result.stdout.splitlines()]
+    streamed_events = [event for event in events if event is not None]
+    assert streamed_events, f"observe --discovery-only streamed no discovery events; stdout={result.stdout!r}"
 
 
 @pytest.mark.release

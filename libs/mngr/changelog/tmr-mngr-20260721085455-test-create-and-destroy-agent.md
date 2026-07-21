@@ -1,0 +1,1 @@
+Strengthened the `test_create_and_destroy_agent` e2e test so it verifies the full scope of the `mngr destroy my-task --force` tutorial block: in addition to confirming the agent is reported destroyed and no longer appears in `mngr list`, the test now asserts that the confirmation prompt ("Are you sure you want to continue?") is absent, directly verifying that `--force` skips it.

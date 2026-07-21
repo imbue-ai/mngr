@@ -146,6 +146,9 @@ def test_config_get(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# Even a single mngr subprocess invocation exceeds the default 10s func-only
+# timeout (cold-start import cost), so allow more headroom.
+@pytest.mark.timeout(60)
 def test_config_get_missing_key(e2e: E2eSession) -> None:
     """Tutorial block:
         # get a specific config value

@@ -41,13 +41,16 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     )
     expect(destroy_result).to_succeed()
     expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
+    # --force must skip the confirmation prompt: the prompt shown by a non-forced
+    # destroy (see the companion test_destroy_specific) must be absent here. This
+    # is the whole point of --force versus a bare destroy.
+    expect(destroy_result.stdout).not_to_contain("Are you sure you want to continue?")
 
     list_result = e2e.run("mngr list", comment="Verify agent no longer appears in list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -92,6 +95,7 @@ def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
 
 
 def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
+    # FIXME(tmr): e2e command-agent creates trigger the ttyd plugin's on_after_provisioning hook, which does a real network download of the ttyd binary from GitHub (120s internal timeout); when GitHub is slow this exceeds the 30s per-command timeout and makes create intermittently flake. The e2e fixture should disable the ttyd plugin (or stub its install) so creates do not depend on GitHub reachability. This affects every command-agent create across the e2e suite, not just this file.
     expect(
         e2e.run(
             f"mngr create my-task --type command --no-ensure-clean --no-connect -- sleep {sleep_value}",
@@ -163,7 +167,6 @@ def test_destroy_short_form(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -180,6 +183,11 @@ def test_destroy_short_form_running_requires_force(e2e: E2eSession) -> None:
     _create_my_task(e2e, 100608)
     refuse_result = e2e.run("yes | mngr rm my-task", comment="short form on a running agent")
     expect(refuse_result).to_succeed()
+    # The refusal happens *even when the confirmation prompt is answered "y"*
+    # (piped in via `yes`): the prompt is shown and confirmed, yet the still-running
+    # agent is refused. Assert the prompt appeared so a regression that skipped
+    # confirmation entirely would not be mistaken for the documented safe default.
+    expect(refuse_result.stdout).to_contain("Are you sure you want to continue?")
     expect(refuse_result.stdout).to_contain("Use --force to destroy running agents")
 
     # The agent must still be present since the destroy was refused.
@@ -232,7 +240,6 @@ def test_destroy_remove_branch(e2e: E2eSession) -> None:
     expect(branch_after.stdout).not_to_contain("mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -282,7 +289,6 @@ def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
     expect(branch_after.stdout).to_contain("mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -328,7 +334,6 @@ def test_destroy_multiple_at_once(e2e: E2eSession) -> None:
         expect(list_after.stdout).not_to_contain(name)
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -363,7 +368,12 @@ def test_destroy_dry_run(e2e: E2eSession) -> None:
     expect(list_result.stdout).to_contain("my-task")
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync here: this test creates a `--type command` agent with
+# `--no-connect` in a clean source repo, so `mngr create` finds no
+# untracked/modified files to copy and skips the extra-file rsync, and neither
+# the forced destroy nor the gc pass syncs any files. rsync is therefore never
+# invoked, and the resource guard fails any test that carries the mark but never
+# invokes rsync (see the companion test_destroy_no_gc, which is likewise unmarked).
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -457,10 +467,9 @@ def test_destroy_by_session_name(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(120)
 def test_destroy_by_session_name_happy_path(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy has a special variant for finding an agent by its tmux session name:
@@ -492,6 +501,11 @@ def test_destroy_by_session_name_happy_path(e2e: E2eSession) -> None:
     expect(destroy_result).to_succeed()
     expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
 
-    list_result = e2e.run("mngr list", comment="verify the agent was actually destroyed")
+    # The agent lived on the local provider (destroy reports "my-task@localhost").
+    # Scope the listing to the local provider so the check does not fail on an
+    # unrelated remote provider (Modal, enabled in the e2e env) being slow or
+    # unreachable -- this matches the convention used across the rest of the e2e
+    # suite.
+    list_result = e2e.run("mngr list --provider local", comment="verify the agent was actually destroyed")
     expect(list_result).to_succeed()
     expect(list_result.stdout).not_to_contain("my-task")

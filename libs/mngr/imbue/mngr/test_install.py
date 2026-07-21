@@ -154,7 +154,10 @@ def test_config_set_roundtrip_in_fresh_install(minimal_install_env: MinimalInsta
     assert get_result.returncode == 0, (
         f"mngr config get failed (exit {get_result.returncode}):\nstdout: {get_result.stdout}\nstderr: {get_result.stderr}"
     )
-    assert "true" in get_result.stdout.lower()
+    # The value must round-trip: `get` reports exactly "true" (not merely output
+    # that happens to contain the substring), proving the set was persisted and
+    # read back. This mirrors the exact-match check in test_config_get_in_fresh_install.
+    assert get_result.stdout.strip().lower() == "true"
 
 
 @pytest.mark.release

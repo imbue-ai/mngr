@@ -1,0 +1,1 @@
+Strengthened the `test_gc_provider_modal` e2e tutorial test to assert that `mngr gc --provider modal` emits its "Garbage Collection Results" summary, confirming gc actually scans the Modal provider rather than silently no-opping.

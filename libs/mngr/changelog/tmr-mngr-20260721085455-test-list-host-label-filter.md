@@ -1,0 +1,1 @@
+Fixed a flaky release test (`test_list_host_label_filter`) that could time out under the default 10s per-test limit. The happy-path `mngr list --host-label` command runs the full provider-discovery path (which routinely takes ~10s), so the test now carries an explicit `@pytest.mark.timeout(60)`, matching the sibling filter tests.

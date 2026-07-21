@@ -1,0 +1,1 @@
+Fixed: the `test_config_set_rejects_unknown_key` e2e test could time out. It runs three `mngr` subprocesses whose cold-start can be slow, but was capped at a 60s test-level timeout with the default 30s per-subprocess budget. The test now allows 180s overall and gives each subprocess matching headroom, matching the sibling `test_config_set_headless_globally` test.

@@ -1,0 +1,1 @@
+Fixed the `test_list_custom_human_format` e2e test: removed an erroneous `@pytest.mark.rsync` mark. The test creates a local `command` agent in a git repo, which uses the `GIT_WORKTREE` transfer mode and never shells out to rsync, so the declared-but-never-invoked mark tripped the resource guard.

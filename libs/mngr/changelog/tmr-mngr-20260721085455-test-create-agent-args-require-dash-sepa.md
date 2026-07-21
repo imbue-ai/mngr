@@ -1,0 +1,1 @@
+Gave the `test_create_agent_args_require_dash_separator` e2e test its own `@pytest.mark.timeout(120)`. Like its sibling create tests, it runs a follow-up `mngr list` that performs full provider discovery and can exceed the default 10s pytest-timeout; without the bump the test failed spuriously on the timeout even though the `--`-separator rejection path behaved correctly.

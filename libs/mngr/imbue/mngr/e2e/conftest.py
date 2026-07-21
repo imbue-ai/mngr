@@ -745,6 +745,10 @@ def e2e(
     # the installer; the e2e fixture mirrors that here so tutorial commands that
     # omit --type (e.g. `mngr create my-task --provider modal`) run as written.
     # "claude" matches the historical source default these tests relied on.
+    # Disable the codex install check so codex-type agents provision without a
+    # `npm i -g @openai/codex` install (no codex binary or npm on the e2e host).
+    # Codex tutorial tests (test_create_codex_positional) rely on this being set
+    # here so `mngr create ... codex` resolves the type without installing codex.
     settings_path.write_text(
         "is_allowed_in_pytest = true\n"
         "allow_settings_key_assignment_narrowing = true\n"
@@ -758,6 +762,9 @@ def e2e(
         "\n"
         "[commands.connect]\n"
         'connect_command = "mngr-e2e-connect"\n'
+        "\n"
+        "[agent_types.codex]\n"
+        "check_installation = false\n"
     )
 
     # NOTE: the project-scope ``settings.toml`` is deliberately NOT seeded here.

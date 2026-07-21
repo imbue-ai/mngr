@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` mark from the `test_create_default_project_label` e2e tutorial test. The test creates a local git-repo agent (which transfers via a git worktree, not rsync), so the mark tripped the resource guard's "marked rsync but never invoked rsync" check. This matches its sibling `test_create_with_project_label`, which is unmarked.

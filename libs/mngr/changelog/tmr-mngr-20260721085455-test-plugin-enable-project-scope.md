@@ -1,0 +1,1 @@
+Added the `@pytest.mark.timeout(60)` marker to the `test_plugin_enable_project_scope` e2e test so it gets the same timeout budget as the other subprocess-driven plugin tutorial tests, which need more than the 10s default to absorb mngr's ~10s cold-start cost.

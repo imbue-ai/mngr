@@ -1,0 +1,1 @@
+Fixed the e2e test fixture so codex-type agents provision without a codex/npm install: the shared `settings.local.toml` now sets `[agent_types.codex] check_installation = false`. This makes the `mngr create <task> codex` positional-type tutorial test pass on hosts without npm.

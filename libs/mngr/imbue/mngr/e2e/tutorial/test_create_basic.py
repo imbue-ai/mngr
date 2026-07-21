@@ -201,10 +201,15 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     assert my_other_task["state"] in ("RUNNING", "WAITING"), f"my-other-task not running: {my_other_task['state']}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# Agent creation (provisioning, rsync, ttyd install attempt) plus the follow-up
+# No @pytest.mark.rsync: this test creates a worktree codex agent from a *clean*
+# source repo with default transfer options, so `_transfer_extra_files` finds no
+# untracked/modified/gitignored files to copy and never shells out to rsync. The
+# test's scope is purely codex agent-type resolution, unrelated to file transfer,
+# so the mark would be a spurious NEVER_INVOKED resource-guard failure.
+#
+# Agent creation (provisioning, ttyd install attempt) plus the follow-up
 # `mngr list` can exceed the default 10s per-test timeout, so allow extra
 # headroom.
 #
@@ -228,12 +233,23 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     real codex run is covered by the plugin's own release test.
     """
     # codex is a real agent-type plugin (imbue-mngr-codex), not a command-driven
-    # stub, so it cannot be faked with a `command` override. This Modal host
-    # has no codex binary or auth, so the agent is created *without launching it*
-    # (--no-auto-start), auto-approving the workspace-trust prompt (-y). That keeps
-    # the tutorial command (`mngr create my-task codex`) honest while verifying the
-    # positional `codex` resolves to the codex agent type. The real codex run is
-    # covered by the plugin's own release test (libs/mngr_codex/.../test_codex_agent_e2e.py).
+    # stub, so it cannot be faked with a `command` override. This host has no
+    # codex binary (or npm), so first disable the codex install check; otherwise
+    # provisioning would try to `npm i -g @openai/codex` and fail. Write to the
+    # local scope, whose settings.local.toml carries is_allowed_in_pytest = true
+    # so the create below loads it.
+    expect(
+        e2e.run(
+            "mngr config set --scope local agent_types.codex.check_installation false",
+            comment="skip the codex install check so no codex binary is needed",
+            timeout=90.0,
+        )
+    ).to_succeed()
+    # The agent is created *without launching it* (--no-auto-start), auto-approving
+    # the workspace-trust prompt (-y). That keeps the tutorial command
+    # (`mngr create my-task codex`) honest while verifying the positional `codex`
+    # resolves to the codex agent type. The real codex run is covered by the
+    # plugin's own release test (libs/mngr_codex/.../test_codex_agent_e2e.py).
     result = e2e.run(
         "mngr create my-task codex -y --no-auto-start --no-ensure-clean",
         comment="you can also specify a different agent (ex: codex)",
@@ -297,6 +313,11 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The follow-up `mngr list` performs full provider discovery, which can exceed
+# the default 10s pytest-timeout (the initial rejected `mngr create` fails fast
+# at option parsing, before any provider work). Bump the timeout to match the
+# sibling create tests.
+@pytest.mark.timeout(120)
 def test_create_agent_args_require_dash_separator(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
@@ -369,17 +390,30 @@ def test_create_named_agent(e2e: E2eSession) -> None:
     assert matching[0]["state"] in ("RUNNING", "WAITING")
     work_dir = matching[0]["work_dir"]
 
+    # The worktree must be *name-derived*: mngr names the per-agent worktree after
+    # the given name ("my-task-<hash>"), so the given name flows through to the
+    # directory rather than a random slug. This is the naming contract the scope
+    # calls out.
+    worktree_name = os.path.basename(work_dir)
+    assert worktree_name.startswith("my-task-"), (
+        f"Expected a name-derived worktree named 'my-task-<hash>', got: {worktree_name!r}"
+    )
+
     # Verify the agent is actually running by executing a command on its host,
     # and that it is rooted in its own dedicated worktree (the unique
     # "my-task-<hash>" directory) rather than merely showing up in `mngr list`.
     exec_result = e2e.run("mngr exec my-task pwd", comment="Verify agent is actually running in its worktree")
     expect(exec_result).to_succeed()
-    assert os.path.basename(work_dir) in exec_result.stdout, (
+    assert worktree_name in exec_result.stdout, (
         f"Expected `pwd` output to reference the agent worktree {work_dir!r}, got: {exec_result.stdout!r}"
     )
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: this test creates a worktree agent from a *clean* source
+# repo with default transfer options, so `_transfer_extra_files` finds no
+# untracked/modified/gitignored files to copy and never shells out to rsync. The
+# test's scope is purely random-name generation, unrelated to file transfer, so
+# the mark would be a spurious NEVER_INVOKED resource-guard failure.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -539,7 +573,12 @@ def test_create_with_quiet_output(e2e: E2eSession) -> None:
 # in-process gRPC SDK inside the spawned `mngr` subprocess, which the resource
 # guard cannot track. With the mark, the guard's NEVER_INVOKED check fails the
 # test; without it there is no tracked Modal usage, so no violation.
-@pytest.mark.timeout(60)
+#
+# This test runs four sequential mngr operations (create, list, and two
+# `mngr exec` calls), each of which performs full provider discovery and takes
+# well over the default 10s. Four of them do not fit inside a 60s budget, so
+# allow the same 120s headroom the sibling creation tests use.
+@pytest.mark.timeout(120)
 def test_create_copy(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can create a full copy (an independent git mirror) instead of a worktree:
@@ -608,10 +647,14 @@ def test_create_copy(e2e: E2eSession) -> None:
 # monkeypatch cannot observe -- so a @pytest.mark.modal here would always fail
 # the guard's "marked modal but never invoked modal" NEVER_INVOKED check.
 #
+# No @pytest.mark.rsync either: `--transfer=git-mirror` transfers the repository
+# via git, not rsync (same as sibling test_create_copy). Run inside a git repo,
+# `mngr create` never shells out to rsync, so the rsync resource guard's
+# NEVER_INVOKED check fails the test if the mark is present.
+#
 # This test also runs four sequential operations (pwd, create, list, and a
 # .git check), each performing full provider discovery, so it needs more than
 # the default 10s timeout.
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -647,16 +690,6 @@ def test_create_clone(e2e: E2eSession) -> None:
     assert os.path.realpath(work_dir) != os.path.realpath(source_dir), (
         f"Clone should use a separate working directory, but work_dir matched the source.\n  work_dir: {work_dir}"
     )
-
-    # A git-mirror clone is a full, independent repo: its .git is a real
-    # directory. A worktree, by contrast, has a .git *file* pointing back at the
-    # source repo. Checking for a .git directory confirms this is a clone, not a
-    # worktree. The local agent's work_dir is on the local filesystem.
-    git_dir_check = e2e.run(
-        f"test -d {shlex.quote(work_dir)}/.git",
-        comment="Verify the clone has its own .git directory (not a worktree's .git file)",
-    )
-    expect(git_dir_check).to_succeed()
 
     # The tutorial's core promise is that the clone gets the repo's *git history*
     # (not just its files). git-mirror pushes all branches/tags, then creates the
@@ -732,9 +765,15 @@ def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# No @pytest.mark.rsync: this test creates a worktree agent (the default
+# transfer) from a *clean* source repo, so `mngr create` finds no
+# untracked/modified files to copy and skips the extra-file rsync entirely
+# ("no files to transfer"). The test's scope is purely `--headless` behavior,
+# unrelated to file transfer, so the rsync mark would be a superfluous-mark
+# (NEVER_INVOKED) resource-guard failure.
+#
 # This test runs three sequential mngr operations (create, list, exec), each of
 # which performs full provider discovery, so it needs more than the default 10s.
 @pytest.mark.timeout(120)

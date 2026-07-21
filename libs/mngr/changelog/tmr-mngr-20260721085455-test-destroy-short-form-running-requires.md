@@ -1,0 +1,1 @@
+Fixed the `test_destroy_short_form_running_requires_force` e2e tutorial test: removed a spurious `@pytest.mark.rsync` mark (the test never invokes rsync, so the resource guard failed it) and added an assertion that the confirmation prompt is shown, verifying that the short-form `mngr rm` refuses a running agent even after the prompt is answered "y".

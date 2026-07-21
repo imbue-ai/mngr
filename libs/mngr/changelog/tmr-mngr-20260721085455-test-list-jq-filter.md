@@ -1,0 +1,1 @@
+Strengthened the `test_list_jq_filter` e2e tutorial test so it observes both clauses of its scope: it now parses `mngr list --format json` output to confirm it is valid JSON with an `agents` array (closing a vacuous-pass hole, since jq exits 0 on empty input) in addition to asserting the `mngr list --format json | jq ...` pipeline exits 0.

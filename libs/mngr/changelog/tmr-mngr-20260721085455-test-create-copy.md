@@ -1,0 +1,1 @@
+Bumped the `test_create_copy` git-mirror e2e test's timeout from 60s to 120s. The test runs four sequential `mngr` operations (create, list, and two `mngr exec` calls), each performing full provider discovery and taking well over 10s, which cannot fit inside a 60s budget. It now uses the same 120s headroom as the sibling agent-creation tests.

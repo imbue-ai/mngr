@@ -1,0 +1,1 @@
+Tightened the `config set` round-trip install test to assert `config get` reads back exactly `true` (instead of a loose substring check), matching the precision of the sibling `config get` default test and more faithfully verifying that config writes persist to disk.

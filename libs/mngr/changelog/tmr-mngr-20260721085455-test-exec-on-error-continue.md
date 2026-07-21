@@ -1,0 +1,1 @@
+Added the missing `@pytest.mark.timeout(120)` marker to the `test_exec_on_error_continue` e2e tutorial test so it no longer fails under the default 10s pytest timeout while creating its command agent.

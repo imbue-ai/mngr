@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` mark from the `test_destroy_all_via_stdin` e2e tutorial test. The test only exercises local agents and never invokes rsync, so the resource guard was failing the test.

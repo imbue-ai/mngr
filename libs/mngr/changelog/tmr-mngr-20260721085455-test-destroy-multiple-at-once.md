@@ -1,0 +1,1 @@
+Fixed the `test_destroy_multiple_at_once` e2e tutorial test: removed the spurious `@pytest.mark.rsync` mark. The test creates command-type agents with `--no-connect` on the local provider and never invokes rsync, so the resource guard failed the otherwise-passing test.

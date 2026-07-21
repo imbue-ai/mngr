@@ -36,7 +36,12 @@ def test_default_output_human_readable(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.rsync
+# @pytest.mark.tmux only: creating the local `command` agent runs its body in a
+# tmux session (so tmux is invoked), but no @pytest.mark.rsync -- this creates a
+# *local* agent in a git repo, whose default transfer mode is GIT_WORKTREE
+# (`git worktree add`) and never shells out to rsync (rsync is only used for
+# non-git projects; see TransferMode in primitives.py). A declared-but-never-
+# invoked rsync mark fails the resource guard even though the body passes.
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_list_custom_human_format(e2e: E2eSession) -> None:
@@ -136,14 +141,19 @@ def test_list_format_jsonl_recap(e2e: E2eSession) -> None:
     expect(result).to_succeed()
     # JSONL means one JSON object per line: every non-empty stdout line must parse
     # as a JSON object -- not a JSON array (as `--format json` produces) and not
-    # human-readable text. With no agents present the stream is empty, which is a
-    # valid (zero-object) JSONL document, so this also guards against a regression
-    # that emitted a `[]` array or a table header under the jsonl format.
+    # human-readable text. This also guards against a regression that emitted a
+    # `[]` array or a table header under the jsonl format.
+    objects = []
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
         parsed = json.loads(line)
         assert isinstance(parsed, dict), f"Expected each JSONL line to be a JSON object, got: {line!r}"
+        objects.append(parsed)
+    # With no agents present the stream is empty: a valid zero-object JSONL
+    # document. Observe that emptiness directly rather than relying on the loop
+    # above being a no-op, so a regression that emitted a spurious object is caught.
+    assert objects == [], f"expected an empty (zero-object) JSONL stream with no agents present, got: {objects!r}"
 
 
 @pytest.mark.release
@@ -188,8 +198,19 @@ def test_observe_discovery_recap(e2e: E2eSession) -> None:
     assert isinstance(event["hosts"], list), f"expected a 'hosts' array in the snapshot, got: {event!r}"
 
 
+# NOTE: this test is intentionally NOT marked @pytest.mark.modal, for the same
+# reason as test_list_format_jsonl_recap above. `mngr list` is a read-only path
+# that reaches Modal only via in-process gRPC inside the `mngr` subprocess, which
+# the resource guard's in-process Modal SDK monkeypatch cannot observe, and it
+# never shells out to the `modal` CLI binary (the cross-process guard). The
+# `mngr plugin list` half does not touch Modal at all. Marking the test
+# @pytest.mark.modal would therefore fail the guard's NEVER_INVOKED check
+# deterministically. The command does not require Modal to succeed (Modal
+# discovery failures are non-fatal warnings). A longer timeout is still needed
+# because provider discovery is slow when Modal credentials are present and
+# exceeds the 10s default.
 @pytest.mark.release
-@pytest.mark.modal
+@pytest.mark.timeout(180)
 def test_jsonl_works_across_commands(e2e: E2eSession) -> None:
     """Tutorial block:
         # JSON and JSONL works with most commands
@@ -227,7 +248,17 @@ def test_jsonl_works_across_commands(e2e: E2eSession) -> None:
         assert "name" in plugin_obj, f"expected a 'name' field in plugin object, got {plugin_obj}"
 
 
+# NOTE: this test is intentionally NOT marked @pytest.mark.modal, for the same
+# reason as test_list_format_jsonl_recap above. `mngr list` is a read-only path
+# that reaches Modal only via in-process gRPC inside the `mngr` subprocess, which
+# the resource guard's in-process Modal SDK monkeypatch cannot observe, and it
+# never shells out to the `modal` CLI binary (the cross-process guard). Marking
+# the test @pytest.mark.modal would therefore fail the guard's NEVER_INVOKED
+# check deterministically. The command does not require Modal to succeed. A
+# longer timeout is still needed because provider discovery is slow when Modal
+# credentials are present and exceeds the 10s default.
 @pytest.mark.release
+@pytest.mark.timeout(180)
 def test_json_with_jq_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # combine json with jq for powerful filtering and transformation
@@ -241,6 +272,10 @@ def test_json_with_jq_filter(e2e: E2eSession) -> None:
     jq_result = e2e.run(
         "mngr list --format json | jq '.agents[] | select(.state == \"RUNNING\") | .name'",
         comment="combine json with jq",
+        # `mngr list` runs a full provider discovery, which is slow when Modal
+        # credentials are present (the same reason test_jsonl_with_jq_stream
+        # carries an extended timeout), so it can exceed the 30s default.
+        timeout=120.0,
     )
     # The whole pipeline must succeed. This also pins the JSON shape the
     # tutorial depends on: `mngr list --format json` emits a single object with
@@ -263,6 +298,7 @@ def test_json_with_jq_filter(e2e: E2eSession) -> None:
 # longer timeout is still needed because provider discovery is slow when Modal
 # credentials are present and exceeds the 30s default.
 @pytest.mark.release
+@pytest.mark.timeout(180)
 def test_jsonl_with_jq_stream(e2e: E2eSession) -> None:
     """Tutorial block:
         # combine jsonl with jq for streaming filtering

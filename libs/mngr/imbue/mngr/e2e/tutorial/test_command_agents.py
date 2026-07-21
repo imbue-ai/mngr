@@ -124,6 +124,13 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+# This test issues several sequential mngr invocations (create, list) plus tmux
+# queries. Each mngr invocation pays the full CLI startup cost, which balloons
+# under the contended sandboxes the release suite runs in (a single invocation
+# can take ~20-25s), so the per-test budget must comfortably cover the whole
+# sequence -- matching the sibling command-agent tests, which use 300s for the
+# same reason. Without this, the suite-default 10s timeout fires mid-create.
+@pytest.mark.timeout(300)
 def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a dev server with extra tmux windows for logs
@@ -143,10 +150,14 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
             comment="ensure the tail target exists",
         )
     ).to_succeed()
+    # The mngr CLI startup cost dominates each invocation and balloons under the
+    # contended sandboxes the release suite runs in, so give each command generous
+    # headroom above the 30s default; the per-test timeout is the real hang guard.
     expect(
         e2e.run(
             'mngr create dev-env --type command -w logs="tail -f /tmp/mngr-app.log" --no-ensure-clean --no-connect -- sleep 100992',
             comment="dev server with extra tmux window for logs",
+            timeout=90.0,
         )
     ).to_succeed()
 
@@ -154,7 +165,11 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     # it stays fast and does not reach out to remote providers (this agent runs
     # purely locally; the Modal command-agent path is covered by
     # test_command_agent_batch_job_modal).
-    list_result = e2e.run("mngr list --provider local --format json", comment="Verify the dev-env agent was created")
+    list_result = e2e.run(
+        "mngr list --provider local --format json",
+        comment="Verify the dev-env agent was created",
+        timeout=90.0,
+    )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "dev-env"]

@@ -1,0 +1,1 @@
+Tightened the `test_list_project_field` e2e tutorial test so it asserts that `mngr list --fields "name,project,state"` renders the created agent's name and project value on the same row, confirming the project column is populated from the agent's project label rather than checking the two values as independent substrings.

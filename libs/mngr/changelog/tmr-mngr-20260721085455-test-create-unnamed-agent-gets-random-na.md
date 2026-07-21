@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` mark from the `test_create_unnamed_agent_gets_random_name` e2e test. The test creates a worktree agent from a clean source repo with default transfer options, which never shells out to rsync, so the mark tripped the rsync resource guard's NEVER_INVOKED check.

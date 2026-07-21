@@ -1,0 +1,1 @@
+Strengthened the `mngr list --format jsonl` e2e recap test so it directly verifies the documented no-agents behavior: the stream is now asserted to be a valid zero-object JSONL document rather than relying on the per-line check being an incidental no-op. This catches a regression that emits a spurious object under the `jsonl` format.

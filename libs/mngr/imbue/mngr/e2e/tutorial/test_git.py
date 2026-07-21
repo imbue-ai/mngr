@@ -40,6 +40,7 @@ def test_exec_branch_show_current(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_list_fields_original_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can see the branch mngr created for each agent as part of the details in "mngr list" as well (field name: "initial_branch")
@@ -85,6 +86,7 @@ def test_list_fields_original_branch_with_agent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_exec_git_status_short(e2e: E2eSession) -> None:
     """Tutorial block:
         # check if the agent has uncommitted changes
@@ -164,6 +166,7 @@ def test_message_commit_request(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_exec_force_commit(e2e: E2eSession) -> None:
     """Tutorial block:
         # or forcibly commit all of it yourself

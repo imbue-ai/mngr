@@ -1,0 +1,1 @@
+Strengthened the `test_list_filter_invalid_cel` e2e tutorial test to assert that rejecting a syntactically invalid `--include` CEL expression produces a clean handled error rather than an unhandled Python traceback, matching the test's documented scope.

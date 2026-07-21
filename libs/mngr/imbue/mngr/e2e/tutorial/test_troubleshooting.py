@@ -192,9 +192,14 @@ def test_troubleshoot_host_diagnostics(e2e: E2eSession) -> None:
     _create_my_task(e2e, 101024)
     # The exec COMMAND is a single quoted argument run by the host's shell, so
     # the pipe in the cat command executes on the host. /var/log/syslog may not
-    # exist (e.g. on macOS hosts); allow that command to fail but still require
-    # mngr to forward it.
-    e2e.run('mngr exec my-task "cat /var/log/syslog | tail -20" || true', comment="cat syslog")
+    # exist (e.g. on macOS hosts), so the host command itself is allowed to fail
+    # -- we do not require exit 0. What we do require is that mngr *forwarded*
+    # the whole piped command to the host, rather than failing at its own layer
+    # (e.g. mis-resolving the agent or choking on the pipe). A forwarding
+    # failure surfaces mngr's distinct "Could not find agent" resolution error,
+    # which must be absent; a swallowing `|| true` guard would hide it.
+    cat_result = e2e.run('mngr exec my-task "cat /var/log/syslog | tail -20"', comment="cat syslog")
+    expect(cat_result.stderr).not_to_contain("Could not find agent")
     # ps aux must run on the agent's host -- verify it reports the agent's own
     # `sleep 101024` process, proving exec reached the right host.
     ps_result = e2e.run('mngr exec my-task "ps aux"', comment="ps aux")

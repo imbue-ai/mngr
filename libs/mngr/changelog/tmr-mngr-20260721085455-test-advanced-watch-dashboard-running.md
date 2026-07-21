@@ -1,0 +1,1 @@
+Added an explicit `@pytest.mark.timeout(120)` to the `test_advanced_watch_dashboard_running` e2e tutorial test so it no longer fails under the default 10s pytest timeout. The test issues two `mngr` invocations (the `watch` dashboard tick and the underlying `mngr list --running` dashboard query), and `mngr`'s cold-start cost pushes the function past 10s.

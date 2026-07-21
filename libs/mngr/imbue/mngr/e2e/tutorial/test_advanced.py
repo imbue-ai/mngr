@@ -67,8 +67,16 @@ def test_advanced_fan_out_create(e2e: E2eSession) -> None:
     # Confirm the fan-out actually launched the task commands rather than only
     # registering agent state: exec onto an agent's (shared local) host and check
     # the sleep processes are alive. pgrep exits 0 only when it finds a match.
+    # The pattern is anchored with `^` on purpose: `mngr exec` runs pgrep inside a
+    # `bash -c "<source-env> && ... && pgrep -f '^sleep 101010'"` whose own command
+    # line contains "sleep 101010", so an unanchored `-f 'sleep 101010'` would
+    # self-match that invoking shell and pass even if no agent process were running
+    # (defeating the "not merely registering agent state" check). Anchoring to the
+    # start of the command line matches only the real `sleep 101010` agent
+    # processes -- whose cmdline begins with "sleep" -- and never the shell, whose
+    # cmdline begins with the source-env prefix.
     proc_check = e2e.run(
-        "mngr exec fix-auth \"pgrep -f 'sleep 101010'\"",
+        "mngr exec fix-auth \"pgrep -f '^sleep 101010'\"",
         comment="confirm the fan-out launched the task commands",
     )
     expect(proc_check).to_succeed()
@@ -77,6 +85,7 @@ def test_advanced_fan_out_create(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
     """Tutorial block:
         # monitor all agents in a refreshing dashboard (uses Unix watch(1))
@@ -402,7 +411,15 @@ def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
         timeout=120.0,
     )
     expect(result).to_succeed()
-    expect(result.stdout).to_contain(agent_id)
+    # The command is `echo $MNGR_AGENT_ID && env | sort`, so confirm both
+    # observable effects the scope calls for landed on the modal host:
+    #   * the echo prints that host's id on its own line, and
+    #   * the env dump exports it as MNGR_AGENT_ID.
+    # A bare `to_contain(agent_id)` would not distinguish these -- the env line
+    # already carries the id as a substring -- so match the echo as a standalone
+    # line to confirm the echo really ran, and check the env line separately.
+    stdout_lines = [line.strip() for line in result.stdout.splitlines()]
+    assert agent_id in stdout_lines, f"expected the echoed agent id on its own line, got: {result.stdout!r}"
     expect(result.stdout).to_contain(f"MNGR_AGENT_ID={agent_id}")
 
 

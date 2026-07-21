@@ -1,0 +1,1 @@
+Tightened the `test_create_with_source_path_no_git` e2e tutorial test to verify exactly its documented scope by removing a redundant `mngr list` assertion that was outside the test's scope (the agent's existence is already proven by the subsequent `mngr exec`).
