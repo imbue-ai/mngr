@@ -722,6 +722,14 @@ def test_descendant_processes_returns_all_children_not_just_observe(tmp_path: Pa
         child.wait(timeout=5.0)
 
 
+def _terminate_pid_if_alive(pid: int) -> None:
+    """Test-teardown kill that tolerates an already-dead process."""
+    try:
+        psutil.Process(pid).kill()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
+
 def _make_fake_forward_spawning_child_binary(tmp_path: Path) -> Path:
     """A fake ``mngr`` whose ``latchkey forward`` spawns a long-lived child and records its PID.
 
@@ -800,10 +808,7 @@ def test_ensure_running_reaps_orphan_forwards_children_too(tmp_path: Path) -> No
             _wait_for_process_exit(info.pid)
         _terminate_orphan(orphan)
         if child_pid is not None:
-            try:
-                psutil.Process(child_pid).kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+            _terminate_pid_if_alive(child_pid)
 
 
 def test_stop_terminates_descendants_of_wedged_supervisor(tmp_path: Path) -> None:
@@ -879,14 +884,6 @@ def test_stop_terminates_descendants_via_on_disk_record(tmp_path: Path) -> None:
             _terminate_pid_if_alive(info.pid)
         if child_pid is not None:
             _terminate_pid_if_alive(child_pid)
-
-
-def _terminate_pid_if_alive(pid: int) -> None:
-    """Test-teardown kill that tolerates an already-dead process."""
-    try:
-        psutil.Process(pid).kill()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
 
 
 def test_is_forward_pid_for_directory_matches_only_its_own_directory(tmp_path: Path) -> None:
