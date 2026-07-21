@@ -218,6 +218,38 @@ mngr imbue_cloud account set-plan [OPTIONS] PLAN
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud account cleanup-grant
+
+**Usage:**
+
+```text
+mngr imbue_cloud account cleanup-grant [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud account recheck-storage
+
+**Usage:**
+
+```text
+mngr imbue_cloud account recheck-storage [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud hosts
 
 **Usage:**
@@ -1083,6 +1115,33 @@ mngr imbue_cloud admin account set-quota [OPTIONS] EMAIL ENTITLEMENT VALUE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin sweep
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin sweep [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin sweep r2
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin sweep r2 [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--email` | text | Scope the pass to one account (full pass when omitted) | None |
 | `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 

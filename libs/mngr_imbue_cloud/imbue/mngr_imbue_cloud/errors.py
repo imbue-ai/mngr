@@ -66,6 +66,22 @@ class ImbueCloudAccountError(ImbueCloudError):
     """Raised when an account (plan / entitlements / usage) operation fails."""
 
 
+class ImbueCloudCleanupGrantBudgetError(ImbueCloudError):
+    """Raised when the connector refuses a storage-cleanup grant: the failed-grant budget is exhausted.
+
+    Carries the structured detail from the connector's 403 (``code:
+    cleanup_grant_budget_exhausted``). Grants that actually reduced usage
+    never count against the budget, so this only fires after repeated grants
+    that freed nothing.
+    """
+
+    def __init__(self, message: str, limit: int, current: int, window_hours: int) -> None:
+        super().__init__(message)
+        self.limit = limit
+        self.current = current
+        self.window_hours = window_hours
+
+
 class PoolHostNotMatchedError(ImbueCloudError):
     """Raised when create_agent is invoked on a leased host that has no pre-baked agent or has more than one."""
 

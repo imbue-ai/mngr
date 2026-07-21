@@ -11,13 +11,15 @@ from imbue.mngr_imbue_cloud.cli.hosts import hosts
 from imbue.mngr_imbue_cloud.cli.keys import keys
 from imbue.mngr_imbue_cloud.cli.paid import paid
 from imbue.mngr_imbue_cloud.cli.server import server
+from imbue.mngr_imbue_cloud.cli.sweep_admin import sweep_admin
 from imbue.mngr_imbue_cloud.cli.sync import sync
 from imbue.mngr_imbue_cloud.cli.tunnels import tunnels
 
-# Operator-only paid-list, account-entitlements, and bare-metal server/slice
-# management live under the existing `admin` group.
+# Operator-only paid-list, account-entitlements, on-demand sweep, and
+# bare-metal server/slice management live under the existing `admin` group.
 admin.add_command(paid)
 admin.add_command(account_admin)
+admin.add_command(sweep_admin)
 admin.add_command(server)
 
 

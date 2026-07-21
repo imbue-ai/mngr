@@ -37,6 +37,8 @@ from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
 from imbue.mngr_imbue_cloud.data_types import ServiceInfo
+from imbue.mngr_imbue_cloud.data_types import StorageCleanupGrant
+from imbue.mngr_imbue_cloud.data_types import StorageRecheckResult
 from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.data_types import TunnelInfo
@@ -47,6 +49,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
@@ -123,14 +126,34 @@ class ImbueCloudConnectorClient(MutableModel):
                 current=float(detail.get("current", 0)),
             )
 
+    def _raise_if_grant_budget_exhausted(self, response: httpx.Response) -> None:
+        """Raise the typed grant-budget error when a 403 carries the connector's structured detail."""
+        if response.status_code != 403:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "cleanup_grant_budget_exhausted":
+            raise ImbueCloudCleanupGrantBudgetError(
+                str(detail.get("message", "Cleanup-grant budget exhausted")),
+                limit=int(detail.get("limit", 0)),
+                current=int(detail.get("current", 0)),
+                window_hours=int(detail.get("window_hours", 0)),
+            )
+
     def _check(self, response: httpx.Response, exc_cls: type[Exception]) -> dict[str, Any]:
         """Raise ``exc_cls`` on non-2xx, otherwise return parsed JSON.
 
         Special-cases the structured quota rejection ->
-        ImbueCloudQuotaExceededError, then 401/403 -> ImbueCloudAuthError so
-        callers can treat them uniformly across all endpoints.
+        ImbueCloudQuotaExceededError (and the grant-budget rejection ->
+        ImbueCloudCleanupGrantBudgetError), then 401/403 ->
+        ImbueCloudAuthError so callers can treat them uniformly across all
+        endpoints.
         """
         self._raise_if_quota_exceeded(response)
+        self._raise_if_grant_budget_exhausted(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
         if response.status_code in (200, 201, 204):
@@ -776,6 +799,40 @@ class ImbueCloudConnectorClient(MutableModel):
                 raise ImbueCloudAccountError(detail)
         return self._check(response, ImbueCloudAccountError)
 
+    def create_storage_cleanup_grant(self, access_token: SecretStr) -> StorageCleanupGrant:
+        """Request a temporary readwrite restore of storage-downgraded keys for client-side cleanup.
+
+        Idempotent server-side (an active grant is returned as-is; an account
+        with nothing downgraded gets a 'not_needed' no-op), so transport-level
+        retries are safe. Raises :class:`ImbueCloudCleanupGrantBudgetError`
+        when the account's failed-grant budget is exhausted.
+        """
+        response = self._send(
+            "POST",
+            self._url("/account/storage-cleanup-grant"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            # The grant measures live usage server-side (one Cloudflare call
+            # per bucket), like the other multi-upstream calls.
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return StorageCleanupGrant.model_validate(self._check(response, ImbueCloudAccountError))
+
+    def recheck_storage(self, access_token: SecretStr) -> StorageRecheckResult:
+        """Re-measure live storage usage and apply enforcement immediately (settling any grant).
+
+        Idempotent server-side (re-measuring converges to the same state), so
+        transport-level retries are safe.
+        """
+        response = self._send(
+            "POST",
+            self._url("/account/storage-recheck"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return StorageRecheckResult.model_validate(self._check(response, ImbueCloudAccountError))
+
     # ------------------------------------------------------------------
     # Account admin (email-addressed, MINDS_PAID_ADMIN_KEY authenticated)
     # ------------------------------------------------------------------
@@ -825,6 +882,24 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(admin_api_key),
             json={"entitlement": entitlement, "value": value},
             timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    def admin_run_r2_sweep(self, admin_api_key: SecretStr, email: str | None) -> dict[str, Any]:
+        """Run one R2 storage-quota sweep pass on demand; ``email`` scopes it to one account.
+
+        The sweep converges to the same state however often it runs, so
+        transport-level retries are safe.
+        """
+        params = {"email": email} if email else None
+        response = self._send(
+            "POST",
+            self._url("/admin/sweep/r2"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            params=params,
+            # A full pass fans out to Cloudflare per over-quota account.
+            timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         return self._check(response, ImbueCloudAccountError)
 

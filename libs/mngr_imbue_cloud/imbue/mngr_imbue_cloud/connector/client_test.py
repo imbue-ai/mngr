@@ -25,6 +25,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
@@ -467,6 +468,119 @@ def test_get_account_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert info.entitlements.max_remote_workspaces == 10
     assert info.usage.llm_spend_usd_this_period == 42.5
     assert info.available_plans == ("ally", "explorer")
+
+
+def test_create_storage_cleanup_grant_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account/storage-cleanup-grant"
+        return httpx.Response(
+            200,
+            json={
+                "status": "granted",
+                "expires_at": "2026-07-21T13:00:00+00:00",
+                "baseline_bytes": 1000,
+                "keys": [
+                    {
+                        "access_key_id": "akid",
+                        "bucket_name": "u--data",
+                        "access": "readwrite",
+                        "alias": "default",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "enforced_access": None,
+                    }
+                ],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    grant = client.create_storage_cleanup_grant(SecretStr("tok"))
+    assert grant.status == "granted"
+    assert grant.baseline_bytes == 1000
+    assert grant.keys[0].enforced_access is None
+
+
+def test_create_storage_cleanup_grant_budget_exhausted_raises_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "cleanup_grant_budget_exhausted",
+                    "limit": 5,
+                    "current": 5,
+                    "window_hours": 24,
+                    "message": "Cleanup-grant budget exhausted",
+                }
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudCleanupGrantBudgetError) as exc_info:
+        client.create_storage_cleanup_grant(SecretStr("tok"))
+    assert exc_info.value.limit == 5
+    assert exc_info.value.current == 5
+    assert exc_info.value.window_hours == 24
+
+
+def test_recheck_storage_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account/storage-recheck"
+        return httpx.Response(
+            200,
+            json={
+                "usage_bytes": 40,
+                "limit_bytes": 100,
+                "is_over_quota": False,
+                "is_grant_settled": True,
+                "keys": [],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    result = client.recheck_storage(SecretStr("tok"))
+    assert result.usage_bytes == 40
+    assert result.is_over_quota is False
+    assert result.is_grant_settled is True
+
+
+def test_admin_run_r2_sweep_scopes_by_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["email"] = request.url.params.get("email", "")
+        return httpx.Response(200, json={"status": "completed", "counters": {"keys_downgraded": 1}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    body = client.admin_run_r2_sweep(SecretStr("admin-key"), "somebody@example.com")
+    assert seen["path"] == "/admin/sweep/r2"
+    assert seen["email"] == "somebody@example.com"
+    assert body["counters"]["keys_downgraded"] == 1
+
+
+def test_list_bucket_keys_parses_enforced_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep's enforcement marker round-trips into the client's key metadata."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "access_key_id": "akid",
+                    "bucket_name": "u--data",
+                    "access": "readwrite",
+                    "alias": "default",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "enforced_access": "read",
+                }
+            ],
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    items = client.list_bucket_keys(SecretStr("tok"), None)
+    assert items[0].enforced_access == "read"
 
 
 def test_set_account_plan_posts_plan(monkeypatch: pytest.MonkeyPatch) -> None:
