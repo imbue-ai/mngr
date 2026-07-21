@@ -61,13 +61,17 @@ excludes the whole `apps/minds` tree by path.
   (currently `skip`), `test_litellm_spend_tracking_via_local_workspace`
   (currently `skip`).
 
-### 1.4 JS / Electron tests (`apps/minds/test/`)
+### 1.4 JS / Electron tests (`apps/minds/test/`, `apps/minds/frontend/`)
 
-- **Node unit** (`test/unit/startup-routing.test.js`): 7 `node --test` cases for
-  startup routing. Run via `pnpm test:unit`. **Not in any CI workflow.**
+- **Node unit** (`test/unit/*.test.js`): `node --test` cases for the Electron
+  main process (startup/surface routing, view layout, log rotation). Run via
+  `pnpm test:unit`; in CI via the `test-minds-frontend` job.
+- **Frontend vitest** (`frontend/src/**/*.test.ts`): strict `tsc --noEmit`
+  plus vitest (jsdom) for the mithril components and the mount protocol. Run
+  via `pnpm test:frontend`; in CI via the `test-minds-frontend` job.
 - **Playwright e2e** (`test/e2e/`, `playwright.config.js`, `pnpm test:e2e`):
   - `macos-launch.spec.js` -- launches the installed `/Applications/Minds.app`
-    via the `mindsApp` fixture. **The only JS spec wired into CI** (in
+    via the `mindsApp` fixture. **The only e2e spec wired into CI** (in
     `minds-launch-to-msg.yml`).
   - `landing-stopped-mind-restart.spec.js` and `recovery-redirect.spec.js` --
     fast DOM-level renderer-contract tests (plain browser `page`, no
@@ -88,6 +92,10 @@ excludes the whole `apps/minds` tree by path.
   not minds_snapshot_resume`; pre-creates a shared Modal env.
 - **`test-docker`** -- real Docker daemon on a GitHub runner; `(docker or
   docker_sdk) and not release and not minds_snapshot_resume`.
+- **`test-minds-frontend`** -- Node-only job (no Python venv): `pnpm install`,
+  the esbuild bundle build (`pnpm build:js`), the frontend typecheck + vitest
+  suite (`pnpm test:frontend`), and the Electron main-process node unit tests
+  (`pnpm test:unit`).
 - **`build-minds-snapshot` + `test-minds-snapshot`** ("Minds Snapshot Resume
   Tests") -- the modal-snapshot stage (see below). All `minds_snapshot_resume`
   tests run here, including the Electron create+chat test (which reuses the
