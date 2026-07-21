@@ -61,6 +61,19 @@ def test_csp_connect_src_allows_sentry_ingest_and_loopback_websockets() -> None:
     assert "connect-src 'self' ws: wss:" not in _FIRST_PARTY_CSP
 
 
+def test_csp_frame_src_allows_the_loopback_content_frame() -> None:
+    # In browser (non-Electron) mode the chrome page embeds the mngr-forward
+    # origin in an iframe, which then redirects to an agent subdomain. Without an
+    # explicit frame-src these fall back to ``default-src 'self'`` and the content
+    # pane silently stays blank, so the loopback forms must be admitted.
+    assert "frame-src" in _FIRST_PARTY_CSP
+    for source in ("https://localhost:*", "http://localhost:*", "https://*.localhost:*", "http://127.0.0.1:*"):
+        assert source in _FIRST_PARTY_CSP
+    # Framing a non-loopback host stays disallowed (no wildcard/scheme-only source).
+    assert "frame-src 'self' *" not in _FIRST_PARTY_CSP
+    assert "frame-src 'self' https:" not in _FIRST_PARTY_CSP
+
+
 def test_security_headers_do_not_clobber_handler_set_values() -> None:
     response = Response()
     response.headers["Content-Security-Policy"] = "default-src 'none'"

@@ -2734,7 +2734,22 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
 # non-loopback host); and the Sentry ingest origin(s) the browser error-reporting
 # SDK POSTs to when the user has opted in (derived from the DSN table so there is
 # one source of truth).
+#
+# ``frame-src`` allows the loopback origins the chrome page embeds. In browser
+# (non-Electron) mode ``static/chrome.js`` points the content iframe at the
+# ``mngr forward`` origin (``https://localhost:<forward-port>/goto/<agent-id>/``),
+# which redirects on to ``<agent-id>.localhost:<port>`` -- all different origins
+# from the desktop client, so without this they would fall back to ``default-src
+# 'self'`` and the content pane would silently stay blank. Electron drives that
+# content through a separate WebContentsView instead, so it is unaffected either
+# way. Scoped to loopback so a compromised template still cannot frame a
+# third-party host.
 _LOOPBACK_WEBSOCKET_SOURCES: Final[str] = "ws://localhost:* wss://localhost:* ws://127.0.0.1:* wss://127.0.0.1:*"
+_LOOPBACK_FRAME_SOURCES: Final[str] = (
+    "http://localhost:* https://localhost:* "
+    "http://127.0.0.1:* https://127.0.0.1:* "
+    "http://*.localhost:* https://*.localhost:*"
+)
 
 
 def _build_first_party_csp() -> str:
@@ -2745,6 +2760,7 @@ def _build_first_party_csp() -> str:
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         f"connect-src {connect_src}; "
+        f"frame-src 'self' {_LOOPBACK_FRAME_SOURCES}; "
         "object-src 'none'; "
         "base-uri 'self'; "
         "frame-ancestors 'self'"
