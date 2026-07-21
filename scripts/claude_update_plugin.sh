@@ -18,7 +18,7 @@ export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
 
 # The plugins and marketplaces are configured at project scope in
 # .claude/settings.json (extraKnownMarketplaces + enabledPlugins), so Claude
-# Code handles installation automatically; this hook only updates them.
+# Code handles installation automatically; this hook keeps them up to date.
 #
 # The plugin cache is deliberately left alone: `claude plugin update` refreshes
 # it on success, while wiping it up front would strip every plugin skill from
