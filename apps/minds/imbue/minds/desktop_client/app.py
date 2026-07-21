@@ -1580,13 +1580,10 @@ def _handle_chrome_events() -> Response:
                 # chrome that missed the one-shot (its target modal was busy, or the webview reloaded)
                 # still reopens it. The chrome pulls the head's content via /help/pending-report.
                 current_pending_head = pending_report_store.head()
-                current_pending_head_id = (
-                    current_pending_head.report_id if current_pending_head is not None else None
-                )
+                current_pending_head_id = current_pending_head.report_id if current_pending_head is not None else None
                 pending_reassert_due = (
                     current_pending_head is not None
-                    and time.monotonic() - last_pending_reassert
-                    >= _SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                    and time.monotonic() - last_pending_reassert >= _SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
                 )
                 if current_pending_head_id != last_pending_head_id or pending_reassert_due:
                     last_pending_head_id = current_pending_head_id
