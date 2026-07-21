@@ -142,8 +142,7 @@ const latestChromeState = {
   workspaces: null, // most recent workspaces array (main's own name/account lookups)
   workspacesEvent: null, // most recent FULL workspaces payload, replayed verbatim into (re)loaded views
   authStatus: null, // most recent auth_status payload
-  requestCount: 0,  // most recent pending-request count
-  requestIds: [],   // most recent ordered list of pending request ids
+  requestIds: [],   // most recent ordered list of pending request ids (the new-id auto-open diff)
   requestsEvent: null, // most recent FULL requests payload (ids + cards + auto_open), replayed verbatim
 };
 
@@ -2588,7 +2587,6 @@ function handleChromeSSEEvent(evt) {
   } else if (evt.type === 'requests') {
     const prevIds = latestChromeState.requestIds || [];
     const newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
-    const newCount = evt.count || 0;
     // Backend defaults auto_open to true; treat a missing field the same way.
     const autoOpen = evt.auto_open !== false;
     // Auto-open keys off a genuinely new id appearing in the pending set
@@ -2597,7 +2595,6 @@ function handleChromeSSEEvent(evt) {
     const prevSet = new Set(prevIds);
     const hasNewRequest = newIds.some((id) => !prevSet.has(id));
     latestChromeState.requestIds = newIds;
-    latestChromeState.requestCount = newCount;
     latestChromeState.requestsEvent = evt;
     const shouldAutoOpen = autoOpen && hasNewRequest;
     // On a genuinely new request, open the inbox. An already-open inbox
