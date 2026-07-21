@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
@@ -111,46 +111,23 @@ def test_antigravity_agent_advertises_tui_ready_indicator() -> None:
     assert pattern.search(splash_only) is None
 
 
-def test_antigravity_agent_implements_send_enter_and_validate() -> None:
-    """AntigravityAgent fills in the abstract method by picking a strategy."""
-    assert "_send_enter_and_validate" not in AntigravityAgent.__abstractmethods__
+def test_antigravity_agent_implements_submission_evidence_probes() -> None:
+    """AntigravityAgent fills in the abstract method with its active-marker evidence."""
+    assert "_build_submission_evidence_probes" not in AntigravityAgent.__abstractmethods__
 
 
-class _RecordingHost(FakeHost):
-    """FakeHost that records stateful commands and reports success without running them.
-
-    Lets ``_send_enter_and_validate`` exercise the wait-for strategy without
-    actually invoking tmux (so the resource guard stays quiet) while we assert
-    the command it issues.
-    """
-
-    recorded: list[str] = Field(default_factory=list)
-
-    def execute_stateful_command(
-        self,
-        command: str,
-        user: str | None = None,
-        cwd: Path | None = None,
-        env: Any = None,
-        timeout_seconds: float | None = None,
-    ) -> CommandResult:
-        self.recorded.append(command)
-        return CommandResult(stdout="", stderr="", success=True)
-
-
-def test_send_enter_and_validate_waits_on_per_session_submit_channel(
+def test_submission_evidence_probes_watch_the_active_marker(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """``_send_enter_and_validate`` uses the tmux wait-for strategy on the per-session channel.
+    """agy's submission evidence is the ``active`` marker its statusLine maintains.
 
-    agy's statusLine fires ``tmux wait-for -S mngr-submit-<session>`` when the
-    agent starts processing the submitted message; mngr registers a waiter on
-    that exact channel (parity with the shell side). The strategy also sends
-    Enter from a backgrounded subshell, which must appear in the issued command.
+    The probe must watch the marker file's mtime (portably, via both GNU and
+    BSD stat forms) and must NOT rely on the tmux wait-for channel: tmux
+    latches a signal fired with no waiter, which is exactly the false-confirm
+    mechanism the durable-evidence design removed.
     """
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    recording_host = _RecordingHost()
     agent = AntigravityAgent.model_construct(
         id=AgentId.generate(),
         name=AgentName("test-antigravity"),
@@ -160,15 +137,19 @@ def test_send_enter_and_validate_waits_on_per_session_submit_channel(
         host_id=HostName(LOCAL_HOST_NAME),
         mngr_ctx=local_provider.mngr_ctx,
         agent_config=AntigravityAgentConfig(),
-        host=recording_host,
+        host=FakeHost(),
     )
-    agent._send_enter_and_validate(agent.tmux_target)
-    assert len(recording_host.recorded) == 1
-    issued = recording_host.recorded[0]
-    assert f"mngr-submit-{agent.session_name}" in issued
-    # The strategy sends Enter (from the backgrounded subshell) alongside the wait.
-    assert "tmux send-keys" in issued
-    assert "tmux wait-for" in issued
+    probes = agent._build_submission_evidence_probes("hello", SubmissionConfirmationPolicy.STRICT)
+    assert len(probes) == 1
+    probe = probes[0]
+    assert probe.name == "active-marker"
+    assert "$MNGR_AGENT_STATE_DIR/active" in probe.poll_command
+    assert "stat -c %y" in probe.poll_command
+    assert "stat -f %Fm" in probe.poll_command
+    assert "wait-for" not in probe.poll_command
+    # Slash commands use the same (only) evidence agy has.
+    relaxed_probes = agent._build_submission_evidence_probes("/model", SubmissionConfirmationPolicy.RELAXED)
+    assert [p.name for p in relaxed_probes] == ["active-marker"]
 
 
 def test_register_agent_type_returns_antigravity_class_and_config() -> None:

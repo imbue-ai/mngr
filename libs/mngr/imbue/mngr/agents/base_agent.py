@@ -11,6 +11,7 @@ from typing import Final
 from typing import Generator
 from typing import Mapping
 from typing import Sequence
+from uuid import uuid4
 
 from loguru import logger
 from pydantic import Field
@@ -26,7 +27,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
-from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
@@ -41,6 +42,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.utils.env_utils import parse_env_file
 
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -213,7 +215,19 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """Get the lifecycle state of this agent using tmux format variables.
 
         Collects tmux state and ps output via SSH, then delegates to the shared
-        determine_lifecycle_state pure function for the actual state logic.
+        determine_lifecycle_probe_result pure function for the actual state logic.
+        """
+        return self.probe_lifecycle().state
+
+    def probe_lifecycle(self) -> LifecycleProbeResult:
+        """Get the lifecycle state and the agent's main process PID in one probe.
+
+        Collects tmux state and ps output via SSH (a single probe, shared with
+        get_lifecycle_state), then delegates to the shared pure function. The PID
+        is that of the running agent process (e.g. ``claude``) when the agent is
+        RUNNING/WAITING, else None. It is a PID in the agent host's namespace, so
+        callers watching the process for spontaneous death must only do so when
+        that host is the local machine.
         """
         try:
             # Get pane state and pid in one command.
@@ -248,18 +262,18 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             expected_process_name = self.get_expected_process_name()
             is_type_known = check_agent_type_known(str(self.agent_type), self.mngr_ctx.config)
 
-            state = determine_lifecycle_state(
+            probe = determine_lifecycle_probe_result(
                 tmux_info=tmux_info if tmux_info else None,
                 is_active=is_active,
                 expected_process_name=expected_process_name,
                 ps_output=ps_output,
                 is_agent_type_known=is_type_known,
             )
-            logger.trace("Determined agent {} lifecycle state: {}", self.name, state)
-            return state
+            logger.trace("Determined agent {} lifecycle state: {} (pid={})", self.name, probe.state, probe.pid)
+            return probe
         except HostConnectionError:
             logger.trace("Determined agent {} lifecycle state: STOPPED (host connection error)", self.name)
-            return AgentLifecycleState.STOPPED
+            return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
 
     def _build_lifecycle_probe_command(self) -> str:
         """Build the command that probes the agent's primary window for lifecycle state."""
@@ -473,6 +487,45 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         }
         self.host.write_text_file(activity_path, json.dumps(data, indent=2))
         logger.trace("Recorded {} activity for agent {}", activity_type, self.name)
+
+    def record_message_delivery_event(self, event_type: str, detail: str) -> None:
+        """Append a structured message-delivery event to the agent's events dir.
+
+        Soft delivery states (an unconfirmed relaxed send, pre-existing
+        input-box text) are recorded at ``events/messages/events.jsonl`` so
+        they are auditable via ``mngr event`` rather than only visible in
+        process logs. Failures are logged and swallowed: observability must
+        never break a send.
+        """
+        events_dir = self._get_agent_dir() / "events" / "messages"
+        events_path = events_dir / "events.jsonl"
+        now = datetime.now(timezone.utc)
+        event_line = json.dumps(
+            {
+                "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.%f000Z"),
+                "type": event_type,
+                "event_id": f"evt-{uuid4().hex}",
+                "source": "messages",
+                "agent_id": str(self.id),
+                "agent_name": str(self.name),
+                "detail": detail,
+            }
+        )
+        append_command = (
+            f"mkdir -p {shlex.quote(str(events_dir))} && "
+            f"printf '%s\\n' {shlex.quote(event_line)} >> {shlex.quote(str(events_path))}"
+        )
+        try:
+            result = self.host.execute_stateful_command(append_command)
+        except (HostConnectionError, TimeoutError) as e:
+            # TimeoutError: the remote SSH layer re-raises its socket timeout
+            # as-is (see Host.execute_idempotent_command).
+            logger.warning("Failed to record message delivery event {}: {}", event_type, e)
+            return
+        if not result.success:
+            logger.warning(
+                "Failed to record message delivery event {}: {}", event_type, result.stderr or result.stdout
+            )
 
     def get_reported_activity_record(self, activity_type: ActivitySource) -> str | None:
         activity_path = self._get_agent_dir() / "activity" / activity_type.value.lower()

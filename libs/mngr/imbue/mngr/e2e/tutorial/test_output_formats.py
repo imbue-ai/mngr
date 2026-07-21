@@ -4,11 +4,17 @@ import json
 
 import pytest
 
+from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+# `mngr ls` runs a full provider discovery (including in-process Modal gRPC),
+# which is slow when Modal credentials are present and exceeds the 10s default
+# per-test cap. See test_list_format_jsonl_recap for the same reasoning about
+# why this read-only path is intentionally NOT marked @pytest.mark.modal.
+@pytest.mark.timeout(180)
 def test_default_output_human_readable(e2e: E2eSession) -> None:
     """Tutorial block:
         # default output is human-readable
@@ -18,7 +24,9 @@ def test_default_output_human_readable(e2e: E2eSession) -> None:
     empty listing renders the prose "No agents found" rather than the "[]" that
     `--format json` would emit.
     """
-    result = e2e.run("mngr ls", comment="default output is human-readable")
+    # A longer command timeout than the 30s default: provider discovery (Modal in
+    # particular) can take ~30s when credentials are present.
+    result = e2e.run("mngr ls", comment="default output is human-readable", timeout=120.0)
     expect(result).to_succeed()
     # The default format is human-readable, not machine-readable: an empty
     # listing renders the prose "No agents found" rather than the "[]" that
@@ -70,7 +78,19 @@ def test_list_custom_human_format(e2e: E2eSession) -> None:
     expect(bogus.stdout).to_contain("()")
 
 
+# NOTE: like test_list_format_jsonl_recap below, this test is intentionally NOT
+# marked @pytest.mark.modal. `mngr list` is a read-only path
+# (is_environment_creation_allowed=False), so it never shells out to the `modal`
+# CLI -- it reaches Modal only via in-process gRPC inside the `mngr` subprocess.
+# The resource guard's Modal SDK monkeypatch lives only in the pytest process, so
+# it cannot observe the subprocess's gRPC traffic, and the modal CLI binary guard
+# (cross-process) is never tripped, so @pytest.mark.modal would fail the guard's
+# NEVER_INVOKED check. The command does not require Modal to succeed (Modal
+# discovery failures are non-fatal warnings). A longer timeout is still needed
+# because Modal discovery is slow when credentials are present and exceeds the
+# 10s default.
 @pytest.mark.release
+@pytest.mark.timeout(180)
 def test_list_format_json_recap(e2e: E2eSession) -> None:
     """Tutorial block:
         # JSON output (full array, good for programmatic use)
@@ -150,9 +170,22 @@ def test_observe_discovery_recap(e2e: E2eSession) -> None:
         timeout=45.0,
     )
     expect(result).to_succeed()
-    # The first JSONL object is a full discovery snapshot (DiscoveryEventType.DISCOVERY_FULL),
-    # confirming the stream emits machine-readable discovery events rather than only exiting 0.
-    expect(result.stdout).to_contain("DISCOVERY_FULL")
+    # The first emitted line is a full discovery snapshot, streamed as a single
+    # machine-readable JSONL object (confirming the stream emits discovery events
+    # rather than only exiting 0). The scope names DiscoveryEventType.DISCOVERY_FULL,
+    # but that legacy global snapshot was deprecated and is no longer produced: it
+    # was superseded by the per-provider full snapshot DISCOVERY_PROVIDER
+    # (ProviderDiscoverySnapshotEvent), which is what a fresh run now emits first.
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines, f"expected at least one JSONL discovery event, got: {result.stdout!r}"
+    event = json.loads(lines[0])
+    assert event["type"] == DiscoveryEventType.DISCOVERY_PROVIDER, (
+        f"expected a full discovery snapshot event, got: {lines[0]!r}"
+    )
+    # A snapshot (as opposed to an incremental event) carries the provider's full
+    # agents/hosts arrays -- this is what makes the first line a *full* snapshot.
+    assert isinstance(event["agents"], list), f"expected an 'agents' array in the snapshot, got: {event!r}"
+    assert isinstance(event["hosts"], list), f"expected a 'hosts' array in the snapshot, got: {event!r}"
 
 
 @pytest.mark.release
@@ -220,8 +253,16 @@ def test_json_with_jq_filter(e2e: E2eSession) -> None:
     expect(jq_result.stdout).to_be_empty()
 
 
+# NOTE: this test is intentionally NOT marked @pytest.mark.modal, for the same
+# reason as test_list_format_jsonl_recap above. `mngr list` is a read-only path
+# that reaches Modal only via in-process gRPC inside the `mngr` subprocess, which
+# the resource guard's in-process Modal SDK monkeypatch cannot observe, and it
+# never shells out to the `modal` CLI binary (the cross-process guard). Marking
+# the test @pytest.mark.modal would therefore fail the guard's NEVER_INVOKED
+# check deterministically. The command does not require Modal to succeed. A
+# longer timeout is still needed because provider discovery is slow when Modal
+# credentials are present and exceeds the 30s default.
 @pytest.mark.release
-@pytest.mark.modal
 def test_jsonl_with_jq_stream(e2e: E2eSession) -> None:
     """Tutorial block:
         # combine jsonl with jq for streaming filtering
@@ -234,5 +275,9 @@ def test_jsonl_with_jq_stream(e2e: E2eSession) -> None:
         e2e.run(
             "mngr list --format jsonl | jq --unbuffered 'select(.state == \"RUNNING\") | .name'",
             comment="combine jsonl with jq for streaming",
+            # `mngr list` runs a full provider discovery, which is slow when Modal
+            # credentials are present (the same reason test_list_format_jsonl_recap
+            # carries an extended timeout), so it can exceed the 30s default.
+            timeout=120.0,
         )
     ).to_succeed()

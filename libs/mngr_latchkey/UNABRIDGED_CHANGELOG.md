@@ -4,6 +4,60 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-17
+
+Bump Latchkey to v2.21.0.
+
+## 2026-07-16
+
+Fixed: `mngr latchkey forward` no longer treats a stopped (but not destroyed) workspace as if it were still running. Previously, when a workspace's container was stopped -- via an app restart, an idle-shutdown, or a VPS reboot -- discovery kept reporting the agent, so the supervisor would repeatedly try to provision the VPS-resident gateway against the stopped container (raising `container ... is not running`) and would keep the agent's reverse tunnel alive, leaving the tunnel health-check loop re-dialing a dead endpoint indefinitely.
+
+The discovery stream now carries each host's lifecycle state through to the discovery handler. When a host is reported as not-running, the handler tears down that agent's reverse tunnel and skips VPS gateway provisioning (the shared desktop gateway still stays up, since it is shared across all agents). When the host returns to running, discovery re-fires and both the tunnel and the VPS gateway are re-established.
+
+VPS latchkey provisioning now gates the NodeSource Node.js install behind a version check instead of a presence check. Previously, a VPS with a preinstalled but too-old node (e.g. Debian bookworm's distro nodejs 18.x) skipped the install and then crashed cryptically in `npm install -g latchkey` (modern npm refuses node < 20.17). Any node older than major 20 is now replaced with the pinned NodeSource install, and if a stale node still shadows the fresh one on PATH afterwards (e.g. a manual /usr/local/bin/node), provisioning fails with an actionable message naming the shadowing binary instead of the cryptic npm crash.
+
+Found by the new opt-in latchkey remote-workspace e2e release test (`apps/minds/test_latchkey_e2e.py`) running against a Debian host with node 18 preinstalled.
+
+## 2026-07-15
+
+The `mngr latchkey forward` daemon now attaches the install's anonymous user id (no PII) to its Sentry events, so its reports count as the same install as the minds backend's in Sentry's per-issue user counts. The id is inherited from the embedder via the new `MNGR_LATCHKEY_SENTRY_USER_ID` environment variable (required alongside the other `MNGR_LATCHKEY_SENTRY_*` infrastructure vars).
+
+- Changed: the `mngr latchkey forward` supervisor now caps its dedicated rotated `events.jsonl` log at 10MB (down from the general mngr default of 100MB), matching the 10MB cap the minds desktop client uses for its own rotated logs. Older rotated copies are still pruned to the newest 10.
+
+## 2026-07-14
+
+Update Latchkey to include support for GitHub's GraphQL API.
+
+Fixed an endless remote-sync feedback loop in the `mngr latchkey forward` supervisor's remote-state watcher.
+
+The watchdog handler that keeps a remote (VPS) host's latchkey credentials and permissions in sync reacted to *every* filesystem event on the watched files. On Linux, watchdog's inotify observer also dispatches read-lifecycle events (`FileOpenedEvent` / `FileClosedNoWriteEvent`) whenever a watched file is merely read -- and the sync itself reads those files (`sync_permissions` reads the host permissions file; `sync_credentials` re-reads it and spawns latchkey CLI subprocesses that open the credentials store). Each sync therefore re-triggered the next one, producing a full VPS re-sync (SSH upload plus a `latchkey auth re-encrypt` subprocess) roughly every 6 seconds for the supervisor's entire lifetime, even though neither file was ever modified.
+
+`_LatchkeyStateChangeHandler.dispatch` now allowlists genuine mutation events only (`FileCreatedEvent`, `FileDeletedEvent`, `FileModifiedEvent`, `FileMovedEvent`), so reads -- including the sync's own -- are inert. `FileClosedEvent` (IN_CLOSE_WRITE) is also excluded since a content-changing write always emits `FileModifiedEvent` as well, and reacting to both would double-fire syncs.
+
+A change to a host's permissions file now syncs that host's full latchkey state (permissions, then credentials) to the VPS instead of permissions only. The permissions determine which services' credentials ship to the host, so a grant must deliver the newly-allowed service's credentials and a revocation must remove the no-longer-allowed ones -- previously the VPS credential store stayed stale until the next supervisor restart or a separate credentials-file change.
+
+## 2026-07-13
+
+The `mngr latchkey forward` daemon now tells Sentry to ignore the paramiko/pyinfra stdlib loggers. The daemon reverse-tunnels the shared gateway into every agent via paramiko; when a target went offline and the health check retried, paramiko's transport thread logged the connection-reset failure at ERROR level, and Sentry's default logging integration captured each one as an event. Those events were not even rate-limited (the stdlib records carry no exception info or fingerprint), so a handful of users produced tens of thousands of Sentry events. The daemon now drops that already-handled noise while still reporting genuine failures raised through loguru.
+
+Fixed the VPS-resident ("secondary") latchkey gateway being unreachable from the agent's container on lima-slice hosts, which left agents with no latchkey access whenever the desktop (primary) gateway was unavailable -- e.g. while the user's laptop was offline.
+
+The VPS->container reverse tunnel was opened to the container's externally-routable SSH port instead of the port the container's sshd is published on from the outer host's own loopback. On a slice (where those two ports differ) the tunnel was refused, so the secondary gateway never bound inside the container. The reverse tunnel now uses the outer-host-loopback port supplied by the provider.
+
+Tunnel setup is also no longer silently treated as successful when the `ssh -R` process dies immediately (e.g. connection refused or a failed forward bind): after backgrounding it, the launch now confirms the process survives a short window, so a broken tunnel surfaces as a failed provision and is retried instead of being cached as "provisioned".
+
+The VPS-resident Latchkey gateway and its VPS->container reverse SSH tunnel are now supervised by `supervisord` instead of being spawned detached (`nohup` + a PID-file guard). `supervisord` is installed from the distro package during remote-gateway provisioning; both processes are registered as `autostart`/`autorestart` programs, so a crashed gateway or tunnel is restarted automatically without a desktop round-trip.
+
+A VPS previously provisioned by an older build (which launched the gateway and tunnel detached via `nohup`, tracked by `~/.latchkey/{gateway,tunnel}.pid`) is migrated automatically: provisioning kills those legacy processes (freeing the gateway port and the container forward bind) and removes any encryption key/password an intermediate build had persisted to disk, before the `supervisord` programs start. Without this the new programs would fail to start against the still-running old ones.
+
+The reverse SSH tunnel now carries keepalive and timeout flags (`ServerAliveInterval`, `ServerAliveCountMax`, `TCPKeepAlive`, `ConnectTimeout`, `BatchMode`) so a connection wedged by a paused-then-resumed VM is detected and torn down, letting `supervisord` re-establish a fresh tunnel.
+
+The gateway's secrets (the encryption key and derived listen password) are kept in a RAM-backed tmpfs directory under `/run` rather than on the persistent disk: this keeps the encryption key off disk (a key file beside the encrypted credential store would be equivalent to storing the credentials in plaintext against a disk-snapshot threat) while still surviving process crashes so `supervisord` can restart the gateway. Provisioning verifies the directory is genuinely RAM-backed (tmpfs/ramfs) before writing the key and refuses to proceed otherwise, so the key can never be silently written to a disk-backed filesystem. The tradeoff is that a full reboot wipes the secrets, leaving the gateway down until the next provisioning pass re-writes them (crash recovery is supported; reboot recovery is intentionally not).
+
+`mngr latchkey forward` now supervises the shared `latchkey gateway` subprocess: a background health check detects when the gateway has died mid-session and respawns it on its original port (so agent reverse tunnels and the published gateway port stay valid across the restart). Previously a crashed gateway went unnoticed -- discovery and reverse tunnels stayed up, so nothing restarted it -- and agents could no longer reach the gateway until the whole app was restarted.
+
+`Latchkey.is_gateway_running` and `Latchkey.start_gateway` are now liveness-aware: they check the gateway subprocess's actual status (via `poll()`) rather than merely whether a record is tracked, so a dead gateway reads as not-running and is respawned instead of returning a stale port.
+
 ## 2026-07-10
 
 The latchkey discovery stream consumer no longer logs a "Discovery error from ..." warning on every poll cycle for a provider stuck on the same failure (e.g. missing credentials): provider-level discovery errors are now logged once per process via the shared `DiscoveryErrorLogSuppressor`, with an info-level recovery line (and re-armed suppression) when the provider's discovery next succeeds. Host- and agent-attributed discovery errors keep logging on every occurrence.

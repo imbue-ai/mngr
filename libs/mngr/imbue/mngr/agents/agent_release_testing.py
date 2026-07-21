@@ -39,6 +39,7 @@ import json
 import subprocess
 from collections.abc import Mapping
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -108,6 +109,9 @@ class AgentReleaseProfile(abc.ABC):
     # native store worth preserving. This is also the store the adoption step adopts
     # (resolved via ``adopt_session_arg``).
     native_session_preserved_relpaths: Sequence[str] = ()
+    # Slash command used by the message-delivery journey's relaxed-policy step
+    # (e.g. "/clear"); None skips the step for agents without a suitable one.
+    clear_slash_command: str | None = None
 
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
@@ -171,11 +175,15 @@ def _marker_path(host_dir: Path) -> Path:
     return _agent_state_dir(host_dir) / "active"
 
 
-def _read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
-    path = _agent_state_dir(host_dir) / "events" / subdir / "common_transcript" / "events.jsonl"
+def _read_common_records_in_state_dir(state_dir: Path, subdir: str) -> list[dict[str, Any]]:
+    path = state_dir / "events" / subdir / "common_transcript" / "events.jsonl"
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
+    return _read_common_records_in_state_dir(_agent_state_dir(host_dir), subdir)
 
 
 # Predicates over the current common-transcript records. Module-level (the call sites
@@ -458,6 +466,251 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
     finally:
         try:
             if not destroyed:
+                profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        finally:
+            if ctx.teardown is not None:
+                ctx.teardown()
+
+
+# =============================================================================
+# Message-delivery journey (evidence-confirmed sends under racey conditions)
+# =============================================================================
+
+# Sending to a busy agent may not confirm until the running turn dequeues the
+# prompt, so the per-send budget must comfortably exceed one model turn.
+_DELIVERY_SEND_TIMEOUT_SECONDS = 180.0
+
+
+def _agent_state_dir_by_name(host_dir: Path, agent_name: str) -> Path:
+    """Resolve an agent's state dir by its recorded name (for multi-agent hosts)."""
+    agents_root = host_dir / "agents"
+    matches: list[Path] = []
+    for path in agents_root.glob("*"):
+        data_path = path / "data.json"
+        if not data_path.exists():
+            continue
+        data = json.loads(data_path.read_text())
+        if data.get("name") == agent_name:
+            matches.append(path)
+    assert len(matches) == 1, f"expected exactly one agent named {agent_name} under {agents_root}, found {matches}"
+    return matches[0]
+
+
+def _read_common_records_for_agent(host_dir: Path, subdir: str, agent_name: str) -> list[dict[str, Any]]:
+    return _read_common_records_in_state_dir(_agent_state_dir_by_name(host_dir, agent_name), subdir)
+
+
+def _count_user_messages_containing(records: list[dict[str, Any]], token: str) -> int:
+    return sum(1 for r in records if r["type"] == "user_message" and token in str(r.get("content", "")))
+
+
+def _is_delivered_exactly_once(host_dir: Path, subdir: str, agent_name: str, token: str) -> bool:
+    records = _read_common_records_for_agent(host_dir, subdir, agent_name)
+    return _count_user_messages_containing(records, token) == 1
+
+
+def _wait_for_user_message(host_dir: Path, subdir: str, token: str, *, description: str) -> None:
+    _wait_for_records(
+        host_dir,
+        subdir,
+        lambda records: _count_user_messages_containing(records, token) >= 1,
+        timeout=_RESPONSE_TIMEOUT_SECONDS,
+        description=description,
+    )
+
+
+def _send_expecting_success(
+    profile: AgentReleaseProfile, ctx: AgentReleaseContext, agent_name: str, message: str
+) -> None:
+    result = profile.run_mngr(ctx, "message", agent_name, "--message", message, timeout=_DELIVERY_SEND_TIMEOUT_SECONDS)
+    assert result.returncode == 0, f"message send failed for {message!r}:\n{result.stdout}\n{result.stderr}"
+
+
+def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -> None:
+    """Drive the evidence-confirmed send pipeline through its racey delivery scenarios.
+
+    One live agent walks: idle delivery -> delivery while a turn is running
+    (queued input) -> rapid sequential sends -> a long (buffer-pasted) message
+    -> a relaxed slash command (when the profile supplies one). Consolidated
+    into a single session to bound model cost and rate-limit pressure.
+
+    ``mngr message`` exiting 0 is load-bearing at every step: with strict
+    confirmation it can only succeed once durable evidence shows the agent
+    accepted the message. The exactly-once assertions prove the engine's
+    pane-gated Enter retries never duplicate a message.
+    """
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    host_dir = ctx.host_dir
+    subdir = profile.common_transcript_subdir
+    agent_name = f"{profile.agent_type.replace('-', '')}-msgs-{get_short_random_string()}"
+    run_id = get_short_random_string()
+    destroyed = False
+
+    try:
+        create = profile.run_mngr(
+            ctx,
+            "create",
+            agent_name,
+            profile.agent_type,
+            "--no-connect",
+            "--yes",
+            *profile.create_extra_args(ctx),
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+
+        # 1. Idle delivery: the agent is WAITING; the send must confirm and the
+        #    message must land in the durable transcript.
+        idle_token = f"IDLE-{run_id}"
+        _send_expecting_success(
+            profile, ctx, agent_name, f"Remember this exact value: {idle_token}. Reply with just OK."
+        )
+        _wait_for_user_message(host_dir, subdir, idle_token, description="idle-delivery message was not captured")
+
+        # 2. Busy delivery: start a turn, then send again while it (likely) runs.
+        #    The TUI queues the input; the send must still confirm (for agents
+        #    with acceptance evidence, the instant it is queued) and the message
+        #    must eventually be processed.
+        busy_token = f"BUSY-{run_id}"
+        _send_expecting_success(
+            profile,
+            ctx,
+            agent_name,
+            "Write a four-line poem about terminals, then reply with just DONE.",
+        )
+        _send_expecting_success(
+            profile, ctx, agent_name, f"Also remember this exact value: {busy_token}. Reply with just OK."
+        )
+        _wait_for_user_message(host_dir, subdir, busy_token, description="busy-delivery message was not captured")
+
+        # 3. Rapid sequential sends: back-to-back through mngr (each send holds
+        #    the per-agent message lock and confirms before returning).
+        rapid_tokens = [f"RAPID-{index}-{run_id}" for index in range(3)]
+        for rapid_token in rapid_tokens:
+            _send_expecting_success(
+                profile, ctx, agent_name, f"Acknowledge this exact value: {rapid_token}. Reply with just OK."
+            )
+        for rapid_token in rapid_tokens:
+            _wait_for_user_message(
+                host_dir, subdir, rapid_token, description=f"rapid-sequential message {rapid_token} was not captured"
+            )
+
+        # 4. Long message: crosses the send-keys length threshold, so it takes
+        #    the tmux load-buffer/paste-buffer path.
+        long_token = f"LONG-{run_id}"
+        filler = "The quick brown fox jumps over the lazy dog. " * 30
+        _send_expecting_success(
+            profile,
+            ctx,
+            agent_name,
+            f"{filler}\nEnd of filler. Remember this exact value: {long_token}. Reply with just OK.",
+        )
+        _wait_for_user_message(host_dir, subdir, long_token, description="long message was not captured")
+
+        # 5. Relaxed slash command: TUI-local, so confirmation is best-effort --
+        #    but the send must still exit 0.
+        if profile.clear_slash_command is not None:
+            _send_expecting_success(profile, ctx, agent_name, profile.clear_slash_command)
+
+        # Exactly-once: no token was delivered twice (the engine re-sends Enter,
+        # never the text, so duplicates would mean the gating is broken).
+        final_records = _read_common_records(host_dir, subdir)
+        for token in [idle_token, busy_token, *rapid_tokens, long_token]:
+            count = _count_user_messages_containing(final_records, token)
+            assert count == 1, f"expected exactly one delivery of {token}, found {count}"
+
+        destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
+        destroyed = True
+    finally:
+        try:
+            if not destroyed:
+                profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        finally:
+            if ctx.teardown is not None:
+                ctx.teardown()
+
+
+def run_concurrent_message_delivery(profile: AgentReleaseProfile, tmp_path: Path) -> None:
+    """Two agents on one host (one tmux server), messaged concurrently.
+
+    Both sends must succeed and each message must land exactly once on its own
+    agent -- proving concurrent sends cannot cross-confirm against each
+    other's submission evidence (the per-agent baseline + per-agent evidence
+    files keep them independent even on a shared tmux server).
+    """
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    host_dir = ctx.host_dir
+    subdir = profile.common_transcript_subdir
+    run_id = get_short_random_string()
+    agent_names = [f"{profile.agent_type.replace('-', '')}-conc-{index}-{run_id}" for index in range(2)]
+    tokens = [f"CONC-{index}-{run_id}" for index in range(2)]
+    created: list[str] = []
+
+    try:
+        for agent_name in agent_names:
+            create = profile.run_mngr(
+                ctx,
+                "create",
+                agent_name,
+                profile.agent_type,
+                "--no-connect",
+                "--yes",
+                *profile.create_extra_args(ctx),
+                timeout=_CREATE_TIMEOUT_SECONDS,
+            )
+            assert create.returncode == 0, f"create {agent_name} failed:\n{create.stdout}\n{create.stderr}"
+            created.append(agent_name)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    profile.run_mngr,
+                    ctx,
+                    "message",
+                    agent_name,
+                    "--message",
+                    f"Remember this exact value: {token}. Reply with just OK.",
+                    timeout=_DELIVERY_SEND_TIMEOUT_SECONDS,
+                )
+                for agent_name, token in zip(agent_names, tokens, strict=True)
+            ]
+            results = [future.result() for future in futures]
+        for agent_name, result in zip(agent_names, results, strict=True):
+            assert result.returncode == 0, f"concurrent send to {agent_name} failed:\n{result.stdout}\n{result.stderr}"
+
+        # Each message landed exactly once on its own agent, and never on the other.
+        for index in range(2):
+            agent_name = agent_names[index]
+            token = tokens[index]
+            other_token = tokens[1 - index]
+            found = poll_until(
+                condition=lambda name=agent_name, wanted=token: _is_delivered_exactly_once(
+                    host_dir, subdir, name, wanted
+                ),
+                timeout=_RESPONSE_TIMEOUT_SECONDS,
+                poll_interval=2.0,
+            )
+            records = _read_common_records_for_agent(host_dir, subdir, agent_name)
+            delivery_count = _count_user_messages_containing(records, token)
+            assert found, (
+                f"expected exactly one delivery of {token} to {agent_name}, found {delivery_count}: "
+                f"{json.dumps(records, indent=2)[:2000]}"
+            )
+            assert _count_user_messages_containing(records, other_token) == 0, (
+                f"agent {agent_name} received the OTHER agent's message {other_token}"
+            )
+    finally:
+        try:
+            for agent_name in created:
                 profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
         finally:
             if ctx.teardown is not None:

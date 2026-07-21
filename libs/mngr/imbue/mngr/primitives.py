@@ -254,9 +254,11 @@ class HostState(UpperCaseStrEnum):
     FAILED = auto()
     DESTROYED = auto()
     UNAUTHENTICATED = auto()
-    # The provider that owns this host could not be accessed during the most recent discovery attempt,
-    # so the host's actual state is unknown. Distinct from None on HostDetails.state (which means
-    # "not observed / not applicable"). Emitted by AgentObserver when its provider errored.
+    # The host could not be observed during the most recent discovery attempt, so its actual state
+    # is unknown: either the provider that owns it could not be accessed (emitted by AgentObserver
+    # when its provider errored), or the provider was reachable but could not reach this specific
+    # host (e.g. imbue_cloud's lease-only fallback when a leased host's outer SSH is unreachable).
+    # Distinct from None on HostDetails.state (which means "not observed / not applicable").
     UNKNOWN = auto()
 
 
@@ -276,6 +278,20 @@ class AgentLifecycleState(UpperCaseStrEnum):
     # whose provider just failed discovery. Sticky: an agent leaves UNKNOWN only by reappearing in a
     # snapshot or being explicitly destroyed.
     UNKNOWN = auto()
+
+
+class LifecycleProbeResult(FrozenModel):
+    """Agent lifecycle state plus the agent's main process PID, from a single probe."""
+
+    state: AgentLifecycleState = Field(description="Agent lifecycle state")
+    pid: int | None = Field(
+        default=None,
+        description=(
+            "PID of the agent's running main process (e.g. claude) in its host's PID "
+            "namespace, populated when the agent is RUNNING or WAITING. Only watchable "
+            "in-process (e.g. via psutil) when the probed host is the local machine."
+        ),
+    )
 
 
 class WaitingReason(UpperCaseStrEnum):

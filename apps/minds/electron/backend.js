@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
 const { getBuildMetadata } = require('./build-metadata');
+const { createRotatingLogStream } = require('./log-rotation');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -199,7 +200,11 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       fs.mkdirSync(logDir, { recursive: true });
 
       const logFile = path.join(logDir, 'minds.log');
-      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+      // Rotate + gzip minds.log like the other logs (it was previously an
+      // unbounded append stream that grew to hundreds of MB). Same write/end
+      // surface as the old fs.createWriteStream, so the callers below are
+      // unchanged.
+      const logStream = createRotatingLogStream({ filePath: logFile });
 
       onProgress('Starting Minds...');
 
@@ -242,6 +247,11 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          // The prestart hook (ensure-binaries.js) downloads the pinned
+          // restic into resources/restic/; without this the backend falls
+          // back to `restic` on PATH, which only works on machines that
+          // happen to have a system restic (packaged mode always sets it).
+          MINDS_RESTIC_BINARY: paths.getResticPath(),
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
         };

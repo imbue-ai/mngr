@@ -40,6 +40,7 @@
    surface (surface-primary -- white in light, black in dark) when no
    workspace is active. #}
 <Base title="Minds"
+      html_class="no-scrollbar-gutter"
       body_class="font-sans antialiased"
       body_style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
       head={{ _head }}
@@ -70,7 +71,7 @@
       <span id="page-title" class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
     </div>
     <div class="flex-1 flex items-center justify-end min-w-0">
-      <TitlebarButton id="help-toggle" aria-label="Get help" data-tooltip="Get help"><Icon16 name="help-circle" /></TitlebarButton>
+      <TitlebarButton id="help-toggle" aria-label="Ran into a bug?" data-tooltip="Ran into a bug?"><Icon16 name="bug" /></TitlebarButton>
       <TitlebarButton id="requests-toggle" aria-label="Requests" data-tooltip="Requests" extra="gap-[3px]">
         <Icon16 name="inbox" />
         <Badge :count="0" id="requests-badge" hidden />

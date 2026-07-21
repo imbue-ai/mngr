@@ -151,6 +151,8 @@ def test_snapshot_create_all_via_stdin(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.modal
+@pytest.mark.rsync
+@pytest.mark.timeout(180)
 def test_snapshot_list(e2e: E2eSession) -> None:
     """Tutorial block:
         # list snapshots for all running agents
@@ -159,9 +161,23 @@ def test_snapshot_list(e2e: E2eSession) -> None:
     Scope: `snapshot list -` reads host/agent ids from stdin, so piping
     `mngr list --ids` into it lists snapshots across all running agents and exits 0.
     """
-    expect(
-        e2e.run("mngr list --ids | mngr snapshot list -", comment="list snapshots for all running agents")
-    ).to_succeed()
+    # Create a running modal agent so the stdin pipeline has a real host id to
+    # resolve and list snapshots for (matching this module's per-test pattern);
+    # without one, `mngr list --ids` is empty and the modal resource guard fires.
+    _create_modal_my_task(e2e)
+    # The pipeline spawns two mngr processes back-to-back, each of which
+    # enumerates every enabled provider on startup; this reliably takes longer
+    # than the default per-command timeout, so give it explicit headroom.
+    result = e2e.run(
+        "mngr list --ids | mngr snapshot list -",
+        comment="list snapshots for all running agents",
+        timeout=120.0,
+    )
+    expect(result).to_succeed()
+    # Confirm the stdin-fed listing actually resolved the running agent and
+    # listed its snapshots (rather than exiting 0 on an empty list): creating
+    # the modal host auto-records an "initial" snapshot, which must appear.
+    expect(result.stdout).to_contain("initial")
 
 
 @pytest.mark.release
@@ -228,8 +244,14 @@ def test_snapshot_list_limit(e2e: E2eSession) -> None:
     assert limited_count < full_count, "expected --limit 1 to truncate the full snapshot list"
 
 
+# NOTE: deliberately NOT marked @pytest.mark.modal. With a fictional snapshot id
+# and no agent/host given, `mngr snapshot destroy` fails during argument handling
+# ("Must specify at least one agent or host") before it ever reaches -- let alone
+# shells out to -- the modal provider. The only subprocess-visible modal usage the
+# resource guard can observe is the `modal` CLI, which this path never invokes, so
+# marking it @pytest.mark.modal would trip the guard's "marked but never invoked
+# modal" check.
 @pytest.mark.release
-@pytest.mark.modal
 def test_snapshot_destroy_by_id_fictional(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy a specific snapshot
@@ -245,7 +267,21 @@ def test_snapshot_destroy_by_id_fictional(e2e: E2eSession) -> None:
         "mngr snapshot destroy --snapshot snap-123abc",
         comment="destroy a specific snapshot",
     )
-    assert result.exit_code != 0 or "not found" in (result.stdout + result.stderr).lower()
+    combined_output = (result.stdout + result.stderr).lower()
+    # Handled gracefully: a non-zero exit or an explicit "not found" for the
+    # fictional snapshot.
+    assert result.exit_code != 0 or "not found" in combined_output
+    # "mngr parses the flag": `--snapshot` must be recognized, not rejected as an
+    # unknown option (which would also exit non-zero, passing the check above for
+    # the wrong reason).
+    assert "no such option" not in combined_output, (
+        f"expected mngr to parse --snapshot, not reject it:\n{result.stdout}\n{result.stderr}"
+    )
+    # "rather than crashing": a clean error, never an uncaught exception traceback
+    # (which would likewise exit non-zero).
+    assert "traceback (most recent call last)" not in combined_output, (
+        f"expected mngr to error cleanly, not crash:\n{result.stdout}\n{result.stderr}"
+    )
 
 
 @pytest.mark.release

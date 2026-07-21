@@ -80,11 +80,16 @@ from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import is_local_workspace_defaults_opt_in
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
+from imbue.minds.desktop_client.workspace_record_store import read_device_id
+from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import start_active_env_state_container
 from imbue.minds.primitives import OneTimeCode
@@ -92,10 +97,13 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
 from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.mngr.api.discovery_events import get_discovery_events_dir
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
@@ -206,13 +214,27 @@ def run(
     # project; development never uploads attachments regardless. The release id (desktop app version)
     # and git sha come from the Electron launcher via env vars, falling back to the in-repo
     # package.json / "unknown" for bare source runs (see imbue.minds.build_info).
+    # The anonymous user id (no PII) is persisted per install and attached to every event so Sentry
+    # can count the distinct installs affected by each issue. The same value is shared with the
+    # detached ``mngr latchkey forward`` daemon (below) so both processes count as one install.
+    anonymous_user_id = resolve_anonymous_user_id(data_directory)
+    # Resolved up front (and reused below for the state container + the ``mngr forward``
+    # consumer): the Sentry attachment sweep needs the discovery events dir under it.
+    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
+    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+    # Built before Sentry setup so the attachment sweep knows the latchkey plugin
+    # data dir (the detached ``mngr latchkey forward`` daemon's logs live there).
+    latchkey = _build_latchkey(data_directory=data_directory)
     setup_sentry(
         environment=resolve_sentry_environment(),
         release_id=resolve_release_id(),
         git_commit_sha=resolve_git_sha(),
         log_folder=paths.log_dir,
+        anonymous_user_id=anonymous_user_id,
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
         is_log_inclusion_enabled=minds_config.get_include_error_logs,
+        latchkey_plugin_data_dir=latchkey.plugin_data_dir,
+        discovery_events_dir=get_discovery_events_dir(MngrConfig(default_host_dir=mngr_host_dir)),
     )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
@@ -240,7 +262,6 @@ def run(
     backend_resolver = MngrCliBackendResolver(
         last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
     )
-    latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
 
     # Mint a fresh central minds API key for this process. The same
@@ -255,11 +276,6 @@ def run(
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()
-
-    # Resolved up front: needed both to restart the docker state container just
-    # below and by the ``mngr forward`` consumer further down.
-    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
-    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
 
     # Restart this env's mngr docker *state* container before the discovery
     # producer spawns. The quit flow stops it (``stop_active_env_state_container``)
@@ -313,7 +329,8 @@ def run(
             # consent lives in the file (written just below and on every change), not in the env,
             # so a grant/revoke reaches the running daemon live.
             **resolve_latchkey_forward_sentry_env(
-                consent_file_path=latchkey_forward_sentry_consent_path(data_directory)
+                consent_file_path=latchkey_forward_sentry_consent_path(data_directory),
+                anonymous_user_id=anonymous_user_id,
             ),
         },
     )
@@ -383,7 +400,27 @@ def run(
         mngr_caller=mngr_caller,
         connector_url=client_env_config.connector_url,
     )
-    session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
+    workspace_record_store = WorkspaceRecordStore(
+        paths=paths,
+        mngr_host_dir=mngr_host_dir,
+        cli=imbue_cloud_cli,
+        device_id=read_device_id(mngr_host_dir),
+        device_label=read_device_label(),
+    )
+    session_store = MultiAccountSessionStore(
+        data_dir=data_directory, cli=imbue_cloud_cli, record_store=workspace_record_store
+    )
+    sync_scheduler = WorkspaceSyncScheduler(
+        record_store=workspace_record_store,
+        session_store=session_store,
+        resolver=backend_resolver,
+        # Newly-materialized SSH material (a cloud workspace unlocked/synced
+        # from another install) is picked up lazily by discovery; bouncing the
+        # observe child makes the workspace reachable now instead of on the
+        # next poll.
+        on_ssh_material_written=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
+    )
+    sync_scheduler.start(root_concurrency_group)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
     for resp in response_events:
@@ -460,7 +497,7 @@ def run(
             f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s; the plugin likely failed to start. "
             "Check the logs above for its stderr and retry."
         )
-    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
+    logger.info("  mngr forward: https://127.0.0.1:{}", mngr_forward_port)
 
     # AgentCreator is constructed *after* ``start_mngr_forward`` so the
     # readiness probe can use the same preauth cookie the plugin accepts and
@@ -563,6 +600,7 @@ def run(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
+        sync_scheduler=sync_scheduler,
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot

@@ -3,7 +3,9 @@
 **Audience:** developers working on the `mngr` common-transcript schema and the per-agent
 emitters (claude, antigravity, opencode, pi-coding, codex).
 
-**Status:** design proposal. No code has been written against it yet.
+**Status:** implemented. Tier 1 (`finish_reason` rename) and Tier 2 (universal `parts[]` /
+`parts_ordered`) landed together in `90ef7a979` (2026-06-15); the schema, all five emitters, and the
+reader carry them.
 
 This spec proposes evolving the agent-agnostic *common transcript* schema toward the
 vocabulary and message shape of the **OpenTelemetry (OTel) GenAI semantic conventions**,
@@ -191,10 +193,22 @@ This is reflected by an "Ordered assistant parts[]" row in the parity matrix in
 
 - Tier 1 and Tier 2 land together: the `finish_reason` rename, the universal `parts[]` /
   `parts_ordered`, all five emitters, the reader, and the conformance/golden records.
-- The reader renders an assistant turn from `parts[]` only (single path, no fallback). Old on-disk
-  transcript lines written before this change lack `parts[]` and would render with an empty assistant
-  body (`(no content)`). This is acceptable: common transcripts are short-lived live-agent logs, not
-  archives, and are continuously re-derived from the always-on raw stream.
+- The reader renders an assistant turn from `parts[]` only (single path, no fallback). Lines written by
+  an emitter version predating `90ef7a979` lack `parts[]` (they carry the flat `text` / `tool_calls` and
+  the old `stop_reason`) and render with an empty assistant body (`(no content)`).
+- **This gap is keyed on emitter version, not line age, and does not self-heal.** Each agent runs the
+  emitter it was created with (or, for deployed/vendored agents, last re-vendored with), so an agent on
+  a pre-`parts[]` emitter emits parts-less lines for its whole life -- including brand-new turns -- until
+  it is re-created or its `mngr_claude` re-synced. And `convert()` dedups by `event_id` and only appends;
+  it never re-derives or rewrites a line it already emitted, so existing lines are immutable. There is
+  **no** continuous re-derivation from the raw stream -- do not rely on one. Empirically (2026-07-08, one
+  host): every agent on the current emitter had `parts[]` on all 2310 post-`90ef7a979` assistant lines (0
+  missing); every parts-less line came from an agent pinned to an old emitter, 12 of which were still
+  active after the cutoff. We accept this -- we do not care about old-emitter transcripts, and everything
+  created on the current emitter renders correctly. A reader that nonetheless wants old-emitter lines
+  readable (e.g. the kanpan peek against a still-running pre-`parts[]` agent) must fall back to the flat
+  `text` / `tool_calls`; that fallback is a back-compat shim for old-emitter lines, not a workaround for a
+  broken emitter -- the current emitter always fills `parts[]`.
 - `finish_reason`: the reader never displayed the stop reason, so pre-existing lines carrying the old
   `stop_reason` are unaffected at read time (the field simply lands in `extra`).
 - No `schema_version` field: the format is uniform going forward, so there is nothing to branch on.

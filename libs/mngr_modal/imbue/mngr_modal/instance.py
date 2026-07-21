@@ -42,7 +42,7 @@ from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
-from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
@@ -2970,7 +2970,7 @@ log "=== Shutdown script completed ==="
         # Lifecycle state from tmux info
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
         is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
-        state = determine_lifecycle_state(
+        lifecycle = determine_lifecycle_probe_result(
             tmux_info=agent_raw.get("tmux_info"),
             is_active=agent_raw.get("is_active", False),
             expected_process_name=expected_process_name,
@@ -2987,7 +2987,8 @@ log "=== Shutdown script completed ==="
             initial_branch=agent_data.get("created_branch_name"),
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
-            state=state,
+            state=lifecycle.state,
+            pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,
             runtime_seconds=runtime_seconds,
