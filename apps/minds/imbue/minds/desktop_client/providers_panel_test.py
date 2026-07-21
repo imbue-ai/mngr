@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
 from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.testing import stub_mngr_host_dir
@@ -53,7 +54,7 @@ def test_build_providers_state_payload_returns_empty_for_non_mngr_resolver() -> 
 
     payload = _build_providers_state_payload(resolver)
 
-    assert payload == {"providers": [], "last_event_at": None, "last_full_snapshot_at": None}
+    assert payload == ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None)
 
 
 def test_build_providers_state_payload_hides_local_provider() -> None:
@@ -69,9 +70,9 @@ def test_build_providers_state_payload_hides_local_provider() -> None:
 
     payload = _build_providers_state_payload(resolver)
 
-    assert payload["providers"] == []
-    assert payload["last_full_snapshot_at"] == now.isoformat()
-    assert payload["last_event_at"] == now.isoformat()
+    assert payload.providers == ()
+    assert payload.last_full_snapshot_at == now.isoformat()
+    assert payload.last_event_at == now.isoformat()
 
 
 def test_build_providers_state_payload_hides_default_imbue_cloud_provider() -> None:
@@ -87,7 +88,7 @@ def test_build_providers_state_payload_hides_default_imbue_cloud_provider() -> N
 
     payload = _build_providers_state_payload(resolver)
 
-    assert payload["providers"] == []
+    assert payload.providers == ()
 
 
 def test_build_providers_state_payload_keeps_per_account_imbue_cloud_provider() -> None:
@@ -103,7 +104,7 @@ def test_build_providers_state_payload_keeps_per_account_imbue_cloud_provider() 
 
     payload = _build_providers_state_payload(resolver)
 
-    assert [entry["name"] for entry in payload["providers"]] == ["imbue_cloud_alice-example-com"]
+    assert [entry.name for entry in payload.providers] == ["imbue_cloud_alice-example-com"]
 
 
 def test_build_providers_state_payload_combines_ok_error_disabled(
@@ -132,18 +133,18 @@ def test_build_providers_state_payload_combines_ok_error_disabled(
     )
 
     payload = _build_providers_state_payload(resolver)
-    names = [entry["name"] for entry in payload["providers"]]
+    names = [entry.name for entry in payload.providers]
 
     # `local` is hidden; the rest are sorted alphabetically across all categories.
     assert names == ["docker", "modal", "zzz_last"]
-    by_name = {entry["name"]: entry for entry in payload["providers"]}
-    assert by_name["docker"]["status"] == "disabled"
-    assert by_name["docker"]["is_enabled"] is False
-    assert by_name["modal"]["status"] == "error"
-    assert by_name["modal"]["error_type"] == "ImbueCloudAuthError"
-    assert by_name["modal"]["error_message"] == "token missing"
-    assert by_name["zzz_last"]["status"] == "ok"
-    assert by_name["zzz_last"]["backend"] == "docker"
+    by_name = {entry.name: entry for entry in payload.providers}
+    assert by_name["docker"].status == "disabled"
+    assert by_name["docker"].is_enabled is False
+    assert by_name["modal"].status == "error"
+    assert by_name["modal"].error_type == "ImbueCloudAuthError"
+    assert by_name["modal"].error_message == "token missing"
+    assert by_name["zzz_last"].status == "ok"
+    assert by_name["zzz_last"].backend == "docker"
 
 
 def test_build_providers_state_payload_dedups_provider_appearing_in_multiple_buckets(
@@ -175,12 +176,12 @@ def test_build_providers_state_payload_dedups_provider_appearing_in_multiple_buc
     )
 
     payload = _build_providers_state_payload(resolver)
-    names = [entry["name"] for entry in payload["providers"]]
+    names = [entry.name for entry in payload.providers]
 
     # Only one entry per provider name, with disabled winning over error.
     assert names == ["modal"]
-    assert payload["providers"][0]["status"] == "disabled"
-    assert payload["providers"][0]["is_enabled"] is False
+    assert payload.providers[0].status == "disabled"
+    assert payload.providers[0].is_enabled is False
 
 
 def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_set(
@@ -200,10 +201,10 @@ def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_
     )
 
     payload = _build_providers_state_payload(resolver)
-    names = [entry["name"] for entry in payload["providers"]]
+    names = [entry.name for entry in payload.providers]
 
     assert names == ["docker"]
-    assert payload["providers"][0]["status"] == "disabled"
+    assert payload.providers[0].status == "disabled"
 
 
 # -- _build_workspace_list stale marking --
@@ -231,7 +232,7 @@ def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() 
     # No provider error -> the workspace is not stale.
     healthy = _build_workspace_list(resolver)
     assert len(healthy) == 1
-    assert "is_stale" not in healthy[0]
+    assert healthy[0].is_stale is None
 
     # Its provider's latest poll errored -> the retained workspace is stale.
     errored = ProviderInstanceName(provider_name)
@@ -245,7 +246,7 @@ def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() 
     )
     stale = _build_workspace_list(resolver)
     assert len(stale) == 1
-    assert stale[0]["is_stale"] == "true"
+    assert stale[0].is_stale == "true"
 
 
 def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error() -> None:
@@ -263,7 +264,7 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
     )
     workspaces = _build_workspace_list(resolver)
     assert len(workspaces) == 1
-    assert "is_stale" not in workspaces[0]
+    assert workspaces[0].is_stale is None
 
 
 # -- _build_workspace_list color emission --
@@ -283,8 +284,8 @@ def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
 
     workspaces = _build_workspace_list(resolver)
     assert len(workspaces) == 1
-    assert workspaces[0]["accent"] == "#0b292b"
-    assert "accent_fg" not in workspaces[0]
+    assert workspaces[0].accent == "#0b292b"
+    assert "accent_fg" not in workspaces[0].to_payload_dict()
 
 
 def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -> None:
@@ -297,4 +298,4 @@ def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
 
     workspaces = _build_workspace_list(resolver)
-    assert workspaces[0]["accent"] == DEFAULT_WORKSPACE_COLOR
+    assert workspaces[0].accent == DEFAULT_WORKSPACE_COLOR

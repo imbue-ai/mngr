@@ -1,4 +1,4 @@
-{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, accent="", crumb_workspace_name="", crumb_agent_id="", active_tab="", page_label="", show_back=False, body_class="", body_style="", head="", scripts="" #}
+{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, accent="", crumb_workspace_name="", crumb_agent_id="", active_tab="", page_label="", show_back=False, boot_state=None, body_class="", body_style="", head="", scripts="" #}
 {#
   Shared trusted app shell: the fixed breadcrumb titlebar + browser-mode floating
   workspace switcher + accent / chrome.js wiring, wrapping a page body passed in
@@ -219,8 +219,17 @@
      (and #local-page-scripts) in place for hub-page navigation, leaving the
      titlebar + switcher + shell scripts untouched. ``display: contents`` keeps
      it layout-transparent so pages whose body classes flex-center their
-     content (Creating, Welcome, ...) are unaffected by the extra wrapper. #}
+     content (Creating, Welcome, ...) are unaffected by the extra wrapper.
+
+     ``boot_state`` (a JSON-ready dict, normally built via
+     build_chrome_boot_state() + page extras) renders the #minds-boot-state
+     island that MindsUI mount functions parse. It lives INSIDE
+     #local-page-root so every swap replaces it together with the page --
+     an island in the shell would go stale on the first hub swap. #}
   <div id="local-page-root" style="display: contents">
+    {%- if boot_state is not none %}
+    <script type="application/json" id="minds-boot-state">{{ boot_state | tojson }}</script>
+    {%- endif %}
     {{ content }}
   </div>
 </Base>

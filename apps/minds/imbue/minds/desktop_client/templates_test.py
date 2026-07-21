@@ -1286,6 +1286,24 @@ def test_overlay_surface_pages_load_the_frontend_bundle() -> None:
     assert html.count(_BUNDLE_SCRIPT_TAG) == 1
 
 
+def test_chrome_shell_boot_state_prop_renders_island_inside_local_page_root() -> None:
+    """A ``boot_state`` dict renders as the ``#minds-boot-state`` JSON island
+    INSIDE ``#local-page-root`` (so hub swaps replace it with the page), and
+    the island round-trips through JSON."""
+    html = CATALOG.render("ChromeShell", boot_state={"requests": {"count": 3}}, _content="<p>body</p>")
+    island_match = re.search(r'<script type="application/json" id="minds-boot-state">(.*?)</script>', html, re.DOTALL)
+    assert island_match is not None
+    assert json.loads(island_match.group(1)) == {"requests": {"count": 3}}
+    root_pos = html.index('id="local-page-root"')
+    assert root_pos < island_match.start()
+    assert island_match.end() < html.index("<p>body</p>")
+
+
+def test_chrome_shell_without_boot_state_renders_no_island() -> None:
+    html = CATALOG.render("ChromeShell", _content="<p>body</p>")
+    assert "minds-boot-state" not in html
+
+
 def test_dev_styleguide_smoke_mount_follows_the_boot_island_protocol() -> None:
     """The styleguide's JS-components section exercises the full mount
     protocol: a parseable ``#minds-boot-state`` JSON island carrying the smoke

@@ -225,6 +225,10 @@
     else if (isLocalPage()) window.history.back();
     else { try { document.getElementById('content-frame').contentWindow.history.back(); } catch (e) {} }
   }
+  // Exported for the mithril bundle's browser host (frontend/src/host.ts):
+  // converted surfaces reuse this swap-engine-aware navigation instead of
+  // reimplementing it.
+  window.__mindsNavigateContent = navigateContent;
 
   // -- Workspace switcher menu ("sidebar") toggle -----------------------------
   //

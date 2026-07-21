@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -823,7 +824,7 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
 
     workspaces = _build_workspace_list(backend_resolver)
     assert len(workspaces) == 1
-    assert workspaces[0]["id"] == str(agent_id)
+    assert workspaces[0].id == str(agent_id)
 
 
 class _NoopRemediator(ProducerRemediator):
@@ -1040,9 +1041,9 @@ class _AllAgentsKnownStaticResolver(StaticBackendResolver):
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    expected = {"count": 0, "request_ids": []}
-    assert _build_requests_payload(None, resolver) == expected
-    assert _build_requests_payload(RequestInbox(), resolver) == expected
+    expected = ChromeRequestsPayload(count=0, request_ids=(), auto_open=True)
+    assert _build_requests_payload(None, resolver, is_auto_open=True) == expected
+    assert _build_requests_payload(RequestInbox(), resolver, is_auto_open=True) == expected
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1052,9 +1053,9 @@ def test_build_requests_payload_carries_pending_ids() -> None:
         agent_id=agent_id, scope="slack-api", rationale="post updates"
     )
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload = _build_requests_payload(RequestInbox().add_request(event), resolver)
-    assert payload["count"] == 1
-    assert payload["request_ids"] == [str(event.event_id)]
+    payload = _build_requests_payload(RequestInbox().add_request(event), resolver, is_auto_open=True)
+    assert payload.count == 1
+    assert payload.request_ids == (str(event.event_id),)
 
 
 def test_build_requests_payload_distinguishes_equal_count_different_contents() -> None:
@@ -1084,11 +1085,11 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
     ).add_request(request_b)
 
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload_a = _build_requests_payload(inbox_with_a, resolver)
-    payload_b = _build_requests_payload(inbox_with_b, resolver)
-    assert payload_a["count"] == payload_b["count"] == 1
+    payload_a = _build_requests_payload(inbox_with_a, resolver, is_auto_open=True)
+    payload_b = _build_requests_payload(inbox_with_b, resolver, is_auto_open=True)
+    assert payload_a.count == payload_b.count == 1
     assert payload_a != payload_b
-    assert payload_b["request_ids"] == [str(request_b.event_id)]
+    assert payload_b.request_ids == (str(request_b.event_id),)
 
 
 # -- Tests for new account management and request routes --

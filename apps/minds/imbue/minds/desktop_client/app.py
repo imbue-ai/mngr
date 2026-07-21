@@ -46,6 +46,14 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.chrome_state import ChromeBootState
+from imbue.minds.desktop_client.chrome_state import ChromeProviderEntry
+from imbue.minds.desktop_client.chrome_state import ChromeProviderStatus
+from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
+from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
+from imbue.minds.desktop_client.chrome_state import ChromeSystemInterfaceStatusPayload
+from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
+from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -182,14 +190,14 @@ def _system_interface_status_payload(
     tracker: "SystemInterfaceHealthTracker | None",
     agent_id: str,
     status: AgentHealth,
-) -> dict[str, str]:
+) -> ChromeSystemInterfaceStatusPayload:
     """Build a ``system_interface_status`` SSE payload, including the failure reason for RESTART_FAILED."""
-    payload: dict[str, str] = {"type": "system_interface_status", "agent_id": agent_id, "status": status.value}
-    if status == AgentHealth.RESTART_FAILED and tracker is not None:
-        error = tracker.get_last_restart_error(AgentId(agent_id))
-        if error is not None:
-            payload["error"] = error
-    return payload
+    error = tracker.get_last_restart_error(AgentId(agent_id)) if tracker is not None else None
+    return ChromeSystemInterfaceStatusPayload(
+        agent_id=agent_id,
+        status=status.value,
+        error=error if status == AgentHealth.RESTART_FAILED else None,
+    )
 
 
 def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
@@ -1500,30 +1508,27 @@ def _handle_chrome_events() -> Response:
             last_restorable_ids = [str(aid) for aid in backend_resolver.list_restorable_workspace_ids()]
             yield "data: {}\n\n".format(
                 json.dumps(
-                    {
-                        "type": "workspaces",
-                        "workspaces": last_workspace_data,
-                        "destroying_agent_ids": last_destroying_ids,
-                        "has_accounts": has_accounts,
-                        "restorable_workspace_ids": last_restorable_ids,
-                        "remote_workspace_states": last_remote_states,
-                    }
+                    ChromeWorkspacesPayload(
+                        workspaces=tuple(last_workspace_data),
+                        destroying_agent_ids=tuple(last_destroying_ids),
+                        has_accounts=has_accounts,
+                        restorable_workspace_ids=tuple(last_restorable_ids),
+                        remote_workspace_states=last_remote_states,
+                    ).to_payload_dict()
                 )
             )
             # Send the initial providers panel state so the chrome can render
             # the providers section before the first resolver change fires.
             last_providers_data = _build_providers_state_payload(backend_resolver)
-            yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
+            yield "data: {}\n\n".format(json.dumps(last_providers_data.to_payload_dict()))
             inbox: RequestInbox | None = get_state().request_inbox
-            last_requests_payload = _build_requests_payload(inbox, backend_resolver)
-            # ``auto_open`` is bundled with the requests payload (rather than
-            # its own SSE event) so the Electron shell sees both atomically
-            # when deciding whether to auto-open the panel.
             minds_config: MindsConfig | None = get_state().minds_config
-            auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
-            yield "data: {}\n\n".format(
-                json.dumps({"type": "requests", **last_requests_payload, "auto_open": auto_open})
+            last_requests_payload = _build_requests_payload(
+                inbox,
+                backend_resolver,
+                is_auto_open=minds_config.get_auto_open_requests_panel() if minds_config else True,
             )
+            yield "data: {}\n\n".format(json.dumps(last_requests_payload.to_payload_dict()))
 
             # Agents for which a STUCK redirect has already been emitted on this
             # connection, so a steadily-STUCK workspace is redirected exactly once
@@ -1536,7 +1541,7 @@ def _handle_chrome_events() -> Response:
                     if status == AgentHealth.STUCK:
                         redirected_agent_ids.add(str(aid))
                     yield "data: {}\n\n".format(
-                        json.dumps(_system_interface_status_payload(tracker, str(aid), status))
+                        json.dumps(_system_interface_status_payload(tracker, str(aid), status).to_payload_dict())
                     )
             # Replay the app-global discovery-pipeline state if it is already
             # BLOCKED, so a freshly (re)loaded chrome re-learns it and takes over
@@ -1614,7 +1619,9 @@ def _handle_chrome_events() -> Response:
                         redirected_agent_ids.discard(aid_str)
                     if status == AgentHealth.STUCK:
                         redirected_agent_ids.add(aid_str)
-                    yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
+                    yield "data: {}\n\n".format(
+                        json.dumps(_system_interface_status_payload(tracker, aid_str, status).to_payload_dict())
+                    )
 
                 if (
                     discovery_watchdog is not None
@@ -1642,7 +1649,7 @@ def _handle_chrome_events() -> Response:
                         if status == AgentHealth.STUCK:
                             redirected_agent_ids.add(str(aid))
                         yield "data: {}\n\n".format(
-                            json.dumps(_system_interface_status_payload(tracker, str(aid), status))
+                            json.dumps(_system_interface_status_payload(tracker, str(aid), status).to_payload_dict())
                         )
 
                 # Each workspace entry carries its mind liveness (derived from
@@ -1662,31 +1669,36 @@ def _handle_chrome_events() -> Response:
                     last_remote_states = current_remote_states
                     yield "data: {}\n\n".format(
                         json.dumps(
-                            {
-                                "type": "workspaces",
-                                "workspaces": current_data,
-                                "destroying_agent_ids": current_destroying_ids,
-                                "remote_workspace_states": current_remote_states,
-                            }
+                            ChromeWorkspacesPayload(
+                                workspaces=tuple(current_data),
+                                destroying_agent_ids=tuple(current_destroying_ids),
+                                remote_workspace_states=current_remote_states,
+                            ).to_payload_dict()
                         )
                     )
 
                 current_providers_data = _build_providers_state_payload(backend_resolver)
                 if current_providers_data != last_providers_data:
                     last_providers_data = current_providers_data
-                    yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
+                    yield "data: {}\n\n".format(json.dumps(current_providers_data.to_payload_dict()))
 
                 inbox = get_state().request_inbox
-                current_requests_payload = _build_requests_payload(inbox, backend_resolver)
-                # Diff the full payload (count + ordered pending ids), not just
-                # the count, so a change to the pending *set* at constant size
-                # still pushes an update and the panel refreshes.
-                if current_requests_payload != last_requests_payload:
+                current_requests_payload = _build_requests_payload(
+                    inbox,
+                    backend_resolver,
+                    is_auto_open=minds_config.get_auto_open_requests_panel() if minds_config else True,
+                )
+                # Diff the pending-set summary (count + ordered pending ids), not
+                # just the count, so a change to the pending *set* at constant
+                # size still pushes an update and the panel refreshes.
+                # ``auto_open`` is deliberately outside the diff: a pure settings
+                # flip must not push a requests event.
+                if (current_requests_payload.count, current_requests_payload.request_ids) != (
+                    last_requests_payload.count,
+                    last_requests_payload.request_ids,
+                ):
                     last_requests_payload = current_requests_payload
-                    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
-                    yield "data: {}\n\n".format(
-                        json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
-                    )
+                    yield "data: {}\n\n".format(json.dumps(current_requests_payload.to_payload_dict()))
         finally:
             help_broker.unsubscribe(open_help_queue, change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
@@ -1717,7 +1729,7 @@ def _handle_chrome_events() -> Response:
 _HIDDEN_PROVIDER_NAMES_IN_PANEL: Final[frozenset[str]] = frozenset({"local", "imbue_cloud"})
 
 
-def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -> dict[str, Any]:
+def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -> ChromeProvidersPayload:
     """Build the providers panel SSE payload from resolver state + minds' settings file.
 
     Combines three sources:
@@ -1733,11 +1745,7 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     + status; errored entries also carry ``error_type`` and ``error_message``.
     """
     if not isinstance(backend_resolver, MngrCliBackendResolver):
-        return {
-            "providers": [],
-            "last_event_at": None,
-            "last_full_snapshot_at": None,
-        }
+        return ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None)
     providers = backend_resolver.list_providers()
     errored = backend_resolver.get_provider_errors()
     disabled_names = list_disabled_provider_names()
@@ -1750,45 +1758,42 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     # both `disabled_names` and the resolver's errored or healthy set. The user's
     # explicitly recorded intent (disabled-in-settings) wins; transient error state
     # wins over stale healthy state.
-    entry_by_name: dict[str, dict[str, Any]] = {}
+    entry_by_name: dict[str, ChromeProviderEntry] = {}
     for provider in providers:
         name = str(provider.provider_name)
         if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
             continue
-        entry_by_name[name] = {
-            "name": name,
-            "backend": str(provider.config.backend),
-            "status": "ok",
-            "is_enabled": provider.config.is_enabled if provider.config.is_enabled is not None else True,
-        }
+        entry_by_name[name] = ChromeProviderEntry(
+            name=name,
+            backend=str(provider.config.backend),
+            status=ChromeProviderStatus.OK,
+            is_enabled=provider.config.is_enabled if provider.config.is_enabled is not None else True,
+        )
     for provider_name, error in errored.items():
         name = str(provider_name)
         if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
             continue
-        entry_by_name[name] = {
-            "name": name,
-            "backend": None,
-            "status": "error",
-            "is_enabled": True,
-            "error_type": error.type_name,
-            "error_message": error.message,
-        }
+        entry_by_name[name] = ChromeProviderEntry(
+            name=name,
+            backend=None,
+            status=ChromeProviderStatus.ERROR,
+            is_enabled=True,
+            error_type=error.type_name,
+            error_message=error.message,
+        )
     for name in disabled_names:
         if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
             continue
-        entry_by_name[name] = {
-            "name": name,
-            "backend": None,
-            "status": "disabled",
-            "is_enabled": False,
-        }
+        entry_by_name[name] = ChromeProviderEntry(
+            name=name, backend=None, status=ChromeProviderStatus.DISABLED, is_enabled=False
+        )
     # Stable alphabetical order by name across all categories.
-    entries = sorted(entry_by_name.values(), key=lambda entry: entry["name"])
-    return {
-        "providers": entries,
-        "last_event_at": last_event_at.isoformat() if last_event_at is not None else None,
-        "last_full_snapshot_at": last_full_snapshot_at.isoformat() if last_full_snapshot_at is not None else None,
-    }
+    entries = tuple(sorted(entry_by_name.values(), key=lambda entry: entry.name))
+    return ChromeProvidersPayload(
+        providers=entries,
+        last_event_at=last_event_at.isoformat() if last_event_at is not None else None,
+        last_full_snapshot_at=last_full_snapshot_at.isoformat() if last_full_snapshot_at is not None else None,
+    )
 
 
 def _destroying_agent_ids(paths: WorkspacePaths | None, backend_resolver: BackendResolverInterface) -> list[str]:
@@ -1810,7 +1815,7 @@ def _destroying_agent_ids(paths: WorkspacePaths | None, backend_resolver: Backen
 def _build_workspace_list(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None = None,
-) -> list[dict[str, str]]:
+) -> list[ChromeWorkspaceEntry]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
     Each entry carries an ``accent`` (#rrggbb CSS color) for the chrome and
@@ -1835,47 +1840,45 @@ def _build_workspace_list(
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     liveness_by_agent_id = compute_mind_liveness_by_agent_id(backend_resolver)
     agent_ids = backend_resolver.list_active_workspace_ids()
-    workspaces: list[dict[str, str]] = []
+    workspaces: list[ChromeWorkspaceEntry] = []
     for aid in agent_ids:
         info = backend_resolver.get_agent_display_info(aid)
         ws_name = backend_resolver.get_workspace_name(aid)
         if not ws_name:
             ws_name = info.agent_name if info else str(aid)
         accent = _resolved_workspace_color(backend_resolver, aid)
-        entry: dict[str, str] = {
-            "id": str(aid),
-            "name": ws_name,
-            "accent": accent,
-        }
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is
         # unverified rather than confirmed healthy.
-        if _is_workspace_provider_errored(info, errored_provider_names):
-            entry["is_stale"] = "true"
+        is_stale = _is_workspace_provider_errored(info, errored_provider_names)
         liveness = liveness_by_agent_id.get(str(aid))
-        if liveness is not None:
-            entry["supports_shutdown"] = "true"
-            entry["liveness"] = liveness.value
-        if session_store is not None:
-            account = session_store.get_account_for_workspace(str(aid))
-            if account is not None:
-                entry["account"] = account.email
-        workspaces.append(entry)
+        account = session_store.get_account_for_workspace(str(aid)) if session_store is not None else None
+        workspaces.append(
+            ChromeWorkspaceEntry(
+                id=str(aid),
+                name=ws_name,
+                accent=accent,
+                is_stale="true" if is_stale else None,
+                supports_shutdown="true" if liveness is not None else None,
+                liveness=liveness.value if liveness is not None else None,
+                account=account.email if account is not None else None,
+            )
+        )
     # Append workspaces known only from synced records (hosted on another
     # device). They render greyed and non-navigable; ``location`` names where
     # they live.
     for tile in _collect_remote_workspace_tiles(backend_resolver, session_store):
-        remote_entry: dict[str, str] = {
-            "id": tile.agent_id,
-            "name": tile.name,
-            "accent": tile.accent,
-            "is_remote": "true",
-            "location": tile.location,
-        }
         owner = session_store.get_account_for_workspace(tile.agent_id) if session_store is not None else None
-        if owner is not None:
-            remote_entry["account"] = owner.email
-        workspaces.append(remote_entry)
+        workspaces.append(
+            ChromeWorkspaceEntry(
+                id=tile.agent_id,
+                name=tile.name,
+                accent=tile.accent,
+                is_remote="true",
+                location=tile.location,
+                account=owner.email if owner is not None else None,
+            )
+        )
     return workspaces
 
 
@@ -1914,7 +1917,8 @@ def _displayable_pending_requests(
 def _build_requests_payload(
     inbox: RequestInbox | None,
     backend_resolver: BackendResolverInterface,
-) -> dict[str, Any]:
+    is_auto_open: bool,
+) -> ChromeRequestsPayload:
     """Build the content-based requests payload pushed over the chrome SSE.
 
     The chrome's live request UI (badge, panel refresh, auto-open) must react
@@ -1928,13 +1932,56 @@ def _build_requests_payload(
     ``request_ids`` to decide whether to refresh the panel and which ids are
     newly arrived (for auto-open); the count remains for the badge.
 
+    ``auto_open`` is bundled here (rather than its own SSE event) so the
+    Electron shell sees both atomically when deciding whether to auto-open
+    the panel -- but the SSE loop deliberately excludes it from its
+    change-detection diff (a pure settings flip does not push an event).
+
     Requests whose host can't be resolved are excluded (see
     :func:`_displayable_pending_requests`) so the badge count and the
     rendered cards stay in agreement.
     """
     pending = _displayable_pending_requests(inbox, backend_resolver)
-    request_ids = [str(req.event_id) for req in pending]
-    return {"count": len(request_ids), "request_ids": request_ids}
+    request_ids = tuple(str(req.event_id) for req in pending)
+    return ChromeRequestsPayload(count=len(request_ids), request_ids=request_ids, auto_open=is_auto_open)
+
+
+def build_chrome_boot_state() -> ChromeBootState:
+    """Assemble the connect-time chrome snapshot for a page's boot-state island.
+
+    Reads the same sources as ``_handle_chrome_events``'s connect-time
+    section, so a page mounting synchronously from the island sees exactly
+    what the SSE stream would deliver on connect -- the island and the stream
+    cannot drift.
+    """
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    session_store = state.session_store
+    paths = state.api_v1_paths
+    minds_config = state.minds_config
+    workspaces = ChromeWorkspacesPayload(
+        workspaces=tuple(_build_workspace_list(backend_resolver, session_store)),
+        destroying_agent_ids=tuple(_destroying_agent_ids(paths, backend_resolver)),
+        has_accounts=bool(session_store and session_store.list_accounts()),
+        restorable_workspace_ids=tuple(str(aid) for aid in backend_resolver.list_restorable_workspace_ids()),
+        remote_workspace_states=_build_remote_tile_states(backend_resolver, session_store),
+    )
+    requests = _build_requests_payload(
+        state.request_inbox,
+        backend_resolver,
+        is_auto_open=minds_config.get_auto_open_requests_panel() if minds_config else True,
+    )
+    tracker = state.system_interface_health_tracker
+    status_by_agent_id = tracker.snapshot_all() if tracker is not None else {}
+    statuses = tuple(
+        _system_interface_status_payload(tracker, str(aid), status) for aid, status in status_by_agent_id.items()
+    )
+    return ChromeBootState(
+        workspaces=workspaces,
+        providers=_build_providers_state_payload(backend_resolver),
+        requests=requests,
+        system_interface_statuses=statuses,
+    )
 
 
 # -- System-interface recovery page --

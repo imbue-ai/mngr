@@ -423,11 +423,11 @@ def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
     )
 
     displayable = _displayable_pending_requests(inbox, backend_resolver)
-    payload = _build_requests_payload(inbox, backend_resolver)
+    payload = _build_requests_payload(inbox, backend_resolver, is_auto_open=True)
 
     assert [str(req.event_id) for req in displayable] == [str(visible_request.event_id)]
-    assert payload["count"] == 1
-    assert payload["request_ids"] == [str(visible_request.event_id)]
+    assert payload.count == 1
+    assert payload.request_ids == (str(visible_request.event_id),)
 
 
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
