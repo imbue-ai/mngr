@@ -31,3 +31,11 @@ def test_log_and_pid_file_defaults_under_dot_mngr() -> None:
     assert _DEFAULT_LOG_FILE.name == "foreman.log"
     assert _DEFAULT_PID_FILE.name == "foreman.pid"
     assert _DEFAULT_LOG_FILE.parent.name == ".mngr"
+
+
+def test_foreman_is_a_group_with_install_and_uninstall() -> None:
+    # Bare `mngr foreman` still runs the server (invoke_without_command); the group
+    # adds the systemd subcommands.
+    assert isinstance(foreman, click.Group)
+    assert foreman.invoke_without_command is True
+    assert set(foreman.commands) >= {"install", "uninstall"}

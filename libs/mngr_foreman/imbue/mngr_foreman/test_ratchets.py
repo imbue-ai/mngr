@@ -159,7 +159,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(87))
+    rc.check_trailing_comments(_DIR, snapshot(92))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -225,7 +225,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(24))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(40))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -254,8 +254,11 @@ def test_prevent_direct_subprocess() -> None:
     # avoid -- so that spawn is a deliberate direct subprocess. The 5th is the
     # warm-pool's ControlMaster pre-warm (terminal.py): a bounded `ssh ... true`
     # that must open the *same* system-ssh multiplexing master the terminal reuses,
-    # which a ConcurrencyGroup (paramiko) connection cannot do.
-    rc.check_direct_subprocess(_DIR, snapshot(5))
+    # which a ConcurrencyGroup (paramiko) connection cannot do. The 6th is the
+    # `mngr foreman install` privileged runner (systemd_service.py): a single
+    # sudo/systemctl/tee spawn to write the unit and enable the service -- host
+    # admin, not agent work, so a ConcurrencyGroup does not apply.
+    rc.check_direct_subprocess(_DIR, snapshot(6))
 
 
 def test_prevent_bare_tmux_targets() -> None:

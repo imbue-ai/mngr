@@ -23,6 +23,10 @@ from imbue.mngr_foreman.assets import get_asset_dir
 from imbue.mngr_foreman.config import ForemanPluginConfig
 from imbue.mngr_foreman.mngr_bin import resolve_mngr_binary
 from imbue.mngr_foreman.server import run_server
+from imbue.mngr_foreman.systemd_service import SERVICE_NAME
+from imbue.mngr_foreman.systemd_service import ServiceInstallError
+from imbue.mngr_foreman.systemd_service import install_service
+from imbue.mngr_foreman.systemd_service import uninstall_service
 
 # ``--log-file`` is already a common mngr option (mngr's own structured JSON log),
 # so the backgrounded server's stdout+stderr capture uses ``--foreman-log-file``.
@@ -40,6 +44,13 @@ class ForemanCliOptions(CommonCliOptions):
     background: bool = False
     foreman_log_file: Path = _DEFAULT_LOG_FILE
     pid_file: Path = _DEFAULT_PID_FILE
+
+
+class ForemanInstallCliOptions(CommonCliOptions):
+    """Options for ``mngr foreman install``. Backed by the click flags below."""
+
+    host: str | None = None
+    port: int | None = None
 
 
 def _resolve_foreman_config(mngr_ctx: Any) -> ForemanPluginConfig:
@@ -88,7 +99,7 @@ def _run_in_background(
     )
 
 
-@click.command(name="foreman")
+@click.group(name="foreman", invoke_without_command=True)
 @click.option("--host", default=None, help="Bind host (default from config, else 0.0.0.0).")
 @click.option("--port", type=int, default=None, help="Bind port (default from config, else 8700).")
 @click.option(
@@ -123,16 +134,22 @@ def foreman(ctx: click.Context, **kwargs: Any) -> None:
     deployed to target boxes and there is no auth -- bind to a tailnet IP or
     firewall the port. Create agents with plain ``mngr create``.
 
-    Pass ``-d``/``--background`` to detach the server into the background; the
-    command prints its PID and returns, and the server keeps serving. Stop it
-    with ``kill <pid>`` (the PID is also in ``--pid-file``).
+    Bare ``mngr foreman`` runs the server in the foreground. ``mngr foreman
+    install`` registers it as a systemd service (recommended for a box);
+    ``mngr foreman uninstall`` removes that service. Pass ``-d``/``--background``
+    to detach a one-off server without systemd; it prints its PID and returns.
 
     \b
     Examples:
       mngr foreman --port 8700
-      mngr foreman --host 100.64.0.1
+      mngr foreman install --host 0.0.0.0 --port 8700
       mngr foreman -d --port 8700
     """
+    # With invoke_without_command the group body runs for `install`/`uninstall` too;
+    # those subcommands set up their own context and do the work, so return early.
+    if ctx.invoked_subcommand is not None:
+        return
+
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="foreman",
@@ -177,10 +194,67 @@ def foreman(ctx: click.Context, **kwargs: Any) -> None:
     )
 
 
+@foreman.command(name="install")
+@click.option("--host", default=None, help="Bind host for the service (default from config, else 0.0.0.0).")
+@click.option("--port", type=int, default=None, help="Bind port for the service (default from config, else 8700).")
+@add_common_options
+@click.pass_context
+def foreman_install(ctx: click.Context, **kwargs: Any) -> None:
+    """Install foreman as a systemd service and enable+start it.
+
+    Writes ``/etc/systemd/system/foreman.service`` (Type=simple, Restart=always,
+    ExecStart pointing at this mngr binary), then ``systemctl daemon-reload`` and
+    ``systemctl enable --now foreman``. Needs root: run as root or as a sudo-capable
+    user (the privileged steps are re-invoked via ``sudo``). Idempotent -- re-running
+    rewrites the unit and restarts cleanly. After this, control foreman with
+    ``systemctl {start,stop,restart,status} foreman``.
+    """
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="foreman install",
+        command_class=ForemanInstallCliOptions,
+        is_format_template_supported=False,
+    )
+    config = _resolve_foreman_config(mngr_ctx)
+    host = opts.host if opts.host is not None else config.host
+    port = opts.port if opts.port is not None else config.port
+    try:
+        install_service(host, port)
+    except ServiceInstallError as e:
+        write_stderr_line(f"foreman install failed: {e}")
+        ctx.exit(1)
+    write_human_line(f"foreman installed as a systemd service ({SERVICE_NAME}).")
+    write_human_line(f"  URL:      http://{host}:{port}/")
+    write_human_line(f"  control:  sudo systemctl status|start|stop|restart {SERVICE_NAME}")
+    write_human_line(f"  logs:     sudo journalctl -u {SERVICE_NAME} -f")
+
+
+@foreman.command(name="uninstall")
+@add_common_options
+@click.pass_context
+def foreman_uninstall(ctx: click.Context, **kwargs: Any) -> None:
+    """Stop, disable, and remove the foreman systemd service (idempotent)."""
+    setup_command_context(
+        ctx=ctx,
+        command_name="foreman uninstall",
+        command_class=CommonCliOptions,
+        is_format_template_supported=False,
+    )
+    try:
+        removed = uninstall_service()
+    except ServiceInstallError as e:
+        write_stderr_line(f"foreman uninstall failed: {e}")
+        ctx.exit(1)
+    if removed:
+        write_human_line(f"foreman systemd service ({SERVICE_NAME}) stopped, disabled, and removed.")
+    else:
+        write_human_line(f"foreman systemd service ({SERVICE_NAME}) was not installed; nothing to do.")
+
+
 CommandHelpMetadata(
     key="foreman",
     one_line_description="Always-on web remote control for your mngr agents [experimental]",
-    synopsis="mngr foreman [--host HOST] [--port PORT] [-d] [OPTIONS]",
+    synopsis="mngr foreman [--host HOST] [--port PORT] [-d] [OPTIONS] | mngr foreman install|uninstall",
     description="""Runs a single Flask server on this box, over every agent in
 mngr's view: a mobile-friendly chat UI for claude agents (live transcript with
 markdown, syntax highlighting, KaTeX, mermaid, inline images and file uploads;
