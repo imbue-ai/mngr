@@ -1144,6 +1144,18 @@ def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> 
     apply_start = html.find("function applyHealth(")
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
     assert apply_block.find("'backend_unreachable'") < apply_block.find("postRestart")
+    # The verdict must stay live: a transient provider error (one failed
+    # discovery cycle, e.g. during app startup) is cleared by the provider's
+    # next clean snapshot, so the branch schedules the slow re-probe to
+    # re-classify and continue the flow instead of dead-ending on the page.
+    unreachable_branch = apply_block[apply_block.find("'backend_unreachable'") : apply_block.find("'healthy'")]
+    assert "scheduleIndeterminateReprobe(autoDispatch)" in unreachable_branch
+    # Only one reprobe timer may be pending at once: the Retry button's
+    # immediate probe re-enters applyHealth, which would otherwise spawn a
+    # parallel self-perpetuating probe chain per click.
+    reprobe_start = html.find("function scheduleIndeterminateReprobe")
+    reprobe_block = html[reprobe_start : html.find("function ", reprobe_start + 1)]
+    assert "if (reprobePending) return" in reprobe_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:

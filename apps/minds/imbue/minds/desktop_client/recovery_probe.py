@@ -204,9 +204,13 @@ class DispatchTier(str, Enum):
     provider's own error verbatim (or the canned access-rejected reason for
     UNREACHABLE, since discovery carries no per-host failure detail), and arms
     a background poll that returns the user to the workspace the moment it
-    recovers. Takes precedence over every host tier because no
-    host-state observation can be trusted when the backend that produces it is
-    unreachable.
+    recovers. The page also keeps re-probing on a slow cadence: a provider
+    error can be transient (e.g. one failed discovery cycle during app
+    startup), and the provider's next clean snapshot clears it from the
+    resolver, at which point the re-probe re-classifies to the real tier and
+    the recovery flow continues. Takes precedence over every host tier because
+    no host-state observation can be trusted when the backend that produces it
+    is unreachable.
     """
 
 

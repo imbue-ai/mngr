@@ -1173,8 +1173,18 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // threaded through so a reprobe on the restart_failed entry (autoDispatch
         // off) never starts auto-dispatching the restarts that entry suppresses.
         var INDETERMINATE_REPROBE_MS = 8000;
+        // Only one reprobe timer may be pending at a time: the waiting states that
+        // arm this (indeterminate, backend-unreachable) re-arm it from applyHealth
+        // on every cycle, and the backend-unreachable state also offers a Retry
+        // button whose immediate probe lands in the same applyHealth -- without
+        // the guard each retry would spawn a parallel self-perpetuating chain of
+        // heavy probes.
+        var reprobePending = false;
         function scheduleIndeterminateReprobe(autoDispatch) {
+          if (reprobePending) return;
+          reprobePending = true;
           setTimeout(function () {
+            reprobePending = false;
             fetchHealth().then(function (data) { applyHealth(data, autoDispatch); }, function () {
               scheduleIndeterminateReprobe(autoDispatch);
             });
@@ -1373,10 +1383,15 @@ _RECOVERY_SCRIPT: Final[str] = """\
           var tier = data && data.dispatch_tier;
           // A backend-unreachable outcome short-circuits before any restart
           // dispatch on EVERY entry path: no restart can or should fire while the
-          // backend is unreachable or rejecting us. Render-only; renderBackendUnreachable
-          // arms the healthy-poll so the page auto-returns once the backend recovers.
+          // backend is unreachable or rejecting us. renderBackendUnreachable
+          // arms the healthy-poll so the page auto-returns once the backend recovers,
+          // and the slow re-probe keeps the verdict live: a transient provider error
+          // (e.g. one failed discovery cycle during app startup) is cleared by the
+          // provider's next clean snapshot, and the re-probe then re-classifies to
+          // the real tier so the flow continues instead of dead-ending here.
           if (tier === 'backend_unreachable') {
             renderBackendUnreachable(data);
+            scheduleIndeterminateReprobe(autoDispatch);
             return;
           }
           // The in-container probe shows the interface is actually answering
