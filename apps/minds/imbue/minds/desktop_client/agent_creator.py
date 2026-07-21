@@ -1967,41 +1967,13 @@ class AgentCreator(MutableModel):
                 # re-creating the agent.
                 latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
 
-                # AWS hosts need the region's security group to exist before
-                # ``mngr create`` (the provider looks it up read-only and
-                # refuses to launch without it). prepare is read-only-first, so
-                # this is a no-op describe when the region is already prepared.
-                # For a bring-your-own-key account the account's block (which holds
-                # the pasted credentials) is the prepare target. ``region`` is
-                # always the account's pinned placement (the create API resolves
-                # it from the block and never re-pins -- the discovery clients
-                # are region/zone-bound, so a moved pin would orphan the entry's
-                # existing workspaces).
-                if launch_mode is LaunchMode.AWS:
-                    if cloud_account:
-                        log_queue.put(f"[minds] Preparing cloud account '{cloud_account}' in {region}...")
-                        run_mngr_aws_prepare(
-                            region,
-                            on_output=emit_log,
-                            provider_name=cloud_account,
-                            parent_cg=self.root_concurrency_group,
-                        )
-                    else:
-                        log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
-                        run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
-                elif launch_mode in (LaunchMode.GCP, LaunchMode.AZURE) and cloud_account:
-                    log_queue.put(f"[minds] Preparing cloud account '{cloud_account}'...")
-                    run_mngr_provider_prepare(
-                        launch_mode.value.lower(),
-                        cloud_account,
-                        on_output=emit_log,
-                        parent_cg=self.root_concurrency_group,
-                    )
-                else:
-                    # Every other mode (docker / lima / vultr / imbue_cloud /
-                    # modal) has no per-account prepare step: their providers
-                    # need no pre-created cloud scaffolding before `mngr create`.
-                    pass
+                # No prepare step here: a bring-your-own-key account's cloud
+                # scaffolding (AWS security group + state bucket, GCP/Azure
+                # equivalents) is created once when the account is *added*
+                # (``_handle_create_cloud_account``), against the account's pinned
+                # placement -- the same region every workspace on it uses. The
+                # other modes (docker / lima / vultr / imbue_cloud / modal) need
+                # no pre-created scaffolding at all.
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
