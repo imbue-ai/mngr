@@ -2000,3 +2000,129 @@ def test_backup_routes_require_bearer(tmp_path: Path) -> None:
         client.post(f"/api/v1/workspaces/{agent_id}/backup-service/verification", json={"enabled": False}).status_code
         == 401
     )
+
+
+# -- Workspace resources (read + set-only resize) --
+
+
+_FAKE_LIMIT_READ_JSON = (
+    '{"hosts": [{"host_id": "host-x", "host_name": "ws", "provider": "lima", '
+    '"capabilities": {"cpu": {"minimum": 1, "default_value": 4, "ceiling": 8}, '
+    '"memory_gib": {"minimum": 1, "default_value": 4, "ceiling": 16}, "is_resize_supported": true}, '
+    '"configured": {"cpu_count": 4.0, "memory_gib": 4.0}, '
+    '"actual": {"cpu_count": 4.0, "memory_gib": 4.0}}], "count": 1}'
+)
+
+_FAKE_LIMIT_SET_JSON = (
+    '{"changes": [{"type": "host_resources", "host_id": "host-x", '
+    '"configured": {"cpu_count": 6.0, "memory_gib": 8.0}, '
+    '"actual": {"cpu_count": 4.0, "memory_gib": 4.0}}], "count": 1}'
+)
+
+
+def _write_fake_mngr_limit(directory: Path) -> str:
+    """Fake ``mngr`` that answers ``limit`` calls: set flags get a changes JSON, else a read report."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "mngr"
+    script.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        f"  *--cpus*|*--memory*) echo '{_FAKE_LIMIT_SET_JSON}' ;;\n"
+        f"  *limit*) echo '{_FAKE_LIMIT_READ_JSON}' ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+def _build_resources_client(tmp_path: Path, agent_id: AgentId, root_concurrency_group: ConcurrencyGroup) -> Any:
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    fake_mngr = _write_fake_mngr_limit(tmp_path / "bin")
+    return _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
+    )
+
+
+def test_workspace_resources_reports_capabilities_and_values(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    client = _build_resources_client(tmp_path, agent_id, root_concurrency_group)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/resources", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["supported"] is True
+    assert body["cpu"] == {"minimum": 1, "default_value": 4, "ceiling": 8}
+    assert body["configured"] == {"cpu_count": 4.0, "memory_gib": 4.0}
+    assert body["actual"] == {"cpu_count": 4.0, "memory_gib": 4.0}
+
+
+def test_workspace_resize_reports_configured_and_actual_discrepancy(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # The fake mngr reports old actual values, mirroring a lima host that keeps
+    # its booted values until restart -- the caller sees the discrepancy.
+    agent_id = AgentId()
+    client = _build_resources_client(tmp_path, agent_id, root_concurrency_group)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/resize",
+        headers=_auth_header(),
+        json={"cpus": 6, "memory_gib": 8},
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["configured"] == {"cpu_count": 6.0, "memory_gib": 8.0}
+    assert body["actual"] == {"cpu_count": 4.0, "memory_gib": 4.0}
+
+
+def test_workspace_resize_accepts_default_values(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
+    agent_id = AgentId()
+    client = _build_resources_client(tmp_path, agent_id, root_concurrency_group)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/resize",
+        headers=_auth_header(),
+        json={"cpus": "default", "memory_gib": "default"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_workspace_resize_rejects_invalid_values(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
+    agent_id = AgentId()
+    client = _build_resources_client(tmp_path, agent_id, root_concurrency_group)
+
+    for bad_body in ({"cpus": 0}, {"cpus": "bogus"}, {"memory_gib": -2}, {}):
+        response = client.post(f"/api/v1/workspaces/{agent_id}/resize", headers=_auth_header(), json=bad_body)
+        assert response.status_code == 400, bad_body
+
+
+def test_workspace_resources_routes_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    client = _build_resources_client(tmp_path, AgentId(), root_concurrency_group)
+
+    assert client.get(f"/api/v1/workspaces/{AgentId()}/resources", headers=_auth_header()).status_code == 404
+    assert (
+        client.post(
+            f"/api/v1/workspaces/{AgentId()}/resize", headers=_auth_header(), json={"cpus": 2}
+        ).status_code
+        == 404
+    )
+
+
+def test_workspace_resources_routes_require_bearer(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    assert client.get(f"/api/v1/workspaces/{agent_id}/resources").status_code == 401
+    assert client.post(f"/api/v1/workspaces/{agent_id}/resize", json={"cpus": 2}).status_code == 401

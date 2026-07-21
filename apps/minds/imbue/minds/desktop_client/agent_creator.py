@@ -597,6 +597,8 @@ def _build_mngr_create_command(
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
+    cpus: int | None = None,
+    memory_gib: int | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -765,9 +767,23 @@ def _build_mngr_create_command(
                 # default, so RUNC needs no extra template.
                 mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
+            # CPU/memory allotment as docker run start-args, so the container is
+            # born with the requested limits (the provider records them from the
+            # live HostConfig). memory-swap is pinned to memory so the allotment
+            # is a true total, matching the provider's resize semantics.
+            if cpus is not None:
+                mngr_command.extend(["-s", f"--cpus={cpus}"])
+            if memory_gib is not None:
+                mngr_command.extend(["-s", f"--memory={memory_gib}g", "-s", f"--memory-swap={memory_gib}g"])
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
+            # CPU/memory allotment as limactl start args, so the VM boots with
+            # the requested resources (the provider records the booted values).
+            if cpus is not None:
+                mngr_command.extend(["-s", f"--cpus={cpus}"])
+            if memory_gib is not None:
+                mngr_command.extend(["-s", f"--memory={memory_gib}"])
             # When the caller resolved a ready pre-baked image (issue 2306),
             # point Lima at the local qcow2 via the provider's existing per-arch
             # image-url override, so the VM boots the baked toolchain instead of
@@ -996,6 +1012,8 @@ def run_mngr_create(
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
+    cpus: int | None = None,
+    memory_gib: int | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -1037,6 +1055,8 @@ def run_mngr_create(
         original_minds_version=original_minds_version,
         original_branch=original_branch,
         prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
+        cpus=cpus,
+        memory_gib=memory_gib,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -1176,6 +1196,9 @@ class _MngrCreateAttemptParams(FrozenModel):
     original_branch: str | None
     # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
     prebaked_lima_image_qcow2_path: Path | None = None
+    # CPU/memory allotment for the new host (docker/lima only); None for provider defaults.
+    cpus: int | None = None
+    memory_gib: int | None = None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1214,6 +1237,8 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
         prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
+        cpus=params.cpus,
+        memory_gib=params.memory_gib,
         parent_cg=params.parent_cg,
     )
 
@@ -1409,6 +1434,8 @@ class AgentCreator(MutableModel):
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
+        cpus: int | None = None,
+        memory_gib: int | None = None,
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -1491,6 +1518,8 @@ class AgentCreator(MutableModel):
                 color,
                 docker_runtime,
                 original_minds_version,
+                cpus,
+                memory_gib,
             ),
             daemon=True,
             name="agent-creator-{}".format(creation_id),
@@ -1555,6 +1584,8 @@ class AgentCreator(MutableModel):
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
+        cpus: int | None = None,
+        memory_gib: int | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
@@ -1808,6 +1839,8 @@ class AgentCreator(MutableModel):
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
                     prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
+                    cpus=cpus,
+                    memory_gib=memory_gib,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:

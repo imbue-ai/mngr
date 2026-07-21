@@ -83,6 +83,7 @@ from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
 from imbue.minds.desktop_client.api_models import ProviderToggleResponse
+from imbue.minds.desktop_client.api_models import ResizeWorkspaceRequest
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
@@ -94,6 +95,8 @@ from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
+from imbue.minds.desktop_client.api_models import WorkspaceResizeResponse
+from imbue.minds.desktop_client.api_models import WorkspaceResourcesResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.api_spec import API_SPEC
@@ -575,6 +578,17 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
 
+    # Optional CPU/memory allotment for the new host. Only the local providers
+    # (docker, lima) support it; reject early for other modes so the caller is
+    # not silently ignored. Structural bounds (int >= 1) come from the model.
+    requested_cpus = body.get("cpus")
+    requested_memory_gib = body.get("memory_gib")
+    if (requested_cpus is not None or requested_memory_gib is not None) and launch_mode not in (
+        LaunchMode.DOCKER,
+        LaunchMode.LIMA,
+    ):
+        return _json_field_error("CPU/memory allotments are only supported for docker and lima workspaces.", "cpus")
+
     # The workspace name is chosen automatically unless one was submitted (the
     # advanced view's optional "Name" field): a submitted value, else the next
     # free ``workspace-N`` name (computed from the host names already in use across
@@ -668,6 +682,10 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         color=color,
         docker_runtime=docker_runtime,
         original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
+        cpus=requested_cpus if isinstance(requested_cpus, int) and not isinstance(requested_cpus, bool) else None,
+        memory_gib=requested_memory_gib
+        if isinstance(requested_memory_gib, int) and not isinstance(requested_memory_gib, bool)
+        else None,
     )
     return OperationHandleResponse(operation_id=str(creation_id), kind="create"), 202
 
@@ -832,6 +850,80 @@ def _handle_workspace_rename(agent_id: str) -> Response:
     if returncode != 0:
         return _json_error(f"Failed to rename workspace host: {stderr.strip()[:200]}", 502)
     return _apply_workspace_display_label(parsed_id, raw_name, str(new_slug), parent_cg)
+
+
+def _parse_resize_dimension_value(raw: object, field: str) -> tuple[int | str | None, Response | None]:
+    """Validate one resize body field to a positive integer or 'default'; None passes through."""
+    if raw is None:
+        return None, None
+    if isinstance(raw, str):
+        if raw.strip().lower() == "default":
+            return "default", None
+        return None, _json_field_error(f"{field} must be a positive integer or 'default'.", field)
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+        return raw, None
+    return None, _json_field_error(f"{field} must be a positive integer or 'default'.", field)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceResourcesResponse))
+def _handle_workspace_resources(agent_id: str) -> WorkspaceResourcesResponse | Response:
+    """Report the workspace host's resize capabilities plus configured and actual resources.
+
+    ``supported`` is false for providers without resize support (the UI hides
+    the Resources section). A configured/actual discrepancy means values were
+    set but apply on the host's next restart; ``actual`` is null when the host
+    is not running.
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    if parsed_id not in state.backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    parent_cg = state.root_concurrency_group
+    if parent_cg is None:
+        return _json_error("Workspace resources are unavailable in this configuration", 503)
+    try:
+        return workspace_settings.get_workspace_resources(
+            parsed_id, state.mngr_binary, state.mngr_host_dir, parent_cg
+        )
+    except workspace_settings.WorkspaceResizeError as exc:
+        return _json_error(str(exc), exc.status_code)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=ResizeWorkspaceRequest, resp=json_response_model(WorkspaceResizeResponse))
+def _handle_workspace_resize(agent_id: str) -> WorkspaceResizeResponse | Response:
+    """Set the workspace host's CPU/memory allotment (``POST .../workspaces/<agent_id>/resize``).
+
+    Set-only: the host is never restarted. Values that cannot apply live are
+    persisted and take effect on the next restart, visible in the response as a
+    configured/actual discrepancy (restarting goes through the existing restart
+    endpoint and its own permission).
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    if parsed_id not in state.backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    parent_cg = state.root_concurrency_group
+    if parent_cg is None:
+        return _json_error("Workspace resize is unavailable in this configuration", 503)
+
+    body = request.get_json(silent=True) or {}
+    cpus, cpus_error = _parse_resize_dimension_value(body.get("cpus"), "cpus")
+    if cpus_error is not None:
+        return cpus_error
+    memory_gib, memory_error = _parse_resize_dimension_value(body.get("memory_gib"), "memory_gib")
+    if memory_error is not None:
+        return memory_error
+    if cpus is None and memory_gib is None:
+        return _json_error("At least one of cpus or memory_gib is required.", 400)
+
+    try:
+        return workspace_settings.resize_workspace_resources(
+            parsed_id, cpus, memory_gib, state.mngr_binary, state.mngr_host_dir, parent_cg
+        )
+    except workspace_settings.WorkspaceResizeError as exc:
+        return _json_error(str(exc), exc.status_code)
 
 
 # -- Workspace recovery routes (health probe + restart) --
@@ -1952,6 +2044,14 @@ def create_api_v1_blueprint() -> Blueprint:
     # ``minds-workspaces-recover`` at the gateway.
     blueprint.add_url_rule("/workspaces/<agent_id>/health", view_func=_handle_workspace_health, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
+
+    # Workspace host resources: the read rides the ``minds-workspaces-read``
+    # grant; the set-only resize is gated by ``minds-workspaces-resize`` at the
+    # gateway (restart-to-apply stays behind ``minds-workspaces-recover``).
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/resources", view_func=_handle_workspace_resources, methods=["GET"]
+    )
+    blueprint.add_url_rule("/workspaces/<agent_id>/resize", view_func=_handle_workspace_resize, methods=["POST"])
 
     # Backup service verification + management. The per-workspace health read
     # (folded into ``/workspaces/<agent_id>/backups`` above) rides the

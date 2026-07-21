@@ -9,13 +9,19 @@ as JSON; mirrors the ``workspace_lifecycle`` / ``workspace_create`` extraction
 pattern.
 """
 
+import json
 import os
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.api_models import WorkspaceResizeDimension
+from imbue.minds.desktop_client.api_models import WorkspaceResizeResponse
+from imbue.minds.desktop_client.api_models import WorkspaceResourceValues
+from imbue.minds.desktop_client.api_models import WorkspaceResourcesResponse
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -52,6 +58,14 @@ class WorkspaceColorError(RuntimeError):
 
 class WorkspaceAssociationError(RuntimeError):
     """An account associate/disassociate was rejected; carries the HTTP status to surface."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class WorkspaceResizeError(RuntimeError):
+    """A resource read or resize failed; carries the HTTP status to surface."""
 
     def __init__(self, message: str, status_code: int) -> None:
         super().__init__(message)
@@ -114,6 +128,108 @@ def set_workspace_color(
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.set_workspace_color_locally(agent_id, normalized)
     return normalized
+
+
+def _run_mngr_limit_json(
+    argv_tail: list[str],
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+) -> dict[str, Any]:
+    """Run ``mngr limit <argv_tail> --format json`` and return the parsed JSON object."""
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+    argv = [mngr_binary, "limit", *argv_tail, "--format", "json"]
+    try:
+        stdout = run_mngr_to_completion(concurrency_group, argv, env)
+    except MngrCommandError as exc:
+        logger.warning("mngr limit failed ({}): {}", argv_tail, exc)
+        raise WorkspaceResizeError(f"mngr limit failed: {exc}", 502) from exc
+    try:
+        return json.loads(stdout.strip() or "{}")
+    except json.JSONDecodeError as exc:
+        logger.warning("mngr limit produced unparseable output: {}", stdout[:200])
+        raise WorkspaceResizeError("mngr limit produced unparseable output", 502) from exc
+
+
+def _resource_values_from_entry(entry: dict[str, Any] | None) -> WorkspaceResourceValues | None:
+    if entry is None:
+        return None
+    return WorkspaceResourceValues(cpu_count=entry.get("cpu_count"), memory_gib=entry.get("memory_gib"))
+
+
+def _resize_dimension_from_entry(entry: dict[str, Any] | None) -> WorkspaceResizeDimension | None:
+    if entry is None:
+        return None
+    return WorkspaceResizeDimension(
+        minimum=entry.get("minimum", 1),
+        default_value=entry.get("default_value"),
+        ceiling=entry.get("ceiling"),
+    )
+
+
+def get_workspace_resources(
+    agent_id: AgentId,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+) -> WorkspaceResourcesResponse:
+    """Read the workspace host's resize capabilities plus configured and actual resource values.
+
+    Shells out to ``mngr limit``'s read mode. Raises :class:`WorkspaceResizeError`
+    when the command fails or reports nothing for the agent.
+    """
+    parsed = _run_mngr_limit_json([str(agent_id)], mngr_binary, mngr_host_dir, concurrency_group)
+    host_entries = parsed.get("hosts") or []
+    if not host_entries:
+        raise WorkspaceResizeError("mngr limit reported no host for the workspace", 502)
+    entry = host_entries[0]
+    capabilities = entry.get("capabilities") or {}
+    return WorkspaceResourcesResponse(
+        agent_id=str(agent_id),
+        supported=bool(capabilities.get("is_resize_supported")),
+        cpu=_resize_dimension_from_entry(capabilities.get("cpu")),
+        memory_gib=_resize_dimension_from_entry(capabilities.get("memory_gib")),
+        configured=_resource_values_from_entry(entry.get("configured")),
+        actual=_resource_values_from_entry(entry.get("actual")),
+    )
+
+
+def resize_workspace_resources(
+    agent_id: AgentId,
+    cpus: int | str | None,
+    memory_gib: int | str | None,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+) -> WorkspaceResizeResponse:
+    """Set the workspace host's CPU/memory allotment via ``mngr limit`` (set-only; never restarts).
+
+    ``cpus``/``memory_gib`` are positive integers or the literal ``'default'``.
+    Returns the persisted configured values and the probed actual values; a
+    discrepancy means the change applies on the host's next restart. Raises
+    :class:`WorkspaceResizeError` on failure.
+    """
+    argv_tail = [str(agent_id)]
+    if cpus is not None:
+        argv_tail.extend(["--cpus", str(cpus)])
+    if memory_gib is not None:
+        argv_tail.extend(["--memory", str(memory_gib)])
+    parsed = _run_mngr_limit_json(argv_tail, mngr_binary, mngr_host_dir, concurrency_group)
+    resource_change = next(
+        (change for change in parsed.get("changes") or [] if change.get("type") == "host_resources"),
+        None,
+    )
+    if resource_change is None:
+        raise WorkspaceResizeError("mngr limit reported no resource change for the workspace", 502)
+    configured = _resource_values_from_entry(resource_change.get("configured"))
+    if configured is None:
+        raise WorkspaceResizeError("mngr limit reported no configured values for the workspace", 502)
+    return WorkspaceResizeResponse(
+        agent_id=str(agent_id),
+        configured=configured,
+        actual=_resource_values_from_entry(resource_change.get("actual")),
+    )
 
 
 def associate_workspace_account(

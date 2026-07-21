@@ -1,0 +1,7 @@
+Added provider-level host resource resizing (CPU + memory):
+
+- New resize capability surface on `ProviderInstanceInterface` (`get_resize_capabilities`, `get_host_resource_limits`, `resize_host`) with default not-supported implementations, plus the supporting data types (`HostResizeCapabilities`, `HostResizeRequest`, `HostResourceLimits`, `HostResourceLimitsReport`). `HostResources` can now represent dimensions with no limit.
+
+- The docker provider implements resizing: limits apply via `docker update` (live where docker allows it, and always while stopped), persist in the durable host record, and re-apply from the record on native start and snapshot restore. Actual values are probed exactly from `docker inspect`; ceilings come from `docker info`. The old hardcoded 1 CPU / 1 GB `get_host_resources` placeholder now reports honest record/HostConfig-derived values, with "no limit" represented distinctly. Because docker cannot unset a limit on an existing container, clearing back to unlimited resolves to the daemon's full allotment (functionally unlimited).
+
+- `mngr limit` gains first-class `--cpus` and `--memory` flags (positive integer GiB, or `default` for the provider default) that work on stopped hosts too, and a read mode: with no setting flags it reports the targets' resize capabilities plus configured and actual values (`--format json` for machine consumers). Values above the physical ceiling warn but proceed. Setting never restarts a host: values that cannot apply live show up as a configured/actual discrepancy and take effect on the next restart.

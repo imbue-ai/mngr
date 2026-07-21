@@ -1,18 +1,24 @@
 import json
 
+import click
 import pluggy
 import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.cli.limit import LimitCliOptions
+from imbue.mngr.cli.limit import _build_resize_value
 from imbue.mngr.cli.limit import _build_updated_activity_config
 from imbue.mngr.cli.limit import _has_agent_level_settings
 from imbue.mngr.cli.limit import _has_any_setting
 from imbue.mngr.cli.limit import _has_host_level_settings
 from imbue.mngr.cli.limit import _output_result
+from imbue.mngr.cli.limit import _parse_resource_flag_value
 from imbue.mngr.cli.limit import limit
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import ActivityConfig
+from imbue.mngr.interfaces.data_types import HostResizeDimensionCapability
+from imbue.mngr.interfaces.data_types import HostResizeValue
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
@@ -364,3 +370,69 @@ def test_limit_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     data = json.loads(captured.out.strip())
     assert data["event"] == "limit_result"
     assert data["count"] == 1
+
+
+def test_parse_resource_flag_value_accepts_integers_and_default() -> None:
+    assert _parse_resource_flag_value(None, "--cpus") is None
+    assert _parse_resource_flag_value("4", "--cpus") == 4
+    assert _parse_resource_flag_value(" Default ", "--cpus") == "default"
+
+
+def test_parse_resource_flag_value_rejects_bad_values() -> None:
+    with pytest.raises(click.UsageError):
+        _parse_resource_flag_value("0", "--cpus")
+    with pytest.raises(click.UsageError):
+        _parse_resource_flag_value("-3", "--memory")
+    with pytest.raises(click.UsageError):
+        _parse_resource_flag_value("lots", "--memory")
+
+
+def test_build_resize_value_resolves_default_against_capability() -> None:
+    concrete_default = HostResizeDimensionCapability(minimum=1, default_value=4, ceiling=8)
+    unlimited_default = HostResizeDimensionCapability(minimum=1, default_value=None, ceiling=8)
+
+    assert _build_resize_value("default", concrete_default, "cpus", "lima") == HostResizeValue(value=4)
+    # A provider whose default is unlimited resolves 'default' to a clear request.
+    assert _build_resize_value("default", unlimited_default, "cpus", "docker") == HostResizeValue(value=None)
+    assert _build_resize_value(6, concrete_default, "cpus", "lima") == HostResizeValue(value=6)
+
+
+def test_build_resize_value_rejects_unsupported_dimension() -> None:
+    with pytest.raises(UserInputError):
+        _build_resize_value(2, None, "cpus", "local")
+
+
+def test_limit_rejects_malformed_resource_flags_before_discovery(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    result = cli_runner.invoke(
+        limit,
+        ["--host", "nope", "--cpus", "banana"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    assert "--cpus must be a positive integer or 'default'" in result.output
+
+
+def test_limit_read_mode_reports_unsupported_provider_for_local_host(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Read mode resolves the local host end-to-end and reports its provider as not resizable."""
+    result = cli_runner.invoke(
+        limit,
+        ["--host", "localhost", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload["count"] == 1
+    entry = payload["hosts"][0]
+    assert entry["capabilities"]["is_resize_supported"] is False
+    assert entry["configured"] is None
+    assert entry["actual"] is None

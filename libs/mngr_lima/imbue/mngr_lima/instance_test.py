@@ -7,13 +7,21 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import HostResizeRequest
+from imbue.mngr.interfaces.data_types import HostResizeValue
+from imbue.mngr.interfaces.data_types import HostResourceLimits
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr_lima.config import LimaProviderConfig
+from imbue.mngr_lima.constants import DEFAULT_LIMA_CPU_COUNT
+from imbue.mngr_lima.constants import DEFAULT_LIMA_MEMORY_GIB
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
@@ -268,3 +276,125 @@ def test_delete_host_removes_keypair_dir(lima_provider: LimaProviderInstance) ->
 
     lima_provider.delete_host(lima_provider._create_offline_host(host_record))
     assert not host_keys_dir.exists()
+
+
+def _write_resize_test_record(
+    lima_provider: LimaProviderInstance,
+    host_id: HostId,
+    resources: HostResources | None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="resize-host",
+            user_tags={},
+            snapshots=[],
+            created_at=now,
+            updated_at=now,
+        ),
+        config=LimaHostConfig(instance_name=f"mngr-{host_id}"),
+        resources=resources,
+    )
+    lima_provider._host_store.write_host_record(record)
+
+
+def test_resize_host_persists_values_and_reports_configured(lima_provider: LimaProviderInstance) -> None:
+    """A resize persists the new values on the record and reports them as configured.
+
+    The instance does not exist in limactl, so the actual side is absent -- the
+    caller sees only the durable configured values, exactly as for a stopped VM.
+    """
+    host_id = HostId.generate()
+    _write_resize_test_record(
+        lima_provider,
+        host_id,
+        HostResources(cpu=CpuResources(count=4), memory_gb=4.0, disk_gb=100.0, gpu=None),
+    )
+
+    report = lima_provider.resize_host(
+        host_id,
+        HostResizeRequest(cpu_count=HostResizeValue(value=6), memory_gib=HostResizeValue(value=8)),
+    )
+
+    assert report.configured == HostResourceLimits(cpu_count=6.0, memory_gib=8.0)
+    assert report.actual is None
+    updated = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert updated is not None and updated.resources is not None
+    assert updated.resources.cpu == CpuResources(count=6)
+    assert updated.resources.memory_gb == 8.0
+    # Untouched dimensions of the record survive the resize.
+    assert updated.resources.disk_gb == 100.0
+
+
+def test_resize_host_merges_partial_request_with_current_values(lima_provider: LimaProviderInstance) -> None:
+    host_id = HostId.generate()
+    _write_resize_test_record(
+        lima_provider,
+        host_id,
+        HostResources(cpu=CpuResources(count=2), memory_gb=6.0, disk_gb=100.0, gpu=None),
+    )
+
+    report = lima_provider.resize_host(host_id, HostResizeRequest(memory_gib=HostResizeValue(value=12)))
+
+    assert report.configured == HostResourceLimits(cpu_count=2.0, memory_gib=12.0)
+    updated = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert updated is not None and updated.resources is not None
+    assert updated.resources.cpu == CpuResources(count=2)
+    assert updated.resources.memory_gb == 12.0
+
+
+def test_resize_host_fills_defaults_for_legacy_record_without_resources(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    """A record written before resize support has no resources; the lima defaults fill the gap."""
+    host_id = HostId.generate()
+    _write_resize_test_record(lima_provider, host_id, None)
+
+    report = lima_provider.resize_host(host_id, HostResizeRequest(cpu_count=HostResizeValue(value=6)))
+
+    assert report.configured == HostResourceLimits(cpu_count=6.0, memory_gib=DEFAULT_LIMA_MEMORY_GIB)
+
+
+def test_resize_host_rejects_clear_to_unlimited(lima_provider: LimaProviderInstance) -> None:
+    host_id = HostId.generate()
+    _write_resize_test_record(
+        lima_provider,
+        host_id,
+        HostResources(cpu=CpuResources(count=4), memory_gb=4.0, disk_gb=100.0, gpu=None),
+    )
+
+    with pytest.raises(UserInputError):
+        lima_provider.resize_host(host_id, HostResizeRequest(memory_gib=HostResizeValue(value=None)))
+
+
+def test_resize_host_raises_for_unknown_host(lima_provider: LimaProviderInstance) -> None:
+    with pytest.raises(HostNotFoundError):
+        lima_provider.resize_host(HostId.generate(), HostResizeRequest(cpu_count=HostResizeValue(value=2)))
+
+
+def test_get_host_resource_limits_reports_defaults_for_legacy_record(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    host_id = HostId.generate()
+    _write_resize_test_record(lima_provider, host_id, None)
+
+    report = lima_provider.get_host_resource_limits(host_id)
+
+    assert report.configured == HostResourceLimits(
+        cpu_count=float(DEFAULT_LIMA_CPU_COUNT), memory_gib=DEFAULT_LIMA_MEMORY_GIB
+    )
+    assert report.actual is None
+
+
+def test_get_resize_capabilities_reports_both_dimensions_with_physical_ceilings(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    capabilities = lima_provider.get_resize_capabilities()
+
+    assert capabilities.is_resize_supported
+    assert capabilities.cpu is not None and capabilities.memory_gib is not None
+    # Ceilings come from the actual machine, so only their existence and sanity
+    # (at least one CPU / one GiB) can be asserted portably.
+    assert capabilities.cpu.ceiling is not None and capabilities.cpu.ceiling >= 1
+    assert capabilities.memory_gib.ceiling is not None and capabilities.memory_gib.ceiling >= 1

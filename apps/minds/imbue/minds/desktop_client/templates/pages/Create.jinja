@@ -64,6 +64,9 @@
     var regionSelect = document.getElementById('region');
     var runtimeRow = document.getElementById('runtime-row');
     var runtimeSelect = document.getElementById('runtime');
+    var resourcesRow = document.getElementById('resources-row');
+    var cpusInput = document.getElementById('cpus');
+    var memoryInput = document.getElementById('memory_gib');
     var presetCards = document.querySelectorAll('[data-preset]');
     var accountError = document.getElementById('account-error');
     // Inputs read when building the create request body.
@@ -348,7 +351,11 @@
         // select is disabled for every other compute provider, so omit it then
         // (JSON.stringify drops undefined keys) and let the server pick its
         // platform default.
-        runtime: runtimeSelect.disabled ? undefined : runtimeSelect.value
+        runtime: runtimeSelect.disabled ? undefined : runtimeSelect.value,
+        // CPU/memory allotments only apply to the local docker/lima providers;
+        // blank means the provider default (omitted from the body).
+        cpus: resourceFieldValue(cpusInput),
+        memory_gib: resourceFieldValue(memoryInput)
       };
       fetch('/api/v1/workspaces', {
         method: 'POST',
@@ -468,6 +475,26 @@
       runtimeSelect.disabled = !isDocker;
     }
 
+    function updateResources() {
+      // CPU/memory allotments only apply to the local docker/lima providers;
+      // hide + disable the inputs otherwise so no values are submitted.
+      var isResizable = launchSelect.value === 'DOCKER' || launchSelect.value === 'LIMA';
+      resourcesRow.classList.toggle('hidden', !isResizable);
+      cpusInput.disabled = !isResizable;
+      memoryInput.disabled = !isResizable;
+    }
+
+    function resourceFieldValue(el) {
+      // Blank / hidden inputs mean "provider default": omit the key entirely
+      // (JSON.stringify drops undefined). Non-integer junk is also omitted --
+      // the number inputs already constrain what can be typed.
+      var raw = fieldValue(el).trim();
+      if (raw === '') return undefined;
+      var parsed = parseInt(raw, 10);
+      if (isNaN(parsed) || parsed < 1) return undefined;
+      return parsed;
+    }
+
     function update() {
       var hasAccount = accountSelect.value !== '';
 
@@ -512,6 +539,7 @@
 
       updateRegion();
       updateRuntime();
+      updateResources();
     }
 
     accountSelect.addEventListener('change', onAccountChange);
@@ -735,6 +763,23 @@
               <option value="{{ rt.value }}"{% if rt.value == selected_docker_runtime %} selected{% endif %}>{{ rt.value | lower }}</option>
             {% endfor %}
           </Select>
+        </div>
+      </div>
+
+      <div id="resources-row" class="hidden">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <FormLabel target="cpus" inline>Resources</FormLabel>
+            <p class="mt-1 type-helper text-tertiary">CPU and memory allotment. Leave empty for the provider default; changeable later in workspace settings.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <input id="cpus" name="cpus" type="number" min="1" step="1"
+                   class="h-[34px] w-20 px-3 rounded-full type-body text-primary placeholder:text-tertiary bg-surface-secondary"
+                   placeholder="CPUs" aria-label="CPU allotment">
+            <input id="memory_gib" name="memory_gib" type="number" min="1" step="1"
+                   class="h-[34px] w-20 px-3 rounded-full type-body text-primary placeholder:text-tertiary bg-surface-secondary"
+                   placeholder="GiB" aria-label="Memory allotment in GiB">
+          </div>
         </div>
       </div>
 

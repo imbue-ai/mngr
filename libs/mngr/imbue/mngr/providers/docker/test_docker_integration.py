@@ -19,6 +19,9 @@ import pytest
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import HostResizeRequest
+from imbue.mngr.interfaces.data_types import HostResizeValue
+from imbue.mngr.interfaces.data_types import HostResourceLimits
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.docker.host_store import ContainerConfig
@@ -509,3 +512,107 @@ def test_docker_volume_remove_directory(docker_provider: DockerProviderInstance)
     volume.remove_directory("rmdir-test")
     with pytest.raises(FileNotFoundError):
         volume.listdir("rmdir-test")
+
+
+# =========================================================================
+# Resource Resizing
+# =========================================================================
+
+
+def _write_resize_host_record(
+    provider: DockerProviderInstance,
+    container: docker.models.containers.Container,
+    host_id: HostId,
+) -> None:
+    now = datetime.now(timezone.utc)
+    provider._host_store.write_host_record(
+        HostRecord(
+            certified_host_data=CertifiedHostData(
+                host_id=str(host_id),
+                host_name="resize-test",
+                user_tags={},
+                snapshots=[],
+                created_at=now,
+                updated_at=now,
+            ),
+            config=ContainerConfig(start_args=(), image=TEST_IMAGE),
+            container_id=container.id,
+        )
+    )
+
+
+@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_resize_host_applies_limits_live_to_running_container(docker_provider: DockerProviderInstance) -> None:
+    """A resize of a running container applies immediately via docker update.
+
+    The report's configured and actual values agree (byte-exact through the
+    GiB conversion), and the container's HostConfig carries the new limits with
+    memory-swap pinned to the memory limit.
+    """
+    container, host_id = _create_test_container(docker_provider)
+    _write_resize_host_record(docker_provider, container, host_id)
+
+    report = docker_provider.resize_host(
+        host_id,
+        HostResizeRequest(cpu_count=HostResizeValue(value=1), memory_gib=HostResizeValue(value=1)),
+    )
+
+    assert report.configured == HostResourceLimits(cpu_count=1.0, memory_gib=1.0)
+    assert report.actual == HostResourceLimits(cpu_count=1.0, memory_gib=1.0)
+    container.reload()
+    host_config = container.attrs["HostConfig"]
+    assert host_config["NanoCpus"] == 1_000_000_000
+    assert host_config["Memory"] == 1024**3
+    assert host_config["MemorySwap"] == 1024**3
+
+    # The read mode sees the same facts.
+    read_report = docker_provider.get_host_resource_limits(host_id)
+    assert read_report.configured == report.configured
+    assert read_report.actual == report.actual
+
+
+@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_resize_host_on_stopped_container_persists_and_reports_no_actual(
+    docker_provider: DockerProviderInstance,
+) -> None:
+    """Resizing a stopped container persists (docker keeps HostConfig across starts); actual is absent."""
+    container, host_id = _create_test_container(docker_provider)
+    _write_resize_host_record(docker_provider, container, host_id)
+    container.stop(timeout=1)
+
+    report = docker_provider.resize_host(
+        host_id,
+        HostResizeRequest(cpu_count=HostResizeValue(value=2), memory_gib=HostResizeValue(value=1)),
+    )
+
+    # Nothing to probe on a stopped container; the configured values are the
+    # durable facts and docker's own HostConfig already carries them.
+    assert report.configured == HostResourceLimits(cpu_count=2.0, memory_gib=1.0)
+    assert report.actual is None
+    container.reload()
+    assert container.attrs["HostConfig"]["NanoCpus"] == 2_000_000_000
+
+    record = docker_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert record is not None and record.resources is not None
+    assert record.resources.cpu is not None and record.resources.cpu.count == 2
+    assert record.resources.memory_gb == 1.0
+
+
+@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
+def test_get_resize_capabilities_reports_daemon_allotment_ceilings(
+    docker_provider: DockerProviderInstance,
+) -> None:
+    capabilities = docker_provider.get_resize_capabilities()
+
+    assert capabilities.is_resize_supported
+    assert capabilities.cpu is not None and capabilities.memory_gib is not None
+    # Docker's default is unlimited for both dimensions.
+    assert capabilities.cpu.default_value is None
+    assert capabilities.memory_gib.default_value is None
+    assert capabilities.cpu.ceiling is not None and capabilities.cpu.ceiling >= 1
+    assert capabilities.memory_gib.ceiling is not None and capabilities.memory_gib.ceiling >= 1

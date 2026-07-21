@@ -18,6 +18,7 @@
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/workspace_settings.js" defer></script>
+<script src="/_static/workspace_resources.js" defer></script>
 <script src="/_static/workspace_backups.js" defer></script>
 <script>
   (function() {
@@ -178,6 +179,66 @@
                  {% if is_stale %}disabled{% endif %}>
         </div>
         <p id="color-error" class="hidden type-body text-important mt-2" role="alert"></p>
+      </div>
+
+      {# Resources (CPU/memory) -- hidden until the async capability fetch
+         confirms the workspace's provider supports resizing (docker/lima).
+         Values and bounds come from GET /api/v1/workspaces/<id>/resources;
+         saving is set-only (POST .../resize) and never restarts by itself. #}
+      <div id="resources-block" class="hidden">
+        <SectionHeader divider extra="flex items-center gap-2">Resources <span id="resources-saving-badge" class="hidden type-section text-primary bg-surface-primary rounded-sm px-1.5 py-1">Saving</span></SectionHeader>
+        <div id="resources-section" class="mb-4">
+          <div id="resources-pending-note" class="hidden mb-2">
+            <Notice variant="info">
+              <span class="flex items-center gap-2">
+                <span>New resource values are saved and will apply the next time this workspace restarts.</span>
+                <Button variant="secondary" id="resources-note-restart-btn">Restart now</Button>
+              </span>
+            </Notice>
+          </div>
+          <div class="flex items-center gap-2 mb-2">
+            <FormLabel target="resources-cpus-input">CPUs</FormLabel>
+            <input id="resources-cpus-input"
+                   type="number"
+                   min="1"
+                   step="1"
+                   class="h-[34px] w-24 px-3 rounded-full type-body text-primary placeholder:text-tertiary disabled:opacity-40 bg-surface-secondary"
+                   aria-label="CPU allotment"
+                   {% if is_stale %}disabled{% endif %}>
+            <span id="resources-cpus-ceiling" class="type-helper text-tertiary"></span>
+          </div>
+          <div class="flex items-center gap-2 mb-2">
+            <FormLabel target="resources-memory-input">Memory (GiB)</FormLabel>
+            <input id="resources-memory-input"
+                   type="number"
+                   min="1"
+                   step="1"
+                   class="h-[34px] w-24 px-3 rounded-full type-body text-primary placeholder:text-tertiary disabled:opacity-40 bg-surface-secondary"
+                   aria-label="Memory allotment in GiB"
+                   {% if is_stale %}disabled{% endif %}>
+            <span id="resources-memory-ceiling" class="type-helper text-tertiary"></span>
+          </div>
+          <p id="resources-warning" class="hidden type-helper text-important mb-2" role="alert"></p>
+          <div class="flex items-center gap-2">
+            <Button variant="secondary" id="resources-save-btn" :disabled="is_stale">Save</Button>
+            <Button variant="secondary" id="resources-reset-btn" :disabled="is_stale">Reset to defaults</Button>
+            <span id="resources-restart-progress" class="hidden type-section text-secondary" aria-live="polite"></span>
+          </div>
+          <p id="resources-error" class="hidden type-body text-important mt-2" role="alert"></p>
+        </div>
+
+        <Modal id="resources-restart-dialog">
+          <h2 class="type-heading text-primary mb-3">Apply new resources now?</h2>
+          <p class="type-body text-primary mb-4">
+            The new CPU/memory values are saved, but <strong>{{ ws_name }}</strong> must restart before they
+            take effect. Restarting will interrupt any work in progress in this workspace.
+          </p>
+          <div class="flex justify-end gap-3">
+            <Button variant="secondary" id="resources-restart-later-btn">Apply on next restart</Button>
+            <Button variant="primary" id="resources-restart-now-btn">Restart now</Button>
+          </div>
+          <p id="resources-restart-error" class="hidden type-body text-important mt-2" role="alert"></p>
+        </Modal>
       </div>
 
       <SectionHeader divider>Account</SectionHeader>

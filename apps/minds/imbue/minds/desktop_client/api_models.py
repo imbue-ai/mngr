@@ -218,6 +218,74 @@ class CreateWorkspaceRequest(ApiRequestModel):
         default=None, description="Persist the typed (just-validated) master password locally for later flows"
     )
     backup_api_key_env: str | None = Field(default=None, description="KEY=VALUE block for an API_KEY backup provider")
+    cpus: int | None = Field(
+        default=None,
+        ge=1,
+        description="CPU allotment for the new workspace's host (docker/lima only; provider default when omitted)",
+    )
+    memory_gib: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Memory allotment in GiB for the new workspace's host (docker/lima only; provider default when omitted)"
+        ),
+    )
+
+
+class WorkspaceResourceValues(FrozenModel):
+    """CPU/memory limit values for a workspace's host. A None dimension means no limit."""
+
+    cpu_count: float | None = Field(description="Number of CPUs (None = unlimited)")
+    memory_gib: float | None = Field(description="Memory in GiB (None = unlimited)")
+
+
+class WorkspaceResizeDimension(FrozenModel):
+    """Resize bounds for one resource dimension, from the provider's capability descriptor."""
+
+    minimum: int = Field(description="Minimum settable value")
+    default_value: int | None = Field(description="Provider default value (None = unlimited by default)")
+    ceiling: int | None = Field(description="Advisory physical ceiling (None if unknown)")
+
+
+class WorkspaceResourcesResponse(FrozenModel):
+    """Resize capabilities plus configured and actual resource values for a workspace's host."""
+
+    agent_id: str = Field(description="The workspace's agent id")
+    supported: bool = Field(description="Whether the workspace's provider supports resizing")
+    cpu: WorkspaceResizeDimension | None = Field(description="CPU resize bounds (None when not resizable)")
+    memory_gib: WorkspaceResizeDimension | None = Field(description="Memory resize bounds (None when not resizable)")
+    configured: WorkspaceResourceValues | None = Field(
+        description="Desired values from the provider's durable record (None when unsupported)"
+    )
+    actual: WorkspaceResourceValues | None = Field(
+        description="Values the running host was probed to actually have (None when not running or unsupported)"
+    )
+
+
+class ResizeWorkspaceRequest(ApiRequestModel):
+    """Body for setting a workspace host's CPU/memory allotment (set-only; never restarts)."""
+
+    cpus: int | str | None = Field(
+        default=None, description="CPU allotment (positive integer, or 'default' for the provider default)"
+    )
+    memory_gib: int | str | None = Field(
+        default=None, description="Memory allotment in GiB (positive integer, or 'default' for the provider default)"
+    )
+
+
+class WorkspaceResizeResponse(FrozenModel):
+    """Outcome of a resize: the persisted configured values and the probed actual values.
+
+    Equal values mean the change applied live; a discrepancy (or a stopped host,
+    where ``actual`` is null) means the configured values apply on the host's
+    next restart.
+    """
+
+    agent_id: str = Field(description="The workspace's agent id")
+    configured: WorkspaceResourceValues = Field(description="Persisted desired values")
+    actual: WorkspaceResourceValues | None = Field(
+        description="Values the running host actually has (None when the host is not running)"
+    )
 
 
 class PatchWorkspaceRequest(ApiRequestModel):
