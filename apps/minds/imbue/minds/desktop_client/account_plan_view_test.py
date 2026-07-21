@@ -54,9 +54,15 @@ def test_build_account_plan_view_flags_over_storage_quota() -> None:
     under = build_account_plan_view(_account_info())
     assert under["is_over_storage_quota"] is False
     over_info = _account_info()
-    usage = over_info["usage"]
-    assert isinstance(usage, dict)
-    usage["total_bucket_bytes"] = 51 * 1024**3
+    over_info["usage"] = {
+        "remote_workspaces": 1,
+        "tunnels": 3,
+        "buckets": 2,
+        "total_bucket_bytes": 51 * 1024**3,
+        "llm_spend_usd_this_period": 12.345,
+        "llm_budget_resets_at": "2026-08-01T00:00:00Z",
+        "active_synced_workspaces": 4,
+    }
     over = build_account_plan_view(over_info)
     assert over["is_over_storage_quota"] is True
 
