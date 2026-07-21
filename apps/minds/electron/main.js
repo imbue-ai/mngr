@@ -9,6 +9,7 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { computeBundleViewBounds } = require('./view-layout');
+const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
 
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
 // main-process failures BEFORE anything else runs, so startup output (including
@@ -130,6 +131,12 @@ const systemInterfaceStatusByAgent = new Map();
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
 let hasCompletedInitialStart = false;
+// A minds:// URL that arrived before the app could act on it (backend not up,
+// startup navigation still in flight, or an error takeover showing).
+// Last-writer-wins; applied by ``flushPendingDeeplink`` once startup
+// navigation has settled.
+let pendingDeeplinkUrl = null;
+let canApplyDeeplinks = false;
 
 // Central cache of the latest SSE state from /_chrome/events so newly-loaded
 // chrome and modal webContents (which may host the sidebar, inbox, or any
@@ -2674,16 +2681,48 @@ function fetchInitialChromeState(timeoutMs = 25000) {
   });
 }
 
-// -- Single instance lock --
+// -- Deeplinks (minds://) protocol registration + single instance lock --
+
+// Register as the OS handler for minds:// URLs. In dev (`electron .`) the
+// registration must point the OS at the electron binary plus this checkout's
+// app path; that works on Windows/Linux but is a no-op on macOS, where
+// LaunchServices only honors schemes declared in a bundle's Info.plist
+// (packaged builds get that via ``appProtocolScheme`` in todesktop.js).
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('minds', process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient('minds');
+}
+
+// macOS delivery. Registered at module scope -- before the 'ready' event --
+// so a cold-start launch URL is caught too.
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleDeeplink(url);
+});
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    // Windows/Linux deliver deeplink re-invocations through the second
+    // instance's argv. Without a URL this stays the old focus-only behavior.
+    const url = extractDeeplinkUrlFromArgv(argv || []);
+    if (url) {
+      handleDeeplink(url);
+      return;
+    }
     const mru = getMostRecentWindow();
     if (mru) focusBundle(mru);
   });
+  // Windows/Linux cold start passes the URL in this process's argv. Harmless
+  // on macOS (open-url is used there) -- and it doubles as the dev-mode test
+  // path on any platform: ``electron . 'minds://...'``.
+  const coldStartDeeplinkUrl = extractDeeplinkUrlFromArgv(process.argv);
+  if (coldStartDeeplinkUrl) handleDeeplink(coldStartDeeplinkUrl);
   app.whenReady().then(onReady);
 }
 
@@ -3100,6 +3139,13 @@ async function startBackendWithRetry() {
         restorableCount: restorable.length,
       });
 
+      // A deeplink that arrived during a genuine first run loses to the
+      // untouched onboarding flow: the user signs in first and the deeplink
+      // degrades to "the app opened". If deeplinks ever need to survive
+      // onboarding, the backend's ``/post-login?return_to=`` redirect
+      // (validated same-origin paths) is the hook to thread them through.
+      if (startupRoute === 'welcome') pendingDeeplinkUrl = null;
+
       const loadInitialContent = (relativePath) => {
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + relativePath);
@@ -3153,6 +3199,13 @@ async function startBackendWithRetry() {
       reloadAllWindowsAfterRetry();
     }
 
+    // Startup navigation has settled (first start: the chosen route is
+    // loading; retry: windows reloaded) -- deeplinks can now navigate
+    // directly, and any URL queued while starting is applied. On the restore
+    // route this deliberately navigates the focused window to the deeplink
+    // target: an explicit link click wins over a restored page.
+    flushPendingDeeplink();
+
     const proc = getBackendProcess();
     if (proc) {
       proc.on('exit', (code) => {
@@ -3168,6 +3221,46 @@ async function startBackendWithRetry() {
   } catch (err) {
     showErrorInAllWindows('Failed to start Minds', err.message);
   }
+}
+
+// -- Deeplinks (minds://) --
+
+// Single router for minds:// URLs regardless of how the OS delivered them
+// (macOS ``open-url``, win/linux second-instance argv, or cold-start argv).
+// Mirrors the notification-click flow below: focus the most recent window,
+// then navigate its content view when the URL names a known action. The
+// loaded path comes exclusively from ``deeplinkTargetPath``'s fixed allowlist
+// -- raw deeplink text is never handed to loadURL.
+function handleDeeplink(rawUrl) {
+  console.log(`[deeplink] received: ${String(rawUrl).slice(0, 256)}`);
+  const mru = getMostRecentWindow();
+  if (!canApplyDeeplinks || !backendBaseUrl || (mru && (mru.isLoadingState || mru.isErrorState))) {
+    // Startup, retry, or an error takeover in progress: queue and let
+    // ``flushPendingDeeplink`` apply it after a successful start.
+    pendingDeeplinkUrl = rawUrl;
+    if (mru) focusBundle(mru);
+    return;
+  }
+  if (!mru) return; // only reachable mid-quit; nothing to focus or navigate
+  focusBundle(mru);
+  const targetPath = deeplinkTargetPath(rawUrl);
+  if (!targetPath) return; // bare/unknown/malformed minds:// -> focus only
+  if (mru.contentView && !mru.contentView.webContents.isDestroyed()) {
+    loadUrlIntoBundleContentView(mru, toAbsoluteUrl(targetPath));
+  }
+}
+
+// Apply a deeplink queued during startup. Called once startup navigation has
+// settled (first start: the chosen route is loading; retry: windows
+// reloaded). On a genuine first run the queued deeplink was already dropped
+// in favor of the untouched onboarding flow (see the 'welcome' branch in
+// startBackendWithRetry).
+function flushPendingDeeplink() {
+  canApplyDeeplinks = true;
+  if (!pendingDeeplinkUrl) return;
+  const url = pendingDeeplinkUrl;
+  pendingDeeplinkUrl = null;
+  handleDeeplink(url);
 }
 
 function handleNotification(event) {
