@@ -26,8 +26,12 @@ import threading
 import time
 from collections.abc import Callable
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from enum import Enum
 from typing import Any
+from typing import Final
 from typing import NoReturn
 from typing import Protocol
 from uuid import UUID
@@ -291,12 +295,55 @@ class R2BucketOwnershipError(PermissionError):
         super().__init__(f"User '{username}' does not own bucket '{bucket_name}'")
 
 
-class R2BucketLimitError(RuntimeError):
-    """Raised when an account is already at the per-account bucket cap."""
+class QuotaExceededError(RuntimeError):
+    """Raised when an operation would exceed one of the account's entitlements.
 
-    def __init__(self, limit: int) -> None:
+    Mapped to a structured 403 (``code: quota_exceeded`` plus the entitlement
+    name, limit, and current usage) so clients can render "N of M used".
+    """
+
+    def __init__(self, entitlement: str, limit: float, current: float, message: str) -> None:
+        self.entitlement = entitlement
         self.limit = limit
-        super().__init__(f"Account is at the maximum of {limit} buckets; destroy one before creating another.")
+        self.current = current
+        self.message = message
+        super().__init__(message)
+
+
+class PlanNotFoundError(KeyError):
+    """Raised when a referenced plan has no row in the plans table."""
+
+    def __init__(self, plan_name: str) -> None:
+        self.plan_name = plan_name
+        super().__init__(
+            f"Plan '{plan_name}' is not seeded in the plans table; "
+            "run `minds env deploy` (which writes the [plans] blocks from deploy.toml)."
+        )
+
+
+class InvalidAuthPolicyError(ValueError):
+    """Raised when an auth policy has no identity constraint (would expose the service publicly)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"Auth policy rejected: {reason}")
+
+
+class UnknownEntitlementColumnError(ValueError):
+    """Raised when an entitlements update names a column that does not exist."""
+
+    def __init__(self, unknown_columns: list[str]) -> None:
+        super().__init__(f"Unknown entitlement columns: {unknown_columns}")
+
+
+class ServicePolicyMissingError(RuntimeError):
+    """Raised when a service would be added with no Access policy available at all."""
+
+    def __init__(self, tunnel_name: str) -> None:
+        self.tunnel_name = tunnel_name
+        super().__init__(
+            f"Tunnel '{tunnel_name}' has no default auth policy and no owner policy could be derived; "
+            "set a default auth policy on the tunnel before adding services."
+        )
 
 
 class PoolHostCleanupError(RuntimeError):
@@ -560,19 +607,91 @@ class CreateBucketResponse(BaseModel):
     key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
 
 
-class CreateR2KeyRequest(BaseModel):
-    alias: str | None = Field(default=None, description="Optional human-readable alias for the key")
-    access: str = Field(default="readwrite", description="Access scope: 'read' or 'readwrite'")
-
-    _validate_access = field_validator("access")(_validate_r2_access)
-
-
 class R2KeyInfo(BaseModel):
     access_key_id: str = Field(description="S3 Access Key ID (= the Cloudflare token id)")
     bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
     access: str = Field(description="Access scope: 'read' or 'readwrite'")
     alias: str | None = Field(default=None, description="Human-readable alias")
     created_at: str = Field(description="ISO 8601 timestamp when the key was created")
+    enforced_access: str | None = Field(
+        default=None,
+        description=(
+            "Storage-quota enforcement state: 'read' when the sweep downgraded this key because the "
+            "owner is over their storage quota; None when the live token policy matches ``access``."
+        ),
+    )
+
+
+# -- Plans + account entitlements models --
+
+# The quota entitlements every plan (and every per-user row) carries. This
+# tuple is the single authority for which columns exist; the admin set-quota
+# endpoint validates entitlement names against it.
+QUOTA_ENTITLEMENT_NAMES: tuple[str, ...] = (
+    "max_remote_workspaces",
+    "max_tunnels",
+    "max_services_per_tunnel",
+    "max_buckets",
+    "max_total_bucket_bytes",
+    "monthly_llm_spend_usd",
+    "max_active_synced_workspaces",
+)
+
+# Entitlement columns holding integer counts/bytes (everything except the
+# monthly LLM spend, which is a USD amount).
+_INTEGER_ENTITLEMENT_NAMES: frozenset[str] = frozenset(QUOTA_ENTITLEMENT_NAMES) - {"monthly_llm_spend_usd"}
+
+
+class PlanEntitlements(BaseModel):
+    """The quota values a plan grants (also the per-user entitlement values)."""
+
+    max_remote_workspaces: int = Field(description="Max concurrent pool-host leases (running or stopped)")
+    max_tunnels: int = Field(description="Max Cloudflare tunnels")
+    max_services_per_tunnel: int = Field(description="Max forwarded services per tunnel")
+    max_buckets: int = Field(description="Max R2 buckets")
+    max_total_bucket_bytes: int = Field(description="Max total bytes across all the account's buckets")
+    monthly_llm_spend_usd: float = Field(description="Monthly LLM spend cap in USD (rolling; 0 disables key minting)")
+    max_active_synced_workspaces: int = Field(description="Max ACTIVE synced workspace records")
+
+
+class AccountUsage(BaseModel):
+    """Live usage numbers for the account, one per quota entitlement."""
+
+    remote_workspaces: int = Field(description="Current pool-host leases")
+    tunnels: int = Field(description="Current Cloudflare tunnels")
+    buckets: int = Field(description="Current R2 buckets")
+    total_bucket_bytes: int = Field(description="Total bytes across the account's buckets (live REST usage)")
+    llm_spend_usd_this_period: float = Field(description="LiteLLM aggregate spend in the current budget period")
+    llm_budget_resets_at: str | None = Field(
+        default=None, description="When the rolling LLM budget period resets (from LiteLLM), if known"
+    )
+    active_synced_workspaces: int = Field(description="Current ACTIVE synced workspace records")
+
+
+class AccountInfoResponse(BaseModel):
+    """The caller's plan, entitlement values, and live usage."""
+
+    user_id: str = Field(description="SuperTokens user id")
+    email: str = Field(description="The caller's verified email")
+    plan_name: str = Field(description="Current plan name")
+    entitlements: PlanEntitlements = Field(description="The account's current entitlement values")
+    usage: AccountUsage = Field(description="Live usage, computed at request time")
+    available_plans: list[str] = Field(
+        default_factory=list, description="Every plan name currently seeded (for plan-selector UIs)"
+    )
+
+
+class SetPlanRequest(BaseModel):
+    plan: str = Field(description="Plan name to switch to (e.g. 'explorer' or 'ally')")
+
+
+class AdminSetPlanRequest(BaseModel):
+    plan: str = Field(description="Plan name to assign (resets the user's entitlements to the plan's defaults)")
+
+
+class AdminSetQuotaRequest(BaseModel):
+    entitlement: str = Field(description="Quota entitlement name (one of QUOTA_ENTITLEMENT_NAMES)")
+    value: float = Field(description="New value (must be a whole number for count/byte entitlements)")
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +993,124 @@ def cf_delete_account_token(client: httpx.Client, account_id: str, token_id: str
     cf_check(client.delete(f"/accounts/{account_id}/tokens/{token_id}"))
 
 
+def cf_update_account_token_policies(
+    client: httpx.Client, account_id: str, token_id: str, name: str, policies: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Replace an account token's policy list in place (the token value is unchanged)."""
+    response = client.put(f"/accounts/{account_id}/tokens/{token_id}", json={"name": name, "policies": policies})
+    return cf_check(response)["result"]
+
+
+def cf_roll_account_token_value(client: httpx.Client, account_id: str, token_id: str) -> str:
+    """Regenerate an account token's secret value (same token id, same policies)."""
+    response = client.put(f"/accounts/{account_id}/tokens/{token_id}/value", json={})
+    return cf_check(response)["result"]
+
+
+def cf_get_bucket_usage(client: httpx.Client, account_id: str, bucket_name: str) -> dict[str, Any]:
+    """Return one bucket's live usage (payloadSize / metadataSize / objectCount / uploadCount)."""
+    response = client.get(f"/accounts/{account_id}/r2/buckets/{bucket_name}/usage")
+    return cf_check(response)["result"]
+
+
+# Row budget for the sweep's GraphQL query. A response that fills the budget
+# may be truncated: buckets whose rows all fall past the limit are absent from
+# the usage map and count as zero, so the parser warns when the budget is hit.
+_R2_STORAGE_GRAPHQL_ROW_LIMIT: Final = 5000
+
+# GraphQL analytics query used by the storage-quota sweep: one request covers
+# every bucket in the account, regardless of bucket count, so the sweep never
+# scales its REST-API usage with the number of users. The dataset is
+# snapshot-based (lags by minutes), which is fine for an hourly sweep; the
+# real-time per-bucket REST endpoint above serves the display path instead.
+_R2_STORAGE_GRAPHQL_QUERY = (
+    """
+query R2StorageByBucket($accountTag: string!, $since: Time!) {
+  viewer {
+    accounts(filter: {accountTag: $accountTag}) {
+      r2StorageAdaptiveGroups(
+        limit: %d
+        filter: {datetime_geq: $since}
+        orderBy: [datetime_DESC]
+      ) {
+        max {
+          payloadSize
+          metadataSize
+        }
+        dimensions {
+          bucketName
+          datetime
+        }
+      }
+    }
+  }
+}
+"""
+    % _R2_STORAGE_GRAPHQL_ROW_LIMIT
+)
+
+# How far back the sweep's GraphQL query looks for storage snapshots. Wide
+# enough to always contain at least one snapshot per bucket; the newest
+# snapshot per bucket wins.
+_R2_STORAGE_LOOKBACK_HOURS = 48
+
+
+def parse_r2_storage_graphql_response(data: dict[str, Any]) -> dict[str, int]:
+    """Extract {bucket_name: total_bytes} from the r2StorageAdaptiveGroups response.
+
+    Rows arrive newest-first; the first row seen per bucket is its latest
+    snapshot and wins. ``payloadSize`` + ``metadataSize`` together are the
+    bucket's stored bytes. A response that fills the query's row budget may be
+    truncated (buckets past the limit count as zero usage, which can only
+    restore keys, never downgrade), so that case is logged as a warning
+    rather than passing silently.
+    """
+    usage_by_bucket: dict[str, int] = {}
+    row_count = 0
+    accounts = data.get("data", {}).get("viewer", {}).get("accounts", []) if isinstance(data, dict) else []
+    for account in accounts:
+        for group in account.get("r2StorageAdaptiveGroups", []) or []:
+            row_count += 1
+            dimensions = group.get("dimensions", {})
+            bucket_name = dimensions.get("bucketName")
+            if not bucket_name or bucket_name in usage_by_bucket:
+                continue
+            max_values = group.get("max", {}) or {}
+            payload = int(max_values.get("payloadSize") or 0)
+            metadata = int(max_values.get("metadataSize") or 0)
+            usage_by_bucket[bucket_name] = payload + metadata
+    if row_count >= _R2_STORAGE_GRAPHQL_ROW_LIMIT:
+        logger.warning(
+            "R2 storage GraphQL response hit the %d-row budget and may be truncated; "
+            "buckets past the limit count as zero usage (restore-only) this sweep. "
+            "Shorten the lookback window or shard the query if this persists.",
+            _R2_STORAGE_GRAPHQL_ROW_LIMIT,
+        )
+    return usage_by_bucket
+
+
+def cf_query_r2_storage_by_bucket(client: httpx.Client, account_id: str) -> dict[str, int]:
+    """Query the GraphQL analytics dataset for every bucket's stored bytes.
+
+    Requires the API token to carry ``Account Analytics: Read``. Raises
+    :class:`CloudflareApiError` when the GraphQL layer reports errors.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=_R2_STORAGE_LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    response = client.post(
+        "/graphql",
+        json={
+            "query": _R2_STORAGE_GRAPHQL_QUERY,
+            "variables": {"accountTag": account_id, "since": since},
+        },
+    )
+    response.raise_for_status()
+    data: dict[str, Any] = response.json()
+    errors = data.get("errors")
+    if errors:
+        raise CloudflareApiError(status_code=response.status_code, errors=list(errors))
+    return parse_r2_storage_graphql_response(data)
+
+
 def build_r2_bucket_token_policies(
     account_id: str, bucket_name: str, permission_group_id: str
 ) -> list[dict[str, Any]]:
@@ -1051,6 +1288,43 @@ def cf_policies_to_auth_policy(cf_policies: list[dict[str, Any]]) -> AuthPolicy:
     return AuthPolicy(rules=rules)
 
 
+# Cloudflare Access include-rule types that constrain access to specific
+# identities. Anything outside this set (``everyone``, ``ip``, ...) would let
+# a policy make a service publicly reachable, which we do not allow -- Access
+# service tokens are the one sanctioned non-identity path and they are managed
+# by the dedicated service-token endpoint, never through AuthPolicy bodies.
+_IDENTITY_INCLUDE_KEYS: Final = frozenset({"email", "email_domain", "login_method", "group"})
+
+
+def validate_auth_policy_has_identity(policy: AuthPolicy) -> None:
+    """Reject any auth policy that would leave a service publicly reachable.
+
+    Every policy must carry at least one rule, and every rule's ``include``
+    list must be non-empty with only identity-constraining entry types.
+    Raises :class:`InvalidAuthPolicyError` otherwise.
+    """
+    if not policy.rules:
+        raise InvalidAuthPolicyError("policy must contain at least one rule")
+    for rule in policy.rules:
+        include = rule.get("include")
+        if not isinstance(include, list) or not include:
+            raise InvalidAuthPolicyError("every rule must have a non-empty 'include' list")
+        for entry in include:
+            if not isinstance(entry, dict) or len(entry) != 1:
+                raise InvalidAuthPolicyError(f"malformed include entry: {entry!r}")
+            (entry_type,) = entry.keys()
+            if entry_type not in _IDENTITY_INCLUDE_KEYS:
+                raise InvalidAuthPolicyError(
+                    f"include type '{entry_type}' is not an identity constraint "
+                    f"(allowed: {sorted(_IDENTITY_INCLUDE_KEYS)})"
+                )
+
+
+def owner_email_auth_policy(email: str) -> AuthPolicy:
+    """The fallback Access policy: allow only the tunnel owner's verified email."""
+    return AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": email}}]}])
+
+
 # ---------------------------------------------------------------------------
 # Cloudflare operations protocol
 # ---------------------------------------------------------------------------
@@ -1098,6 +1372,10 @@ class CloudflareOps(Protocol):
     def delete_bucket(self, name: str) -> None: ...
     def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]: ...
     def delete_bucket_token(self, token_id: str) -> None: ...
+    def update_bucket_token_access(self, token_id: str, bucket_name: str, access: str, token_name: str) -> None: ...
+    def roll_bucket_token_value(self, token_id: str) -> dict[str, Any]: ...
+    def get_bucket_usage_bytes(self, bucket_name: str) -> int: ...
+    def query_r2_storage_by_bucket(self) -> dict[str, int]: ...
 
 
 class HttpCloudflareOps:
@@ -1225,6 +1503,20 @@ class HttpCloudflareOps:
     def delete_bucket_token(self, token_id: str) -> None:
         cf_delete_account_token(self.client, self.account_id, token_id)
 
+    def update_bucket_token_access(self, token_id: str, bucket_name: str, access: str, token_name: str) -> None:
+        policies = build_r2_bucket_token_policies(self.account_id, bucket_name, self._r2_permission_group_id(access))
+        cf_update_account_token_policies(self.client, self.account_id, token_id, token_name, policies)
+
+    def roll_bucket_token_value(self, token_id: str) -> dict[str, Any]:
+        return {"value": cf_roll_account_token_value(self.client, self.account_id, token_id)}
+
+    def get_bucket_usage_bytes(self, bucket_name: str) -> int:
+        usage = cf_get_bucket_usage(self.client, self.account_id, bucket_name)
+        return int(usage.get("payloadSize") or 0) + int(usage.get("metadataSize") or 0)
+
+    def query_r2_storage_by_bucket(self) -> dict[str, int]:
+        return cf_query_r2_storage_by_bucket(self.client, self.account_id)
+
 
 # ---------------------------------------------------------------------------
 # Forwarding service (business logic)
@@ -1256,7 +1548,15 @@ class ForwardingCtx:
             raise TunnelNotFoundError(tunnel_id)
         return tunnel["name"]
 
-    def create_tunnel(self, username: str, agent_id: str, default_auth_policy: AuthPolicy | None = None) -> TunnelInfo:
+    def create_tunnel(
+        self,
+        username: str,
+        agent_id: str,
+        default_auth_policy: AuthPolicy | None = None,
+        # Applied as the tunnel's default policy only when no default is stored
+        # yet (idempotent re-creates must not clobber a user-set default).
+        fallback_auth_policy: AuthPolicy | None = None,
+    ) -> TunnelInfo:
         name = make_tunnel_name(username, agent_id)
         existing = self.ops.get_tunnel_by_name(name)
         if existing is not None:
@@ -1267,6 +1567,12 @@ class ForwardingCtx:
             # from the original creation or may need updating)
             if default_auth_policy is not None:
                 self.ops.kv_put(name, default_auth_policy.model_dump_json())
+            elif fallback_auth_policy is not None and self.ops.kv_get(name) is None:
+                self.ops.kv_put(name, fallback_auth_policy.model_dump_json())
+            else:
+                # A stored default already exists (or no fallback was given);
+                # an idempotent re-create must not clobber it.
+                pass
             return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=services)
 
         result = self.ops.create_tunnel(name)
@@ -1274,8 +1580,9 @@ class ForwardingCtx:
         token = self.ops.get_tunnel_token(tid)
         self.ops.put_tunnel_config(tid, wrap_ingress([]))
 
-        if default_auth_policy is not None:
-            self.ops.kv_put(name, default_auth_policy.model_dump_json())
+        effective_policy = default_auth_policy if default_auth_policy is not None else fallback_auth_policy
+        if effective_policy is not None:
+            self.ops.kv_put(name, effective_policy.model_dump_json())
 
         return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=[])
 
@@ -1306,45 +1613,86 @@ class ForwardingCtx:
         self.ops.delete_tunnel(tid)
         self._kv_delete_safe(tunnel_name)
 
-    def add_service(self, tunnel_name: str, username: str, service_name: str, service_url: str) -> ServiceInfo:
+    def add_service(
+        self,
+        tunnel_name: str,
+        username: str,
+        service_name: str,
+        service_url: str,
+        # The Access policy applied when the tunnel has no stored default --
+        # typically allow-only-the-owner's-email. When both this and the KV
+        # default are absent the add is refused: a service must never go up
+        # without an Access Application.
+        fallback_policy: AuthPolicy | None = None,
+    ) -> ServiceInfo:
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
         agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
-        cname_target = f"{tid}.cfargotunnel.com"
-        existing_dns = self.ops.list_dns_records(name=hostname)
-        if not existing_dns:
-            self.ops.create_cname(hostname, cname_target)
-        elif existing_dns[0].get("content") != cname_target:
-            raise CloudflareApiError(
-                status_code=409,
-                errors=[
-                    {
-                        "message": (
-                            f"DNS record for {hostname} already exists pointing to "
-                            f"{existing_dns[0].get('content')!r}, not {cname_target!r}"
-                        )
-                    }
-                ],
-            )
-        else:
-            # CNAME already points at this tunnel; idempotent re-add.
-            pass
-        config = self.ops.get_tunnel_config(tid)
-        rules = [
-            r for r in non_catchall_rules(config.get("config", {}).get("ingress", [])) if r.get("hostname") != hostname
-        ]
-        rules.append(
-            {
-                "hostname": hostname,
-                "service": service_url,
-                "originRequest": {"noTLSVerify": True},
-            }
-        )
-        self.ops.put_tunnel_config(tid, wrap_ingress(rules))
 
-        self._apply_default_access_policy(tunnel_name, hostname)
+        # Resolve the Access policy up front and create the Access Application
+        # BEFORE any exposure exists (DNS/ingress). A failure here aborts the
+        # add outright, so a failed Access call can never leave a service
+        # publicly reachable.
+        stored_default = self.ops.kv_get(tunnel_name)
+        policy = AuthPolicy.model_validate_json(stored_default) if stored_default is not None else fallback_policy
+        if policy is None:
+            raise ServicePolicyMissingError(tunnel_name)
+        created_access_app_id: str | None = None
+        is_dns_created_here = False
+        try:
+            if self.ops.get_access_app_by_domain(hostname) is None:
+                # A pre-existing app means the service was configured before (with a
+                # possibly customized policy) -- leave it untouched on re-add.
+                access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
+                created_access_app_id = access_app["id"]
+                for cf_policy in policy_to_cf_rules(policy):
+                    self.ops.create_access_policy(access_app["id"], cf_policy)
+
+            cname_target = f"{tid}.cfargotunnel.com"
+            existing_dns = self.ops.list_dns_records(name=hostname)
+            if not existing_dns:
+                self.ops.create_cname(hostname, cname_target)
+                is_dns_created_here = True
+            elif existing_dns[0].get("content") != cname_target:
+                raise CloudflareApiError(
+                    status_code=409,
+                    errors=[
+                        {
+                            "message": (
+                                f"DNS record for {hostname} already exists pointing to "
+                                f"{existing_dns[0].get('content')!r}, not {cname_target!r}"
+                            )
+                        }
+                    ],
+                )
+            else:
+                # CNAME already points at this tunnel; idempotent re-add.
+                pass
+            config = self.ops.get_tunnel_config(tid)
+            rules = [
+                r
+                for r in non_catchall_rules(config.get("config", {}).get("ingress", []))
+                if r.get("hostname") != hostname
+            ]
+            rules.append(
+                {
+                    "hostname": hostname,
+                    "service": service_url,
+                    "originRequest": {"noTLSVerify": True},
+                }
+            )
+            self.ops.put_tunnel_config(tid, wrap_ingress(rules))
+        except (CloudflareApiError, httpx.HTTPError):
+            # Roll back only what this call created (never a pre-existing DNS
+            # record or Access App) so a half-added service leaves nothing
+            # behind -- in particular nothing publicly reachable.
+            if created_access_app_id is not None:
+                self._delete_access_app_for_hostname(hostname)
+            if is_dns_created_here:
+                self._delete_dns_by_name(hostname)
+            raise
 
         return ServiceInfo(service_name=service_name, hostname=hostname, service_url=service_url)
 
@@ -1430,27 +1778,6 @@ class ForwardingCtx:
                 self.ops.delete_access_app(access_app["id"])
         except (CloudflareApiError, httpx.HTTPError) as exc:
             logger.warning("Failed to delete Access Application for %s: %s", hostname, exc)
-
-    def _apply_default_access_policy(self, tunnel_name: str, hostname: str) -> None:
-        """Apply the tunnel's default auth policy to a new service, if one is set.
-
-        Skipped when an Access Application already exists for the hostname:
-        on a re-add the service may have a customized per-service policy from
-        a prior :meth:`set_service_auth` call, and re-applying the tunnel
-        default would clobber it.
-        """
-        try:
-            raw = self.ops.kv_get(tunnel_name)
-            if raw is None:
-                return
-            if self.ops.get_access_app_by_domain(hostname) is not None:
-                return
-            policy = AuthPolicy.model_validate_json(raw)
-            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
-            for cf_policy in policy_to_cf_rules(policy):
-                self.ops.create_access_policy(access_app["id"], cf_policy)
-        except (CloudflareApiError, httpx.HTTPError) as exc:
-            logger.warning("Failed to apply Access policy for %s: %s", hostname, exc)
 
     def _kv_delete_safe(self, key: str) -> None:
         try:
@@ -1571,6 +1898,15 @@ def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
 _USER_ID_PREFIX_LENGTH = 16
 
 
+def derive_username_prefix(user_id: str) -> str:
+    """The 16-hex prefix of a SuperTokens user id, used to namespace tunnels/leases/buckets.
+
+    Also the ``account_entitlements.username_prefix`` lookup key, so every
+    caller must derive it identically -- always go through this helper.
+    """
+    return user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+
+
 def _default_email_getter(
     user_id: str,
     user_getter: Callable[[str], Any] = get_user,
@@ -1637,8 +1973,7 @@ def _authenticate_supertokens(
         raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
 
     user_id = session.get_user_id()
-    # Derive 16-char hex prefix from UUID
-    user_id_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+    user_id_prefix = derive_username_prefix(user_id)
 
     # Resolve the verified email live from the core rather than trusting the
     # token's cached email-verification claim. That claim is baked into the
@@ -1764,8 +2099,8 @@ def is_email_paid_in_db(
     to :func:`_get_pool_db_connection` (resolved lazily because that helper
     is defined further down this module).
 
-    Raises ``psycopg2.Error`` on any database failure; the caller
-    (:func:`require_paid_account`) converts that into a fail-closed 403.
+    Raises ``psycopg2.Error`` on any database failure; gate-style callers
+    (:func:`require_ally_eligible`) convert that into a fail-closed 403.
     """
     factory = connection_factory if connection_factory is not None else _get_pool_db_connection
     email_lower = email.strip().lower()
@@ -1812,37 +2147,36 @@ def is_email_paid(
     return is_paid
 
 
-def require_paid_account(
-    auth: AdminAuth,
+def require_ally_eligible(
+    email: str | None,
     paid_checker: Callable[[str], bool] = is_email_paid,
 ) -> None:
-    """Gate paid features on the caller's email appearing in the paid lists.
+    """Gate ally-plan selection on the caller's email appearing in the paid lists.
 
-    Raises ``HTTPException(403)`` when the caller has no verified email,
-    when their email is not in the ``paid_emails`` / ``paid_domains``
-    tables, or when the database lookup fails (fail closed). ``/tunnels/*``
-    (Cloudflare forwarding) intentionally does NOT call this gate --
-    email-verified accounts can still use forwarding regardless.
-    ``paid_checker`` is injected for tests; production callers use the
-    cached, table-backed default.
+    Raises ``HTTPException(403)`` when the caller has no verified email, when
+    their email is not in the ``paid_emails`` / ``paid_domains`` tables, or
+    when the database lookup fails (fail closed). This is the only remaining
+    consumer of the paid lists as a *gate* -- resource access itself is now
+    governed by per-account entitlements. ``paid_checker`` is injected for
+    tests; production callers use the cached, table-backed default.
     """
-    if not auth.email:
+    if not email:
         raise HTTPException(
             status_code=403,
-            detail="Account email unavailable; cannot authorize paid feature access",
+            detail="Account email unavailable; cannot check ally-plan eligibility",
         )
     try:
-        is_paid = paid_checker(auth.email)
+        is_paid = paid_checker(email)
     except psycopg2.Error as exc:
-        logger.warning("Paid-status lookup failed for %s: %s", auth.email, exc)
+        logger.warning("Paid-status lookup failed for %s: %s", email, exc)
         raise HTTPException(
             status_code=403,
-            detail="Could not verify paid-feature access (database error); please try again",
+            detail="Could not verify ally-plan eligibility (database error); please try again",
         ) from exc
     if not is_paid:
         raise HTTPException(
             status_code=403,
-            detail="Account is not authorized for paid features",
+            detail="The 'ally' plan requires partner access (a paid-listed email)",
         )
 
 
@@ -1875,6 +2209,327 @@ def require_paid_admin_key(request: Request) -> None:
     # total (a malformed key cleanly yields 401, not a 500) and constant-time.
     if not hmac.compare_digest(provided.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="Invalid paid-list admin API key")
+
+
+# ---------------------------------------------------------------------------
+# Plans + account entitlements
+#
+# Plans (git-owned, written from deploy.toml on every deploy) define the
+# default entitlements a user receives when a plan is assigned. Each account
+# gets its own ``account_entitlements`` row -- created lazily on first
+# quota-relevant touch -- whose values are copied wholesale from the plan and
+# are the operator-adjustable source of truth thereafter. Changing a plan's
+# defaults never retroactively changes existing rows.
+# ---------------------------------------------------------------------------
+
+
+_PLAN_EXPLORER = "explorer"
+_PLAN_ALLY = "ally"
+
+# Ship-time cutoff for the lazy-backfill rule: accounts whose SuperTokens
+# ``time_joined`` predates this instant get the paid-list-based initial plan
+# (ally when paid-listed); accounts created after it always start as explorer
+# and must select ally explicitly. 2026-07-21T00:00:00Z, in the epoch
+# milliseconds SuperTokens uses for ``time_joined``.
+_PREEXISTING_ACCOUNT_CUTOFF_EPOCH_MS = 1784592000000
+
+_QUOTA_COLUMNS_SQL = ", ".join(QUOTA_ENTITLEMENT_NAMES)
+_PLAN_COLUMNS_SQL = f"plan_name, {_QUOTA_COLUMNS_SQL}"
+_ENTITLEMENT_COLUMNS_SQL = f"user_id, username_prefix, plan_name, {_QUOTA_COLUMNS_SQL}"
+
+
+class AccountEntitlements(PlanEntitlements):
+    """One account's entitlement row: identity fields plus the quota values."""
+
+    user_id: str = Field(description="Full SuperTokens user id (row key)")
+    username_prefix: str = Field(description="16-hex user-id prefix used to namespace tunnels/leases/buckets")
+    plan_name: str = Field(description="The plan this row was last assigned from")
+
+    def quota_values(self) -> PlanEntitlements:
+        return PlanEntitlements(
+            max_remote_workspaces=self.max_remote_workspaces,
+            max_tunnels=self.max_tunnels,
+            max_services_per_tunnel=self.max_services_per_tunnel,
+            max_buckets=self.max_buckets,
+            max_total_bucket_bytes=self.max_total_bucket_bytes,
+            monthly_llm_spend_usd=self.monthly_llm_spend_usd,
+            max_active_synced_workspaces=self.max_active_synced_workspaces,
+        )
+
+
+def _quota_values_from_row(row: tuple[Any, ...], offset: int) -> dict[str, Any]:
+    """Map the trailing quota columns of a SELECT row into name->value pairs."""
+    values: dict[str, Any] = {}
+    for idx, name in enumerate(QUOTA_ENTITLEMENT_NAMES):
+        raw = row[offset + idx]
+        values[name] = float(raw) if name == "monthly_llm_spend_usd" else int(raw)
+    return values
+
+
+class EntitlementsStore(Protocol):
+    """Abstraction over the plans + account_entitlements tables."""
+
+    def get_plan(self, plan_name: str) -> dict[str, Any] | None: ...
+    def list_plans(self) -> list[dict[str, Any]]: ...
+    def get_entitlements(self, user_id: str) -> dict[str, Any] | None: ...
+    def get_entitlements_by_prefix(self, username_prefix: str) -> dict[str, Any] | None: ...
+    def insert_entitlements_if_absent(self, row: dict[str, Any]) -> None: ...
+    def update_entitlements(self, user_id: str, values: dict[str, Any]) -> None: ...
+
+
+class PostgresEntitlementsStore:
+    """EntitlementsStore backed by the connector's existing Neon DB."""
+
+    def _plan_row_to_dict(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        return {"plan_name": row[0], **_quota_values_from_row(row, 1)}
+
+    def _entitlements_row_to_dict(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "user_id": row[0],
+            "username_prefix": row[1],
+            "plan_name": row[2],
+            **_quota_values_from_row(row, 3),
+        }
+
+    def get_plan(self, plan_name: str) -> dict[str, Any] | None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {_PLAN_COLUMNS_SQL} FROM plans WHERE plan_name = %s", (plan_name,))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return self._plan_row_to_dict(row) if row is not None else None
+
+    def list_plans(self) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {_PLAN_COLUMNS_SQL} FROM plans ORDER BY plan_name")
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [self._plan_row_to_dict(row) for row in rows]
+
+    def get_entitlements(self, user_id: str) -> dict[str, Any] | None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_ENTITLEMENT_COLUMNS_SQL} FROM account_entitlements WHERE user_id = %s",
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return self._entitlements_row_to_dict(row) if row is not None else None
+
+    def get_entitlements_by_prefix(self, username_prefix: str) -> dict[str, Any] | None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_ENTITLEMENT_COLUMNS_SQL} FROM account_entitlements WHERE username_prefix = %s",
+                    (username_prefix,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return self._entitlements_row_to_dict(row) if row is not None else None
+
+    def insert_entitlements_if_absent(self, row: dict[str, Any]) -> None:
+        column_names = ["user_id", "username_prefix", "plan_name", *QUOTA_ENTITLEMENT_NAMES]
+        placeholders = ", ".join(["%s"] * len(column_names))
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"INSERT INTO account_entitlements ({', '.join(column_names)}) "
+                        f"VALUES ({placeholders}) ON CONFLICT (user_id) DO NOTHING",
+                        tuple(row[name] for name in column_names),
+                    )
+        finally:
+            conn.close()
+
+    def update_entitlements(self, user_id: str, values: dict[str, Any]) -> None:
+        allowed = {"plan_name", *QUOTA_ENTITLEMENT_NAMES}
+        unknown = set(values) - allowed
+        if unknown:
+            raise UnknownEntitlementColumnError(sorted(unknown))
+        assignments = ", ".join(f"{name} = %s" for name in values)
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE account_entitlements SET {assignments}, updated_at = NOW() WHERE user_id = %s",
+                        (*values.values(), user_id),
+                    )
+        finally:
+            conn.close()
+
+
+@functools.cache
+def get_entitlements_store() -> EntitlementsStore:
+    return PostgresEntitlementsStore()
+
+
+def _get_user_time_joined_ms(user_id: str, user_getter: Callable[[str], Any] = get_user) -> int:
+    """Return the SuperTokens account-creation timestamp (epoch ms), 0 when unknown.
+
+    An unknown timestamp (missing user, SDK error) conservatively counts as
+    pre-existing -- the pre-cutoff rule only *adds* the paid-list check, and a
+    genuinely-new account is never paid-listed by accident in practice.
+    """
+    try:
+        user = user_getter(user_id)
+    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        logger.warning("Failed to fetch SuperTokens user %s for time_joined: %s", user_id[:8], exc)
+        return 0
+    if user is None:
+        return 0
+    return int(user.time_joined)
+
+
+def _initial_plan_name_for_user(
+    user_id: str,
+    email: str,
+    # Resolved at call time (not bound as a default) so tests that patch the
+    # module-level ``_get_user_time_joined_ms`` take effect.
+    time_joined_getter: Callable[[str], int] | None = None,
+    paid_checker: Callable[[str], bool] = is_email_paid,
+) -> str:
+    """Pick the plan for a lazily-created entitlements row.
+
+    Accounts predating the feature-ship cutoff get ally when their email is
+    paid-listed (the backfill rule); everyone else starts as explorer.
+    """
+    resolved_getter = time_joined_getter if time_joined_getter is not None else _get_user_time_joined_ms
+    if resolved_getter(user_id) < _PREEXISTING_ACCOUNT_CUTOFF_EPOCH_MS and email and paid_checker(email):
+        return _PLAN_ALLY
+    return _PLAN_EXPLORER
+
+
+def ensure_account_entitlements(
+    user_id: str,
+    username_prefix: str,
+    email: str,
+    store: "EntitlementsStore | None" = None,
+) -> AccountEntitlements:
+    """Return the account's entitlements row, lazily creating it from the initial plan.
+
+    The lazy creation writes only the DB row; the LiteLLM user budget is
+    pushed later, at the points that actually need it (`/keys/create` and the
+    explicit plan/quota operations), so an unreachable LiteLLM cannot fail an
+    unrelated request. Insert races resolve via ON CONFLICT DO NOTHING plus a
+    re-read.
+    """
+    entitlements_store = store if store is not None else get_entitlements_store()
+    existing = entitlements_store.get_entitlements(user_id)
+    if existing is not None:
+        return AccountEntitlements(**existing)
+    plan_name = _initial_plan_name_for_user(user_id, email)
+    plan = entitlements_store.get_plan(plan_name)
+    if plan is None:
+        raise PlanNotFoundError(plan_name)
+    row = {
+        "user_id": user_id,
+        "username_prefix": username_prefix,
+        "plan_name": plan_name,
+        **{name: plan[name] for name in QUOTA_ENTITLEMENT_NAMES},
+    }
+    entitlements_store.insert_entitlements_if_absent(row)
+    stored = entitlements_store.get_entitlements(user_id)
+    if stored is None:
+        raise HTTPException(status_code=500, detail="Failed to create the account entitlements row")
+    return AccountEntitlements(**stored)
+
+
+def resolve_entitlements_for_admin(request: Request, admin: AdminAuth) -> AccountEntitlements:
+    """Resolve (lazily creating) the entitlements row for an admin-authenticated request."""
+    token = request.headers.get("authorization", "")[7:]
+    user_id = _get_user_id_from_access_token(token)
+    return ensure_account_entitlements(user_id=user_id, username_prefix=admin.username, email=admin.email or "")
+
+
+def raise_quota_exceeded(entitlement: str, limit: float, current: float, noun: str) -> NoReturn:
+    raise QuotaExceededError(
+        entitlement=entitlement,
+        limit=limit,
+        current=current,
+        message=(
+            f"Quota exceeded: this account allows {limit:g} {noun} and {current:g} are already in use. "
+            "Free some up, or ask for a higher limit."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM user budgets
+#
+# The monthly LLM spend quota is enforced by LiteLLM itself: every virtual key
+# carries the account's SuperTokens user_id, and LiteLLM aggregates spend from
+# all of a user's keys against the *user-level* ``max_budget``. The budget is
+# a rolling monthly window (``budget_duration = "1mo"``, anchored when the
+# budget is first created). Pushed at key-creation time and on every explicit
+# plan/quota change -- never during lazy row creation, so an unreachable
+# LiteLLM cannot fail an unrelated request.
+# ---------------------------------------------------------------------------
+
+
+_LITELLM_USER_BUDGET_DURATION = "1mo"
+
+
+def upsert_litellm_user_budget(user_id: str, max_budget: float) -> None:
+    """Create or update the LiteLLM internal user carrying the account's monthly budget.
+
+    Raises (via ``_litellm_request``) on failure -- callers deliberately let
+    that fail the whole operation so the DB row and LiteLLM never diverge.
+    """
+    body: dict[str, object] = {
+        "user_id": user_id,
+        "max_budget": max_budget,
+        "budget_duration": _LITELLM_USER_BUDGET_DURATION,
+    }
+    try:
+        _litellm_request("POST", "/user/new", json_body=body)
+    except HTTPException as exc:
+        # LiteLLM rejects /user/new for an existing user (the exact status/text
+        # varies by version); fall through to /user/update, which raises on any
+        # genuine failure.
+        logger.debug("LiteLLM /user/new for %s rejected (%s); trying /user/update", user_id[:8], exc.status_code)
+        _litellm_request("POST", "/user/update", json_body=body)
+
+
+def get_litellm_user_spend(
+    user_id: str,
+    # Resolved at call time (not bound as a default) so installed fakes that
+    # replace the module-level ``_litellm_request`` still take effect.
+    request_fn: "Callable[..., httpx.Response] | None" = None,
+) -> tuple[float, str | None]:
+    """Return (spend this budget period, budget reset timestamp) for the account.
+
+    A user that does not exist in LiteLLM yet (never minted a key) reports
+    zero spend. Any LiteLLM error also reports zero -- this feeds the
+    display-only usage endpoint, not enforcement. ``request_fn`` is injected
+    for tests; production callers use the module-level ``_litellm_request``.
+    """
+    resolved_request = request_fn if request_fn is not None else _litellm_request
+    try:
+        response = resolved_request("GET", "/user/info", params={"user_id": user_id})
+    except (HTTPException, httpx.HTTPError) as exc:
+        # HTTPException covers HTTP >= 400 responses and missing proxy config;
+        # httpx.HTTPError covers transport failures (proxy unreachable).
+        logger.warning("LiteLLM /user/info for %s failed (%s); reporting zero spend", user_id[:8], exc)
+        return 0.0, None
+    data = response.json()
+    info = data.get("user_info") if isinstance(data, dict) else None
+    if not isinstance(info, dict):
+        return 0.0, None
+    spend = info.get("spend")
+    reset_at = info.get("budget_reset_at")
+    return (float(spend) if spend is not None else 0.0, str(reset_at) if reset_at else None)
 
 
 # ---------------------------------------------------------------------------
@@ -1926,8 +2581,23 @@ def raise_as_http(exc: Exception) -> NoReturn:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(exc, R2BucketExistsError):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if isinstance(exc, R2BucketLimitError):
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, QuotaExceededError):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "quota_exceeded",
+                "entitlement": exc.entitlement,
+                "limit": exc.limit,
+                "current": exc.current,
+                "message": exc.message,
+            },
+        ) from exc
+    if isinstance(exc, PlanNotFoundError):
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if isinstance(exc, InvalidAuthPolicyError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, ServicePolicyMissingError):
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     logger.error("Unexpected error in endpoint handler", exc_info=exc)
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1946,6 +2616,13 @@ def handle_endpoint_errors() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 # Host pool helpers
 # ---------------------------------------------------------------------------
+
+
+# What counts as one "remote workspace": a pool-host row leased to the user
+# (running or stopped -- stopped workspaces still hold their lease and slice).
+# Shared by the lease-time quota check and the /account usage display so the
+# two can never drift.
+_COUNT_LEASED_HOSTS_SQL: Final = "SELECT COUNT(*) FROM pool_hosts WHERE leased_to_user = %s AND status = 'leased'"
 
 
 def _get_pool_db_connection() -> Any:
@@ -2349,13 +3026,44 @@ def get_version() -> dict[str, str]:
     }
 
 
+def count_user_tunnels(ops: CloudflareOps, username_prefix: str) -> int:
+    """Count the user's tunnels.
+
+    Shared by the tunnel quota check (``POST /tunnels``) and the ``/account``
+    usage display so the two can never drift.
+    """
+    prefix = f"{username_prefix}{TUNNEL_NAME_SEP}"
+    return len([t for t in ops.list_tunnels(include_prefix=prefix) if t["name"].startswith(prefix)])
+
+
 @web_app.post("/tunnels")
 def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
-    """Create a tunnel (idempotent) and return its info with token."""
+    """Create a tunnel (idempotent) and return its info with token.
+
+    Enforces the account's tunnel quota (idempotent re-creates of an existing
+    tunnel are always allowed), validates any provided default auth policy,
+    and -- when none is provided -- installs an allow-only-the-owner's-email
+    default so services added later are never publicly reachable.
+    """
     with handle_endpoint_errors():
-        auth = authenticate_request(request, get_ctx().ops)
+        ctx = get_ctx()
+        auth = authenticate_request(request, ctx.ops)
         admin = require_admin(auth)
-        return get_ctx().create_tunnel(admin.username, body.agent_id, body.default_auth_policy).model_dump()
+        entitlements = resolve_entitlements_for_admin(request, admin)
+        if body.default_auth_policy is not None:
+            validate_auth_policy_has_identity(body.default_auth_policy)
+        tunnel_name = make_tunnel_name(admin.username, body.agent_id)
+        if ctx.ops.get_tunnel_by_name(tunnel_name) is None:
+            current = count_user_tunnels(ctx.ops, admin.username)
+            if current >= entitlements.max_tunnels:
+                raise_quota_exceeded("max_tunnels", entitlements.max_tunnels, current, "tunnels")
+        fallback = owner_email_auth_policy(admin.email) if admin.email else None
+        return ctx.create_tunnel(
+            admin.username,
+            body.agent_id,
+            default_auth_policy=body.default_auth_policy,
+            fallback_auth_policy=fallback,
+        ).model_dump()
 
 
 @web_app.get("/tunnels")
@@ -2388,13 +3096,57 @@ def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
         return {"status": "deleted"}
 
 
+def _service_quota_and_owner_email(request: Request, auth: AuthResult, tunnel_name: str) -> tuple[int, str | None]:
+    """Resolve the services-per-tunnel limit and the owner's email for either auth kind.
+
+    Admin auth resolves (lazily creating) the caller's entitlements row and
+    uses their verified email. Agent auth only knows the tunnel-name prefix:
+    it reads the row by prefix (created earlier, at admin-authed tunnel
+    creation) and looks the owner's email up from SuperTokens; a missing row
+    falls back to the explorer plan's limit with no derivable owner email.
+    """
+    if isinstance(auth, AdminAuth):
+        entitlements = resolve_entitlements_for_admin(request, auth)
+        return entitlements.max_services_per_tunnel, auth.email
+    prefix = extract_username_from_tunnel_name(tunnel_name)
+    store = get_entitlements_store()
+    row = store.get_entitlements_by_prefix(prefix)
+    if row is not None:
+        entitlements = AccountEntitlements(**row)
+        return entitlements.max_services_per_tunnel, _default_email_getter(entitlements.user_id)
+    plan = store.get_plan(_PLAN_EXPLORER)
+    if plan is None:
+        raise PlanNotFoundError(_PLAN_EXPLORER)
+    return int(plan["max_services_per_tunnel"]), None
+
+
 @web_app.post("/tunnels/{tunnel_name}/services")
 def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> dict[str, object]:
-    """Add a service to a tunnel. Works with both admin and agent auth."""
+    """Add a service to a tunnel. Works with both admin and agent auth.
+
+    Enforces the services-per-tunnel quota (re-adding an existing service is
+    always allowed) and guarantees the service comes up behind a Cloudflare
+    Access Application -- falling back to an owner-email-only policy when the
+    tunnel has no stored default, and refusing outright when no policy can be
+    derived at all.
+    """
     with handle_endpoint_errors():
-        auth = authenticate_request(request, get_ctx().ops)
+        ctx = get_ctx()
+        auth = authenticate_request(request, ctx.ops)
         username = require_tunnel_access(auth, tunnel_name)
-        return get_ctx().add_service(tunnel_name, username, body.service_name, body.service_url).model_dump()
+        limit, owner_email = _service_quota_and_owner_email(request, auth, tunnel_name)
+        existing_services = ctx.list_services(tunnel_name, username)
+        is_new_service = body.service_name not in {s.service_name for s in existing_services}
+        if is_new_service and len(existing_services) >= limit:
+            raise_quota_exceeded("max_services_per_tunnel", limit, len(existing_services), "services on this tunnel")
+        fallback = owner_email_auth_policy(owner_email) if owner_email else None
+        return ctx.add_service(
+            tunnel_name,
+            username,
+            body.service_name,
+            body.service_url,
+            fallback_policy=fallback,
+        ).model_dump()
 
 
 @web_app.delete("/tunnels/{tunnel_name}/services/{service_name}")
@@ -2430,10 +3182,11 @@ def get_tunnel_auth(request: Request, tunnel_name: str) -> dict[str, object]:
 
 @web_app.put("/tunnels/{tunnel_name}/auth")
 def set_tunnel_auth(request: Request, tunnel_name: str, body: AuthPolicy) -> dict[str, str]:
-    """Set the default auth policy for a tunnel."""
+    """Set the default auth policy for a tunnel. Identity-less policies are rejected."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         require_admin(auth)
+        validate_auth_policy_has_identity(body)
         get_ctx().set_tunnel_auth(tunnel_name, body)
         return {"status": "updated"}
 
@@ -2473,10 +3226,11 @@ def list_service_tokens_endpoint(request: Request, tunnel_name: str) -> list[dic
 
 @web_app.put("/tunnels/{tunnel_name}/services/{service_name}/auth")
 def set_service_auth(request: Request, tunnel_name: str, service_name: str, body: AuthPolicy) -> dict[str, str]:
-    """Set the auth policy for a specific service."""
+    """Set the auth policy for a specific service. Identity-less policies are rejected."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
+        validate_auth_policy_has_identity(body)
         get_ctx().set_service_auth(tunnel_name, admin.username, service_name, body)
         return {"status": "updated"}
 
@@ -2488,15 +3242,36 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
 
 @web_app.post("/hosts/lease")
 def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
-    """Lease an available host from the pool, injecting the caller's SSH public key."""
+    """Lease an available host from the pool, injecting the caller's SSH public key.
+
+    Enforces the account's remote-workspace quota strictly: a per-user
+    advisory lock (held for the lease transaction) serializes concurrent
+    leases so two simultaneous requests cannot both squeeze past the count
+    check. Stopped workspaces still hold their lease (and their slice), so
+    they count against the quota too.
+    """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
+        entitlements = resolve_entitlements_for_admin(request, admin)
         conn = _get_pool_db_connection()
         try:
             with conn:
                 with conn.cursor() as cur:
+                    # Serialize this user's leases for the duration of the
+                    # transaction, then enforce the workspace quota. The
+                    # advisory lock releases automatically at commit/rollback.
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (admin.username,))
+                    cur.execute(_COUNT_LEASED_HOSTS_SQL, (admin.username,))
+                    count_row = cur.fetchone()
+                    leased_count = int(count_row[0]) if count_row is not None else 0
+                    if leased_count >= entitlements.max_remote_workspaces:
+                        raise_quota_exceeded(
+                            "max_remote_workspaces",
+                            entitlements.max_remote_workspaces,
+                            leased_count,
+                            "remote workspaces",
+                        )
                     # Build the lease selection dynamically. A hard ``region``
                     # adds an equality filter; when unset the lease is
                     # region-agnostic. The selection stays a single round-trip
@@ -2625,7 +3400,6 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
@@ -2710,7 +3484,6 @@ def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> 
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
@@ -2743,7 +3516,6 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
@@ -2993,13 +3765,32 @@ def _litellm_base_url_for_agents() -> str:
 
 @web_app.post("/keys/create")
 def create_litellm_key(request: Request, body: CreateKeyRequest) -> dict[str, object]:
-    """Create a new LiteLLM virtual key for the authenticated user."""
+    """Create a new LiteLLM virtual key for the authenticated user.
+
+    Refused with a quota error when the account's monthly LLM budget is zero
+    (e.g. the explorer plan -- pick 'subscription' as the AI provider
+    instead). Otherwise the account's user-level LiteLLM budget is upserted
+    before the key is minted, so aggregate spend across every key is capped
+    at the account's monthly quota by the time any key exists. Per-key
+    budgets remain entirely caller-controlled.
+    """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
+        entitlements = resolve_entitlements_for_admin(request, admin)
+        if entitlements.monthly_llm_spend_usd <= 0:
+            raise QuotaExceededError(
+                entitlement="monthly_llm_spend_usd",
+                limit=entitlements.monthly_llm_spend_usd,
+                current=0,
+                message=(
+                    "This account's plan has no LLM spend budget, so imbue-cloud inference keys cannot be "
+                    "created. Select 'subscription' (or your own API key) as the AI provider instead."
+                ),
+            )
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
+        upsert_litellm_user_budget(user_id, entitlements.monthly_llm_spend_usd)
 
         litellm_body: dict[str, object] = {"user_id": user_id}
         if body.key_alias is not None:
@@ -3025,8 +3816,7 @@ def list_litellm_keys(request: Request) -> list[dict[str, object]]:
     """List all LiteLLM virtual keys owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        require_paid_account(admin)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -3068,8 +3858,7 @@ def get_litellm_key_info(request: Request, key_id: str) -> dict[str, object]:
     """Get info (including spend and budget) for a specific LiteLLM key."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        require_paid_account(admin)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -3096,8 +3885,7 @@ def update_litellm_key_budget(request: Request, key_id: str, body: UpdateBudgetR
     """Update the budget for a LiteLLM key owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        require_paid_account(admin)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -3123,8 +3911,7 @@ def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
     """Delete a LiteLLM key owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        require_paid_account(admin)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -3145,7 +3932,6 @@ def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-_MAX_BUCKETS_PER_ACCOUNT = 50
 _R2_BUCKET_NAME_SEP = "--"
 _R2_BUCKET_MIN_LENGTH = 3
 _R2_BUCKET_MAX_LENGTH = 63
@@ -3203,7 +3989,7 @@ def _r2_token_name(bucket_name: str, alias: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-_R2_KEY_COLUMNS = "access_key_id, owner_user_id, bucket_name, access, alias, created_at"
+_R2_KEY_COLUMNS = "access_key_id, owner_user_id, bucket_name, access, alias, created_at, enforced_access"
 
 
 def _r2_key_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -3214,6 +4000,7 @@ def _r2_key_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "access": row[3],
         "alias": row[4],
         "created_at": str(row[5]) if row[5] is not None else "",
+        "enforced_access": row[6],
     }
 
 
@@ -3224,9 +4011,11 @@ class KeyStore(Protocol):
         self, access_key_id: str, owner_user_id: str, bucket_name: str, access: str, alias: str | None
     ) -> None: ...
     def list_keys(self, owner_user_id: str, bucket_name: str | None = None) -> list[dict[str, Any]]: ...
+    def list_all_keys(self) -> list[dict[str, Any]]: ...
     def get_key(self, access_key_id: str) -> dict[str, Any] | None: ...
     def delete_key(self, access_key_id: str) -> None: ...
     def delete_keys_for_bucket(self, owner_user_id: str, bucket_name: str) -> list[dict[str, Any]]: ...
+    def set_enforced_access(self, access_key_id: str, enforced_access: str | None) -> None: ...
 
 
 class PostgresKeyStore:
@@ -3267,6 +4056,16 @@ class PostgresKeyStore:
             conn.close()
         return [_r2_key_row_to_dict(row) for row in rows]
 
+    def list_all_keys(self) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {_R2_KEY_COLUMNS} FROM r2_keys ORDER BY owner_user_id, bucket_name, created_at")
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [_r2_key_row_to_dict(row) for row in rows]
+
     def get_key(self, access_key_id: str) -> dict[str, Any] | None:
         conn = _get_pool_db_connection()
         try:
@@ -3276,6 +4075,18 @@ class PostgresKeyStore:
         finally:
             conn.close()
         return _r2_key_row_to_dict(row) if row is not None else None
+
+    def set_enforced_access(self, access_key_id: str, enforced_access: str | None) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE r2_keys SET enforced_access = %s WHERE access_key_id = %s",
+                        (enforced_access, access_key_id),
+                    )
+        finally:
+            conn.close()
 
     def delete_key(self, access_key_id: str) -> None:
         conn = _get_pool_db_connection()
@@ -3342,6 +4153,7 @@ def _key_info_from_row(row: dict[str, Any]) -> R2KeyInfo:
         access=row["access"],
         alias=row["alias"],
         created_at=row["created_at"],
+        enforced_access=row.get("enforced_access"),
     )
 
 
@@ -3384,19 +4196,19 @@ def _mint_and_record_key(
 
 @web_app.post("/buckets")
 def create_bucket_endpoint(request: Request, body: CreateBucketRequest) -> dict[str, object]:
-    """Create an R2 bucket for the caller and mint its default key (returned inline)."""
+    """Create an R2 bucket for the caller and mint its single key (returned inline)."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
+        entitlements = resolve_entitlements_for_admin(request, admin)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
         full_name = make_bucket_name(admin.username, body.name)
         owned = _list_owned_buckets(ops, admin.username)
         if any(b.get("name") == full_name for b in owned):
             raise R2BucketExistsError(full_name)
-        if len(owned) >= _MAX_BUCKETS_PER_ACCOUNT:
-            raise R2BucketLimitError(_MAX_BUCKETS_PER_ACCOUNT)
+        if len(owned) >= entitlements.max_buckets:
+            raise_quota_exceeded("max_buckets", entitlements.max_buckets, len(owned), "buckets")
         ops.create_bucket(full_name)
         material = _mint_and_record_key(
             ops, get_key_store(), owner_user_id, full_name, body.access, _DEFAULT_R2_KEY_ALIAS, rollback_bucket=True
@@ -3413,7 +4225,6 @@ def list_buckets_endpoint(request: Request) -> list[dict[str, object]]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
         ops = get_ctx().ops
         endpoint = r2_s3_endpoint(ops.account_id)
         return [
@@ -3428,7 +4239,6 @@ def get_bucket_endpoint(request: Request, name: str) -> dict[str, object]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
         ops = get_ctx().ops
         full_name = make_bucket_name(admin.username, name)
         if not _owned_bucket_exists(ops, admin.username, full_name):
@@ -3442,7 +4252,6 @@ def delete_bucket_endpoint(request: Request, name: str) -> dict[str, str]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
         full_name = make_bucket_name(admin.username, name)
@@ -3454,22 +4263,46 @@ def delete_bucket_endpoint(request: Request, name: str) -> dict[str, str]:
         return {"status": "deleted"}
 
 
-@web_app.post("/buckets/{name}/keys")
-def create_bucket_key_endpoint(request: Request, name: str, body: CreateR2KeyRequest) -> dict[str, object]:
-    """Mint an additional bucket-scoped key for one of the caller's buckets."""
+@web_app.post("/buckets/{name}/roll-key")
+def roll_bucket_key_endpoint(request: Request, name: str) -> dict[str, object]:
+    """Return fresh credentials for a bucket's single key by rolling its secret in place.
+
+    Each bucket has exactly one key. The secret is derived from the
+    Cloudflare token value and is shown only once, so re-provisioning
+    (e.g. minds re-applying backups) rolls the existing token's value --
+    same Access Key ID, fresh Secret Access Key, and, crucially, the
+    token's *policies* are untouched, so a storage-quota downgrade
+    survives a roll. When the bucket has no recorded key (revoked, or
+    a legacy bucket), a fresh key is minted instead.
+    """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
         full_name = make_bucket_name(admin.username, name)
         if not _owned_bucket_exists(ops, admin.username, full_name):
             raise R2BucketNotFoundError(full_name)
-        material = _mint_and_record_key(
-            ops, get_key_store(), owner_user_id, full_name, body.access, body.alias, rollback_bucket=False
-        )
-        return material.model_dump()
+        store = get_key_store()
+        rows = store.list_keys(owner_user_id, full_name)
+        if not rows:
+            material = _mint_and_record_key(
+                ops, store, owner_user_id, full_name, "readwrite", _DEFAULT_R2_KEY_ALIAS, rollback_bucket=False
+            )
+            return material.model_dump()
+        # The sweep enforces single-key-per-bucket; if extras still exist
+        # (pre-sweep), roll the newest -- the sweep will revoke the rest.
+        newest = rows[-1]
+        result = ops.roll_bucket_token_value(str(newest["access_key_id"]))
+        secret_access_key = derive_s3_secret_access_key(str(result["value"]))
+        effective_access = str(newest.get("enforced_access") or newest["access"])
+        return R2KeyMaterial(
+            access_key_id=str(newest["access_key_id"]),
+            secret_access_key=secret_access_key,
+            s3_endpoint=r2_s3_endpoint(ops.account_id),
+            bucket_name=full_name,
+            access=effective_access,
+        ).model_dump()
 
 
 @web_app.get("/buckets/{name}/keys")
@@ -3478,7 +4311,6 @@ def list_bucket_keys_endpoint(request: Request, name: str) -> list[dict[str, obj
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        require_paid_account(admin)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         full_name = make_bucket_name(admin.username, name)
         rows = get_key_store().list_keys(owner_user_id, full_name)
@@ -3490,8 +4322,7 @@ def list_all_bucket_keys_endpoint(request: Request) -> list[dict[str, object]]:
     """List all of the caller's bucket keys across every bucket."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        require_paid_account(admin)
+        require_admin(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         rows = get_key_store().list_keys(owner_user_id, None)
         return [_key_info_from_row(row).model_dump() for row in rows]
@@ -3502,8 +4333,7 @@ def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str
     """Revoke one of the caller's bucket keys (by Access Key ID) and drop its DB row."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        require_paid_account(admin)
+        require_admin(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         store = get_key_store()
         row = store.get_key(access_key_id)
@@ -3512,6 +4342,176 @@ def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str
         get_ctx().ops.delete_bucket_token(access_key_id)
         store.delete_key(access_key_id)
         return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# R2 storage-quota sweep
+#
+# Hourly cron: reads every bucket's stored bytes from the GraphQL analytics
+# dataset (one query per sweep regardless of bucket count), sums per owner,
+# and flips bucket-key token policies in place -- readwrite keys of an
+# over-quota owner become read-only (same S3 credentials, so restores keep
+# working while writes fail), and are restored automatically once the owner
+# is back under quota. The sweep also permanently enforces the
+# single-key-per-bucket invariant: any bucket with more than one recorded key
+# has the extras revoked (newest wins), which doubles as the one-time cleanup
+# of multi-key buckets minted before this model.
+# ---------------------------------------------------------------------------
+
+
+def _sweep_owner_email(user_id: str, email_getter: Callable[[str], str | None]) -> str | None:
+    """Best-effort verified-email lookup for the sweep's lazy row creation."""
+    try:
+        return email_getter(user_id)
+    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        logger.warning("Sweep could not resolve email for user %s: %s", user_id[:8], exc)
+        return None
+
+
+def _revoke_extra_bucket_keys(
+    ops: CloudflareOps, key_store: KeyStore, counters: dict[str, int]
+) -> dict[str, list[dict[str, Any]]]:
+    """Enforce the single-key-per-bucket invariant; returns the surviving keys grouped by owner.
+
+    The newest key per (owner, bucket) survives; extras are revoked and their
+    rows dropped, counted in ``counters["extra_keys_revoked"]``. The row is
+    dropped only after a successful Cloudflare revoke: the ``r2_keys`` table
+    is the sole record of keys, so dropping the row of a still-live token
+    would orphan a credential no later sweep could revoke or downgrade. A
+    failed revoke is logged, counted in ``counters["key_update_failures"]``,
+    and retried on the next sweep.
+    """
+    keys_by_owner: dict[str, list[dict[str, Any]]] = {}
+    keys_by_owner_bucket: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in key_store.list_all_keys():
+        keys_by_owner_bucket.setdefault((str(row["owner_user_id"]), str(row["bucket_name"])), []).append(row)
+    for (owner_user_id, _bucket_name), rows in keys_by_owner_bucket.items():
+        ordered = sorted(rows, key=lambda r: str(r["created_at"]))
+        for extra in ordered[:-1]:
+            access_key_id = str(extra["access_key_id"])
+            try:
+                ops.delete_bucket_token(access_key_id)
+            except (CloudflareApiError, httpx.HTTPError) as exc:
+                logger.error("Sweep failed to revoke extra key %s: %s", access_key_id, exc)
+                counters["key_update_failures"] += 1
+                continue
+            key_store.delete_key(access_key_id)
+            counters["extra_keys_revoked"] += 1
+        keys_by_owner.setdefault(owner_user_id, []).append(ordered[-1])
+    return keys_by_owner
+
+
+def _resolve_owner_storage_limit_bytes(
+    owner_user_id: str,
+    owner_prefix: str,
+    entitlements_store: EntitlementsStore,
+    email_getter: Callable[[str], str | None],
+) -> int | None:
+    """Resolve the owner's storage limit, lazily creating their entitlements row when needed.
+
+    Mirrors the request-path rule (paid pre-cutoff accounts land on ally).
+    Returns ``None`` for an unresolvable owner (no row and no verified email)
+    -- the sweep must skip them, never enforce against guessed limits.
+    """
+    existing = entitlements_store.get_entitlements(owner_user_id)
+    if existing is not None:
+        return int(existing["max_total_bucket_bytes"])
+    email = _sweep_owner_email(owner_user_id, email_getter)
+    if email is None:
+        return None
+    entitlements = ensure_account_entitlements(
+        user_id=owner_user_id, username_prefix=owner_prefix, email=email, store=entitlements_store
+    )
+    return entitlements.max_total_bucket_bytes
+
+
+def _enforce_owner_key_access(
+    ops: CloudflareOps,
+    key_store: KeyStore,
+    rows: list[dict[str, Any]],
+    is_over_quota: bool,
+    counters: dict[str, int],
+) -> None:
+    """Downgrade (or restore) one owner's bucket-key token policies around the storage quota.
+
+    A failed Cloudflare token update is logged and counted, skipping only
+    that key.
+    """
+    for row in rows:
+        access_key_id = str(row["access_key_id"])
+        bucket_name = str(row["bucket_name"])
+        token_name = _r2_token_name(bucket_name, row.get("alias"))
+        try:
+            if is_over_quota and row["access"] == "readwrite" and row.get("enforced_access") != "read":
+                ops.update_bucket_token_access(access_key_id, bucket_name, "read", token_name)
+                key_store.set_enforced_access(access_key_id, "read")
+                counters["keys_downgraded"] += 1
+            elif not is_over_quota and row.get("enforced_access") is not None:
+                ops.update_bucket_token_access(access_key_id, bucket_name, str(row["access"]), token_name)
+                key_store.set_enforced_access(access_key_id, None)
+                counters["keys_restored"] += 1
+            else:
+                # The key already reflects the desired state (intentionally
+                # read-only, already downgraded, or already restored).
+                pass
+        except (CloudflareApiError, httpx.HTTPError) as exc:
+            logger.error("Sweep failed to update token %s for bucket %s: %s", access_key_id, bucket_name, exc)
+            counters["key_update_failures"] += 1
+
+
+def run_r2_quota_sweep(
+    ops: CloudflareOps,
+    key_store: KeyStore,
+    entitlements_store: EntitlementsStore,
+    email_getter: Callable[[str], str | None] = _default_email_getter,
+) -> dict[str, int]:
+    """Run one storage-quota sweep pass; returns counters for the cron log.
+
+    Fails loudly (raises) when the account-wide usage query fails -- a sweep
+    that cannot see usage must not look like a clean pass. Per-user failures
+    (email lookup, a Cloudflare token update) are logged and skip only that
+    user/key, and an unknown limit skips the user entirely. Missing data never
+    *downgrades* a key: a bucket absent from the analytics snapshot counts as
+    zero usage, which can only restore (a wrong restore self-corrects on the
+    next pass, once the bucket's snapshot lands).
+    """
+    counters = {
+        "extra_keys_revoked": 0,
+        "users_over_quota": 0,
+        "keys_downgraded": 0,
+        "keys_restored": 0,
+        "users_skipped": 0,
+        "key_update_failures": 0,
+    }
+
+    # Enforce the single-key-per-bucket invariant first: newest key per
+    # (owner, bucket) survives, extras are revoked + dropped.
+    keys_by_owner = _revoke_extra_bucket_keys(ops, key_store, counters)
+
+    # One GraphQL query covers every bucket's stored bytes; a failure here
+    # aborts the sweep (raising) rather than being mistaken for zero usage.
+    usage_by_bucket = ops.query_r2_storage_by_bucket()
+    all_buckets = [str(b.get("name", "")) for b in ops.list_buckets()]
+
+    for owner_user_id, rows in keys_by_owner.items():
+        owner_prefix = str(rows[0]["bucket_name"]).split(_R2_BUCKET_NAME_SEP, 1)[0]
+        bucket_prefix = f"{owner_prefix}{_R2_BUCKET_NAME_SEP}"
+        owner_buckets = [name for name in all_buckets if name.startswith(bucket_prefix)]
+        owner_usage_bytes = sum(usage_by_bucket.get(name, 0) for name in owner_buckets)
+
+        limit_bytes = _resolve_owner_storage_limit_bytes(owner_user_id, owner_prefix, entitlements_store, email_getter)
+        if limit_bytes is None:
+            logger.error(
+                "Sweep skipping user %s: no resolvable verified email for lazy plan assignment", owner_user_id[:8]
+            )
+            counters["users_skipped"] += 1
+            continue
+
+        is_over_quota = owner_usage_bytes > limit_bytes
+        if is_over_quota:
+            counters["users_over_quota"] += 1
+        _enforce_owner_key_access(ops, key_store, rows, is_over_quota, counters)
+    return counters
 
 
 # ---------------------------------------------------------------------------
@@ -3871,11 +4871,16 @@ def _decode_size_capped_base64(field_name: str, encoded: str, max_bytes: int) ->
     return decoded
 
 
+def _sync_caller(request: Request) -> tuple[AdminAuth, str]:
+    """Authenticate a sync endpoint call; returns (admin auth, full user_id)."""
+    auth = authenticate_request(request, get_ctx().ops)
+    admin = require_admin(auth)
+    return admin, _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+
+
 def _sync_caller_user_id(request: Request) -> str:
     """Authenticate a sync endpoint call and return the caller's full user_id."""
-    auth = authenticate_request(request, get_ctx().ops)
-    require_admin(auth)
-    return _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+    return _sync_caller(request)[1]
 
 
 @web_app.get("/sync/records")
@@ -3889,11 +4894,33 @@ def list_workspace_records_endpoint(request: Request) -> dict[str, object]:
 
 @web_app.put("/sync/records/{host_id}")
 def put_workspace_record_endpoint(request: Request, host_id: str, body: WorkspaceRecordModel) -> dict[str, object]:
-    """Insert or CAS-update one workspace record; 409 (with the stored row) on conflict."""
+    """Insert or CAS-update one workspace record; 409 (with the stored row) on conflict.
+
+    Enforces the active-synced-workspaces quota: a push that would create a
+    *new* ACTIVE record (a fresh row, or an existing non-active row flipping
+    to active) is refused at the cap. Updates to already-active rows and
+    tombstoning are always allowed.
+    """
     with handle_endpoint_errors():
-        user_id = _sync_caller_user_id(request)
+        admin, user_id = _sync_caller(request)
         if body.host_id != host_id:
             raise HTTPException(status_code=400, detail="host_id in the path and body must match")
+        if body.state == WorkspaceRecordState.ACTIVE:
+            existing_records = get_sync_store().list_records(user_id)
+            existing_row = next((r for r in existing_records if r["host_id"] == host_id), None)
+            is_new_active = existing_row is None or existing_row["state"] != WorkspaceRecordState.ACTIVE.value
+            if is_new_active:
+                entitlements = ensure_account_entitlements(
+                    user_id=user_id, username_prefix=admin.username, email=admin.email or ""
+                )
+                active_count = sum(1 for r in existing_records if r["state"] == WorkspaceRecordState.ACTIVE.value)
+                if active_count >= entitlements.max_active_synced_workspaces:
+                    raise_quota_exceeded(
+                        "max_active_synced_workspaces",
+                        entitlements.max_active_synced_workspaces,
+                        active_count,
+                        "active synced workspaces",
+                    )
         record = body.model_dump(mode="json")
         record["encrypted_secrets"] = (
             _decode_size_capped_base64("encrypted_secrets", body.encrypted_secrets, _MAX_ENCRYPTED_SECRETS_BYTES)
@@ -3964,6 +4991,202 @@ def delete_key_bundle_endpoint(request: Request) -> dict[str, str]:
         user_id = _sync_caller_user_id(request)
         get_sync_store().delete_bundle(user_id)
         return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Account endpoints (plan + entitlements + live usage)
+# ---------------------------------------------------------------------------
+
+
+def _count_leased_hosts(username_prefix: str) -> int:
+    """Count the user's current pool-host leases (the remote-workspace usage number)."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_COUNT_LEASED_HOSTS_SQL, (username_prefix,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return int(row[0]) if row is not None else 0
+
+
+def _count_active_sync_records(user_id: str) -> int:
+    records = get_sync_store().list_records(user_id)
+    return sum(1 for r in records if r["state"] == WorkspaceRecordState.ACTIVE.value)
+
+
+def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str) -> AccountUsage:
+    """Compute the account's live usage numbers, one upstream call per source.
+
+    Bucket byte counts come from the real-time per-bucket REST usage endpoint
+    (bounded by the account's bucket quota); a failed usage call for one
+    bucket logs a warning and counts that bucket as zero rather than failing
+    the whole (display-only) request.
+    """
+    tunnel_count = count_user_tunnels(ops, username_prefix)
+    owned_buckets = _list_owned_buckets(ops, username_prefix)
+    total_bucket_bytes = 0
+    for bucket in owned_buckets:
+        bucket_name = str(bucket.get("name", ""))
+        try:
+            total_bucket_bytes += ops.get_bucket_usage_bytes(bucket_name)
+        except (CloudflareApiError, httpx.HTTPError) as exc:
+            logger.warning("Failed to read usage for bucket %s: %s", bucket_name, exc)
+    spend, reset_at = get_litellm_user_spend(user_id)
+    return AccountUsage(
+        remote_workspaces=_count_leased_hosts(username_prefix),
+        tunnels=tunnel_count,
+        buckets=len(owned_buckets),
+        total_bucket_bytes=total_bucket_bytes,
+        llm_spend_usd_this_period=spend,
+        llm_budget_resets_at=reset_at,
+        active_synced_workspaces=_count_active_sync_records(user_id),
+    )
+
+
+@web_app.get("/account")
+def get_account(request: Request) -> dict[str, object]:
+    """Return the caller's plan, entitlement values, and live usage.
+
+    Lazily creates the entitlements row on first touch (like every other
+    quota-relevant endpoint), so this is also the cheapest way for a client
+    to materialize an account's plan.
+    """
+    with handle_endpoint_errors():
+        ops = get_ctx().ops
+        auth = authenticate_request(request, ops)
+        admin = require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+        entitlements = ensure_account_entitlements(
+            user_id=user_id, username_prefix=admin.username, email=admin.email or ""
+        )
+        usage = compute_account_usage(ops, admin.username, user_id)
+        return AccountInfoResponse(
+            user_id=user_id,
+            email=admin.email or "",
+            plan_name=entitlements.plan_name,
+            entitlements=entitlements.quota_values(),
+            usage=usage,
+            available_plans=[str(p["plan_name"]) for p in get_entitlements_store().list_plans()],
+        ).model_dump()
+
+
+def apply_plan_to_account(user_id: str, plan_name: str, store: "EntitlementsStore | None" = None) -> PlanEntitlements:
+    """Reset an account's entitlements wholesale to a plan's defaults.
+
+    Pushes the plan's monthly LLM budget to LiteLLM *first*: a failed push
+    fails the whole operation, so the DB row and LiteLLM never diverge.
+    """
+    entitlements_store = store if store is not None else get_entitlements_store()
+    plan = entitlements_store.get_plan(plan_name)
+    if plan is None:
+        raise HTTPException(status_code=400, detail=f"Unknown plan: {plan_name!r}")
+    upsert_litellm_user_budget(user_id, float(plan["monthly_llm_spend_usd"]))
+    entitlements_store.update_entitlements(
+        user_id, {"plan_name": plan_name, **{name: plan[name] for name in QUOTA_ENTITLEMENT_NAMES}}
+    )
+    return PlanEntitlements(**{name: plan[name] for name in QUOTA_ENTITLEMENT_NAMES})
+
+
+@web_app.post("/account/plan")
+def set_account_plan(request: Request, body: SetPlanRequest) -> dict[str, object]:
+    """Switch the caller's plan, resetting their entitlements to the plan's defaults.
+
+    Re-selecting the current plan is a no-op (so idempotent client retries
+    never wipe operator-granted bumps). Switching to 'ally' requires a
+    paid-listed email.
+    """
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        entitlements = resolve_entitlements_for_admin(request, admin)
+        if body.plan == entitlements.plan_name:
+            return {"plan_name": entitlements.plan_name, "entitlements": entitlements.quota_values().model_dump()}
+        if body.plan == _PLAN_ALLY:
+            require_ally_eligible(admin.email)
+        new_values = apply_plan_to_account(entitlements.user_id, body.plan)
+        return {"plan_name": body.plan, "entitlements": new_values.model_dump()}
+
+
+# ---------------------------------------------------------------------------
+# Account admin endpoints (email-addressed, admin-key authenticated)
+#
+# Same fixed-key auth as the paid-list CRUD (``MINDS_PAID_ADMIN_KEY``); the
+# operator addresses users by email and the connector resolves the SuperTokens
+# user. ``show`` lazily creates the entitlements row (so a subsequent
+# ``set-quota`` always has a row to update); ``set-plan`` always resets to the
+# plan's defaults (the operator's way to wipe manual bumps) and deliberately
+# skips the ally eligibility check -- the operator knows best.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_user_id_by_email(email: str) -> str:
+    """Resolve a SuperTokens user id from an email; 404 when no account exists."""
+    users = list_users_by_account_info(
+        tenant_id=_AUTH_TENANT_ID,
+        account_info=AccountInfoInput(email=email.strip().lower()),
+    )
+    if not users:
+        raise HTTPException(status_code=404, detail=f"No account found for email {email!r}")
+    return str(users[0].id)
+
+
+def _admin_ensure_entitlements(email: str) -> AccountEntitlements:
+    user_id = _resolve_user_id_by_email(email)
+    username_prefix = derive_username_prefix(user_id)
+    return ensure_account_entitlements(user_id=user_id, username_prefix=username_prefix, email=email)
+
+
+@web_app.get("/admin/accounts/{email}")
+def admin_get_account(request: Request, email: str) -> dict[str, object]:
+    """Operator view of one account: plan, entitlements, and live usage."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        entitlements = _admin_ensure_entitlements(email)
+        usage = compute_account_usage(get_ctx().ops, entitlements.username_prefix, entitlements.user_id)
+        return AccountInfoResponse(
+            user_id=entitlements.user_id,
+            email=email.strip().lower(),
+            plan_name=entitlements.plan_name,
+            entitlements=entitlements.quota_values(),
+            usage=usage,
+            available_plans=[str(p["plan_name"]) for p in get_entitlements_store().list_plans()],
+        ).model_dump()
+
+
+@web_app.post("/admin/accounts/{email}/plan")
+def admin_set_account_plan(request: Request, email: str, body: AdminSetPlanRequest) -> dict[str, object]:
+    """Assign a plan to an account, resetting its entitlements to the plan's defaults."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        entitlements = _admin_ensure_entitlements(email)
+        new_values = apply_plan_to_account(entitlements.user_id, body.plan)
+        return {"plan_name": body.plan, "entitlements": new_values.model_dump()}
+
+
+@web_app.post("/admin/accounts/{email}/quota")
+def admin_set_account_quota(request: Request, email: str, body: AdminSetQuotaRequest) -> dict[str, object]:
+    """Set a single entitlement value on an account (an operator bump)."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        if body.entitlement not in QUOTA_ENTITLEMENT_NAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown entitlement {body.entitlement!r}; must be one of {list(QUOTA_ENTITLEMENT_NAMES)}",
+            )
+        if body.entitlement in _INTEGER_ENTITLEMENT_NAMES and body.value != int(body.value):
+            raise HTTPException(
+                status_code=400, detail=f"Entitlement {body.entitlement!r} requires a whole number, got {body.value}"
+            )
+        if body.value < 0:
+            raise HTTPException(status_code=400, detail="Entitlement values must be non-negative")
+        entitlements = _admin_ensure_entitlements(email)
+        value: float | int = body.value if body.entitlement == "monthly_llm_spend_usd" else int(body.value)
+        if body.entitlement == "monthly_llm_spend_usd":
+            upsert_litellm_user_budget(entitlements.user_id, float(value))
+        get_entitlements_store().update_entitlements(entitlements.user_id, {body.entitlement: value})
+        return {"status": "updated", "entitlement": body.entitlement, "value": value}
 
 
 # ---------------------------------------------------------------------------
@@ -4719,3 +5942,26 @@ def cleanup_removing_pool_hosts() -> dict[str, int]:
         conn.close()
     logger.info("Slice reconcile done: slice_divergences=%d", divergence_count)
     return {"slice_divergences": divergence_count}
+
+
+# One-time-per-container SuperTokens init for the sweep cron: the sweep's lazy
+# entitlements creation resolves owner emails via the SuperTokens SDK, and
+# ``supertokens_init`` must not run twice in a warm container.
+@functools.cache
+def _init_supertokens_once() -> None:
+    _init_supertokens()
+
+
+@app.function(
+    name="r2_quota_sweep",
+    secrets=_connector_secrets(),
+    # Hourly storage-quota sweep, offset from the slice reconcile so the two
+    # crons don't contend for a cold container at the top of the hour.
+    schedule=modal.Cron("30 * * * *"),
+    timeout=900,
+)
+def r2_quota_sweep() -> dict[str, int]:
+    _init_supertokens_once()
+    counters = run_r2_quota_sweep(get_ctx().ops, get_key_store(), get_entitlements_store())
+    logger.info("R2 quota sweep done: %s", counters)
+    return counters

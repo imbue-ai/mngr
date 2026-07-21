@@ -102,37 +102,29 @@ def destroy_bucket(name: str, account: str | None, connector_url: str | None) ->
     emit_json({"destroyed": True, "bucket": name})
 
 
-@bucket.group(name="keys")
-def keys() -> None:
-    """Manage the scoped S3 keys for a bucket."""
-
-
-@keys.command(name="create")
-@click.argument("bucket_name")
-@click.option("--alias", default=None, help="Optional human-readable alias for the key")
-@click.option(
-    "--access",
-    type=click.Choice(["read", "readwrite"]),
-    default="readwrite",
-    help="Access scope for the key",
-)
+@bucket.command(name="roll-key")
+@click.argument("name")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
-def create_key(
-    bucket_name: str,
-    alias: str | None,
-    access: str,
-    account: str | None,
-    connector_url: str | None,
-) -> None:
-    """Mint an additional scoped key for a bucket. Emits the key material (includes the secret)."""
+def roll_key(name: str, account: str | None, connector_url: str | None) -> None:
+    """Roll the bucket's single key: same Access Key ID, fresh secret. Emits the key material.
+
+    Each bucket has exactly one key; the secret is shown only once, so this
+    is how you get working credentials again (and how a leaked secret is
+    invalidated -- the old value stops working immediately).
+    """
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
-    material = client.create_bucket_key(access_token=token, name=bucket_name, alias=alias, access=access)
+    material = client.roll_bucket_key(access_token=token, name=name)
     emit_json(_key_material_to_json(material))
+
+
+@bucket.group(name="keys")
+def keys() -> None:
+    """Inspect the S3 keys for a bucket (each bucket has a single key; see `bucket roll-key`)."""
 
 
 @keys.command(name="list")
@@ -148,18 +140,3 @@ def list_keys(bucket_name: str | None, account: str | None, connector_url: str |
     token = get_active_token(store, client, parsed_account)
     items = client.list_bucket_keys(token, bucket_name)
     emit_json([item.model_dump(mode="json") for item in items])
-
-
-@keys.command(name="destroy")
-@click.argument("access_key_id")
-@click.option("--account", default=None, help="Account email (defaults to the active account)")
-@click.option("--connector-url", default=None, help="Override connector URL")
-@handle_imbue_cloud_errors
-def destroy_key(access_key_id: str, account: str | None, connector_url: str | None) -> None:
-    """Revoke a bucket key by its Access Key ID."""
-    client = make_connector_client(connector_url)
-    store = make_session_store()
-    parsed_account = resolve_account_or_active(store, account)
-    token = get_active_token(store, client, parsed_account)
-    client.destroy_bucket_key(token, access_key_id)
-    emit_json({"destroyed": True, "access_key_id": access_key_id})
