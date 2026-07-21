@@ -26,6 +26,10 @@ pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
 _HTTP_TIMEOUT_SECONDS = 60.0
 
+# A comfortably-large max_total_bucket_bytes the grant-cycle test restores
+# the shared user's entitlement to (both mid-test and on any failure path).
+_SANE_STORAGE_LIMIT_BYTES = 50 * 1024**3
+
 
 def _connector_url(env: SharedEnvHandle) -> str:
     return str(env.urls.connector_url).rstrip("/")
@@ -167,7 +171,7 @@ def test_storage_cleanup_grant_cycle(
 
             # Back under quota, the recheck settles the grant and leaves the
             # key writable.
-            _set_storage_limit_bytes(env, user_id, 50 * 1024**3)
+            _set_storage_limit_bytes(env, user_id, _SANE_STORAGE_LIMIT_BYTES)
             settled = client.post(f"{connector_url}/account/storage-recheck", headers=_auth_header(verified_user))
             assert settled.status_code == 200, f"settling recheck failed: {settled.text[:400]!r}"
             settled_body = settled.json()
@@ -175,6 +179,9 @@ def test_storage_cleanup_grant_cycle(
             assert settled_body["is_grant_settled"] is True
             assert all(key["enforced_access"] is None for key in settled_body["keys"])
         finally:
+            # A mid-test failure must not leave the shared user's entitlement
+            # at -1 (every later bucket create would 403 on the storage gate).
+            _set_storage_limit_bytes(env, user_id, _SANE_STORAGE_LIMIT_BYTES)
             cleanup = client.delete(f"{connector_url}/buckets/grant-cycle-probe", headers=_auth_header(verified_user))
             assert cleanup.status_code == 200, f"bucket cleanup failed: {cleanup.text[:400]!r}"
             _delete_cleanup_grants(env, user_id)
