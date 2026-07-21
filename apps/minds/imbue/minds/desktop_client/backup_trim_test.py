@@ -11,6 +11,8 @@ from imbue.minds.desktop_client.backup_trim import run_backup_trim
 from imbue.minds.desktop_client.backup_trim import select_snapshot_ids_to_forget
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.restic_cli import ResticSnapshot
+from imbue.minds.desktop_client.restic_cli import forget_snapshots
+from imbue.minds.desktop_client.restic_cli import list_snapshots
 from imbue.mngr.primitives import AgentId
 
 
@@ -66,6 +68,8 @@ def test_run_backup_trim_short_circuits_when_already_under_quota(tmp_path: Path)
         cli=cli,
         paths=WorkspacePaths(data_dir=tmp_path),
         report_progress=lambda _detail: None,
+        list_snapshots_fn=list_snapshots,
+        forget_snapshots_fn=forget_snapshots,
     )
     assert is_under is True
     assert cli.cleanup_grant_call_count == 0
@@ -139,6 +143,8 @@ def test_run_backup_trim_reports_untrimmable_buckets_when_still_over(tmp_path: P
         cli=cli,
         paths=WorkspacePaths(data_dir=tmp_path),
         report_progress=lambda _detail: None,
+        list_snapshots_fn=list_snapshots,
+        forget_snapshots_fn=forget_snapshots,
     )
     assert is_under is False
     assert "u1--host-elsewhere" in detail

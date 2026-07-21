@@ -140,14 +140,15 @@ def run_backup_trim(
     cli: ImbueCloudCli,
     paths: WorkspacePaths,
     report_progress: Callable[[str], None],
-    # Injected for tests; production callers use the restic_cli functions.
-    list_snapshots_fn: Callable[..., tuple[ResticSnapshot, ...]] = list_snapshots,
-    forget_snapshots_fn: Callable[..., None] = forget_snapshots,
-    # (is_under_quota, human-readable outcome detail)
+    # Injectable (fakes in tests); production callers pass the restic_cli
+    # functions of the same names.
+    list_snapshots_fn: Callable[..., tuple[ResticSnapshot, ...]],
+    forget_snapshots_fn: Callable[..., None],
 ) -> tuple[bool, str]:
     """Trim old snapshots in rounds until the account is under its storage quota.
 
-    Raises ``ImbueCloudCliError`` / ``BackupProvisioningError`` on a failed
+    Returns ``(is_under_quota, human-readable outcome detail)``. Raises
+    ``ImbueCloudCliError`` / ``BackupProvisioningError`` on a failed
     connector call or restic invocation; the caller records those as the
     run's failure outcome.
     """
@@ -291,6 +292,8 @@ class BackupTrimManager(MutableModel):
                 report_progress=lambda progress_detail: self._set_status(
                     user_id, BackupTrimState.RUNNING, progress_detail
                 ),
+                list_snapshots_fn=list_snapshots,
+                forget_snapshots_fn=forget_snapshots,
             )
             self._set_status(user_id, BackupTrimState.SUCCEEDED if is_under_quota else BackupTrimState.FAILED, detail)
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
