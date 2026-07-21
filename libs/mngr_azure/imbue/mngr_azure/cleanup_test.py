@@ -68,5 +68,4 @@ def test_cleanup_reclaims_network_and_destroys_only_old_vms() -> None:
     cleaned = cleanup_old_azure_test_instances(client, max_age=timedelta(hours=1), now=_NOW)
     assert cleaned == 1
     assert client.destroyed_ids == ["old"]
-    # The orphaned-network reclaim always runs (even when no VM is old).
     assert len(client.reclaim_calls) == 1

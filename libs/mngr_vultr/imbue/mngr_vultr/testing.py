@@ -3,8 +3,7 @@
 Holds the release-test opt-in flag so both ``conftest.py`` (the session-end
 leak detector) and ``test_release_vultr.py`` (the test gate) read the same
 value, plus the placeholder OS image id the cleanup paths use to construct a
-``VultrVpsClient``. Mirrors the ``*_RELEASE_TESTS_OPT_IN`` pattern in mngr_aws,
-mngr_gcp, and mngr_azure.
+``VultrVpsClient``.
 """
 
 import os

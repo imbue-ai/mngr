@@ -90,8 +90,6 @@ def _mark_session_failed(session: pytest.Session) -> None:
 
     Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
     setting ``session.exitstatus`` is the supported way to signal failure.
-    Only overwrite a successful (0) status: a non-zero status
-    carries more diagnostic information than TESTS_FAILED=1.
     """
     if session.exitstatus == 0:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
@@ -105,12 +103,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     into (``MNGR_GCP_RELEASE_TESTS`` is unset) -- an ordinary run that never
     touches GCE. When the opt-in *is* set but ADC cannot be resolved (or no
     default project is configured, or the client cannot be built), the session
-    is *failed* rather than skipped: a release run that cannot authenticate is
-    a misconfiguration, not a benign skip, and skipping would silently green a
-    run that could not have scanned for leaks. If leaks are found they are
-    force-deleted and the session fails. All failure paths set
-    ``session.exitstatus`` only when the session was otherwise passing, so a
-    more-specific failure is preserved.
+    is *failed* rather than skipped: a release run that cannot authenticate
+    could not have scanned for leaks. If leaks are found they are
+    force-deleted and the session fails.
     """
     del exitstatus
     if not GCP_RELEASE_TESTS_OPT_IN:

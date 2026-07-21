@@ -17,34 +17,22 @@ The mechanism is tag-based:
      subprocess and inherits the env, so this works transparently across
      ``_run_mngr`` calls.
 
-     The timestamp tag feeds the *out-of-band, age-based* reaper in
-     ``imbue.mngr_vultr.cleanup`` (driven by
-     ``scripts/cleanup_old_vultr_test_instances.py``, analogous to Modal's
-     ``cleanup_old_modal_test_environments.py``): the in-process check in
-     ``pytest_sessionfinish`` only reaps leaks from sessions that survive
-     to run it, so a session/runner killed mid-run leaves orphans that no
-     future session -- each with a fresh uuid -- can match. The timestamp
-     lets the out-of-band reaper find and destroy those by age, independent
-     of the random session uuid. The tag is built by
+     The timestamp tag feeds the out-of-band, age-based reaper in
+     ``imbue.mngr_vultr.cleanup``: a session killed mid-run leaves orphans
+     that no future session -- each with a fresh uuid -- can match, so the
+     reaper finds them by age instead. The tag is built by
      ``build_test_created_tag`` so its format stays in lockstep with the
      reaper that parses it.
   2. ``pytest_sessionfinish`` lists Vultr instances, filters to those
      bearing the session tag, destroys any survivors, and fails the
-     session on any real leak. A real leak is any survivor that was
-     still alive at list time -- either we destroyed it
-     (``DESTROYED``) or we could not destroy it (``DESTROY_FAILED``,
-     worse: the instance stays live). Only the 404-race-with-test-
-     finally case (``ALREADY_GONE``) is benign and does not fail.
+     session on any real leak (see ``_is_real_leak``).
 
 Gated on the ``MNGR_VULTR_RELEASE_TESTS=1`` opt-in (the same flag that
 gates the release tests in ``test_release_vultr.py``): when it is unset
 this is an ordinary unit-only run that creates no Vultr instances, so the
 hooks no-op. When the opt-in *is* set but ``VULTR_API_KEY`` is missing,
 ``pytest_sessionfinish`` fails the session rather than skipping silently --
-a release run with no key is a misconfiguration, not a benign skip.
-Modeled on the leak detector in
-``libs/mngr_modal/imbue/mngr_modal/conftest.py`` and the opt-in gating in
-the mngr_aws / mngr_gcp / mngr_azure conftests.
+a release run with no key could not have scanned for leaks.
 """
 
 import os
@@ -70,12 +58,6 @@ from imbue.mngr_vultr.testing import VULTR_TEST_OS_ID
 
 _SESSION_TAG_KEY: Final[str] = "mngr-vultr-test-session"
 _SESSION_TAG: Final[str] = f"{_SESSION_TAG_KEY}={uuid.uuid4().hex}"
-
-# Timestamp tag for out-of-band age-based reaping (of sessions killed before
-# ``pytest_sessionfinish`` runs). Built by ``build_test_created_tag`` so the
-# format stays in lockstep with the reaper that parses it
-# (``imbue.mngr_vultr.cleanup``). Computed at import (session start), which is
-# within seconds of the first VPS create.
 _CREATED_TAG: Final[str] = build_test_created_tag(datetime.now(timezone.utc))
 
 
@@ -99,8 +81,6 @@ def _mark_session_failed(session: pytest.Session) -> None:
 
     Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
     setting ``session.exitstatus`` is the supported way to signal failure.
-    Only overwrite a successful (0) status: a non-zero status carries more
-    diagnostic information than TESTS_FAILED=1.
     """
     if session.exitstatus == 0:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
@@ -126,8 +106,7 @@ def _list_leaked_instances(client: VultrVpsClient) -> list[dict[str, Any]]:
     """Return Vultr instances bearing this session's tag (i.e., leaked).
 
     A ``list_instances`` failure propagates: the caller fails the session rather
-    than silently reporting "no leaks" for a scan that never ran (the same
-    policy the AWS / GCP / Azure session-end hooks apply).
+    than silently reporting "no leaks" for a scan that never ran.
     """
     instances = client.list_instances()
     return [inst for inst in instances if _SESSION_TAG in inst.get("tags", [])]
@@ -148,7 +127,11 @@ def _destroy_leaked_instance(client: VultrVpsClient, instance: dict[str, Any]) -
 
 
 def _is_real_leak(outcome: _LeakDestroyOutcome) -> bool:
-    """Whether the outcome is a real leak (should fail the session)."""
+    """Whether the outcome is a real leak (should fail the session).
+
+    Only ``ALREADY_GONE`` -- a 404 race with the test's own finally-block
+    destroy -- is benign.
+    """
     match outcome:
         case _LeakDestroyOutcome.DESTROYED | _LeakDestroyOutcome.DESTROY_FAILED:
             return True

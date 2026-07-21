@@ -134,8 +134,6 @@ def _mark_session_failed(session: pytest.Session) -> None:
 
     Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
     setting ``session.exitstatus`` is the supported way to signal failure.
-    Only overwrite a successful (0) status: a non-zero status
-    carries more diagnostic information than TESTS_FAILED=1.
     """
     if session.exitstatus == 0:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
@@ -150,12 +148,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     unset) -- an ordinary run that never touches EC2. When the opt-in *is*
     set but AWS credentials cannot be resolved (or the EC2 client cannot be
     built), the session is *failed* rather than skipped: a release run that
-    cannot authenticate is a misconfiguration, not a benign skip, and
-    skipping would silently green a run that could not have scanned for
-    leaks. If leaks are found they are force-cleaned and the session fails.
-    All failure paths set ``session.exitstatus`` only when the session was
-    otherwise passing, so a more-specific failure (INTERRUPTED,
-    INTERNAL_ERROR, etc.) is preserved.
+    cannot authenticate could not have scanned for leaks. Leaks found are
+    force-cleaned and also fail the session.
     """
     # exitstatus is required by the hook signature but unused; we read
     # session.exitstatus, which is the canonical source.

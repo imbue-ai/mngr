@@ -16,7 +16,6 @@ from imbue.mngr_vps.leak_cleanup import cleanup_old_test_instances
 from imbue.mngr_vps.leak_cleanup import parse_strptime_utc
 from imbue.mngr_vps.leak_cleanup import parse_tag_value
 
-# Tag key marking a VPS as test-created and carrying its UTC creation time.
 VULTR_TEST_CREATED_TAG_KEY: Final[str] = "mngr-vultr-test-created"
 # Colon-free timestamp format for the created tag (safe as a Vultr tag string).
 VULTR_TEST_CREATED_TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d-%H-%M-%S"

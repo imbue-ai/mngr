@@ -88,8 +88,6 @@ def _mark_session_failed(session: pytest.Session) -> None:
 
     Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
     setting ``session.exitstatus`` is the supported way to signal failure.
-    Only overwrite a successful (0) status: a non-zero status
-    carries more diagnostic information than TESTS_FAILED=1.
     """
     if session.exitstatus == 0:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
@@ -104,13 +102,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     touches Azure. When the opt-in *is* set but credentials cannot be resolved
     (or no subscription is resolvable, or the clients cannot be built), the
     session is *failed* rather than skipped: a release run that cannot
-    authenticate is a misconfiguration, not a benign skip, and skipping would
-    silently green a run that could not have scanned for leaks. Leaked VMs
-    also force-fail the session (a real test bug); orphaned NICs / public IPs
-    from capacity-failed creates are reclaimed silently (an Azure-side
-    artifact, not a test leak). All failure paths set ``session.exitstatus``
-    only when the session was otherwise passing, so a more-specific failure
-    (INTERRUPTED, INTERNAL_ERROR, etc.) is preserved.
+    authenticate could not have scanned for leaks. Leaked VMs also force-fail
+    the session (a real test bug); orphaned NICs / public IPs from
+    capacity-failed creates are reclaimed silently.
     """
     del exitstatus
     if not AZURE_RELEASE_TESTS_OPT_IN:
@@ -135,8 +129,6 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     try:
         client = make_azure_reaper_client(subscription_id)
-        # Reclaim orphaned NICs / public IPs (capacity-failed creates) silently -- an Azure-side
-        # artifact, not a test leak -- before scanning for leaked VMs.
         client.reclaim_orphaned_network_resources(AZURE_REAPER_PROVIDER_NAME)
         instances = client.list_instances()
     except (VpsError, AzureError) as e:
