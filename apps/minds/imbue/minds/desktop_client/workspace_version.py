@@ -150,7 +150,10 @@ def _exec_git_in_workspace(
         envelope = json.loads(result.stdout)
         return str(envelope["results"][0]["stdout"])
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-        logger.debug("git {} in workspace {} produced an unparseable exec envelope: {}", git_args, agent_id, e)
+        # Warning (not debug): a zero-exit exec whose ``--format json`` envelope
+        # does not parse is a broken mngr output contract, not a normal
+        # offline/no-tags fallback.
+        logger.warning("git {} in workspace {} produced an unparseable exec envelope: {}", git_args, agent_id, e)
         return None
 
 
