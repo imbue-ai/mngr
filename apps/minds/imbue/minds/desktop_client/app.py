@@ -54,6 +54,7 @@ from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeSystemInterfaceStatusPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -82,7 +83,6 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_servi
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
-from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
@@ -1020,62 +1020,29 @@ def _handle_landing_page() -> Response:
         return consent_response
 
     backend_resolver = get_state().backend_resolver
-    all_agent_ids = backend_resolver.list_active_workspace_ids()
     paths: WorkspacePaths | None = get_state().api_v1_paths
     landing_session_store: MultiAccountSessionStore | None = get_state().session_store
-    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
+    # Side-effectful walk: finalizes DONE destroy records (account
+    # disassociation + record deletion) BEFORE the boot snapshot below reads
+    # the remaining records, so a finished destroy vanishes on this render.
+    _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
     launcher_email, launcher_extra_count = _account_launcher_context(landing_session_store)
-    remote_workspaces = _collect_remote_workspace_tiles(backend_resolver, landing_session_store)
-    locked_account_emails = _collect_locked_account_emails(landing_session_store)
 
-    if all_agent_ids or remote_workspaces:
-        agent_names: dict[str, str] = {}
-        agent_accents: dict[str, str] = {}
-        agent_providers: dict[str, str] = {}
-        for aid in all_agent_ids:
-            info = backend_resolver.get_agent_display_info(aid)
-            ws_name = backend_resolver.get_workspace_name(aid)
-            if ws_name:
-                agent_names[str(aid)] = ws_name
-            else:
-                agent_names[str(aid)] = info.agent_name if info else str(aid)
-            agent_accents[str(aid)] = _resolved_workspace_color(backend_resolver, aid)
-            # Collapse the per-region / per-account provider instance name to a
-            # single friendly compute-provider label (e.g. aws-us-west-2 -> AWS).
-            agent_providers[str(aid)] = friendly_provider_label(info.provider_name if info else None)
-        shutdown_capable_agent_ids = get_shutdown_capable_workspace_agent_ids(backend_resolver)
-        mind_liveness_by_agent_id = {
-            aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
-        }
-        html = render_landing_page(
-            accessible_agent_ids=all_agent_ids,
+    # The rows (local + remote), providers, requests and health statuses all
+    # ride the chrome boot snapshot; the LandingPage component renders from
+    # it. If discovery finished with nothing to show, fall through to the
+    # create form so the user can create their first workspace.
+    chrome_boot_state = build_chrome_boot_state()
+    has_rows = bool(chrome_boot_state.workspaces.workspaces)
+    if has_rows or not backend_resolver.has_completed_initial_discovery():
+        landing_extras = LandingBootExtras(
             mngr_forward_origin=_get_mngr_forward_origin(),
-            agent_names=agent_names,
-            destroying_status_by_agent_id=destroying_status_by_agent_id,
-            agent_accents=agent_accents,
-            shutdown_capable_agent_ids=shutdown_capable_agent_ids,
-            mind_liveness_by_agent_id=mind_liveness_by_agent_id,
-            agent_providers=agent_providers,
             account_email=launcher_email,
             extra_account_count=launcher_extra_count,
-            remote_workspaces=remote_workspaces,
-            locked_account_emails=locked_account_emails,
+            locked_account_emails=tuple(_collect_locked_account_emails(landing_session_store)),
+            is_discovering=not has_rows,
         )
-        return make_html_response(content=html)
-
-    # No agents discovered yet. If discovery is still in progress, show a
-    # "Discovering agents..." page with auto-refresh. Once discovery has
-    # completed with no agents found, show the create form so the user can
-    # create their first agent instead of polling forever.
-    if not backend_resolver.has_completed_initial_discovery():
-        html = render_landing_page(
-            accessible_agent_ids=(),
-            mngr_forward_origin=_get_mngr_forward_origin(),
-            is_discovering=True,
-            account_email=launcher_email,
-            extra_account_count=launcher_extra_count,
-        )
-        return make_html_response(content=html)
+        return make_html_response(content=render_landing_page(chrome_boot_state, landing_extras))
 
     git_url = request.args.get("git_url", "")
     branch = request.args.get("branch", "")
@@ -1498,7 +1465,7 @@ def _handle_chrome_events() -> Response:
             session_store: MultiAccountSessionStore | None = get_state().session_store
             paths: WorkspacePaths | None = get_state().api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
+            last_destroying_statuses = _destroying_status_by_agent_id(paths, backend_resolver)
             last_remote_states = _build_remote_tile_states(backend_resolver, session_store)
             has_accounts = bool(session_store and session_store.list_accounts())
             # The agent ids the shell may restore windows to: live workspaces plus
@@ -1510,7 +1477,8 @@ def _handle_chrome_events() -> Response:
                 json.dumps(
                     ChromeWorkspacesPayload(
                         workspaces=tuple(last_workspace_data),
-                        destroying_agent_ids=tuple(last_destroying_ids),
+                        destroying_agent_ids=tuple(last_destroying_statuses.keys()),
+                        destroying_status_by_agent_id=last_destroying_statuses,
                         has_accounts=has_accounts,
                         restorable_workspace_ids=tuple(last_restorable_ids),
                         remote_workspace_states=last_remote_states,
@@ -1657,21 +1625,22 @@ def _handle_chrome_events() -> Response:
                 # change makes ``current_data`` differ and pushes a ``workspaces``
                 # update below -- no separate liveness channel needed.
                 current_data = _build_workspace_list(backend_resolver, session_store)
-                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
+                current_destroying_statuses = _destroying_status_by_agent_id(paths, backend_resolver)
                 current_remote_states = _build_remote_tile_states(backend_resolver, session_store)
                 if (
                     current_data != last_workspace_data
-                    or current_destroying_ids != last_destroying_ids
+                    or current_destroying_statuses != last_destroying_statuses
                     or current_remote_states != last_remote_states
                 ):
                     last_workspace_data = current_data
-                    last_destroying_ids = current_destroying_ids
+                    last_destroying_statuses = current_destroying_statuses
                     last_remote_states = current_remote_states
                     yield "data: {}\n\n".format(
                         json.dumps(
                             ChromeWorkspacesPayload(
                                 workspaces=tuple(current_data),
-                                destroying_agent_ids=tuple(current_destroying_ids),
+                                destroying_agent_ids=tuple(current_destroying_statuses.keys()),
+                                destroying_status_by_agent_id=current_destroying_statuses,
                                 remote_workspace_states=current_remote_states,
                             ).to_payload_dict()
                         )
@@ -1796,20 +1765,27 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     )
 
 
-def _destroying_agent_ids(paths: WorkspacePaths | None, backend_resolver: BackendResolverInterface) -> list[str]:
-    """Return the agent ids currently in any in-flight / failed destroy state.
+def _destroying_status_by_agent_id(
+    paths: WorkspacePaths | None, backend_resolver: BackendResolverInterface
+) -> dict[str, str]:
+    """Return ``{agent_id: "running" | "failed"}`` for any in-flight / failed destroy.
 
     Pure read of the on-disk ``destroying/`` dir; never deletes records (the
     landing-page render path owns DONE-record cleanup). The chrome SSE emits
-    this alongside the workspaces list so Electron can distinguish "the
+    the ids alongside the workspaces list so Electron can distinguish "the
     workspace disappeared because we destroyed it" from "discovery transiently
     lost it" -- the latter must not navigate the user's window away from a
-    workspace that is still around.
+    workspace that is still around. The statuses drive the landing rows'
+    Destroying / Destroy-failed chips.
     """
     if paths is None:
-        return []
+        return {}
     records = list_destroying(paths, lambda aid: is_host_still_active(backend_resolver, paths, aid))
-    return [str(agent_id) for agent_id, record in records.items() if record.status != DestroyingStatus.DONE]
+    return {
+        str(agent_id): ("running" if record.status == DestroyingStatus.RUNNING else "failed")
+        for agent_id, record in records.items()
+        if record.status != DestroyingStatus.DONE
+    }
 
 
 def _build_workspace_list(
@@ -1861,6 +1837,10 @@ def _build_workspace_list(
                 is_stale="true" if is_stale else None,
                 supports_shutdown="true" if liveness is not None else None,
                 liveness=liveness.value if liveness is not None else None,
+                # Collapse the per-region / per-account provider instance name
+                # to a single friendly compute-provider label (aws-us-west-2
+                # -> AWS) for the landing row chip.
+                provider=friendly_provider_label(info.provider_name if info else None) or None,
                 account=account.email if account is not None else None,
             )
         )
@@ -1876,6 +1856,8 @@ def _build_workspace_list(
                 accent=tile.accent,
                 is_remote="true",
                 location=tile.location,
+                host_id=tile.host_id,
+                state_detail=tile.state_detail,
                 account=owner.email if owner is not None else None,
             )
         )
@@ -1959,9 +1941,11 @@ def build_chrome_boot_state() -> ChromeBootState:
     session_store = state.session_store
     paths = state.api_v1_paths
     minds_config = state.minds_config
+    destroying_statuses = _destroying_status_by_agent_id(paths, backend_resolver)
     workspaces = ChromeWorkspacesPayload(
         workspaces=tuple(_build_workspace_list(backend_resolver, session_store)),
-        destroying_agent_ids=tuple(_destroying_agent_ids(paths, backend_resolver)),
+        destroying_agent_ids=tuple(destroying_statuses.keys()),
+        destroying_status_by_agent_id=destroying_statuses,
         has_accounts=bool(session_store and session_store.list_accounts()),
         restorable_workspace_ids=tuple(str(aid) for aid in backend_resolver.list_restorable_workspace_ids()),
         remote_workspace_states=_build_remote_tile_states(backend_resolver, session_store),

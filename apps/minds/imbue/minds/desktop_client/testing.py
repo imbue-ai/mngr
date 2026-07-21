@@ -1,6 +1,8 @@
 """Shared non-fixture test helpers for desktop_client tests."""
 
+import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -20,3 +22,10 @@ def restic_backup_a_file(repository: str, password: str, source: Path) -> None:
         timeout=120.0,
     )
     assert result.returncode == 0, result.stderr
+
+
+def parse_boot_island(html: str) -> dict:
+    """Extract and parse a rendered page's boot-state JSON island (``id="minds-boot-state"``)."""
+    match = re.search(r'<script type="application/json" id="minds-boot-state">(.*?)</script>', html, re.DOTALL)
+    assert match is not None, "page carries no boot-state island"
+    return json.loads(match.group(1))

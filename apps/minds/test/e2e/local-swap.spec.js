@@ -12,6 +12,9 @@ const { test, expect } = require('@playwright/test');
 const path = require('path');
 
 const CHROME_JS = path.resolve(__dirname, '../../imbue/minds/desktop_client/static/chrome.js');
+// The compiled mithril bundle chrome.js expects (window.MindsUI) -- loaded
+// before chrome.js exactly like the production shell's classic script tag.
+const CHROME_BUNDLE = path.resolve(__dirname, '../../imbue/minds/desktop_client/static/dist/chrome.bundle.js');
 const ORIGIN = 'http://minds-swap-harness.localhost:7777';
 
 // The shared shell chrome (titlebar + switcher + shell-script slots), matching
@@ -57,7 +60,9 @@ async function bootHarness(page, { startPath = '/' } = {}) {
     body: shellPage({ title: 'Creating', label: 'creating' }),
   }));
   await page.goto(`${ORIGIN}${startPath}`);
-  // Browser mode (no window.minds): chrome.js's local-page branch drives swaps.
+  // Browser mode (no window.minds): chrome.js's local-page branch drives
+  // swaps. The bundle loads first, as in the production shell.
+  await page.addScriptTag({ path: CHROME_BUNDLE });
   await page.addScriptTag({ path: CHROME_JS });
   // Stamp the titlebar node so a rebuild (full navigation) would erase it.
   await page.evaluate(() => { document.getElementById('minds-titlebar').dataset.stamp = 'persistent'; });
@@ -69,7 +74,7 @@ test.describe('local page swap engine (chrome.js contract)', () => {
     await page.evaluate(() => {
       window.__tornDown = 0;
       window.addEventListener('minds:page-teardown', () => { window.__tornDown += 1; });
-      document.getElementById('sidebar-new-workspace').onclick();
+      document.getElementById('sidebar-new-workspace').click();
     });
     await expect(page.locator('[data-page="create"]')).toBeVisible();
     const state = await page.evaluate(() => ({
@@ -92,7 +97,7 @@ test.describe('local page swap engine (chrome.js contract)', () => {
 
   test('back over a swap restores the previous hub page via popstate', async ({ page }) => {
     await bootHarness(page);
-    await page.evaluate(() => document.getElementById('sidebar-new-workspace').onclick());
+    await page.evaluate(() => document.getElementById('sidebar-new-workspace').click());
     await expect(page.locator('[data-page="create"]')).toBeVisible();
     await page.goBack();
     await expect(page.locator('[data-page="home"]')).toBeVisible();
@@ -106,7 +111,7 @@ test.describe('local page swap engine (chrome.js contract)', () => {
     // canSwapTo requires the current path to be swappable too, so the switcher
     // entry does a full navigation that replaces the document -- proven by the
     // titlebar stamp being gone on the destination.
-    await page.evaluate(() => { document.getElementById('sidebar-new-workspace').onclick(); });
+    await page.evaluate(() => { document.getElementById('sidebar-new-workspace').click(); });
     await expect(page.locator('[data-page="create"]')).toBeVisible({ timeout: 5000 });
     expect(await page.evaluate(() => document.getElementById('minds-titlebar').dataset.stamp)).toBeUndefined();
   });

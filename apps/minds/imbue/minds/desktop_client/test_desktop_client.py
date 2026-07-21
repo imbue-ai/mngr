@@ -16,7 +16,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _collect_remote_workspace_tiles
-from imbue.minds.desktop_client.app import _destroying_agent_ids
+from imbue.minds.desktop_client.app import _destroying_status_by_agent_id
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -56,6 +56,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import parse_boot_island
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
@@ -434,8 +435,8 @@ def test_landing_page_shows_discovering_when_initial_discovery_not_done(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Discovering agents" in response.text
-    assert "reload" in response.text
+    # The discovering state renders client-side; the island carries the flag.
+    assert parse_boot_island(response.text)["landing"]["is_discovering"] is True
 
 
 def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path: Path) -> None:
@@ -507,39 +508,6 @@ def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert str(agent_id_1) in response.text
     assert str(agent_id_2) in response.text
-
-
-def test_landing_row_buttons_have_tooltips(tmp_path: Path) -> None:
-    """Landing workspace-row action buttons carry data-tooltip labels (rendered
-    as in-page custom tooltips by tooltip_triggers.js, since the content view
-    has no overlay bridge) rather than native title= attributes, plus an
-    aria-label so these icon-only buttons keep an accessible name."""
-    agent_id = AgentId()
-    backend_resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {"web": "http://test:9100"}},
-    )
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/")
-    assert response.status_code == 200
-    # A normal (non-shutdown-capable) row shows Restart / Open / Settings.
-    assert 'data-tooltip="Restart workspace"' in response.text
-    assert 'data-tooltip="Open in new window"' in response.text
-    assert 'data-tooltip="Settings"' in response.text
-    # No native title= tooltips remain on the row buttons.
-    assert 'title="Restart workspace"' not in response.text
-    assert 'title="Settings"' not in response.text
-    # data-tooltip is not exposed to assistive tech, so the aria-labels stay.
-    assert 'aria-label="Restart workspace"' in response.text
-    assert 'aria-label="Workspace settings"' in response.text
-    # The shared trigger script is loaded (via Base), which wires these up and
-    # -- absent the window.minds bridge -- renders them in-page.
-    assert "/_static/tooltip_triggers.js" in response.text
 
 
 def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
@@ -656,7 +624,10 @@ def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Pat
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "/create" in response.text
+    # Both known workspaces ride the island (the component renders the Create
+    # button client-side from them).
+    island = parse_boot_island(response.text)
+    assert len(island["chrome"]["workspaces"]["workspaces"]) == 2
 
 
 def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:
@@ -888,7 +859,7 @@ def test_chrome_events_sse_omits_discovery_health_when_healthy(tmp_path: Path) -
     assert "discovery_health" not in response.text
 
 
-def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> None:
+def test_destroying_statuses_include_live_destroy(tmp_path: Path) -> None:
     """An agent with an alive destroy pid + still in the resolver shows up as running.
 
     main.js keys its "ok to navigate the user away from this workspace"
@@ -908,14 +879,14 @@ def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> N
     # The pid is alive, so the record is RUNNING regardless of host state; an
     # empty resolver is enough to drive the helper.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    ids = _destroying_agent_ids(paths, backend_resolver)
-    assert ids == [str(agent_id)]
+    statuses = _destroying_status_by_agent_id(paths, backend_resolver)
+    assert statuses == {str(agent_id): "running"}
 
 
-def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
+def test_destroying_statuses_empty_when_paths_is_none() -> None:
     """The test-server helper builds a minimal app without WorkspacePaths;
     the helper must tolerate that without raising."""
-    assert _destroying_agent_ids(None, StaticBackendResolver(url_by_agent_and_service={})) == []
+    assert _destroying_status_by_agent_id(None, StaticBackendResolver(url_by_agent_and_service={})) == {}
 
 
 def _write_dead_destroy_dir(paths: WorkspacePaths, agent_id: AgentId, host_id: HostId) -> None:

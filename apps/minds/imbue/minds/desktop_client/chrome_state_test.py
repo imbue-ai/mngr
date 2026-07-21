@@ -39,6 +39,7 @@ def test_workspace_entry_full_local_matches_legacy_key_order() -> None:
         is_stale="true",
         supports_shutdown="true",
         liveness="RUNNING",
+        provider="Docker",
         account="alice@example.com",
     )
 
@@ -50,6 +51,7 @@ def test_workspace_entry_full_local_matches_legacy_key_order() -> None:
             "is_stale": "true",
             "supports_shutdown": "true",
             "liveness": "RUNNING",
+            "provider": "Docker",
             "account": "alice@example.com",
         }
     )
@@ -62,6 +64,8 @@ def test_workspace_entry_remote_matches_legacy_key_order() -> None:
         accent="#123456",
         is_remote="true",
         location="my-laptop",
+        host_id="host-1",
+        state_detail="key sync failed",
         account="alice@example.com",
     )
 
@@ -72,6 +76,8 @@ def test_workspace_entry_remote_matches_legacy_key_order() -> None:
             "accent": "#123456",
             "is_remote": "true",
             "location": "my-laptop",
+            "host_id": "host-1",
+            "state_detail": "key sync failed",
             "account": "alice@example.com",
         }
     )
@@ -84,6 +90,7 @@ def test_workspaces_connect_snapshot_matches_legacy_bytes() -> None:
     payload = ChromeWorkspacesPayload(
         workspaces=(ChromeWorkspaceEntry(id="agent-1", name="ws", accent="#0b292b"),),
         destroying_agent_ids=("agent-9",),
+        destroying_status_by_agent_id={"agent-9": "running"},
         has_accounts=True,
         restorable_workspace_ids=("agent-1", "agent-9"),
         remote_workspace_states={"agent-2": "connecting"},
@@ -94,6 +101,7 @@ def test_workspaces_connect_snapshot_matches_legacy_bytes() -> None:
             "type": "workspaces",
             "workspaces": [{"id": "agent-1", "name": "ws", "accent": "#0b292b"}],
             "destroying_agent_ids": ["agent-9"],
+            "destroying_status_by_agent_id": {"agent-9": "running"},
             "has_accounts": True,
             "restorable_workspace_ids": ["agent-1", "agent-9"],
             "remote_workspace_states": {"agent-2": "connecting"},
@@ -105,6 +113,7 @@ def test_workspaces_update_event_omits_connect_only_fields() -> None:
     payload = ChromeWorkspacesPayload(
         workspaces=(),
         destroying_agent_ids=(),
+        destroying_status_by_agent_id={},
         remote_workspace_states={},
     )
 
@@ -113,6 +122,7 @@ def test_workspaces_update_event_omits_connect_only_fields() -> None:
             "type": "workspaces",
             "workspaces": [],
             "destroying_agent_ids": [],
+            "destroying_status_by_agent_id": {},
             "remote_workspace_states": {},
         }
     )
@@ -196,6 +206,7 @@ def test_boot_state_bundles_the_event_payloads_by_name() -> None:
         workspaces=ChromeWorkspacesPayload(
             workspaces=(),
             destroying_agent_ids=(),
+            destroying_status_by_agent_id={},
             has_accounts=False,
             restorable_workspace_ids=(),
             remote_workspace_states={},

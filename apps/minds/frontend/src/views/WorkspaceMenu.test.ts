@@ -139,6 +139,7 @@ describe("WorkspaceMenu", () => {
       type: "workspaces",
       workspaces,
       destroying_agent_ids: [],
+      destroying_status_by_agent_id: {},
       remote_workspace_states: {},
     });
   }

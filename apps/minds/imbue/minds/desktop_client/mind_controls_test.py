@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.testing import parse_boot_island
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -217,10 +218,11 @@ def test_landing_page_stopped_mind_shows_only_start(tmp_path: Path) -> None:
 
     html = client.get("/").text
 
-    # Exactly one control is visible: Start (the container is stopped), not Stop.
-    assert _button_display(html, "landing-start-btn") == ""
-    assert _button_display(html, "landing-stop-btn") == "none"
-    assert "Restart workspace" not in html
+    # The island entry drives the controls (the component shows Start for
+    # STOPPED; the button logic itself is vitest-covered).
+    entry = parse_boot_island(html)["chrome"]["workspaces"]["workspaces"][0]
+    assert entry["supports_shutdown"] == "true"
+    assert entry["liveness"] == "STOPPED"
 
 
 def test_landing_page_running_mind_shows_only_stop(tmp_path: Path) -> None:
@@ -231,8 +233,9 @@ def test_landing_page_running_mind_shows_only_stop(tmp_path: Path) -> None:
 
     html = client.get("/").text
 
-    assert _button_display(html, "landing-stop-btn") == ""
-    assert _button_display(html, "landing-start-btn") == "none"
+    entry = parse_boot_island(html)["chrome"]["workspaces"]["workspaces"][0]
+    assert entry["supports_shutdown"] == "true"
+    assert entry["liveness"] == "RUNNING"
 
 
 def test_landing_page_unknown_mind_shows_neither_control(tmp_path: Path) -> None:
@@ -245,5 +248,6 @@ def test_landing_page_unknown_mind_shows_neither_control(tmp_path: Path) -> None
 
     html = client.get("/").text
 
-    assert _button_display(html, "landing-start-btn") == "none"
-    assert _button_display(html, "landing-stop-btn") == "none"
+    entry = parse_boot_island(html)["chrome"]["workspaces"]["workspaces"][0]
+    assert entry["supports_shutdown"] == "true"
+    assert entry["liveness"] == "UNKNOWN"

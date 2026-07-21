@@ -10,6 +10,12 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.chrome_state import ChromeBootState
+from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
+from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
+from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
+from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
@@ -30,6 +36,7 @@ from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import resolve_create_host_name
+from imbue.minds.desktop_client.testing import parse_boot_island
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_NAME
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -51,35 +58,101 @@ _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 
 
-def test_render_landing_page_with_agents_lists_them_as_links() -> None:
-    ids = (_AGENT_A, _AGENT_B)
-    html = render_landing_page(accessible_agent_ids=ids)
-    assert f"/goto/{_AGENT_A}/" in html
-    assert f"/goto/{_AGENT_B}/" in html
-    assert str(_AGENT_A) in html
-    assert str(_AGENT_B) in html
+def _landing_entry_fixture(agent_id: AgentId, liveness: str | None = None) -> ChromeWorkspaceEntry:
+    return ChromeWorkspaceEntry(
+        id=str(agent_id),
+        name=f"ws-{str(agent_id)[-4:]}",
+        accent="#0b292b",
+        supports_shutdown="true" if liveness is not None else None,
+        liveness=liveness,
+    )
 
 
-def test_render_landing_page_settings_link_interpolates_agent_id() -> None:
-    # Regression: the settings gear is a <Button> (JinjaX component), so its
-    # onclick must use the `attr={{ expr }}` form -- a quoted `onclick="...{{ }}..."`
-    # is forwarded literally, which sent `/workspace/{{ agent_id }}/settings` to the
-    # server and 500'd the AgentId parse on destroy.
-    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
-    assert f"/workspace/{_AGENT_A}/settings" in html
+def _landing_boot_fixture(
+    entries: tuple[ChromeWorkspaceEntry, ...],
+    destroying_status_by_agent_id: dict[str, str] | None = None,
+) -> ChromeBootState:
+    statuses = destroying_status_by_agent_id or {}
+    return ChromeBootState(
+        workspaces=ChromeWorkspacesPayload(
+            workspaces=entries,
+            destroying_agent_ids=tuple(statuses.keys()),
+            destroying_status_by_agent_id=statuses,
+            has_accounts=False,
+            restorable_workspace_ids=(),
+            remote_workspace_states={},
+        ),
+        providers=ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None),
+        requests=ChromeRequestsPayload(count=0, request_ids=(), auto_open=True),
+        system_interface_statuses=(),
+    )
+
+
+def _landing_extras_fixture(
+    account_email: str = "",
+    extra_account_count: int = 0,
+    is_discovering: bool = False,
+    locked_account_emails: tuple[str, ...] = (),
+) -> LandingBootExtras:
+    return LandingBootExtras(
+        mngr_forward_origin="https://localhost:8421",
+        account_email=account_email,
+        extra_account_count=extra_account_count,
+        locked_account_emails=locked_account_emails,
+        is_discovering=is_discovering,
+    )
+
+
+def test_render_landing_page_island_carries_rows_and_origin() -> None:
+    """The boot island is the page's data contract now: every row entry and
+    the mngr-forward origin the component builds ``/goto/`` links from must
+    round-trip through it."""
+    boot = _landing_boot_fixture((_landing_entry_fixture(_AGENT_A), _landing_entry_fixture(_AGENT_B)))
+    html = render_landing_page(boot, _landing_extras_fixture())
+    island = parse_boot_island(html)
+    assert [entry["id"] for entry in island["chrome"]["workspaces"]["workspaces"]] == [str(_AGENT_A), str(_AGENT_B)]
+    assert island["landing"]["mngr_forward_origin"] == "https://localhost:8421"
+    # JinjaX interpolation must have actually run (a literal moustache in the
+    # page means a component attr was forwarded unrendered).
     assert "{{" not in html
 
 
-def test_render_landing_page_has_open_in_new_window_button_before_settings() -> None:
-    # Each workspace row carries an "open in new window" arrow to the LEFT of
-    # the settings gear. It calls window.landingOpenInNewWindow, which relays
-    # to the main process in Electron (or opens a new tab in a browser).
-    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
-    assert "window.landingOpenInNewWindow(this)" in html
-    # The open-in-new arrow glyph (Icon16 ``arrow-up-right``, Figma node 857-5137).
-    assert '<path d="M12.9331 10.3336' in html
-    # It sits before the settings button within the row.
-    assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
+def test_render_landing_page_island_carries_liveness_and_destroying_status() -> None:
+    boot = _landing_boot_fixture(
+        (_landing_entry_fixture(_AGENT_A, liveness="STOPPED"), _landing_entry_fixture(_AGENT_B)),
+        destroying_status_by_agent_id={str(_AGENT_B): "failed"},
+    )
+    html = render_landing_page(boot, _landing_extras_fixture())
+    island = parse_boot_island(html)
+    entries = island["chrome"]["workspaces"]["workspaces"]
+    assert entries[0]["liveness"] == "STOPPED"
+    assert entries[0]["supports_shutdown"] == "true"
+    assert "liveness" not in entries[1]
+    assert island["chrome"]["workspaces"]["destroying_status_by_agent_id"] == {str(_AGENT_B): "failed"}
+
+
+def test_render_landing_page_island_marks_discovering_and_launcher_account() -> None:
+    html = render_landing_page(
+        _landing_boot_fixture(()),
+        _landing_extras_fixture(account_email="alice@example.com", extra_account_count=2, is_discovering=True),
+    )
+    island = parse_boot_island(html)
+    assert island["landing"]["is_discovering"] is True
+    assert island["landing"]["account_email"] == "alice@example.com"
+    assert island["landing"]["extra_account_count"] == 2
+
+
+def test_render_landing_page_mounts_the_component_from_page_scripts() -> None:
+    """The shell is markup-free: the island renders inside ``#local-page-root``,
+    the mount call sits in ``#local-page-scripts`` (re-run per swap), and none
+    of the deleted inline handlers remain."""
+    html = render_landing_page(_landing_boot_fixture((_landing_entry_fixture(_AGENT_A),)), _landing_extras_fixture())
+    assert "window.MindsUI.mountLanding(document.getElementById('landing-root'))" in html
+    assert 'id="landing-root"' in html
+    assert html.index('id="minds-boot-state"') < html.index("mountLanding")
+    assert "landingRowClick" not in html
+    assert "landingOpenInNewWindow" not in html
+    assert "loadBackupStatus" not in html
 
 
 def test_render_workspace_settings_data_agent_id_interpolates() -> None:
@@ -186,43 +259,6 @@ def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
     )
     assert f"/goto/{_AGENT_A}/" in html
     assert "{{" not in html
-
-
-def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
-    html = render_landing_page(accessible_agent_ids=())
-    assert "No workspaces yet" in html
-
-
-def test_render_landing_page_discovering_shows_auto_refresh() -> None:
-    html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
-    assert "Discovering agents" in html
-    assert "reload" in html
-    assert "No workspaces yet" not in html
-    assert "/goto/" not in html
-
-
-def test_render_landing_page_signed_out_launcher_signs_in_back_to_home() -> None:
-    # Signed out (no account email): the bottom-left account launcher reads
-    # "Log in", and (the Landing page being a trusted local page on the chrome
-    # surface) it opens the sign-in modal via the shell bridge with
-    # ``returnTo: '/'`` so a successful sign-in lands back on the home screen
-    # (the server's return_to default is the create screen), leading with the
-    # sign-in tab to match the launcher's label.
-    html = render_landing_page(accessible_agent_ids=())
-    assert 'id="landing-minds-settings"' in html
-    assert 'id="landing-account"' in html
-    assert "Log in" in html
-    assert "window.minds.openSigninModal('/', 'signin')" in html
-
-
-def test_render_landing_page_signed_in_launcher_shows_email_and_extra_count() -> None:
-    html = render_landing_page(
-        accessible_agent_ids=(),
-        account_email="alice@example.com",
-        extra_account_count=2,
-    )
-    assert "alice@example.com" in html
-    assert "(+2)" in html
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
@@ -866,7 +902,7 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     assert opted_out in render_inbox_page(cards=())
     # Normal scrolling content pages keep the reserved gutter so their layout
     # doesn't shift sideways when a classic scrollbar appears.
-    assert '<html lang="en">' in render_landing_page(accessible_agent_ids=())
+    assert '<html lang="en">' in render_landing_page(_landing_boot_fixture(()), _landing_extras_fixture())
 
 
 def test_render_sidebar_page_is_a_positioning_shell_with_a_menu_mount() -> None:
@@ -1276,7 +1312,7 @@ def test_chrome_shell_pages_load_the_frontend_bundle_once_outside_page_scripts()
     """ChromeShell pages load the mithril bundle exactly once, as a classic
     (non-deferred) SHELL script -- never inside ``#local-page-scripts``, where
     the swap engine would re-execute the IIFE on every hub swap."""
-    html = render_landing_page(accessible_agent_ids=[])
+    html = render_landing_page(_landing_boot_fixture(()), _landing_extras_fixture())
     assert html.count(_BUNDLE_SCRIPT_TAG) == 1
     assert html.index(_BUNDLE_SCRIPT_TAG) < html.index('id="local-page-scripts"')
 

@@ -40,6 +40,7 @@ interface AccentCacheEntry {
 interface StoreState {
   workspaces: ChromeWorkspaceEntry[];
   destroyingAgentIds: string[];
+  destroyingStatusByAgentId: Record<string, string>;
   remoteWorkspaceStates: Record<string, string>;
   hasAccounts: boolean | null;
   restorableWorkspaceIds: string[] | null;
@@ -79,6 +80,7 @@ function initialState(): StoreState {
   return {
     workspaces: [],
     destroyingAgentIds: [],
+    destroyingStatusByAgentId: {},
     remoteWorkspaceStates: {},
     hasAccounts: null,
     restorableWorkspaceIds: null,
@@ -123,6 +125,11 @@ export function getWorkspaces(): ChromeWorkspaceEntry[] {
 
 export function getDestroyingAgentIds(): string[] {
   return state.destroyingAgentIds;
+}
+
+// "running" | "failed" while a destroy is in flight / failed; null otherwise.
+export function getDestroyingStatus(agentId: string): string | null {
+  return state.destroyingStatusByAgentId[agentId] ?? null;
 }
 
 export function getRemoteWorkspaceStates(): Record<string, string> {
@@ -239,6 +246,7 @@ export function applyChromeEvent(event: ChromeEvent): void {
     case "workspaces": {
       state.workspaces = event.workspaces;
       state.destroyingAgentIds = event.destroying_agent_ids;
+      state.destroyingStatusByAgentId = event.destroying_status_by_agent_id;
       state.remoteWorkspaceStates = event.remote_workspace_states;
       if (event.has_accounts !== undefined) state.hasAccounts = event.has_accounts;
       if (event.restorable_workspace_ids !== undefined) {
@@ -315,6 +323,18 @@ export function seed(bootState: ChromeBootState): void {
 export function beginMindAction(agentId: string, targetLiveness: "RUNNING" | "STOPPED"): void {
   state.pendingMindActionTargetByAgentId[agentId] = targetLiveness;
   state.transientLivenessByAgentId[agentId] = targetLiveness === "RUNNING" ? "STARTING" : "STOPPING";
+  notify();
+}
+
+// The action's synchronous endpoint confirmed the target state: show it
+// immediately (the transient flips to the final state) while keeping the
+// pending guard so an interim SSE payload still carrying the pre-action
+// state cannot flicker the row back; the payload that reaches the target
+// clears both (applyAuthoritativeLiveness).
+export function completeMindAction(agentId: string): void {
+  const target = state.pendingMindActionTargetByAgentId[agentId];
+  if (target === undefined) return;
+  state.transientLivenessByAgentId[agentId] = target;
   notify();
 }
 

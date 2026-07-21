@@ -17,9 +17,15 @@ export interface ChromeWorkspaceEntry {
   supports_shutdown?: string;
   // RUNNING / STOPPED / UNKNOWN, present only on shutdown-capable minds.
   liveness?: string;
+  // Friendly compute-provider label (e.g. "AWS") for the landing row chip.
+  provider?: string;
   // "true" for workspaces known only from synced records (another device).
   is_remote?: string;
   location?: string;
+  // The synced record's host id (the remove-record handle); remote rows only.
+  host_id?: string;
+  // Detail for a remote tile's "error" state (the tooltip text).
+  state_detail?: string;
   account?: string;
 }
 
@@ -27,6 +33,7 @@ export interface ChromeWorkspacesPayload {
   type: "workspaces";
   workspaces: ChromeWorkspaceEntry[];
   destroying_agent_ids: string[];
+  destroying_status_by_agent_id: Record<string, string>;
   // Connect-time snapshot only; absent on diff-driven updates.
   has_accounts?: boolean;
   restorable_workspace_ids?: string[];
@@ -107,4 +114,19 @@ export interface ChromeBootState {
   providers: ChromeProvidersPayload;
   requests: ChromeRequestsPayload;
   system_interface_statuses: ChromeSystemInterfaceStatusPayload[];
+}
+
+// Landing-page-specific boot island data (the ``landing`` sibling of the
+// chrome snapshot; mirror of LandingBootExtras in chrome_state.py).
+export interface LandingBootExtras {
+  mngr_forward_origin: string;
+  account_email: string;
+  extra_account_count: number;
+  locked_account_emails: string[];
+  is_discovering: boolean;
+}
+
+export interface LandingBootIsland {
+  chrome: ChromeBootState;
+  landing: LandingBootExtras;
 }

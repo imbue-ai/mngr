@@ -53,11 +53,21 @@ class ChromeWorkspaceEntry(FrozenModel):
     liveness: str | None = Field(
         default=None, description="RUNNING / STOPPED / UNKNOWN for shutdown-capable minds; absent otherwise"
     )
+    provider: str | None = Field(
+        default=None,
+        description="Friendly compute-provider label (e.g. AWS) for the landing row chip; absent on remote rows",
+    )
     is_remote: str | None = Field(
         default=None, description='"true" for workspaces known only from synced records; absent otherwise'
     )
     location: str | None = Field(
         default=None, description="Where a remote workspace lives (device label / provider kind); absent on local rows"
+    )
+    host_id: str | None = Field(
+        default=None, description="The synced record's host id (the remove-record handle); remote rows only"
+    )
+    state_detail: str | None = Field(
+        default=None, description="Detail for a remote tile's 'error' state (the tooltip text); absent otherwise"
     )
     account: str | None = Field(
         default=None, description="Owning account email when known; absent for account-less workspaces"
@@ -80,6 +90,9 @@ class ChromeWorkspacesPayload(FrozenModel):
     workspaces: tuple[ChromeWorkspaceEntry, ...] = Field(description="Every known workspace row, local then remote")
     destroying_agent_ids: tuple[str, ...] = Field(
         description="Agent ids in any in-flight / failed destroy state (so a vanished id is not treated as lost)"
+    )
+    destroying_status_by_agent_id: dict[str, str] = Field(
+        description='agent_id -> "running" | "failed" for the same destroy records (the landing row chip)'
     )
     has_accounts: bool | None = Field(
         default=None, description="Whether any account is signed in; connect-time snapshot only, absent on updates"
@@ -173,6 +186,26 @@ class ChromeSystemInterfaceStatusPayload(FrozenModel):
     @pure
     def to_payload_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)
+
+
+class LandingBootExtras(FrozenModel):
+    """Landing-page-specific boot island data, a sibling of the chrome
+    snapshot in the ``landing`` island key (everything row-level rides the
+    chrome workspaces payload instead, so live pushes keep rows complete)."""
+
+    mngr_forward_origin: str = Field(description="Bare origin of the mngr forward plugin (workspace links target it)")
+    account_email: str = Field(description="The bottom-left launcher's account email; empty renders 'Log in'")
+    extra_account_count: int = Field(description="How many further accounts are signed in (the '(+N)' suffix)")
+    locked_account_emails: tuple[str, ...] = Field(
+        description="Accounts whose synced secrets exist but whose key is absent here (the unlock banner)"
+    )
+    is_discovering: bool = Field(
+        description="Initial discovery still running with no rows yet (the 'Discovering agents...' state)"
+    )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
 
 
 class ChromeBootState(FrozenModel):

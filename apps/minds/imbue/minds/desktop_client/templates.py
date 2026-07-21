@@ -33,6 +33,8 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.chrome_state import ChromeBootState
+from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -288,75 +290,23 @@ class RemoteWorkspaceTile(FrozenModel):
 
 @pure
 def render_landing_page(
-    accessible_agent_ids: Sequence[AgentId],
-    mngr_forward_origin: str = "",
-    is_discovering: bool = False,
-    agent_names: dict[str, str] | None = None,
-    destroying_status_by_agent_id: dict[str, str] | None = None,
-    agent_accents: dict[str, str] | None = None,
-    shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
-    mind_liveness_by_agent_id: dict[str, str] | None = None,
-    agent_providers: dict[str, str] | None = None,
-    account_email: str = "",
-    extra_account_count: int = 0,
-    remote_workspaces: Sequence[RemoteWorkspaceTile] | None = None,
-    locked_account_emails: Sequence[str] | None = None,
+    chrome_boot_state: ChromeBootState,
+    landing_extras: LandingBootExtras,
 ) -> str:
-    """Render the landing page listing accessible workspaces.
+    """Render the landing page shell.
 
-    ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin
-    (e.g. ``"http://localhost:8421"``). Workspace links target
-    ``{mngr_forward_origin}/goto/<agent>/`` because Phase 2 deletes minds'
-    in-process subdomain forwarder; the plugin owns ``/goto/`` now.
-
-    agent_names maps agent ID strings to human-readable workspace names.
-
-    agent_accents maps agent ID strings to ``#rrggbb`` workspace accent
-    hexes (the stored color label, resolved by the caller). Agents without
-    an entry -- including the whole map being None -- render their homepage
-    tile with the default workspace color.
-
-    destroying_status_by_agent_id maps agent ID strings to one of
-    ``"running"``/``"failed"`` for agents whose detached destroy subprocess
-    is currently in flight (running) or exited without removing the agent
-    (failed). Agents whose destroy is ``done`` are not included -- the
-    landing handler deletes those records so the row vanishes naturally
-    once discovery propagates ``AgentDestroyed``. When None, no marker is
-    shown.
-
-    When is_discovering is True, the page shows a "Discovering agents..." message
-    with auto-refresh instead of the empty state. This is used when the
-    envelope-stream consumer hasn't completed initial agent discovery yet.
-
-    ``account_email`` / ``extra_account_count`` feed the bottom-left account
-    launcher: the default (or first) signed-in account's email, plus how many
-    further accounts are signed in (rendered as a "(+N)" suffix). An empty
-    email renders the launcher as "Log in" instead.
+    The workspace rows, providers panel, unlock banner and launchers are the
+    mithril LandingPage component, mounted from the ``#minds-boot-state``
+    island this render seeds: the chrome snapshot (workspaces incl. liveness /
+    provider labels / destroying statuses, providers, requests, health
+    statuses) under ``chrome``, and the page extras (launcher account, locked
+    accounts, discovering flag, mngr-forward origin) under ``landing``.
     """
-    # Workspaces without an entry in agent_accents (caller didn't supply
-    # one, or supplied a partial map) fall back to the default workspace
-    # color so the homepage tile still paints with something readable.
-    effective_accents: dict[str, str] = {}
-    supplied = agent_accents or {}
-    for aid in accessible_agent_ids:
-        effective_accents[str(aid)] = supplied.get(str(aid), DEFAULT_WORKSPACE_COLOR)
-    shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
-    return CATALOG.render(
-        "pages.Landing",
-        remote_workspaces=list(remote_workspaces or []),
-        locked_account_emails=list(locked_account_emails or []),
-        agent_ids=accessible_agent_ids,
-        agent_accents=effective_accents,
-        mngr_forward_origin=mngr_forward_origin,
-        is_discovering=is_discovering,
-        agent_names=agent_names or {},
-        destroying_status_by_agent_id=destroying_status_by_agent_id or {},
-        shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
-        mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
-        agent_providers=agent_providers or {},
-        account_email=account_email,
-        extra_account_count=extra_account_count,
-    )
+    island = {
+        "chrome": chrome_boot_state.to_payload_dict(),
+        "landing": landing_extras.to_payload_dict(),
+    }
+    return CATALOG.render("pages.Landing", boot_state=island)
 
 
 # Hardcoded fallbacks for the workspace-creation form. Overridable via the

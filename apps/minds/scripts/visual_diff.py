@@ -62,6 +62,12 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import setup_logging
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.chrome_state import ChromeBootState
+from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
+from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
+from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
+from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.templates import render_accounts_modal_page
@@ -88,6 +94,7 @@ from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
@@ -186,6 +193,45 @@ def _stub_account(user_id: str, email: str, n_workspaces: int = 0) -> _Account:
     )
 
 
+def _landing_entry(agent_id: AgentId, name: str, liveness: str | None = None) -> ChromeWorkspaceEntry:
+    return ChromeWorkspaceEntry(
+        id=str(agent_id),
+        name=name,
+        accent=DEFAULT_WORKSPACE_COLOR,
+        supports_shutdown="true" if liveness is not None else None,
+        liveness=liveness,
+        provider="Docker",
+    )
+
+
+def _landing_boot(
+    entries: tuple[ChromeWorkspaceEntry, ...], destroying_status_by_agent_id: dict[str, str]
+) -> ChromeBootState:
+    return ChromeBootState(
+        workspaces=ChromeWorkspacesPayload(
+            workspaces=entries,
+            destroying_agent_ids=tuple(destroying_status_by_agent_id.keys()),
+            destroying_status_by_agent_id=destroying_status_by_agent_id,
+            has_accounts=False,
+            restorable_workspace_ids=(),
+            remote_workspace_states={},
+        ),
+        providers=ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None),
+        requests=ChromeRequestsPayload(count=0, request_ids=(), auto_open=True),
+        system_interface_statuses=(),
+    )
+
+
+def _landing_extras(is_discovering: bool = False) -> LandingBootExtras:
+    return LandingBootExtras(
+        mngr_forward_origin="http://localhost:8421",
+        account_email="alice@example.com",
+        extra_account_count=0,
+        locked_account_emails=(),
+        is_discovering=is_discovering,
+    )
+
+
 def _build_scenarios() -> list[Scenario]:
     agent_a = AgentId("agent-00000000000000000000000000000001")
     agent_b = AgentId("agent-00000000000000000000000000000002")
@@ -213,26 +259,36 @@ def _build_scenarios() -> list[Scenario]:
 
     return [
         # -- Landing page ------------------------------------------------
-        Scenario(name="landing_empty", builder=lambda: render_landing_page(accessible_agent_ids=())),
+        Scenario(name="landing_empty", builder=lambda: render_landing_page(_landing_boot((), {}), _landing_extras())),
         Scenario(
             name="landing_discovering",
-            builder=lambda: render_landing_page(accessible_agent_ids=(), is_discovering=True),
+            builder=lambda: render_landing_page(_landing_boot((), {}), _landing_extras(is_discovering=True)),
         ),
         Scenario(
             name="landing_with_workspaces",
             builder=lambda: render_landing_page(
-                accessible_agent_ids=(agent_a, agent_b),
-                mngr_forward_origin="http://localhost:8421",
-                agent_names={str(agent_a): "alpha", str(agent_b): "beta"},
+                _landing_boot(
+                    (
+                        _landing_entry(agent_a, "alpha"),
+                        _landing_entry(agent_b, "beta", liveness="STOPPED"),
+                    ),
+                    {},
+                ),
+                _landing_extras(),
             ),
         ),
         Scenario(
             name="landing_with_destroying_workspace",
             builder=lambda: render_landing_page(
-                accessible_agent_ids=(agent_a, agent_b, agent_c),
-                mngr_forward_origin="http://localhost:8421",
-                agent_names={str(agent_a): "alpha", str(agent_b): "beta-destroying", str(agent_c): "gamma-failed"},
-                destroying_status_by_agent_id={str(agent_b): "running", str(agent_c): "failed"},
+                _landing_boot(
+                    (
+                        _landing_entry(agent_a, "alpha"),
+                        _landing_entry(agent_b, "beta-destroying"),
+                        _landing_entry(agent_c, "gamma-failed"),
+                    ),
+                    {str(agent_b): "running", str(agent_c): "failed"},
+                ),
+                _landing_extras(),
             ),
         ),
         # -- Welcome page ------------------------------------------------
@@ -574,6 +630,15 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
                         "  try { return (s.href || '').includes('app.min.css')"
                         "    && s.cssRules.length > 0; }"
                         "  catch (e) { return false; } })",
+                        timeout=10000,
+                    )
+                    # Converted pages render client-side from the boot island;
+                    # wait for the mount marker so the screenshot captures the
+                    # mounted component, not the empty container. Pages without
+                    # an island pass instantly.
+                    page.wait_for_function(
+                        "() => !document.querySelector('#minds-boot-state')"
+                        " || document.querySelector('[data-minds-mounted]') !== null",
                         timeout=10000,
                     )
                     for action in sc.interactions:
