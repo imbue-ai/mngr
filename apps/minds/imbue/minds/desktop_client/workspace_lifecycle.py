@@ -31,7 +31,7 @@ from imbue.mngr.primitives import HostState
 # is reported to the UI as a stop *failure* even though the underlying stop
 # keeps running -- so a too-small cap manufactures false failures for exactly
 # the flows that are working.
-_LIFECYCLE_TIMEOUT_SECONDS: Final[float] = 1200.0
+_HOST_STOP_START_TIMEOUT_SECONDS: Final[float] = 1200.0
 
 
 class MindHostAction(UpperCaseStrEnum):
@@ -79,7 +79,7 @@ def perform_mind_host_action(
     try:
         with cg:
             finished = cg.run_process_to_completion(
-                argv, timeout=_LIFECYCLE_TIMEOUT_SECONDS, is_checked_after=False, env=env
+                argv, timeout=_HOST_STOP_START_TIMEOUT_SECONDS, is_checked_after=False, env=env
             )
     except (OSError, ConcurrencyGroupError) as exc:
         logger.warning("Could not run mngr to {} host for {}: {!r}", action.value, workspace_agent_id, exc)

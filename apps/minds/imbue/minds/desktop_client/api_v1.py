@@ -168,9 +168,11 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
 
-# A blocking lifecycle (start/stop) call shells out to ``mngr`` and waits for
-# the host transition to resolve before returning the final state.
-_LIFECYCLE_TIMEOUT_SECONDS: float = 300.0
+# Cap for a short blocking ``mngr`` command run via ``_run_mngr_blocking``
+# (restart-services, git label read/write) -- quick operations, unlike the host
+# stop/start transition (that path uses ``perform_mind_host_action``'s much
+# larger ``_HOST_STOP_START_TIMEOUT_SECONDS``, sized for the slow first cloud stop).
+_MNGR_BLOCKING_COMMAND_TIMEOUT_SECONDS: float = 300.0
 
 # SSE event-stream headers (disable proxy/browser buffering so events flush live).
 _SSE_HEADERS: dict[str, str] = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
@@ -773,7 +775,7 @@ def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[in
     """Run an ``mngr`` command to completion; return ``(returncode, stdout, stderr)``."""
     cg = parent_cg.make_concurrency_group(name="workspace-lifecycle")
     with cg:
-        finished = cg.run_process_to_completion(argv, timeout=_LIFECYCLE_TIMEOUT_SECONDS, is_checked_after=False)
+        finished = cg.run_process_to_completion(argv, timeout=_MNGR_BLOCKING_COMMAND_TIMEOUT_SECONDS, is_checked_after=False)
     returncode = finished.returncode if finished.returncode is not None else 1
     return returncode, finished.stdout, finished.stderr
 
