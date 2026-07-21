@@ -30,6 +30,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.onboarding_services import OnboardingService
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -623,6 +624,7 @@ def expected_creation_duration_seconds(launch_mode: LaunchMode) -> float:
 def render_creating_page(
     creation_id: CreationId,
     info: AgentCreationInfo,
+    onboarding_services: Sequence[OnboardingService] = (),
 ) -> str:
     """Render the progress page shown while an agent is being created.
 
@@ -646,6 +648,13 @@ def render_creating_page(
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
+        # Onboarding walkthrough context: the theme-color swatches for the
+        # step-1 demo (interactive only -- the pick is not persisted), the
+        # latchkey services for the step-2 carousel, and whether the
+        # workspace machine is remote (drives the step-3 copy/graphic).
+        palette=WORKSPACE_PALETTE,
+        onboarding_services=list(onboarding_services),
+        is_remote=info.launch_mode is LaunchMode.IMBUE_CLOUD,
     )
 
 

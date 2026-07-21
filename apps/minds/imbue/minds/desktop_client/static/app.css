@@ -576,3 +576,158 @@ html.no-scrollbar-gutter {
 .styleguide-toggle:active {
   background-image: linear-gradient(var(--c-fill-active), var(--c-fill-active));
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * Creating-page onboarding walkthrough (Creating.jinja + onboarding.js).
+ *
+ * The walkthrough is a three-step explainer. #onboarding carries one of
+ * step-1 / step-2 / step-3; that class drives (a) which .onboarding-step
+ * text panel is visible (onboarding.js toggles ``hidden`` on those) and
+ * (b) which scene nodes are revealed. The scene nodes shrink/grow with
+ * transform+max-width transitions so advancing steps reads as zooming out
+ * from the laptop to the full computer-tunnel-workspace picture.
+ */
+.scene-node,
+.scene-group {
+  transition:
+    opacity 500ms ease,
+    transform 500ms ease,
+    max-width 500ms ease;
+}
+/* Hidden scene elements collapse (max-width) so visible ones re-center. */
+.onboarding.step-1 #scene-key,
+.onboarding.step-1 #scene-tunnel,
+.onboarding.step-1 #scene-workspace,
+.onboarding.step-2 #scene-tunnel,
+.onboarding.step-2 #scene-workspace {
+  opacity: 0;
+  transform: scale(0.6);
+  max-width: 0;
+  overflow: hidden;
+  padding-left: 0;
+  padding-right: 0;
+  pointer-events: none;
+}
+.scene-node,
+.scene-group {
+  max-width: 20rem;
+}
+/* The laptop is the sole, larger focus of step 1; it shrinks as the
+ * picture zooms out on later steps. */
+.onboarding.step-1 #scene-laptop svg {
+  transform: scale(1.25);
+}
+#scene-laptop svg {
+  transition: transform 500ms ease;
+}
+/* The group labels and the group boxes only make sense once the full
+ * picture is on screen (step 3); before that the computer group renders
+ * frameless and unlabeled. */
+.onboarding:not(.step-3) .scene-label {
+  opacity: 0;
+}
+.scene-label {
+  transition: opacity 500ms ease;
+}
+.onboarding:not(.step-3) .scene-group > div:last-child {
+  border-color: transparent;
+  background: transparent;
+}
+.scene-group > div:last-child {
+  transition: border-color 500ms ease, background-color 500ms ease;
+}
+
+/* Step dots: the current step's dot takes the accent. */
+.onboarding-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--c-fill-subtle);
+  transition: background-color 200ms ease;
+}
+.onboarding-dot.is-active {
+  background: var(--c-accent);
+}
+
+/*
+ * Step-1 theme demo. --demo-accent is the picked swatch color
+ * (onboarding.js writes it on #theme-demo); the demo titlebar, chat
+ * bubble, and app skeleton read it inline. Demo tabs mimic workspace
+ * tabs: translucent on the accent titlebar, opaque surface when active.
+ */
+#theme-demo {
+  --demo-accent: #0b292b;
+}
+.demo-tab {
+  padding: 4px 12px;
+  border-radius: 8px 8px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+}
+.demo-tab:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.demo-tab.demo-tab-active {
+  background: var(--c-surface-primary);
+  color: var(--c-text-primary);
+}
+
+/*
+ * Step-2 services carousel: an infinite marquee. The track holds the
+ * chip list twice (second copy aria-hidden), so translating by -50%
+ * loops seamlessly.
+ */
+@keyframes service-marquee-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.service-marquee {
+  mask-image: linear-gradient(to right, transparent, black 8%, black 92%, transparent);
+}
+.service-marquee-track {
+  animation: service-marquee-scroll 40s linear infinite;
+}
+.service-marquee:hover .service-marquee-track {
+  animation-play-state: paused;
+}
+
+/*
+ * Workspace-machine fill: creating.js mirrors the top progress bar into
+ * --create-progress (0-100) on #creating; the server icon's inner rect
+ * scales up from the bottom to match, so the machine "fills" as the
+ * workspace loads.
+ */
+.server-fill-rect {
+  transform: scaleY(calc(var(--create-progress, 0) / 100));
+  transform-origin: center bottom;
+  transform-box: fill-box;
+  transition: transform 300ms ease-out;
+}
+
+/*
+ * Begin transition: clicking Begin zooms into the workspace machine
+ * before navigating. onboarding.js adds is-entering to #onboarding,
+ * waits for the animation, then follows the redirect URL.
+ */
+@keyframes onboarding-enter-zoom {
+  to {
+    transform: scale(3);
+    opacity: 0;
+  }
+}
+.onboarding.is-entering #scene {
+  animation: onboarding-enter-zoom 600ms ease-in forwards;
+  transform-origin: 75% 50%; /* zoom toward the workspace-machine side */
+}
+.onboarding.is-entering .onboarding-step,
+.onboarding.is-entering nav {
+  transition: opacity 300ms ease;
+  opacity: 0;
+}
+/* Grow the step-1 laptop upward so it doesn't overlap its caption. */
+.onboarding.step-1 #scene-laptop svg {
+  transform-origin: center bottom;
+}

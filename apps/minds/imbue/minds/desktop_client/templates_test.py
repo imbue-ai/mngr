@@ -9,6 +9,7 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.onboarding_services import OnboardingService
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
@@ -458,6 +459,66 @@ def test_render_create_form_start_advanced_opens_advanced_view() -> None:
 def test_render_create_form_shows_error_message_when_supplied() -> None:
     html = render_create_form(error_message="Imbue cloud requires an account.")
     assert "Imbue cloud requires an account." in html
+
+
+def test_render_creating_page_renders_onboarding_walkthrough() -> None:
+    """The creating page carries the three-step onboarding walkthrough.
+
+    Step markers, the theme-color demo swatches (one per palette entry),
+    the services carousel, and the nav (Previous/Next/Begin, Begin hidden
+    until onboarding.js reveals it) must all be present on first paint.
+    """
+    creation_id = CreationId()
+    info = AgentCreationInfo(
+        creation_id=creation_id,
+        status=AgentCreationStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    services = [
+        OnboardingService(service_id="slack", display_name="Slack", icon_url="/_static/service_icons/slack.svg"),
+        OnboardingService(service_id="ramp", display_name="Ramp", icon_url=None),
+    ]
+    html = render_creating_page(creation_id=creation_id, info=info, onboarding_services=services)
+    for step in ("1", "2", "3"):
+        assert f'data-step="{step}"' in html
+    assert 'id="onboarding-color-picker"' in html
+    assert html.count("color-swatch") >= len(WORKSPACE_PALETTE)
+    assert "service-marquee" in html
+    assert "/_static/service_icons/slack.svg" in html
+    assert "Ramp" in html
+    assert 'id="onboarding-prev"' in html
+    assert 'id="onboarding-next"' in html
+    # Begin ships hidden (inline display, since the button base's
+    # inline-flex would win the CSS order against the ``hidden`` utility);
+    # onboarding.js reveals it once the workspace is ready and the user is
+    # on the last step.
+    begin_index = html.index('id="onboarding-begin"')
+    tag_start = html.rindex("<button", 0, begin_index)
+    tag_end = html.index(">", begin_index)
+    assert "display: none" in html[tag_start:tag_end]
+
+
+def test_render_creating_page_step3_copy_matches_launch_mode() -> None:
+    """Step 3 explains where the workspace machine runs, per launch mode."""
+    creation_id = CreationId()
+    local_info = AgentCreationInfo(
+        creation_id=creation_id,
+        status=AgentCreationStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    local_html = render_creating_page(creation_id=creation_id, info=local_info)
+    assert "runs directly on your own computer" in local_html
+    assert 'data-is-remote="false"' in local_html
+
+    remote_info = AgentCreationInfo(
+        creation_id=creation_id,
+        status=AgentCreationStatus.INITIALIZING,
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+    )
+    remote_html = render_creating_page(creation_id=creation_id, info=remote_info)
+    assert "runs 24/7 in the cloud" in remote_html
+    assert 'data-is-remote="true"' in remote_html
+    assert "Workspace machine" in remote_html
 
 
 def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:

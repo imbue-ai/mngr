@@ -1,7 +1,12 @@
 // Creating-page flow: the workspace is created in the background, so this
-// page shows a loading screen (progress bar + rotating hints) and redirects
-// into the workspace once creation finishes. Creation status + logs stream
-// over SSE.
+// page shows a top progress bar (plus the onboarding walkthrough, see
+// onboarding.js) while creation runs. Creation status + logs stream over
+// SSE. There is no automatic redirect: when creation finishes this file
+// marks #creating with data-ready + data-redirect-url and dispatches
+// 'minds:create-ready'; onboarding.js shows the Begin button that actually
+// navigates. Progress is also mirrored into the --create-progress CSS var
+// (0-100) so the walkthrough's workspace-machine graphic fills in lockstep
+// with the bar.
 (function () {
   var root = document.getElementById('creating');
   if (!root) return;
@@ -17,16 +22,6 @@
   var creationError = '';
   var creationErrorKind = '';
 
-  // ---- Loading screen: progress bar + rotating hints ----
-  var TIPS = [
-    'Tip: your workspace is backed up automatically so your work survives a restart.',
-    'Did you know: in <b>privacy mode</b>, the data we gather stays on your own computer.',
-    'Tip: switch accounts anytime from the workspace menu.',
-    'Tip: share a running app with a teammate from the workspace’s Share menu.',
-    'Did you know: you can revisit permissions and compute settings later.'
-  ];
-  var tipsInterval = null;
-
   function startLoading() {
     // If creation already failed, never show the in-progress UI -- jump
     // straight to the failure view.
@@ -34,35 +29,18 @@
       showFailure();
       return;
     }
-    startTips();
     requestAnimationFrame(tickProgress);
   }
 
-  function startTips() {
-    var tipEl = document.getElementById('tip');
-    if (!tipEl) return;
-    var idx = 0;
-    tipEl.innerHTML = TIPS[0];
-    tipsInterval = setInterval(function () {
-      idx = (idx + 1) % TIPS.length;
-      tipEl.style.opacity = '0';
-      setTimeout(function () {
-        tipEl.innerHTML = TIPS[idx];
-        tipEl.style.opacity = '1';
-      }, 250);
-    }, 3000);
-  }
-
   // ---- Failure view ----
-  // Surface a creation failure prominently. Stops the rotating tips and
-  // progress bar, swaps the loading screen's progress sub-view for the
-  // failure sub-view, and fills in the error message. Idempotent: safe to
-  // call from both the status poll and the SSE 'done' handler.
+  // Surface a creation failure prominently. Stops the progress bar, swaps
+  // the loading screen's walkthrough sub-view for the failure sub-view, and
+  // fills in the error message. Idempotent: safe to call from both the
+  // status poll and the SSE 'done' handler.
   var failureShown = false;
   function showFailure() {
     if (failureShown) return;
     failureShown = true;
-    if (tipsInterval) { clearInterval(tipsInterval); tipsInterval = null; }
     var progressView = document.getElementById('progress-view');
     var failureView = document.getElementById('failure-view');
     if (progressView) progressView.classList.add('hidden');
@@ -95,21 +73,32 @@
     return 80 + 20 * (1 - Math.exp(-(t - T) / T));
   }
 
-  function tickProgress() {
+  function setProgress(pct) {
     var fill = document.getElementById('bar-fill');
+    if (fill) fill.style.width = pct.toFixed(1) + '%';
+    // Mirror the bar into a CSS var so the walkthrough's workspace-machine
+    // graphic (the server-fill rect in Creating.jinja) fills in lockstep.
+    root.style.setProperty('--create-progress', pct.toFixed(1));
+  }
+
+  function tickProgress() {
     if (creationFailed) {
       // showFailure() (called from the poll/SSE handlers) owns the failure
       // UI; just stop advancing the bar.
       return;
     }
     if (creationDone && redirectUrl) {
-      if (fill) fill.style.width = '100%';
-      window.location.href = redirectUrl;
+      // Creation finished: snap to 100% and hand off to onboarding.js,
+      // which shows the Begin button that performs the actual navigation
+      // once the user has clicked through the walkthrough.
+      setProgress(100);
+      root.setAttribute('data-redirect-url', redirectUrl);
+      root.setAttribute('data-ready', 'true');
+      root.dispatchEvent(new Event('minds:create-ready'));
       return;
     }
     var elapsed = ((window.performance && performance.now) ? performance.now() : Date.now()) - startTime;
-    var pct = Math.min(99.5, progressForElapsed(elapsed / 1000));
-    if (fill) fill.style.width = pct.toFixed(1) + '%';
+    setProgress(Math.min(99.5, progressForElapsed(elapsed / 1000)));
     requestAnimationFrame(tickProgress);
   }
 

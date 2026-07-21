@@ -112,6 +112,7 @@ from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_consent_page
 from imbue.minds.desktop_client.templates import render_create_form
+from imbue.minds.desktop_client.onboarding_services import list_onboarding_services
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
@@ -151,6 +152,7 @@ from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -1164,7 +1166,15 @@ def _handle_creating_page(
         # navigations, and their JS handles the not-found case itself.)
         return make_redirect_response(url="/", status_code=303)
 
-    html = render_creating_page(creation_id=creation_id, info=info)
+    # The onboarding walkthrough's step-2 carousel lists the services
+    # latchkey can connect to. ServicesCatalog reads the bundled
+    # services.json lazily and memoizes it process-wide, so constructing
+    # one here is cheap.
+    html = render_creating_page(
+        creation_id=creation_id,
+        info=info,
+        onboarding_services=list_onboarding_services(ServicesCatalog()),
+    )
     return make_html_response(content=html)
 
 

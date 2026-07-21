@@ -594,10 +594,11 @@ def _create_test_server_with_agent_creator(
 
 
 def test_creating_page_shows_status(tmp_path: Path) -> None:
-    """GET /creating/{agent_id} shows the loading/progress page directly.
+    """GET /creating/{agent_id} shows the loading page with the onboarding walkthrough.
 
-    The page no longer interposes any onboarding questions before the
-    setting-up screen, so it goes straight to the loading view.
+    The page carries the top progress bar plus the three-step onboarding
+    explainer (see Creating.jinja / onboarding.js), including the
+    services carousel sourced from the bundled latchkey catalog.
     """
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
@@ -606,10 +607,12 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
     assert "Creating your workspace" in response.text
-    assert "Setting up your workspace" in response.text
-    # The onboarding question UI was removed, so none of its markers render.
-    assert "data-question" not in response.text
-    assert 'class="opt' not in response.text
+    assert 'id="bar-fill"' in response.text
+    assert 'id="onboarding"' in response.text
+    assert "access terminal for an AI operating system" in response.text
+    # The carousel is populated from the real bundled services catalog.
+    assert "service-marquee" in response.text
+    assert "Slack" in response.text
     agent_creator.wait_for_all()
 
 
