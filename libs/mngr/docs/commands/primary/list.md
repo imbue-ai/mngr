@@ -149,10 +149,10 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `host.boot_time` - When the host was last started
 - `host.uptime_seconds` - How long the host has been running
 - `host.resource` - Resource limits for the host
-- `host.resource.cpu` - CPU resources
+- `host.resource.cpu` - CPU resources (None if the host has no CPU limit)
 - `host.resource.cpu.count` - Number of CPUs allocated to the host
 - `host.resource.cpu.frequency_ghz` - CPU frequency in GHz (None if not reported by provider)
-- `host.resource.memory_gb` - Allocated memory in GB
+- `host.resource.memory_gb` - Allocated memory in GB (None if the host has no memory limit)
 - `host.resource.disk_gb` - Allocated disk space in GB (None if not reported)
 - `host.resource.gpu` - GPU resources (None if no GPU allocated)
 - `host.resource.gpu.count` - Number of GPUs allocated to the host

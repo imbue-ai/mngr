@@ -30,10 +30,16 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostOfflineError
+from imbue.mngr.errors import HostResizeNotSupportedError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import ActivityConfig
+from imbue.mngr.interfaces.data_types import HostResizeDimensionCapability
+from imbue.mngr.interfaces.data_types import HostResizeRequest
+from imbue.mngr.interfaces.data_types import HostResizeValue
 from imbue.mngr.interfaces.data_types import get_activity_sources_for_idle_mode
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import DiscoveredHost
@@ -41,6 +47,7 @@ from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 
 
@@ -57,6 +64,9 @@ class LimitCliOptions(CommonCliOptions):
     activity_sources: str | None
     add_activity_source: tuple[str, ...]
     remove_activity_source: tuple[str, ...]
+    # Resources (positive integer or 'default')
+    cpus: str | None
+    memory: str | None
     # SSH Keys (not yet implemented)
     refresh_ssh_keys: bool
     add_ssh_key: tuple[str, ...]
@@ -140,7 +150,7 @@ def _build_updated_activity_config(
 
 
 def _has_host_level_settings(opts: LimitCliOptions) -> bool:
-    """Return True if any host-level settings are being changed."""
+    """Return True if any host-level activity settings are being changed."""
     return (
         opts.idle_timeout is not None
         or opts.idle_mode is not None
@@ -150,6 +160,11 @@ def _has_host_level_settings(opts: LimitCliOptions) -> bool:
     )
 
 
+def _has_resource_settings(opts: LimitCliOptions) -> bool:
+    """Return True if any host resource limits (CPU/memory) are being changed."""
+    return opts.cpus is not None or opts.memory is not None
+
+
 def _has_agent_level_settings(opts: LimitCliOptions) -> bool:
     """Return True if any agent-level settings are being changed."""
     return opts.start_on_boot is not None
@@ -157,7 +172,213 @@ def _has_agent_level_settings(opts: LimitCliOptions) -> bool:
 
 def _has_any_setting(opts: LimitCliOptions) -> bool:
     """Return True if any setting is being changed."""
-    return _has_host_level_settings(opts) or _has_agent_level_settings(opts)
+    return _has_host_level_settings(opts) or _has_agent_level_settings(opts) or _has_resource_settings(opts)
+
+
+@pure
+def _parse_resource_flag_value(raw: str | None, flag_name: str) -> int | str | None:
+    """Parse a --cpus/--memory flag into a positive integer or the literal 'default'.
+
+    Raises click.UsageError for anything else.
+    """
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized == "default":
+        return "default"
+    try:
+        parsed_value = int(normalized)
+    except ValueError:
+        raise click.UsageError(f"{flag_name} must be a positive integer or 'default', got {raw!r}") from None
+    if parsed_value < 1:
+        raise click.UsageError(f"{flag_name} must be at least 1, got {raw!r}")
+    return parsed_value
+
+
+def _build_resize_value(
+    parsed_flag: int | str,
+    dimension: HostResizeDimensionCapability | None,
+    dimension_name: str,
+    provider_name: str,
+) -> HostResizeValue:
+    """Resolve a parsed --cpus/--memory flag against a provider's capability descriptor.
+
+    'default' resolves to the provider's default value (which may be a clear-to-unlimited
+    for providers whose default is no limit). A concrete value above the physical ceiling
+    warns but proceeds -- over-provisioning is allowed, never blocked.
+    """
+    if dimension is None:
+        raise UserInputError(f"Provider {provider_name} does not support resizing {dimension_name}")
+    if isinstance(parsed_flag, str):
+        return HostResizeValue(value=dimension.default_value)
+    if dimension.ceiling is not None and parsed_flag > dimension.ceiling:
+        logger.warning(
+            "Requested {}={} exceeds the physical ceiling of {}; over-provisioning is allowed but may "
+            "degrade performance",
+            dimension_name,
+            parsed_flag,
+            dimension.ceiling,
+        )
+    return HostResizeValue(value=parsed_flag)
+
+
+def _apply_resource_changes(
+    provider: ProviderInstanceInterface,
+    host_id: HostId,
+    opts: LimitCliOptions,
+    output_opts: OutputOptions,
+    changes: list[dict[str, Any]],
+) -> None:
+    """Set the requested CPU/memory limits on a host via its provider and record the outcome.
+
+    Works for stopped hosts too: the provider persists the values and they apply
+    on the host's next start (visible as a configured/actual discrepancy).
+    """
+    parsed_cpus = _parse_resource_flag_value(opts.cpus, "--cpus")
+    parsed_memory = _parse_resource_flag_value(opts.memory, "--memory")
+
+    capabilities = provider.get_resize_capabilities()
+    if not capabilities.is_resize_supported:
+        raise HostResizeNotSupportedError(provider.name)
+
+    resize_request = HostResizeRequest(
+        cpu_count=_build_resize_value(parsed_cpus, capabilities.cpu, "cpus", str(provider.name))
+        if parsed_cpus is not None
+        else None,
+        memory_gib=_build_resize_value(parsed_memory, capabilities.memory_gib, "memory", str(provider.name))
+        if parsed_memory is not None
+        else None,
+    )
+    report = provider.resize_host(host_id, resize_request)
+
+    configured = report.configured
+    _output(
+        f"Set resources for host {host_id}: cpus={_format_limit(configured.cpu_count)} "
+        f"memory={_format_limit(configured.memory_gib)}GiB",
+        output_opts,
+    )
+    if report.actual is not None and report.actual != configured:
+        _output(
+            f"Host {host_id} is running with cpus={_format_limit(report.actual.cpu_count)} "
+            f"memory={_format_limit(report.actual.memory_gib)}GiB; the new values apply on its next restart",
+            output_opts,
+        )
+    changes.append(
+        {
+            "type": "host_resources",
+            "host_id": str(host_id),
+            "configured": configured.model_dump(mode="json"),
+            "actual": report.actual.model_dump(mode="json") if report.actual is not None else None,
+        }
+    )
+
+
+@pure
+def _format_limit(value: float | None) -> str:
+    """Format a limit value for human output ('none' when unlimited)."""
+    if value is None:
+        return "none"
+    return f"{value:g}"
+
+
+def _build_host_limits_entry(
+    provider: ProviderInstanceInterface,
+    host_id: HostId,
+    host_name: str,
+) -> dict[str, Any]:
+    """Build the read-mode report entry for one host: capabilities + configured + actual."""
+    capabilities = provider.get_resize_capabilities()
+    entry: dict[str, Any] = {
+        "host_id": str(host_id),
+        "host_name": host_name,
+        "provider": str(provider.name),
+        "capabilities": capabilities.model_dump(mode="json"),
+        "configured": None,
+        "actual": None,
+    }
+    if capabilities.is_resize_supported:
+        report = provider.get_host_resource_limits(host_id)
+        entry["configured"] = report.configured.model_dump(mode="json")
+        entry["actual"] = report.actual.model_dump(mode="json") if report.actual is not None else None
+    return entry
+
+
+def _resolve_distinct_target_hosts(
+    opts: LimitCliOptions,
+    agent_addresses: Sequence[AgentAddress],
+    mngr_ctx: MngrContext,
+) -> list[tuple[ProviderInstanceName, HostId, str]]:
+    """Resolve the targeted agents/hosts to a deduplicated list of (provider, host_id, host_name)."""
+    if opts.hosts and not agent_addresses:
+        all_hosts = _build_host_references(mngr_ctx)
+        resolved_hosts = [filter_one_host(host_address, all_hosts) for host_address in opts.hosts]
+        return [(h.provider_name, h.host_id, str(h.host_name)) for h in resolved_hosts]
+
+    agents = find_all_agents(
+        addresses=list(agent_addresses),
+        filter_all=False,
+        target_state=None,
+        mngr_ctx=mngr_ctx,
+    )
+    if opts.hosts:
+        resolved_host_ids = _resolve_host_addresses(opts.hosts, mngr_ctx)
+        agents = [a for a in agents if a.host_id in resolved_host_ids]
+
+    distinct_hosts: list[tuple[ProviderInstanceName, HostId, str]] = []
+    seen_host_ids: set[HostId] = set()
+    for agent in agents:
+        if agent.host_id in seen_host_ids:
+            continue
+        seen_host_ids.add(agent.host_id)
+        distinct_hosts.append((agent.provider_name, agent.host_id, str(agent.host_name)))
+    return distinct_hosts
+
+
+def _output_limits_report(entries: list[dict[str, Any]], output_opts: OutputOptions) -> None:
+    """Output the read-mode resource limits report."""
+    result_data = {"hosts": entries, "count": len(entries)}
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            write_json_line(result_data)
+        case OutputFormat.JSONL:
+            emit_event("limit_report", result_data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            for entry in entries:
+                configured = entry["configured"]
+                actual = entry["actual"]
+                if configured is None:
+                    write_human_line(
+                        "host {} ({}): resource resizing not supported", entry["host_name"], entry["provider"]
+                    )
+                    continue
+                configured_text = (
+                    f"cpus={_format_limit(configured['cpu_count'])} memory={_format_limit(configured['memory_gib'])}GiB"
+                )
+                if actual is None:
+                    write_human_line(
+                        "host {} ({}): configured {} (not running)",
+                        entry["host_name"],
+                        entry["provider"],
+                        configured_text,
+                    )
+                else:
+                    actual_text = (
+                        f"cpus={_format_limit(actual['cpu_count'])} memory={_format_limit(actual['memory_gib'])}GiB"
+                    )
+                    if actual == configured:
+                        write_human_line(
+                            "host {} ({}): {}", entry["host_name"], entry["provider"], configured_text
+                        )
+                    else:
+                        write_human_line(
+                            "host {} ({}): configured {}; running with {} (configured values apply on next restart)",
+                            entry["host_name"],
+                            entry["provider"],
+                            configured_text,
+                            actual_text,
+                        )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _apply_activity_config_to_host(
@@ -268,6 +489,19 @@ def _resolve_host_addresses(
     multiple=True,
     help="Remove an activity source from idle detection (repeatable)",
 )
+@optgroup.group("Resources")
+@optgroup.option(
+    "--cpus",
+    type=str,
+    default=None,
+    help="Set the host's CPU allotment (positive integer, or 'default' for the provider default)",
+)
+@optgroup.option(
+    "--memory",
+    type=str,
+    default=None,
+    help="Set the host's memory allotment in GiB (positive integer, or 'default' for the provider default)",
+)
 @optgroup.group("SSH Keys")
 @optgroup.option(
     "--refresh-ssh-keys",
@@ -302,12 +536,9 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     if opts.remove_ssh_key:
         raise NotImplementedError("--remove-ssh-key is not implemented yet")
 
-    # Validate at least one setting is being changed
-    if not _has_any_setting(opts):
-        raise click.UsageError(
-            "Must specify at least one setting to change (e.g., --idle-timeout, --idle-mode, "
-            "--activity-sources, --start-on-boot)"
-        )
+    # Fail fast on malformed resource flags, before any discovery work
+    _parse_resource_flag_value(opts.cpus, "--cpus")
+    _parse_resource_flag_value(opts.memory, "--memory")
 
     # Validate --activity-sources is not combined with --add/--remove-activity-source
     if opts.activity_sources is not None and (opts.add_activity_source or opts.remove_activity_source):
@@ -327,6 +558,16 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
             raise click.UsageError(
                 "Must specify at least one agent or --host (use '-' to read agent names from stdin)"
             )
+        return
+
+    # With no settings to change, report the targets' resize capabilities and
+    # configured/actual resource limits instead
+    if not _has_any_setting(opts):
+        report_entries = [
+            _build_host_limits_entry(get_provider_instance(provider_name, mngr_ctx), host_id, host_name)
+            for provider_name, host_id, host_name in _resolve_distinct_target_hosts(opts, agent_addresses, mngr_ctx)
+        ]
+        _output_limits_report(report_entries, output_opts)
         return
 
     # If only --host is specified (no agents), agent-level settings are not allowed
@@ -379,11 +620,28 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     agents_by_host = group_agents_by_host(target_agents)
     updated_host_ids: set[str] = set()
 
+    resized_host_ids: set[str] = set()
     for host_key, agent_list in agents_by_host.items():
         host_id_str, _ = host_key.split(":", 1)
         provider_name = agent_list[0].provider_name
 
         provider = get_provider_instance(provider_name, mngr_ctx)
+
+        # Resource limits go through the provider directly (not the online host),
+        # so they can be set on stopped hosts too and apply on the next start.
+        if _has_resource_settings(opts) and host_id_str not in resized_host_ids:
+            _apply_resource_changes(
+                provider=provider,
+                host_id=HostId(host_id_str),
+                opts=opts,
+                output_opts=output_opts,
+                changes=changes,
+            )
+            resized_host_ids.add(host_id_str)
+
+        if not _has_host_level_settings(opts) and not _has_agent_level_settings(opts):
+            continue
+
         host = provider.get_host(HostId(host_id_str))
 
         match host:
@@ -433,6 +691,21 @@ def _apply_host_only_changes(
     resolved_host = filter_one_host(host_address, all_hosts)
 
     provider = get_provider_instance(resolved_host.provider_name, mngr_ctx)
+
+    # Resource limits go through the provider directly (not the online host),
+    # so they can be set on stopped hosts too and apply on the next start.
+    if _has_resource_settings(opts):
+        _apply_resource_changes(
+            provider=provider,
+            host_id=resolved_host.host_id,
+            opts=opts,
+            output_opts=output_opts,
+            changes=changes,
+        )
+
+    if not _has_host_level_settings(opts):
+        return
+
     host = provider.get_host(resolved_host.host_id)
 
     match host:
@@ -484,13 +757,21 @@ def _apply_agent_changes(
 CommandHelpMetadata(
     key="limit",
     one_line_description="Configure limits for agents and hosts [experimental]",
-    synopsis="mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot]",
+    synopsis="mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--cpus <N|default>] [--memory <GIB|default>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot]",
     arguments_description="- `AGENTS`: Agent name(s) or ID(s) to configure (can also be specified via `--agent`)",
-    description="""Changes to some limits for hosts (e.g. CPU, RAM, disk space, network) are
-handled by the provider.
+    description="""When targeting agents, host-level settings (cpus, memory, idle-timeout,
+idle-mode, activity-sources) are applied to each agent's underlying host.
 
-When targeting agents, host-level settings (idle-timeout, idle-mode,
-activity-sources) are applied to each agent's underlying host.
+Resource limits (--cpus, --memory) are handled by the provider (currently
+lima and docker). Setting them never restarts the host: values that cannot
+apply live are persisted and take effect on the host's next restart, which
+shows up as a difference between the configured and actual values in the
+output. Pass 'default' to restore the provider's default. Values above the
+machine's physical resources print a warning but are allowed.
+
+With no settings to change, reports the targets' resize capabilities and
+their configured and actual resource values (use --format json for a
+machine-readable report).
 
 Agent-level settings (start-on-boot) require agent targeting
 and cannot be used with --host alone.
@@ -501,6 +782,9 @@ Use '-' in place of agent names to read them from stdin, one per line.""",
         ("Set idle timeout for an agent's host", "mngr limit my-agent --idle-timeout 5m"),
         ("Disable idle detection for all agents", "mngr list --ids | mngr limit - --idle-mode disabled"),
         ("Update host idle settings directly", "mngr limit --host my-host --idle-timeout 1h"),
+        ("Give an agent's host 8 CPUs and 16 GiB of memory", "mngr limit my-agent --cpus 8 --memory 16"),
+        ("Restore a host's default resources", "mngr limit --host my-host --cpus default --memory default"),
+        ("Report configured and actual resources", "mngr limit --host my-host --format json"),
     ),
     see_also=(
         ("create", "Create a new agent"),

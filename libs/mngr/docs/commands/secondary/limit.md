@@ -6,16 +6,24 @@
 **Synopsis:**
 
 ```text
-mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot]
+mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--cpus <N|default>] [--memory <GIB|default>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot]
 ```
 
 Configure limits for agents and hosts [experimental].
 
-Changes to some limits for hosts (e.g. CPU, RAM, disk space, network) are
-handled by the provider.
+When targeting agents, host-level settings (cpus, memory, idle-timeout,
+idle-mode, activity-sources) are applied to each agent's underlying host.
 
-When targeting agents, host-level settings (idle-timeout, idle-mode,
-activity-sources) are applied to each agent's underlying host.
+Resource limits (--cpus, --memory) are handled by the provider (currently
+lima and docker). Setting them never restarts the host: values that cannot
+apply live are persisted and take effect on the host's next restart, which
+shows up as a difference between the configured and actual values in the
+output. Pass 'default' to restore the provider's default. Values above the
+machine's physical resources print a warning but are allowed.
+
+With no settings to change, reports the targets' resize capabilities and
+their configured and actual resource values (use --format json for a
+machine-readable report).
 
 Agent-level settings (start-on-boot) require agent targeting
 and cannot be used with --host alone.
@@ -52,6 +60,13 @@ mngr limit [OPTIONS] [AGENTS]...
 | `--activity-sources` | text | Set activity sources for idle detection (comma-separated) | None |
 | `--add-activity-source` | choice (`create` &#x7C; `boot` &#x7C; `start` &#x7C; `ssh` &#x7C; `process` &#x7C; `agent` &#x7C; `user`) | Add an activity source for idle detection (repeatable) | None |
 | `--remove-activity-source` | choice (`create` &#x7C; `boot` &#x7C; `start` &#x7C; `ssh` &#x7C; `process` &#x7C; `agent` &#x7C; `user`) | Remove an activity source from idle detection (repeatable) | None |
+
+## Resources
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--cpus` | text | Set the host's CPU allotment (positive integer, or 'default' for the provider default) | None |
+| `--memory` | text | Set the host's memory allotment in GiB (positive integer, or 'default' for the provider default) | None |
 
 ## SSH Keys
 
@@ -102,4 +117,22 @@ $ mngr list --ids | mngr limit - --idle-mode disabled
 
 ```bash
 $ mngr limit --host my-host --idle-timeout 1h
+```
+
+**Give an agent's host 8 CPUs and 16 GiB of memory**
+
+```bash
+$ mngr limit my-agent --cpus 8 --memory 16
+```
+
+**Restore a host's default resources**
+
+```bash
+$ mngr limit --host my-host --cpus default --memory default
+```
+
+**Report configured and actual resources**
+
+```bash
+$ mngr limit --host my-host --format json
 ```

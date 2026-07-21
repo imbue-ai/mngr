@@ -27,6 +27,8 @@ def _make_limit_opts(
     add_activity_source: tuple[str, ...] = (),
     remove_activity_source: tuple[str, ...] = (),
     start_on_boot: bool | None = None,
+    cpus: str | None = None,
+    memory: str | None = None,
 ) -> LimitCliOptions:
     """Create a LimitCliOptions with sensible defaults, allowing overrides."""
     return LimitCliOptions(
@@ -39,6 +41,8 @@ def _make_limit_opts(
         activity_sources=activity_sources,
         add_activity_source=add_activity_source,
         remove_activity_source=remove_activity_source,
+        cpus=cpus,
+        memory=memory,
         refresh_ssh_keys=False,
         add_ssh_key=(),
         remove_ssh_key=(),
@@ -64,6 +68,8 @@ def test_limit_cli_options_fields() -> None:
         activity_sources=None,
         add_activity_source=(),
         remove_activity_source=(),
+        cpus=None,
+        memory=None,
         refresh_ssh_keys=False,
         add_ssh_key=(),
         remove_ssh_key=(),
@@ -96,11 +102,11 @@ def test_limit_requires_target(
     assert "Must specify at least one agent or --host" in result.output
 
 
-def test_limit_requires_setting(
+def test_limit_without_settings_enters_read_mode(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that limit requires at least one setting to change."""
+    """With no settings to change, limit reports resource limits, so an unknown agent fails resolution."""
     result = cli_runner.invoke(
         limit,
         ["my-agent"],
@@ -108,8 +114,9 @@ def test_limit_requires_setting(
         catch_exceptions=True,
     )
 
+    # Read mode proceeds to target resolution instead of raising a usage error
     assert result.exit_code != 0
-    assert "Must specify at least one setting to change" in result.output
+    assert "Agent not found" in result.output
 
 
 def test_limit_host_only_rejects_agent_settings(
