@@ -504,6 +504,15 @@ class SnapshotsNotSupportedError(SnapshotError):
         super().__init__(provider_name, f"Provider {provider_name} does not support snapshots")
 
 
+class HostResizeNotSupportedError(ProviderError):
+    """Provider does not support resizing host resources."""
+
+    user_help_text = "Host resource resizing is only available for providers that support it (e.g. lima, docker)."
+
+    def __init__(self, provider_name: ProviderInstanceName) -> None:
+        super().__init__(provider_name, f"Provider {provider_name} does not support resizing host resources")
+
+
 class LocalHostNotStoppableError(ProviderError):
     """Raised when attempting to stop the local host."""
 

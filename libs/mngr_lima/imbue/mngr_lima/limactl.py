@@ -362,6 +362,35 @@ def limactl_disk_delete(
         raise LimaCommandError("disk delete", result.returncode, result.stderr)
 
 
+def limactl_edit(
+    cg: ConcurrencyGroup,
+    instance_name: str,
+    cpu_count: int | None,
+    memory_gib: float | None,
+    timeout: float = 60.0,
+) -> None:
+    """Rewrite a stopped instance's CPU/memory config.
+
+    Runs: limactl edit [--cpus N] [--memory M] <instance_name>
+
+    limactl refuses to edit a running instance, so callers must only invoke
+    this while the VM is stopped. The new values take effect on the next boot.
+    """
+    cmd = ["limactl", "edit"]
+    if cpu_count is not None:
+        cmd.extend(["--cpus", str(cpu_count)])
+    if memory_gib is not None:
+        # limactl interprets --memory as GiB (float).
+        cmd.extend(["--memory", f"{memory_gib:g}"])
+    if len(cmd) == 2:
+        return
+    cmd.append(instance_name)
+    with log_span("Running limactl edit: {}", instance_name):
+        result = cg.run_process_to_completion(cmd, timeout=timeout)
+    if result.returncode != 0:
+        raise LimaCommandError("edit", result.returncode, result.stderr)
+
+
 def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, Any]]:
     """List all Lima instances as parsed JSON.
 

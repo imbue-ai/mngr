@@ -260,8 +260,14 @@ class HostResources(FrozenModel):
     allocated to the host, not necessarily what is currently in use.
     """
 
-    cpu: CpuResources = Field(description="CPU resources")
-    memory_gb: float = Field(description="Allocated memory in GB")
+    cpu: CpuResources | None = Field(
+        default=None,
+        description="CPU resources (None if the host has no CPU limit)",
+    )
+    memory_gb: float | None = Field(
+        default=None,
+        description="Allocated memory in GB (None if the host has no memory limit)",
+    )
     disk_gb: float | None = Field(
         default=None,
         description="Allocated disk space in GB (None if not reported)",
@@ -270,6 +276,78 @@ class HostResources(FrozenModel):
         default=None,
         description="GPU resources (None if no GPU allocated)",
     )
+
+
+# Number of bytes in one GiB, for converting provider-reported byte counts to GiB.
+BYTES_PER_GIB: Final[int] = 1024**3
+
+
+class HostResourceLimits(FrozenModel):
+    """CPU and memory limit values for a host. A None dimension means no limit is set."""
+
+    cpu_count: float | None = Field(
+        description="Number of CPUs (fractional values are possible for container providers; None = unlimited)"
+    )
+    memory_gib: float | None = Field(description="Memory in GiB (None = unlimited)")
+
+
+class HostResourceLimitsReport(FrozenModel):
+    """Configured (desired) and actual (probed) resource limits for a host.
+
+    A discrepancy between configured and actual means the configured values have
+    not been applied yet (they apply on the host's next start). ``actual`` is None
+    when the host is not running, since there is nothing to probe.
+    """
+
+    configured: HostResourceLimits = Field(description="Desired limits from the provider's durable host record")
+    actual: HostResourceLimits | None = Field(
+        description="Limits the running host was probed to actually have (None when the host is not running)"
+    )
+
+
+class HostResizeDimensionCapability(FrozenModel):
+    """Resize capability descriptor for one resource dimension (CPU count or memory GiB)."""
+
+    minimum: int = Field(description="Minimum settable value")
+    default_value: int | None = Field(description="Provider default value (None = unlimited by default)")
+    ceiling: int | None = Field(
+        description=(
+            "Advisory physical ceiling (machine cores / RAM, or the container VM's allotment). "
+            "Requests above it warn but are not blocked. None if unknown."
+        )
+    )
+
+
+class HostResizeCapabilities(FrozenModel):
+    """Which host resource dimensions a provider can resize, with per-dimension bounds."""
+
+    cpu: HostResizeDimensionCapability | None = Field(description="CPU-count resize capability (None = not resizable)")
+    memory_gib: HostResizeDimensionCapability | None = Field(
+        description="Memory (GiB) resize capability (None = not resizable)"
+    )
+
+    @computed_field
+    @cached_property
+    def is_resize_supported(self) -> bool:
+        return self.cpu is not None or self.memory_gib is not None
+
+
+class HostResizeValue(FrozenModel):
+    """A target for one resource dimension: a concrete value, or clear-to-unlimited."""
+
+    value: int | None = Field(ge=1, description="Target value, or None to clear the limit (unlimited)")
+
+
+class HostResizeRequest(FrozenModel):
+    """Requested resource-limit changes for a host. A dimension that is None is left unchanged."""
+
+    cpu_count: HostResizeValue | None = Field(default=None, description="Requested CPU count change")
+    memory_gib: HostResizeValue | None = Field(default=None, description="Requested memory (GiB) change")
+
+    @computed_field
+    @cached_property
+    def is_empty(self) -> bool:
+        return self.cpu_count is None and self.memory_gib is None
 
 
 class ActivityConfig(FrozenModel):

@@ -48,12 +48,18 @@ from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_confi
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
+from imbue.mngr.interfaces.data_types import BYTES_PER_GIB
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
+from imbue.mngr.interfaces.data_types import HostResizeCapabilities
+from imbue.mngr.interfaces.data_types import HostResizeDimensionCapability
+from imbue.mngr.interfaces.data_types import HostResizeRequest
+from imbue.mngr.interfaces.data_types import HostResourceLimits
+from imbue.mngr.interfaces.data_types import HostResourceLimitsReport
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -666,6 +672,9 @@ class DockerProviderInstance(BaseProviderInstance):
         user_tags: Mapping[str, str] | None,
         config: ContainerConfig,
         host_data: CertifiedHostData,
+        # Configured resource limits to persist on the (re)written host record; pass the
+        # prior record's value on restart paths so a resize is not silently dropped.
+        resources: HostResources | None = None,
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
     ) -> tuple[Host, str, int, str]:
@@ -710,6 +719,7 @@ class DockerProviderInstance(BaseProviderInstance):
             config=config,
             certified_host_data=host_data,
             container_id=container.id,
+            resources=resources,
         )
         self._host_store.write_host_record(host_record)
 
@@ -1422,6 +1432,9 @@ kill -TERM 1
                 user_tags=tags,
                 config=config,
                 host_data=host_data,
+                # Record what docker actually applied (start_args like --cpus/--memory
+                # become HostConfig limits), so the record never lies about resources.
+                resources=self._resources_from_container(container),
                 known_hosts=known_hosts,
                 authorized_keys=authorized_keys,
             )
@@ -1545,6 +1558,13 @@ kill -TERM 1
 
         # Native restart: just start the stopped container
         if container is not None:
+            # Re-apply the recorded resource limits while the container is stopped, so a
+            # resize that could not apply live (e.g. a memory shrink docker rejected while
+            # the container was under load) takes effect on this start. Applying while
+            # stopped cannot hit the shrink-below-usage rejection.
+            if host_record is not None and host_record.resources is not None:
+                self._apply_resource_limits_to_container(container, host_record.resources)
+
             with log_span("Starting stopped container", host_id=str(host_id)):
                 container.start()
 
@@ -1568,6 +1588,7 @@ kill -TERM 1
                 user_tags=user_tags,
                 config=config,
                 host_data=host_record.certified_host_data,
+                resources=host_record.resources,
             )
 
             self._evict_cached_host(host_id, replacement=restored_host)
@@ -1652,6 +1673,11 @@ kill -TERM 1
         self._container_cache_by_id[host_id] = new_container
         self._evict_cached_host(host_id)
 
+        # The replayed docker run args do not carry limits set after creation, so
+        # re-apply the recorded limits to the freshly created container.
+        if host_record.resources is not None:
+            self._apply_resource_limits_to_container(new_container, host_record.resources)
+
         restored_host, _, _, _ = self._setup_container_ssh_and_create_host(
             container=new_container,
             host_id=host_id,
@@ -1659,6 +1685,7 @@ kill -TERM 1
             user_tags=user_tags,
             config=config,
             host_data=host_record.certified_host_data,
+            resources=host_record.resources,
         )
 
         self._evict_cached_host(host_id, replacement=restored_host)
@@ -2047,17 +2074,199 @@ kill -TERM 1
         ]
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
-        """Get resource information for a Docker container.
+        """Get configured resource limits for a Docker container.
 
-        Resource limits are applied via docker run flags (start_args) and are
-        managed by Docker directly. We return defaults here since we don't
-        parse the raw CLI args.
+        Prefers the durable host record; for records written before resize
+        support, falls back to the container's live HostConfig. A dimension
+        with no limit is reported as None.
         """
+        # Tolerate an unreachable daemon: resources are advisory listing data, so a
+        # host that cannot be looked up simply reports no limits.
+        try:
+            host_record = self._host_store.read_host_record(host.id)
+        except (MngrError, docker.errors.DockerException, OSError) as e:
+            logger.debug("Failed to read host record for resources of {}: {}", host.id, e)
+            host_record = None
+        if host_record is not None and host_record.resources is not None:
+            return host_record.resources
+        try:
+            container = self._find_container_by_host_id(host.id)
+        except (MngrError, docker.errors.DockerException, OSError) as e:
+            logger.debug("Failed to look up container for resources of {}: {}", host.id, e)
+            container = None
+        if container is not None:
+            return self._resources_from_container(container)
+        return HostResources()
+
+    # =========================================================================
+    # Resource Resize Methods
+    # =========================================================================
+
+    def get_resize_capabilities(self) -> HostResizeCapabilities:
+        """Describe docker resize support, with ceilings from the daemon's total allotment."""
+        try:
+            daemon_info = self._docker_client.info()
+        except docker.errors.DockerException as e:
+            raise ProviderUnavailableError(self.name, str(e)) from e
+        cpu_ceiling = int(daemon_info.get("NCPU") or 0)
+        memory_ceiling_gib = int(daemon_info.get("MemTotal") or 0) // BYTES_PER_GIB
+        return HostResizeCapabilities(
+            cpu=HostResizeDimensionCapability(
+                minimum=1,
+                default_value=None,
+                ceiling=cpu_ceiling if cpu_ceiling > 0 else None,
+            ),
+            memory_gib=HostResizeDimensionCapability(
+                minimum=1,
+                default_value=None,
+                ceiling=memory_ceiling_gib if memory_ceiling_gib > 0 else None,
+            ),
+        )
+
+    @staticmethod
+    def _limits_from_container(container: docker.models.containers.Container) -> HostResourceLimits:
+        """Derive resource limits from a container's HostConfig (0 means no limit in docker)."""
+        host_config = (container.attrs or {}).get("HostConfig") or {}
+        nano_cpus = host_config.get("NanoCpus") or 0
+        memory_bytes = host_config.get("Memory") or 0
+        return HostResourceLimits(
+            cpu_count=nano_cpus / 1e9 if nano_cpus else None,
+            memory_gib=memory_bytes / BYTES_PER_GIB if memory_bytes else None,
+        )
+
+    def _resources_from_container(self, container: docker.models.containers.Container) -> HostResources:
+        """Build a HostResources record from a container's live HostConfig."""
+        limits = self._limits_from_container(container)
         return HostResources(
-            cpu=CpuResources(count=1, frequency_ghz=None),
-            memory_gb=1.0,
+            cpu=CpuResources(count=int(round(limits.cpu_count))) if limits.cpu_count is not None else None,
+            memory_gb=limits.memory_gib,
             disk_gb=None,
             gpu=None,
+        )
+
+    def _apply_resource_limits_to_container(
+        self,
+        container: docker.models.containers.Container,
+        resources: HostResources,
+    ) -> None:
+        """Apply concrete resource limits to a container via ``docker update``.
+
+        Works on both running and stopped containers; docker persists the updated
+        HostConfig across restarts. A rejected update (e.g. shrinking memory below
+        the container's current usage) is logged and left as a configured/actual
+        discrepancy rather than raised -- the values re-apply on the next start.
+        Dimensions with no limit are skipped: docker treats 0 as "no change", so
+        an existing limit cannot be cleared, only overwritten.
+        """
+        update_args: list[str] = []
+        if resources.cpu is not None:
+            update_args.extend(["--cpus", str(resources.cpu.count)])
+        if resources.memory_gb is not None:
+            # Pin memory-swap to the memory limit so the allotment is a true total
+            # (no swap headroom) and docker never rejects the memory change for
+            # being above a previously-set memoryswap limit.
+            memory_arg = f"{int(resources.memory_gb * 1024)}m"
+            update_args.extend(["--memory", memory_arg, "--memory-swap", memory_arg])
+        if not update_args:
+            return
+        try:
+            with log_span("Applying resource limits via docker update", container_id=container.id):
+                self._run_docker_creation_command(["update", *update_args, container.id], timeout=60)
+        except (ProcessError, OSError) as e:
+            logger.warning("Docker rejected the resource limit update (will re-apply on next start): {}", e)
+
+    def _probe_actual_limits(self, container: docker.models.containers.Container | None) -> HostResourceLimits | None:
+        """Read the limits a running container actually has, or None when not running."""
+        if container is None:
+            return None
+        try:
+            container.reload()
+        except docker.errors.DockerException as e:
+            logger.debug("Failed to reload container while probing limits: {}", e)
+            return None
+        if not self._is_container_running(container):
+            return None
+        return self._limits_from_container(container)
+
+    def _configured_limits_for_record(
+        self,
+        host_record: HostRecord,
+        container: docker.models.containers.Container | None,
+    ) -> HostResourceLimits:
+        """Configured limits from the host record, falling back to the container for legacy records."""
+        if host_record.resources is not None:
+            return HostResourceLimits(
+                cpu_count=float(host_record.resources.cpu.count) if host_record.resources.cpu is not None else None,
+                memory_gib=host_record.resources.memory_gb,
+            )
+        if container is not None:
+            return self._limits_from_container(container)
+        return HostResourceLimits(cpu_count=None, memory_gib=None)
+
+    def get_host_resource_limits(self, host: HostInterface | HostId) -> HostResourceLimitsReport:
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            raise HostNotFoundError(self.name, host_id)
+        container = self._find_container_by_host_id(host_id)
+        return HostResourceLimitsReport(
+            configured=self._configured_limits_for_record(host_record, container),
+            actual=self._probe_actual_limits(container),
+        )
+
+    def resize_host(self, host: HostInterface | HostId, resize: HostResizeRequest) -> HostResourceLimitsReport:
+        """Persist desired resource limits for a container and apply them via ``docker update``.
+
+        The update applies live to a running container (docker may reject e.g. a
+        memory shrink below current usage, which surfaces as a configured/actual
+        discrepancy and re-applies on the next start). Clearing a dimension back
+        to unlimited is resolved to the docker daemon's full allotment, since
+        docker cannot unset a limit on an existing container.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            raise HostNotFoundError(self.name, host_id)
+        container = self._find_container_by_host_id(host_id)
+        current = self._configured_limits_for_record(host_record, container)
+
+        # Resolve each requested dimension; a clear request becomes the daemon's
+        # full allotment (functionally unlimited -- a container can never use more).
+        capabilities = self.get_resize_capabilities()
+        new_cpu_count = current.cpu_count
+        if resize.cpu_count is not None:
+            if resize.cpu_count.value is not None:
+                new_cpu_count = float(resize.cpu_count.value)
+            elif capabilities.cpu is not None and capabilities.cpu.ceiling is not None:
+                new_cpu_count = float(capabilities.cpu.ceiling)
+            else:
+                new_cpu_count = None
+        new_memory_gib = current.memory_gib
+        if resize.memory_gib is not None:
+            if resize.memory_gib.value is not None:
+                new_memory_gib = float(resize.memory_gib.value)
+            elif capabilities.memory_gib is not None and capabilities.memory_gib.ceiling is not None:
+                new_memory_gib = float(capabilities.memory_gib.ceiling)
+            else:
+                new_memory_gib = None
+
+        updated_resources = HostResources(
+            cpu=CpuResources(count=int(round(new_cpu_count))) if new_cpu_count is not None else None,
+            memory_gb=new_memory_gib,
+            disk_gb=None,
+            gpu=None,
+        )
+        if container is not None:
+            self._apply_resource_limits_to_container(container, updated_resources)
+        self._host_store.write_host_record(
+            host_record.model_copy_update(
+                to_update(host_record.field_ref().resources, updated_resources),
+            )
+        )
+
+        return HostResourceLimitsReport(
+            configured=HostResourceLimits(cpu_count=new_cpu_count, memory_gib=new_memory_gib),
+            actual=self._probe_actual_limits(container),
         )
 
     # =========================================================================

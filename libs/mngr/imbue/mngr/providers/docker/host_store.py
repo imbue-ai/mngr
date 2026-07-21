@@ -13,6 +13,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostConfig
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -75,6 +76,10 @@ class HostRecord(FrozenModel):
     ssh_host_public_key: str | None = Field(default=None, description="SSH host public key for verification")
     config: ContainerConfig | None = Field(default=None, description="Container configuration")
     container_id: str | None = Field(default=None, description="Docker container ID for reconnection")
+    resources: HostResources | None = Field(
+        default=None,
+        description="Configured host resource limits (None for records written before resize support)",
+    )
 
 
 class DockerHostStore(MutableModel):

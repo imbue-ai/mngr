@@ -27,12 +27,16 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostResizeNotSupportedError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
+from imbue.mngr.interfaces.data_types import HostResizeCapabilities
+from imbue.mngr.interfaces.data_types import HostResizeRequest
+from imbue.mngr.interfaces.data_types import HostResourceLimitsReport
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -871,6 +875,35 @@ class ProviderInstanceInterface(MutableModel, ABC):
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get CPU, memory, disk, and GPU resource information for a host."""
         ...
+
+    # =========================================================================
+    # Resource Resize Methods
+    # =========================================================================
+
+    def get_resize_capabilities(self) -> HostResizeCapabilities:
+        """Describe which host resource dimensions this provider can resize.
+
+        The default is no resizable dimensions; providers that support
+        resizing (e.g. lima, docker) override this.
+        """
+        return HostResizeCapabilities(cpu=None, memory_gib=None)
+
+    def get_host_resource_limits(self, host: HostInterface | HostId) -> HostResourceLimitsReport:
+        """Report a host's configured (desired) and actual (probed) resource limits.
+
+        Raises HostResizeNotSupportedError for providers without resize support.
+        """
+        raise HostResizeNotSupportedError(self.name)
+
+    def resize_host(self, host: HostInterface | HostId, resize: HostResizeRequest) -> HostResourceLimitsReport:
+        """Persist desired resource limits for a host and apply them live where possible.
+
+        Never restarts the host: values that cannot apply live are visible as a
+        configured/actual discrepancy in the returned report and take effect on
+        the host's next start. Raises HostResizeNotSupportedError for providers
+        without resize support.
+        """
+        raise HostResizeNotSupportedError(self.name)
 
     def get_host_and_agent_details(
         self,

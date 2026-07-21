@@ -8,6 +8,7 @@ from typing import Any
 from typing import Mapping
 from typing import Sequence
 
+import psutil
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -21,6 +22,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
@@ -28,8 +30,14 @@ from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
+from imbue.mngr.interfaces.data_types import BYTES_PER_GIB
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
+from imbue.mngr.interfaces.data_types import HostResizeCapabilities
+from imbue.mngr.interfaces.data_types import HostResizeDimensionCapability
+from imbue.mngr.interfaces.data_types import HostResizeRequest
+from imbue.mngr.interfaces.data_types import HostResourceLimits
+from imbue.mngr.interfaces.data_types import HostResourceLimitsReport
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -59,6 +67,9 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
+from imbue.mngr_lima.constants import DEFAULT_LIMA_CPU_COUNT
+from imbue.mngr_lima.constants import DEFAULT_LIMA_DISK_GIB
+from imbue.mngr_lima.constants import DEFAULT_LIMA_MEMORY_GIB
 from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaHostCreationError
@@ -75,6 +86,7 @@ from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_delete
 from imbue.mngr_lima.limactl import limactl_disk_create
 from imbue.mngr_lima.limactl import limactl_disk_delete
+from imbue.mngr_lima.limactl import limactl_edit
 from imbue.mngr_lima.limactl import limactl_list
 from imbue.mngr_lima.limactl import limactl_shell
 from imbue.mngr_lima.limactl import limactl_show_ssh
@@ -638,8 +650,10 @@ sudo poweroff
             is_run_as_root=self.config.is_run_as_root,
         )
 
-        # Read configured resources from Lima config
-        resources = self._read_resources_from_config(lima_config)
+        # Record the resources the VM actually booted with (start_args like
+        # --cpus/--memory override the YAML config, so the YAML alone can lie).
+        # Falls back to the YAML-derived values if the probe fails.
+        resources = self._probe_booted_resources(instance_name, fallback=self._read_resources_from_config(lima_config))
 
         host_record = HostRecord(
             certified_host_data=host_data,
@@ -687,9 +701,9 @@ sudo poweroff
 
     def _read_resources_from_config(self, lima_config: dict) -> HostResources:
         """Read configured resources from a Lima YAML config dict."""
-        cpus = lima_config.get("cpus", 4)
-        memory_str = lima_config.get("memory", "4GiB")
-        disk_str = lima_config.get("disk", "100GiB")
+        cpus = lima_config.get("cpus", DEFAULT_LIMA_CPU_COUNT)
+        memory_str = lima_config.get("memory", f"{DEFAULT_LIMA_MEMORY_GIB:g}GiB")
+        disk_str = lima_config.get("disk", f"{DEFAULT_LIMA_DISK_GIB:g}GiB")
 
         # Parse memory (Lima uses strings like "4GiB")
         memory_gb = _parse_size_to_gb(memory_str) if isinstance(memory_str, str) else float(memory_str)
@@ -699,6 +713,33 @@ sudo poweroff
             cpu=CpuResources(count=int(cpus)),
             memory_gb=memory_gb,
             disk_gb=disk_gb,
+            gpu=None,
+        )
+
+    def _find_lima_instance(self, instance_name: str) -> dict[str, Any] | None:
+        """Return the limactl list entry for an instance, or None if not found."""
+        try:
+            instances = limactl_list(self.mngr_ctx.concurrency_group)
+        except (LimaCommandError, OSError, ProcessError) as e:
+            logger.warning("Failed to list Lima instances while probing {}: {}", instance_name, e)
+            return None
+        for instance in instances:
+            if instance.get("name") == instance_name:
+                return instance
+        return None
+
+    def _probe_booted_resources(self, instance_name: str, fallback: HostResources) -> HostResources:
+        """Read the exact resources of a just-booted instance from limactl, falling back per-field."""
+        instance = self._find_lima_instance(instance_name)
+        if instance is None:
+            return fallback
+        cpus = instance.get("cpus")
+        memory_bytes = instance.get("memory")
+        disk_bytes = instance.get("disk")
+        return HostResources(
+            cpu=CpuResources(count=int(cpus)) if cpus else fallback.cpu,
+            memory_gb=float(memory_bytes) / BYTES_PER_GIB if memory_bytes else fallback.memory_gb,
+            disk_gb=float(disk_bytes) / BYTES_PER_GIB if disk_bytes else fallback.disk_gb,
             gpu=None,
         )
 
@@ -761,6 +802,23 @@ sudo poweroff
             )
 
         instance_name = host_record.config.instance_name
+
+        # Apply the recorded CPU/memory limits to the instance config while the
+        # VM is stopped (the only time limactl allows edits), so the VM always
+        # boots with exactly the configured values.
+        if host_record.resources is not None:
+            recorded_cpu = host_record.resources.cpu
+            recorded_memory_gb = host_record.resources.memory_gb
+            if recorded_cpu is not None or recorded_memory_gb is not None:
+                try:
+                    limactl_edit(
+                        self.mngr_ctx.concurrency_group,
+                        instance_name,
+                        cpu_count=recorded_cpu.count if recorded_cpu is not None else None,
+                        memory_gib=recorded_memory_gb,
+                    )
+                except LimaCommandError as e:
+                    raise MngrError(f"Failed to apply configured resources to Lima VM {host_id}: {e}") from e
 
         try:
             limactl_start_existing(self.mngr_ctx.concurrency_group, instance_name)
@@ -1085,10 +1143,114 @@ sudo poweroff
             return host_record.resources
         # Return defaults if no record
         return HostResources(
-            cpu=CpuResources(count=4),
-            memory_gb=4.0,
-            disk_gb=100.0,
+            cpu=CpuResources(count=DEFAULT_LIMA_CPU_COUNT),
+            memory_gb=DEFAULT_LIMA_MEMORY_GIB,
+            disk_gb=DEFAULT_LIMA_DISK_GIB,
             gpu=None,
+        )
+
+    # =========================================================================
+    # Resource Resize Methods
+    # =========================================================================
+
+    def get_resize_capabilities(self) -> HostResizeCapabilities:
+        return HostResizeCapabilities(
+            cpu=HostResizeDimensionCapability(
+                minimum=1,
+                default_value=DEFAULT_LIMA_CPU_COUNT,
+                ceiling=psutil.cpu_count(logical=True),
+            ),
+            memory_gib=HostResizeDimensionCapability(
+                minimum=1,
+                default_value=int(DEFAULT_LIMA_MEMORY_GIB),
+                ceiling=int(psutil.virtual_memory().total // BYTES_PER_GIB),
+            ),
+        )
+
+    def _configured_limits_from_record(self, host_record: HostRecord) -> HostResourceLimits:
+        """Derive the configured CPU/memory limits from a host record, filling lima defaults."""
+        resources = host_record.resources
+        cpu_count = (
+            float(resources.cpu.count)
+            if resources is not None and resources.cpu is not None
+            else float(DEFAULT_LIMA_CPU_COUNT)
+        )
+        memory_gib = (
+            resources.memory_gb
+            if resources is not None and resources.memory_gb is not None
+            else DEFAULT_LIMA_MEMORY_GIB
+        )
+        return HostResourceLimits(cpu_count=cpu_count, memory_gib=memory_gib)
+
+    def _probe_actual_limits(self, instance_name: str) -> HostResourceLimits | None:
+        """Read the CPU/memory values a running VM actually booted with, or None if not running.
+
+        A running VM's limactl config always matches its booted values, since
+        limactl refuses config edits while the VM runs.
+        """
+        instance = self._find_lima_instance(instance_name)
+        if instance is None or instance.get("status") != "Running":
+            return None
+        cpus = instance.get("cpus")
+        memory_bytes = instance.get("memory")
+        if cpus is None or memory_bytes is None:
+            return None
+        return HostResourceLimits(cpu_count=float(cpus), memory_gib=float(memory_bytes) / BYTES_PER_GIB)
+
+    def get_host_resource_limits(self, host: HostInterface | HostId) -> HostResourceLimitsReport:
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            raise HostNotFoundError(self.name, host_id)
+        configured = self._configured_limits_from_record(host_record)
+        actual = self._probe_actual_limits(host_record.config.instance_name) if host_record.config else None
+        return HostResourceLimitsReport(configured=configured, actual=actual)
+
+    def resize_host(self, host: HostInterface | HostId, resize: HostResizeRequest) -> HostResourceLimitsReport:
+        """Persist desired CPU/memory for a Lima VM; values apply on the next start.
+
+        The values are written to the durable host record only -- ``start_host``
+        applies them via ``limactl edit`` while the VM is stopped, so a running
+        VM keeps its booted values until it is restarted.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            raise HostNotFoundError(self.name, host_id)
+        if host_record.config is None:
+            raise MngrError(f"Host {host_id} has no configuration and cannot be resized.")
+        requested_cpu_count = resize.cpu_count.value if resize.cpu_count is not None else None
+        requested_memory_gib = resize.memory_gib.value if resize.memory_gib is not None else None
+        if (resize.cpu_count is not None and requested_cpu_count is None) or (
+            resize.memory_gib is not None and requested_memory_gib is None
+        ):
+            raise UserInputError("Lima VMs require concrete CPU/memory values; clearing to unlimited is not supported")
+
+        # Merge the request into the currently configured values (which are
+        # always concrete for lima; the defaults are only a fallback for
+        # legacy records with no recorded resources).
+        current = self._configured_limits_from_record(host_record)
+        current_cpu_count = current.cpu_count if current.cpu_count is not None else float(DEFAULT_LIMA_CPU_COUNT)
+        current_memory_gib = current.memory_gib if current.memory_gib is not None else DEFAULT_LIMA_MEMORY_GIB
+        new_cpu_count = requested_cpu_count if requested_cpu_count is not None else int(current_cpu_count)
+        new_memory_gib = float(requested_memory_gib) if requested_memory_gib is not None else float(current_memory_gib)
+        current_disk_gb = host_record.resources.disk_gb if host_record.resources is not None else None
+        updated_resources = HostResources(
+            cpu=CpuResources(count=new_cpu_count),
+            memory_gb=new_memory_gib,
+            disk_gb=current_disk_gb if current_disk_gb is not None else DEFAULT_LIMA_DISK_GIB,
+            gpu=None,
+        )
+        self._host_store.write_host_record(
+            host_record.model_copy_update(
+                to_update(host_record.field_ref().resources, updated_resources),
+            )
+        )
+
+        actual = self._probe_actual_limits(host_record.config.instance_name)
+        return HostResourceLimitsReport(
+            configured=HostResourceLimits(cpu_count=float(new_cpu_count), memory_gib=new_memory_gib),
+            actual=actual,
         )
 
     # =========================================================================

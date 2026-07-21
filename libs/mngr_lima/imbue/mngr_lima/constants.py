@@ -25,6 +25,11 @@ DEFAULT_IMAGE_URL_X86_64: Final[str] = (
 # Default host directory inside the VM
 DEFAULT_HOST_DIR: Final[str] = "/mngr"
 
+# Resource defaults Lima applies when the instance config does not set them.
+DEFAULT_LIMA_CPU_COUNT: Final[int] = 4
+DEFAULT_LIMA_MEMORY_GIB: Final[float] = 4.0
+DEFAULT_LIMA_DISK_GIB: Final[float] = 100.0
+
 # SSH connection timeout when waiting for Lima VM to become reachable
 SSH_CONNECT_TIMEOUT_SECONDS: Final[float] = 120.0
 
