@@ -86,9 +86,13 @@ To test real OS-level delivery (browser link clicks, `open 'minds://...'`) again
 PLIST=apps/minds/node_modules/electron/dist/Electron.app/Contents/Info.plist
 plutil -insert CFBundleURLTypes -json '[{"CFBundleURLName":"Minds Deeplink","CFBundleURLSchemes":["minds"]}]' "$PLIST"
 plutil -replace CFBundleIdentifier -string com.imbue.minds.dev "$PLIST"
+plutil -replace CFBundleDisplayName -string "Minds" "$PLIST"
+plutil -replace CFBundleName -string "Minds" "$PLIST"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
   -f apps/minds/node_modules/electron/dist/Electron.app
 ```
+
+The display-name lines make the browser's external-protocol prompt say "open the minds link with Minds" instead of naming the handler "Electron" (the prompt itself is browser UI and can't be customized further; packaged builds are already named Minds).
 
 Then start the dev app (its `setAsDefaultProtocolClient` call points the scheme at the patched bundle) and click minds:// links while it is running. The patch lives in `node_modules` (wiped on reinstall, never committed), and a link clicked while the dev app is *not* running launches bare Electron without the app code -- keep the dev app running. Packaged builds need none of this.
 
