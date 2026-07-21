@@ -1,0 +1,1 @@
+Pin the litellm version in the Modal proxy image. The proxy's auth/budget behavior now enforces per-account monthly LLM spend quotas (user-level budgets), so it must not drift on redeploy; bump the pin deliberately and re-verify budget enforcement and the model price map.

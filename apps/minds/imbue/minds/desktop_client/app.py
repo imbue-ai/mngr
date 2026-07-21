@@ -7,6 +7,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -1984,7 +1986,31 @@ def _handle_recovery_page(
 # -- Account management routes --
 
 
-def _handle_accounts_page() -> Response:
+def _fetch_plan_views_for_accounts(accounts: Sequence[Any]) -> dict[str, dict[str, Any] | None]:
+    """Fetch each signed-in account's plan/usage view model (None on any failure).
+
+    Usage is computed live by the connector on every page load (a deliberate
+    freshness choice), so a slow or offline connector must degrade to a
+    "usage unavailable" section rather than breaking the page.
+    """
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    plan_view_by_user_id: dict[str, dict[str, Any] | None] = {}
+    for account in accounts:
+        user_id = str(account.user_id)
+        if cli is None:
+            plan_view_by_user_id[user_id] = None
+            continue
+        try:
+            info = cli.get_account_info(str(account.email))
+        except ImbueCloudCliError as exc:
+            logger.debug("Could not fetch account info for {}: {}", account.email, exc)
+            plan_view_by_user_id[user_id] = None
+            continue
+        plan_view_by_user_id[user_id] = build_account_plan_view(info)
+    return plan_view_by_user_id
+
+
+def _handle_accounts_page(plan_error: str | None = None) -> Response:
     """Render the manage accounts page."""
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
@@ -1999,8 +2025,34 @@ def _handle_accounts_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
+        plan_view_by_user_id=_fetch_plan_views_for_accounts(accounts),
+        plan_error=plan_error,
     )
     return make_html_response(content=html)
+
+
+def _handle_account_set_plan(user_id: str) -> Response:
+    """Switch an account's plan; on failure re-render the page with the server's reason."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    plan = str(request.form.get("plan", "")).strip()
+    if not plan:
+        return _handle_accounts_page(plan_error="No plan selected.")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None or cli is None:
+        return _handle_accounts_page(plan_error="Account not found or imbue_cloud CLI unavailable.")
+    try:
+        cli.set_account_plan(str(account.email), plan)
+    except ImbueCloudCliError as exc:
+        # The connector's reason (e.g. "requires partner access") is the
+        # user-facing explanation -- surface it plainly.
+        return _handle_accounts_page(plan_error=f"Could not switch {account.email} to '{plan}': {exc}")
+    return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
 def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | None:
@@ -2894,6 +2946,7 @@ def create_desktop_client(
         methods=["POST"],
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
+    app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 
     # Workspace settings page (the account-association and color writes it drives

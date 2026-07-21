@@ -47,6 +47,25 @@ class ImbueCloudPaidListError(ImbueCloudError):
     """Raised when a paid-list (paid domains / emails) admin operation fails."""
 
 
+class ImbueCloudQuotaExceededError(ImbueCloudError):
+    """Raised when the connector refuses an operation because a quota entitlement is exhausted.
+
+    Carries the structured detail from the connector's 403 (``code:
+    quota_exceeded``) so callers can render "N of M used" without parsing
+    the message text.
+    """
+
+    def __init__(self, message: str, entitlement: str, limit: float, current: float) -> None:
+        super().__init__(message)
+        self.entitlement = entitlement
+        self.limit = limit
+        self.current = current
+
+
+class ImbueCloudAccountError(ImbueCloudError):
+    """Raised when an account (plan / entitlements / usage) operation fails."""
+
+
 class PoolHostNotMatchedError(ImbueCloudError):
     """Raised when create_agent is invoked on a leased host that has no pre-baked agent or has more than one."""
 
