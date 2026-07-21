@@ -13,8 +13,12 @@ same models into the handlers as spectree request/response validators so the
 documented contract and the enforced contract can never drift.
 """
 
+from typing import Annotated
+from typing import Literal
+
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import RootModel
 from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -261,26 +265,60 @@ class BugReportRequest(ApiRequestModel):
     description: str = Field(min_length=1, description="What went wrong (required, non-empty)")
 
 
-class CloudAccountCreateRequest(ApiRequestModel):
-    """Body for registering a bring-your-own-key cloud account (pasted credentials)."""
+class _CloudAccountCreateBase(ApiRequestModel):
+    """Fields shared by every backend's bring-your-own-key account registration."""
 
     alias: str = Field(min_length=1, description="Display name for the account (also seeds the block-name slug)")
-    backend: str = Field(description="Cloud backend: 'aws', 'gcp', or 'azure'")
     region: str = Field(
         min_length=1,
         description="Default placement for machines created on this account (an AWS/Azure region, or a GCE zone)",
     )
-    aws_access_key_id: str | None = Field(default=None, description="AWS access key id (required for aws)")
-    aws_secret_access_key: str | None = Field(default=None, description="AWS secret access key (required for aws)")
+
+
+class AwsCloudAccountCreateRequest(_CloudAccountCreateBase):
+    """Register an AWS account from a pasted access-key pair."""
+
+    backend: Literal["aws"] = Field(description="Cloud backend discriminator")
+    aws_access_key_id: str | None = Field(default=None, description="AWS access key id")
+    aws_secret_access_key: str | None = Field(default=None, description="AWS secret access key")
+
+
+class GcpCloudAccountCreateRequest(_CloudAccountCreateBase):
+    """Register a GCP account from a pasted service-account key."""
+
+    backend: Literal["gcp"] = Field(description="Cloud backend discriminator")
     gcp_service_account_key_json: str | None = Field(
-        default=None, description="Full JSON contents of a GCP service-account key (required for gcp)"
+        default=None, description="Full JSON contents of a GCP service-account key"
     )
-    azure_subscription_id: str | None = Field(default=None, description="Azure subscription id (required for azure)")
-    azure_tenant_id: str | None = Field(default=None, description="Entra tenant id (required for azure)")
-    azure_client_id: str | None = Field(default=None, description="Service-principal client id (required for azure)")
-    azure_client_secret: str | None = Field(
-        default=None, description="Service-principal client secret (required for azure)"
-    )
+
+
+class AzureCloudAccountCreateRequest(_CloudAccountCreateBase):
+    """Register an Azure account from a service-principal."""
+
+    backend: Literal["azure"] = Field(description="Cloud backend discriminator")
+    azure_subscription_id: str | None = Field(default=None, description="Azure subscription id")
+    azure_tenant_id: str | None = Field(default=None, description="Entra tenant id")
+    azure_client_id: str | None = Field(default=None, description="Service-principal client id")
+    azure_client_secret: str | None = Field(default=None, description="Service-principal client secret")
+
+
+class CloudAccountCreateRequest(
+    RootModel[
+        Annotated[
+            AwsCloudAccountCreateRequest | GcpCloudAccountCreateRequest | AzureCloudAccountCreateRequest,
+            Field(discriminator="backend"),
+        ]
+    ]
+):
+    """Body for registering a bring-your-own-key cloud account (pasted credentials).
+
+    A discriminated union on ``backend``: each cloud's credential fields live on
+    its own variant instead of being splatted flat across one model. The wire
+    shape stays flat (a variant's fields sit at the top level of the body).
+    Which fields are actually *required* per backend, and the GCP key's
+    structure, are semantic checks that stay in the handler, per
+    :class:`ApiRequestModel`.
+    """
 
 
 class CloudAccountSummary(FrozenModel):
