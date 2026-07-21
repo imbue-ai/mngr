@@ -4973,6 +4973,14 @@ def run_r2_quota_sweep(
         if is_over_quota:
             counters["users_over_quota"] += 1
         with enforcement_lock(owner_user_id):
+            # Re-check under the lock before downgrading: a cleanup grant may
+            # have been created (restoring the keys under this same lock)
+            # between the loop-top check and lock acquisition, and a
+            # downgrade here would break the mid-cleanup guarantee. Restores
+            # need no re-check -- restoring is exactly what a grant wants.
+            if is_over_quota and grant_store.get_active_grant(owner_user_id) is not None:
+                counters["users_skipped_for_grant"] += 1
+                continue
             _enforce_owner_key_access(ops, key_store, rows, is_over_quota, counters)
     return counters
 

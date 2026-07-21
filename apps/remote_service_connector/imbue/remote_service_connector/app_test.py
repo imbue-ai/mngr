@@ -1,7 +1,9 @@
 import base64
+import contextlib
 import hashlib
 import json
 from collections.abc import Callable
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -4014,6 +4016,38 @@ def test_sweep_skips_owner_with_active_grant() -> None:
     ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
     grant_store.create_grant("user-1", "u1prefix", 1000, 60)
     counters = _run_sweep(ops, store, entitlements_store, grant_store=grant_store)
+    assert counters["users_skipped_for_grant"] == 1
+    assert counters["keys_downgraded"] == 0
+    assert ops.account_tokens[key_id]["access"] == "readwrite"
+
+
+def test_sweep_skips_downgrade_when_grant_appears_before_lock_acquisition() -> None:
+    """A grant created between the loop-top check and the lock must still block the downgrade.
+
+    Simulates the interleave by injecting an enforcement lock that creates
+    the grant on entry (a real grant request holds the same lock while it
+    restores the keys, so from the sweep's perspective the grant simply
+    exists by the time it enters).
+    """
+    ops, store, entitlements_store = _sweep_fixtures()
+    grant_store = make_fake_grant_store()
+    _seed_sweep_row(entitlements_store, "user-1", "u1prefix", 100)
+    key_id = _add_bucket_with_key(ops, store, "user-1", "u1prefix--data")
+    ops.usage_bytes_by_bucket["u1prefix--data"] = 1000
+
+    @contextlib.contextmanager
+    def grant_creating_lock(owner_user_id: str) -> Iterator[None]:
+        grant_store.create_grant(owner_user_id, "u1prefix", 1000, 60)
+        yield
+
+    counters = app_mod.run_r2_quota_sweep(
+        ops,
+        store,
+        entitlements_store,
+        grant_store,
+        email_getter=lambda uid: None,
+        enforcement_lock=grant_creating_lock,
+    )
     assert counters["users_skipped_for_grant"] == 1
     assert counters["keys_downgraded"] == 0
     assert ops.account_tokens[key_id]["access"] == "readwrite"
