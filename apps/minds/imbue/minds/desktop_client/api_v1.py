@@ -209,8 +209,8 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
 # backups) through the hub. Every route is gated at the gateway by the
 # ``minds-workspaces`` detent scope (see ``mngr_latchkey.agent_setup``); the
 # scope's per-verb permissions decide which of these a given caller may reach.
-# A workspace is addressed by its primary (``is_primary``+``workspace``) agent
-# id, matching minds discovery.
+# A workspace is addressed by its primary (``is_primary``) agent id, matching
+# minds discovery.
 
 
 def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
