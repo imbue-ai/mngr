@@ -2307,3 +2307,13 @@ def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
     assert '<script type="application/json" id="minds-sentry-config">' in html
     assert '"environment": "staging"' in html
     assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html
+
+
+def test_render_chrome_page_shows_workspace_switching_loading_bar() -> None:
+    """The wrapper's white loading card carries a 2-second loading bar, so
+    switching workspaces shows progress instead of a blank card while the
+    target loads (the content surface covers the bar the moment it paints)."""
+    html = render_chrome_page()
+    assert "ws-loading-track" in html
+    assert "ws-loading-fill" in html
+    assert "ws-loading-fill 2s" in html
