@@ -502,6 +502,11 @@ def _handle_check_email_page() -> Response:
 # subprocess.
 _OAUTH_FLOW_TTL_SECONDS = 10 * 60
 
+# Passed to the plugin's oauth subcommand so its browser success page bounces
+# straight back to the desktop app: a bare minds:// deeplink focuses the app
+# without navigating (see the Electron main process's handleDeeplink).
+_MINDS_FOCUS_DEEPLINK = "minds://"
+
 
 class _OAuthFlowStatus(FrozenModel):
     """Status snapshot for a single in-flight OAuth subprocess.
@@ -565,7 +570,9 @@ def _run_oauth_subprocess(
     non-OAuth signins.
     """
     try:
-        result = imbue_cloud_cli.auth_oauth(account="", provider_id=provider_id)
+        result = imbue_cloud_cli.auth_oauth(
+            account="", provider_id=provider_id, success_redirect_url=_MINDS_FOCUS_DEEPLINK
+        )
     except ImbueCloudCliError as exc:
         logger.warning("Plugin OAuth subprocess failed for {}: {}", provider_id, exc)
         _record_oauth_status(

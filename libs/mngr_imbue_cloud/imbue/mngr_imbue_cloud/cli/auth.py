@@ -1,7 +1,9 @@
 """`mngr imbue_cloud auth ...` subcommands."""
 
 import getpass
+import html
 import http.server
+import json
 import socket
 import threading
 import time
@@ -337,12 +339,39 @@ class _OAuthCaptureBox:
             return None if self._params is None else dict(self._params)
 
 
-def _make_callback_handler_class(box: _OAuthCaptureBox) -> type[http.server.BaseHTTPRequestHandler]:
+def _oauth_success_page(success_redirect_url: str | None) -> bytes:
+    """Build the HTML the callback listener serves to the browser.
+
+    With a redirect URL, the page immediately navigates the browser there --
+    the minds desktop app passes its minds:// deeplink so the browser hands
+    focus back to the app -- and keeps a visible link as the fallback for
+    browsers that only follow custom schemes on a user gesture.
+    """
+    if success_redirect_url is None:
+        tail = "<p>You can close this tab and return to your terminal.</p>"
+    else:
+        href = html.escape(success_redirect_url, quote=True)
+        # JSON-encode for the script body, with angle brackets escaped so a
+        # crafted URL can't close the <script> tag and inject markup.
+        target = json.dumps(success_redirect_url).replace("<", "\\u003c").replace(">", "\\u003e")
+        tail = (
+            f'<p>Returning you to the app... if nothing happens, <a href="{href}">open the app</a> '
+            "and close this tab.</p>"
+            f"<script>window.location.href = {target};</script>"
+        )
+    page = f"<html><head><title>Imbue Cloud sign-in</title></head><body><h1>You are signed in</h1>{tail}</body></html>"
+    return page.encode("utf-8")
+
+
+def _make_callback_handler_class(
+    box: _OAuthCaptureBox, success_redirect_url: str | None
+) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a handler class closed over a specific capture box.
 
     Closing over the box lets the handler push state without us touching the
     HTTPServer instance's attributes (which would trip the no-getattr ratchet).
     """
+    body = _oauth_success_page(success_redirect_url)
 
     class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -357,11 +386,6 @@ def _make_callback_handler_class(box: _OAuthCaptureBox) -> type[http.server.Base
             # at the same listener; those must not overwrite the captured params.
             if parsed.path == _OAUTH_CALLBACK_PATH and params:
                 box.set(params)
-            body = (
-                b"<html><head><title>Imbue Cloud sign-in</title></head>"
-                b"<body><h1>You are signed in</h1>"
-                b"<p>You can close this tab and return to your terminal.</p></body></html>"
-            )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -403,6 +427,15 @@ def _free_localhost_port() -> int:
     default=False,
     help="Print the authorize URL instead of launching the browser; useful when running headless.",
 )
+@click.option(
+    "--success-redirect-url",
+    default=None,
+    help=(
+        "URL the success page redirects the browser to once the OAuth callback lands "
+        "(e.g. a minds:// deeplink so the desktop app regains focus). Default: no "
+        "redirect; the page just says to close the tab."
+    ),
+)
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def oauth(
@@ -410,6 +443,7 @@ def oauth(
     account: str | None,
     callback_port: int | None,
     no_browser: bool,
+    success_redirect_url: str | None,
     connector_url: str | None,
 ) -> None:
     """OAuth-based sign-in. Spins up a localhost callback listener.
@@ -432,7 +466,7 @@ def oauth(
         fail_with_json("Connector did not return an authorize URL", error_class="OAuthFailed")
 
     capture_box = _OAuthCaptureBox()
-    handler_class = _make_callback_handler_class(capture_box)
+    handler_class = _make_callback_handler_class(capture_box, success_redirect_url)
     server = http.server.HTTPServer(("127.0.0.1", port), handler_class)
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="imbue-cloud-oauth-cb")

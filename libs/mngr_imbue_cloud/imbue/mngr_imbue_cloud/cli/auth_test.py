@@ -13,6 +13,7 @@ The ``running_callback_server`` fixture lives in ``cli/conftest.py``.
 import urllib.request
 
 from imbue.mngr_imbue_cloud.cli.auth import _OAuthCaptureBox
+from imbue.mngr_imbue_cloud.cli.auth import _oauth_success_page
 
 
 def _get(port: int, path: str) -> int:
@@ -60,3 +61,28 @@ def test_callback_handler_ignores_query_params_on_wrong_path(
     box, port = running_callback_server
     assert _get(port, "/some-other-path?code=should_be_ignored") == 200
     assert box.get() is None
+
+
+def test_success_page_without_redirect_says_return_to_terminal() -> None:
+    page = _oauth_success_page(None).decode("utf-8")
+    assert "return to your terminal" in page
+    assert "<script>" not in page
+
+
+def test_success_page_with_redirect_navigates_and_links_to_url() -> None:
+    page = _oauth_success_page("minds://").decode("utf-8")
+    assert 'window.location.href = "minds://"' in page
+    assert '<a href="minds://">' in page
+
+
+def test_success_page_escapes_redirect_url_markup() -> None:
+    """A crafted URL must not be able to inject markup into the page.
+
+    The href is attribute-escaped and the script target is JSON-encoded with
+    angle brackets unicode-escaped, so a ``</script>`` payload can't close
+    the script tag.
+    """
+    page = _oauth_success_page('minds://x?a=<b>&q="hi"</script>').decode("utf-8")
+    assert "<b>" not in page
+    assert 'href="minds://x?a=&lt;b&gt;&amp;q=&quot;hi&quot;&lt;/script&gt;"' in page
+    assert "\\u003c/script\\u003e" in page
