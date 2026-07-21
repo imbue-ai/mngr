@@ -586,6 +586,8 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
             "ai_provider": "SUBSCRIPTION",
             "backup_provider": "CONFIGURE_LATER",
             "runtime": "RUNSC",
+            "cpus": 4,
+            "memory_gib": 8,
         },
     )
 
@@ -597,6 +599,8 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert str(creator.last_call["color"]) == "#0b292b"
     assert str(creator.last_call["branch"]) == "main"
     assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
+    assert creator.last_call["cpus"] == 4
+    assert creator.last_call["memory_gib"] == 8
 
 
 def test_create_workspace_coerces_validated_resource_spellings(
@@ -622,6 +626,26 @@ def test_create_workspace_coerces_validated_resource_spellings(
     assert response.status_code == 202
     assert creator.last_call["cpus"] == 4
     assert creator.last_call["memory_gib"] == 8
+
+
+def test_create_workspace_rejects_resources_for_non_local_launch_mode(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # CPU/memory allotments only apply to the local docker/lima providers; a
+    # remote-mode create carrying them fails fast with a structured field error
+    # rather than silently ignoring the requested allotment.
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "launch_mode": "IMBUE_CLOUD", "cpus": 4},
+    )
+
+    assert response.status_code == 400
+    assert json.loads(response.data)["field"] == "cpus"
 
 
 def test_create_workspace_requires_api_key_for_api_key_provider(
