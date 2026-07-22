@@ -71,6 +71,12 @@ _MATCHES_TTL_SECONDS = 60.0
 _KEEPALIVE_TIMEOUT_SECONDS = 10.0
 # Cap the keepalive fan-out so a large fleet doesn't spawn a thread per host.
 _KEEPALIVE_MAX_WORKERS = 16
+# Turn on SSH-level keepalive on every warm connection: paramiko sends a keepalive
+# request this often, so a peer that vanished SILENTLY (a reverse tunnel that dropped
+# with no FIN/RST -- e.g. `ssh mac` cutting out) is detected within ~2 intervals and
+# its transport dies, instead of the reader thread blocking in read_all forever. That
+# silent-half-open case was the paramiko-thread leak (1000s of threads over hours).
+_SSH_KEEPALIVE_SECONDS = 15
 
 
 @dataclass
@@ -135,10 +141,46 @@ class ConnectionPool:
         with self._lock:
             return self._host_locks.setdefault(id(host), threading.Lock())
 
-    def invalidate(self, agent_name: str) -> None:
-        """Forget a cached handle so the next access re-resolves (e.g. after error)."""
+    def _disconnect_host(self, host: OnlineHostInterface) -> None:
+        """Best-effort close of a host's SSH connection so its paramiko reader thread
+        exits. A dropped/half-open connection whose client is never closed leaves that
+        daemon thread blocked in ``read_all`` forever -- the foreman thread leak. GC
+        cannot reap it (the live thread, plus the provider's cached host ref, keep the
+        object alive), so we must close explicitly whenever we stop using a connection.
+        """
+        try:
+            host.disconnect()
+        except Exception as e:  # noqa: BLE001 - a failed close must not break the caller
+            logger.trace("pool: host disconnect failed (ignored): {}", e)
+
+    def _drop_handles(self, names: set[str]) -> None:
+        """Remove the named handles and disconnect any host no longer referenced by a
+        surviving handle -- so we reap the paramiko connection of an agent that left
+        (or a dead handle) without ever closing one another agent still shares. The
+        disconnect (network I/O) runs OUTSIDE the pool lock.
+        """
+        to_close: list[OnlineHostInterface] = []
         with self._lock:
-            self._handles.pop(agent_name, None)
+            dropped = [self._handles.pop(n) for n in names if n in self._handles]
+            surviving = {id(h.host) for h in self._handles.values() if h.host is not None}
+            for h in dropped:
+                if h.host is not None and id(h.host) not in surviving:
+                    to_close.append(h.host)
+        for host in to_close:
+            self._disconnect_host(host)
+
+    def _enable_keepalive(self, host: OnlineHostInterface) -> None:
+        """Turn on SSH keepalive so a silently-dropped peer is detected and its reader
+        thread exits on its own (proactive backstop to _drop_handles' explicit close)."""
+        try:
+            host._get_paramiko_transport().set_keepalive(_SSH_KEEPALIVE_SECONDS)
+        except Exception as e:  # noqa: BLE001 - local agents have no transport; best effort
+            logger.trace("pool: set_keepalive failed (ignored): {}", e)
+
+    def invalidate(self, agent_name: str) -> None:
+        """Forget a cached handle (and close its now-unused connection) so the next
+        access re-resolves -- e.g. after a keepalive ping failed on a dropped host."""
+        self._drop_handles({agent_name})
 
     # --- send-path resolution (cached find_all_agents matches) -----------
 
@@ -177,6 +219,8 @@ class ConnectionPool:
                     allow_auto_start=False,
                     mngr_ctx=self.mngr_ctx,
                 )
+                # Fresh connection -> arm SSH keepalive so a silent peer-drop is noticed.
+                self._enable_keepalive(handle.host)
             agent, host = handle.agent, handle.host
         # Execute outside the agent handle lock, under the shared per-host lock,
         # so all commands to this connection serialize even across agents.
@@ -251,9 +295,13 @@ class ConnectionPool:
         # The registry already filters to live coding agents, so every card is one
         # we keep warm.
         live_names = {card["name"] for card in self._registry.snapshot()}
-        # Drop handles for agents that have left the live set (gone -> dropped).
+        # Drop handles for agents that have left the live set (gone -> dropped), and
+        # CLOSE their SSH connection so the paramiko reader thread exits -- otherwise a
+        # destroyed/moved agent's warm connection leaks its thread for the process life.
         with self._lock:
-            self._handles = {name: h for name, h in self._handles.items() if name in live_names}
+            gone = {name for name in self._handles if name not in live_names}
+        if gone:
+            self._drop_handles(gone)
         if not live_names:
             return
         # Warm agents concurrently on the persistent executor: each SSH touch is
@@ -272,9 +320,14 @@ class ConnectionPool:
         self._stop.set()
         # Unblock the maintainer's interval wait so it observes _stop at once.
         self._wake.set()
-        # Tear down the keepalive workers (and let their gevent Hubs go with them).
+        # Close every warm connection so its paramiko reader thread exits.
         with self._lock:
+            hosts = [h.host for h in self._handles.values() if h.host is not None]
+            self._handles = {}
             executor, self._executor = self._executor, None
+        for host in hosts:
+            self._disconnect_host(host)
+        # Tear down the keepalive workers (and let their gevent Hubs go with them).
         if executor is not None:
             executor.shutdown(wait=False)
 

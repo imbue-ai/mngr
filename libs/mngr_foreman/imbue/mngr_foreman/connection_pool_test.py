@@ -13,10 +13,37 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_foreman import connection_pool as cp
 from imbue.mngr_foreman.connection_pool import ConnectionPool
+from imbue.mngr_foreman.connection_pool import _Handle
 
 
 def _pool() -> ConnectionPool:
     return ConnectionPool(cast(MngrContext, SimpleNamespace()))
+
+
+def test_drop_handles_disconnects_only_unshared_hosts() -> None:
+    # Dropping a handle must CLOSE its SSH connection (so the paramiko reader thread
+    # exits -- the leak fix) but NEVER close a host object a surviving handle shares.
+    class _Host:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def disconnect(self) -> None:
+            self.closed += 1
+
+    shared = _Host()  # used by two agents on the same host
+    solo = _Host()  # used by one
+    pool = _pool()
+    pool._handles = {
+        "a": _Handle(host=cast(Any, shared)),
+        "b": _Handle(host=cast(Any, shared)),
+        "c": _Handle(host=cast(Any, solo)),
+    }
+    pool._drop_handles({"a", "c"})
+    assert set(pool._handles) == {"b"}  # a, c removed; b survives
+    assert solo.closed == 1  # unshared -> connection closed
+    assert shared.closed == 0  # still referenced by b -> left intact
+    pool._drop_handles({"b"})  # last referrer of shared now leaves
+    assert shared.closed == 1  # -> now closed
 
 
 def test_send_matches_cached(monkeypatch: pytest.MonkeyPatch) -> None:
