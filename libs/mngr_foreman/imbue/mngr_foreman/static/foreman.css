@@ -143,17 +143,17 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
    duplicate, drifting signals). The ~1s poller sets its label text + colour class. */
 .status-badge {
   margin-left: auto; /* sit at the right edge of the row, after the name */
-  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
-  padding: 2px 9px; border-radius: 999px; white-space: nowrap;
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  white-space: nowrap;
   display: inline-flex; align-items: center; gap: 6px;
-  color: var(--chip-stop); border: 1px solid #2a2a2a;
+  color: var(--chip-stop);
 }
-.status-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.status-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
 .status-badge.ready { color: var(--chip-stop); }
-.status-badge.needs-input { color: var(--chip-wait); border-color: #3a3016; }
-.status-badge.working { color: var(--chip-run); border-color: #24361f; }
+.status-badge.needs-input { color: var(--chip-wait); }
+.status-badge.working { color: var(--chip-run); }
 .status-badge.working::before { animation: working-pulse 1.1s ease-in-out infinite; }
-.status-badge.working-background { color: var(--chip-bg); border-color: #1f3138; }
+.status-badge.working-background { color: var(--chip-bg); }
 .status-badge.working-background::before { animation: working-pulse 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
   .status-badge.working::before, .status-badge.working-background::before { animation: none; }
