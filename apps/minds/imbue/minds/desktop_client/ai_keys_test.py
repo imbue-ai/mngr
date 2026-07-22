@@ -1,5 +1,6 @@
 """Tests for the workspace AI-key mint helpers and routes (see ai_keys.py)."""
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from flask.testing import FlaskClient
@@ -144,7 +145,7 @@ class _FailingMintImbueCloudCli(FakeImbueCloudCli):
         alias: str | None = None,
         max_budget: float | None = None,
         budget_duration: str | None = None,
-        metadata: dict[str, str] | None = None,
+        metadata: Mapping[str, str] | None = None,
     ) -> LiteLLMKeyMaterial:
         raise ImbueCloudCliError("keys litellm create: connector unreachable (fake)")
 
