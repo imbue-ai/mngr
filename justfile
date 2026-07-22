@@ -573,6 +573,13 @@ minds-start branch="" default_workspace_template="":
     fi
     echo "MINDS_WORKSPACE_GIT_URL=$MINDS_WORKSPACE_GIT_URL"
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
+    # Inherited from the shell/.env; electron/main.js turns it into a Chrome
+    # DevTools Protocol port. Surface the attach URL so a CDP client (or the
+    # user via chrome://inspect) knows where to connect once the app is up.
+    #   MINDS_REMOTE_DEBUGGING_PORT=9222 just minds-start
+    if [ -n "${MINDS_REMOTE_DEBUGGING_PORT:-}" ]; then
+        echo "MINDS_REMOTE_DEBUGGING_PORT=$MINDS_REMOTE_DEBUGGING_PORT -> CDP targets at http://127.0.0.1:$MINDS_REMOTE_DEBUGGING_PORT/json"
+    fi
     echo "$$" > "$pid_file"
     trap 'rm -f "$pid_file"' EXIT
     # Bail with a copy-pasteable install + build hint if the electron

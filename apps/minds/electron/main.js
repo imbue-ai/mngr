@@ -26,6 +26,32 @@ const {
 // Sentry init and any early crash) is durably captured on disk.
 initElectronLogging();
 
+// Opt-in remote debugging for local inspection. When MINDS_REMOTE_DEBUGGING_PORT
+// is set, expose the Chrome DevTools Protocol on that localhost port so an
+// external CDP client (chrome://inspect, Puppeteer, the chrome-devtools MCP) can
+// attach to every surface's webContents and read its console, network, and
+// errors -- unlike MINDS_OPEN_DEVTOOLS, which only opens in-app DevTools windows
+// on this machine. --remote-allow-origins is required alongside the port: modern
+// Chromium rejects the CDP WebSocket handshake with HTTP 403 for any non-listed
+// origin, so without it the port listens but no client can attach. Both switches
+// must be set before the 'ready' event, hence at module load. Dev-only (binds to
+// localhost, gated on the env var); never set in packaged builds.
+const remoteDebuggingPort = process.env.MINDS_REMOTE_DEBUGGING_PORT;
+if (remoteDebuggingPort) {
+  if (/^\d+$/.test(remoteDebuggingPort)) {
+    app.commandLine.appendSwitch('remote-debugging-port', remoteDebuggingPort);
+    app.commandLine.appendSwitch('remote-allow-origins', '*');
+    console.log(
+      `[remote-debug] Chrome DevTools Protocol on http://127.0.0.1:${remoteDebuggingPort} ` +
+        `(target list at http://127.0.0.1:${remoteDebuggingPort}/json)`,
+    );
+  } else {
+    console.error(
+      `[remote-debug] Ignoring MINDS_REMOTE_DEBUGGING_PORT="${remoteDebuggingPort}": expected a port number.`,
+    );
+  }
+}
+
 // Initialize Sentry as early as possible so errors thrown during main-process
 // startup (window creation, env setup, backend spawn) are captured. The SDK is
 // always initialized but only sends when the user has enabled error reporting

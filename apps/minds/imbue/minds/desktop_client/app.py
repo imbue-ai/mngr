@@ -1296,6 +1296,19 @@ def _handle_destroying_page(
 # -- Chrome (persistent shell) route handlers --
 
 
+def _resolve_crumb_workspace_name(workspaces: Sequence[ChromeWorkspaceEntry], crumb_agent_id: str) -> str:
+    """Resolve the titlebar breadcrumb name for a ``?agent=`` crumb id.
+
+    Returns the matching workspace's display name, the ellipsis placeholder
+    ("…") when the id is not among the rows (or that row has no name), and ""
+    when there is no crumb id at all. ``workspaces`` are ``ChromeWorkspaceEntry``
+    models, so this reads their attributes.
+    """
+    if not crumb_agent_id:
+        return ""
+    return next((ws.name for ws in workspaces if ws.id == crumb_agent_id and ws.name), "…")
+
+
 def _handle_chrome_page() -> Response:
     """Serve the persistent chrome page (title bar + sidebar + content iframe).
 
@@ -1325,18 +1338,12 @@ def _handle_chrome_page() -> Response:
     # placeholder chrome.js uses (never the raw id).
     agent_arg = request.args.get("agent", "")
     crumb_agent_id = agent_arg if re.fullmatch(r"agent-[a-f0-9]+", agent_arg) else ""
-    crumb_workspace_name = ""
-    if crumb_agent_id:
-        crumb_workspace_name = next(
-            (ws["name"] for ws in initial_workspaces if ws.get("id") == crumb_agent_id and ws.get("name")),
-            "…",
-        )
+    crumb_workspace_name = _resolve_crumb_workspace_name(initial_workspaces, crumb_agent_id)
 
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(),
-        initial_workspaces=initial_workspaces,
         accent=accent,
         crumb_workspace_name=crumb_workspace_name,
         crumb_agent_id=crumb_agent_id,

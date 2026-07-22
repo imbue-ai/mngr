@@ -84,6 +84,8 @@ The accent is a **pure function of the window's current screen**, not a remember
 - `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
 - `MINDS_ROOT_NAME`: Selects the data root for the running backend. Default `minds` (i.e. production at `~/.minds/`). Must match `minds(-<env-name>)?`. Activated by `minds env activate <name>`; legacy values like `devminds` are silently treated as unset with a warning.
 - `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load. Set by `minds env activate`; passing `--config-file` to `minds run` overrides it. The backend refuses to start when neither is set.
+- `MINDS_OPEN_DEVTOOLS=1`: Opens an in-app (detached) DevTools window for each surface on this machine. For eyeballing the app locally; not attachable by an external tool.
+- `MINDS_REMOTE_DEBUGGING_PORT=<port>`: Exposes the Chrome DevTools Protocol on `127.0.0.1:<port>` so an external CDP client (`chrome://inspect`, Puppeteer, the chrome-devtools MCP) can attach to every surface's `webContents` and read its console, network, and errors. Dev-only; ignored in packaged builds. `just minds-start` inherits it from the shell and prints the `/json` target-list URL: `MINDS_REMOTE_DEBUGGING_PORT=9222 just minds-start`.
 
 ## Output and logging conventions
 
