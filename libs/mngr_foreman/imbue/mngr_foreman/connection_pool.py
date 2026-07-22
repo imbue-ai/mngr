@@ -42,7 +42,9 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
@@ -62,6 +64,20 @@ from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 
 T = TypeVar("T")
 
+
+class HostBusyError(Exception):
+    """Raised when a host's lock can't be acquired within the allotted time.
+
+    A hung/slow connection holds its per-host (or per-agent) lock while an SSH
+    command runs. WITHOUT a bound, every subsequent request for that host -- the 1s
+    input-state poll, transcript ticks, sends -- would block on the lock in its own
+    werkzeug thread FOREVER, so threads pile up unboundedly until the GIL is
+    contended and the whole server degrades (the "everything goes offline" cascade).
+    Bounding the acquire makes a waiter give up fast and the caller degrade (skip the
+    poll / retry next tick) instead of wedging a thread. This is the load-bearing
+    robustness guarantee: no single bad connection can exhaust the thread pool.
+    """
+
 # How often we ping each warm connection to keep it hot (and to notice a drop).
 _KEEPALIVE_INTERVAL_SECONDS = 10.0
 # Cached send matches self-heal within this window if an agent moved hosts.
@@ -77,6 +93,12 @@ _KEEPALIVE_MAX_WORKERS = 16
 # its transport dies, instead of the reader thread blocking in read_all forever. That
 # silent-half-open case was the paramiko-thread leak (1000s of threads over hours).
 _SSH_KEEPALIVE_SECONDS = 15
+# Longest a request will wait to acquire a host/handle lock before giving up with
+# HostBusyError. Generous enough that normal serialized commands (bounded by the ~10s
+# command timeout) never false-trip, but short enough that a hung host can't grow an
+# unbounded queue of blocked threads. High-frequency pollers (input-state) pass a much
+# shorter timeout so they skip a busy tick instead of queueing at all.
+_DEFAULT_LOCK_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass
@@ -199,17 +221,39 @@ class ConnectionPool:
 
     # --- host-path resolution (cached agent + host) ----------------------
 
-    def run_on_host(self, agent_name: str, fn: Callable[[AgentInterface, OnlineHostInterface], T]) -> T:
+    @staticmethod
+    @contextmanager
+    def _bounded(lock: threading.Lock, timeout: float, what: str) -> Iterator[None]:
+        """Acquire ``lock`` within ``timeout`` or raise HostBusyError -- never block
+        forever. This is what stops a hung host from wedging an unbounded pile of
+        werkzeug threads (each caller gives up and returns instead)."""
+        if not lock.acquire(timeout=timeout):
+            raise HostBusyError(what)
+        try:
+            yield
+        finally:
+            lock.release()
+
+    def run_on_host(
+        self,
+        agent_name: str,
+        fn: Callable[[AgentInterface, OnlineHostInterface], T],
+        lock_timeout: float = _DEFAULT_LOCK_TIMEOUT_SECONDS,
+    ) -> T:
         """Resolve (cached) and run ``fn(agent, host)`` serialized on the host lock.
 
         Resolution happens under the per-agent handle lock; the command then runs
         under the per-*host* lock, so two agents sharing one host connection can't
-        drive it concurrently. A transient failure is *not* invalidated here -- it
-        propagates to the caller and the cached connection is left intact;
+        drive it concurrently. Both lock acquisitions are BOUNDED by ``lock_timeout``:
+        a hung host raises ``HostBusyError`` rather than blocking this thread forever
+        (which is what let threads pile up unboundedly). High-frequency callers pass a
+        short timeout to skip a busy tick; the default is generous so a normal
+        serialized command never false-trips. A transient command failure is *not*
+        invalidated here -- it propagates and the cached connection is left intact;
         reconnection is the keepalive's job (see ``_warm_one``).
         """
         handle = self._handle_for(agent_name)
-        with handle.lock:
+        with self._bounded(handle.lock, lock_timeout, f"resolve {agent_name}"):
             if handle.agent is None or handle.host is None:
                 address = parse_agent_address(agent_name)
                 host_ref, agent_ref = find_one_agent(address, self.mngr_ctx)
@@ -224,7 +268,7 @@ class ConnectionPool:
             agent, host = handle.agent, handle.host
         # Execute outside the agent handle lock, under the shared per-host lock,
         # so all commands to this connection serialize even across agents.
-        with self._host_lock_for(host):
+        with self._bounded(self._host_lock_for(host), lock_timeout, f"host {agent_name}"):
             return fn(agent, host)
 
     # --- background keepalive --------------------------------------------

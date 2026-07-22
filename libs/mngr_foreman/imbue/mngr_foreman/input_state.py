@@ -106,6 +106,13 @@ _TAIL_LINES = 25
 
 # Bound the capture-pane probe so an unresponsive host can't wedge the poll.
 _HOST_COMMAND_TIMEOUT_SECONDS = 10.0
+# The input-state poll fires every ~1s per agent. If the host's connection is busy
+# (another command holds its lock) we must NOT queue -- skip this tick and let the
+# client keep its last state. A short lock wait means these high-frequency probes can
+# never build a backlog of blocked threads (that backlog was the "everything offline"
+# cascade). Slightly above one command timeout so a probe still lands when the host is
+# merely finishing a normal command, not truly stuck.
+_POLL_LOCK_TIMEOUT_SECONDS = 12.0
 # The one generic label -- the UI shows a single "interactive prompt" state
 # regardless of which dialog it is.
 _GENERIC_DIALOG_REASON = "interactive prompt"
@@ -148,8 +155,8 @@ def detect_blocking_dialog(pool: ConnectionPool, agent_name: str) -> str | None:
         return classify_blocking_pane(result.stdout)
 
     try:
-        return pool.run_on_host(agent_name, _capture)
-    except Exception as e:  # noqa: BLE001 - a failed probe is "unknown", not "blocked"
+        return pool.run_on_host(agent_name, _capture, lock_timeout=_POLL_LOCK_TIMEOUT_SECONDS)
+    except Exception as e:  # noqa: BLE001 - a failed/busy probe is "unknown", not "blocked"
         logger.trace("input-state probe for {} failed: {}", agent_name, e)
         return None
 
@@ -206,7 +213,7 @@ def probe_pane_state(pool: ConnectionPool, agent_name: str) -> tuple[bool | None
         return is_working_title(title), classify_blocking_pane(pane)
 
     try:
-        return pool.run_on_host(agent_name, _probe)
-    except Exception as e:  # noqa: BLE001 - a failed probe is "unknown", not a state
+        return pool.run_on_host(agent_name, _probe, lock_timeout=_POLL_LOCK_TIMEOUT_SECONDS)
+    except Exception as e:  # noqa: BLE001 - a failed/busy probe is "unknown", not a state
         logger.trace("input-state pane probe for {} failed: {}", agent_name, e)
         return None, None
