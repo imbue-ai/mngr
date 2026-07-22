@@ -30,7 +30,7 @@ import json
 import shutil
 import subprocess
 import tempfile
-import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -54,6 +54,7 @@ _IN_CONTAINER_TIMEOUT_SECONDS = 120
 _SYSTEM_INTERFACE_READY_ATTEMPTS = 60
 _CHAT_REPLY_ATTEMPTS = 60
 _SPEND_POLL_ATTEMPTS = 30
+_SPEND_POLL_INTERVAL_SECONDS = 10
 
 
 def _run(command: list[str], *, cwd: Path | None = None, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -200,7 +201,7 @@ def _await_key_spend(neon_litellm_dsn: str, key_alias: str) -> float:
         spends = [float(row[0]) for row in rows]
         if any(spend > 0 for spend in spends):
             return max(spends)
-        threading.Event().wait(10)
+        time.sleep(_SPEND_POLL_INTERVAL_SECONDS)
     raise AssertionError(f"litellm never recorded spend for key alias {key_alias!r}")
 
 

@@ -47,8 +47,11 @@ def test_prevent_time_sleep() -> None:
     # window after the swap), and ``deployment_tests/test_deploy_rollback.py::
     # _poll_for_deploy_id`` (polling /version after a forced auto-
     # rollback to confirm the rolled-back version is the one actually
-    # serving traffic; same Modal swap-window justification).
-    rc.check_time_sleep(_DIR, snapshot(9))
+    # serving traffic; same Modal swap-window justification), and
+    # ``deployment_tests/test_litellm_via_workspace.py::_await_key_spend``
+    # (polling the env's litellm Postgres spend table until the proxy's
+    # asynchronous spend flush lands -- no event-driven alternative).
+    rc.check_time_sleep(_DIR, snapshot(10))
 
 
 def test_prevent_global_keyword() -> None:
