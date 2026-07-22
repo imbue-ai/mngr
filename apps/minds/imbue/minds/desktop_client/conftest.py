@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import AnyUrl
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -22,6 +23,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
@@ -162,6 +164,40 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def sync_bundle_delete(self, account: str) -> None:
         self._check_sync_online("sync bundle delete")
         self.sync_bundle_by_email.pop(account, None)
+
+
+class RecordingImbueCloudCli(FakeImbueCloudCli):
+    """``FakeImbueCloudCli`` that records ``create_litellm_key`` calls.
+
+    Returns a stub :class:`LiteLLMKeyMaterial` instead of spawning the real
+    ``mngr imbue_cloud keys litellm create`` subprocess so tests can run
+    fully offline.
+    """
+
+    create_calls: list[dict[str, object]] = Field(default_factory=list)
+
+    def create_litellm_key(
+        self,
+        *,
+        account: str,
+        alias: str | None = None,
+        max_budget: float | None = None,
+        budget_duration: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> LiteLLMKeyMaterial:
+        self.create_calls.append(
+            {
+                "account": account,
+                "alias": alias,
+                "max_budget": max_budget,
+                "budget_duration": budget_duration,
+                "metadata": dict(metadata) if metadata is not None else None,
+            }
+        )
+        return LiteLLMKeyMaterial(
+            key=SecretStr("sk-fake-litellm-key"),
+            base_url=AnyUrl("https://litellm.example.com"),
+        )
 
 
 def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:

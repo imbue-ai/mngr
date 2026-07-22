@@ -1,11 +1,8 @@
 """Tests for the workspace AI-key mint helpers (see ai_keys.py)."""
 
-from collections.abc import Mapping
 from pathlib import Path
 
-from pydantic import AnyUrl
 from pydantic import Field
-from pydantic import SecretStr
 
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import WorkspacePaths
@@ -14,7 +11,7 @@ from imbue.minds.desktop_client.ai_keys import mint_workspace_credential_blob
 from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
-from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
+from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
@@ -28,35 +25,6 @@ class _FixedEmailSessionStore(MultiAccountSessionStore):
 
     def get_account_email(self, user_id: str) -> str | None:
         return self.email_by_user_id.get(user_id)
-
-
-class _MintRecordingImbueCloudCli(FakeImbueCloudCli):
-    """Records ``create_litellm_key`` calls and returns stub key material."""
-
-    create_calls: list[dict[str, object]] = Field(default_factory=list)
-
-    def create_litellm_key(
-        self,
-        *,
-        account: str,
-        alias: str | None = None,
-        max_budget: float | None = None,
-        budget_duration: str | None = None,
-        metadata: Mapping[str, str] | None = None,
-    ) -> LiteLLMKeyMaterial:
-        self.create_calls.append(
-            {
-                "account": account,
-                "alias": alias,
-                "max_budget": max_budget,
-                "budget_duration": budget_duration,
-                "metadata": dict(metadata) if metadata is not None else None,
-            }
-        )
-        return LiteLLMKeyMaterial(
-            key=SecretStr("sk-fake-minted-key"),
-            base_url=AnyUrl("https://litellm.example.com/"),
-        )
 
 
 def _make_record_store(tmp_path: Path) -> WorkspaceRecordStore:
@@ -134,7 +102,7 @@ def test_build_credential_blob_is_env_var_lines() -> None:
 def test_mint_workspace_credential_blob_fixes_workspace_identity_on_the_key(tmp_path: Path) -> None:
     """The key's alias/metadata carry the workspace host id server-side; there is
     no user-editable naming input by design."""
-    cli = _MintRecordingImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+    cli = RecordingImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
 
     blob = mint_workspace_credential_blob(
         workspace_host_id="host-abc", account_email="alice@example.com", imbue_cloud_cli=cli
@@ -147,5 +115,5 @@ def test_mint_workspace_credential_blob_fixes_workspace_identity_on_the_key(tmp_
     assert call["max_budget"] == 100.0
     assert call["budget_duration"] == "1d"
     assert call["metadata"] == {"workspace_host_id": "host-abc", "source": "ai-keys-page"}
-    assert "ANTHROPIC_API_KEY=sk-fake-minted-key" in blob
+    assert "ANTHROPIC_API_KEY=sk-fake-litellm-key" in blob
     assert "ANTHROPIC_BASE_URL=https://litellm.example.com/" in blob

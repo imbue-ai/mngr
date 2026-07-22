@@ -11,17 +11,13 @@ import queue
 import subprocess
 import threading
 import time
-from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
 
 import httpx
 import pytest
-from pydantic import AnyUrl
-from pydantic import Field
 from pydantic import PrivateAttr
-from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -46,8 +42,7 @@ from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
-from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
-from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
+from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -1356,40 +1351,6 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _RecordingImbueCloudCli(FakeImbueCloudCli):
-    """``FakeImbueCloudCli`` that records ``create_litellm_key`` calls.
-
-    Returns a stub :class:`LiteLLMKeyMaterial` instead of spawning the real
-    ``mngr imbue_cloud keys litellm create`` subprocess so the test can run
-    fully offline.
-    """
-
-    create_calls: list[dict[str, object]] = Field(default_factory=list)
-
-    def create_litellm_key(
-        self,
-        *,
-        account: str,
-        alias: str | None = None,
-        max_budget: float | None = None,
-        budget_duration: str | None = None,
-        metadata: Mapping[str, str] | None = None,
-    ) -> LiteLLMKeyMaterial:
-        self.create_calls.append(
-            {
-                "account": account,
-                "alias": alias,
-                "max_budget": max_budget,
-                "budget_duration": budget_duration,
-                "metadata": dict(metadata) if metadata is not None else None,
-            }
-        )
-        return LiteLLMKeyMaterial(
-            key=SecretStr("sk-fake-litellm-key"),
-            base_url=AnyUrl("https://litellm.example.com"),
-        )
-
-
 def _make_fake_repo(tmp_path: Path) -> Path:
     """Create a directory that ``_create_agent_background`` will accept as a local
     repo (it just needs to exist and not look like a git worktree)."""
@@ -1398,7 +1359,7 @@ def _make_fake_repo(tmp_path: Path) -> Path:
     return repo_dir
 
 
-def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> AgentCreator:
+def _make_creator_with_cli(tmp_path: Path, cli: RecordingImbueCloudCli) -> AgentCreator:
     cg = ConcurrencyGroup(name="agent-creator-test")
     cg.__enter__()
     return AgentCreator(
@@ -1432,7 +1393,7 @@ def test_start_creation_never_mints_a_litellm_key(tmp_path: Path) -> None:
     """Creation injects no Anthropic credentials: even with an imbue_cloud
     account supplied (for compute/backups), no LiteLLM key is minted -- the
     workspace signs in through its own modal after boot."""
-    cli = _RecordingImbueCloudCli(
+    cli = RecordingImbueCloudCli(
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
