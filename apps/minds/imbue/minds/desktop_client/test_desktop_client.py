@@ -2470,7 +2470,7 @@ def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tm
     The home-page restart control navigates here explicitly. Without the
     intent marker the healthy-redirect guard would bounce the user straight
     back to ``return_to`` and nothing would happen. With it, the page renders
-    as STUCK so its JS runs the probe and dispatches a restart.
+    as STUCK so its entry dispatches the start-only restart.
     """
     tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
@@ -2485,7 +2485,7 @@ def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tm
 
     assert response.status_code == 200
     # An explicit restart of a healthy workspace renders as STUCK so the page
-    # probes and dispatches rather than sitting idle.
+    # dispatches its start-only restart rather than sitting idle.
     assert 'data-initial-status="stuck"' in response.text
 
 

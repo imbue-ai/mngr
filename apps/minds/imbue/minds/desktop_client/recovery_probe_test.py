@@ -393,28 +393,28 @@ def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
 
 @pytest.mark.parametrize("host_state", ["STOPPED", "CRASHED"])
 def test_dispatch_tier_host_offline_when_container_observed_stopped_or_crashed(host_state: str) -> None:
-    """A trusted observed-not-running state (settled, non-FAILED) auto-restarts unattended.
+    """A trusted observed-not-running state (settled, non-FAILED) reads HOST_OFFLINE.
 
-    In-app stops close their workspace windows first, so an open window observing
-    STOPPED implies an out-of-app stop; reviving it is intended (this is also the
-    path that revives workspaces after a laptop reboot).
+    Display-only, like every tier: the recovery flow's start-only restart is
+    dispatched unconditionally on page entry, so this verdict just names the
+    observed condition on the failure page's diagnostics.
     """
     response = _response(host_state=host_state)
     assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
 
 
 def test_dispatch_tier_indeterminate_while_host_is_stopping() -> None:
-    """STOPPING is transitional: keep checking; the restart fires off the settled STOPPED."""
+    """STOPPING is transitional: keep checking; it settles to STOPPED a moment later."""
     response = _response(host_state="STOPPING", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
 def test_dispatch_tier_host_unresponsive_for_failed_host_state() -> None:
-    """FAILED is consent-gated, not auto-restarted.
+    """FAILED renders the consent page, not the offline verdict.
 
-    A failed-to-create host is observed not running, but an unattended
-    ``mngr start`` on it mostly re-fails -- so it renders the consent-gated
-    "Workspace unresponsive" page instead of HOST_OFFLINE's unattended restart.
+    A failed-to-create host is observed not running, but a plain start on it
+    mostly re-fails -- so it renders the "Workspace unresponsive" page (manual
+    stop+start on offer) instead of HOST_OFFLINE's offline framing.
     """
     response = _response(host_state="FAILED", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
@@ -512,32 +512,27 @@ def test_dispatch_tier_indeterminate_when_snapshot_is_stale() -> None:
 
 
 @pytest.mark.parametrize("host_state", ["STOPPED", "CRASHED"])
-def test_dispatch_tier_stale_offline_state_still_dispatches_unattended(host_state: str) -> None:
-    """An observed STOPPED/CRASHED dispatches HOST_OFFLINE even off a stale snapshot.
+def test_dispatch_tier_stale_offline_state_is_gated_like_every_other_verdict(host_state: str) -> None:
+    """A stale STOPPED/CRASHED reading is INDETERMINATE, uniformly with other verdicts.
 
-    Unlike every other host-state verdict, the offline states need no freshness
-    gate: the auto-dispatched action is a pure ``mngr start`` (the auto path
-    skips the stop step), which targets only STOPPED agents -- if the reading is
-    stale and the container actually came back, the start is a no-op and the
-    liveness poll sends the user home. In-app stops close their workspace
-    windows first, so an open window observing STOPPED implies an out-of-app
-    stop, and reviving it is intended. Gating this on a post-onset snapshot
-    (as the classifier once did) parked a stopped workspace on the consent page
-    at app startup, when only the replayed pre-start topology exists.
+    The offline pair once carried a no-freshness-gate exemption so its verdict
+    could auto-dispatch the cold boot off a stale reading; with the restart now
+    dispatched unconditionally on page entry, the tiers are display-only and
+    the exemption is gone -- a stale offline reading keeps checking rather than
+    rendering an offline verdict off non-evidence.
     """
     response = _response(host_state=host_state, in_container_stdout=None, classification_is_trustworthy=False)
-    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
-def test_dispatch_tier_stale_offline_state_beats_a_completed_exec_failure() -> None:
-    """A stale STOPPED plus a completed exec failure is still the unattended restart.
+def test_dispatch_tier_stale_offline_state_with_completed_exec_failure_reads_unresponsive() -> None:
+    """A stale STOPPED plus a completed exec failure resolves via the exec evidence.
 
     The app-startup shape: only the replayed pre-start snapshot exists (reading
-    STOPPED), discovery counts as stalled, so the exec is attempted and
-    completes without reaching the stopped container. The offline observation
-    wins over the consent-gated exec verdict for the same reason as the trusted
-    case: the exec failure is just the expected consequence of a stopped
-    container.
+    STOPPED, untrusted), discovery counts as stalled, so the exec is attempted
+    and completes without reaching the stopped container. The completed exec
+    failure is the direct evidence that resolves the page (the stale reading
+    stays gated), so the failure page renders the unresponsive verdict.
     """
     response = _response(
         host_state="STOPPED",
@@ -545,16 +540,15 @@ def test_dispatch_tier_stale_offline_state_beats_a_completed_exec_failure() -> N
         probe_exec_attempted=True,
         classification_is_trustworthy=False,
     )
-    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
 def test_dispatch_tier_timeout_stays_indeterminate_even_with_a_stale_offline_state() -> None:
     """A probe timeout keeps checking even when the (stale) state reads STOPPED.
 
     The macOS-sleep protection keeps precedence: a timed-out exec observed
-    nothing, so no verdict fires off that probe -- the next completed probe (or
-    the stale STOPPED on a probe that skips the exec) resolves to the
-    unattended restart a cycle later.
+    nothing, so no verdict fires off that probe -- the next completed probe
+    resolves to a real tier a cycle later.
     """
     response = _response(
         host_state="STOPPED",
@@ -636,12 +630,12 @@ def test_dispatch_tier_timeout_stays_indeterminate_even_for_an_attempted_exec() 
 
 
 def test_dispatch_tier_trusted_offline_state_beats_a_completed_exec_failure() -> None:
-    """A trusted STOPPED observation keeps the unattended HOST_OFFLINE restart.
+    """A trusted STOPPED observation renders HOST_OFFLINE over the exec verdict.
 
     When discovery re-observed the host post-onset and read it STOPPED, the
     exec's failure is just the expected consequence of a stopped container; the
-    trusted observation earns the unattended restart rather than downgrading to
-    the consent-gated verdict.
+    trusted observation names the condition precisely (offline) rather than
+    downgrading the display to the generic unresponsive verdict.
     """
     response = _response(
         host_state="STOPPED",

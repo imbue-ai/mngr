@@ -134,10 +134,11 @@ class Probe(FrozenModel):
 class DispatchTier(str, Enum):
     """What is wrong with the workspace, derived from the probe answers.
 
-    Every member names a *condition* (what we observed), not the *action* the
-    recovery page takes in response -- the action is a consequence of the
-    condition (e.g. HOST_OFFLINE -> unattended host restart;
-    HOST_UNRESPONSIVE -> ask the user first).
+    Every member names a *condition* (what we observed). The tiers are
+    display-only: the recovery flow's start-only restart is dispatched
+    unconditionally on page entry, never off a tier, so a verdict here decides
+    which page renders (and whether the manual stop+start restart is offered),
+    not whether anything is restarted.
     """
 
     HEALTHY = "healthy"
@@ -158,24 +159,26 @@ class DispatchTier(str, Enum):
     supervisord is already fixing it), or the exec probe was never attempted and
     the host state carries no trusted verdict: the discovery snapshot backing it
     predates the outage onset (a pre-outage snapshot still reads the stale host
-    state, e.g. a just-stopped container still shows RUNNING; a stale
-    STOPPED/CRASHED is the exception -- it classifies HOST_OFFLINE, needing no
-    freshness) or the snapshot carries no observation of the container (host
-    state UNKNOWN -- the host was unobservable during discovery -- or a
-    transitional/absent state, e.g. STOPPING, which settles to STOPPED a moment
-    later).
-    A negative verdict or an auto-dispatched restart off such non-evidence is
-    exactly the misclassification this tier avoids. The recovery page renders a
-    live "reconnecting" state and keeps checking: the cheap liveness poll returns
-    the user home the instant the workspace answers, and a later probe that
-    *completes* resolves to a real tier if the workspace is genuinely down (a
-    completed exec is direct evidence even when discovery has stalled and no
-    fresh snapshot will ever land). Direct in-container evidence (a live GET /
-    200) still short-circuits to HEALTHY even here -- positive evidence is
-    trusted regardless of snapshot freshness."""
+    state, e.g. a just-stopped container still shows RUNNING) or the snapshot
+    carries no observation of the container (host state UNKNOWN -- the host was
+    unobservable during discovery -- or a transitional/absent state, e.g.
+    STOPPING, which settles to STOPPED a moment later).
+    A negative verdict off such non-evidence is exactly the misclassification
+    this tier avoids. The recovery page renders a live "reconnecting" state and
+    keeps checking: the cheap liveness poll returns the user home the instant
+    the workspace answers, and a later probe that *completes* resolves to a
+    real tier if the workspace is genuinely down (a completed exec is direct
+    evidence even when discovery has stalled and no fresh snapshot will ever
+    land). Direct in-container evidence (a live GET / 200) still
+    short-circuits to HEALTHY even here -- positive evidence is trusted
+    regardless of snapshot freshness."""
 
     HOST_OFFLINE = "host_offline"
-    """Container is offline -- restart the host (no live work to interrupt)."""
+    """Container observed fully stopped (STOPPED / CRASHED off a trusted
+    snapshot). Display-only, like every tier: the recovery flow's start-only
+    restart is dispatched unconditionally on page entry, so by the time this
+    verdict renders (the restart-failed page's diagnostics) that dispatch has
+    already run -- the tier names what the probe observed, not an action."""
 
     HOST_UNRESPONSIVE = "host_unresponsive"
     """The workspace is not answering and only a consent-gated host restart is on
@@ -190,8 +193,8 @@ class DispatchTier(str, Enum):
     providers report when the container was observed running but inner SSH is
     unreachable; see PR #2247 -- the consent-gated restart is the engineered
     recovery, since the stop step is not skipped the relaunch brings sshd back);
-    and the FAILED host state (a failed-to-create host, where an unattended
-    ``mngr start`` mostly re-fails, so the restart is consent-gated too). A host
+    and the FAILED host state (a failed-to-create host, where a plain start
+    mostly re-fails, so only the manual restart is offered). A host
     state that answers neither "running" nor "offline", with no completed exec
     to consult, is non-evidence and classifies INDETERMINATE instead.
     """
@@ -364,20 +367,10 @@ _OBSERVED_RUNNING_STATES: Final[frozenset[str]] = frozenset({_RUNNING_STATE, "UN
 # Display vocabulary for the "is the container running?" probe: states that are
 # a truthful "observed not running". The classifier does NOT branch on this
 # collapsed answer -- it consults the raw host state, because these states
-# diverge in treatment (STOPPED/CRASHED auto-restart, FAILED is consent-gated,
-# STOPPING is transitional).
+# diverge in display treatment (STOPPED/CRASHED read as offline, FAILED as
+# unresponsive, STOPPING as transitional).
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
-# Host states that justify an *unattended* host restart -- off any observation,
-# fresh or stale (the classifier applies no freshness gate to these): the
-# container was observed not running and not in transition, so there is no live
-# work to interrupt, and the dispatched ``mngr start`` targets only STOPPED
-# agents, so a stale reading whose container actually came back is a no-op.
-# In-app stops close their workspace windows first, so an open window observing
-# STOPPED implies an out-of-app stop, and reviving it is intended (this is also
-# the path that revives workspaces after a laptop reboot). FAILED is
-# deliberately excluded: an unattended ``mngr start`` on a failed-to-create
-# host mostly re-fails.
-_AUTO_RESTART_OFFLINE_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "CRASHED"})
+_OBSERVED_STOPPED_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "CRASHED"})
 _FAILED_STATE: Final[str] = "FAILED"
 _UNREACHABLE_STATE: Final[str] = "UNREACHABLE"
 
@@ -729,26 +722,21 @@ def _classify_dispatch_tier(
       timeout is absence of evidence, not evidence of a down workspace -- e.g. a
       probe whose window spanned a laptop sleep). The page keeps checking and a
       later probe that *completes* resolves to a real tier.
-    * HOST_OFFLINE whenever the host state reads STOPPED / CRASHED -- stale or
-      fresh. This is the one host-state verdict with no freshness gate, because
-      the dispatched action is commit-time-checked rather than trust-dependent:
-      the auto path runs a pure ``mngr start``, which targets only STOPPED
-      agents, so a stale reading whose container actually came back degrades to
-      a no-op (and in-app stops close their windows first, so an open window
-      observing STOPPED implies an out-of-app stop whose revival is intended).
     * The trusted host-state verdicts, when a discovery snapshot taken at/after
       the outage onset backs the host state. These branch on the *raw* state
       rather than the collapsed "is it running?" probe answer, because the
-      remaining states diverge in treatment: FAILED
-      -> HOST_UNRESPONSIVE (an unattended start on a failed-to-create host
-      mostly re-fails, so consent-gate it); UNREACHABLE -> BACKEND_UNREACHABLE
-      (the host rejected this machine's access; a restart routes through the
-      same rejected credential); RUNNING / UNAUTHENTICATED -> HOST_UNRESPONSIVE
-      (observed running but the exec could not get inside). A trusted UNKNOWN /
-      transitional / absent state says nothing either way and falls through.
-      Unlike the offline pair these verdicts stay freshness-gated: none of them
-      is backed by an idempotent action, so a stale reading could render a
-      wrong terminal page or consent-gate a workspace that merely slept.
+      states diverge in display treatment: STOPPED / CRASHED -> HOST_OFFLINE
+      (container observed fully stopped); FAILED -> HOST_UNRESPONSIVE (a
+      failed-to-create host, where a plain start mostly re-fails); UNREACHABLE
+      -> BACKEND_UNREACHABLE (the host rejected this machine's access; a
+      restart routes through the same rejected credential); RUNNING /
+      UNAUTHENTICATED -> HOST_UNRESPONSIVE (observed running but the exec could
+      not get inside). A trusted UNKNOWN / transitional / absent state says
+      nothing either way and falls through. Every tier is display-only -- the
+      recovery flow's start-only restart is dispatched unconditionally on page
+      entry, never off a verdict -- so a stale reading costs wrong page copy,
+      not a wrong action; the freshness gate exists to keep even the copy
+      honest.
     * HOST_UNRESPONSIVE when the exec probe was attempted and *completed*
       without ever reaching the in-container script (a nonzero exit or a clean
       exit with no sentinel -- e.g. the container's sshd is dead, or the
@@ -780,21 +768,9 @@ def _classify_dispatch_tier(
     if probe_timed_out:
         return DispatchTier.INDETERMINATE
     upper_state = host_state.upper()
-    # An observed STOPPED / CRASHED dispatches the unattended restart even off a
-    # stale (pre-onset or replayed) snapshot -- unlike every other host-state
-    # verdict, no freshness gate applies. Commit-time idempotency, not snapshot
-    # freshness, is what makes this dispatch safe: the auto path is a pure
-    # ``mngr start`` (the stop step is skipped), which targets only STOPPED
-    # agents -- a stale reading whose container actually came back makes it a
-    # no-op, and the liveness poll sends the user home. In-app stops close
-    # their workspace windows first, so an open window observing STOPPED
-    # implies an out-of-app stop, and reviving it is intended. Freshness-gating
-    # this verdict parked a stopped workspace on the consent page at app
-    # startup, when only the replayed pre-start topology exists and the first
-    # trusted snapshot is a discovery cycle away.
-    if upper_state in _AUTO_RESTART_OFFLINE_STATES:
-        return DispatchTier.HOST_OFFLINE
     if classification_is_trustworthy:
+        if upper_state in _OBSERVED_STOPPED_STATES:
+            return DispatchTier.HOST_OFFLINE
         if upper_state == _UNREACHABLE_STATE:
             return DispatchTier.BACKEND_UNREACHABLE
         if upper_state == _FAILED_STATE:
@@ -856,10 +832,7 @@ def build_host_health_response(
     unreachable and classifies HOST_UNRESPONSIVE regardless of snapshot
     freshness. ``classification_is_trustworthy`` is False when the host state
     read here comes from a discovery snapshot that predates the outage onset (so
-    it may be stale), which suppresses the host-state verdicts -- except the
-    offline pair (STOPPED / CRASHED), whose unattended restart is safe off a
-    stale reading because the dispatched ``mngr start`` only targets STOPPED
-    agents.
+    it may be stale), which suppresses the host-state verdicts.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"

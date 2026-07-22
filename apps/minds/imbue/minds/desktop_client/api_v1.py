@@ -894,9 +894,10 @@ def _handle_workspace_health(agent_id: str) -> Response:
 def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
     """Dispatch a workspace host restart; return an operation handle to poll.
 
-    Body: ``{"scope": "host", "host_already_stopped"?: bool}``. The restart
-    bounces the whole host; ``host_already_stopped`` lets a known-stopped host
-    skip the redundant stop step. The former ``services`` scope (an in-place
+    Body: ``{"scope": "host", "start_only"?: bool}``. The restart
+    bounces the whole host; ``start_only`` skips the stop step and runs only
+    the idempotent ``mngr start`` (the recovery page's unconditional entry
+    dispatch). The former ``services`` scope (an in-place
     system-services restart) was removed and is rejected with a 400. Returns
     ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
     agent id), followed via ``/api/v1/workspaces/operations/restart/<id>``
@@ -924,16 +925,16 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         return _json_error("Workspace restart is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
-    # A recovery-page auto-dispatch can race the workspace's own self-recovery
-    # (the host-health probe that picks the restart verdict is slow), but no
-    # guard is needed here: the auto-dispatched restart runs only ``mngr start``
-    # (``host_already_stopped`` skips the stop step), and ``mngr start`` targets
-    # only STOPPED agents and starts the host idempotently -- against a
-    # self-recovered workspace the whole restart degrades to a no-op. A veto
-    # keyed on tracker health would misfire here: the tracker reports
-    # default-HEALTHY for never-probed workspaces (e.g. a host offline since
-    # before this process started), so it would silently drop the cold-boot
-    # those workspaces need.
+    # The recovery page dispatches its restart unconditionally on entry, with
+    # no knowledge of the host's state, and it can race the workspace's own
+    # self-recovery -- but no guard is needed here: that dispatch runs only
+    # ``mngr start`` (``start_only`` skips the stop step), which checks ground
+    # truth at commit time, targets only STOPPED agents, and starts the host
+    # idempotently -- against a live or self-recovered workspace the whole
+    # restart degrades to a no-op. A veto keyed on tracker health would
+    # misfire here: the tracker reports default-HEALTHY for never-probed
+    # workspaces (e.g. a host offline since before this process started), so
+    # it would silently drop the cold-boot those workspaces need.
     # Serialize with the backup operations: ``registry.start`` below replaces
     # the workspace's record, so a RUNNING backup update/configure must be
     # rejected here (its worker's terminal complete/fail would corrupt the
@@ -959,10 +960,11 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
 
     registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
 
-    # host_already_stopped lets an auto-dispatched restart skip the redundant
-    # stop step (a manual restart may target a still-running container, which
-    # must be stopped first).
-    skip_stop = bool(body.get("host_already_stopped", False))
+    # start_only makes the restart a pure ``mngr start`` (the recovery page's
+    # unconditional entry dispatch, which must never bounce a live container);
+    # a manual restart keeps the stop step, since it may target a running but
+    # wedged container that only a bounce fixes.
+    skip_stop = bool(body.get("start_only", False))
 
     # is_checked=False + on_failure: a crash of the one-shot worker transitions
     # the tracker to RESTART_FAILED and the registry to FAILED (so neither the

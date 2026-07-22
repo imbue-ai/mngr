@@ -479,16 +479,6 @@ class _LastGoodAgentTopology(FrozenModel):
     agents_by_host: Mapping[str, tuple[_AgentRecord, ...]] = Field(
         default_factory=dict, description="Host id -> the agents last seen on that host with a complete enumeration"
     )
-    offline_host_state_by_host_id: Mapping[str, HostState] = Field(
-        default_factory=dict,
-        description=(
-            "Host id -> a last-known offline state (STOPPED/CRASHED), persisted so a workspace stopped in-app "
-            "is recognized as offline on the next launch before discovery re-observes it. Only the offline pair "
-            "is stored: its recovery dispatch is an idempotent ``mngr start`` (a no-op if the container actually "
-            "came back), so a stale entry self-corrects; a persisted RUNNING would instead strand a stopped "
-            "workspace on a doomed liveness probe."
-        ),
-    )
 
 
 def _to_agent_record(agent: DiscoveredAgent) -> _AgentRecord:
@@ -572,14 +562,6 @@ class _HostStateOverride(FrozenModel):
     set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
 
 
-# The host states whose recovery dispatch is a pure, idempotent ``mngr start`` (see
-# recovery_probe's offline pair). Only these are persisted across a quit: a stale one
-# self-corrects (the restart no-ops if the container is actually up, and the first fresh
-# discovery clears it), whereas persisting RUNNING would reintroduce the stale-RUNNING
-# bug that strands a stopped workspace on a doomed liveness probe.
-_OFFLINE_HOST_STATES: Final[frozenset[HostState]] = frozenset({HostState.STOPPED, HostState.CRASHED})
-
-
 _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS: Final[float] = 90.0
 
 
@@ -635,11 +617,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
-    # host_id_str -> a short-lived optimistic state set by a UI lifecycle action (or seeded on load
-    # from a persisted offline state, see model_post_init), masking discovery in ``get_host_state``
-    # until discovery agrees or the TTL elapses. Guarded by _lock. Only ever holds a real
-    # RUNNING/STOPPED-style transition -- never DESTROYED -- so it cannot affect the DESTROYED-only
-    # filtering in ``list_active_workspace_ids``.
+    # host_id_str -> a short-lived optimistic state set by a UI lifecycle action, masking discovery
+    # in ``get_host_state`` until discovery agrees or the TTL elapses. Guarded by _lock. Only ever
+    # holds a real RUNNING/STOPPED-style transition -- never DESTROYED -- so it cannot affect the
+    # DESTROYED-only filtering in ``list_active_workspace_ids``.
     _host_state_override_by_host_id: dict[str, _HostStateOverride] = PrivateAttr(default_factory=dict)
     # agent_id_str -> a short-lived optimistic workspace name set by a UI-initiated
     # rename, masking discovery in ``get_workspace_name`` / ``get_host_name`` until
@@ -650,12 +631,6 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # _lock by update_agents; read by get_system_services_agent_id as the
     # fallback when live discovery has lost the host.
     _last_good_agents_by_host: dict[str, tuple[_AgentRecord, ...]] = PrivateAttr(default_factory=dict)
-    # host_id_str -> a last-known offline state (STOPPED/CRASHED), the in-memory image of the
-    # persisted-topology field of the same name. Written whenever an offline state is set via a
-    # lifecycle override or confirmed by discovery, and cleared when the host is seen non-offline.
-    # Seeded as live host-state overrides on load so a workspace stopped in-app reads offline on
-    # the next launch before discovery re-observes it. Guarded by _lock.
-    _offline_host_state_by_host_id: dict[str, HostState] = PrivateAttr(default_factory=dict)
     # Set of agent ids for which we've already logged a malformed-color-label
     # warning, so the log line fires once per agent rather than on every SSE
     # tick. Plain set is fine -- get_workspace_color holds ``_lock`` while
@@ -663,28 +638,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _logged_malformed_color_agents: set[str] = PrivateAttr(default_factory=set)
 
     def model_post_init(self, __context: object) -> None:
-        """Load the persisted last-good agent topology from disk, if configured.
-
-        Persisted offline host states are seeded as live optimistic overrides (stamped now, so the
-        90s TTL bounds them from *this* launch, not the arbitrarily-long closed window): they mask
-        the stale RUNNING that the replayed pre-onset discovery backlog carries, so the first
-        recovery probe reads the host as offline and dispatches the idempotent cold-boot instead of
-        crawling through the consent-gated "unresponsive" page until fresh discovery catches up.
-        """
+        """Load the persisted last-good agent topology from disk, if configured."""
         if self.last_good_agents_path is not None:
-            topology = _read_last_good_agent_topology(self.last_good_agents_path)
-            self._last_good_agents_by_host = dict(topology.agents_by_host)
-            self._offline_host_state_by_host_id = dict(topology.offline_host_state_by_host_id)
-            now = time.monotonic()
-            self._host_state_override_by_host_id = {
-                host_id_str: _HostStateOverride(state=state, set_at_monotonic=now)
-                for host_id_str, state in self._offline_host_state_by_host_id.items()
-            }
-            logger.info(
-                "Loaded last-good topology from {}: seeded {} persisted offline host state(s) as overrides: {}",
-                self.last_good_agents_path,
-                len(self._offline_host_state_by_host_id),
-                {h: s.value for h, s in self._offline_host_state_by_host_id.items()},
+            self._last_good_agents_by_host = dict(
+                _read_last_good_agent_topology(self.last_good_agents_path).agents_by_host
             )
 
     def add_on_change_callback(self, callback: Callable[[], None]) -> None:
@@ -756,61 +713,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._initial_discovery_done = True
             self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
             self._sweep_workspace_name_overrides_locked()
-            topology_changed = self._merge_last_good_topology_locked(
-                result.discovered_agents, result.host_state_by_host_id
-            )
-            offline_changed = self._reconcile_persisted_offline_states_locked(result.host_state_by_host_id)
-            if (topology_changed or offline_changed) and path is not None:
-                topology_to_write = self._build_topology_snapshot_locked()
+            if (
+                self._merge_last_good_topology_locked(result.discovered_agents, result.host_state_by_host_id)
+                and path is not None
+            ):
+                topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)
         self._fire_on_change()
-
-    def _build_topology_snapshot_locked(self) -> _LastGoodAgentTopology:
-        """Snapshot the in-memory last-good topology + persisted offline states. Holds ``self._lock``."""
-        return _LastGoodAgentTopology(
-            agents_by_host=dict(self._last_good_agents_by_host),
-            offline_host_state_by_host_id=dict(self._offline_host_state_by_host_id),
-        )
-
-    def _reconcile_persisted_offline_states_locked(self, discovery_state_by_host_id: Mapping[str, HostState]) -> bool:
-        """Sync the persisted offline map to the fresh snapshot's concrete host observations.
-
-        A host freshly observed offline (STOPPED/CRASHED) is recorded so it survives a quit that
-        blinds discovery; a host freshly observed in any other concrete state is dropped (it is
-        back). A host absent from the snapshot is left untouched -- absence is transient discovery
-        loss, not evidence the host came back (the same principle the topology merge follows).
-        Returns whether the map changed (so the caller writes the file). Holds ``self._lock``.
-        """
-        changed = False
-        for host_id_str, state in discovery_state_by_host_id.items():
-            if self._update_persisted_offline_state_locked(host_id_str, state, source="discovery-reconcile"):
-                changed = True
-        return changed
-
-    def _update_persisted_offline_state_locked(self, host_id_str: str, state: HostState, source: str) -> bool:
-        """Record ``state`` in the persisted offline map iff offline, else drop the host. Returns changed.
-
-        ``source`` labels the caller (lifecycle override vs discovery reconcile) for the diagnostic
-        log, so a stop-time write can be told apart from a stale-observation drop after the fact.
-        """
-        if state in _OFFLINE_HOST_STATES:
-            if self._offline_host_state_by_host_id.get(host_id_str) != state:
-                self._offline_host_state_by_host_id[host_id_str] = state
-                logger.info("Persisted offline map [{}]: recorded {} = {}", source, host_id_str, state.value)
-                return True
-            return False
-        if host_id_str in self._offline_host_state_by_host_id:
-            dropped = self._offline_host_state_by_host_id.pop(host_id_str)
-            logger.info(
-                "Persisted offline map [{}]: dropped {} (was {}, observed {})",
-                source,
-                host_id_str,
-                dropped.value,
-                state.value,
-            )
-            return True
-        return False
 
     def _sweep_host_state_overrides_locked(self, discovery_state_by_host_id: Mapping[str, HostState]) -> None:
         """Drop optimistic overrides that the fresh snapshot has confirmed or that have expired.
@@ -1091,30 +1001,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return override.state
 
     def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
-        """Optimistically override ``host_id``'s state until discovery confirms it; fires on-change.
-
-        An offline override (STOPPED/CRASHED) is also persisted to the last-good topology so it
-        survives a quit -- the fix for a workspace stopped in-app being read as stale RUNNING on the
-        next launch. A non-offline override drops any persisted offline entry (the host is back).
-        """
-        path = self.last_good_agents_path
-        topology_to_write: _LastGoodAgentTopology | None = None
+        """Optimistically override ``host_id``'s state until discovery confirms it; fires on-change."""
         with self._lock:
             self._host_state_override_by_host_id[str(host_id)] = _HostStateOverride(
                 state=state, set_at_monotonic=time.monotonic()
             )
-            if self._update_persisted_offline_state_locked(str(host_id), state, source="lifecycle-override") and (
-                path is not None
-            ):
-                topology_to_write = self._build_topology_snapshot_locked()
-        logger.info(
-            "set_host_state_override({}, {}): {}",
-            host_id,
-            state.value,
-            "persisted offline map + wrote topology" if topology_to_write is not None else "in-memory override only",
-        )
-        if path is not None and topology_to_write is not None:
-            _write_last_good_agent_topology(path, topology_to_write)
+        logger.info("set_host_state_override({}, {})", host_id, state.value)
         self._fire_on_change()
 
     def clear_host_state_override(self, host_id: HostId) -> None:

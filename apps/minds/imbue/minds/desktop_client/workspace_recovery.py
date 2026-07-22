@@ -121,16 +121,15 @@ def is_recovery_classification_trustworthy(
 ) -> bool:
     """Whether the resolver's host state is fresh enough to base a recovery verdict on.
 
-    A negative recovery verdict (or an auto-dispatched restart) leans on the host
-    state the passive discovery resolver reports. That state is only trustworthy
-    once a full snapshot taken at/after the outage onset
-    (``get_failure_run_started_wall_at``) has landed: a snapshot that predates the
-    outage still carries the pre-outage host state (a just-stopped container still
-    reads RUNNING), which would misclassify the tier. Until then the verdict path
-    treats the classification as untrustworthy and surfaces INDETERMINATE -- for
-    every host-state verdict except the offline pair: a STOPPED/CRASHED reading
-    dispatches HOST_OFFLINE off any snapshot, because the idempotent ``mngr
-    start`` needs no freshness gate (see ``_classify_dispatch_tier``).
+    A negative recovery verdict leans on the host state the passive discovery
+    resolver reports. That state is only trustworthy once a full snapshot taken
+    at/after the outage onset (``get_failure_run_started_wall_at``) has landed:
+    a snapshot that predates the outage still carries the pre-outage host state
+    (a just-stopped container still reads RUNNING), which would misclassify the
+    tier. Until then the verdict path treats the classification as
+    untrustworthy and surfaces INDETERMINATE. The tiers are display-only (the
+    recovery restart is dispatched unconditionally on page entry), so this gate
+    protects the page copy, not an action.
 
     When no onset is recorded (only the force-``mark_stuck`` path, used in tests,
     lacks one) fall back to the absolute-age freshness gate. Only the
@@ -283,11 +282,13 @@ def run_restart_sequence(
     surface is quiet (Principle 3), so a failed restart must reach error
     reporting even though the page renders it for the user.
 
-    ``skip_stop`` is set only for the auto-dispatched restart, which is chosen
-    exclusively when the host-health probe found the container fully stopped --
-    there is nothing to stop, so the (idempotent but not free) ``mngr stop
-    --stop-host`` subprocess is skipped to shave a full mngr invocation off the
-    cold boot's critical path.
+    ``skip_stop`` is set by the recovery page's unconditional entry dispatch
+    (the API's ``start_only``), which fires with no knowledge of the host's
+    state: the sequence must then never bounce a live container, and ``mngr
+    start`` alone guarantees that -- it checks ground truth at commit time,
+    no-ops on a running host, and cold-boots a stopped one. The manual
+    "Restart workspace" click keeps the stop step, since it may target a
+    running-but-wedged container that only a bounce fixes.
     """
     registry.append_log(workspace_agent_id, "Starting host restart.")
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
@@ -404,8 +405,8 @@ def probe_workspace_health(
     layer cannot already answer: either the host is observed RUNNING (so the
     container should be reachable and the exec tests the inner interface), or the
     resolver's host state is not trustworthy yet (a stale pre-onset snapshot, or a
-    dead/stalled discovery producer whose freshness gate can never open) and that
-    state is not the STOPPED/CRASHED offline pair. When the passive layer cannot
+    dead/stalled discovery producer whose freshness gate can never open). When
+    the passive layer cannot
     answer, the exec's own outcome is the only direct evidence available; a fresh,
     trustworthy, actionable state is left to the classifier so an outage never
     pays a doomed provider round-trip. The plugin's resolver-snapshot mirror
@@ -421,9 +422,6 @@ def probe_workspace_health(
     the probe returned direct evidence: a live GET / 200 is trusted regardless of
     freshness, and an exec that completed without reaching the container is
     likewise direct (fresh) evidence for the consent-gated HOST_UNRESPONSIVE.
-    The offline pair is also exempt: a STOPPED/CRASHED reading classifies
-    HOST_OFFLINE off any snapshot, stale or fresh -- the idempotent ``mngr
-    start`` dispatch needs no freshness gate (see ``_classify_dispatch_tier``).
 
     The host state that feeds the classifier is re-read after the exec, at the
     same instant the trustworthiness check runs, so the freshness gate always
@@ -456,12 +454,9 @@ def probe_workspace_health(
     # surfaced error) and the passive layer will not already answer: either the
     # host is observed RUNNING, or its state is not trustworthy yet (a stale
     # pre-onset snapshot, or a dead/stalled discovery producer whose freshness
-    # gate can never open) and it is not the STOPPED/CRASHED offline pair. The
-    # offline pair is skipped because it auto-dispatches an idempotent ``mngr
-    # start`` off any snapshot (see ``_classify_dispatch_tier``); a doomed exec
-    # into a stopped container would only delay that restart. A fresh, trusted
-    # state (e.g. a transitional STOPPING) is left to the classifier rather than
-    # execced, so a normal transition is not prematurely consent-gated. The exec
+    # gate can never open). A fresh, trusted non-RUNNING state (e.g. STOPPED, or
+    # a transitional STOPPING) is left to the classifier rather than execced, so
+    # an outage never pays a doomed provider round-trip. The exec
     # SSHes to the container via ``get_host`` (the connector's ~30s httpx), so it
     # carries an explicit 30s-class cap; its outcome is the only direct evidence
     # available when the passive layer is silent, resolving the page to HEALTHY or
@@ -473,10 +468,7 @@ def probe_workspace_health(
     if (
         services_agent_id is not None
         and provider_error_message is None
-        and (
-            host_state_enum == HostState.RUNNING
-            or (not state_is_trustworthy and host_state_enum not in (HostState.STOPPED, HostState.CRASHED))
-        )
+        and (host_state_enum == HostState.RUNNING or not state_is_trustworthy)
     ):
         probe_exec_attempted = True
         try:

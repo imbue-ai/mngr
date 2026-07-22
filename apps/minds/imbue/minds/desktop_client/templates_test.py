@@ -984,15 +984,15 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     )
     assert "dispatch_tier" in html
     for tier in (
-        "'host_offline'",
-        "'host_unresponsive'",
+        "'healthy'",
         "'backend_unreachable'",
         "'indeterminate'",
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The interface_unresponsive tier (and its surgical in-place restart) is
-    # gone: the server never emits it, and unknown tiers fall back to the
-    # consent-gated unresponsive page.
+    # gone: the server never emits it. The concrete verdicts (host_offline,
+    # host_unresponsive, unknown tiers) share the catch-all consent-page
+    # branch -- tiers are display-only, so no per-verdict dispatch exists.
     assert "interface_unresponsive" not in html
     assert "scope: 'services'" not in html
     # The shared landing places for each branch.
@@ -1001,16 +1001,16 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     assert "renderReconnecting" in html
 
 
-def test_render_recovery_page_offline_restart_shows_informative_state() -> None:
-    """The auto-dispatched host_offline restart names the offline condition.
+def test_render_recovery_page_fresh_entry_dispatches_start_only_unconditionally() -> None:
+    """A fresh (stuck) entry dispatches the start-only restart immediately, with no probe gate.
 
-    Rather than the generic first-open "Loading workspace" spinner (or the
-    "Reconnecting" state), the host_offline branch dispatches the unattended
-    cold-boot with ``renderRestartingOffline``, whose copy tells the user the
-    workspace was offline and is being brought back. A manual restart (and a
-    page load that lands on the RESTARTING tracker state) falls back to the
-    generic ``renderRestarting`` state, which still names the restart instead of
-    reusing the "Loading workspace" spinner.
+    The dispatch decision no longer consults any host-state knowledge: the
+    start-only restart is safe regardless of the host's state (``mngr start``
+    checks ground truth at commit time and no-ops on a live host), so the entry
+    fires it unconditionally and the classifier tiers stay display-only. The
+    in-flight dispatch renders the restarting state (never the generic
+    "Loading workspace" spinner), and applyHealth -- the display path -- must
+    contain no dispatch at all.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -1018,24 +1018,20 @@ def test_render_recovery_page_offline_restart_shows_informative_state() -> None:
         initial_status="stuck",
         initial_error="",
     )
-    # The host_offline branch passes the offline pending-render to postRestart, so
-    # the in-flight cold boot shows the offline copy rather than the generic spinner.
+    # The fresh entry (the trailing else of the initialStatus dispatcher) POSTs
+    # the start-only restart directly.
+    entry = html[html.rfind("if (initialStatus === 'restarting')") :]
+    assert "postRestart({ scope: 'host', start_only: true })" in entry
+    # No probe-gated dispatch remains: applyHealth renders, never restarts.
     apply_start = html.find("function applyHealth(")
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
-    assert "postRestart({ scope: 'host', host_already_stopped: true }, renderRestartingOffline)" in apply_block
-    # The offline render names the offline condition (so the wait reads as
-    # recovery) over the spinner.
-    offline_start = html.find("function renderRestartingOffline")
-    offline_block = html[offline_start : html.find("function ", offline_start + 1)]
-    assert "was offline" in offline_block
-    assert "show(spinnerEl, true)" in offline_block
-    # postRestart defaults to the generic restarting state (the manual restart click).
+    assert "postRestart" not in apply_block
+    # postRestart renders the restarting state while the dispatch is in flight.
     post_start = html.find("function postRestart(")
     post_block = html[post_start : html.find("function ", post_start + 1)]
-    assert "(renderPending || renderRestarting)()" in post_block
-    # A page load that lands on the RESTARTING tracker state renders the generic
+    assert "renderRestarting()" in post_block
+    # A page load that lands on the RESTARTING tracker state renders the
     # restarting state, not the generic first-open "Loading workspace" spinner.
-    entry = html[html.rfind("if (initialStatus === 'restarting')") :]
     restarting_entry = entry[: entry.find("else if")]
     assert "renderRestarting()" in restarting_entry
     assert "renderLoading()" not in restarting_entry
@@ -1044,10 +1040,11 @@ def test_render_recovery_page_offline_restart_shows_informative_state() -> None:
 def test_render_recovery_page_indeterminate_renders_reconnecting_not_a_verdict() -> None:
     """The INDETERMINATE tier keeps checking instead of rendering a verdict.
 
-    When the probe timed out or the snapshot is stale, the page must not auto-
-    dispatch a restart or show a restart verdict -- it renders the live
-    "reconnecting" state and re-probes slowly. The branch must come before the
-    auto-dispatch tiers so no restart fires off non-evidence.
+    When the probe timed out or the snapshot is stale, the page must not show a
+    restart verdict off non-evidence -- it renders the live "reconnecting"
+    state and re-probes slowly. The branch must come before the catch-all
+    verdict branch so an indeterminate result keeps checking rather than
+    rendering the "Workspace unresponsive" verdict.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -1059,12 +1056,8 @@ def test_render_recovery_page_indeterminate_renders_reconnecting_not_a_verdict()
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
     assert "'indeterminate'" in apply_block
     assert "renderReconnecting()" in apply_block
-    assert "scheduleIndeterminateReprobe(autoDispatch)" in apply_block
-    assert apply_block.find("'indeterminate'") < apply_block.find("postRestart")
-    # The indeterminate branch must precede the restart_failed (!autoDispatch)
-    # branch so an indeterminate result on that entry also keeps checking rather
-    # than rendering the "Workspace unresponsive" verdict off non-evidence.
-    assert apply_block.find("'indeterminate'") < apply_block.find("if (!autoDispatch)")
+    assert "scheduleIndeterminateReprobe()" in apply_block
+    assert apply_block.find("'indeterminate'") < apply_block.rfind("renderUnresponsive()")
     # renderReconnecting shows a spinner and no restart button, and arms the poll.
     recon_start = html.find("function renderReconnecting")
     recon_block = html[recon_start : html.find("function ", recon_start + 1)]
@@ -1079,9 +1072,9 @@ def test_render_recovery_page_dropped_probe_request_reconnects_not_a_verdict() -
     fetch when the machine suspends, so ``fetchHealth`` rejects. The old handler
     rendered the terminal "Workspace unresponsive" verdict and never re-probed,
     stranding the user even after the workspace came back. The rejection handler
-    must instead render the live "reconnecting" state and schedule a retry
-    (preserving autoDispatch), so the cheap liveness poll returns the user home
-    and the slow re-probe converges to a real tier.
+    must instead render the live "reconnecting" state and schedule a retry, so
+    the cheap liveness poll returns the user home and the slow re-probe
+    converges to a real tier.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -1095,10 +1088,10 @@ def test_render_recovery_page_dropped_probe_request_reconnects_not_a_verdict() -
     probe_start = html.find("function runProbe(")
     probe_block = html[probe_start : html.find("hostBtn.addEventListener", probe_start)]
     # The success path still applies the health payload...
-    assert "applyHealth(data, autoDispatch)" in probe_block
+    assert "applyHealth(data)" in probe_block
     # ...and the rejection path reconnects + retries instead of a static verdict.
     assert "renderReconnecting()" in probe_block
-    assert "scheduleIndeterminateReprobe(autoDispatch)" in probe_block
+    assert "scheduleIndeterminateReprobe()" in probe_block
     assert "renderUnresponsive()" not in probe_block
 
 
@@ -1107,8 +1100,9 @@ def test_render_recovery_page_every_wait_state_arms_the_homeward_poll() -> None:
 
     This is the fix for the post-macOS-sleep "Workspace unresponsive" strand: a
     workspace that comes back on its own must return the user home without any
-    action. Every terminal/waiting render arms the poll, and the stuck entry arms
-    it before the slow heavy probe even runs (cheap-probe-first).
+    action. Every terminal/waiting render arms the poll, and the stuck entry
+    arms it before dispatching the start-only restart, so a workspace that
+    answers while the dispatch settles still goes straight home.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -1120,9 +1114,9 @@ def test_render_recovery_page_every_wait_state_arms_the_homeward_poll() -> None:
         start = html.find("function " + fn)
         block = html[start : html.find("function ", start + 1)]
         assert "armHealthyPoll()" in block, f"{fn} must arm the homeward poll so it is not a dead end"
-    # Cheap-probe-first: the stuck entry arms the poll before running the heavy probe.
+    # The stuck entry arms the poll before dispatching the start-only restart.
     entry = html[html.rfind("if (initialStatus === 'restarting')") :]
-    assert entry.find("armHealthyPoll();") < entry.rfind("runProbe(true);")
+    assert 0 < entry.find("armHealthyPoll();") < entry.rfind("postRestart(")
 
 
 def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> None:
@@ -1160,16 +1154,16 @@ def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> 
     # The render arms the cheap liveness poll so the page auto-returns the user
     # once the backend recovers and the tracker flips HEALTHY.
     assert "armHealthyPoll()" in provider_block
-    # The backend_unreachable branch returns before any restart dispatch.
+    # The display path contains no dispatch at all (tiers are display-only).
     apply_start = html.find("function applyHealth(")
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
-    assert apply_block.find("'backend_unreachable'") < apply_block.find("postRestart")
+    assert "postRestart" not in apply_block
     # The verdict must stay live: a transient provider error (one failed
     # discovery cycle, e.g. during app startup) is cleared by the provider's
     # next clean snapshot, so the branch schedules the slow re-probe to
     # re-classify and continue the flow instead of dead-ending on the page.
     unreachable_branch = apply_block[apply_block.find("'backend_unreachable'") : apply_block.find("'healthy'")]
-    assert "scheduleIndeterminateReprobe(autoDispatch)" in unreachable_branch
+    assert "scheduleIndeterminateReprobe()" in unreachable_branch
     # Only one reprobe timer may be pending at once: the Retry button's
     # immediate probe re-enters applyHealth, which would otherwise spawn a
     # parallel self-perpetuating probe chain per click.
@@ -1181,11 +1175,9 @@ def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> 
 def test_render_recovery_page_unresponsive_verdict_stays_live_and_resets_state() -> None:
     """The unresponsive verdict is not a dead-end, and verdict renders reset each other's elements.
 
-    A workspace whose container is stopped can classify host_unresponsive first
-    (a completed exec failure under absent discovery cannot tell "stopped" from
-    "broken ssh"), so the unresponsive branches must keep re-probing -- the
-    first trusted STOPPED snapshot then re-classifies to host_offline and the
-    unattended restart dispatches. And because the page can move between
+    The catch-all verdict branch (host_offline / host_unresponsive / unknown
+    tiers) must keep re-probing so the failure page's verdict and diagnostics
+    stay live as evidence changes. And because the page can move between
     verdicts (backend_unreachable -> host_unresponsive), renderUnresponsive and
     renderDispatchError must hide the Retry button and clear the provider-error
     paragraph that renderBackendUnreachable showed -- otherwise the page shows
@@ -1199,12 +1191,10 @@ def test_render_recovery_page_unresponsive_verdict_stays_live_and_resets_state()
     )
     apply_start = html.find("function applyHealth(")
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
-    # Both unresponsive-verdict paths (restart_failed entry and the
-    # host_unresponsive fallthrough) schedule the slow re-probe.
-    no_dispatch_branch = apply_block[apply_block.find("if (!autoDispatch)") : apply_block.find("'host_offline'")]
-    assert "scheduleIndeterminateReprobe(autoDispatch)" in no_dispatch_branch
-    fallthrough = apply_block[apply_block.find("'host_offline'") :]
-    assert "scheduleIndeterminateReprobe(autoDispatch)" in fallthrough
+    # The catch-all verdict branch (after the indeterminate branch) renders the
+    # consent page and schedules the slow re-probe.
+    fallthrough = apply_block[apply_block.rfind("renderUnresponsive()") :]
+    assert "scheduleIndeterminateReprobe()" in fallthrough
     for fn in ("renderUnresponsive", "renderDispatchError"):
         start = html.find("function " + fn)
         block = html[start : html.find("function ", start + 1)]
@@ -1272,10 +1262,11 @@ def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
         initial_status="restart_failed",
         initial_error="Stop step of host restart failed: exited 1",
     )
-    # The restart_failed branch in the dispatcher calls runProbe(false) so
-    # the diagnostics are populated without auto-dispatching another restart.
+    # The restart_failed branch in the dispatcher calls runProbe() so the
+    # diagnostics are populated (the probe path is display-only, so this can
+    # never dispatch another restart).
     assert "restart_failed" in html
-    assert "runProbe(false)" in html
+    assert "runProbe()" in html
     # The error-details DOM hook is rendered alongside the diagnostic.
     assert 'id="recovery-error"' in html
     assert 'id="recovery-debug-details"' in html

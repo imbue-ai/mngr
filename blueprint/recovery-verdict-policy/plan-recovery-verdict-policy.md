@@ -17,9 +17,11 @@ report).
 - Make the classifier interpret evidence it already collects rather than adding
   delays. From the in-container probe's supervisord status: `STARTING`/`BACKOFF`
   means self-heal is in progress (keep checking). From the discovery snapshot's
-  host state: `STOPPING` is transitional (keep checking); `FAILED` is
-  consent-gated; `STOPPED`/`CRASHED` keep today's unattended host restart
-  (this is the path that revives workspaces after a laptop reboot).
+  host state: `STOPPING` is transitional (keep checking); `FAILED` renders the
+  consent page; `STOPPED`/`CRASHED` render as offline. The tiers are
+  display-only -- the recovery restart itself is dispatched unconditionally on
+  page entry as an idempotent start-only restart (see "Expected behavior"),
+  which is the path that revives workspaces after a laptop reboot.
 
 - Add a dedicated `HostState.UNREACHABLE` so imbue_cloud outer-SSH auth
   rejection stops overloading `UNAUTHENTICATED`. minds maps it to the terminal
@@ -49,25 +51,33 @@ report).
     user home the moment the interface self-heals, so no restart fires without
     a click.
 
-- Host observed as `STOPPED` / `CRASHED` -- off any snapshot, fresh or stale:
-  unattended host restart. This is the one host-state verdict with no
-  freshness gate, because the dispatched action is commit-time-checked rather
-  than trust-dependent: the auto path runs a pure `mngr start`
-  (`host_already_stopped` skips the stop step), which targets only STOPPED
-  agents, so a stale reading whose container actually came back degrades to a
-  no-op and the liveness poll returns the user home. In-app stops (landing
-  page and agent API) close open windows first, so an open window observing
-  STOPPED implies an out-of-app stop, and reviving it is intended. (Initially
-  this verdict was freshness-gated like the rest; live testing on 2026-07-21
-  showed that parked a stopped workspace on the consent page at app startup --
-  when only the replayed pre-start topology exists -- for a full discovery
-  cycle before converging, so the gate was dropped for the offline pair.)
+- The recovery flow's restart is dispatched unconditionally on recovery-page
+  entry as a start-only restart (`start_only` skips the stop step), with no
+  knowledge of the host's state. The dispatch is commit-time-checked rather
+  than trust-dependent: `mngr start` probes ground truth at dispatch time,
+  no-ops on a live host, targets only STOPPED agents, and cold-boots a
+  stopped one -- so a stopped workspace revives on first entry with no
+  discovery-freshness crawl, and a workspace that merely blipped makes the
+  dispatch a no-op while the liveness poll returns the user home. In-app
+  stops (landing page and agent API) close open windows first, so a window
+  that reaches the recovery page over a stopped host implies an out-of-app
+  stop, and reviving it is intended. The classifier's tiers are display-only:
+  a trusted `STOPPED`/`CRASHED` reading renders as `HOST_OFFLINE` on the
+  failure page's diagnostics, but no dispatch ever branches on a tier.
+  (History: this dispatch was originally tier-gated -- fire only on a
+  classified `HOST_OFFLINE` -- which required the classifier to *know* the
+  host was stopped. That spawned a freshness-gate exemption for the offline
+  pair, then a persisted offline-state map with launch-time override seeding
+  so the knowledge survived a quit, and that map proved unreconcilable
+  against stale in-flight and replayed discovery snapshots, which kept
+  erasing it (live traces 2026-07-21/22). Dispatching unconditionally removes
+  the need for the knowledge, and with it that entire subsystem.)
 
 - Host observed (with a trusted, post-onset snapshot) as:
-  - `STOPPING`: transitional -- keep checking; the auto-restart fires a few
-    seconds later off the settled STOPPED.
+  - `STOPPING`: transitional -- keep checking; it settles to STOPPED a moment
+    later.
   - `FAILED`: consent-gated "Workspace unresponsive" page (a failed host is
-    unresponsive; auto-`mngr start` on a failed-to-create host mostly re-fails).
+    unresponsive; a plain start on a failed-to-create host mostly re-fails).
   - `UNREACHABLE`: terminal "Can't connect to ..." page with Retry and report
     only, showing the canned reason: "This machine's access to the workspace
     host was rejected. Retrying or restarting won't fix this -- the workspace
@@ -110,9 +120,9 @@ could ever land and the freshness gate never opened):
   not actually running) is direct fresh evidence and classifies the
   consent-gated HOST_UNRESPONSIVE without waiting on the snapshot-freshness
   gate. A probe *timeout* still classifies INDETERMINATE (it observed nothing;
-  the macOS-sleep protection). A `STOPPED`/`CRASHED`
-  observation still wins over a completed exec failure, keeping the unattended
-  HOST_OFFLINE restart.
+  the macOS-sleep protection). A trusted `STOPPED`/`CRASHED` observation still
+  wins over a completed exec failure, naming the condition precisely
+  (HOST_OFFLINE).
 
 - The exec probe is attempted not only when the host reads RUNNING but also
   whenever the workspace's provider has produced no discovery snapshot for
@@ -147,11 +157,10 @@ container):
 - No verdict page is a dead-end: the BACKEND_UNREACHABLE and HOST_UNRESPONSIVE
   renders re-arm the same slow re-probe the INDETERMINATE state uses, so a
   cleared provider error or a newly-landed STOPPED observation re-classifies
-  and the flow continues (including the unattended offline dispatch) without
-  user action. Dispatching a restart silences the re-probe chain, so a stale
-  in-flight probe result cannot overwrite the restarting state or double-POST.
-  Verdict renders also reset each other's residual elements (Retry button,
-  provider-error paragraph).
+  and the flow continues without user action. Dispatching a restart silences
+  the re-probe chain, so a stale in-flight probe result cannot overwrite the
+  restarting state. Verdict renders also reset each other's residual elements
+  (Retry button, provider-error paragraph).
 
 - Background/diagnostic ``mngr exec`` calls in minds pass ``--no-start``
   (exec auto-starts the host by default): the periodic backup verification
@@ -164,11 +173,23 @@ container):
   read/write; every diagnostic and cleanup exec fast-fails against a stopped
   host instead.
 
-- The STOPPED/CRASHED -> HOST_OFFLINE verdict lost its freshness gate (see
-  "Expected behavior" above): requiring a post-onset snapshot made the startup
-  sequence crawl through consent-gated and reconnecting states for ~30s when
-  the replayed topology already read STOPPED, for no safety benefit the
-  idempotent `mngr start` dispatch did not already provide.
+Redesign after further live testing (2026-07-22, quit/relaunch traces showing
+the persisted offline map erased by stale in-flight and replayed discovery
+snapshots -- see "Expected behavior"):
+
+- The recovery page's restart dispatch is decoupled from the classifier
+  entirely: a fresh entry POSTs the start-only restart (`start_only`, the
+  renamed `host_already_stopped`) immediately and unconditionally, before any
+  probe. The probe/classifier remains for display -- the failure page's
+  diagnostics, the consent-gated manual stop+start, and the
+  backend-unreachable page -- and all tiers are uniformly freshness-gated
+  again (the offline pair's exemption is gone along with its reason).
+
+- Deleted with the knowledge requirement: the persisted offline-state map in
+  the resolver's last-good topology, its launch-time seeding as host-state
+  overrides, its discovery reconcile, the classifier's offline freshness
+  exemption, and the probe's offline exec-skip carve-out. Host-state
+  overrides remain in-memory-only UI optimism for lifecycle clicks.
 
 ## Changes
 
@@ -215,11 +236,13 @@ minds policy layer (`apps/minds`):
     found (currently unlogged), plus the worker-spawn failure in `api_v1.py`.
 
 - `api_v1.py` + `api_models.py`: restart route accepts only `scope: "host"`
-  (400 for `"services"`); request-model description updated; the restart dedup
-  is unchanged. (The `auto_dispatched`+HEALTHY skip guard this plan originally
-  left untouched was removed on main while this branch was in flight -- an
-  auto-dispatched cold-boot degrades to a no-op via `mngr start` targeting only
-  STOPPED agents, so no endpoint-side veto is needed.)
+  (400 for `"services"`); the skip-stop request field is `start_only`
+  (renamed from `host_already_stopped`, which implied state knowledge the
+  unconditional dispatch does not have); the restart dedup is unchanged. (The
+  `auto_dispatched`+HEALTHY skip guard this plan originally left untouched
+  was removed on main while this branch was in flight -- an auto-dispatched
+  cold-boot degrades to a no-op via `mngr start` targeting only STOPPED
+  agents, so no endpoint-side veto is needed.)
 
 - stop flow: after a successful STOP, the backend broadcasts a one-shot
   `workspace_stopped` chrome SSE event (emitted from the
@@ -235,10 +258,11 @@ minds policy layer (`apps/minds`):
   error-surfacing unit -- additive changes in a different region than their
   work; coordinate before merge.)
 
-- `templates.py`: only the now-dead `interface_unresponsive` JS branch (and its
-  `scope: 'services'` dispatch) is removed; the rest of the recovery-page JS is
-  owned by the error-surfacing unit and stays untouched. The server never emits
-  that tier, and unknown tiers already fall back to the consent page.
+- `templates.py`: the `interface_unresponsive` JS branch (and its
+  `scope: 'services'` dispatch) is removed, and the recovery script's fresh
+  entry dispatches the start-only restart unconditionally -- `applyHealth`
+  is display-only (no tier-branched dispatch remains). Unknown tiers fall
+  back to the consent page.
 
 - Tests updated across `recovery_probe_test.py`, `workspace_recovery_test.py`,
   `api_v1_test.py`, provider state-minting tests, and any ratchet counts that
@@ -275,13 +299,15 @@ minds policy layer (`apps/minds`):
     RUNNING/FATAL/EXITED/STOPPED/unparseable -> HOST_UNRESPONSIVE; exec OK +
     curl non-200 + supervisord STARTING or BACKOFF -> INDETERMINATE.
   - no tier value `interface_unresponsive` exists; no input produces it.
-  - STOPPED / CRASHED -> HOST_OFFLINE off any snapshot, stale or fresh (the
-    offline pair carries no freshness gate; see the 2026-07-20/21
-    refinements); STOPPING -> INDETERMINATE;
+  - trusted STOPPED / CRASHED -> HOST_OFFLINE; STOPPING -> INDETERMINATE;
     FAILED -> HOST_UNRESPONSIVE; UNREACHABLE -> BACKEND_UNREACHABLE with the
-    canned reason; UNKNOWN/absent -> INDETERMINATE; stale-snapshot gating for
-    the non-offline states and probe-timeout gating unchanged (INDETERMINATE,
-    including a timeout with a stale STOPPED reading).
+    canned reason; UNKNOWN/absent -> INDETERMINATE; stale-snapshot gating is
+    uniform across all host-state verdicts (a stale STOPPED is INDETERMINATE,
+    or HOST_UNRESPONSIVE via a completed exec failure), and probe-timeout
+    gating is unchanged (INDETERMINATE, including a timeout with a stale
+    STOPPED reading).
+  - The recovery page's fresh entry dispatches the start-only restart
+    unconditionally (templates test), and `applyHealth` contains no dispatch.
 - Provider unit tests:
   - imbue_cloud: outer-SSH `HostAuthenticationError` -> host state UNREACHABLE
     (agents re-attached, failure_reason carried); non-auth outer failure still

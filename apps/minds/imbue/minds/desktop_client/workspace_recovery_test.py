@@ -386,8 +386,8 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     assert record is not None and record.status == WorkspaceOperationStatus.DONE
 
 
-def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Path) -> None:
-    """``skip_stop=True`` on a host restart goes straight to ``mngr start`` (no stop subprocess)."""
+def test_run_restart_sequence_skips_stop_for_start_only_dispatch(tmp_path: Path) -> None:
+    """``skip_stop=True`` (the API's ``start_only``) goes straight to ``mngr start`` (no stop subprocess)."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
@@ -695,8 +695,8 @@ def test_probe_skips_exec_for_a_trusted_not_running_host(tmp_path: Path) -> None
     """With discovery flowing and the host trustworthily observed STOPPED, no exec fires.
 
     The doomed-round-trip guard: a fresh post-onset snapshot already answers the
-    question, so the probe classifies HOST_OFFLINE (unattended restart) without
-    paying the exec's provider round-trip.
+    question, so the probe classifies HOST_OFFLINE without paying the exec's
+    provider round-trip.
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
@@ -722,14 +722,13 @@ def test_probe_skips_exec_for_a_trusted_not_running_host(tmp_path: Path) -> None
 
 
 def test_probe_attempts_exec_for_an_untrusted_non_offline_state(tmp_path: Path) -> None:
-    """A stale, non-offline host state gathers direct evidence instead of waiting.
+    """A stale host state gathers direct evidence instead of waiting.
 
     Any state the resolver cannot yet vouch for (no snapshot at/after the outage
-    onset has landed) that is not the STOPPED/CRASHED offline pair triggers the
-    exec immediately -- there is no fixed staleness threshold to wait out. Here a
-    pre-onset STOPPING resolves via the exec's completed failure (the stub exits 0
-    with no sentinel) to the consent-gated HOST_UNRESPONSIVE instead of spinning
-    at INDETERMINATE.
+    onset has landed) triggers the exec immediately -- there is no fixed
+    staleness threshold to wait out. Here a pre-onset STOPPING resolves via the
+    exec's completed failure (the stub exits 0 with no sentinel) to the
+    consent-gated HOST_UNRESPONSIVE instead of spinning at INDETERMINATE.
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
@@ -763,8 +762,8 @@ def test_probe_skips_exec_for_a_trusted_transitional_host(tmp_path: Path) -> Non
     A fresh post-onset snapshot showing STOPPING is the host genuinely
     mid-shutdown; firing a doomed exec there would flip a normal transition into a
     premature consent-gated HOST_UNRESPONSIVE. The probe skips the exec and yields
-    INDETERMINATE (keep checking), so the next snapshot resolves it (e.g. to the
-    offline restart once it reads STOPPED).
+    INDETERMINATE (keep checking), so the next snapshot resolves it (e.g. to
+    HOST_OFFLINE once it reads STOPPED).
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()

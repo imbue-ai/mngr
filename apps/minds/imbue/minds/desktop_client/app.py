@@ -1966,8 +1966,9 @@ def _handle_recovery_page(
         if is_explicit_restart:
             # The user explicitly asked to restart a currently-healthy
             # workspace (the home-page restart control). Render as STUCK so
-            # the page runs the layer-2 probe and dispatches a restart instead
-            # of sitting idle on a "healthy" page.
+            # the page dispatches its start-only restart (a cold boot for a
+            # stopped mind, a no-op for a live one) instead of sitting idle
+            # on a "healthy" page.
             render_status = AgentHealth.STUCK.value
         elif return_to:
             # The workspace recovered before this page loaded -- either a race

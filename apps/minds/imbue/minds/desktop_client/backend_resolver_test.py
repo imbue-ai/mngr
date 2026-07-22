@@ -585,107 +585,20 @@ def test_host_state_override_does_not_affect_active_workspace_filtering() -> Non
     assert resolver.list_active_workspace_ids() == (agent,)
 
 
-def test_offline_override_persists_and_reseeds_to_mask_stale_running(tmp_path: Path) -> None:
-    """A stop persisted at quit reads STOPPED on the next launch, masking the stale RUNNING backlog.
+def test_host_state_override_is_not_persisted_across_sessions(tmp_path: Path) -> None:
+    """Overrides are in-memory only: a fresh resolver on the same topology path knows nothing of them.
 
-    This is the fix for a workspace stopped in-app being read as a stale RUNNING on the next
-    launch (the quit blinds discovery before it can observe the stop), which sent recovery down
-    the doomed-exec "unresponsive" path instead of the idempotent host_offline cold-boot.
+    Host lifecycle state is deliberately not persisted across a quit -- the
+    recovery flow dispatches its start-only restart unconditionally on entry,
+    so the next launch needs no memory of which hosts were stopped (a persisted
+    lifecycle mirror proved unreconcilable against stale in-flight and replayed
+    discovery snapshots).
     """
     topology_path = tmp_path / "last_good_agent_topology.json"
     host = HostId.generate()
-    agent = AgentId.generate()
-
-    # Session 1: the workspace is stopped in-app.
     MngrCliBackendResolver(last_good_agents_path=topology_path).set_host_state_override(host, HostState.STOPPED)
 
-    # Session 2: a fresh resolver seeds the persisted offline state as an optimistic override.
-    reloaded = MngrCliBackendResolver(last_good_agents_path=topology_path)
-    assert reloaded.get_host_state(host) is HostState.STOPPED
-    # The replayed pre-onset discovery backlog still reads the host RUNNING; the seeded override
-    # masks it so recovery classifies host_offline rather than crawling through "unresponsive".
-    reloaded.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent),),
-            host_state_by_host_id={str(host): HostState.RUNNING},
-        )
-    )
-    assert reloaded.get_host_state(host) is HostState.STOPPED
-
-
-def test_persisted_offline_seed_clears_once_fresh_discovery_confirms(tmp_path: Path) -> None:
-    """The seeded override is dropped when a fresh snapshot agrees, unmasking later discovery."""
-    topology_path = tmp_path / "last_good_agent_topology.json"
-    host = HostId.generate()
-    agent = AgentId.generate()
-    MngrCliBackendResolver(last_good_agents_path=topology_path).set_host_state_override(host, HostState.STOPPED)
-
-    reloaded = MngrCliBackendResolver(last_good_agents_path=topology_path)
-    reloaded.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent),),
-            host_state_by_host_id={str(host): HostState.STOPPED},
-        )
-    )
-    assert reloaded.get_host_state(host) is HostState.STOPPED
-    # Override confirmed and dropped: the cold-boot's later RUNNING is now reflected, unmasked.
-    reloaded.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent),),
-            host_state_by_host_id={str(host): HostState.RUNNING},
-        )
-    )
-    assert reloaded.get_host_state(host) is HostState.RUNNING
-
-
-def test_start_override_removes_persisted_offline_entry(tmp_path: Path) -> None:
-    """Starting a workspace clears the persisted offline state so the next launch does not cold-boot it."""
-    topology_path = tmp_path / "last_good_agent_topology.json"
-    host = HostId.generate()
-    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
-    resolver.set_host_state_override(host, HostState.STOPPED)
-    resolver.set_host_state_override(host, HostState.RUNNING)
-
     assert MngrCliBackendResolver(last_good_agents_path=topology_path).get_host_state(host) is None
-
-
-def test_running_override_is_never_persisted(tmp_path: Path) -> None:
-    """A RUNNING optimistic override is not durable -- only the offline pair is persisted."""
-    topology_path = tmp_path / "last_good_agent_topology.json"
-    host = HostId.generate()
-    MngrCliBackendResolver(last_good_agents_path=topology_path).set_host_state_override(host, HostState.RUNNING)
-
-    assert MngrCliBackendResolver(last_good_agents_path=topology_path).get_host_state(host) is None
-
-
-def test_discovery_observed_offline_is_persisted_and_reseeded(tmp_path: Path) -> None:
-    """A host discovery observes STOPPED is persisted too, so a quit that blinds discovery still cold-boots it."""
-    topology_path = tmp_path / "last_good_agent_topology.json"
-    host = HostId.generate()
-    agent = AgentId.generate()
-    MngrCliBackendResolver(last_good_agents_path=topology_path).update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent),),
-            host_state_by_host_id={str(host): HostState.STOPPED},
-        )
-    )
-    assert MngrCliBackendResolver(last_good_agents_path=topology_path).get_host_state(host) is HostState.STOPPED
-
-
-def test_persisted_offline_entry_survives_host_absent_from_snapshot(tmp_path: Path) -> None:
-    """A snapshot that omits the host (transient discovery loss) does not drop the persisted offline state."""
-    topology_path = tmp_path / "last_good_agent_topology.json"
-    host = HostId.generate()
-    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
-    resolver.set_host_state_override(host, HostState.STOPPED)
-    # An empty snapshot omits the host entirely -- transient discovery loss, not evidence it came back.
-    resolver.update_agents(ParsedAgentsResult())
-
-    assert MngrCliBackendResolver(last_good_agents_path=topology_path).get_host_state(host) is HostState.STOPPED
 
 
 def test_parse_agents_from_json_extracts_host_state() -> None:

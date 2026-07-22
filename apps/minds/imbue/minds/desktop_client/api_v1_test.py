@@ -1730,11 +1730,11 @@ def test_restart_dispatches_for_never_probed_workspace(
 
     A workspace whose host has been offline since before this process started is
     never enrolled as a probe suspect, so the tracker reports default-HEALTHY for
-    it. A veto keyed on that reading would drop the recovery page's cold-boot
-    dispatch (host scope + ``host_already_stopped``), stranding the workspace on
-    the loader forever. The dispatch must proceed to a real restart operation --
-    self-recovery races are absorbed by ``mngr start`` only targeting STOPPED
-    agents, not by an endpoint-side veto.
+    it. A veto keyed on that reading would drop the recovery page's
+    unconditional entry dispatch (host scope + ``start_only``), stranding the
+    workspace on the loader forever. The dispatch must proceed to a real restart
+    operation -- self-recovery races are absorbed by ``mngr start`` only
+    targeting STOPPED agents, not by an endpoint-side veto.
     """
     agent_id = AgentId()
     services_id = AgentId()
@@ -1755,7 +1755,7 @@ def test_restart_dispatches_for_never_probed_workspace(
     response = client.post(
         f"/api/v1/workspaces/{agent_id}/restart",
         headers=_auth_header(),
-        json={"scope": "host", "host_already_stopped": True},
+        json={"scope": "host", "start_only": True},
     )
 
     assert response.status_code == 202

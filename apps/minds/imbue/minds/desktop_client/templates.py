@@ -1180,9 +1180,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // can take tens of seconds, and the cheap liveness poll above already does
         // the fast recovery work -- this is only the slow convergence path.
         // Re-render via applyHealth (not renderLoading) so the "Reconnecting" state
-        // stays put while the background probe is in flight. ``autoDispatch`` is
-        // threaded through so a reprobe on the restart_failed entry (autoDispatch
-        // off) never starts auto-dispatching the restarts that entry suppresses.
+        // stays put while the background probe is in flight.
         var INDETERMINATE_REPROBE_MS = 8000;
         // Only one reprobe timer may be pending at a time: the waiting states that
         // arm this (indeterminate, backend-unreachable, and the unresponsive
@@ -1192,23 +1190,22 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // the guard each retry would spawn a parallel self-perpetuating chain of
         // heavy probes.
         var reprobePending = false;
-        // Set once a restart POST goes out (manual click or the host_offline
-        // auto-dispatch); never reset within this page instance. From then on
+        // Set once a restart POST goes out (the unconditional entry dispatch or a
+        // manual click); never reset within this page instance. From then on
         // scheduleRefresh and the cheap healthy-poll own convergence (both end
-        // in a navigation that reloads this script), so the reprobe chain the
-        // pre-dispatch verdict left armed -- a pending timer or an in-flight
+        // in a navigation that reloads this script), so any reprobe chain a
+        // prior verdict left armed -- a pending timer or an in-flight
         // heavy probe -- must go quiet: its stale result would overwrite the
-        // restarting render (and could re-POST a restart) seconds after the
-        // click.
+        // restarting render seconds after the dispatch.
         var restartDispatched = false;
-        function scheduleIndeterminateReprobe(autoDispatch) {
+        function scheduleIndeterminateReprobe() {
           if (reprobePending || restartDispatched) return;
           reprobePending = true;
           setTimeout(function () {
             reprobePending = false;
             if (restartDispatched) return;
-            fetchHealth().then(function (data) { applyHealth(data, autoDispatch); }, function () {
-              scheduleIndeterminateReprobe(autoDispatch);
+            fetchHealth().then(function (data) { applyHealth(data); }, function () {
+              scheduleIndeterminateReprobe();
             });
           }, INDETERMINATE_REPROBE_MS);
         }
@@ -1231,39 +1228,20 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
         }
-        // A restart is in flight -- either a manual "Restart workspace" click or
-        // the page reloaded while the tracker was already RESTARTING. Names the
-        // action instead of the generic first-open "Loading workspace" spinner so
-        // the wait reads as a deliberate restart, not a hang. The RESTARTING
-        // tracker state carries no reason, so a reload mid-restart lands here even
-        // for an offline cold-boot; the generic wording still fits. scheduleRefresh
-        // (armed by the caller) sends the user home the moment the tracker flips
-        // HEALTHY, so this state needs no separate homeward poll.
+        // A restart is in flight -- the unconditional entry dispatch, a manual
+        // "Restart workspace" click, or the page reloaded while the tracker was
+        // already RESTARTING. Names the action instead of the generic first-open
+        // "Loading workspace" spinner so the wait reads as a deliberate recovery,
+        // not a hang. The copy covers both dispatch flavors (a start-only that
+        // no-ops on a live host, and a cold boot of a stopped one) -- either way
+        // the user is returned automatically. scheduleRefresh (armed by the
+        // caller) sends the user home the moment the tracker flips HEALTHY, so
+        // this state needs no separate homeward poll.
         function renderRestarting() {
           titleEl.textContent = 'Restarting your workspace';
           messageEl.textContent =
-            'We\\'ll return you to your workspace automatically as soon as it is back.';
-          show(spinnerEl, true);
-          show(errorEl, false);
-          show(hostBtn, false);
-          show(retryBtn, false);
-          show(reportBtn, false);
-          show(debugDetailsEl, false);
-          if (debugContentEl) debugContentEl.innerHTML = '';
-          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
-          latestHealth = null;
-        }
-        // The auto-dispatched host_offline restart: the container was observed
-        // fully stopped, so minds cold-boots it unattended (no live work to
-        // interrupt). Unlike the generic restarting state this names what
-        // happened -- the workspace was offline and we are bringing it back -- so
-        // the (possibly long) cold boot reads as recovery rather than a fresh open
-        // that is taking too long.
-        function renderRestartingOffline() {
-          titleEl.textContent = 'Bringing your workspace back online';
-          messageEl.textContent =
-            'This workspace was offline. We\\'re starting it back up and will '
-            + 'return you to it automatically.';
+            'If it was stopped, we\\'re starting it back up. We\\'ll return you to your '
+            + 'workspace automatically as soon as it responds.';
           show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);
@@ -1375,13 +1353,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
           armHealthyPoll();
         }
 
-        // ``renderPending`` is the spinner state to show while the dispatch is in
-        // flight; defaults to the generic ``renderRestarting`` (the manual
-        // "Restart workspace" click), and the host_offline auto-dispatch passes
-        // ``renderRestartingOffline`` so the user sees the workspace was offline.
-        function postRestart(body, renderPending) {
+        function postRestart(body) {
           restartDispatched = true;
-          (renderPending || renderRestarting)();
+          renderRestarting();
           // The endpoint returns a 202 operation handle once the tracker is
           // RESTARTING; any other status means the dispatch did not start, so
           // surface an error instead of refreshing into a re-probe loop. The
@@ -1404,41 +1378,38 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }).then(function (resp) { return resp.json(); });
         }
 
-        // Render (and, when ``autoDispatch``, dispatch a restart for) the tier in
-        // a host-health payload. The page can be reached before discovery has
-        // re-observed the host after an outage (the STUCK redirect is no longer
-        // gated on freshness), so a classification the backend cannot yet trust
-        // arrives as the ``indeterminate`` tier -- handled below as a live
-        // "reconnecting" state rather than a verdict.
-        function applyHealth(data, autoDispatch) {
+        // Render the tier in a host-health payload. Display-only: the recovery
+        // flow's restart is dispatched unconditionally on page entry (see the
+        // entry branching at the bottom), never off a classified tier -- the
+        // start-only dispatch is safe regardless of what we believe about the
+        // host, so no verdict is trusted with that decision. This runs only on
+        // the restart_failed entry's probe and the reprobe/Retry chains it arms.
+        function applyHealth(data) {
           // A restart is in flight (or its dispatch just failed): this result
           // raced the dispatch, so it is stale -- the restarting render and
           // scheduleRefresh own the page now, and rendering a verdict here
-          // would overwrite them (or re-dispatch a restart).
+          // would overwrite them.
           if (restartDispatched) return;
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;
-          // A backend-unreachable outcome short-circuits before any restart
-          // dispatch on EVERY entry path: no restart can or should fire while the
-          // backend is unreachable or rejecting us. renderBackendUnreachable
-          // arms the healthy-poll so the page auto-returns once the backend recovers,
-          // and the slow re-probe keeps the verdict live: a transient provider error
-          // (e.g. one failed discovery cycle during app startup) is cleared by the
-          // provider's next clean snapshot, and the re-probe then re-classifies to
-          // the real tier so the flow continues instead of dead-ending here.
+          // Backend unreachable: no restart can help while the backend is
+          // unreachable or rejecting us. renderBackendUnreachable arms the
+          // healthy-poll so the page auto-returns once the backend recovers,
+          // and the slow re-probe keeps the verdict live: a transient provider
+          // error (e.g. one failed discovery cycle during app startup) is
+          // cleared by the provider's next clean snapshot, and the re-probe
+          // then re-classifies so the flow continues instead of dead-ending.
           if (tier === 'backend_unreachable') {
             renderBackendUnreachable(data);
-            scheduleIndeterminateReprobe(autoDispatch);
+            scheduleIndeterminateReprobe();
             return;
           }
           // The in-container probe shows the interface is actually answering
-          // (HTTP 200), so there is nothing to restart -- on EVERY entry path
-          // (live auto-dispatch and restart_failed alike). Reload the recovery
+          // (HTTP 200), so there is nothing left to recover. Reload the recovery
           // route; once the background tracker also confirms HEALTHY it 302s the
           // user back to the workspace. If the tracker is still catching up the
-          // route re-renders here, we re-probe, see HEALTHY again, and converge
-          // -- never dispatching a restart against a working backend.
+          // route re-renders here, we re-probe, see HEALTHY again, and converge.
           if (tier === 'healthy') {
             renderLoading();
             scheduleRefresh();
@@ -1446,71 +1417,42 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }
           // No trustworthy evidence to classify (probe timed out, discovery has
           // not re-observed the host since the outage, or the snapshot carries no
-          // observation of the container). Show a live "reconnecting"
-          // state and keep checking -- never a verdict or an auto-restart off
-          // non-evidence -- on EITHER entry path. Checked before the restart_failed
-          // branch below so an indeterminate result there also keeps checking
-          // rather than rendering a dead "Workspace unresponsive" verdict off
-          // non-evidence. The cheap liveness poll (armed by renderReconnecting)
-          // does the fast recovery; the slow re-probe converges to a real tier,
-          // preserving autoDispatch so the restart_failed entry stays no-dispatch.
+          // observation of the container). Show a live "reconnecting" state and
+          // keep checking rather than rendering a verdict off non-evidence. The
+          // cheap liveness poll (armed by renderReconnecting) does the fast
+          // recovery; the slow re-probe converges to a real tier.
           if (tier === 'indeterminate') {
             renderReconnecting();
-            scheduleIndeterminateReprobe(autoDispatch);
+            scheduleIndeterminateReprobe();
             return;
           }
-          if (!autoDispatch) {
-            // restart_failed entry: render unresponsive so the failure reason and
-            // the diagnostics list both stay visible (renderUnresponsive keeps the
-            // healthy-poll running so a self-recovery still returns the user home).
-            // The slow re-probe keeps the verdict and diagnostics live
-            // (autoDispatch stays false, so no restart is ever dispatched here).
-            renderUnresponsive();
-            scheduleIndeterminateReprobe(autoDispatch);
-            return;
-          }
-          if (tier === 'host_offline') {
-            // Container fully stopped: nothing live to interrupt, dispatch
-            // unattended. Tell the endpoint the host is already stopped so it
-            // skips the redundant stop step and cold-boots straight away. Safe
-            // even if the workspace self-recovered while the slow host-health
-            // probe was in flight: the resulting mngr start only targets
-            // STOPPED agents, so a live workspace makes it a no-op.
-            postRestart({ scope: 'host', host_already_stopped: true }, renderRestartingOffline);
-            return;
-          }
-          // 'host_unresponsive' or anything else: require explicit user consent
-          // for a host restart. Not a dead-end: the slow re-probe keeps the
-          // verdict live, so when better evidence lands the page moves on its
-          // own -- e.g. a workspace whose container is stopped can classify
-          // here first (a completed exec failure under absent/stalled
-          // discovery cannot tell "stopped" from "broken ssh"), and the first
-          // STOPPED snapshot -- stale or fresh -- then re-classifies to
-          // host_offline and dispatches the unattended cold boot.
+          // Any concrete verdict (host_offline, host_unresponsive, or anything
+          // else): render the failure state with the manual restart button and
+          // the diagnostics list. Not a dead-end: renderUnresponsive keeps the
+          // healthy-poll running so a self-recovery still returns the user
+          // home, and the slow re-probe keeps the verdict and diagnostics live.
           renderUnresponsive();
-          scheduleIndeterminateReprobe(autoDispatch);
+          scheduleIndeterminateReprobe();
         }
 
-        // Fetch the host-health probe and populate the diagnostic. When
-        // ``autoDispatch`` is true (the live stuck/probe entry) we also pick
-        // a restart tier from ``dispatch_tier``; when it's false (the
-        // restart_failed entry) we only render the diagnostic alongside the
-        // existing failure-reason error block, so the user sees both.
-        function runProbe(autoDispatch) {
+        // Fetch the host-health probe and render the diagnostic alongside the
+        // existing failure-reason error block (the restart_failed entry and the
+        // Retry button), so the user sees both. Display-only; never dispatches.
+        function runProbe() {
           renderLoading();
           fetchHealth().then(function (data) {
-            applyHealth(data, autoDispatch);
+            applyHealth(data);
           }, function () {
             // The probe request itself failed -- most often the machine slept and
             // Chromium aborted the in-flight fetch (a dropped request is absence of
             // evidence, not proof the workspace is down). Treat it exactly like an
             // INDETERMINATE verdict: render the live "reconnecting" state and retry
-            // the probe on the slow cadence (preserving autoDispatch), while the
-            // cheap liveness poll armed by renderReconnecting returns the user home
-            // the instant the workspace answers. This is the post-sleep strand fix:
-            // a dropped request no longer dead-ends on a static unresponsive verdict.
+            // the probe on the slow cadence, while the cheap liveness poll armed by
+            // renderReconnecting returns the user home the instant the workspace
+            // answers. This is the post-sleep strand fix: a dropped request no
+            // longer dead-ends on a static unresponsive verdict.
             renderReconnecting();
-            scheduleIndeterminateReprobe(autoDispatch);
+            scheduleIndeterminateReprobe();
           });
         }
 
@@ -1519,10 +1461,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         });
         if (retryBtn) {
           retryBtn.addEventListener('click', function () {
-            // Re-check reachability immediately. autoDispatch stays true, but the
-            // provider/unreachable tiers are render-only, so this never dispatches
-            // a restart -- it just refreshes the probe and re-renders the state.
-            runProbe(true);
+            // Re-check reachability immediately: refresh the probe and
+            // re-render the state (display-only, like every probe path).
+            runProbe();
           });
         }
         if (copyBtn) {
@@ -1554,25 +1495,32 @@ _RECOVERY_SCRIPT: Final[str] = """\
           renderRestarting();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
-          // Show the failure reason AND the diagnostic together: re-run the probe
-          // with auto-dispatch off so the renderUnresponsive path also has the
+          // Show the failure reason AND the diagnostic together: run the
+          // (display-only) probe so the renderUnresponsive path also has the
           // diagnostics populated. renderUnresponsive arms the healthy-poll, so a
           // failed restart is not terminal -- if the background probe loop recovers
           // the workspace on its own (e.g. a cold boot that finished just after the
           // restart worker's bounded wait elapsed) the user is returned home.
-          runProbe(false);
+          runProbe();
         } else if (initialStatus === 'healthy') {
           // Degenerate: rendered HEALTHY with no return_to to 302 to. Offer a
           // manual restart rather than auto-dispatching one on a healthy page.
           renderUnresponsive();
         } else {
-          // Cheap-probe-first: start the liveness poll immediately so a workspace
-          // that is actually healthy (or recovers while the slow in-container probe
-          // is in flight) returns the user home within ~1s, without waiting on the
-          // heavy diagnosis probe. The heavy probe still runs to populate
-          // diagnostics and pick a restart tier, but it can no longer strand anyone.
+          // Fresh entry (the STUCK redirect or a failed content load): dispatch
+          // the start-only restart immediately and unconditionally, with no
+          // knowledge of the host's state. This is safe regardless of that
+          // state -- ``mngr start`` checks ground truth at commit time, no-ops
+          // on a live host, and never bounces running agents -- so a stopped
+          // workspace cold-boots on first entry with no discovery-freshness
+          // crawl, and a workspace that merely blipped makes it a no-op. The
+          // liveness poll is armed first so a workspace that answers while the
+          // dispatch settles still goes straight home; if the start cannot
+          // bring the interface back, the worker lands on restart_failed and
+          // the reload renders the manual-consent page with diagnostics (the
+          // stop+start bounce is never dispatched without a click).
           armHealthyPoll();
-          runProbe(true);
+          postRestart({ scope: 'host', start_only: true });
         }
       })();
 """
