@@ -519,7 +519,6 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     return default_workspace_template_path, host_config_root
 
 
-@pytest.mark.minds_snapshot_resume
 def _sign_in_with_api_key_via_modal(page: Page, api_key: str) -> None:
     """Drive the workspace's Claude sign-in modal through the API-key path.
 
@@ -549,6 +548,7 @@ def _sign_in_and_chat(page: Page, api_key: str, token: str) -> None:
     _send_message_and_await_reply(page, token)
 
 
+@pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
