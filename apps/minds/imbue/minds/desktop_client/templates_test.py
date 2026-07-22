@@ -1008,9 +1008,9 @@ def test_render_recovery_page_fresh_entry_dispatches_start_only_unconditionally(
     start-only restart is safe regardless of the host's state (``mngr start``
     checks ground truth at commit time and no-ops on a live host), so the entry
     fires it unconditionally and the classifier tiers stay display-only. The
-    in-flight dispatch renders the restarting state (never the generic
-    "Loading workspace" spinner), and applyHealth -- the display path -- must
-    contain no dispatch at all.
+    in-flight copy claims only what is known (the offline copy off the hint,
+    else the neutral loading spinner -- never "Restarting your workspace"),
+    and applyHealth -- the display path -- must contain no dispatch at all.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -1027,17 +1027,21 @@ def test_render_recovery_page_fresh_entry_dispatches_start_only_unconditionally(
     apply_start = html.find("function applyHealth(")
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
     assert "postRestart" not in apply_block
-    # postRestart renders a restarting state while the dispatch is in flight
-    # (the generic copy unless the caller passed the offline flavor).
+    # postRestart renders a pending state while the dispatch is in flight;
+    # the default (renderRestarting) is reserved for the manual click, where
+    # the restart is known.
     post_start = html.find("function postRestart(")
     post_block = html[post_start : html.find("function ", post_start + 1)]
     assert "(renderPending || renderRestarting)()" in post_block
-    # A page load that lands on the RESTARTING tracker state renders a
-    # restarting state (generic or offline-flavored per the display hint),
-    # not the generic first-open "Loading workspace" spinner.
+    # The entry dispatch claims only what it knows: the offline copy when the
+    # host reads offline, else the neutral loading spinner -- never
+    # "Restarting your workspace", since the start may be a no-op.
+    assert "hostOffline ? renderRestartingOffline : renderLoading" in entry
+    # A page load that lands on the RESTARTING tracker state likewise claims
+    # nothing beyond the offline hint.
     restarting_entry = entry[: entry.find("else if")]
-    assert "(hostOffline ? renderRestartingOffline : renderRestarting)()" in restarting_entry
-    assert "renderLoading()" not in restarting_entry
+    assert "(hostOffline ? renderRestartingOffline : renderLoading)()" in restarting_entry
+    assert "renderRestarting()" not in restarting_entry
 
 
 def test_render_recovery_page_offline_copy_is_display_only() -> None:
@@ -1073,7 +1077,7 @@ def test_render_recovery_page_offline_copy_is_display_only() -> None:
     assert "was offline" in offline_block
     # The entry dispatch picks the render off the hint...
     entry = html[html.rfind("if (initialStatus === 'restarting')") :]
-    assert "hostOffline ? renderRestartingOffline : renderRestarting" in entry
+    assert "hostOffline ? renderRestartingOffline : renderLoading" in entry
     # ...and the convergence poll upgrades it off the per-tick header, gated on
     # the dispatch having been the start-only one.
     refresh_start = html.find("function scheduleRefresh")

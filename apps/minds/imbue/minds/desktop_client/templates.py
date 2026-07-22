@@ -1229,13 +1229,15 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
         }
-        // A restart is in flight -- the unconditional entry dispatch, a manual
-        // "Restart workspace" click, or the page reloaded while the tracker was
-        // already RESTARTING. Names the action instead of the generic first-open
-        // "Loading workspace" spinner so the wait reads as a deliberate recovery,
-        // not a hang. scheduleRefresh (armed by the caller) sends the user home
-        // the moment the tracker flips HEALTHY, so this state needs no separate
-        // homeward poll.
+        // A restart the user asked for is in flight (the manual "Restart
+        // workspace" click). Names the action so the wait reads as a
+        // deliberate recovery, not a hang. The entry dispatch does NOT use
+        // this copy: it fires without knowing whether the start will do
+        // anything, so it stays on the neutral "Loading workspace" spinner
+        // (or the offline copy, when the host is known offline) rather than
+        // claiming a restart. scheduleRefresh (armed by the caller) sends the
+        // user home the moment the tracker flips HEALTHY, so this state needs
+        // no separate homeward poll.
         function renderRestarting() {
           titleEl.textContent = 'Restarting your workspace';
           messageEl.textContent =
@@ -1278,7 +1280,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // stale RUNNING (the replayed discovery backlog), but discovery lands
         // the real STOPPED observation a few seconds later; the convergence
         // poll carries it back via the X-Workspace-Offline header, and the
-        // generic "Restarting" copy upgrades to the offline copy. Display-only
+        // neutral pending copy upgrades to the offline copy. Display-only
         // and one-way (never downgrades), and only for the start-only entry
         // dispatch -- a manual stop+start's transient STOPPED mid-bounce should
         // not rewrite the page as an offline revival.
@@ -1391,9 +1393,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
 
         // ``renderPending`` is the spinner state shown while the dispatch is in
-        // flight; defaults to ``renderRestarting``. The entry dispatch passes
-        // ``renderRestartingOffline`` when the render-time hint already reads
-        // the host as offline.
+        // flight; defaults to ``renderRestarting`` (the manual click, where the
+        // restart is known). The entry dispatch passes the offline copy when
+        // the render-time hint reads the host as offline, else the neutral
+        // ``renderLoading`` -- it cannot know whether its start will do
+        // anything.
         function postRestart(body, renderPending) {
           restartDispatched = true;
           startOnlyDispatched = Boolean(body && body.start_only);
@@ -1538,7 +1542,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // maybeUpgradeToOfflineCopy corrects the copy when discovery lands).
         var hostOffline = root.dataset.hostOffline === '1';
         if (initialStatus === 'restarting') {
-          (hostOffline ? renderRestartingOffline : renderRestarting)();
+          // A restart is in flight but this page instance doesn't know its
+          // flavor (a reload lands here for the entry dispatch and the manual
+          // bounce alike), so claim nothing beyond what the offline hint knows.
+          (hostOffline ? renderRestartingOffline : renderLoading)();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
           // Show the failure reason AND the diagnostic together: run the
@@ -1564,11 +1571,17 @@ _RECOVERY_SCRIPT: Final[str] = """\
           // dispatch settles still goes straight home; if the start cannot
           // bring the interface back, the worker lands on restart_failed and
           // the reload renders the manual-consent page with diagnostics (the
-          // stop+start bounce is never dispatched without a click).
+          // stop+start bounce is never dispatched without a click). The
+          // pending copy claims only what is known: the offline copy when the
+          // host reads offline (a real cold boot is coming), else the neutral
+          // "Loading workspace" spinner -- the dispatch may well be a no-op,
+          // and "Restarting your workspace" would overclaim (the header
+          // upgrade switches to the offline copy if a STOPPED observation
+          // lands mid-dispatch).
           armHealthyPoll();
           postRestart(
             { scope: 'host', start_only: true },
-            hostOffline ? renderRestartingOffline : renderRestarting
+            hostOffline ? renderRestartingOffline : renderLoading
           );
         }
       })();
