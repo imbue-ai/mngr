@@ -71,9 +71,12 @@ def test_success_page_without_redirect_says_return_to_terminal() -> None:
 
 def test_success_page_with_redirect_links_to_url_without_auto_navigation() -> None:
     # Deliberately a plain link, not an automatic navigation: the click is the
-    # user gesture that triggers the browser's open-external-app prompt.
+    # user gesture that triggers the browser's open-external-app prompt. The
+    # app-driven variant carries the minds wordmark and copy.
     page = _oauth_success_page("minds://").decode("utf-8")
-    assert '<a href="minds://">' in page
+    assert '<a href="minds://">Open app</a>' in page
+    assert '<div class="wordmark">minds</div>' in page
+    assert "Feel free to close this tab." in page
     assert "<script>" not in page
 
 

@@ -344,12 +344,14 @@ _OAUTH_SUCCESS_PAGE_STYLE = (
     "html,body{height:100%;margin:0}"
     "body{display:flex;align-items:center;justify-content:center;text-align:center;"
     'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;'
-    "background:#fafaf7;color:#1a1a1a}"
+    "background:#f5f2ea;color:#1a1a1a}"
     "main{padding:2rem;max-width:26rem}"
+    ".wordmark{font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:3.25rem;font-weight:500;margin:0 0 1rem}"
     "h1{font-size:1.6rem;font-weight:600;margin:0 0 0.6rem}"
-    "p{margin:0;color:#6b6b6b;line-height:1.6}"
+    "p{margin:0;line-height:1.6}"
+    ".open-link{margin-top:1.6rem}"
     "a{color:inherit}"
-    "@media (prefers-color-scheme:dark){body{background:#161616;color:#f2f2f2}p{color:#9a9a9a}}"
+    "@media (prefers-color-scheme:dark){body{background:#161616;color:#f2f2f2}}"
 )
 
 
@@ -357,21 +359,27 @@ def _oauth_success_page(success_redirect_url: str | None) -> bytes:
     """Build the HTML the callback listener serves to the browser.
 
     With a redirect URL, the page offers a link to it -- the minds desktop
-    app passes its minds:// deeplink so a click hands focus back to the app.
-    Deliberately a link rather than an automatic navigation: the click is a
-    user gesture, so browsers show their open-external-app prompt at a moment
-    the user chose instead of unprompted on page load.
+    app passes its minds:// deeplink so a click hands focus back to the app;
+    since that flow is minds-driven (nothing else passes the option today),
+    the page carries the minds wordmark. Deliberately a link rather than an
+    automatic navigation: the click is a user gesture, so browsers show
+    their open-external-app prompt at a moment the user chose instead of
+    unprompted on page load.
     """
     if success_redirect_url is None:
-        tail = "<p>You can close this tab and return to your terminal.</p>"
+        body_html = "<h1>You are signed in</h1><p>You can close this tab and return to your terminal.</p>"
     else:
         href = html.escape(success_redirect_url, quote=True)
-        tail = f'<p><a href="{href}">Open the app</a> and close this tab.</p>'
+        body_html = (
+            '<div class="wordmark">minds</div>'
+            "<p>You're in! Feel free to close this tab.</p>"
+            f'<p class="open-link"><a href="{href}">Open app</a></p>'
+        )
     page = (
         "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<style>{_OAUTH_SUCCESS_PAGE_STYLE}</style></head>"
-        f"<body><main><h1>You are signed in</h1>{tail}</main></body></html>"
+        f"<body><main>{body_html}</main></body></html>"
     )
     return page.encode("utf-8")
 
