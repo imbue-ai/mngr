@@ -13,6 +13,7 @@ import re
 import shlex
 import tomllib
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
@@ -58,7 +59,7 @@ def _find_snapshot_resume_marked_test_files() -> set[str]:
     return marked_files
 
 
-def _read_offload_config() -> dict[str, object]:
+def _read_offload_config() -> dict[str, Any]:
     return tomllib.loads(_OFFLOAD_CONFIG_PATH.read_text())
 
 
