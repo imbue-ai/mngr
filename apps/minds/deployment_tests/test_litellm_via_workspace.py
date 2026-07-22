@@ -57,13 +57,22 @@ _SPEND_POLL_ATTEMPTS = 30
 _SPEND_POLL_INTERVAL_SECONDS = 10
 
 
-def _run(command: list[str], *, cwd: Path | None = None, timeout: int) -> subprocess.CompletedProcess[str]:
-    logger.info("Running: {}", " ".join(command))
+def _run(
+    command: list[str], *, cwd: Path | None = None, timeout: int, logged_command: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run ``command``; ``logged_command`` (when given) is logged in its place so secrets stay out of the logs."""
+    logger.info("Running: {}", " ".join(command) if logged_command is None else logged_command)
     return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
 
 
-def _exec_in_container(container_name: str, command: str, *, timeout: int) -> subprocess.CompletedProcess[str]:
-    return _run(["docker", "exec", container_name, "bash", "-lc", command], timeout=timeout)
+def _exec_in_container(
+    container_name: str, command: str, *, timeout: int, logged_command: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        ["docker", "exec", container_name, "bash", "-lc", command],
+        timeout=timeout,
+        logged_command=None if logged_command is None else f"docker exec {container_name} bash -lc {logged_command}",
+    )
 
 
 def _prepare_template_clone(source_worktree: Path) -> Path:
@@ -144,11 +153,17 @@ def _wait_for_system_interface(container_name: str) -> None:
 def _submit_credentials_via_workspace_endpoint(container_name: str, credential_blob: str) -> dict[str, object]:
     """POST the blob to the workspace's own modal backend (the strict endpoint)."""
     payload = json.dumps({"credentials": credential_blob})
+    # The blob carries the minted LiteLLM key, so the real command must never be
+    # logged; a redacted stand-in is logged instead.
     submit = _exec_in_container(
         container_name,
         "curl -s -X POST http://localhost:8000/api/claude-auth/submit-credentials "
         f"-H 'Content-Type: application/json' -d {json.dumps(payload)}",
         timeout=600,
+        logged_command=(
+            "curl -s -X POST http://localhost:8000/api/claude-auth/submit-credentials "
+            "-H 'Content-Type: application/json' -d '<credential blob redacted>'"
+        ),
     )
     assert submit.returncode == 0, f"submit-credentials curl failed: {submit.stderr}"
     body = json.loads(submit.stdout)
