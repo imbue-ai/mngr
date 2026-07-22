@@ -40,11 +40,14 @@ otherwise. Release-marked, so it does not run in CI.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -53,6 +56,8 @@ from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_concurrent_message_delivery
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
+from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
@@ -103,6 +108,29 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
     # in a new worktree adopts the just-preserved session and must recall the pre-destroy
     # secret -- proving the store resumes and the cross-cwd re-filing works.
     native_session_preserved_relpaths = (_CLAUDE_PROJECTS_RELPATH,)
+
+    def count_injected_deliveries(self, host_dir: Path, token: str) -> int:
+        """Count queue-removals of ``token`` in the raw transcript.
+
+        Claude Code (2.1.21x) may deliver a queued message by removing it from
+        the queue and injecting it into the running turn: the raw transcript
+        gets a ``queue-operation``/``remove`` record carrying the message text,
+        and no user record is ever written.
+        """
+        count = 0
+        for events_path in host_dir.glob("agents/*/logs/claude_transcript/events.jsonl"):
+            for line in events_path.read_text().splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    record.get("type") == "queue-operation"
+                    and record.get("operation") == "remove"
+                    and token in str(record.get("content", ""))
+                ):
+                    count += 1
+        return count
 
     def adopt_session_arg(self, preserved_dir: Path) -> str:
         # Return the absolute path of the single preserved session JSONL. The shallow
@@ -217,3 +245,242 @@ def test_claude_concurrent_message_delivery(tmp_path: Path) -> None:
     cross-talk, via latched tmux wait-for signals on a shared server).
     """
     run_concurrent_message_delivery(_ClaudeReleaseProfile(), tmp_path)
+
+
+# =============================================================================
+# Transcript record contract
+# =============================================================================
+
+_CONTRACT_SEND_TIMEOUT_SECONDS = 180.0
+_CONTRACT_RECORD_TIMEOUT_SECONDS = 90.0
+_CONTRACT_BUSY_ATTEMPTS = 3
+
+
+def _contract_read_records(session_file: Path) -> list[dict[str, Any]]:
+    records = []
+    for line in session_file.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _contract_wait_for_record(
+    session_file: Path, predicate: Callable[[dict[str, Any]], bool], *, failure: str
+) -> dict[str, Any]:
+    found: list[dict[str, Any]] = []
+
+    def has_match() -> bool:
+        for record in _contract_read_records(session_file):
+            if predicate(record):
+                found.append(record)
+                return True
+        return False
+
+    assert poll_until(has_match, timeout=_CONTRACT_RECORD_TIMEOUT_SECONDS), failure
+    return found[0]
+
+
+def _contract_message_text(record: dict[str, Any]) -> str:
+    """Flatten a user/assistant record's message.content (str or block-array) to text."""
+    content = record.get("message", {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return ""
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_transcript_record_contract(tmp_path: Path) -> None:
+    """Pin the native-transcript record shapes mngr consumes, against a live claude.
+
+    Reads the RAW session JSONL with plain json parsing -- deliberately not
+    through mngr's probes -- so when a Claude Code release reshapes a record,
+    the failure names the drifted record and the mngr consumer to update,
+    stamped with the claude version that broke it. Lenient to additions:
+    only the fields mngr reads are asserted.
+    """
+    profile = _ClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"claude-contract-{get_short_random_string()}"
+    run_id = get_short_random_string()
+    version_result = subprocess.run(
+        ["claude", "--version"], capture_output=True, text=True, env=dict(ctx.env), timeout=60.0
+    )
+    claude_version = version_result.stdout.strip() or "unknown"
+    drift = f"(claude version: {claude_version}; a failure here means the record shape drifted)"
+    destroyed = False
+
+    try:
+        create = profile.run_mngr(
+            ctx,
+            "create",
+            agent_name,
+            profile.agent_type,
+            "--no-connect",
+            "--yes",
+            *profile.create_extra_args(ctx),
+            timeout=600.0,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+
+        agent_dirs = list(ctx.host_dir.glob("agents/*"))
+        assert len(agent_dirs) == 1, f"expected exactly one agent dir, found {agent_dirs}"
+        agent_dir = agent_dirs[0]
+        session_id = (agent_dir / "claude_session_id").read_text().strip()
+        assert session_id != "", "claude_session_id marker is empty"
+
+        # Contract 1: an idle prompt lands as {"type":"user","message":{"content":...}}.
+        idle_token = f"contract-idle-{run_id}"
+        send = profile.run_mngr(
+            ctx,
+            "message",
+            agent_name,
+            "--message",
+            f"Remember this exact value: {idle_token}. Reply with just OK.",
+            timeout=_CONTRACT_SEND_TIMEOUT_SECONDS,
+        )
+        assert send.returncode == 0, f"idle send failed:\n{send.stdout}\n{send.stderr}"
+
+        # Contract 5: the native session JSONL lives at
+        # <config-dir>/projects/<encoded-cwd>/<session-id>.jsonl with the file
+        # named by the claude_session_id marker. Every probe's native-path
+        # expression depends on this layout. Claude writes the file lazily on
+        # the first prompt, so this is checked after the idle send, with a poll.
+        session_glob = f"plugin/claude/anthropic/projects/*/{session_id}.jsonl"
+        assert poll_until(lambda: len(list(agent_dir.glob(session_glob))) == 1, timeout=60.0), (
+            f"native session JSONL not at <config-dir>/projects/<encoded-cwd>/{session_id}.jsonl "
+            f"{drift}; consumers: every probe's native-transcript path expression"
+        )
+        session_file = list(agent_dir.glob(session_glob))[0]
+        user_record = _contract_wait_for_record(
+            session_file,
+            lambda r: r.get("type") == "user" and idle_token in _contract_message_text(r),
+            failure=f"no user record with message.content carrying the sent text {drift}; "
+            "consumers: content probes, common-transcript converter",
+        )
+        # Contract 6: records carry a top-level uuid (raw-streamer offset reconciliation).
+        assert isinstance(user_record.get("uuid"), str) and user_record["uuid"] != "", (
+            f"user record lost its top-level uuid {drift}; consumer: stream_transcript.sh offset reconciliation"
+        )
+
+        # Contract 4: the reply lands as {"type":"assistant","message":{"content":...}}.
+        _contract_wait_for_record(
+            session_file,
+            lambda r: r.get("type") == "assistant" and _contract_message_text(r) != "",
+            failure=f"no assistant record with message.content {drift}; "
+            "consumers: common-transcript converter, transcript readers",
+        )
+
+        # Contract 2: a message sent while a turn runs lands as
+        # {"type":"queue-operation","operation":"enqueue","content":...}.
+        # Retried: the race is real (the running turn can finish first), and a
+        # missed race must not read as record drift.
+        enqueue_found = False
+        for attempt in range(_CONTRACT_BUSY_ATTEMPTS):
+            busy_token = f"contract-busy-{attempt}-{run_id}"
+            # The starter must still be generating when the next send lands, or
+            # nothing enqueues; a long counting task keeps the turn open far
+            # longer than a short completion would.
+            starter = profile.run_mngr(
+                ctx,
+                "message",
+                agent_name,
+                "--message",
+                "Count from 1 to 200, one number per line. Do not use tools. End with DONE.",
+                timeout=_CONTRACT_SEND_TIMEOUT_SECONDS,
+            )
+            assert starter.returncode == 0, f"busy-starter send failed:\n{starter.stdout}\n{starter.stderr}"
+            queued = profile.run_mngr(
+                ctx,
+                "message",
+                agent_name,
+                "--message",
+                f"Also remember: {busy_token}. Reply with just OK.",
+                timeout=_CONTRACT_SEND_TIMEOUT_SECONDS,
+            )
+            assert queued.returncode == 0, f"queued send failed:\n{queued.stdout}\n{queued.stderr}"
+
+            def is_enqueue_with_token(record: dict[str, Any], token: str = busy_token) -> bool:
+                return (
+                    record.get("type") == "queue-operation"
+                    and record.get("operation") == "enqueue"
+                    and token in str(record.get("content", ""))
+                )
+
+            if poll_until(
+                lambda: any(is_enqueue_with_token(r) for r in _contract_read_records(session_file)),
+                timeout=30.0,
+            ):
+                enqueue_found = True
+                break
+        assert enqueue_found, (
+            f"no queue-operation/enqueue record with content across {_CONTRACT_BUSY_ATTEMPTS} busy sends {drift}; "
+            "consumers: busy-send accept evidence, content probes"
+        )
+
+        # Contract 2b: the queued message then either dequeues as a user record
+        # or is removed from the queue and injected into the running turn (a
+        # queue-operation/remove record carrying the text, no user record).
+        # Both are single deliveries; anything else is drift.
+        _contract_wait_for_record(
+            session_file,
+            lambda r: (r.get("type") == "user" and busy_token in _contract_message_text(r))
+            or (
+                r.get("type") == "queue-operation"
+                and r.get("operation") == "remove"
+                and busy_token in str(r.get("content", ""))
+            ),
+            failure=f"queued message neither dequeued as a user record nor removed-and-injected {drift}; "
+            "consumers: release-test delivery counting, content probes",
+        )
+
+        # Contract 2c: the queue-operation vocabulary itself. A new operation
+        # value means delivery-evidence semantics changed under mngr.
+        known_operations = {"enqueue", "dequeue", "remove"}
+        seen_operations = {
+            str(r.get("operation")) for r in _contract_read_records(session_file) if r.get("type") == "queue-operation"
+        }
+        assert seen_operations <= known_operations, (
+            f"unknown queue-operation values {sorted(seen_operations - known_operations)} {drift}; "
+            "consumers: accept-evidence probes, release-test delivery counting"
+        )
+
+        # Contract 3: an unknown slash command lands as
+        # {"type":"system","level":"warning","content":"Unknown command: ..."}.
+        typo = f"/contract-zzz-{run_id}"
+        typo_send = profile.run_mngr(
+            ctx, "message", agent_name, "--message", typo, timeout=_CONTRACT_SEND_TIMEOUT_SECONDS
+        )
+        assert typo_send.returncode == 0, f"typo send failed:\n{typo_send.stdout}\n{typo_send.stderr}"
+        _contract_wait_for_record(
+            session_file,
+            lambda r: r.get("type") == "system"
+            and r.get("level") == "warning"
+            and str(r.get("content", "")).startswith("Unknown command")
+            and typo in str(r.get("content", "")),
+            failure=f"no system/warning 'Unknown command' record for {typo!r} {drift}; "
+            "consumer: _REJECTED_COMMAND_JQ_FILTER (rejection probe)",
+        )
+
+        destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=300.0)
+        assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
+        destroyed = True
+    finally:
+        try:
+            if not destroyed:
+                profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=300.0)
+        finally:
+            if ctx.teardown is not None:
+                ctx.teardown()

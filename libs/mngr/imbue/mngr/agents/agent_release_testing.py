@@ -119,6 +119,17 @@ class AgentReleaseProfile(abc.ABC):
     # TUI changing the shape of its rejection record.
     unknown_slash_command: str | None = None
 
+    def count_injected_deliveries(self, host_dir: Path, token: str) -> int:
+        """Count deliveries of ``token`` that produced no user-message record.
+
+        Some TUIs deliver a queued message by removing it from the queue and
+        injecting it into the running turn, writing no user record (Claude Code
+        does this as of 2.1.21x, via a ``queue-operation``/``remove`` record).
+        The journey counts these as deliveries alongside user-message records.
+        Default: no such mechanism.
+        """
+        return 0
+
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
         """Return a skip reason if the agent can't run here (missing binary/creds), else None."""
@@ -525,6 +536,36 @@ def _wait_for_user_message(host_dir: Path, subdir: str, token: str, *, descripti
     )
 
 
+def _wait_for_delivery(
+    profile: AgentReleaseProfile, host_dir: Path, subdir: str, token: str, *, description: str
+) -> None:
+    """Wait until ``token`` was delivered: a user-message record OR an injected delivery.
+
+    Used for sends that may be queued: the TUI either dequeues the message as a
+    user record or injects it into the running turn with no user record (see
+    ``count_injected_deliveries``).
+    """
+    _wait_for_records(
+        host_dir,
+        subdir,
+        lambda records: _count_user_messages_containing(records, token) >= 1
+        or profile.count_injected_deliveries(host_dir, token) >= 1,
+        timeout=_RESPONSE_TIMEOUT_SECONDS,
+        description=description,
+    )
+
+
+def _has_rejection_event(host_dir: Path, message: str) -> bool:
+    for events_path in host_dir.glob("agents/*/events/messages/events.jsonl"):
+        for line in events_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("type") == "send_rejected_by_agent" and message in event.get("detail", ""):
+                return True
+    return False
+
+
 def _wait_for_rejection_event(host_dir: Path, message: str) -> None:
     """Wait for a send_rejected_by_agent delivery event mentioning ``message``.
 
@@ -533,19 +574,7 @@ def _wait_for_rejection_event(host_dir: Path, message: str) -> None:
     means the TUI changed that record's shape and the agent's rejection filter
     (for Claude: ``_REJECTED_COMMAND_JQ_FILTER``) must be updated to match.
     """
-
-    def has_rejection_event() -> bool:
-        for events_path in host_dir.glob("agents/*/events/messages/events.jsonl"):
-            for line in events_path.read_text().splitlines():
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("type") == "send_rejected_by_agent" and message in event.get("detail", ""):
-                    return True
-        return False
-
-    assert poll_until(has_rejection_event, timeout=30.0), (
+    assert poll_until(lambda: _has_rejection_event(host_dir, message), timeout=30.0), (
         f"no send_rejected_by_agent event recorded for {message!r}: the rejection probe never fired. "
         "If the TUI changed its rejection record (e.g. the 'Unknown command' warning), "
         "update the agent's rejection filter to match the new shape."
@@ -618,7 +647,7 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
         _send_expecting_success(
             profile, ctx, agent_name, f"Also remember this exact value: {busy_token}. Reply with just OK."
         )
-        _wait_for_user_message(host_dir, subdir, busy_token, description="busy-delivery message was not captured")
+        _wait_for_delivery(profile, host_dir, subdir, busy_token, description="busy-delivery message was not captured")
 
         # 3. Rapid sequential sends: back-to-back through mngr (each send holds
         #    the per-agent message lock and confirms before returning).
@@ -628,8 +657,12 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
                 profile, ctx, agent_name, f"Acknowledge this exact value: {rapid_token}. Reply with just OK."
             )
         for rapid_token in rapid_tokens:
-            _wait_for_user_message(
-                host_dir, subdir, rapid_token, description=f"rapid-sequential message {rapid_token} was not captured"
+            _wait_for_delivery(
+                profile,
+                host_dir,
+                subdir,
+                rapid_token,
+                description=f"rapid-sequential message {rapid_token} was not captured",
             )
 
         # 4. Long message: crosses the send-keys length threshold, so it takes
@@ -642,7 +675,7 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
             agent_name,
             f"{filler}\nEnd of filler. Remember this exact value: {long_token}. Reply with just OK.",
         )
-        _wait_for_user_message(host_dir, subdir, long_token, description="long message was not captured")
+        _wait_for_delivery(profile, host_dir, subdir, long_token, description="long message was not captured")
 
         # 5. Relaxed slash command: TUI-local, so confirmation is best-effort --
         #    but the send must still exit 0.
@@ -657,11 +690,19 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
             _wait_for_rejection_event(host_dir, profile.unknown_slash_command)
 
         # Exactly-once: no token was delivered twice (the engine re-sends Enter,
-        # never the text, so duplicates would mean the gating is broken).
+        # never the text, so duplicate user records would mean the gating is
+        # broken). A queued message the TUI injected into the running turn has
+        # no user record at all; one injected delivery counts instead.
         final_records = _read_common_records(host_dir, subdir)
         for token in [idle_token, busy_token, *rapid_tokens, long_token]:
             count = _count_user_messages_containing(final_records, token)
-            assert count == 1, f"expected exactly one delivery of {token}, found {count}"
+            assert count <= 1, f"expected at most one user-message delivery of {token}, found {count}"
+            if count == 0:
+                injected = profile.count_injected_deliveries(host_dir, token)
+                assert injected == 1, (
+                    f"expected exactly one delivery of {token}, found no user record and "
+                    f"{injected} injected deliveries"
+                )
 
         destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
         assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
