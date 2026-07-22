@@ -141,7 +141,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 # then put the log sentinel. The creating page's status poll
                 # (`operations/create/<creation_id>`) is the authoritative
                 # completion signal: once it returns DONE + redirect_url the
-                # page stamps data-ready + data-redirect-url on #creating and
+                # page stamps data-ready + data-redirect-url on the creating root and
                 # waits for the user to finish the onboarding walkthrough --
                 # there is no automatic redirect anymore. The redirect URL is
                 # the canonical `/goto/<agent>/` route the real creator

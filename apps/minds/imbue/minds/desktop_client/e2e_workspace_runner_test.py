@@ -66,7 +66,7 @@ class _FakePage:
         self.evaluate_calls += 1
 
     def get_attribute(self, selector: str, name: str, timeout: float | None = None) -> str:
-        # The waiter polls #creating[data-ready='true'] for its redirect URL;
+        # The waiter polls the creating root's data-ready state for its redirect URL;
         # Playwright raises TimeoutError while the attribute isn't there yet.
         if self._redirect_url is None:
             raise PlaywrightTimeoutError("data-ready not set")
@@ -111,7 +111,7 @@ def test_wait_returns_for_https_workspace_url() -> None:
 
 
 def test_wait_navigates_to_redirect_url_when_ready() -> None:
-    """When #creating carries data-ready + data-redirect-url, the waiter
+    """When the creating root carries data-ready + data-redirect-url, the waiter
     enters the workspace itself (the Begin button is a human affordance the
     driver skips)."""
     page = _FakePage(urls=[_PENDING_URL], is_visible_results=[False], redirect_url=_READY_URL)
