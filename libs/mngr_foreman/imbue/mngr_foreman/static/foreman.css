@@ -92,6 +92,7 @@ body:not(.term-body) .wrap {
   min-height: 0;               /* let the flex child actually shrink + scroll */
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  overflow-anchor: none;       /* JS owns stick-to-bottom; browser anchoring must not fight it */
 }
 body:not(.term-body) .composer { position: static; flex: 0 0 auto; }
 /* no fixed composer to clear anymore -- it's a sibling below the scroll area */
@@ -116,13 +117,25 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
 }
 .composer .autoscroll-btn.on { background: #2f6bff; }   /* ON = solid blue */
 .composer .autoscroll-btn:active { transform: scale(0.94); }
+/* Mobile composer: two rows. Row 1 = [+] [textarea]. Row 2 = [send] [⌄⌄ centered] [Esc],
+   so the auto-scroll toggle sits BELOW the input, in the button row, dead center. */
 @media (max-width: 620px) {
-  .composer .autoscroll-btn {
-    position: static;             /* drop into the button row, between send + Esc */
-    right: auto; bottom: auto;
-    width: 46px; height: 42px; min-height: 42px;  /* match the row's button height */
-    border-radius: 0;             /* match the flat composer buttons */
+  .composer .inner {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: end;
+    column-gap: 8px; row-gap: 8px;
   }
+  .composer .inner .attach-btn { grid-column: 1; grid-row: 1; }
+  .composer .inner textarea    { grid-column: 2 / 4; grid-row: 1; }
+  .composer .inner #send       { grid-column: 1; grid-row: 2; justify-self: start; }
+  .composer .inner .autoscroll-btn {
+    grid-column: 2; grid-row: 2; justify-self: center;
+    position: static; right: auto; bottom: auto;   /* in flow, not the desktop float */
+    width: 46px; height: 42px; min-height: 42px;    /* match the row's button height */
+    border-radius: 0;                               /* match the flat composer buttons */
+  }
+  .composer .inner .esc-btn    { grid-column: 3; grid-row: 2; justify-self: end; }
 }
 
 /* ---- agent list ---- */

@@ -577,70 +577,84 @@
     // The middle column (.wrap) is the scroll container now (the shell is a
     // fixed-height flex column), so scrolling is measured on it, not the window.
     const scroller = document.querySelector(".wrap") || document.scrollingElement || document.documentElement;
-    // Stick-to-bottom: follow new content ONLY while the user is at the bottom.
-    // Scrolling up detaches (they're reading history); scrolling back down to the
-    // bottom re-attaches. Starts attached, so a freshly opened chat lands on the
-    // newest message.
-    let stick = true;
-    let lastTop = 0;      // previous scrollTop, for scroll-direction detection
-    let lastH = 0;        // previous content height, so we follow ONLY on growth
-    let touching = false; // finger down: never auto-scroll mid-drag (iOS batches scroll events)
-    let lastProg = 0;     // Date.now() of our last programmatic scroll
+    // ---- stick-to-bottom scroll engine -------------------------------------
+    // Model taken from established chat components (react-scroll-to-bottom,
+    // use-stick-to-bottom): ONE boolean, `following`. The crux is what may change it:
+    //   * `following` flips ONLY on a genuine USER scroll gesture (wheel / touch drag).
+    //   * Layout changes (mobile keyboard, URL bar), programmatic scrolls, and
+    //     streaming growth NEVER change it -- they only keep us pinned IF following.
+    // That separation is what kills the two bugs: the keyboard opening no longer
+    // detaches you, and streaming/backfill no longer yanks you around. Browser scroll
+    // anchoring is turned off in CSS (overflow-anchor:none) so it can't fight us.
+    let following = true;    // auto-follow the newest content (starts on)
+    let userGesture = false; // a real wheel/touch interaction is currently happening
+    let gestureTimer = 0;
+    const BOTTOM_SLOP = 32;  // within this many px of the true bottom counts as "at bottom"
     function atBottom() {
-      return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+      return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= BOTTOM_SLOP;
     }
-    // Every programmatic scroll is stamped so the scroll event it triggers is not
-    // mistaken for the USER reaching the bottom (re-attach guard below). Our own
-    // scrolls only ever move DOWN, so they can never look like an upward user drag.
-    function markProg() { lastProg = Date.now(); }
-    function scrollToBottom() { markProg(); scroller.scrollTop = scroller.scrollHeight; }
-    function scrollDown(force) {
-      if (force) stick = true;
-      if (stick) scrollToBottom();
-      updateAutoBtn();
-    }
-    // The auto-scroll toggle button IS the visible face of `stick`: solid blue when
-    // following the tail, outline when the user has scrolled away. Tap = resume.
     const autoBtn = document.getElementById("autoscroll");
-    function updateAutoBtn() { if (autoBtn) autoBtn.classList.toggle("on", stick); }
+    function updateAutoBtn() { if (autoBtn) autoBtn.classList.toggle("on", following); }
+    function setFollowing(v) { if (following !== v) { following = v; updateAutoBtn(); } }
+    // Pin to the bottom, but only while following. Setting scrollTop from inside a
+    // ResizeObserver runs before paint, so there's no visible jump.
+    function pinToBottom() { if (following) scroller.scrollTop = scroller.scrollHeight; }
+    // Public: jump to bottom AND resume following (initial load, a sent message, the
+    // button). scrollDown(false) only re-pins if already following.
+    function scrollToBottom() { setFollowing(true); scroller.scrollTop = scroller.scrollHeight; }
+    function scrollDown(force) { if (force) setFollowing(true); if (following) scroller.scrollTop = scroller.scrollHeight; }
+
+    // The ONLY path that flips `following`: a user gesture that moves the viewport.
+    // Away from the bottom -> detach; back to the bottom -> re-attach. Guarded by
+    // `userGesture` so layout/programmatic scrolls (which carry no gesture) are ignored.
+    function onGestureScroll() {
+      if (!userGesture) return;
+      setFollowing(atBottom());
+      armGestureClear();
+    }
+    // Clear the gesture flag once scrolling goes idle (~350ms), so momentum scrolling
+    // still counts as user, but a later programmatic scroll doesn't.
+    function armGestureClear() {
+      clearTimeout(gestureTimer);
+      gestureTimer = setTimeout(() => { userGesture = false; }, 350);
+    }
+    scroller.addEventListener("wheel", (e) => {
+      userGesture = true;
+      if (e.deltaY < 0) setFollowing(false);   // scrolling up = detach at once
+      else if (atBottom()) setFollowing(true);
+      armGestureClear();
+    }, { passive: true });
+    scroller.addEventListener("touchstart", () => { userGesture = true; clearTimeout(gestureTimer); }, { passive: true });
+    scroller.addEventListener("touchmove", onGestureScroll, { passive: true });
+    scroller.addEventListener("touchend", () => { onGestureScroll(); armGestureClear(); }, { passive: true });
+    scroller.addEventListener("touchcancel", () => { onGestureScroll(); armGestureClear(); }, { passive: true });
+    scroller.addEventListener("scroll", onGestureScroll, { passive: true });
+
+    // The button is the visible face of `following`: solid blue = following, outline =
+    // detached. Tap resumes at the bottom.
     if (autoBtn) {
-      autoBtn.addEventListener("click", () => { stick = true; scrollToBottom(); updateAutoBtn(); });
-      // Float it just above the composer whatever the composer's height (grows with
-      // typed lines / upload strip / blocked banner).
+      autoBtn.addEventListener("click", scrollToBottom);
       const composerEl = document.getElementById("composer");
       if (composerEl && typeof ResizeObserver !== "undefined") {
+        // Keep the desktop floating button parked just above the composer.
         new ResizeObserver(() => {
           document.body.style.setProperty("--composer-h", composerEl.offsetHeight + "px");
         }).observe(composerEl);
       }
     }
-    // stick = "auto-follow the bottom". User drags UP -> detach (always honored). Re-
-    // attach ONLY when the USER scrolls back to the tail -- NOT when our own
-    // scrollToBottom lands there (guarded by the ~120ms prog window). That programmatic
-    // land -> atBottom -> stick=true -> scroll-to-bottom-again loop was exactly what
-    // kept yanking the reader down during the first load's history backfill.
-    scroller.addEventListener("scroll", () => {
-      const t = scroller.scrollTop;
-      if (t < lastTop - 2) stick = false;
-      else if (atBottom() && Date.now() - lastProg > 120) stick = true;
-      lastTop = t;
-      updateAutoBtn();
-    }, { passive: true });
-    // While a finger is down, NEVER auto-scroll (the backfill chunks honor this too):
-    // iOS batches scroll events during a drag, so `stick` may still read true mid-drag.
-    scroller.addEventListener("touchstart", () => { touching = true; }, { passive: true });
-    const endTouch = () => { touching = false; };
-    scroller.addEventListener("touchend", endTouch, { passive: true });
-    scroller.addEventListener("touchcancel", endTouch, { passive: true });
-    // Follow the tail ONLY when the transcript actually EXPANDS (new/streaming content,
-    // late-loading images/mermaid/katex), we're still attached, and no drag is active.
-    // A resize that adds no height (mobile URL bar showing/hiding) is ignored.
+    updateAutoBtn();
+
+    // Keep pinned on content growth + viewport changes. None of these touch
+    // `following` -- they only act when it's already true.
     if (typeof ResizeObserver !== "undefined") {
-      new ResizeObserver(() => {
-        const h = scroller.scrollHeight;
-        if (h > lastH && stick && !touching) scrollToBottom();
-        lastH = h;
-      }).observe(tEl);
+      new ResizeObserver(pinToBottom).observe(tEl);       // transcript grew (streaming, images, katex)
+      new ResizeObserver(pinToBottom).observe(scroller);  // scroll viewport resized (composer, keyboard)
+    }
+    // Mobile soft keyboard: the visual viewport resizes with no content change. Pin if
+    // following; never flip following, so opening/closing the keyboard can't detach or
+    // re-attach the reader (that was the "keyboard changes scroll state" bug).
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", () => requestAnimationFrame(pinToBottom));
     }
 
     // ---- diff rendering (client-side, no lib) ----
@@ -1012,10 +1026,11 @@
       function chunk() {
         if (!anchor.parentNode) return; // anchor detached -> nothing to anchor older content to
         const oldH = scroller.scrollHeight;
-        const pinned = stick && !touching; // don't yank to the tail while they're dragging
         for (let n = 0; idx < older.length && n < 15; n++, idx++) renderEvent(older[idx], anchor);
-        if (pinned) scrollToBottom(); // stay at the tail while history fills above
-        else { markProg(); scroller.scrollTop += scroller.scrollHeight - oldH; } // keep the viewport stable
+        // following -> stay glued to the tail; reading history -> hold the viewport by
+        // the height just added above it (older content is prepended above the anchor).
+        if (following) scroller.scrollTop = scroller.scrollHeight;
+        else scroller.scrollTop += scroller.scrollHeight - oldH;
         if (idx < older.length) scheduleIdle(chunk);
       }
       scheduleIdle(chunk);
@@ -1036,10 +1051,9 @@
       olderScheduled = false;
       if (!olderBuf.length) return;
       const oldH = scroller.scrollHeight;
-      const pinned = stick && !touching; // don't yank to the tail while they're dragging
       for (let n = 0; olderBuf.length && n < 15; n++) renderEvent(olderBuf.shift(), tEl.firstChild);
-      if (pinned) scrollToBottom(); // stay pinned to the tail while history fills above
-      else { markProg(); scroller.scrollTop += scroller.scrollHeight - oldH; } // keep the viewport stable
+      if (following) scroller.scrollTop = scroller.scrollHeight;   // glued to the tail
+      else scroller.scrollTop += scroller.scrollHeight - oldH;     // hold the viewport stable
       if (olderBuf.length) scheduleOlder();
     }
 
@@ -1116,10 +1130,11 @@
           if (backfilling) { backfilling = false; flushInitialBackfill(); }
           clearStatus();
           composer.hidden = false;
-          // Jump to the bottom only on the first load, or if the user is already there.
-          // A background reconnect re-sends backfill_complete; without this guard it
-          // would yank someone who has scrolled up reading history back to the bottom.
-          if (wasInitial || stick) scrollDown(true);
+          // Jump to the bottom only on the first load, or if the user is already
+          // following. A background reconnect re-sends backfill_complete; without this
+          // guard it would yank someone who scrolled up reading history back down.
+          if (wasInitial) scrollToBottom();
+          else if (following) scrollDown(true);
         } else if (msg.type === "older") {
           // Older history (streamed newest-first after the tail). Dedup, then prepend
           // above the current top in idle chunks.
