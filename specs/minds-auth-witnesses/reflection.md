@@ -243,6 +243,13 @@ Run-time friction observed across the two runs:
   working reintegrate hint) — correct behavior for this state. Prompt-quality and
   report-quality of *successful* mapping could not be assessed, since no agent
   produced an outcome.
+- **Secrets passed via `--env` are echoed in plaintext.** Launching with
+  `--env "ANTHROPIC_API_KEY=<value>"` caused `mngr tmr-specs` to echo the
+  fully-resolved command — key and all — into the run log and the launching
+  agent's transcript. The launcher should redact known-secret `--env` values
+  (or accept a secret by name/file reference) rather than printing the resolved
+  command. This surfaced as a real leak during this task (the affected key was
+  scrubbed from `/tmp` and should be rotated).
 
 ## Machinery feedback is feedback, not edits
 
