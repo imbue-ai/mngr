@@ -585,28 +585,32 @@
     let lastTop = 0;      // previous scrollTop, for scroll-direction detection
     let lastH = 0;        // previous content height, so we follow ONLY on growth
     let touching = false; // finger down: never auto-scroll mid-drag (iOS batches scroll events)
+    let lastProg = 0;     // Date.now() of our last programmatic scroll
     function atBottom() {
       return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
     }
-    function scrollToBottom() { scroller.scrollTop = scroller.scrollHeight; }
+    // Every programmatic scroll is stamped so the scroll event it triggers is not
+    // mistaken for the USER reaching the bottom (re-attach guard below). Our own
+    // scrolls only ever move DOWN, so they can never look like an upward user drag.
+    function markProg() { lastProg = Date.now(); }
+    function scrollToBottom() { markProg(); scroller.scrollTop = scroller.scrollHeight; }
     function scrollDown(force) {
       if (force) stick = true;
       if (stick) scrollToBottom();
     }
-    // Detach the instant the user drags UP, so nothing yanks them back down; re-attach
-    // only when they return to the tail. Direction-based, not an 80px distance
-    // threshold -- near the bottom a distance rule lets streaming growth keep pulling
-    // them down (that was the mobile scroll-up jitter).
+    // stick = "auto-follow the bottom". User drags UP -> detach (always honored). Re-
+    // attach ONLY when the USER scrolls back to the tail -- NOT when our own
+    // scrollToBottom lands there (guarded by the ~120ms prog window). That programmatic
+    // land -> atBottom -> stick=true -> scroll-to-bottom-again loop was exactly what
+    // kept yanking the reader down during the first load's history backfill.
     scroller.addEventListener("scroll", () => {
       const t = scroller.scrollTop;
       if (t < lastTop - 2) stick = false;
-      else if (atBottom()) stick = true;
+      else if (atBottom() && Date.now() - lastProg > 120) stick = true;
       lastTop = t;
     }, { passive: true });
-    // While a finger is down, NEVER auto-scroll: iOS batches scroll events during a
-    // touch-drag, so `stick` may still read true mid-drag and streaming growth would
-    // yank the view down, fighting the drag (the jitter). On release, if they let go
-    // at the tail we re-follow; otherwise they stay put.
+    // While a finger is down, NEVER auto-scroll (the backfill chunks honor this too):
+    // iOS batches scroll events during a drag, so `stick` may still read true mid-drag.
     scroller.addEventListener("touchstart", () => { touching = true; }, { passive: true });
     const endTouch = () => { touching = false; };
     scroller.addEventListener("touchend", endTouch, { passive: true });
@@ -991,10 +995,10 @@
       function chunk() {
         if (!anchor.parentNode) return; // anchor detached -> nothing to anchor older content to
         const oldH = scroller.scrollHeight;
-        const pinned = stick;
+        const pinned = stick && !touching; // don't yank to the tail while they're dragging
         for (let n = 0; idx < older.length && n < 15; n++, idx++) renderEvent(older[idx], anchor);
         if (pinned) scrollToBottom(); // stay at the tail while history fills above
-        else scroller.scrollTop += scroller.scrollHeight - oldH; // keep the viewport stable
+        else { markProg(); scroller.scrollTop += scroller.scrollHeight - oldH; } // keep the viewport stable
         if (idx < older.length) scheduleIdle(chunk);
       }
       scheduleIdle(chunk);
@@ -1015,10 +1019,10 @@
       olderScheduled = false;
       if (!olderBuf.length) return;
       const oldH = scroller.scrollHeight;
-      const pinned = stick;
+      const pinned = stick && !touching; // don't yank to the tail while they're dragging
       for (let n = 0; olderBuf.length && n < 15; n++) renderEvent(olderBuf.shift(), tEl.firstChild);
       if (pinned) scrollToBottom(); // stay pinned to the tail while history fills above
-      else scroller.scrollTop += scroller.scrollHeight - oldH; // keep the viewport stable
+      else { markProg(); scroller.scrollTop += scroller.scrollHeight - oldH; } // keep the viewport stable
       if (olderBuf.length) scheduleOlder();
     }
 
