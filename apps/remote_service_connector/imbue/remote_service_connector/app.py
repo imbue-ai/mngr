@@ -3182,6 +3182,23 @@ def count_user_tunnels(ops: CloudflareOps, username_prefix: str) -> int:
     return len([t for t in ops.list_tunnels(include_prefix=prefix) if t["name"].startswith(prefix)])
 
 
+def enforce_tunnel_quota_for_new_tunnel(
+    ops: CloudflareOps, username: str, tunnel_name: str, entitlements: AccountEntitlements
+) -> None:
+    """Refuse creating ``tunnel_name`` when it does not exist yet and the account is at ``max_tunnels``.
+
+    Idempotent re-creates of an existing tunnel are always allowed, so the
+    count is only checked when the tunnel is absent. Shared by ``POST
+    /tunnels`` and ``POST /sharing/enable`` so the two enforcement points
+    cannot drift.
+    """
+    if ops.get_tunnel_by_name(tunnel_name) is not None:
+        return
+    current = count_user_tunnels(ops, username)
+    if current >= entitlements.max_tunnels:
+        raise_quota_exceeded("max_tunnels", entitlements.max_tunnels, current, "tunnels")
+
+
 @web_app.post("/tunnels")
 def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
     """Create a tunnel (idempotent) and return its info with token.
@@ -3199,10 +3216,7 @@ def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, obje
         if body.default_auth_policy is not None:
             validate_auth_policy_has_identity(body.default_auth_policy)
         tunnel_name = make_tunnel_name(admin.username, body.agent_id)
-        if ctx.ops.get_tunnel_by_name(tunnel_name) is None:
-            current = count_user_tunnels(ctx.ops, admin.username)
-            if current >= entitlements.max_tunnels:
-                raise_quota_exceeded("max_tunnels", entitlements.max_tunnels, current, "tunnels")
+        enforce_tunnel_quota_for_new_tunnel(ctx.ops, admin.username, tunnel_name, entitlements)
         fallback = owner_email_auth_policy(admin.email) if admin.email else None
         return ctx.create_tunnel(
             admin.username,
@@ -3429,10 +3443,7 @@ def enable_sharing_endpoint(request: Request, body: EnableSharingRequest) -> dic
         entitlements = resolve_entitlements_for_admin(request, admin)
         validate_auth_policy_has_identity(body.auth_policy)
         tunnel_name = make_tunnel_name(admin.username, body.agent_id)
-        if ctx.ops.get_tunnel_by_name(tunnel_name) is None:
-            current = count_user_tunnels(ctx.ops, admin.username)
-            if current >= entitlements.max_tunnels:
-                raise_quota_exceeded("max_tunnels", entitlements.max_tunnels, current, "tunnels")
+        enforce_tunnel_quota_for_new_tunnel(ctx.ops, admin.username, tunnel_name, entitlements)
         fallback = owner_email_auth_policy(admin.email) if admin.email else None
         tunnel_info = ctx.create_tunnel(
             admin.username,
