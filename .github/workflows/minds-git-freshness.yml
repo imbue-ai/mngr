@@ -63,19 +63,28 @@ jobs:
           fi
           echo "Pinned: $pinned_tag (git $pinned_gitver)"
 
-          # Fetch releases and pick the NEWEST one that has cleared the cooldown
-          # window (published at least COOLDOWN_DAYS ago), excluding drafts and
-          # prereleases. A younger release is deliberately ignored until vetted.
+          # Fetch releases and pick the one with the HIGHEST git version among
+          # those that have cleared the cooldown window (published at least
+          # COOLDOWN_DAYS ago), excluding drafts and prereleases. A younger
+          # release is deliberately ignored until vetted. Sorting by git
+          # version -- not published date -- matters because upstream may cut
+          # a patch release for an older git line after a newer line ships;
+          # date-sorting would then hide the newer git from the nag.
           releases_json=$(mktemp)
           gh api "repos/desktop/dugite-native/releases?per_page=100" > "$releases_json"
 
           candidate=$(mktemp)
           jq '
+            def gitver_parts:
+              # v2.53.0-3 -> [2, 53, 0]; v2.53.0 -> [2, 53, 0]
+              (.tag_name | ltrimstr("v") | split("-")[0] | split(".") | map(tonumber));
             [ .[]
               | select(.draft == false and .prerelease == false)
               | select((.published_at | fromdateiso8601) <= (now - (env.COOLDOWN_DAYS | tonumber) * 86400))
             ]
-            | sort_by(.published_at) | reverse | (.[0] // null)
+            # Highest git version wins; among equal git versions (same-git
+            # rebuilds like v2.53.0 vs v2.53.0-3) prefer the newest published.
+            | sort_by([gitver_parts, .published_at]) | reverse | (.[0] // null)
           ' "$releases_json" > "$candidate"
 
           if [ "$(jq -r 'if . == null then "null" else "ok" end' "$candidate")" = "null" ]; then
@@ -89,7 +98,7 @@ jobs:
           # git version = tag with the leading 'v' and trailing '-<build>' removed
           # (v2.53.0-3 -> 2.53.0; v2.53.0 -> 2.53.0).
           cand_gitver="${cand_tag#v}"; cand_gitver="${cand_gitver%%-*}"
-          echo "Newest cooldown-cleared release: $cand_tag (git $cand_gitver, published $cand_published)"
+          echo "Highest-version cooldown-cleared release: $cand_tag (git $cand_gitver, published $cand_published)"
 
           # Locate the tracking issue purely by exact title. Search can return
           # partial-title matches, so filter to an exact equality in jq.
