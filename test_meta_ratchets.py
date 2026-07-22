@@ -736,3 +736,69 @@ def test_top_level_coverage_omit_covers_subproject_omits() -> None:
     assert len(errors) == 0, (
         "Top-level [tool.coverage.run].omit is missing entries for files that subprojects omit:\n" + "\n".join(errors)
     )
+
+
+# --- Meta: offload CI config performance invariants ---
+
+# The unit/integration and acceptance offload suites. The release and
+# minds-snapshot configs intentionally diverge (no coverage gates, custom
+# framework command) and are not covered here.
+_OFFLOAD_PERF_CONFIGS: tuple[str, ...] = (
+    "offload-modal.toml",
+    "offload-modal-acceptance.toml",
+)
+
+
+def test_offload_configs_keep_batches_and_discovery_cheap() -> None:
+    """Guard the offload CI performance invariants established in MIND-142.
+
+    - Root addopts must not contain ``--cov-report*`` or ``--coverage-to-file``:
+      per-run coverage reports walk every measured file and are never consumed
+      from sandboxes (CI combines the raw .coverage data files on the runner).
+      Keeping them out of addopts is also what allows ``--cov-report=`` (below)
+      to clear reports entirely -- pytest-cov only treats the empty value as
+      "no reports" when it is the sole ``--cov-report`` given.
+    - offload-modal.toml must pass ``--cov-report=`` so its batches generate no
+      reports but still write the .coverage data file the gates combine.
+    - Every group must include ``--no-cov`` in its filters: filters are
+      discovery-only args, and without this pytest-cov traces module imports
+      during ``pytest --collect-only``, roughly quadrupling discovery time.
+    - The framework command must invoke ``.venv/bin/pytest`` rather than
+      ``uv run pytest``: sandbox network is disabled, so uv's resolution and
+      editability checks are pure latency and a rebuild-attempt failure mode.
+    """
+    errors: list[str] = []
+
+    root_addopts = _get_addopts(tomlkit.parse((_REPO_ROOT / "pyproject.toml").read_text()))
+    if isinstance(root_addopts, list):
+        for opt in root_addopts:
+            if str(opt).startswith("--cov-report") or str(opt) == "--coverage-to-file":
+                errors.append(f"root pyproject.toml addopts must not contain {opt} (see MIND-142 note in addopts)")
+
+    for config_name in _OFFLOAD_PERF_CONFIGS:
+        config = tomlkit.parse((_REPO_ROOT / config_name).read_text())
+
+        command = str(config.get("framework", {}).get("command", ""))
+        if "uv run pytest" in command or ".venv/bin/pytest" not in command:
+            errors.append(
+                f"{config_name}: framework.command must invoke .venv/bin/pytest directly, not `uv run pytest`"
+            )
+
+        run_args = str(config.get("framework", {}).get("run_args", ""))
+        if config_name == "offload-modal.toml" and "--cov-report=" not in run_args.split():
+            errors.append(
+                f"{config_name}: framework.run_args must contain `--cov-report=` to suppress per-batch reports"
+            )
+
+        groups = config.get("groups", {})
+        assert isinstance(groups, dict)
+        for group_name, group in groups.items():
+            filters = str(group.get("filters", ""))
+            if "--no-cov" not in filters.split():
+                errors.append(
+                    f"{config_name}: group {group_name!r} filters must start with --no-cov (discovery speed)"
+                )
+
+    assert len(errors) == 0, "offload CI config performance invariants violated:\n" + "\n".join(
+        f"  - {e}" for e in errors
+    )

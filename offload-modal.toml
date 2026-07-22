@@ -21,40 +21,56 @@ dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 # Everything else rides the checkpoint via thin git diff.
 #
 # pyproject.toml + uv.lock are here because Python deps are installed
-# at image build time via `uv sync --all-packages` in the mngr Dockerfile.
-# Per-package pyproject.toml files are also included: changes to per-package
-# metadata (entry points, optional deps, build-system requires) make `uv run`
-# in the sandbox consider editable installs stale and try to rebuild them,
-# which fails because the sandbox runs with network disabled. Rebuilding the
-# checkpoint image regenerates editable-install dist-info to match the new
-# source so `uv run` finds nothing to rebuild.
-# If dep churn starts invalidating the checkpoint too often, the
-# alternative is to drop these from build_inputs and add a second
-# `uv sync` call at sandbox startup (e.g. via offload's sandbox_init_cmd
-# or the CMD) on top of the existing build-time one -- the Dockerfile
-# RUN still provides the baseline install, and the startup sync picks
-# up whatever drifted since the checkpoint. Trade-off is slower
-# per-sandbox startup vs faster warm-cache hit rate.
+# at image build time via `uv sync --all-packages` in the mngr Dockerfile
+# (any per-package dependency change necessarily also changes uv.lock).
+#
+# Per-package pyproject.toml files are deliberately NOT build inputs: they
+# churn often and each churn cost a full checkpoint rebuild (+~2min on ~7%
+# of runs). They used to be listed because a per-package metadata change
+# made `uv run` in the sandbox consider editable installs stale and try to
+# rebuild them, which fails with the sandbox's network disabled. Two things
+# since removed that failure mode: post_patch_cmd reruns
+# scripts/post-source-setup.sh (including `uv sync --all-packages`) after
+# every thin diff -- with network available at image-build time -- so
+# dist-info always matches the patched source, and test batches now invoke
+# .venv/bin/pytest directly instead of `uv run pytest`, so no sandbox-time
+# uv resolution happens at all.
 build_inputs = [
     "libs/mngr/imbue/mngr/resources/Dockerfile",
     "pyproject.toml",
     "uv.lock",
-    "libs/*/pyproject.toml",
-    "apps/*/pyproject.toml",
 ]
 
 [framework]
 type = "pytest"
-command = "uv run pytest"
-run_args = "--cov-fail-under=0 -p no:xdist"
+# Invoke the venv's pytest directly instead of `uv run pytest`: sandbox
+# network is disabled, so uv's resolution/editability checks are pure
+# latency and a failure mode (stale dist-info -> rebuild attempt -> no
+# network). The bash wrapper prepends .venv/bin to PATH and sets
+# VIRTUAL_ENV so the pytest process env matches what `uv run` provided.
+# $PWD is the repo root in both contexts: in the sandbox offload's exec
+# wrapper cd's to sandbox_project_root first; locally offload spawns
+# discovery from the directory it was invoked in (the repo root).
+command = "bash -c 'export PATH=\"$PWD/.venv/bin:$PATH\" VIRTUAL_ENV=\"$PWD/.venv\"; exec .venv/bin/pytest \"$@\"' --"
+# --cov-report= (empty, and the sole --cov-report since reports are no
+# longer in root addopts) disables ALL per-batch coverage reports: they
+# walked every measured file in every batch but were never consumed -- CI
+# combines the raw .coverage data files on the runner and enforces the
+# gates there. The data file is still written (parallel=true +
+# pytest-cov's finish-time combine), so coverage measurement is
+# unaffected.
+run_args = "--cov-fail-under=0 -p no:xdist --cov-report="
 
 [groups.all]
 retry_count = 0
-filters = "-m 'not acceptance and not release and not flaky and not sdk_live and not minds_deployment and not minds_services and not minds_snapshot_resume'"
+# --no-cov is discovery-only (filters are passed to `pytest --collect-only`,
+# never to batch execution): pytest-cov otherwise traces module imports
+# during collection, which roughly quadruples its cost.
+filters = "--no-cov -m 'not acceptance and not release and not flaky and not sdk_live and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 [groups.flaky]
 retry_count = 4
-filters = "-m 'flaky and not acceptance and not release and not sdk_live and not minds_deployment and not minds_services and not minds_snapshot_resume'"
+filters = "--no-cov -m 'flaky and not acceptance and not release and not sdk_live and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 [history]
 path = "offload-history-modal.jsonl"
