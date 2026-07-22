@@ -350,7 +350,7 @@ _OAUTH_SUCCESS_PAGE_STYLE = (
     "p{margin:0;font-size:1rem;line-height:1.25}"
     ".message{margin:1.75rem 0 1.25rem}"
     "a{color:inherit}"
-    "@media (prefers-color-scheme:dark){body{background:#161616;color:#f2f2f2}}"
+    "@media (prefers-color-scheme:dark){body{background:#1a170a;color:#fff}}"
 )
 
 # The minds wordmark, inlined because the page ships no assets. Paths fill
