@@ -26,9 +26,11 @@ Companion document: `audit.md` (the Phase 1 map and before/after matrix).
   `libs/mngr_forward/specs/`), so `tmr-specs` runs cleanly per system. As a
   result, the six `mngr_forward`-owned units are intentionally left unwitnessed
   from `apps/minds` and read as `none`/blocked here.
-- **Provider: Modal** (`--provider modal`), spend approved. The fleet ran 6
-  mappers (one per feature file) + 1 reducer over the whole authentication
-  corpus with the default `apps/minds` test root.
+- **Provider: two Modal runs, then a pivot to `local`.** Both Modal runs (6
+  mappers + reducer over the authentication corpus, default `apps/minds` test
+  root) failed to produce witnesses (see "Fleet run outcome"). Because the
+  root-cause command works locally, the direction became to generate the tests
+  on the `local` provider / by hand.
 
 ## Coverage trajectory (`mngr specs matrix --root apps/minds/specs`)
 
@@ -46,26 +48,50 @@ are the `mngr_forward` bridge units (out of scope) and one is `expired-token`
 (needs control over the 30-day `max_age` clock, deliberately left for the
 fleet to see how it handles a time-dependent unit).
 
-## Fleet run outcome: total timeout, zero adoptable output
+## Fleet run outcome: two Modal runs, zero adoptable witnesses
 
-The first Modal fleet run (`20260721082621`) produced **nothing adoptable**: all
-six mappers were stopped at the 3600s per-agent timeout "without publishing
-outputs", so no branch was pulled, the reducer never ran, and the report's
-coverage matrix is empty. The run still exited 0 (a clean "everyone failed"),
-and it cost real money.
+Two Modal fleet runs were attempted; neither produced an adoptable witness.
 
-The likely cause is resource contention, not a slow task per se: `mngr ls` shows
-the six mappers were packed **three-per-host onto just two Modal hosts**
-(`host-0`, `host-1`). Three heavyweight Claude Code agents sharing one host —
-each doing a cold `uv sync --all-packages` over the monorepo and then collecting
-/ running a large pytest suite — almost certainly thrashed CPU/RAM/disk (the
-hosts went unreachable near the end, "Could not connect ... Unable to connect
-to port ...", consistent with an OOM or a wedged host). Under that contention
-every agent crawled past 3600s before reaching even its first outcome write.
+**Run 1** (`20260721082621`, default `--agents-per-host 4` which placed 3 mappers
+on each of 2 hosts, `--timeout 3600`): all six mappers were stopped at the 3600s
+timeout "without publishing outputs" — no branch pulled, no reducer, empty
+coverage matrix, clean exit 0. My first hypothesis was host contention (three
+heavyweight agents thrashing one host), so run 2 changed the packing.
 
-This is the dominant machinery finding of the exercise and is expanded in
-section 3. Because the run yielded no witnesses, sections 1 and 2 below have no
-fleet material to assess for this run.
+**Run 2** (`20260721205010`, `--agents-per-host 1` so each mapper got its own
+host, `--timeout 7200`): the launcher then crashed ~88 min in on a *transient*
+Modal `ServiceError: Authorization check failed` during polling (a Modal-side
+glitch, not our credentials — `mngr ls` worked again immediately after), so it
+never polled the mappers to completion, pulled outputs, or ran the reducer (exit
+1). Crucially the six mappers *survived* the launcher crash and were still
+RUNNING on their dedicated hosts, which let me diagnose them directly.
+
+**Root cause — the contention hypothesis was wrong.** With one agent per host and
+no contention, the mappers *still* made no progress: ~90 minutes with zero file
+writes after venv setup, no commits, no outputs, no pytest running, only 3–14
+minutes of CPU each. A surviving agent's Claude transcript pinned the stall
+exactly — the mapper's last tool call was
+
+    uv run mngr specs matrix --root apps/minds/specs --tests apps/minds
+
+(the coverage command the mapper prompt tells every agent to run early: "To find
+the current witnesses of your units, run the coverage matrix"), and that Bash
+call **never returned** — the transcript dead-ends on it with no tool_result for
+the rest of the run. Every mapper blocked on the same command. The identical
+command completes in *seconds* on the local dev machine, so the hang is specific
+to running it on the Modal host. `mngr specs matrix --tests apps/minds` drives a
+`pytest --collect-only` over the whole `apps/minds` tree (plus `uv run`'s env
+resolution); the likely mechanism is a collection-time hang in that large suite
+on the Modal host (a conftest/import that probes for docker/modal/network and
+blocks where they are absent) and/or `uv run` re-resolving — either way the outer
+command does not return, and the framework's inner 300s collection timeout does
+not save it. So host packing (run 1) was at most secondary; the primary,
+run-killing bug is the hanging coverage command, which no timeout or concurrency
+change addresses. This is why the layer-3 direction became: **run locally**,
+where that command works.
+
+This is the dominant machinery finding and is expanded in section 3. Because
+neither run yielded witnesses, sections 1 and 2 have no fleet material to assess.
 
 ## 1. Quality of the generated witnesses
 
@@ -125,32 +151,39 @@ recipe, prompts, and report code, and confirmed against the matrix):
   shows 14 matrix witnesses from 4 markers because two `responses_test`
   parametrizations contribute 4 + 8 nodes. Harmless, but noisy in the report.
 
-Run-time friction observed this run:
+Run-time friction observed across the two runs:
 
-- **Host packing starves heavyweight agents (the run-killer).** The fleet placed
-  three mappers per Modal host. For a lightweight suite that is fine; for the
-  minds monorepo — where each agent independently pays a cold `uv sync
-  --all-packages` and a large pytest collection — three concurrent agents per
-  host is enough to thrash it into the timeout (and, it appears, to knock the
-  host offline). Two mitigations for a re-run: cap concurrency so agents do not
-  share a host (`--max-parallel-agents` low enough, or one agent per host), and
-  raise `--timeout` well above 3600s for this repo. A cheaper alternative is the
-  `local` provider, which reuses the already-synced `.venv` and skips the
-  per-host cold sync entirely.
-- **The default 3600s timeout is mis-scaled for this repo.** Even without
-  contention, a cold environment plus a first pytest run against the minds tree
-  can approach or exceed an hour before the agent writes its first outcome. The
-  timeout should be tuned per target repo (or the recipe should carry a
-  minds-appropriate default), and the mapper prompt could ask agents to write a
-  partial outcome early so a timeout still yields *something*.
-- **A clean exit hides a total failure.** The run exits 0 with an all-`FAILED`
-  report; a caller scripting on exit code alone would not notice that zero units
-  were witnessed. A non-zero exit (or a summary line) when no mapper succeeds
-  would help.
-- Prompt-quality and report-quality (claimed-vs-verified matrix, escalations,
-  normalizations) could not be assessed: no agent produced an outcome. The
-  report itself rendered the failure cleanly (six FAILED rows, empty matrix,
-  a working reintegrate hint), which is the correct behavior for this state.
+- **The mapper prompt's coverage command hangs on this repo/host (the actual
+  run-killer).** Every mapper runs `uv run mngr specs matrix --root
+  apps/minds/specs --tests apps/minds` early because the prompt instructs it
+  ("To find the current witnesses of your units, run the coverage matrix"). On
+  the Modal host that command never returns, so every agent blocks on it
+  indefinitely and produces nothing — in *both* runs, independent of host
+  packing or timeout. It is fast locally. Fixes to consider: (a) make
+  `harvest_witness_links`' `pytest --collect-only` robust to collection-time
+  hangs on this repo — the existing 300s inner timeout did not save the outer
+  `uv run mngr` invocation, so the guard is at the wrong layer; (b) narrow the
+  collection to the paired test tree; or (c) have the mapper prompt read current
+  coverage from a pre-computed artifact the orchestrator supplies, rather than
+  each agent re-running a full-suite collection. This single issue is why the
+  fleet must run where that command works (the `local` provider).
+- **A launcher crash orphans running agents with no timeout enforcement.** Run
+  2's launcher died on a *transient* Modal auth error mid-poll; the six agents
+  kept running on their hosts with the launcher's `--timeout` no longer
+  enforced, so they would have burned compute indefinitely had I not stopped
+  them. The launcher should treat a transient provider error during polling as
+  retryable (it recovered on the very next call), and/or agents should
+  self-bound their own wall-clock. `--reintegrate` *does* re-pull each agent's
+  outputs and re-run the reducer (a good recovery primitive) — but only once the
+  mappers actually finish, which here they never did.
+- **A clean exit hides a total failure.** Run 1 exited 0 with an all-`FAILED`
+  report; a caller scripting on exit code alone would not notice zero units were
+  witnessed. A non-zero exit (or a summary line) when no mapper succeeds would
+  help.
+- **The report rendered the failure cleanly** (six FAILED rows, empty matrix, a
+  working reintegrate hint) — correct behavior for this state. Prompt-quality and
+  report-quality of *successful* mapping could not be assessed, since no agent
+  produced an outcome.
 
 ## Machinery feedback is feedback, not edits
 
