@@ -44,7 +44,7 @@ class BackburnerStore:
         with self._lock:
             return agent_id in self._ids
 
-    def set(self, agent_id: str, on: bool) -> None:
+    def set_parked(self, agent_id: str, on: bool) -> None:
         with self._lock:
             if on:
                 self._ids.add(agent_id)

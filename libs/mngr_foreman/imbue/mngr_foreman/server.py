@@ -295,7 +295,7 @@ def create_app(
     def api_shortcuts() -> Response:
         # Front-page command buttons (name + cmd). The client opens a terminal tab
         # running <cmd> with the shortcut's freeform args appended.
-        return jsonify({"shortcuts": shortcuts.list()})
+        return jsonify({"shortcuts": shortcuts.all()})
 
     @app.route("/api/agents/stream")
     def api_agents_stream() -> Response:
@@ -441,7 +441,7 @@ def create_app(
         if agent is None:
             return _not_found()
         on = bool((request.get_json(silent=True) or {}).get("on", True))
-        backburner.set(str(agent.id), on)
+        backburner.set_parked(str(agent.id), on)
         registry.republish()
         return jsonify({"ok": True, "backburner": on})
 

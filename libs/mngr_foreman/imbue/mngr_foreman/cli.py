@@ -300,7 +300,7 @@ def foreman_rm_shortcut(ctx: click.Context, name: str, **kwargs: Any) -> None:
 @click.pass_context
 def foreman_list_shortcuts(ctx: click.Context, **kwargs: Any) -> None:
     """List the front-page shortcuts."""
-    entries = _shortcut_store(ctx, "foreman list-shortcuts").list()
+    entries = _shortcut_store(ctx, "foreman list-shortcuts").all()
     if not entries:
         write_human_line("no shortcuts set")
         return

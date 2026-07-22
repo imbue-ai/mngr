@@ -42,7 +42,7 @@ class ShortcutStore:
         tmp.write_text(json.dumps(shortcuts, indent=2, sort_keys=True))
         tmp.replace(self._path)  # atomic
 
-    def list(self) -> list[dict[str, str]]:
+    def all(self) -> list[dict[str, str]]:
         """All shortcuts as ``[{"name", "cmd"}, ...]`` sorted by name."""
         with self._lock:
             return [{"name": n, "cmd": c} for n, c in sorted(self._read().items())]
