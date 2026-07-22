@@ -5,9 +5,11 @@ h2 { margin-top: 1.5rem; font-size: 1.1rem; }
 .run-commands { background: rgb(245, 245, 245); border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1.5rem; font-size: 0.85rem; }
 .run-cmd { margin: 0.3rem 0; }
 .run-cmd-label { color: rgb(80, 80, 80); }
-.blocked-hint { background: rgb(255, 243, 224); border-left: 3px solid rgb(244, 67, 54); padding: 0.5rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; border-radius: 0 4px 4px 0; }
-.blocked-hint p { margin: 0 0 0.3rem 0; font-weight: 600; }
-.blocked-hint ol { margin: 0; padding-left: 1.5rem; }
+.esc-kind { display: inline-block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 0.1rem 0.4rem; border-radius: 3px; background: rgb(255, 235, 238); color: rgb(183, 28, 28); margin-left: 0.4rem; vertical-align: middle; }
+.esc-source { font-size: 0.8rem; color: rgb(117, 117, 117); margin-left: 0.4rem; }
+.unresolved-hint { background: rgb(255, 243, 224); border-left: 3px solid rgb(244, 67, 54); padding: 0.5rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; border-radius: 0 4px 4px 0; }
+.unresolved-hint p { margin: 0 0 0.3rem 0; font-weight: 600; }
+.unresolved-hint ol { margin: 0; padding-left: 1.5rem; }
 .toc-sidebar { position: sticky; top: 2rem; width: 200px; float: left; padding-right: 1rem; }
 .toc-link { display: block; font-weight: 600; font-size: 0.9rem; text-decoration: none; margin-bottom: 0.5rem; }
 .toc-link:hover { text-decoration: underline; }

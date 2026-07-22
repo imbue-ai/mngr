@@ -262,6 +262,26 @@ def test_render_create_form_shows_preset_cards() -> None:
     assert "Advanced Configuration" in html
 
 
+def test_render_create_form_landing_fallback_wires_self_heal_sse() -> None:
+    # The landing fallback (create form shown at "/" when no workspace is known)
+    # subscribes to the chrome SSE and navigates to "/" once a workspace appears,
+    # so a user stranded here by a cold-start discovery race is not trapped.
+    html = render_create_form(is_landing_fallback=True)
+    assert "/_chrome/events" in html
+    assert "EventSource" in html
+    assert "workspaceNowExists" in html
+    assert "window.location = '/'" in html
+
+
+def test_render_create_form_explicit_page_omits_self_heal_sse() -> None:
+    # The explicit /create page (the default, is_landing_fallback False) must not
+    # wire the self-heal SSE, so a deliberate "create another workspace" flow is
+    # never bounced away by the user's existing workspaces.
+    html = render_create_form()
+    assert "/_chrome/events" not in html
+    assert "workspaceNowExists" not in html
+
+
 def test_render_create_form_opens_signin_modal_via_overlay_relay() -> None:
     # Choosing Imbue Cloud while signed out opens the sign-in modal in the
     # desktop client's shared overlay layer (so it covers the title bar), not an

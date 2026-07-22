@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-21
+
+The connector's Modal function now allows up to 8 concurrent requests per container (`@modal.concurrent(max_inputs=8)`). Previously Modal delivered one request per container at a time, so a single slow request (a lease's SSH provisioning, a cold sync pull) made every other caller queue behind it or wait out a fresh container's cold boot -- even with the production/staging warm pool of one container. The app was audited for concurrent execution: routes are sync `def` handlers run on FastAPI's threadpool, every route opens and closes its own psycopg2 connection, the lease selection already uses `FOR UPDATE SKIP LOCKED`, the shared Cloudflare `httpx.Client` is thread-safe, and the only module-level mutable state (the paid-status cache) is lock-guarded. The cap is kept modest because each concurrent request holds one direct Neon connection for its duration.
+
 ## 2026-07-15
 
 Added workspace-sync storage and endpoints (migration 013): `workspace_records` (per-account plaintext workspace metadata plus an opaque client-encrypted secrets blob, compare-and-swap on a per-row revision, at most one ACTIVE row per agent id) and `account_key_bundles` (the password-wrapped per-account data key).

@@ -1014,11 +1014,32 @@ def _handle_landing_page() -> Response:
         )
         return make_html_response(content=html)
 
-    # No agents discovered yet. If discovery is still in progress, show a
-    # "Discovering agents..." page with auto-refresh. Once discovery has
-    # completed with no agents found, show the create form so the user can
-    # create their first agent instead of polling forever.
-    if not backend_resolver.has_completed_initial_discovery():
+    # No live workspaces and no remote tiles. Choose between the auto-refreshing
+    # "Discovering agents..." page and the terminal create form.
+    #
+    # Never strand a user who has workspaces on the terminal create form. Show
+    # the auto-refreshing Landing page (which self-heals into the workspace list
+    # via its reload timer + chrome SSE) when either:
+    #   - discovery has not completed yet (the agent list may still be filling
+    #     in), or
+    #   - the restorable set (live primary agents unioned with the persisted
+    #     last-good topology) is non-empty -- we know workspaces exist but a
+    #     slow/partial cold-start snapshot has not re-surfaced them yet.
+    # Only show the create form once discovery has completed AND nothing anywhere
+    # (live, remote, or last-good) says a workspace exists, i.e. a genuine
+    # first-run user creating their first workspace.
+    restorable_agent_ids = backend_resolver.list_restorable_workspace_ids()
+    is_discovery_complete = backend_resolver.has_completed_initial_discovery()
+    is_showing_create_form = is_discovery_complete and not restorable_agent_ids
+    logger.debug(
+        "Resolved landing fallback: active={} remote={} discovery_complete={} restorable={} -> {}",
+        len(all_agent_ids),
+        len(remote_workspaces),
+        is_discovery_complete,
+        len(restorable_agent_ids),
+        "create-form" if is_showing_create_form else "discovering",
+    )
+    if not is_showing_create_form:
         html = render_landing_page(
             accessible_agent_ids=(),
             mngr_forward_origin=_get_mngr_forward_origin(),
@@ -1049,6 +1070,10 @@ def _handle_landing_page() -> Response:
         # walkthrough owns the color pick there (the hidden input still
         # carries the auto-chosen color).
         show_color_picker=minds_config is None or minds_config.get_create_onboarding_seen(),
+        # This create form is the landing fallback (shown at "/" when no
+        # workspace exists), so wire its self-heal SSE: if a workspace appears
+        # while it is open, it navigates to "/" instead of stranding the user.
+        is_landing_fallback=True,
     )
     return make_html_response(content=html)
 
