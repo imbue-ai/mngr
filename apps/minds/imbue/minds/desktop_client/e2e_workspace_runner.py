@@ -581,27 +581,51 @@ def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> No
     """Block until the create flow reaches the workspace or reports failure.
 
     The minds create flow has two mutually exclusive terminal states after
-    the create form is submitted: a redirect to the ``agent-<id>.localhost``
+    the create form is submitted: entering the ``agent-<id>.localhost``
     workspace URL (success), or the loading screen's failure sub-view
     (``#failure-view``) becoming visible (failure -- ``creating.js``'s
     ``showFailure()`` un-hides it once the status poll/SSE reports FAILED).
 
-    Polls both rather than only waiting for the success URL (the old
-    behavior), so a creation failure raises ``WorkspaceCreationFailedError``
-    with the surfaced error text immediately instead of hanging until
-    ``timeout_seconds`` expires. Raises ``PlaywrightTimeoutError`` if neither
-    state is reached within the budget.
+    The creating page no longer redirects on its own: it shows an onboarding
+    walkthrough and gates both entry (a Begin click on the last step) and
+    failure surfacing behind reaching that last step. This driver therefore
+    navigates directly to the ready workspace's ``data-redirect-url`` the
+    moment ``creating.js`` stamps ``data-ready`` on ``#creating``, and stamps
+    ``data-surface-errors`` up front so a failure surfaces immediately
+    instead of waiting for a (nonexistent) user to click through.
+
+    Raises ``WorkspaceCreationFailedError`` on the failure state and
+    ``PlaywrightTimeoutError`` if neither state is reached within the budget.
     """
     deadline = time.monotonic() + timeout_seconds
+    errors_unlocked = False
     while time.monotonic() < deadline:
         if _AGENT_SUBDOMAIN_PATTERN.search(page.url):
             return
         try:
+            if not errors_unlocked and page.locator("#creating").count() > 0:
+                # Bypass the walkthrough's surface-errors gate: tell
+                # creating.js to show any failure right away.
+                page.evaluate(
+                    "() => { const r = document.getElementById('creating');"
+                    " r.setAttribute('data-surface-errors', 'true');"
+                    " r.dispatchEvent(new Event('minds:surface-errors')); }"
+                )
+                errors_unlocked = True
+            redirect_url = page.get_attribute("#creating[data-ready='true']", "data-redirect-url", timeout=100)
+            if redirect_url:
+                # Ready: enter the workspace directly (the Begin button is a
+                # human affordance; the driver skips the walkthrough).
+                page.goto(redirect_url, wait_until="domcontentloaded")
+                continue
+        except PlaywrightError:
+            # A navigation can destroy the execution context mid-check, and
+            # the ready attribute may simply not be there yet; loop so the
+            # next iteration re-reads page.url / the DOM.
+            pass
+        try:
             failure_is_visible = page.is_visible("#failure-view")
         except PlaywrightError:
-            # A redirect to the workspace can destroy the execution context
-            # mid-check; loop so the next iteration re-reads page.url, which
-            # will match the success pattern and return.
             failure_is_visible = False
         if failure_is_visible:
             raise WorkspaceCreationFailedError(f"Workspace creation failed: {_read_failure_message(page)}")

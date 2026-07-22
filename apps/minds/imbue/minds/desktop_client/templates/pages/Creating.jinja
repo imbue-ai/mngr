@@ -76,7 +76,7 @@
               <div class="flex items-end gap-3 rounded-xl border border-subtle bg-fill-subtle px-4 py-4">
                 <div id="scene-laptop" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="1" title="What is minds?">
                   {# Imbue minds icon (simplified from electron/assets/icon.svg, grain filters dropped). #}
-                  <svg viewBox="0 0 1024 1024" class="w-20 h-20 rounded-xl" aria-label="minds">
+                  <svg viewBox="0 0 1024 1024" class="w-28 h-28 rounded-xl" aria-label="minds">
                     <rect width="1024" height="1024" rx="200" fill="#492222"/>
                     <path d="M239.393 346.233C213.333 388.701 181.957 578.826 170.21 692.964C168.726 707.387 179.615 719.956 194.083 720.906L243.5 724.15C254.832 724.894 264.36 732.926 267.01 743.968L287.114 827.735C289.477 837.581 297.325 845.189 307.312 846.857C387.978 860.334 533.31 868.318 620.93 820.192C992.068 616.341 865.659 254.427 642.258 194.566C418.857 134.706 303.377 241.962 239.393 346.233Z" fill="#E9ECD9"/>
                     <path d="M719.991 411.97C744.539 411.97 762.39 420.422 774.234 434.21C786.236 448.181 792.898 468.606 792.898 493.876C792.898 542.499 753.481 581.916 704.858 581.916C656.236 581.916 616.819 542.499 616.819 493.876C616.819 470.597 629.516 450.292 649.247 435.491C669.022 420.657 695.154 411.97 719.991 411.97Z" stroke="#492222" stroke-width="17.28" fill="none"/>
@@ -88,7 +88,7 @@
                 <div id="scene-key" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="6" title="What is latchkey?">
                   {# Imbue latchkey logo, redrawn as SVG from the imbue.com #}
                   {# product-page mark (olive tile, pink vintage key + tag). #}
-                  <svg viewBox="0 0 64 64" class="w-14 h-14 rounded-xl" aria-label="latchkey">
+                  <svg viewBox="0 0 64 64" class="w-20 h-20 rounded-xl" aria-label="latchkey">
                     <rect width="64" height="64" rx="14" fill="#4b4c08"/>
                     <g transform="rotate(-45 32 32)" fill="none" stroke="#e4999a" stroke-linecap="round">
                       {# bow #}
@@ -107,7 +107,7 @@
 
             <div id="scene-tunnel" class="scene-node flex flex-col items-center gap-1 self-center mt-6 cursor-pointer" data-goto-step="8" title="What is the tunnel?">
               {# Tunnel: two gentle arcs with an encryption lock between them. #}
-              <svg viewBox="0 0 120 48" class="w-28 h-12 text-tertiary" fill="none" stroke="currentColor" aria-label="encrypted tunnel">
+              <svg viewBox="0 0 120 48" class="w-40 h-16 text-tertiary" fill="none" stroke="currentColor" aria-label="encrypted tunnel">
                 <path d="M4 14 C 40 5, 80 5, 116 14" stroke-width="3" stroke-linecap="round"/>
                 <path d="M4 34 C 40 43, 80 43, 116 34" stroke-width="3" stroke-linecap="round"/>
                 <rect x="51" y="21" width="18" height="14" rx="3" stroke-width="3"/>
@@ -132,7 +132,7 @@
                   {# confusion tile, peace glyph, comfort sparkle). The inner #}
                   {# fill rect scales with --create-progress so the machine #}
                   {# visually fills up in lockstep with the top progress bar. #}
-                  <svg viewBox="0 0 64 64" class="w-14 h-14 rounded-xl" aria-label="workspace machine">
+                  <svg viewBox="0 0 64 64" class="w-20 h-20 rounded-xl" aria-label="workspace machine">
                     <defs>
                       <clipPath id="server-clip"><rect width="64" height="64" rx="14"/></clipPath>
                     </defs>
@@ -281,7 +281,7 @@
           {# Walkthrough nav: Previous / dots / Next, and Begin once both the #}
           {# workspace is ready and the user is on the last step. #}
           <nav class="flex items-center gap-4" aria-label="Walkthrough">
-            <Button variant="ghost" id="onboarding-prev" disabled>Previous</Button>
+            <Button variant="secondary" size="lg" id="onboarding-prev" disabled>Previous</Button>
             <div class="flex items-center gap-1.5" id="onboarding-dots" aria-hidden="true">
               {% for _step in range(1, 10) %}
                 <span class="onboarding-dot" data-dot="{{ _step }}"></span>
@@ -290,8 +290,8 @@
             {# Next/Begin visibility is inline display (not the ``hidden`` #}
             {# utility): the button base's inline-flex would win the CSS #}
             {# order against ``hidden``. onboarding.js toggles style.display. #}
-            <Button variant="secondary" id="onboarding-next">Next</Button>
-            <Button variant="primary" id="onboarding-begin" style="display: none">Begin</Button>
+            <Button variant="primary" size="lg" id="onboarding-next" extra="min-w-28">Next</Button>
+            <Button variant="primary" size="lg" id="onboarding-begin" extra="min-w-28" style="display: none">Begin</Button>
           </nav>
         </div>
       </div>

@@ -39,11 +39,15 @@ class _FakePage:
         urls: Sequence[str],
         is_visible_results: Sequence[bool | BaseException],
         error_message: str | None = None,
+        redirect_url: str | None = None,
     ) -> None:
         self._urls = list(urls)
         self._is_visible_results = list(is_visible_results)
         self._error_message = error_message
+        self._redirect_url = redirect_url
         self.wait_for_timeout_calls = 0
+        self.evaluate_calls = 0
+        self.goto_urls: list[str] = []
 
     @property
     def url(self) -> str:
@@ -55,6 +59,23 @@ class _FakePage:
             raise result
         return result
 
+    def locator(self, selector: str) -> "_FakeLocator":
+        return _FakeLocator(count=1 if selector == "#creating" else 0)
+
+    def evaluate(self, script: str) -> None:
+        self.evaluate_calls += 1
+
+    def get_attribute(self, selector: str, name: str, timeout: float | None = None) -> str:
+        # The waiter polls #creating[data-ready='true'] for its redirect URL;
+        # Playwright raises TimeoutError while the attribute isn't there yet.
+        if self._redirect_url is None:
+            raise PlaywrightTimeoutError("data-ready not set")
+        return self._redirect_url
+
+    def goto(self, url: str, wait_until: str | None = None) -> None:
+        self.goto_urls.append(url)
+        self._urls = [url]
+
     def query_selector(self, selector: str) -> _FakeElement | None:
         if selector == "#error-message" and self._error_message is not None:
             return _FakeElement(self._error_message)
@@ -62,6 +83,14 @@ class _FakePage:
 
     def wait_for_timeout(self, timeout_ms: float) -> None:
         self.wait_for_timeout_calls += 1
+
+
+class _FakeLocator:
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    def count(self) -> int:
+        return self._count
 
 
 def test_wait_returns_when_workspace_url_reached() -> None:
@@ -79,6 +108,17 @@ def test_wait_returns_for_https_workspace_url() -> None:
     https_ready_url = "https://agent-deadbeef.localhost:8421/"
     page = _FakePage(urls=[https_ready_url], is_visible_results=[False])
     _wait_for_workspace_ready_or_failure(cast(Page, page), timeout_seconds=5)
+
+
+def test_wait_navigates_to_redirect_url_when_ready() -> None:
+    """When #creating carries data-ready + data-redirect-url, the waiter
+    enters the workspace itself (the Begin button is a human affordance the
+    driver skips)."""
+    page = _FakePage(urls=[_PENDING_URL], is_visible_results=[False], redirect_url=_READY_URL)
+    _wait_for_workspace_ready_or_failure(cast(Page, page), timeout_seconds=5)
+    assert page.goto_urls == [_READY_URL]
+    # The waiter also unlocked failure surfacing up front.
+    assert page.evaluate_calls >= 1
 
 
 def test_wait_raises_with_surfaced_error_on_failure_view() -> None:
