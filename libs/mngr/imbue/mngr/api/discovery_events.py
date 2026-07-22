@@ -32,6 +32,8 @@ from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discovery_reconciliation import RemovedItemDecision
+from imbue.mngr.api.discovery_reconciliation import classify_removed_item
 from imbue.mngr.api.discovery_reconciliation import is_intervening_event
 from imbue.mngr.api.discovery_reconciliation import parse_event_timestamp
 from imbue.mngr.config.data_types import MngrConfig
@@ -679,7 +681,11 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
     For each provider, a ``DISCOVERY_PROVIDER`` snapshot is authoritative back to its
     ``discovery_started_at`` (when its read began), which is *earlier* than its own line
     position (written at ``discovery_finished_at``). So the value here is the minimum,
-    across every provider's *latest* snapshot, of that snapshot's ``discovery_started_at``.
+    across every provider, of that provider's *latest non-errored* snapshot's
+    ``discovery_started_at`` (falling back to its latest snapshot when the file holds
+    only errored ones). An errored snapshot carries no membership -- its read failed --
+    so a window starting there would reconstruct the provider as empty for as long as
+    its outage lasts; the last non-errored snapshot is where its membership actually is.
 
     The legacy ``DISCOVERY_FULL`` timestamp participates only when the file holds no
     per-provider snapshot at all (a pure pre-migration log). Nothing writes
@@ -690,6 +696,7 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
     of either kind.
     """
     latest_start_by_provider: dict[str, datetime] = {}
+    latest_non_errored_start_by_provider: dict[str, datetime] = {}
     latest_full_started_at: datetime | None = None
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path) as f:
@@ -702,9 +709,11 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
             if event_type == DiscoveryEventType.DISCOVERY_PROVIDER:
                 started_at_raw = data.get("discovery_started_at")
                 if started_at_raw is not None:
-                    latest_start_by_provider[str(data.get("provider_name", ""))] = parse_event_timestamp(
-                        IsoTimestamp(str(started_at_raw))
-                    )
+                    provider_name = str(data.get("provider_name", ""))
+                    started_at = parse_event_timestamp(IsoTimestamp(str(started_at_raw)))
+                    latest_start_by_provider[provider_name] = started_at
+                    if data.get("error") is None:
+                        latest_non_errored_start_by_provider[provider_name] = started_at
             elif event_type == DiscoveryEventType.DISCOVERY_FULL:
                 # The legacy global snapshot has no span; its own write time is the
                 # furthest back its (whole-world) reset needs replaying from.
@@ -715,7 +724,10 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
                 pass
 
     if latest_start_by_provider:
-        return min(latest_start_by_provider.values())
+        return min(
+            latest_non_errored_start_by_provider.get(provider_name, latest_start)
+            for provider_name, latest_start in latest_start_by_provider.items()
+        )
     return latest_full_started_at
 
 
@@ -828,24 +840,28 @@ def _apply_provider_snapshot_to_maps(
 
     A per-provider snapshot is authoritative only for its own provider, and only for
     agents with no newer incremental event during its discovery span. Mirrors the
-    rule in :class:`DiscoveryStateAggregator` so the resolution replay does not
+    rules in :class:`DiscoveryStateAggregator` so the resolution replay does not
     resurrect an agent destroyed mid-span, nor drop one created mid-span (the
     read-after-write case): the snapshot's read began at ``discovery_started_at``, so
-    any event at/after that instant reflects newer truth than the snapshot.
+    any event at/after that instant reflects newer truth than the snapshot. An
+    errored snapshot retains the provider's known agents: their absence reflects
+    the failed read, not a confirmed removal.
     """
     span_start = event.discovery_started_at
     provider_str = str(event.provider_name)
+    is_errored = event.error is not None
     snapshot_agent_ids = {str(agent.agent_id) for agent in event.agents}
 
     # Reconcile agents previously attributed to this provider but absent from the
-    # snapshot: forget them only if no newer in-span event contradicts the omission.
+    # snapshot: forget them only when the omission is a confirmed removal (the
+    # provider's read succeeded and no newer in-span event contradicts it).
     prior_provider_agent_ids = [aid for aid, name in maps.provider_by_agent_id.items() if name == provider_str]
     for agent_id in prior_provider_agent_ids:
         if agent_id in snapshot_agent_ids:
             continue
-        if is_intervening_event(last_event_time_by_agent_id.get(agent_id), span_start):
-            continue
-        maps.forget_agent(agent_id)
+        has_intervening = is_intervening_event(last_event_time_by_agent_id.get(agent_id), span_start)
+        if classify_removed_item(is_errored, has_intervening) is RemovedItemDecision.DROP:
+            maps.forget_agent(agent_id)
 
     # Apply each snapshot agent unless a newer in-span event already superseded it
     # (e.g. a destroy during the span must not be undone by this stale snapshot).
@@ -1258,9 +1274,9 @@ def tail_discovery_events_file(
     Tolerates the file being absent when called (the tail loop waits for it to appear)
     and being truncated/rotated while tailing (it resets and re-reads). On attach it
     replays from :func:`find_discovery_snapshot_replay_offset` -- the earliest offset
-    that still includes every provider's latest per-provider snapshot (or, for a pure
-    pre-migration log, the legacy full snapshot) -- so a consumer attaching mid-stream
-    is populated immediately
+    that still includes every provider's latest non-errored per-provider snapshot (or,
+    for a pure pre-migration log, the legacy full snapshot) -- so a consumer attaching
+    mid-stream is populated immediately
     without re-reading the whole file. The dedup set keeps a later real snapshot from
     double-emitting.
     """
