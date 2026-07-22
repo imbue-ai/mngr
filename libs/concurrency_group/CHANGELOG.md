@@ -15,6 +15,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: Force-terminate log message now states the reason explicitly ("it exceeded its <N>s timeout" or "a shutdown was requested (shutdown_event was set)"), so a routine cancellation is no longer misread as a timeout.
 
+### Fixed
+
+- Fixed: Subprocess shutdown logging no longer misreports routine cleanup as a forced kill. A process that already exited by the time its shutdown is requested (the common case for single-use workers) is reaped quietly with a debug line stating its actual exit code, instead of logging "Terminating subprocess ... with SIGTERM because a shutdown was requested". A process that is genuinely still alive logs the explicit "Stopping subprocess ... because the parent requested cleanup" wording; the timeout path keeps its "exceeded its Ns timeout" message.
+
 ## [v0.1.20] - 2026-06-13
 
 ### Changed

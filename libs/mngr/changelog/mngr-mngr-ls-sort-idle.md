@@ -1,1 +1,0 @@
-Fixed `mngr list --sort` on numeric fields (e.g. `idle`, `age`, `runtime`, `idle_seconds`), which previously ordered values as strings -- so an idle spread like 2.4, 14040.2, 111044 came out interleaved rather than sorted. Numeric sort keys now compare numerically; string fields are unchanged, and missing values still sort to the end in both directions.
