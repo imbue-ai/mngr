@@ -39,7 +39,20 @@ def test_render_auth_page_without_return_to_has_no_back_link() -> None:
 def test_render_auth_page_includes_oauth_buttons() -> None:
     html = render_auth_page()
     assert "Continue with Google" in html
-    assert "Continue with GitHub" in html
+    # GitHub OAuth is not enabled in production, so its login button was removed
+    # from the auth page (the underlying provider support is left intact).
+    assert "Continue with GitHub" not in html
+
+
+def test_render_auth_page_oauth_buttons_carry_click_spinner() -> None:
+    # On click auth.js hides ``.oauth-btn-icon`` and reveals ``.oauth-btn-spinner``
+    # in its place, so both wrappers must be present. ``hidden`` must sit on a
+    # plain wrapper span (not on ``<Spinner>``, whose own ``inline-block`` would
+    # override ``display:none`` and leave the spinner showing at rest), so assert
+    # the exact wrapper class.
+    html = render_auth_page()
+    assert 'class="oauth-btn-spinner hidden"' in html
+    assert 'class="oauth-btn-icon"' in html
 
 
 def test_render_auth_page_includes_toggle_links() -> None:

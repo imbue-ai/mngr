@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.errors import WorkspaceSyncError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
 
@@ -1123,12 +1124,21 @@ class WorkspaceRecordStore(MutableModel):
         """Whether a legacy-association workspace is provably gone from this device.
 
         Mirrors the tombstone pass's caution: only a complete discovery
-        snapshot with no errored providers can prove absence -- a failed poll
-        proves nothing, so its associations must survive for a later pass.
+        snapshot whose failures cannot be hiding this workspace can prove
+        absence -- a failed poll proves nothing, so its associations must
+        survive for a later pass. Unconfigured providers
+        (``ProviderNotAuthorizedError``) do not block: a provider with no
+        credentials on this device errors on *every* poll, so treating it as
+        a failed poll would keep a gone workspace's association in limbo
+        forever. (A legacy association names no provider, so filtering by
+        error type is the closest available per-provider scoping.)
         """
         if not resolver.has_completed_initial_discovery():
             return False
-        if resolver.get_provider_errors():
+        is_any_provider_poll_failed = any(
+            error.type_name != ProviderNotAuthorizedError.__name__ for error in resolver.get_provider_errors().values()
+        )
+        if is_any_provider_poll_failed:
             return False
         return str(agent_id) not in {str(aid) for aid in resolver.list_known_workspace_ids()}
 

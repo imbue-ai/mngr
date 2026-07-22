@@ -236,9 +236,10 @@ PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     rule_name="trailing comments",
     rule_description=(
         "Comments should be on their own line, not trailing after code. Trailing comments make code harder to read. "
-        "`# ty: ignore[code]` is exempt, as are hex colors and `PR #NNNN` references inside prose."
+        "`# ty: ignore[code]` is exempt, as are hex colors, `PR #NNNN` references inside prose, and `#{...}` "
+        "interpolation/format tokens (e.g. tmux format strings), which are not comments."
     ),
-    pattern_string=r"[^\s#].*[ \t](?<![Pp][Rr] )#(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
+    pattern_string=r"[^\s#].*[ \t](?<![Pp][Rr] )#(?!\{)(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
 )
 
 PREVENT_INIT_DOCSTRINGS = RegexRatchetRule(

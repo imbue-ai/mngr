@@ -4,6 +4,7 @@ import json
 import threading
 from collections.abc import Callable
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from io import StringIO
 from typing import Any
@@ -15,6 +16,7 @@ from click.testing import CliRunner
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
 from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
 from imbue.mngr.cli.exit_codes import EXIT_CODE_SUCCESS
@@ -585,6 +587,56 @@ def test_sort_agents_by_cel_nested_field() -> None:
     compiled = compile_cel_sort_keys("host.provider")
     result = _sort_agents_by_cel(agents, compiled)
     assert [str(a.name) for a in result] == ["agent-a", "agent-b"]
+
+
+def _agent_with_idle(name: str, idle_seconds: float) -> AgentDetails:
+    """Build an agent whose computed `idle` field is approximately `idle_seconds`."""
+    now = datetime.now(timezone.utc)
+    return make_test_agent_details(name=name, user_activity_time=now - timedelta(seconds=idle_seconds))
+
+
+def test_sort_agents_by_cel_numeric_idle_ascending() -> None:
+    """Sorting by a numeric CEL field must order numerically, not lexicographically.
+
+    Uses 2 / 10 / 100: numerically 2 < 10 < 100, but as strings "10" < "100" <
+    "2", so a string comparator mis-orders them.
+    """
+    agents = [
+        _agent_with_idle("large", 100),
+        _agent_with_idle("medium", 10),
+        _agent_with_idle("small", 2),
+    ]
+    compiled = compile_cel_sort_keys("idle asc")
+    result = _sort_agents_by_cel(agents, compiled)
+    assert [str(a.name) for a in result] == ["small", "medium", "large"]
+    idle_values = [float(build_agent_cel_context(agent)["idle"]) for agent in result]
+    assert idle_values == sorted(idle_values)
+
+
+def test_sort_agents_by_cel_numeric_idle_descending() -> None:
+    """Sorting a numeric CEL field descending must order numerically."""
+    agents = [
+        _agent_with_idle("small", 2),
+        _agent_with_idle("medium", 10),
+        _agent_with_idle("large", 100),
+    ]
+    compiled = compile_cel_sort_keys("idle desc")
+    result = _sort_agents_by_cel(agents, compiled)
+    assert [str(a.name) for a in result] == ["large", "medium", "small"]
+    idle_values = [float(build_agent_cel_context(agent)["idle"]) for agent in result]
+    assert idle_values == sorted(idle_values, reverse=True)
+
+
+def test_sort_agents_by_cel_numeric_missing_sorts_last() -> None:
+    """Agents whose numeric CEL field is absent sort to the end in either direction."""
+    with_idle = _agent_with_idle("has-idle", 2)
+    without_idle = make_test_agent_details(name="no-idle")
+
+    ascending = _sort_agents_by_cel([without_idle, with_idle], compile_cel_sort_keys("idle asc"))
+    assert [str(a.name) for a in ascending] == ["has-idle", "no-idle"]
+
+    descending = _sort_agents_by_cel([without_idle, with_idle], compile_cel_sort_keys("idle desc"))
+    assert [str(a.name) for a in descending] == ["has-idle", "no-idle"]
 
 
 # =============================================================================
@@ -1316,6 +1368,38 @@ def test_list_command_json_format_with_agents(
     names = [a["name"] for a in output["agents"]]
     assert "alpha" in names
     assert "bravo" in names
+
+
+def test_list_command_sorts_numeric_field_numerically(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mngr ls --sort 'idle_seconds asc'` must order a numeric field numerically.
+
+    Drives the real list command end-to-end. Uses 2 / 10 / 100: numerically
+    2 < 10 < 100, but as strings "10" < "100" < "2", so a string sort would
+    mis-order them.
+    """
+    agents = [
+        make_test_agent_details(name="large", idle_seconds=100),
+        make_test_agent_details(name="medium", idle_seconds=10),
+        make_test_agent_details(name="small", idle_seconds=2),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "idle_seconds asc", "--fields", "name,idle_seconds"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    idle_values = [agent["idle_seconds"] for agent in output["agents"]]
+    assert idle_values == [2, 10, 100]
+    assert [agent["name"] for agent in output["agents"]] == ["small", "medium", "large"]
 
 
 def test_list_command_jsonl_format_with_agents(
