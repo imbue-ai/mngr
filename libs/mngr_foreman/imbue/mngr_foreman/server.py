@@ -34,6 +34,7 @@ from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr_foreman.agent_registry import AgentRegistry
 from imbue.mngr_foreman.assets import ensure_assets
 from imbue.mngr_foreman.assets import get_asset_dir
+from imbue.mngr_foreman.backburner import BackburnerStore
 from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.harness import TranscriptStrategy
 from imbue.mngr_foreman.harness import transcript_strategy_for
@@ -144,13 +145,6 @@ def _sse(event_dict: dict) -> str:
     return f"data: {json.dumps(event_dict)}\n\n"
 
 
-# Label that marks an agent as "backburner" -- the home page files it under a
-# Backburner section instead of the main list. Stored in the agent's mngr labels
-# (persisted to its data.json), so it survives restarts and is one signal both the
-# home render and this endpoint agree on.
-_BACKBURNER_LABEL = "foreman.backburner"
-
-
 def _not_found() -> Response:
     return Response("Not found", status=404, mimetype="text/plain")
 
@@ -216,6 +210,14 @@ def create_app(
     @app.teardown_request
     def _cleanup_thread_hub(_exc: BaseException | None) -> None:
         cleanup_thread_local_resources()
+
+    # Foreman-local "parked" set -- which agents render under the home Backburner
+    # section. Kept on the box (no per-agent host round-trip); the registry tags each
+    # card from it at snapshot time.
+    backburner = BackburnerStore(
+        mngr_ctx.config.default_host_dir.expanduser() / "plugin" / "foreman" / "backburner.json"
+    )
+    registry.set_backburner_predicate(backburner.is_backburner)
 
     # ---- pages ------------------------------------------------------------
 
@@ -408,35 +410,18 @@ def create_app(
 
     @app.route("/api/agents/<name>/backburner", methods=["POST"])
     def api_backburner(name: str) -> ResponseReturnValue:
-        """Toggle the backburner label on an agent (persisted in its mngr labels).
+        """Park / un-park an agent. Body: ``{"on": true|false}`` (defaults to true).
 
-        Body: ``{"on": true|false}`` (defaults to true). Mirrors mngr's own ``label``
-        command: set the label on a fresh agent object from the host so its
-        ``set_labels`` writes through to the agent's ``data.json``. The registry's
-        next discovery poll re-reads that and re-broadcasts, so every home page moves
-        the card into / out of the Backburner section.
+        Just a fast local write to foreman's own parked-set keyed by agent id -- no
+        host round-trip. ``republish`` pushes a fresh snapshot so every open home page
+        moves the card into / out of the Backburner section immediately.
         """
         agent = registry.get_agent(name)
         if agent is None:
             return _not_found()
         on = bool((request.get_json(silent=True) or {}).get("on", True))
-
-        def _apply(_agent: AgentInterface, host: OnlineHostInterface) -> None:
-            for live in host.get_agents():
-                if str(live.id) == str(agent.id):
-                    labels = dict(live.get_labels())
-                    if on:
-                        labels[_BACKBURNER_LABEL] = "true"
-                    else:
-                        labels.pop(_BACKBURNER_LABEL, None)
-                    live.set_labels(labels)
-                    return
-
-        try:
-            pool.run_on_host(name, _apply)
-        except Exception as e:  # noqa: BLE001 - surface the failure to the UI, don't crash the route
-            logger.info("Backburner toggle for {} failed: {}", name, e)
-            return _error(str(e), 502)
+        backburner.set(str(agent.id), on)
+        registry.republish()
         return jsonify({"ok": True, "backburner": on})
 
     # ---- attachments ------------------------------------------------------

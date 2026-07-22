@@ -89,6 +89,9 @@ class AgentRegistry:
         # newly-appeared agents and drops departed ones without waiting out its own
         # keepalive interval.
         self._on_change: Callable[[], None] | None = None
+        # Tags each card with whether the user parked it (foreman-local state, injected
+        # by the app). Default: nothing parked.
+        self._is_backburner: Callable[[str], bool] = lambda _id: False
         self._live_names: frozenset[str] = frozenset()
         self._last_broadcast: str | None = None
         self._stop = threading.Event()
@@ -109,6 +112,15 @@ class AgentRegistry:
     def set_on_change(self, callback: Callable[[], None]) -> None:
         """Register a callback fired when the live-agent name set changes."""
         self._on_change = callback
+
+    def set_backburner_predicate(self, is_backburner: Callable[[str], bool]) -> None:
+        """Inject the "is this agent id parked?" test used to tag each card."""
+        self._is_backburner = is_backburner
+
+    def republish(self) -> None:
+        """Broadcast a fresh snapshot now (e.g. right after a backburner toggle) so
+        every open home page reflects the change immediately, not on the next poll."""
+        self._publish()
 
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
@@ -219,7 +231,7 @@ class AgentRegistry:
     def snapshot(self) -> list[dict]:
         with self._lock:
             agents = list(self._agents.values())
-        return [_agent_to_card(a) for a in sorted(agents, key=_sort_key)]
+        return [_agent_to_card(a, self._is_backburner) for a in sorted(agents, key=_sort_key)]
 
     def get_agent(self, name_or_id: str) -> AgentDetails | None:
         with self._lock:
@@ -270,7 +282,7 @@ def _sort_key(agent: AgentDetails) -> tuple:
     return (0 if activity else 1, -(activity.timestamp() if activity else 0.0), str(agent.name))
 
 
-def _agent_to_card(agent: AgentDetails) -> dict:
+def _agent_to_card(agent: AgentDetails, is_backburner: Callable[[str], bool]) -> dict:
     """Project an ``AgentDetails`` down to the fields the list UI needs."""
     activity = agent.agent_activity_time or agent.user_activity_time
     return {
@@ -281,6 +293,9 @@ def _agent_to_card(agent: AgentDetails) -> dict:
         "host_name": agent.host.name,
         "provider": str(agent.host.provider_name),
         "labels": dict(agent.labels),
+        # Foreman-local parked flag (not an mngr label) -- the home page files parked
+        # agents under the Backburner section.
+        "backburner": is_backburner(str(agent.id)),
         "activity_time": activity.isoformat() if activity else None,
         # Chat (live transcript + composer) is available for any type foreman has a
         # transcript strategy for (claude, codex, opencode, pi-coding); others are

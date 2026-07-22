@@ -275,8 +275,8 @@
       if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
       return Math.floor(secs / 86400) + "d ago";
     }
-    // Backburner: agents the user has parked. Marked by the `foreman.backburner`
-    // mngr label (persisted server-side); the home page files them under their own
+    // Backburner: agents the user has parked. Server tags each card with a `backburner`
+    // flag from foreman-local state; the home page files parked ones under their own
     // section instead of the live list.
     let lastAgents = [];
     // Per-agent in-flight guard. A toggle flips a persisted mngr label, then a
@@ -286,7 +286,7 @@
     // reconciles (POST lost, agent vanished), the guard releases so the button can't
     // wedge forever.
     const bbPending = new Map(); // name -> { want: bool, timer }
-    function rawBackburner(a) { return !!(a.labels && a.labels["foreman.backburner"] === "true"); }
+    function rawBackburner(a) { return !!a.backburner; }
     function isBackburner(a) {
       const p = bbPending.get(a.name);
       return p ? p.want : rawBackburner(a); // optimistic value wins until reconciled
@@ -529,6 +529,8 @@
     // bottom re-attaches. Starts attached, so a freshly opened chat lands on the
     // newest message.
     let stick = true;
+    let lastTop = 0; // previous scrollTop, for scroll-direction detection
+    let lastH = 0;   // previous content height, so we follow ONLY on growth
     function atBottom() {
       return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
     }
@@ -537,12 +539,26 @@
       if (force) stick = true;
       if (stick) scrollToBottom();
     }
-    scroller.addEventListener("scroll", () => { stick = atBottom(); }, { passive: true });
-    // Follow late-growing content too -- streaming assistant text, and images /
-    // mermaid / katex that finish loading after their event first rendered --
-    // whenever we're still attached to the bottom.
+    // Detach the instant the user drags UP, so nothing yanks them back down; re-attach
+    // only when they return to the tail. Direction-based, not an 80px distance
+    // threshold -- near the bottom a distance rule lets streaming growth keep pulling
+    // them down (that was the mobile scroll-up jitter).
+    scroller.addEventListener("scroll", () => {
+      const t = scroller.scrollTop;
+      if (t < lastTop - 2) stick = false;
+      else if (atBottom()) stick = true;
+      lastTop = t;
+    }, { passive: true });
+    // Follow the tail ONLY when the transcript actually EXPANDS (new/streaming content,
+    // late-loading images/mermaid/katex) and we're still attached. A resize that adds
+    // no height -- notably the mobile URL bar showing/hiding on scroll -- is ignored;
+    // reacting to that non-expansion resize was the jitter.
     if (typeof ResizeObserver !== "undefined") {
-      new ResizeObserver(() => { if (stick) scrollToBottom(); }).observe(tEl);
+      new ResizeObserver(() => {
+        const h = scroller.scrollHeight;
+        if (h > lastH && stick) scrollToBottom();
+        lastH = h;
+      }).observe(tEl);
     }
 
     // ---- diff rendering (client-side, no lib) ----
