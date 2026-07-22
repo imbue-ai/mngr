@@ -15,21 +15,17 @@ fi
 # Non-interactive ssh so a marketplace git fetch can never hang the hook at a
 # host-key or credential prompt, with a short connect timeout so that even with
 # several plugins attempting update and install while offline, every attempt
-# finishes (and the explanatory warning prints) within the hook time budget.
+# finishes within the hook time budget.
 export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5'
 
 # The plugins and marketplaces are configured at project scope in
-# .claude/settings.json (extraKnownMarketplaces + enabledPlugins), so Claude
-# Code handles installation automatically; this hook keeps them up to date.
+# .claude/settings.json (extraKnownMarketplaces + enabledPlugins); this hook
+# installs them when missing and keeps them up to date.
 #
-# The plugin cache is deliberately left alone: `claude plugin update` refreshes
-# it on success (verified on claude 2.1.205, where update repopulates even a
-# deleted cache dir), while wiping it up front would strip every plugin skill
-# from the session whenever the update fails (offline, git auth). Failures are
-# surfaced (but not fatal) so a session missing /autofix and friends says why,
-# instead of silently losing them; the final warning goes to stdout because
-# SessionStart stdout is injected into the session context, where the agent
-# can actually read it.
+# The cache is left in place across updates: wiping it first would strip every
+# plugin skill from the session whenever an update fails (offline, git auth).
+# The final warning goes to stdout because SessionStart stdout is injected into
+# the session context, where the agent can read it.
 for plugin_id in "${PLUGIN_IDS[@]}"; do
     if output=$(claude plugin update "$plugin_id" 2>&1); then
         printf '%s\n' "$output"
