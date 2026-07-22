@@ -273,10 +273,8 @@ def test_litellm_spend_tracking_via_local_workspace(
     # 2-5. Create the workspace, sign it in, chat, and assert spend.
     template_path = _prepare_template_clone(default_workspace_template_ref.worktree_path)
     token = get_short_random_string()
-    created = False
     try:
         _agent_id, host_id = _create_docker_workspace(template_path, host_name)
-        created = True
         container_name = _find_container_name(host_id)
         _wait_for_system_interface(container_name)
 
@@ -290,12 +288,15 @@ def test_litellm_spend_tracking_via_local_workspace(
         spend = _await_key_spend(env.neon_litellm_dsn.get_secret_value(), key_alias)
         logger.info("litellm recorded spend {} for key alias {}", spend, key_alias)
     finally:
-        if created:
-            destroy = _run(
-                ["mngr", "destroy", f"system-services@{host_name}", "--force"],
-                cwd=template_path,
-                timeout=_CREATE_TIMEOUT_SECONDS,
-            )
-            if destroy.returncode != 0:
-                logger.warning("Workspace teardown failed (leaving for manual cleanup): {}", destroy.stderr[-500:])
+        # Destroy unconditionally: even a create that failed partway (timeout,
+        # nonzero exit, missing created event) may have brought a container up.
+        # Destroying a host that never came up fails harmlessly and is only
+        # logged.
+        destroy = _run(
+            ["mngr", "destroy", f"system-services@{host_name}", "--force"],
+            cwd=template_path,
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        if destroy.returncode != 0:
+            logger.warning("Workspace teardown failed (leaving for manual cleanup): {}", destroy.stderr[-500:])
         shutil.rmtree(template_path.parent, ignore_errors=True)
