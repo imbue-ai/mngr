@@ -967,11 +967,13 @@ def _pick_chrome_page(browser: Browser, timeout_seconds: int) -> Page:
 def drive_create_docker_imbue_workspace(
     page: Page, default_workspace_template_path: Path, workspace_name: str
 ) -> None:
-    """Fill + submit the create form for a local-Docker workspace with Imbue-Cloud AI.
+    """Fill + submit the create form for a local-Docker workspace with an Imbue account.
 
-    Local Docker compute keeps the workspace on this machine; Imbue-Cloud AI
-    gives the agent working credentials (via the activated env's account) so it
-    can answer the chat message. Backups are deferred to keep create fast.
+    Local Docker compute keeps the workspace on this machine; the selected
+    account only associates the workspace for compute/backups -- the create
+    flow injects no AI credentials, so a chat reply relies on the operator's
+    synced Claude subscription credentials keeping the workspace
+    authenticated. Backups are deferred to keep create fast.
     """
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)

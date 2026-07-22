@@ -4,8 +4,10 @@ Drives the real Electron app via Playwright (CDP) through the whole user
 journey the desktop client exists for, against a *local Docker* workspace
 created from the default-workspace-template:
 
-  1. create a Docker workspace (local compute) with Imbue-Cloud AI creds so
-     the agent can actually answer,
+  1. create a Docker workspace (local compute) with an Imbue account
+     selected (compute/backup association; the create flow injects no AI
+     credentials, so the chat step relies on the operator's synced Claude
+     subscription credentials keeping the workspace authenticated),
   2. send a chat message and wait for the agent's reply,
   3. open a terminal panel in the dockview,
   4. navigate back to the home/landing screen (via the chrome Home button),
@@ -13,8 +15,8 @@ created from the default-workspace-template:
      ``POST /api/v1/workspaces/<id>/destroy`` flow), confirming it leaves the
      landing list.
 
-This complements ``test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron``
-(which asserts the create + chat steps). The reusable flow lives in
+This complements ``test_snapshot_resume.py::test_create_workspace_and_sign_in_via_modal_then_chat_via_electron``
+(which asserts the create + modal sign-in + chat steps). The reusable flow lives in
 ``e2e_workspace_runner.run_full_workspace_flow``;
 this script is the thin CLI wrapper that picks names + an env and reports.
 
@@ -23,9 +25,9 @@ Run it headless on Linux via ``just minds-test-electron-flow`` (wraps this in
 logged-in account first, e.g. ``eval "$(uv run minds env activate dev-josh-1)"``.
 
 This is an operator/debug harness, not a pytest test: chat replies depend on
-live AI creds and Docker, which are not available on the standard unit/CI
-runners. The create + chat path is the one crystallized as a pytest test
-(``test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron``).
+live Claude credentials and Docker, which are not available on the standard
+unit/CI runners. The create + chat path is the one crystallized as a pytest test
+(``test_snapshot_resume.py::test_create_workspace_and_sign_in_via_modal_then_chat_via_electron``).
 """
 
 import os
