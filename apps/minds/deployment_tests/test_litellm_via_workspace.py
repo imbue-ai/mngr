@@ -192,9 +192,12 @@ def _chat_and_await_echo(container_name: str, chat_agent_id: str, token: str) ->
         timeout=300,
     )
     assert messaged.returncode == 0, f"mngr message failed: {messaged.stderr}"
+    # Filter to assistant events: the sent prompt itself contains the token, so
+    # an unfiltered transcript would match the user's own message before (and
+    # regardless of) any reply.
     poll = (
         f"for i in $(seq 1 {_CHAT_REPLY_ATTEMPTS}); do "
-        f"cd /code && mngr transcript {chat_agent_id} 2>/dev/null | grep -q {token} && exit 0; "
+        f"cd /code && mngr transcript {chat_agent_id} --role assistant 2>/dev/null | grep -q {token} && exit 0; "
         "sleep 5; done; exit 1"
     )
     replied = _exec_in_container(container_name, poll, timeout=_CHAT_REPLY_ATTEMPTS * 5 + 120)
