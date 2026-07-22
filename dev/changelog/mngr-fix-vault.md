@@ -1,0 +1,1 @@
+Removed the root `.minds/policies/` directory (and its `.gitignore` un-ignore block): the minds-tier Vault ACL policy text now lives in the imbue-ai/vault repo's terraform (`terraform/employee.tf` and `terraform/minds_operators.tf`), which is the single source of truth. Keeping a second copy here is what let the live policies drift from the vault repo's config in the first place.
