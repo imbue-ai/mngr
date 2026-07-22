@@ -72,6 +72,17 @@ describe("classifyContent", () => {
       activeTab: "workspace",
     });
   });
+
+  it("treats the /_chrome loading wrapper as home, not a workspace", () => {
+    // The persistent shell swaps /_chrome in as the agent-content LOADING
+    // surface; it is never a page of its own. If it reaches the titlebar's
+    // content URL it must classify as home -- which hides the workspace crumb.
+    // That is exactly why the swap engine must not stamp it (see the
+    // crumb-visibility regression guard below and chrome.js's swapLocalPage).
+    expect(classifyContent("/_chrome")).toEqual({ kind: "home" });
+    expect(classifyContent(`/_chrome?accent=%23112233&agent=${AGENT}`)).toEqual({ kind: "home" });
+    expect(classifyContent(`http://localhost:49403/_chrome?agent=${AGENT}`)).toEqual({ kind: "home" });
+  });
 });
 
 describe("TitleBar", () => {
@@ -137,5 +148,28 @@ describe("TitleBar", () => {
 
     expect(calls).toContain(`navigate:https://localhost:8421/goto/${AGENT}/`);
     expect(calls).toContain("minimize");
+  });
+
+  it("drops the workspace crumb when the /_chrome wrapper URL is stamped as content (regression guard)", () => {
+    // The fragile-crumb bug: the shell's swap engine stamped the /_chrome
+    // loading-wrapper path as the content URL, which classifies as home and
+    // hides the crumb -- racing main's authoritative workspace-URL push, so the
+    // crumb showed or hid nondeterministically. This locks in the contract the
+    // fix relies on: a workspace URL shows the crumb, the wrapper path hides it,
+    // so chrome.js's swapLocalPage must never stamp /_chrome as the content URL.
+    applyChromeEvent({
+      type: "workspaces",
+      workspaces: [{ id: AGENT, name: "ws-bravo", accent: "#112233" }],
+      destroying_agent_ids: [],
+      destroying_status_by_agent_id: {},
+      remote_workspace_states: {},
+    });
+    setContentUrl(`http://${AGENT}.localhost:8421/`);
+    const container = mountBar(recordingHost().host);
+    expect((container.querySelector("#ws-crumb") as HTMLElement).hidden).toBe(false);
+
+    setContentUrl(`/_chrome?accent=%23112233&agent=${AGENT}`);
+    m.redraw.sync();
+    expect((container.querySelector("#ws-crumb") as HTMLElement).hidden).toBe(true);
   });
 });
