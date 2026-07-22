@@ -76,6 +76,13 @@ _TRANSCRIPT_POLL_SECONDS: Final[float] = 0.5
 # Bound every foreground host command (stat/probe) so an unresponsive host can't
 # wedge an SSE poll or request thread indefinitely.
 _HOST_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
+# Tail-first backfill: parse only the last _BACKFILL_TAIL_LINES for the initial paint so
+# a huge transcript loads its recent history in well under a second; the rest streams in
+# afterward as "older" frames. _BACKFILL_PAINT_EVENTS is how many of the most recent
+# events are painted before ``backfill_complete`` (the client fills the gap above from the
+# "older" stream). Kept in lockstep with the client's TAIL_RENDER_COUNT.
+_BACKFILL_TAIL_LINES: Final[int] = 400
+_BACKFILL_PAINT_EVENTS: Final[int] = 40
 
 
 def _read_static(rel_path: str, asset_dir: Path | None) -> tuple[bytes, str] | None:
@@ -523,30 +530,53 @@ def _transcript_stream_inner(
     # so queued messages appear the instant they're enqueued (see the parser).
     queue_state: list[dict[str, Any]] = []
 
-    def _emit(lines: list[str]) -> Iterator[str]:
+    def _parse(lines: list[str], queue: list[dict[str, Any]]) -> list[dict]:
         if not lines:
-            return
-        events = strategy.parse(
-            lines,
-            existing_event_ids=existing_event_ids,
-            tool_name_by_call_id=tool_name_by_call_id,
-            max_tool_output_chars=max_tool_output_chars,
-            queue_state=queue_state,
+            return []
+        return list(
+            strategy.parse(
+                lines,
+                existing_event_ids=existing_event_ids,
+                tool_name_by_call_id=tool_name_by_call_id,
+                max_tool_output_chars=max_tool_output_chars,
+                queue_state=queue,
+            )
         )
+
+    def _frames(events: list[dict], kind: str) -> Iterator[str]:
         for event in events:
             # Move large base64 images out-of-band so SSE frames stay small; the
             # client fetches them by id from the /timage endpoint.
             externalize_event_images(event)
-            yield _sse({"type": "event", "event": event})
+            yield _sse({"type": kind, "event": event})
 
-    # Backfill: first poll reads the whole file from offset 0.
+    # Read the whole file once (cheap I/O over the warm host); the tailer offset is now
+    # at EOF so live-follow below only sees genuinely new lines.
     try:
         backfill_lines = tailer.poll()
     except Exception as e:  # noqa: BLE001
         yield _sse({"type": "error", "message": f"Failed to read transcript: {e}"})
         return
-    yield from _emit(backfill_lines)
+
+    # Tail-first: parse only the recent tail and paint the last few messages immediately,
+    # then stream the rest of history above them (newest-first). A 9 MB / 2000-event
+    # transcript otherwise ships+parses+paints everything before the first byte renders
+    # (~10s in the browser); this makes the current conversation appear in well under 1s.
+    tail_lines = backfill_lines[-_BACKFILL_TAIL_LINES:]
+    head_lines = backfill_lines[: len(backfill_lines) - len(tail_lines)]
+    tail_events = _parse(tail_lines, queue_state)  # the live queue derives from recent ops
+    paint = tail_events[-_BACKFILL_PAINT_EVENTS:]
+    region_older = tail_events[: len(tail_events) - len(paint)]
+
+    yield from _frames(paint, "event")
     yield _sse({"type": "backfill_complete"})
+
+    # Older history, newest-first so the client prepends each event straight onto the top.
+    # The head is parsed with a throwaway queue so its long-resolved queue-ops can't
+    # perturb the live queue built from the tail; ids/tool-names stay shared for dedup.
+    yield from _frames(list(reversed(region_older)), "older")
+    yield from _frames(list(reversed(_parse(head_lines, []))), "older")
+    yield _sse({"type": "older_complete"})
 
     # Live follow at a fixed, consistent fast rate -- the connection is always warm
     # and a stat-before-read keeps a poll cheap when the file hasn't grown.
@@ -558,7 +588,7 @@ def _transcript_stream_inner(
         except Exception as e:  # noqa: BLE001
             logger.trace("Transcript poll error (continuing): {}", e)
             new_lines = []
-        yield from _emit(new_lines)
+        yield from _frames(_parse(new_lines, queue_state), "event")
         now = time.monotonic()
         if now - last_heartbeat >= _HEARTBEAT_SECONDS:
             yield _sse({"type": "heartbeat"})

@@ -788,6 +788,28 @@
       scheduleIdle(chunk);
     }
 
+    // Older history streamed newest-first by the server's tail-first backfill: prepend
+    // each event at the very top so the transcript grows upward in order. Buffered and
+    // rendered in idle chunks (insert before firstChild) so thousands of old events
+    // never jank the page or move the reader's viewport.
+    let olderBuf = [];
+    let olderScheduled = false;
+    function scheduleOlder() {
+      if (olderScheduled) return;
+      olderScheduled = true;
+      scheduleIdle(flushStreamedOlder);
+    }
+    function flushStreamedOlder() {
+      olderScheduled = false;
+      if (!olderBuf.length) return;
+      const oldH = scroller.scrollHeight;
+      const pinned = stick;
+      for (let n = 0; olderBuf.length && n < 15; n++) renderEvent(olderBuf.shift(), tEl.firstChild);
+      if (pinned) scrollToBottom(); // stay pinned to the tail while history fills above
+      else scroller.scrollTop += scroller.scrollHeight - oldH; // keep the viewport stable
+      if (olderBuf.length) scheduleOlder();
+    }
+
     function setStatus(text) {
       let s = document.getElementById("stat");
       if (!s) { s = el("div", "status-line"); s.id = "stat"; addMain(s); }
@@ -865,6 +887,15 @@
           // A background reconnect re-sends backfill_complete; without this guard it
           // would yank someone who has scrolled up reading history back to the bottom.
           if (wasInitial || stick) scrollDown(true);
+        } else if (msg.type === "older") {
+          // Older history (streamed newest-first after the tail). Dedup, then prepend
+          // above the current top in idle chunks.
+          const id = msg.event && msg.event.event_id;
+          if (id) { if (seenEventIds.has(id)) return; seenEventIds.add(id); }
+          olderBuf.push(msg.event);
+          scheduleOlder();
+        } else if (msg.type === "older_complete") {
+          // History fully streamed; the idle flush drains olderBuf on its own.
         } else if (msg.type === "unsupported") {
           clearStatus();
           addMain(el("div", "unsupported", "No transcript for agent type '" + msg.agent_type + "'."));
@@ -1523,36 +1554,40 @@
     }
 
     // ---- highlight-to-copy ----
-    // Selecting text in xterm doesn't copy on its own. Copy the selection once it
-    // settles: a debounced onSelectionChange covers mouse-drag, touch, and
-    // keyboard Shift-select in one hook (it fires continuously mid-drag, so wait
-    // for it to go quiet). navigator.clipboard.writeText needs a secure context --
-    // true on https + http://localhost, FALSE over http://<remote-ip>:8700 -- so
-    // auto-copy works via localhost/https and quietly no-ops elsewhere; the
-    // browser's native long-press / right-click copy still works on the xterm
-    // selection either way.
-    // tmux nuance: a pane with `mouse on` captures a plain drag into tmux
-    // copy-mode, so on those the user must Shift+drag to make a browser selection.
-    // term.getSelection() returns whatever the browser selected regardless, so
-    // copy works either way. (This box's ~/.mngr/tmux.conf leaves mouse off, so a
-    // plain drag selects here.)
-    const canCopy = !!(navigator.clipboard && window.isSecureContext);
-    if (canCopy) {
-      let copyTimer = null;
-      term.onSelectionChange(() => {
-        if (copyTimer) clearTimeout(copyTimer);
-        copyTimer = setTimeout(() => {
-          if (term.hasSelection()) {
-            const sel = term.getSelection();
-            if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-          }
-        }, 250);
-      });
-    } else {
-      // Remote-IP over plain http: auto-copy is unavailable. Leave a hover hint so
-      // the "selecting doesn't copy" surprise is explained; native copy still works.
-      const termEl = document.getElementById("term");
-      if (termEl) termEl.title = "Auto-copy needs https or localhost. Use your browser's copy (long-press / right-click) on the selection.";
+    // Selecting text in xterm doesn't copy on its own. We copy on the gesture that
+    // ENDS the selection (mouseup / touchend) rather than a debounced timer, because
+    // being inside a real user gesture is what lets the plain-http fallback work:
+    // navigator.clipboard.writeText needs a secure context (https / http://localhost)
+    // and is blocked over http://<remote-ip>:8700 (phone on the tailnet), but
+    // document.execCommand("copy") from a hidden textarea DOES work there when called
+    // synchronously inside a gesture. So: async clipboard first, execCommand fallback.
+    // tmux nuance: a pane with `mouse on` captures a plain drag into tmux copy-mode,
+    // so there the user must Shift+drag to make a browser selection; getSelection()
+    // returns it either way. (This box's ~/.mngr/tmux.conf leaves mouse off.)
+    function copyViaTextarea(text) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", ""); // readonly -> selecting it won't pop the mobile keyboard
+      ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+      document.body.appendChild(ta);
+      ta.select();
+      try { ta.setSelectionRange(0, text.length); } catch (_e) {}
+      try { document.execCommand("copy"); } catch (_e) {}
+      document.body.removeChild(ta);
+    }
+    function copySelection(e) {
+      if (!term.hasSelection()) return;
+      const sel = term.getSelection();
+      if (!sel) return;
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(sel).catch(() => copyViaTextarea(sel));
+      else copyViaTextarea(sel);
+      // Restore terminal focus on desktop; on touch, refocusing xterm pops the keyboard.
+      if (!e || e.type !== "touchend") term.focus();
+    }
+    const termElForCopy = document.getElementById("term");
+    if (termElForCopy) {
+      termElForCopy.addEventListener("mouseup", copySelection);
+      termElForCopy.addEventListener("touchend", copySelection);
     }
 
     // Ctrl+Shift+V pastes (mirrors the Paste button); the shell keeps plain Ctrl+V.

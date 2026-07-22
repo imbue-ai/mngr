@@ -276,7 +276,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(38))
+    rc.check_inline_functions(_DIR, snapshot(39))
 
 
 def test_prevent_underscore_imports() -> None:
