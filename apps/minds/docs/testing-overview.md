@@ -187,7 +187,7 @@ Legend for where each test best fits:
   modal-snapshot stage too (mark `minds_snapshot_resume`), reusing the snapshot
   image's baked Electron/Playwright/Xvfb toolchain; request the `xvfb_display`
   fixture so the test gets a display in the offload sandbox. See
-  `test_create_apikey_workspace_and_chat_via_electron`.
+  `test_create_workspace_and_sign_in_via_modal_then_chat_via_electron`.
 - **[local]** -- a plain integration test (Flask test client or pure logic), no
   Docker; runs in the default offload suite.
 
