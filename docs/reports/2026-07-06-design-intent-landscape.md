@@ -100,7 +100,7 @@ The following principles were expressed by Danver on 2026-07-06 as governing des
 
 **2. Navigability.** Artifacts must be self-describing and route onward: each states what it is, who it is for, when it was true, and where the adjacent truths live — in parseable structure (headings, tables, stable paths). Test: *once found, does it take you to the next thing without a human?* (Exemplar: the `release-minds` skill. Counterexample: `apps/minds/docs/` with no index.)
 
-**3. Simplicity.** Low but well-appointed token count: one source of truth per topic plus pointers; every token earning its keep; staleness visible (date-stamp what is point-in-time, delete what is dead). Test: *is anything here a copy, and would a reader know if it had expired?* (Exemplar: `vendor-mngr-sync.md`, 74 lines that four other artifacts defer to. Counterexample: `minds-dev-workflow`'s 244-line re-encoding.)
+**3. Simplicity.** Low but well-appointed token count: one source of truth per topic plus pointers; every token earning its keep; staleness visible (date-stamp what is point-in-time, delete what is dead). Test: *is anything here a copy, and would a reader know if it had expired?* (Exemplar: `vendor-mngr-sync.md`, 74 lines that four other artifacts defer to. Counterexample: `minds-dev-workflow`'s 243-line re-encoding.)
 
 Corollaries, taken from what already works here: **prefer the pointer to the copy** (the release-minds pattern over the dev-workflow pattern); **push intent down the enforcement ladder** whenever a rule can be a hook, gate, or ratchet instead of a sentence; and **give point-in-time documents a dated home** — which `docs/reports/` (this directory) now is — rather than the repo root.
 
