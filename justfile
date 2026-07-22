@@ -279,13 +279,14 @@ minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
 
 # End-to-end acceptance test that drives the real Electron minds app to create
-# a local Docker workspace from default-workspace-template using the manual
-# `api_key` AI provider, then sends a chat message and asserts the agent replies.
+# a local Docker workspace from default-workspace-template (which boots with no
+# AI credentials), signs in through the workspace's own Claude sign-in modal
+# with a raw API key, then sends a chat message and asserts the agent replies.
 # Wraps the invocation with `xvfb-run` so it works on headless Linux. macOS users
 # with a real display can run the underlying pytest directly without xvfb-run.
 # Requires apps/minds/node_modules/ (`cd apps/minds && pnpm install`) and a real
-# ANTHROPIC_API_KEY exported (the api_key path calls the official Anthropic API;
-# the test skips without it). Depends on `minds-css` because the test launches
+# ANTHROPIC_API_KEY exported (the key is typed into the modal and talks to the
+# official Anthropic API; the test skips without it). Depends on `minds-css` because the test launches
 # `electron main.js` directly (not via `pnpm start`), so nothing else compiles
 # the gitignored stylesheet. The test lives in the snapshot-resume suite (it
 # runs in CI in the snapshot offload stage, reusing that image's warm Electron
@@ -295,7 +296,7 @@ minds-test-deployment-only *tests:
 # operator worktree is already present, mirroring the CI snapshot bake.
 minds-test-electron *args: minds-css
   uv run python -c 'from imbue.minds.desktop_client.default_workspace_template_worktree import materialize_paired_default_workspace_template_worktree; materialize_paired_default_workspace_template_worktree()'
-  xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
+  xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_workspace_and_sign_in_via_modal_then_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Drive the FULL Electron workspace lifecycle end-to-end (create local Docker
 # workspace -> send a chat message + await reply -> open a terminal -> navigate
