@@ -98,26 +98,31 @@ body:not(.term-body) .composer { position: static; flex: 0 0 auto; }
 body:not(.term-body) .transcript { padding-bottom: 16px; }
 
 /* ---- auto-scroll toggle button ----
-   Floats just above the composer. ON (following the tail) = solid blue fill;
-   OFF (user scrolled up, detached) = blue outline only. Lines always white. On
-   desktop it sits bottom-right; on mobile it centers above the chat bar. */
-.autoscroll-btn {
+   ON (following the tail) = solid blue fill; OFF (scrolled up, detached) = blue
+   outline. Lines always white. Desktop: floats bottom-right over the transcript.
+   Mobile: sits IN the composer bar, between send and Esc. Scoped under .composer so
+   it overrides the generic .composer button styling. */
+.composer .autoscroll-btn {
   position: fixed;
   right: 16px;
   bottom: calc(var(--composer-h, 60px) + 12px);
-  width: 40px; height: 40px; padding: 0;
+  width: 40px; height: 40px; min-height: 0; padding: 0;
   display: flex; align-items: center; justify-content: center;
   border-radius: 8px; cursor: pointer; z-index: 50;
   color: #fff;                    /* the chevrons: always white */
   border: 2px solid #2f6bff;      /* blue */
   background: transparent;        /* OFF = outline only */
-  transition: background 0.12s, opacity 0.12s;
+  transition: background 0.12s;
 }
-.autoscroll-btn.on { background: #2f6bff; }   /* ON = solid blue */
-.autoscroll-btn:active { transform: scale(0.94); }
+.composer .autoscroll-btn.on { background: #2f6bff; }   /* ON = solid blue */
+.composer .autoscroll-btn:active { transform: scale(0.94); }
 @media (max-width: 620px) {
-  .autoscroll-btn { right: auto; left: 50%; transform: translateX(-50%); }
-  .autoscroll-btn:active { transform: translateX(-50%) scale(0.94); }
+  .composer .autoscroll-btn {
+    position: static;             /* drop into the button row, between send + Esc */
+    right: auto; bottom: auto;
+    width: 46px; height: 42px; min-height: 42px;  /* match the row's button height */
+    border-radius: 0;             /* match the flat composer buttons */
+  }
 }
 
 /* ---- agent list ---- */
