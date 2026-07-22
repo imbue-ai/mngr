@@ -34,7 +34,6 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-import httpx
 import psycopg2
 import pytest
 import tomlkit
@@ -43,12 +42,13 @@ from loguru import logger
 from imbue.minds.deployment_tests.data_types import DefaultWorkspaceTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
+from imbue.minds.deployment_tests.helpers import signin_and_mint_litellm_key
 from imbue.minds.deployment_tests.helpers import wait_for_env_ready
+from imbue.minds.desktop_client.ai_keys import build_credential_blob
 from imbue.mngr.utils.testing import get_short_random_string
 
 pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
-_HTTP_TIMEOUT_SECONDS = 60.0
 _CREATE_TIMEOUT_SECONDS = 1200
 _IN_CONTAINER_TIMEOUT_SECONDS = 120
 _SYSTEM_INTERFACE_READY_ATTEMPTS = 60
@@ -240,31 +240,18 @@ def test_litellm_spend_tracking_via_local_workspace(
         pytest.skip("No local template worktree available (offload sandboxes lack the Docker daemon anyway)")
 
     # 1. Mint a key for the signed-in user, aliased to the workspace like the
-    #    desktop app's mint page does.
+    #    desktop app's mint page does, and render the same paste-ready blob.
     host_name = f"litellm-e2e-{get_short_random_string()}"
     key_alias = f"workspace-{host_name}"
-    connector_url = str(env.urls.connector_url).rstrip("/")
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-        signin = client.post(
-            f"{connector_url}/auth/signin",
-            json={"email": str(verified_user.email), "password": verified_user.password.get_secret_value()},
-        )
-        signin.raise_for_status()
-        signin_json = signin.json()
-        assert signin_json.get("status") == "OK", f"connector /auth/signin returned non-OK: {signin_json!r}"
-        access_token = signin_json["tokens"]["access_token"]
-        key_response = client.post(
-            f"{connector_url}/keys/create",
-            headers={"Authorization": f"Bearer {access_token}"},
-            json={"key_alias": key_alias, "max_budget": 100.0, "budget_duration": "1d"},
-        )
-        assert key_response.status_code == 200, (
-            f"connector /keys/create failed ({key_response.status_code}): {key_response.text[:400]!r}"
-        )
-        key_material = key_response.json()
-        minted_key = key_material["key"]
-        base_url = str(key_material["base_url"]).rstrip("/")
-    credential_blob = f"ANTHROPIC_BASE_URL={base_url}\nANTHROPIC_API_KEY={minted_key}\n"
+    minted = signin_and_mint_litellm_key(
+        connector_url=str(env.urls.connector_url),
+        email=str(verified_user.email),
+        password=verified_user.password.get_secret_value(),
+        key_alias=key_alias,
+        max_budget=100.0,
+        budget_duration="1d",
+    )
+    credential_blob = build_credential_blob(api_key=minted.key.get_secret_value(), base_url=str(minted.base_url))
 
     # 2-5. Create the workspace, sign it in, chat, and assert spend.
     template_path = _prepare_template_clone(default_workspace_template_ref.worktree_path)

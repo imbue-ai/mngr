@@ -19,8 +19,10 @@ from typing import Final
 import httpx
 from loguru import logger
 from pydantic import AnyUrl
+from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
@@ -40,6 +42,7 @@ from imbue.minds.envs.vault_reader import write_vault_kv
 from imbue.minds.errors import MindError
 
 _SUPERTOKENS_TENANT_ID: Final[str] = "public"
+_CONNECTOR_HTTP_TIMEOUT_SECONDS: Final[float] = 60.0
 _SUPERTOKENS_ADMIN_TIMEOUT_SECONDS: Final[float] = 30.0
 _ENV_READY_TIMEOUT_SECONDS: Final[float] = 60.0
 _ENV_READY_POLL_INTERVAL_SECONDS: Final[float] = 1.0
@@ -108,6 +111,52 @@ def read_ci_test_user_credentials() -> tuple[NonEmptyStr, SecretStr]:
             f"{CI_TEST_USER_EMAIL_KEY}/{CI_TEST_USER_PASSWORD_KEY}; populate them per the Phase 0 runbook."
         )
     return NonEmptyStr(email), SecretStr(password)
+
+
+class MintedLiteLLMKey(FrozenModel):
+    """A LiteLLM virtual key minted through a shared env's connector."""
+
+    key: SecretStr = Field(description="The minted LiteLLM virtual key")
+    base_url: NonEmptyStr = Field(description="The litellm proxy base URL returned with the key (no trailing slash)")
+
+
+def signin_and_mint_litellm_key(
+    *,
+    connector_url: str,
+    email: str,
+    password: str,
+    key_alias: str,
+    max_budget: float,
+    budget_duration: str,
+    timeout_seconds: float = _CONNECTOR_HTTP_TIMEOUT_SECONDS,
+) -> MintedLiteLLMKey:
+    """Sign in to a shared env's connector and mint a LiteLLM key.
+
+    The exact product path the litellm deployment tests exercise: POST
+    ``/auth/signin`` for an access token, then POST ``/keys/create`` (which
+    runs the paid-account gate) for the key + proxy base URL.
+    """
+    base = connector_url.rstrip("/")
+    with httpx.Client(timeout=timeout_seconds) as client:
+        signin = client.post(f"{base}/auth/signin", json={"email": email, "password": password})
+        signin.raise_for_status()
+        signin_json = signin.json()
+        assert signin_json.get("status") == "OK", f"connector /auth/signin returned non-OK: {signin_json!r}"
+        access_token = signin_json["tokens"]["access_token"]
+        key_response = client.post(
+            f"{base}/keys/create",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={"key_alias": key_alias, "max_budget": max_budget, "budget_duration": budget_duration},
+        )
+        assert key_response.status_code == 200, (
+            f"connector /keys/create failed ({key_response.status_code}); the paid-account gate or "
+            f"litellm wiring is broken: {key_response.text[:400]!r}"
+        )
+        key_material = key_response.json()
+    return MintedLiteLLMKey(
+        key=SecretStr(str(key_material["key"])),
+        base_url=NonEmptyStr(str(key_material["base_url"]).rstrip("/")),
+    )
 
 
 def create_verified_user_via_admin_api(
