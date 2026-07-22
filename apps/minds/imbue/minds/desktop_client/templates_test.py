@@ -1021,20 +1021,68 @@ def test_render_recovery_page_fresh_entry_dispatches_start_only_unconditionally(
     # The fresh entry (the trailing else of the initialStatus dispatcher) POSTs
     # the start-only restart directly.
     entry = html[html.rfind("if (initialStatus === 'restarting')") :]
-    assert "postRestart({ scope: 'host', start_only: true })" in entry
+    assert "postRestart(" in entry
+    assert "{ scope: 'host', start_only: true }" in entry
     # No probe-gated dispatch remains: applyHealth renders, never restarts.
     apply_start = html.find("function applyHealth(")
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
     assert "postRestart" not in apply_block
-    # postRestart renders the restarting state while the dispatch is in flight.
+    # postRestart renders a restarting state while the dispatch is in flight
+    # (the generic copy unless the caller passed the offline flavor).
     post_start = html.find("function postRestart(")
     post_block = html[post_start : html.find("function ", post_start + 1)]
-    assert "renderRestarting()" in post_block
-    # A page load that lands on the RESTARTING tracker state renders the
-    # restarting state, not the generic first-open "Loading workspace" spinner.
+    assert "(renderPending || renderRestarting)()" in post_block
+    # A page load that lands on the RESTARTING tracker state renders a
+    # restarting state (generic or offline-flavored per the display hint),
+    # not the generic first-open "Loading workspace" spinner.
     restarting_entry = entry[: entry.find("else if")]
-    assert "renderRestarting()" in restarting_entry
+    assert "(hostOffline ? renderRestartingOffline : renderRestarting)()" in restarting_entry
     assert "renderLoading()" not in restarting_entry
+
+
+def test_render_recovery_page_offline_copy_is_display_only() -> None:
+    """The offline restarting copy is selected by the render hint and upgraded by the poll header.
+
+    The entry dispatch picks ``renderRestartingOffline`` ("Bringing your
+    workspace back online") when the render-time ``data-host-offline`` hint
+    reads 1. When the hint was stale (a cold launch still replaying a
+    pre-stop RUNNING), the convergence poll's ``X-Workspace-Offline`` header
+    upgrades the copy one-way once discovery lands the STOPPED observation --
+    and only for the start-only entry dispatch, so a manual bounce's transient
+    STOPPED never rewrites the page as an offline revival. Display-only:
+    ``applyHealth`` stays dispatch-free regardless of the hint.
+    """
+    offline_html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+        initial_offline=True,
+    )
+    assert 'data-host-offline="1"' in offline_html
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert 'data-host-offline="0"' in html
+    # The offline render names the offline condition.
+    offline_start = html.find("function renderRestartingOffline")
+    offline_block = html[offline_start : html.find("function ", offline_start + 1)]
+    assert "was offline" in offline_block
+    # The entry dispatch picks the render off the hint...
+    entry = html[html.rfind("if (initialStatus === 'restarting')") :]
+    assert "hostOffline ? renderRestartingOffline : renderRestarting" in entry
+    # ...and the convergence poll upgrades it off the per-tick header, gated on
+    # the dispatch having been the start-only one.
+    refresh_start = html.find("function scheduleRefresh")
+    refresh_block = html[refresh_start : html.find("function scheduleHealthyPoll")]
+    assert "maybeUpgradeToOfflineCopy(resp)" in refresh_block
+    upgrade_start = html.find("function maybeUpgradeToOfflineCopy")
+    upgrade_block = html[upgrade_start : html.find("function ", upgrade_start + 1)]
+    assert "X-Workspace-Offline" in upgrade_block
+    assert "startOnlyDispatched" in upgrade_block
 
 
 def test_render_recovery_page_indeterminate_renders_reconnecting_not_a_verdict() -> None:

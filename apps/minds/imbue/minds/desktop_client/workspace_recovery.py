@@ -303,8 +303,8 @@ def run_restart_sequence(
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
 
     if skip_stop:
-        logger.info("Skipping stop step for {}: container already fully stopped", workspace_agent_id)
-        registry.append_log(workspace_agent_id, "Container already fully stopped; skipping stop step.")
+        logger.info("Start-only restart for {}: skipping the stop step", workspace_agent_id)
+        registry.append_log(workspace_agent_id, "Start-only restart; skipping the stop step.")
     else:
         registry.append_log(workspace_agent_id, "Stopping the system-services agent.")
         try:

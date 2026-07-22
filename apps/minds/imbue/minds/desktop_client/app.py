@@ -148,6 +148,8 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -1983,18 +1985,38 @@ def _handle_recovery_page(
             # restart button.
             pass
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
+    # Display-only offline hint: whether the resolver currently reads the
+    # workspace's host as offline. Selects the "Bringing your workspace back
+    # online" copy for the restarting state (and rides along on every poll
+    # tick as a header, so a stale reading at a cold launch self-corrects once
+    # discovery lands). Never gates what is dispatched.
+    display_info = backend_resolver.get_agent_display_info(aid)
+    host_state: HostState | None = None
+    if display_info is not None:
+        try:
+            host_state = backend_resolver.get_host_state(HostId(display_info.host_id))
+        except ValueError:
+            # Resolvers without discovery report a "localhost" placeholder that
+            # is not a parseable HostId; they carry no host state anyway.
+            host_state = None
+    is_host_offline = host_state in (HostState.STOPPED, HostState.CRASHED)
     html_body = render_recovery_page(
         agent_id=aid,
         return_to=return_to,
         initial_status=render_status,
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
+        initial_offline=is_host_offline,
     )
     # Expose the rendered status so the page's background convergence poll can
     # tell "still restarting" (keep waiting, no reload) from a state change
     # (reload to render the new state) without a focus-stealing full reload on
-    # every tick. See the recovery script's ``scheduleRefresh``.
-    return make_html_response(content=html_body, headers={"X-Recovery-Status": render_status})
+    # every tick. See the recovery script's ``scheduleRefresh``, which also
+    # reads the offline hint off every tick.
+    return make_html_response(
+        content=html_body,
+        headers={"X-Recovery-Status": render_status, "X-Workspace-Offline": "1" if is_host_offline else "0"},
+    )
 
 
 # -- Account management routes --

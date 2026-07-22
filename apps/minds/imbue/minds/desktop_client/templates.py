@@ -1128,6 +1128,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
                 return;
               }
               if ((resp.headers.get('X-Recovery-Status') || '') === 'restarting') {
+                maybeUpgradeToOfflineCopy(resp);
                 scheduleRefresh();
                 return;
               }
@@ -1232,16 +1233,13 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // "Restart workspace" click, or the page reloaded while the tracker was
         // already RESTARTING. Names the action instead of the generic first-open
         // "Loading workspace" spinner so the wait reads as a deliberate recovery,
-        // not a hang. The copy covers both dispatch flavors (a start-only that
-        // no-ops on a live host, and a cold boot of a stopped one) -- either way
-        // the user is returned automatically. scheduleRefresh (armed by the
-        // caller) sends the user home the moment the tracker flips HEALTHY, so
-        // this state needs no separate homeward poll.
+        // not a hang. scheduleRefresh (armed by the caller) sends the user home
+        // the moment the tracker flips HEALTHY, so this state needs no separate
+        // homeward poll.
         function renderRestarting() {
           titleEl.textContent = 'Restarting your workspace';
           messageEl.textContent =
-            'If it was stopped, we\\'re starting it back up. We\\'ll return you to your '
-            + 'workspace automatically as soon as it responds.';
+            'We\\'ll return you to your workspace automatically as soon as it is back.';
           show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);
@@ -1251,6 +1249,45 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (debugContentEl) debugContentEl.innerHTML = '';
           if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
+        }
+        // The offline flavor of the restarting state: the workspace's host is
+        // observed stopped, so the wait is a cold boot -- name that, so the
+        // (possibly long) boot reads as recovery rather than a fresh open that
+        // is taking too long. Purely display: which copy shows never affects
+        // what is dispatched. Shown when the render-time hint (data-host-offline,
+        // the resolver's current reading) says offline, and upgraded to
+        // mid-restart by maybeUpgradeToOfflineCopy when the hint was stale.
+        function renderRestartingOffline() {
+          offlineCopyShown = true;
+          titleEl.textContent = 'Bringing your workspace back online';
+          messageEl.textContent =
+            'This workspace was offline. We\\'re starting it back up and will '
+            + 'return you to it automatically.';
+          show(spinnerEl, true);
+          show(errorEl, false);
+          show(hostBtn, false);
+          show(retryBtn, false);
+          show(reportBtn, false);
+          show(debugDetailsEl, false);
+          if (debugContentEl) debugContentEl.innerHTML = '';
+          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
+          latestHealth = null;
+        }
+        // One-way display upgrade while the start-only entry dispatch is in
+        // flight. At a cold launch the render-time offline hint can read a
+        // stale RUNNING (the replayed discovery backlog), but discovery lands
+        // the real STOPPED observation a few seconds later; the convergence
+        // poll carries it back via the X-Workspace-Offline header, and the
+        // generic "Restarting" copy upgrades to the offline copy. Display-only
+        // and one-way (never downgrades), and only for the start-only entry
+        // dispatch -- a manual stop+start's transient STOPPED mid-bounce should
+        // not rewrite the page as an offline revival.
+        var offlineCopyShown = false;
+        var startOnlyDispatched = false;
+        function maybeUpgradeToOfflineCopy(resp) {
+          if (!startOnlyDispatched || offlineCopyShown) return;
+          if ((resp.headers.get('X-Workspace-Offline') || '') !== '1') return;
+          renderRestartingOffline();
         }
         // The shared "Workspace unresponsive" state -- shown after a restart
         // failure and for the host_unresponsive tier (container observed
@@ -1353,9 +1390,14 @@ _RECOVERY_SCRIPT: Final[str] = """\
           armHealthyPoll();
         }
 
-        function postRestart(body) {
+        // ``renderPending`` is the spinner state shown while the dispatch is in
+        // flight; defaults to ``renderRestarting``. The entry dispatch passes
+        // ``renderRestartingOffline`` when the render-time hint already reads
+        // the host as offline.
+        function postRestart(body, renderPending) {
           restartDispatched = true;
-          renderRestarting();
+          startOnlyDispatched = Boolean(body && body.start_only);
+          (renderPending || renderRestarting)();
           // The endpoint returns a 202 operation handle once the tracker is
           // RESTARTING; any other status means the dispatch did not start, so
           // surface an error instead of refreshing into a re-probe loop. The
@@ -1491,8 +1533,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
           });
         }
 
+        // The render-time offline hint: the resolver's current host-state
+        // reading, passed for display only (it may be stale at a cold launch;
+        // maybeUpgradeToOfflineCopy corrects the copy when discovery lands).
+        var hostOffline = root.dataset.hostOffline === '1';
         if (initialStatus === 'restarting') {
-          renderRestarting();
+          (hostOffline ? renderRestartingOffline : renderRestarting)();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
           // Show the failure reason AND the diagnostic together: run the
@@ -1520,7 +1566,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
           // the reload renders the manual-consent page with diagnostics (the
           // stop+start bounce is never dispatched without a click).
           armHealthyPoll();
-          postRestart({ scope: 'host', start_only: true });
+          postRestart(
+            { scope: 'host', start_only: true },
+            hostOffline ? renderRestartingOffline : renderRestarting
+          );
         }
       })();
 """
@@ -1533,6 +1582,7 @@ def render_recovery_page(
     initial_status: str,
     initial_error: str,
     ssh_command: str | None = None,
+    initial_offline: bool = False,
 ) -> str:
     """Render the workspace-recovery page shown when the system interface is unresponsive.
 
@@ -1542,7 +1592,10 @@ def render_recovery_page(
     governs the page's initial UI state. ``initial_error`` is the failure
     reason shown (collapsed) when ``initial_status`` is ``"restart_failed"``.
     ``return_to`` is the URL the page navigates back to once the workspace is
-    healthy again.
+    healthy again. ``initial_offline`` is the display-only hint that the host
+    currently reads as offline (STOPPED/CRASHED), which selects the "Bringing
+    your workspace back online" copy for the restarting state; it never
+    affects what is dispatched.
 
     ``ssh_command`` is the copy-pasteable SSH command for the agent's host. When
     provided, a "Copy SSH command" button sits beside "Copy diagnostics" in the
@@ -1597,6 +1650,7 @@ def render_recovery_page(
         f' data-agent-id="{html.escape(str(agent_id))}"'
         f' data-return-to="{html.escape(return_to)}"'
         f' data-initial-status="{html.escape(initial_status)}"'
+        f' data-host-offline="{"1" if initial_offline else "0"}"'
     )
     return render_loading_page(
         style_extra=_RECOVERY_STYLE,

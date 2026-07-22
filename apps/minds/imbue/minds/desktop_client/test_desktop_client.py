@@ -66,6 +66,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -2363,6 +2364,51 @@ def test_recovery_page_renders_copy_ssh_button_from_resolver(tmp_path: Path) -> 
     assert 'data-ssh-command="ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"' in response.text
 
 
+def test_recovery_page_surfaces_offline_hint_from_resolver(tmp_path: Path) -> None:
+    """The recovery route surfaces the resolver's offline reading as a display hint.
+
+    A host observed STOPPED renders ``data-host-offline="1"`` and carries
+    ``X-Workspace-Offline: 1`` on the response (the page's convergence poll
+    reads it each tick, so a hint that was stale at render time self-corrects
+    once discovery lands). The hint is display-only -- it selects the
+    "Bringing your workspace back online" copy, never what is dispatched.
+    """
+    agent_id = AgentId()
+    host_id = HostId.generate()
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    tracker = SystemInterfaceHealthTracker()
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent_id,),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=agent_id,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName("docker"),
+                    certified_data={"labels": {"is_primary": "true"}},
+                ),
+            ),
+            host_state_by_host_id={str(host_id): HostState.STOPPED},
+        )
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        system_interface_health_tracker=tracker,
+    )
+    client = app.test_client()
+    _authenticate_client(client=client, auth_store=auth_store)
+    tracker.mark_stuck(agent_id)
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+    assert response.status_code == 200
+    assert 'data-host-offline="1"' in response.text
+    assert response.headers["X-Workspace-Offline"] == "1"
+
+
 def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
     """create_desktop_client should expose the tracker on the app state for handlers."""
     auth_dir = tmp_path / "auth"
@@ -2437,6 +2483,9 @@ def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path
     # The page's background convergence poll keys off this header to tell "still
     # restarting" (keep waiting, no focus-stealing reload) from a state change.
     assert response.headers["X-Recovery-Status"] == "restarting"
+    # The static test resolver knows no host state, so the offline display
+    # hint reads 0 (the hint header rides on every recovery response).
+    assert response.headers["X-Workspace-Offline"] == "0"
 
 
 def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_path: Path) -> None:
