@@ -2052,23 +2052,26 @@ def test_help_page_agent_report_frames_as_agent_submission_and_hides_mode_choice
     assert "it broke" in response.text
 
 
-def test_help_page_has_no_logs_checkbox(tmp_path: Path) -> None:
-    """Logs are always attached to a submitted report now, so the form offers no logs checkbox."""
+def test_help_page_auto_includes_logs_and_diagnostics(tmp_path: Path) -> None:
+    """Logs and app diagnostics are always attached now, so neither has an opt-in checkbox, and the
+    workspaces-consent reassurance is shown."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
     assert 'id="help-include-logs"' not in response.text
-    assert "Recent logs are always included" in response.text
+    assert 'id="help-app-diagnostics"' not in response.text
+    assert "always attached" in response.text
+    assert "Imbue will never look into your workspaces without your consent." in response.text
 
 
-def test_help_page_shows_checkboxes_inline_and_report_id_affordance(tmp_path: Path) -> None:
-    """The diagnostics checkboxes are top-level (no Advanced disclosure) and the confirmation can show
-    a copyable report ID."""
+def test_help_page_shows_optional_checkboxes_inline_and_report_id_affordance(tmp_path: Path) -> None:
+    """The opt-in options are top-level (no Advanced disclosure) and the confirmation can show a
+    copyable report ID."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
     assert response.status_code == 200
-    # Checkboxes are rendered directly, not hidden behind an Advanced <details> disclosure.
+    # Options are rendered directly, not hidden behind an Advanced <details> disclosure.
     assert "<details" not in response.text
-    assert 'id="help-app-diagnostics"' in response.text
+    # Remote access stays an explicit opt-in.
     assert 'id="help-remote-access"' in response.text
     # The confirmation hosts a copyable report-ID slot populated from the response's event_id.
     assert 'id="help-event-id"' in response.text
@@ -2085,9 +2088,10 @@ def test_help_report_accepts_a_description(tmp_path: Path) -> None:
     # Sentry is not initialized in tests, so the report is collected and the route returns ok with a
     # null event_id (nothing was actually transmitted). This exercises the full collect path end to end.
     client, _ = _create_test_client_with_stores(tmp_path)
+    # App diagnostics are always collected server-side now; the request need not opt in.
     response = client.post(
         "/help/report",
-        json={"description": "the app froze", "include_app_diagnostics": True, "remote_access": True},
+        json={"description": "the app froze", "remote_access": True},
     )
     assert response.status_code == 200
     body = response.get_json()

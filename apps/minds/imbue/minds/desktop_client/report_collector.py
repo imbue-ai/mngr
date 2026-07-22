@@ -176,15 +176,17 @@ def submit_bug_report_from_body(
     """Parse a help-form / API request body and submit the resulting bug report.
 
     Shared by the local ``POST /help/report`` handler and the ``/api/v1`` bug-report route so both
-    interpret the same fields identically. Recent logs are always attached (a no-op in environments
-    without an S3 bucket). The caller is responsible for validating that a description is present.
+    interpret the same fields identically. Recent logs and app diagnostics (app version, signed-in
+    accounts, the list of workspaces, and host/system info -- no workspace contents) are always
+    included. Per-workspace details and remote access remain opt-in (Imbue does not look into a
+    workspace without consent). The caller is responsible for validating that a description is present.
 
     Returns the Sentry event id (or None when Sentry is inactive / the event was dropped).
     """
     workspace_agent_id = body.get("workspace_agent_id") or None
     return submit_bug_report(
         description=str(body.get("description", "")).strip(),
-        include_app_diagnostics=bool(body.get("include_app_diagnostics", False)),
+        include_app_diagnostics=True,
         include_workspace_details=bool(body.get("include_workspace_details", False)),
         remote_access_requested=bool(body.get("remote_access", False)),
         workspace_agent_id=str(workspace_agent_id) if workspace_agent_id else None,
