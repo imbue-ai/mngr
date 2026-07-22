@@ -323,9 +323,14 @@ MANIFEST: tuple[AssetSpec, ...] = tuple(
 )
 
 
+def get_state_dir(mngr_ctx: MngrContext) -> Path:
+    """Local dir for foreman's own persisted state (backburner set, shortcuts)."""
+    return mngr_ctx.config.default_host_dir.expanduser() / "plugin" / "foreman"
+
+
 def get_asset_dir(mngr_ctx: MngrContext) -> Path:
     """Local cache dir for fetched frontend assets (mirrors mngr_forward's layout)."""
-    return mngr_ctx.config.default_host_dir.expanduser() / "plugin" / "foreman" / "assets"
+    return get_state_dir(mngr_ctx) / "assets"
 
 
 def _sha256(data: bytes) -> str:

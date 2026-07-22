@@ -20,9 +20,11 @@ from imbue.mngr.utils.parent_process import start_parent_death_watcher
 from imbue.mngr_foreman import daemon
 from imbue.mngr_foreman.assets import ensure_assets
 from imbue.mngr_foreman.assets import get_asset_dir
+from imbue.mngr_foreman.assets import get_state_dir
 from imbue.mngr_foreman.config import ForemanPluginConfig
 from imbue.mngr_foreman.mngr_bin import resolve_mngr_binary
 from imbue.mngr_foreman.server import run_server
+from imbue.mngr_foreman.shortcuts import ShortcutStore
 from imbue.mngr_foreman.systemd_service import SERVICE_NAME
 from imbue.mngr_foreman.systemd_service import ServiceInstallError
 from imbue.mngr_foreman.systemd_service import install_service
@@ -249,6 +251,61 @@ def foreman_uninstall(ctx: click.Context, **kwargs: Any) -> None:
         write_human_line(f"foreman systemd service ({SERVICE_NAME}) stopped, disabled, and removed.")
     else:
         write_human_line(f"foreman systemd service ({SERVICE_NAME}) was not installed; nothing to do.")
+
+
+def _shortcut_store(ctx: click.Context, command_name: str) -> ShortcutStore:
+    """Open the foreman-local shortcut store for a CLI command."""
+    mngr_ctx, _output_opts, _opts = setup_command_context(
+        ctx=ctx,
+        command_name=command_name,
+        command_class=CommonCliOptions,
+        is_format_template_supported=False,
+    )
+    return ShortcutStore(get_state_dir(mngr_ctx) / "shortcuts.json")
+
+
+@foreman.command(name="set-shortcut")
+@click.argument("name")
+@click.argument("cmd")
+@add_common_options
+@click.pass_context
+def foreman_set_shortcut(ctx: click.Context, name: str, cmd: str, **kwargs: Any) -> None:
+    """Add / update a front-page shortcut button that runs CMD.
+
+    Clicking the button on the home page opens a terminal tab in ``~`` running CMD,
+    with whatever you type into the shortcut's args box appended. Quote CMD so the
+    shell passes it as one argument, e.g.
+
+    \b
+      mngr foreman set-shortcut minds 'bash ~/create-minds-agent.sh'
+    """
+    _shortcut_store(ctx, "foreman set-shortcut").set(name, cmd)
+    write_human_line(f"shortcut {name!r} -> {cmd}")
+
+
+@foreman.command(name="rm-shortcut")
+@click.argument("name")
+@add_common_options
+@click.pass_context
+def foreman_rm_shortcut(ctx: click.Context, name: str, **kwargs: Any) -> None:
+    """Remove a front-page shortcut by NAME."""
+    if _shortcut_store(ctx, "foreman rm-shortcut").remove(name):
+        write_human_line(f"removed shortcut {name!r}")
+    else:
+        write_human_line(f"no shortcut named {name!r}")
+
+
+@foreman.command(name="list-shortcuts")
+@add_common_options
+@click.pass_context
+def foreman_list_shortcuts(ctx: click.Context, **kwargs: Any) -> None:
+    """List the front-page shortcuts."""
+    entries = _shortcut_store(ctx, "foreman list-shortcuts").list()
+    if not entries:
+        write_human_line("no shortcuts set")
+        return
+    for entry in entries:
+        write_human_line(f"{entry['name']}\t{entry['cmd']}")
 
 
 CommandHelpMetadata(

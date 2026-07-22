@@ -279,6 +279,7 @@
     // flag from foreman-local state; the home page files parked ones under their own
     // section instead of the live list.
     let lastAgents = [];
+    let shortcuts = []; // front-page command buttons, fetched from /api/shortcuts
     // Per-agent in-flight guard. A toggle flips a persisted mngr label, then a
     // discovery poll (~10s) re-reads it. During that window we (1) hold the optimistic
     // value so a stale snapshot can't flip the card back, and (2) refuse a second
@@ -363,10 +364,27 @@
     // pop back open on the next tick.
     const BB_COLLAPSE_KEY = "foreman.backburnerCollapsed";
     function scrollSection() { return el("div", "scroll-section"); }
+    // #list holds two persistent children: the agents area (rebuilt every snapshot)
+    // and the shortcuts section (rendered only when shortcuts change) -- so a snapshot
+    // re-render never wipes an expanded/half-typed shortcut.
+    let agentsArea = null;
+    let shortcutsSection = null;
+    function ensureAreas() {
+      if (agentsArea) return;
+      listEl.innerHTML = "";
+      agentsArea = el("div", "agents-area");
+      shortcutsSection = el("div", "shortcuts-block");
+      shortcutsSection.appendChild(el("div", "section-head", "Shortcuts"));
+      shortcutsSection.appendChild(el("div", "shortcuts-body"));
+      listEl.appendChild(agentsArea);
+      listEl.appendChild(shortcutsSection);
+      renderShortcuts();
+    }
     function renderAll(agents) {
       lastAgents = agents;
-      reconcileBackburner(agents); // release guards whose label has now propagated
-      listEl.innerHTML = "";
+      reconcileBackburner(agents); // release guards whose flag has now propagated
+      ensureAreas();
+      agentsArea.innerHTML = ""; // only the agents part rebuilds on a snapshot
       const active = agents.filter((a) => !isBackburner(a));
       const back = agents.filter(isBackburner);
 
@@ -374,7 +392,7 @@
       const live = scrollSection();
       if (!agents.length) live.appendChild(el("div", "empty", "no agents"));
       active.forEach((a) => live.appendChild(cardEl(a)));
-      listEl.appendChild(live);
+      agentsArea.appendChild(live);
 
       // 2. Backburner: collapsible header + its own ~5-row scroll body.
       if (back.length) {
@@ -393,17 +411,52 @@
         const body = scrollSection();
         back.forEach((a) => body.appendChild(cardEl(a)));
         block.appendChild(body);
-        listEl.appendChild(block);
+        agentsArea.appendChild(block);
       }
-
-      // 3. Shortcuts: always present, below the agents. (Contents TBD.)
-      const sc = el("div", "shortcuts-block");
-      sc.appendChild(el("div", "section-head", "Shortcuts"));
-      sc.appendChild(el("div", "shortcuts-body"));
-      listEl.appendChild(sc);
 
       pollStatuses(); // populate the new cards' dots right away, don't wait a tick
     }
+
+    // A shortcut: a button that, on click, expands a freeform args box; Run opens a
+    // terminal tab running "<cmd> <args>" in ~. Set them via `mngr foreman set-shortcut`.
+    function renderShortcuts() {
+      if (!shortcutsSection) return;
+      const body = shortcutsSection.querySelector(".shortcuts-body");
+      body.innerHTML = "";
+      if (!shortcuts.length) {
+        body.appendChild(el("div", "shortcuts-empty", 'none yet — add with:  mngr foreman set-shortcut <name> "<cmd>"'));
+        return;
+      }
+      shortcuts.forEach((sc) => {
+        const item = el("div", "shortcut");
+        const btn = el("button", "shortcut-btn", sc.name);
+        btn.type = "button";
+        btn.title = sc.cmd;
+        const form = el("div", "shortcut-args");
+        const argsIn = el("input", "shortcut-input");
+        argsIn.type = "text";
+        argsIn.placeholder = "args (optional)…";
+        const run = el("button", "shortcut-run", "Run ›");
+        run.type = "button";
+        function launch() {
+          const extra = argsIn.value.trim();
+          const full = extra ? sc.cmd + " " + extra : sc.cmd;
+          window.open("/terminal?cmd=" + encodeURIComponent(full), "_blank"); // new terminal tab
+        }
+        run.addEventListener("click", launch);
+        argsIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); launch(); } });
+        btn.addEventListener("click", () => { if (item.classList.toggle("open")) argsIn.focus(); });
+        form.appendChild(argsIn);
+        form.appendChild(run);
+        item.appendChild(btn);
+        item.appendChild(form);
+        body.appendChild(item);
+      });
+    }
+    fetch("/api/shortcuts")
+      .then((r) => r.json())
+      .then((d) => { shortcuts = d.shortcuts || []; renderShortcuts(); })
+      .catch(() => {}); // no shortcuts endpoint -> just leave the section empty
 
     // Live status dots: one shared interval, one input-state fetch per visible
     // card. The card DOM is the source of truth for "which cards are live" -- a
@@ -529,8 +582,9 @@
     // bottom re-attaches. Starts attached, so a freshly opened chat lands on the
     // newest message.
     let stick = true;
-    let lastTop = 0; // previous scrollTop, for scroll-direction detection
-    let lastH = 0;   // previous content height, so we follow ONLY on growth
+    let lastTop = 0;      // previous scrollTop, for scroll-direction detection
+    let lastH = 0;        // previous content height, so we follow ONLY on growth
+    let touching = false; // finger down: never auto-scroll mid-drag (iOS batches scroll events)
     function atBottom() {
       return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
     }
@@ -549,14 +603,21 @@
       else if (atBottom()) stick = true;
       lastTop = t;
     }, { passive: true });
+    // While a finger is down, NEVER auto-scroll: iOS batches scroll events during a
+    // touch-drag, so `stick` may still read true mid-drag and streaming growth would
+    // yank the view down, fighting the drag (the jitter). On release, if they let go
+    // at the tail we re-follow; otherwise they stay put.
+    scroller.addEventListener("touchstart", () => { touching = true; }, { passive: true });
+    const endTouch = () => { touching = false; };
+    scroller.addEventListener("touchend", endTouch, { passive: true });
+    scroller.addEventListener("touchcancel", endTouch, { passive: true });
     // Follow the tail ONLY when the transcript actually EXPANDS (new/streaming content,
-    // late-loading images/mermaid/katex) and we're still attached. A resize that adds
-    // no height -- notably the mobile URL bar showing/hiding on scroll -- is ignored;
-    // reacting to that non-expansion resize was the jitter.
+    // late-loading images/mermaid/katex), we're still attached, and no drag is active.
+    // A resize that adds no height (mobile URL bar showing/hiding) is ignored.
     if (typeof ResizeObserver !== "undefined") {
       new ResizeObserver(() => {
         const h = scroller.scrollHeight;
-        if (h > lastH && stick) scrollToBottom();
+        if (h > lastH && stick && !touching) scrollToBottom();
         lastH = h;
       }).observe(tEl);
     }
@@ -1537,7 +1598,9 @@
       const host = decodeURIComponent(h[1]);
       return { kind: "host", name: host, wsPath: "/ws/hosts/" + encodeURIComponent(host) + "/terminal", back: "/", label: "shell · " + host };
     }
-    return { kind: "orchestrator", name: "", wsPath: "/ws/terminal", back: "/", label: "orchestrator (this box)" };
+    // Forward ?cmd=... (a front-page shortcut) through to the ws so the orchestrator
+    // pty runs it. location.search already carries the encoded command.
+    return { kind: "orchestrator", name: "", wsPath: "/ws/terminal" + location.search, back: "/", label: "orchestrator (this box)" };
   }
 
   // Control-bar key → escape sequence sent straight down the WS.

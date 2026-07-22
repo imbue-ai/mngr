@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
+from flask import request
 from loguru import logger
 
 from imbue.mngr.api.connect import _build_ssh_activity_wrapper_script
@@ -271,18 +272,28 @@ def _teardown(child_pid: int, master_fd: int) -> None:
         pass
 
 
-def _spawn_bash_pty() -> tuple[int, int]:
-    """Fork a child running a login shell (``bash -l``) on a fresh pty.
+def _spawn_bash_pty(command: str | None = None) -> tuple[int, int]:
+    """Fork a child running a login shell on a fresh pty, in the user's HOME.
 
-    Used by the orchestrator terminal -- a plain shell on the foreman server
-    machine itself (no mngr, no agent). Returns ``(child_pid, master_fd)``.
+    Used by the orchestrator terminal -- a plain shell on the foreman server machine
+    itself (no mngr, no agent). We ``chdir`` to HOME first so it lands in ``~`` rather
+    than wherever the foreman service runs (``~/mngr``). If ``command`` is given (a
+    front-page shortcut), the shell runs it first and then drops into an interactive
+    login shell, so its output stays on screen and the terminal remains usable.
+    Returns ``(child_pid, master_fd)``.
     """
     child_pid, master_fd = pty.fork()
     if child_pid == 0:
         # --- child ---
         env = _child_env()
+        home = env.get("HOME") or os.path.expanduser("~")
         try:
-            os.execvpe("bash", ["bash", "-l"], env)
+            os.chdir(home)
+        except OSError:
+            pass
+        argv = ["bash", "-l"] if not command else ["bash", "-l", "-c", command + "\nexec bash -l"]
+        try:
+            os.execvpe("bash", argv, env)
         except OSError:
             os._exit(127)
     return child_pid, master_fd
@@ -397,9 +408,14 @@ def handle_host_shell_ws(ws: Any, agent_on_host: str, host_label: str, pool: Con
 
 
 def handle_orchestrator_ws(ws: Any) -> None:
-    """Bridge a websocket to a plain ``bash -l`` pty on the foreman server host."""
-    logger.info("Opening orchestrator terminal (bash -l)")
-    child_pid, master_fd = _spawn_bash_pty()
+    """Bridge a websocket to a ``bash -l`` pty in ``~`` on the foreman server host.
+
+    An optional ``?cmd=`` query arg runs that command first (front-page shortcuts),
+    then drops into an interactive shell.
+    """
+    command = request.args.get("cmd") or None
+    logger.info("Opening orchestrator terminal (cmd={!r})", command)
+    child_pid, master_fd = _spawn_bash_pty(command)
     _bridge_pty_to_ws(ws, child_pid, master_fd, label="orchestrator")
     logger.info("Closed orchestrator terminal")
 

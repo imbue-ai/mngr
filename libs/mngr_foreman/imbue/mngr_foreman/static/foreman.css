@@ -146,7 +146,32 @@ button.section-head {
 .section-head .count { margin-left: 4px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--fg-faint); }
 .bb-block.collapsed .chevron { transform: rotate(-90deg); }
 .bb-block.collapsed .scroll-section { display: none; }
-.shortcuts-body { min-height: 8px; }
+.shortcuts-body { min-height: 8px; display: flex; flex-direction: column; gap: 6px; }
+.shortcuts-empty { color: var(--fg-faint); font-size: 12px; font-family: var(--mono); }
+.shortcut { display: flex; flex-direction: column; gap: 6px; }
+.shortcut-btn {
+  align-self: flex-start; max-width: 100%;
+  padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  background: var(--bg-raised); color: var(--fg); border: 1px solid var(--border);
+  font-size: 13px; font-weight: 600; font-family: inherit;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.shortcut-btn:hover { border-color: var(--border-strong); }
+.shortcut.open .shortcut-btn { border-color: var(--chip-run); }
+.shortcut-args { display: none; gap: 6px; }
+.shortcut.open .shortcut-args { display: flex; }
+.shortcut-input {
+  flex: 1; min-width: 0; padding: 6px 10px; border-radius: 6px;
+  background: var(--bg-inset); color: var(--fg); border: 1px solid var(--border);
+  font-size: 13px; font-family: var(--mono);
+}
+.shortcut-input:focus { outline: none; border-color: var(--border-strong); }
+.shortcut-run {
+  flex: none; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  background: var(--chip-run); color: #0a0a0a; border: none;
+  font-size: 13px; font-weight: 600; font-family: inherit;
+}
+.shortcut-run:hover { filter: brightness(1.1); }
 .chip {
   font-size: 11px;
   padding: 1px 7px;

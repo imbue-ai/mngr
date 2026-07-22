@@ -34,6 +34,7 @@ from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr_foreman.agent_registry import AgentRegistry
 from imbue.mngr_foreman.assets import ensure_assets
 from imbue.mngr_foreman.assets import get_asset_dir
+from imbue.mngr_foreman.assets import get_state_dir
 from imbue.mngr_foreman.backburner import BackburnerStore
 from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.harness import TranscriptStrategy
@@ -45,6 +46,7 @@ from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
 from imbue.mngr_foreman.messaging import send_message_to_agent
+from imbue.mngr_foreman.shortcuts import ShortcutStore
 from imbue.mngr_foreman.terminal import handle_host_shell_ws
 from imbue.mngr_foreman.terminal import handle_orchestrator_ws
 from imbue.mngr_foreman.terminal import handle_terminal_ws
@@ -211,13 +213,13 @@ def create_app(
     def _cleanup_thread_hub(_exc: BaseException | None) -> None:
         cleanup_thread_local_resources()
 
-    # Foreman-local "parked" set -- which agents render under the home Backburner
-    # section. Kept on the box (no per-agent host round-trip); the registry tags each
-    # card from it at snapshot time.
-    backburner = BackburnerStore(
-        mngr_ctx.config.default_host_dir.expanduser() / "plugin" / "foreman" / "backburner.json"
-    )
+    # Foreman-local state, kept on the box: the "parked" set (which agents render
+    # under the home Backburner section -- the registry tags each card from it at
+    # snapshot time) and the front-page shortcuts.
+    state_dir = get_state_dir(mngr_ctx)
+    backburner = BackburnerStore(state_dir / "backburner.json")
     registry.set_backburner_predicate(backburner.is_backburner)
+    shortcuts = ShortcutStore(state_dir / "shortcuts.json")
 
     # ---- pages ------------------------------------------------------------
 
@@ -278,6 +280,12 @@ def create_app(
     @app.route("/api/agents")
     def api_agents() -> Response:
         return jsonify({"agents": registry.snapshot()})
+
+    @app.route("/api/shortcuts")
+    def api_shortcuts() -> Response:
+        # Front-page command buttons (name + cmd). The client opens a terminal tab
+        # running <cmd> with the shortcut's freeform args appended.
+        return jsonify({"shortcuts": shortcuts.list()})
 
     @app.route("/api/agents/stream")
     def api_agents_stream() -> Response:
