@@ -822,6 +822,13 @@ def _build_mngr_create_command(
             # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
             # run the provisioning chain over SSH on the freshly-created sandbox.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
+            # Optional overlay template stacked on ``modal`` (like ``docker_runsc`` on
+            # ``docker``): any create host may name one via ``MINDS_MODAL_EXTRA_TEMPLATE``.
+            # The eval harness sets it to ``modal_eval`` (shorter sandbox timeout); a
+            # normal create leaves it unset and gets plain ``modal``.
+            extra_modal_template = os.environ.get("MINDS_MODAL_EXTRA_TEMPLATE")
+            if extra_modal_template:
+                mngr_command.extend(["--template", extra_modal_template])
             mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:
             assert_never(unreachable)

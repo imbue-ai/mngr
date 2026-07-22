@@ -142,6 +142,9 @@ def _box_env(user_id: str, ref: str, minds_env: str) -> dict[str, str | None]:
         "MNGR__PROVIDERS__MODAL__USER_ID": user_id,
         "MINDS_BOX_MNGR_REF": ref,
         "MINDS_EVAL_IN_BOX": "1",
+        # Every workspace this box creates is an eval worker: stack the modal_eval overlay
+        # (shorter 3h sandbox timeout) on the modal template. minds' create reads this.
+        "MINDS_MODAL_EXTRA_TEMPLATE": "modal_eval",
     }
     env.update(_modal_token_env())
     aws = s3_store.load_aws_env()

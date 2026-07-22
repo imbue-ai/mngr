@@ -260,6 +260,21 @@ def test_build_mngr_create_command_omits_prebaked_image_override_when_unset() ->
     assert "default_image_url" not in " ".join(command)
 
 
+def test_build_mngr_create_command_stacks_modal_overlay_template_from_env(monkeypatch) -> None:
+    """A MODAL create stacks the overlay template named in ``MINDS_MODAL_EXTRA_TEMPLATE`` on top of
+    ``modal`` (mirroring ``docker_runsc`` on ``docker``); the eval harness uses this for ``modal_eval``."""
+    monkeypatch.setenv("MINDS_MODAL_EXTRA_TEMPLATE", "modal_eval")
+    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
+    assert "--template main --template modal --template modal_eval" in joined
+
+
+def test_build_mngr_create_command_modal_has_no_overlay_when_env_unset(monkeypatch) -> None:
+    monkeypatch.delenv("MINDS_MODAL_EXTRA_TEMPLATE", raising=False)
+    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
+    assert "--template main --template modal" in joined
+    assert "modal_eval" not in joined
+
+
 def test_build_mngr_create_command_stamps_original_minds_version_label() -> None:
     """The resolved template ref is stamped as an immutable
     ``original_minds_version`` label so the version API can report what

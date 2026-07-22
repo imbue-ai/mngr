@@ -289,7 +289,8 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
             "aws_access_key_id": env["AWS_ACCESS_KEY_ID"],
             "aws_secret_access_key": env["AWS_SECRET_ACCESS_KEY"],
             "aws_region": env.get("AWS_DEFAULT_REGION") or "auto",
-            "anthropic_api_key": anthropic_key,  # so the worker can role-play the client on DECIDE_FROM_PERSONA turns
+            # (No anthropic_api_key here: the worker reads ANTHROPIC_API_KEY from the workspace
+            # env, forwarded by the template's pass_host_env -- same key the agent already uses.)
         }
         print("  preparing clone: {}".format(case["id"]), flush=True)
         prepared.append((case, _prepare_clone(case, case_config)))
