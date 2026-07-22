@@ -44,7 +44,13 @@ def load_aws_env() -> dict:
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
                 env[key.strip()] = value.strip().strip("'\"")
-    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION", "MINDS_EVAL_BUCKET", "MINDS_EVAL_S3_ENDPOINT"):
+    for key in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_DEFAULT_REGION",
+        "MINDS_EVAL_BUCKET",
+        "MINDS_EVAL_S3_ENDPOINT",
+    ):
         env.setdefault(key, os.environ.get(key, ""))
     if not (
         env.get("AWS_ACCESS_KEY_ID")
