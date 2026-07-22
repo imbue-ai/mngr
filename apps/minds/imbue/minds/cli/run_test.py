@@ -39,7 +39,7 @@ def test_resolve_client_config_path_returns_existing_file(tmp_path: Path) -> Non
     assert _resolve_client_config_path(config) == config
 
 
-def test_resolve_client_config_path_rejects_unset_config(tmp_path: Path) -> None:
+def test_resolve_client_config_path_rejects_unset_config() -> None:
     """No activated env (``None``) is refused with activation guidance, not a stack trace."""
     with pytest.raises(click.ClickException) as excinfo:
         _resolve_client_config_path(None)
