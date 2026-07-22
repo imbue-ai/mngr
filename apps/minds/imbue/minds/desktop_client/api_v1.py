@@ -1831,7 +1831,9 @@ def _handle_patch_provider(provider_name: str) -> ProviderToggleResponse | Respo
 @require_api_or_cookie_auth
 def _handle_running_workspaces() -> Response:
     """Return the shutdown-capable workspaces whose containers are currently running."""
-    return _json_response({"running": desktop_control.running_workspace_entries(get_state().backend_resolver)})
+    running = desktop_control.running_workspace_entries(get_state().backend_resolver)
+    logger.info("running-workspaces query (quit-time shutdown prompt): {}", running)
+    return _json_response({"running": running})
 
 
 @require_api_or_cookie_auth

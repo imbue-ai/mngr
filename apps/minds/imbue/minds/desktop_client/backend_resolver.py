@@ -680,6 +680,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 host_id_str: _HostStateOverride(state=state, set_at_monotonic=now)
                 for host_id_str, state in self._offline_host_state_by_host_id.items()
             }
+            logger.info(
+                "Loaded last-good topology from {}: seeded {} persisted offline host state(s) as overrides: {}",
+                self.last_good_agents_path,
+                len(self._offline_host_state_by_host_id),
+                {h: s.value for h, s in self._offline_host_state_by_host_id.items()},
+            )
 
     def add_on_change_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked whenever agent or service data changes.
@@ -773,19 +779,31 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """
         changed = False
         for host_id_str, state in discovery_state_by_host_id.items():
-            if self._update_persisted_offline_state_locked(host_id_str, state):
+            if self._update_persisted_offline_state_locked(host_id_str, state, source="discovery-reconcile"):
                 changed = True
         return changed
 
-    def _update_persisted_offline_state_locked(self, host_id_str: str, state: HostState) -> bool:
-        """Record ``state`` in the persisted offline map iff offline, else drop the host. Returns changed."""
+    def _update_persisted_offline_state_locked(self, host_id_str: str, state: HostState, source: str) -> bool:
+        """Record ``state`` in the persisted offline map iff offline, else drop the host. Returns changed.
+
+        ``source`` labels the caller (lifecycle override vs discovery reconcile) for the diagnostic
+        log, so a stop-time write can be told apart from a stale-observation drop after the fact.
+        """
         if state in _OFFLINE_HOST_STATES:
             if self._offline_host_state_by_host_id.get(host_id_str) != state:
                 self._offline_host_state_by_host_id[host_id_str] = state
+                logger.info("Persisted offline map [{}]: recorded {} = {}", source, host_id_str, state.value)
                 return True
             return False
         if host_id_str in self._offline_host_state_by_host_id:
-            del self._offline_host_state_by_host_id[host_id_str]
+            dropped = self._offline_host_state_by_host_id.pop(host_id_str)
+            logger.info(
+                "Persisted offline map [{}]: dropped {} (was {}, observed {})",
+                source,
+                host_id_str,
+                dropped.value,
+                state.value,
+            )
             return True
         return False
 
@@ -801,11 +819,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
         for host_id_str in tuple(self._host_state_override_by_host_id):
             override = self._host_state_override_by_host_id[host_id_str]
             discovery_state = discovery_state_by_host_id.get(host_id_str)
-            if (
-                discovery_state == override.state
-                or (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
-            ):
+            agreed = discovery_state == override.state
+            expired = (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            if agreed or expired:
                 del self._host_state_override_by_host_id[host_id_str]
+                logger.info(
+                    "host-state override for {} dropped by sweep ({}): override={} discovery={} age={:.1f}s",
+                    host_id_str,
+                    "discovery-agreed" if agreed else "ttl-expired",
+                    override.state.value,
+                    discovery_state.value if discovery_state is not None else None,
+                    now - override.set_at_monotonic,
+                )
 
     def _sweep_workspace_name_overrides_locked(self) -> None:
         """Drop name overrides that the current snapshot has confirmed or that have expired.
@@ -1016,11 +1041,17 @@ class MngrCliBackendResolver(BackendResolverInterface):
             override = self._host_state_override_by_host_id.get(host_id_str)
             if override is None:
                 return discovery_state
-            if (
-                discovery_state == override.state
-                or (time.monotonic() - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
-            ):
+            agreed = discovery_state == override.state
+            expired = (time.monotonic() - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            if agreed or expired:
                 del self._host_state_override_by_host_id[host_id_str]
+                logger.info(
+                    "host-state override for {} dropped in get_host_state ({}): override={} discovery={}",
+                    host_id_str,
+                    "discovery-agreed" if agreed else "ttl-expired",
+                    override.state.value,
+                    discovery_state.value if discovery_state is not None else None,
+                )
                 return discovery_state
             return override.state
 
@@ -1037,8 +1068,16 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._host_state_override_by_host_id[str(host_id)] = _HostStateOverride(
                 state=state, set_at_monotonic=time.monotonic()
             )
-            if self._update_persisted_offline_state_locked(str(host_id), state) and path is not None:
+            if self._update_persisted_offline_state_locked(str(host_id), state, source="lifecycle-override") and (
+                path is not None
+            ):
                 topology_to_write = self._build_topology_snapshot_locked()
+        logger.info(
+            "set_host_state_override({}, {}): {}",
+            host_id,
+            state.value,
+            "persisted offline map + wrote topology" if topology_to_write is not None else "in-memory override only",
+        )
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)
         self._fire_on_change()

@@ -2592,7 +2592,10 @@ async function stopAllMindsThenDecide(running) {
   let remaining = running;
   while (true) {
     updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 mind…' : `Stopping ${remaining.length} minds…`);
-    const { ok, stillRunning } = await postStopMinds(remaining.map((mind) => mind.id));
+    const stopIds = remaining.map((mind) => mind.id);
+    console.log('[mind-shutdown] posting bulk stop for', JSON.stringify(stopIds));
+    const { ok, stillRunning } = await postStopMinds(stopIds);
+    console.log(`[mind-shutdown] bulk stop result: ok=${ok} stillRunning=${JSON.stringify(stillRunning)}`);
     // ``ok`` && empty stillRunning = the server confirms everything is down. A
     // request-level failure (ok=false) is treated as "could not confirm", so we
     // fall through to the recovery dialog rather than quit assuming success.
@@ -2644,6 +2647,7 @@ async function promptMindShutdown() {
     if (response === 0) return { proceed: false, stop: false, running: [] };
     return { proceed: true, stop: false, running: [] };
   }
+  console.log('[mind-shutdown] prompt: running minds =', JSON.stringify(running));
   if (running.length === 0) return { proceed: true, stop: false, running: [] };
   const names = running.map((mind) => mind.name).join(', ');
   const { response } = await dialog.showMessageBox({
@@ -2658,6 +2662,7 @@ async function promptMindShutdown() {
       + 'Shutting them down stops their agents and makes their services inaccessible '
       + '(your data is preserved and you can start them again).',
   });
+  console.log(`[mind-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
   if (response === 0) return { proceed: false, stop: false, running: [] };
   if (response === 1) return { proceed: true, stop: false, running: [] };
   return { proceed: true, stop: true, running };
