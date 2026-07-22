@@ -689,7 +689,13 @@ class ImbueCloudConnectorClient(MutableModel):
         tunnel_raw = body.get("tunnel")
         service_raw = body.get("service")
         if not isinstance(tunnel_raw, dict) or not isinstance(service_raw, dict):
-            raise ImbueCloudTunnelError(f"Malformed /sharing/enable response: {body!r}")
+            # Describe only the body's shape, never its contents: a well-formed
+            # "tunnel" half carries the cloudflared token, which must not leak
+            # into an error message that ends up in CLI stderr and client logs.
+            raise ImbueCloudTunnelError(
+                f"Malformed /sharing/enable response: expected 'tunnel' and 'service' objects, "
+                f"got dict with keys {sorted(body)}"
+            )
         return _parse_tunnel_info(tunnel_raw), _parse_service_info(service_raw)
 
     def remove_service(self, access_token: SecretStr, tunnel_name: str, service_name: str) -> None:

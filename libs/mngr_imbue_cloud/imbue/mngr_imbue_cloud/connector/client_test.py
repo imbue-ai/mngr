@@ -1033,11 +1033,24 @@ def test_enable_sharing_posts_combined_body_and_parses_result(monkeypatch: pytes
 
 
 def test_enable_sharing_raises_on_malformed_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The well-formed "tunnel" half carries the cloudflared token, so the
+    # malformed-response error must describe the body's shape without leaking
+    # its contents (the message ends up in CLI stderr and client logs).
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"tunnel": "nope"})
+        return httpx.Response(
+            200,
+            json={
+                "tunnel": {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "token": "SECRET-TUNNEL-TOKEN"},
+                "service": "nope",
+            },
+        )
 
     client = _install_mock_httpx(monkeypatch, handler)
-    with pytest.raises(ImbueCloudTunnelError):
+    with pytest.raises(ImbueCloudTunnelError) as exc_info:
         client.enable_sharing(
             SecretStr("tok"), "agent-abc123", "web", "http://localhost:8080", AuthPolicy(emails=("a@b.com",))
         )
+    message = str(exc_info.value)
+    assert "SECRET-TUNNEL-TOKEN" not in message
+    assert "tunnel" in message
+    assert "service" in message

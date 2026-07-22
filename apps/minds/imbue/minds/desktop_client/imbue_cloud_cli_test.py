@@ -131,3 +131,30 @@ def test_find_tunnel_for_agent_returns_none_when_plugin_emits_null() -> None:
     cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
 
     assert cli.find_tunnel_for_agent(account="owner@example.com", agent_id="agent-abc123") is None
+
+
+def test_enable_sharing_malformed_output_error_omits_the_tunnel_token() -> None:
+    """A malformed enable-sharing payload (well-formed tunnel half, broken
+    service half) must not leak the cloudflared token into the exception
+    message -- it reaches the sharing UI's 502 body and the logs."""
+    body = {
+        "tunnel": {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "token": "SECRET-TUNNEL-TOKEN"},
+        "service": "nope",
+    }
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(body)))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    with pytest.raises(ImbueCloudCliError) as exc_info:
+        cli.enable_sharing(
+            account="owner@example.com",
+            agent_id="agent-abc123",
+            service_name="web",
+            service_url="http://localhost:8080",
+            policy={"emails": ["a@b.com"]},
+        )
+
+    message = str(exc_info.value)
+    assert "SECRET-TUNNEL-TOKEN" not in message
+    # The shape (keys) stays in the message so the failure is still debuggable.
+    assert "service" in message
+    assert "tunnel" in message

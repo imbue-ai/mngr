@@ -534,7 +534,13 @@ class ImbueCloudCli(MutableModel):
         tunnel_raw = body.get("tunnel") if isinstance(body, dict) else None
         service_raw = body.get("service") if isinstance(body, dict) else None
         if not isinstance(tunnel_raw, dict) or not isinstance(service_raw, dict):
-            raise ImbueCloudCliError(f"Malformed enable-sharing output: {body!r}")
+            # Describe only the body's shape, never its contents: a well-formed
+            # "tunnel" half carries the cloudflared token, which must not leak
+            # into an error message that reaches logs and the sharing UI.
+            shape = f"dict with keys {sorted(body)}" if isinstance(body, dict) else type(body).__name__
+            raise ImbueCloudCliError(
+                f"Malformed enable-sharing output: expected 'tunnel' and 'service' objects, got {shape}"
+            )
         return TunnelInfo.model_validate(tunnel_raw), service_raw
 
     def list_services(self, account: str, tunnel_name: str) -> list[dict[str, Any]]:
