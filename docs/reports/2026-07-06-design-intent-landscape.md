@@ -104,7 +104,7 @@ The following principles were expressed by Danver on 2026-07-06 as governing des
 
 Corollaries, taken from what already works here: **prefer the pointer to the copy** (the release-minds pattern over the dev-workflow pattern); **push intent down the enforcement ladder** whenever a rule can be a hook, gate, or ratchet instead of a sentence; and **give point-in-time documents a dated home** — which `docs/reports/` (this directory) now is — rather than the repo root.
 
-These are recorded here first. If they earn agreement, the natural promotions are: a three-line entry in `CLAUDE.md` (instant level-something, since agents auto-load it), and eventually a ratchet or CI check for the mechanizable parts (e.g., "every `docs/` directory with more than N files has a README index").
+These were recorded here first and have since been given a durable home in `docs/reports/README.md`. If they earn wider agreement, the remaining promotions are: a three-line entry in `CLAUDE.md` (instant level-something, since agents auto-load it), and eventually a ratchet or CI check for the mechanizable parts (e.g., "every `docs/` directory with more than N files has a README index").
 
 ## What I would do next
 

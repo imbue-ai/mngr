@@ -4,6 +4,7 @@ A field report on the build, packaging, CI, signing, and release pipeline of the
 
 - **Date:** 2026-07-06. This is a snapshot. If the prose and the citations ever disagree, trust the citations; if the citations and the code disagree, the code won.
 - **Vantage point:** branch `danver/understanding-minds`, whose working tree says minds `0.3.4`. The newest release tag is `minds-v0.3.5`; this branch simply predates that bump, which is normal between releases.
+- **Erratum (2026-07-22):** after the research date, `origin/main` was merged into this branch, bringing the 2026-07-10 rename of `forever-claude-template` (FCT) to `default-workspace-template` and releases through `minds-v0.3.8` (`FALLBACK_BRANCH` now sits at `templates.py:314`). The prose keeps its research-date names, versions, and line anchors; the schematic in Part 2 uses the current name. Where this report and the tree disagree, the tree won — as promised one bullet up.
 - **Paths** are relative to the repo root.
 - **Companion report:** [Where Design Intent Lives](2026-07-06-design-intent-landscape.md), which treats the general question of how this repo records intent. This report treats one subsystem: how the app ships.
 
@@ -72,7 +73,7 @@ digraph minds_ship_path {
         label="release pinning (release.md, human-run)";
         style="filled"; fillcolor="#F3EEE3"; color="#C9BC9C";
         "mngr tag" [label="mngr repo\nannotated tag minds-vX\non the verified SHA"];
-        "FCT tag" [label="forever-claude-template repo\nvendor/mngr = git archive of that SHA\nannotated tag minds-vX"];
+        "template tag" [label="default-workspace-template repo\n(formerly forever-claude-template)\nvendor/mngr = git archive of that SHA\nannotated tag minds-vX"];
     }
 
     subgraph cluster_td {
@@ -94,7 +95,7 @@ digraph minds_ship_path {
         style="filled"; fillcolor="#F7ECEC"; color="#CBA3A3";
         "Minds.app" [label="Minds.app\n(@todesktop/runtime auto-update)"];
         "backend venv" [label="first run: bundled uv fetches\nPython 3.12, installs the wheels\ninto ~/.minds/.venv, spawns minds run"];
-        "agent workspace" [label="agent workspace (Lima VM / Docker)\nclones FCT at the FALLBACK_BRANCH tag\n(optional prebaked Lima image,\nminisign-verified, from R2)"];
+        "agent workspace" [label="agent workspace (Lima VM / Docker)\nclones the template at the\nFALLBACK_BRANCH tag (optional prebaked\nLima image, minisign-verified, from R2)"];
     }
 
     { rank=same; "sign and notarize"; "latest channel"; }
@@ -102,16 +103,16 @@ digraph minds_ship_path {
 
     "minds source" -> "build.js";
     "minds source" -> "snapshot suite" [style=dashed, label="every PR"];
-    "minds source" -> "FCT tag" [style=dotted, label="dev loop only: rsync of the\nworking tree (just minds-start)"];
+    "minds source" -> "template tag" [style=dotted, label="dev loop only: rsync of the\nworking tree (just minds-start)"];
     "release pins" -> "mngr tag" [label="bump, merge\n(merge commit, never squash)"];
-    "mngr tag" -> "FCT tag" [label="just sync-vendor-mngr\n(ls-tree compare proves the match)"];
+    "mngr tag" -> "template tag" [label="just sync-vendor-mngr\n(ls-tree compare proves the match)"];
     "build.js" -> "sign and notarize" [label="pnpm dist\n(todesktop build)"];
     "sign and notarize" -> "launch-to-msg" [label="artifact under test,\nbuilt from THIS SHA"];
     "launch-to-msg" -> "latest channel" [style=dashed, label="green e2e gates step 9:\na human clicks Release"];
     "latest channel" -> "Minds.app" [label="auto-update / download"];
     "Minds.app" -> "backend venv";
     "backend venv" -> "agent workspace";
-    "FCT tag" -> "agent workspace" [label="cloned at runtime\n(pinned, immutable)"];
+    "template tag" -> "agent workspace" [label="cloned at runtime\n(pinned, immutable)"];
 }
 ```
 

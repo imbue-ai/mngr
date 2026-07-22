@@ -6,6 +6,14 @@ This directory exists so that reports have a legible home and do not accumulate 
 
 PDFs of these reports are rendered locally with a pandoc pipeline (pandoc, a graphviz filter that turns `dot` code blocks into diagrams, then xelatex). The markdown is the source of truth; the generated `*.pdf` files and the filter's `graphviz-images/` cache are gitignored.
 
+## Principles
+
+Documentation in this repository is held to three principles, first articulated in the 2026-07-06 design-intent report and recorded here as the durable statement:
+
+1. **Discoverability** — intent must be findable from a cold start: at a root, linked from something a newcomer actually reads, or auto-loaded.
+2. **Navigability** — artifacts must be self-describing and route onward: each states what it is, who it is for, when it was true, and where the adjacent truths live.
+3. **Simplicity** — low but well-appointed token count: one source of truth per topic plus pointers; staleness visible (date what is point-in-time, delete what is dead).
+
 ## Index
 
 | Date | Report | Question it answers |

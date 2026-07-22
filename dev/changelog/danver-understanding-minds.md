@@ -7,3 +7,5 @@ Added `docs/reports/`, a dated home at the repo root for point-in-time analyses 
 Also gitignored `**/docs/reports/*.pdf`: PDFs rendered from these reports via a local pandoc/xelatex pipeline are generated artifacts and stay untracked.
 
 The build/sign/ship report now embeds a graphviz `dot` schematic of the ship-path (developer machine, release pinning, ToDesktop, CI verification, user's Mac), rendered into the PDF by the pipeline's graphviz filter; `**/graphviz-images/` (that filter's render cache) is gitignored as well.
+
+Follow-ups from architecture review: the root README now points to `docs/reports/`; the META principles (discoverability, navigability, simplicity) are enshrined durably in `docs/reports/README.md`; and the build/sign/ship report carries an erratum for the upstream `forever-claude-template` to `default-workspace-template` rename (2026-07-10) that merged into this branch after the research date — its embedded schematic now uses the current name.

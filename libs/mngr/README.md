@@ -402,6 +402,8 @@ The repo also contains code for some dependencies and related projects, includin
 - [libs/imbue_common](https://github.com/imbue-ai/mngr/blob/main/libs/imbue_common/README.md): core libraries that are shared across all of our projects
 - [apps/minds](https://github.com/imbue-ai/mngr/blob/main/apps/minds/README.md): an experimental project around scheduling runs of autonomous agents
 
+Dated, point-in-time analyses of this repository (audits, investigations, state-of-the-world reports) live in [docs/reports](https://github.com/imbue-ai/mngr/blob/main/docs/reports/README.md).
+
 
 ## Contributing
 
