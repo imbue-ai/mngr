@@ -20,6 +20,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import AgentDataOptions
+from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -114,6 +115,28 @@ def _build_host_environment(config: LaunchConfig) -> HostEnvironmentOptions:
     return HostEnvironmentOptions(authorized_keys=config.additional_authorized_keys)
 
 
+def _resolve_agent_environment(config: LaunchConfig, kind: AgentKind) -> AgentEnvironmentOptions:
+    """Resolve the environment for one agent, adding reducer-only vars for the reducer.
+
+    Every agent gets ``config.env_options``. The reducer additionally gets
+    ``config.reducer_env_options`` merged over the top (so a reducer-only value
+    wins on a key collision), which is how credentials that mappers must not
+    receive reach it.
+    """
+    if kind is not AgentKind.REDUCER or config.reducer_env_options is None:
+        return config.env_options
+
+    reducer_only = config.reducer_env_options
+    overridden = {var.key for var in reducer_only.env_vars}
+    merged_vars = (
+        tuple(var for var in config.env_options.env_vars if var.key not in overridden) + reducer_only.env_vars
+    )
+    return AgentEnvironmentOptions(
+        env_vars=merged_vars,
+        env_files=config.env_options.env_files + reducer_only.env_files,
+    )
+
+
 def _build_agent_options(
     agent_name: AgentName,
     branch_name: str,
@@ -150,7 +173,7 @@ def _build_agent_options(
             new_branch_name=branch_name,
         ),
         data_options=AgentDataOptions(is_rsync_enabled=False),
-        environment=config.env_options,
+        environment=_resolve_agent_environment(config, kind),
         label_options=label_options,
         ready_timeout_seconds=60.0 if is_remote else 10.0,
     )

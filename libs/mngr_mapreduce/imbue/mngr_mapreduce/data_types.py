@@ -125,6 +125,12 @@ class LaunchConfig(FrozenModel):
         default_factory=AgentEnvironmentOptions,
         description="Environment variables to pass to agents",
     )
+    reducer_env_options: AgentEnvironmentOptions | None = Field(
+        default=None,
+        description="Extra environment for the reducer only, merged over env_options. For credentials the "
+        "reducer needs but mappers must not receive (e.g. a token that can push and open pull requests): "
+        "mappers are the untrusted bulk of a run, so a write-capable token should not be handed to all of them.",
+    )
     label_options: AgentLabelOptions = Field(
         default_factory=AgentLabelOptions,
         description="Labels to attach to agents",

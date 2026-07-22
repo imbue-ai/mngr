@@ -97,6 +97,9 @@ jobs:
           path: tmr-report/
           retention-days: 30
 
+      # Unlike tmr.yml, this workflow opens the PR itself. It passes no
+      # --reducer-env, so the reducer is not given a GH_TOKEN and its prompt
+      # omits the open-a-PR section entirely -- there is no double-open here.
       - name: Push integrator branch and open PR
         if: success()
         run: |
