@@ -37,6 +37,7 @@ from tenacity import stop_after_delay
 from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -246,6 +247,10 @@ class CreationErrorKind(UpperCaseStrEnum):
     GIT_AUTH_REQUIRED = auto()
 
 
+class UnknownCreationError(KeyError):
+    """Raised when a creation-keyed operation references an id the registry does not track."""
+
+
 class AgentCreationInfo(FrozenModel):
     """Snapshot of agent creation state, returned to callers for status polling.
 
@@ -280,6 +285,13 @@ class AgentCreationInfo(FrozenModel):
         ),
     )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
+    color: str | None = Field(
+        default=None,
+        description=(
+            "Latest workspace color for this creation (a normalized rrggbb hex): the create form's "
+            "pick, or the onboarding walkthrough's re-pick when the user changed it mid-creation"
+        ),
+    )
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
     error_kind: CreationErrorKind | None = Field(
         default=None,
@@ -1553,6 +1565,17 @@ class AgentCreator(MutableModel):
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
+    # Latest workspace color per creation: seeded from the create form's
+    # pick, and overwritten when the user re-picks in the onboarding
+    # walkthrough (``set_pending_color``). Applied as the ``color`` label --
+    # either by the initial ``mngr create`` or by a follow-up ``mngr label``
+    # just before DONE when the pick changed mid-creation.
+    _colors: dict[str, str] = PrivateAttr(default_factory=dict)
+    # Creations whose creating-page render included the onboarding
+    # walkthrough. In-memory (like the rest of the registry) so a reload of
+    # the same /creating/<id> page keeps showing the walkthrough even after
+    # the persistent first-run flag has been marked seen.
+    _onboarding_shown: set[str] = PrivateAttr(default_factory=set)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
@@ -1636,6 +1659,8 @@ class AgentCreator(MutableModel):
             self._launch_modes[str(creation_id)] = launch_mode
             self._host_names[str(creation_id)] = effective_name
             self._log_queues[str(creation_id)] = log_queue
+            if color is not None:
+                self._colors[str(creation_id)] = color
 
         thread = threading.Thread(
             target=self._create_agent_background,
@@ -1694,6 +1719,7 @@ class AgentCreator(MutableModel):
                 launch_mode=self._launch_modes.get(cid_str, LaunchMode.DOCKER),
                 host_name=self._host_names.get(cid_str, ""),
                 redirect_url=self._redirect_urls.get(cid_str),
+                color=self._colors.get(cid_str),
                 error=self._errors.get(cid_str),
                 error_kind=self._error_kinds.get(cid_str),
             )
@@ -1702,6 +1728,41 @@ class AgentCreator(MutableModel):
         """Get the log queue for an in-flight creation, or None if not tracked."""
         with self._lock:
             return self._log_queues.get(str(creation_id))
+
+    def set_pending_color(self, creation_id: CreationId, normalized_hex: str) -> AgentId | None:
+        """Record a mid-creation workspace color re-pick (from the onboarding walkthrough).
+
+        ``normalized_hex`` must already be a normalized ``#rrggbb`` hex (the
+        API route validates). While the creation is in flight the color is
+        applied by the worker via ``mngr label`` just before DONE. If the
+        creation has already finished, the stored value is updated and the
+        canonical ``AgentId`` is returned so the caller can apply the label
+        itself (via ``workspace_settings.set_workspace_color``); returns
+        ``None`` otherwise. Raises ``UnknownCreationError`` for an unknown
+        creation.
+        """
+        cid_str = str(creation_id)
+        with self._lock:
+            if cid_str not in self._statuses:
+                raise UnknownCreationError(cid_str)
+            self._colors[cid_str] = normalized_hex
+            if self._statuses[cid_str] == AgentCreationStatus.DONE:
+                return self._canonical_agent_ids.get(cid_str)
+        return None
+
+    def mark_onboarding_shown(self, creation_id: CreationId) -> None:
+        """Record that this creation's page rendered the onboarding walkthrough.
+
+        Keeps a page reload of the same creation on the walkthrough even
+        after the persistent first-run flag flips to seen.
+        """
+        with self._lock:
+            self._onboarding_shown.add(str(creation_id))
+
+    def was_onboarding_shown(self, creation_id: CreationId) -> bool:
+        """Whether this creation's page already rendered the walkthrough."""
+        with self._lock:
+            return str(creation_id) in self._onboarding_shown
 
     def _create_agent_background(
         self,
@@ -2059,6 +2120,16 @@ class AgentCreator(MutableModel):
                 # subdomain. The plugin owns ``/goto/<agent>/``.
                 redirect_url = self._build_redirect_url(canonical_id)
 
+                # If the user re-picked the workspace color in the onboarding
+                # walkthrough while creation ran, the ``mngr create`` above
+                # carried the stale form color; apply the latest pick as the
+                # ``color`` label before publishing DONE (best-effort -- a
+                # label failure must not fail an otherwise-created workspace).
+                with self._lock:
+                    latest_color = self._colors.get(cid_str)
+                if latest_color is not None and latest_color != color:
+                    self._apply_color_label(canonical_id, latest_color, log_queue)
+
                 # Publish the canonical id + DONE atomically so the UI sees
                 # both at once. ``on_created`` runs after publication so any
                 # downstream consumer (e.g. ``OnCreatedCallback``, which kicks
@@ -2210,6 +2281,26 @@ class AgentCreator(MutableModel):
                 ),
                 agent_display_name=str(agent_id)[:8],
             )
+
+    def _apply_color_label(self, agent_id: AgentId, color_hex: str, log_queue: queue.Queue[str]) -> None:
+        """Write the ``color`` label for a just-created agent (best-effort).
+
+        Runs ``mngr label`` in the same inherited environment the creation's
+        own ``mngr`` subprocesses use. Failures are logged to the creation's
+        log stream but never fail the creation -- the workspace exists and
+        merely keeps the color the form originally picked.
+        """
+        command = [MNGR_BINARY, "label", str(agent_id), "-l", f"color={color_hex}"]
+        logger.info("Applying onboarding color pick: {}", " ".join(command))
+        cg = _make_child_cg("mngr-color-label", self.root_concurrency_group)
+        try:
+            with cg:
+                result = cg.run_process_to_completion(command=command, is_checked_after=False)
+            if result.returncode != 0:
+                raise MngrCommandError(result.stderr.strip() or result.stdout.strip())
+        except (MngrCommandError, OSError, ConcurrencyGroupError) as e:
+            logger.warning("Failed to apply color label {} to {}: {}", color_hex, agent_id, e)
+            log_queue.put(f"[minds] WARNING: could not apply picked color {color_hex}: {e}")
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:
         """Build the absolute URL the UI should navigate to after creation.

@@ -546,6 +546,7 @@ def render_create_form(
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,
+        palette=WORKSPACE_PALETTE,
     )
 
 
@@ -625,6 +626,7 @@ def render_creating_page(
     creation_id: CreationId,
     info: AgentCreationInfo,
     onboarding_services: Sequence[OnboardingService] = (),
+    show_walkthrough: bool = True,
 ) -> str:
     """Render the progress page shown while an agent is being created.
 
@@ -648,13 +650,19 @@ def render_creating_page(
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
-        # Onboarding walkthrough context: the theme-color swatches for the
-        # step-1 demo (interactive only -- the pick is not persisted), the
-        # latchkey services for the step-2 carousel, and whether the
-        # workspace machine is remote (drives the step-3 copy/graphic).
+        # Onboarding walkthrough context: the theme-color swatches (the pick
+        # is written to the workspace's color label via the create-operation
+        # color endpoint), the latchkey services for the carousel, and
+        # whether the workspace machine is remote (drives the final-step
+        # copy/graphic). ``show_walkthrough`` selects walkthrough-first
+        # (first-ever creation) vs the plain loading screen with a "Learn
+        # more about Minds" button. ``initial_color`` seeds the picker with
+        # the creation's current color (the create form's pick).
         palette=WORKSPACE_PALETTE,
         onboarding_services=list(onboarding_services),
         is_remote=info.launch_mode is LaunchMode.IMBUE_CLOUD,
+        show_walkthrough=show_walkthrough,
+        initial_color=info.color or DEFAULT_WORKSPACE_COLOR,
     )
 
 

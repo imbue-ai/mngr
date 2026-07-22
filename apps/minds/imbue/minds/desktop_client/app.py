@@ -1166,15 +1166,34 @@ def _handle_creating_page(
         # navigations, and their JS handles the not-found case itself.)
         return make_redirect_response(url="/", status_code=303)
 
-    # The onboarding walkthrough's step-2 carousel lists the services
-    # latchkey can connect to. ServicesCatalog reads the bundled
-    # services.json lazily and memoizes it process-wide, so constructing
-    # one here is cheap.
+    # The onboarding walkthrough auto-shows only on the user's FIRST
+    # workspace creation (persisted flag); later creations get the plain
+    # loading screen with a "Learn more about Minds" button that reopens
+    # it on demand. The per-creation ``was_onboarding_shown`` memory keeps
+    # a reload of the same /creating/<id> page on the walkthrough even
+    # though the persistent flag flips to seen on first render. With no
+    # config (minimal test apps), the walkthrough always shows.
+    minds_config: MindsConfig | None = get_state().minds_config
+    show_walkthrough = (
+        minds_config is None
+        or not minds_config.get_create_onboarding_seen()
+        or agent_creator.was_onboarding_shown(creation_id)
+    )
+
+    # The onboarding walkthrough's carousel lists the services latchkey
+    # can connect to. ServicesCatalog reads the bundled services.json
+    # lazily and memoizes it process-wide, so constructing one here is
+    # cheap.
     html = render_creating_page(
         creation_id=creation_id,
         info=info,
         onboarding_services=list_onboarding_services(ServicesCatalog()),
+        show_walkthrough=show_walkthrough,
     )
+    if show_walkthrough:
+        agent_creator.mark_onboarding_shown(creation_id)
+        if minds_config is not None:
+            minds_config.set_create_onboarding_seen(True)
     return make_html_response(content=html)
 
 

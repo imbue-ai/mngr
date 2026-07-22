@@ -98,13 +98,17 @@
       return;
     }
     if (creationDone && redirectUrl) {
-      // Creation finished: snap to 100% and hand off to onboarding.js,
-      // which shows the Begin button that performs the actual navigation
-      // once the user has clicked through the walkthrough.
       setProgress(100);
       root.setAttribute('data-redirect-url', redirectUrl);
       root.setAttribute('data-ready', 'true');
       root.dispatchEvent(new Event('minds:create-ready'));
+      // With the walkthrough open (first creation, or "Learn more"
+      // clicked), onboarding.js shows the Begin button that performs the
+      // navigation. On the plain loading screen, enter the workspace
+      // directly, as the page always used to.
+      if (root.getAttribute('data-walkthrough-active') !== 'true') {
+        window.location.href = redirectUrl;
+      }
       return;
     }
     var elapsed = ((window.performance && performance.now) ? performance.now() : Date.now()) - startTime;

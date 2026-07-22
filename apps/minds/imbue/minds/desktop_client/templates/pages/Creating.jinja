@@ -1,4 +1,4 @@
-{#def agent_id, status_text, expected_duration_seconds, palette, onboarding_services, is_remote #}
+{#def agent_id, status_text, expected_duration_seconds, palette, onboarding_services, is_remote, show_walkthrough=True, initial_color="#0b292b" #}
 {#
   Progress page shown while an agent is being created. The page is keyed
   by creation_id (passed as agent_id here -- a minds-internal in-flight
@@ -7,9 +7,12 @@
   expected_duration_seconds drives the client-side time-based progress
   bar (eases toward ~80% over this duration).
 
-  Layout: the screen is a nine-micro-step onboarding walkthrough (see
-  onboarding.js), one short sentence per step, over a shared scene graphic
-  that zooms out as the steps advance. The progress strip (bar + stage
+  Layout: on the user's FIRST-ever creation (show_walkthrough=True) the
+  screen is a nine-micro-step onboarding walkthrough (see onboarding.js),
+  one short sentence per step, over a shared scene graphic that zooms out
+  as the steps advance. Later creations show the plain loading screen
+  (progress strip visible, errors immediate, auto-redirect on ready) with
+  a "Learn more about Minds" button that opens the walkthrough on demand. The progress strip (bar + stage
   caption + collapsible logs) and any creation failure stay hidden until
   the user reaches the LAST step -- only there do the bar, the rotating
   tips, and the setting-up/Ready state surface. When creation finishes AND
@@ -30,11 +33,17 @@
 <Base title="Creating your workspace..."
       body_class="bg-surface-primary text-primary font-sans antialiased min-h-screen"
       scripts={{ _scripts }}>
+  {# show_walkthrough: walkthrough-first (first-ever creation). Otherwise #}
+  {# the plain loading screen shows immediately (bar visible, errors #}
+  {# surface right away -- data-surface-errors preset) with a "Learn more #}
+  {# about Minds" button that opens the walkthrough on demand. #}
   <main id="creating"
         class="w-full min-h-screen flex flex-col"
         data-agent-id="{{ agent_id }}"
         data-expected-duration-seconds="{{ expected_duration_seconds }}"
-        data-is-remote="{{ 'true' if is_remote else 'false' }}">
+        data-is-remote="{{ 'true' if is_remote else 'false' }}"
+        data-show-walkthrough="{{ 'true' if show_walkthrough else 'false' }}"
+        {% if not show_walkthrough %}data-surface-errors="true"{% endif %}>
 
     {# Loading screen. Holds the pinned top progress strip plus two mutually #}
     {# exclusive sub-views: the onboarding walkthrough (in-flight) and the #}
@@ -45,7 +54,7 @@
       {# Top strip: progress bar + stage caption + collapsible logs. #}
       {# Hidden until the user reaches the last walkthrough step -- #}
       {# onboarding.js reveals it there (see the page docstring). #}
-      <div id="top-strip" class="w-full px-6 pt-4 hidden">
+      <div id="top-strip" class="w-full px-6 pt-4{{ ' hidden' if show_walkthrough else '' }}">
         <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
           <div id="bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>
         </div>
@@ -65,7 +74,14 @@
       {# creating.js if creation fails. Step visibility/transitions are #}
       {# driven by the step-1/2/3 class on #onboarding (see app.css). #}
       <div id="progress-view" class="flex-1 flex flex-col min-h-0">
-        <div id="onboarding" class="onboarding step-1 flex-1 flex flex-col items-center justify-center w-full max-w-3xl mx-auto px-6 py-4 gap-6">
+        {# Plain loading view (repeat creations): shown instead of the #}
+        {# walkthrough until the user asks to learn more. #}
+        <div id="plain-loading" class="{{ 'hidden ' if show_walkthrough else '' }}flex-1 flex flex-col items-center justify-center gap-4 px-6">
+          <div class="type-heading">Setting up your workspace</div>
+          <Button variant="ghost" id="learn-more">Learn more about Minds</Button>
+        </div>
+
+        <div id="onboarding" class="{{ 'hidden ' if not show_walkthrough else '' }}onboarding step-1 flex-1 flex flex-col items-center justify-center w-full max-w-3xl mx-auto px-6 py-4 gap-6">
 
           {# Shared scene: the four graphic nodes. Steps reveal them #}
           {# progressively (laptop -> +key -> +tunnel+server) with a #}
@@ -218,7 +234,7 @@
           {# picked color (demo only; the real workspace color came from the #}
           {# create form). #}
           <div id="demo-wrap" class="hidden w-full flex flex-col items-center gap-3">
-            <div id="theme-demo" class="w-full max-w-md rounded-xl overflow-hidden border border-subtle shadow-overlay text-left">
+            <div id="theme-demo" class="w-full max-w-md rounded-xl overflow-hidden border border-subtle shadow-overlay text-left" style="--demo-accent: {{ initial_color }};">
               <div id="demo-titlebar" class="flex items-center gap-1.5 px-3 pt-2" style="background-color: var(--demo-accent);">
                 <div class="flex gap-1.5 pr-2 py-2">
                   <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
@@ -251,7 +267,7 @@
             <div id="color-picker-wrap" class="hidden">
               <div id="onboarding-color-picker" role="radiogroup" aria-label="Theme color" class="flex items-center gap-2 flex-wrap justify-center">
                 {% for name, hex_value in palette.items() %}
-                  <ColorSwatch :hex="hex_value" :name="name" size="sm" :selected="loop.first" />
+                  <ColorSwatch :hex="hex_value" :name="name" size="sm" :selected="hex_value == initial_color" />
                 {% endfor %}
               </div>
             </div>

@@ -375,21 +375,26 @@ def test_render_create_form_omits_env_file_checkbox() -> None:
     assert "include_env_file" not in html
 
 
-def test_render_create_form_carries_color_in_hidden_input_without_swatches() -> None:
-    # The color is auto-chosen, so there is no visible palette picker; a hidden
-    # ``color`` input carries the selection through the POST.
+def test_render_create_form_carries_color_in_hidden_input_with_visible_picker() -> None:
+    # A hidden ``color`` input carries the selection through the POST; the
+    # visible swatch picker (one swatch per palette entry, pre-picked entry
+    # selected) writes it on click.
     html = render_create_form()
     assert 'name="color"' in html
     assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
-    # No visible swatches (the palette picker markup is gone).
-    assert "color-swatch" not in html
+    assert 'id="create-color-picker"' in html
     for hex_value in WORKSPACE_PALETTE.values():
-        assert f'data-color="{hex_value}"' not in html
+        assert f'data-color="{hex_value}"' in html
 
 
 def test_render_create_form_carries_provided_color_in_hidden_input() -> None:
     html = render_create_form(color="#cecd0c")
     assert 'value="#cecd0c"' in html
+    # The matching swatch is pre-selected.
+    swatch_index = html.index('data-color="#cecd0c"')
+    tag_start = html.rindex("<button", 0, swatch_index)
+    tag_end = html.index(">", swatch_index)
+    assert 'aria-checked="true"' in html[tag_start:tag_end]
 
 
 def _preset_card_tag(html: str, preset: str) -> str:
@@ -502,6 +507,49 @@ def test_render_creating_page_renders_onboarding_walkthrough() -> None:
     tag_start = html.rindex("<button", 0, begin_index)
     tag_end = html.index(">", begin_index)
     assert "display: none" in html[tag_start:tag_end]
+
+
+def test_render_creating_page_plain_mode_defers_walkthrough() -> None:
+    """With show_walkthrough=False (repeat creations), the page shows the
+    plain loading screen: progress strip visible immediately, errors
+    unlocked up front, walkthrough hidden behind a Learn-more button."""
+    creation_id = CreationId()
+    info = AgentCreationInfo(
+        creation_id=creation_id,
+        status=AgentCreationStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    html = render_creating_page(creation_id=creation_id, info=info, show_walkthrough=False)
+    assert 'data-show-walkthrough="false"' in html
+    assert 'data-surface-errors="true"' in html
+    assert "Learn more about Minds" in html
+    assert "Setting up your workspace" in html
+    # The top strip is NOT hidden in plain mode...
+    strip_index = html.index('id="top-strip"')
+    strip_tag = html[html.rindex("<div", 0, strip_index) : html.index(">", strip_index)]
+    assert "hidden" not in strip_tag
+    # ...while the walkthrough is.
+    onboarding_index = html.index('id="onboarding"')
+    onboarding_tag = html[html.rindex("<div", 0, onboarding_index) : html.index(">", onboarding_index)]
+    assert "hidden" in onboarding_tag
+
+
+def test_render_creating_page_seeds_picker_with_creation_color() -> None:
+    """The walkthrough's color picker pre-selects the creation's current
+    color (the create form's pick) and seeds the demo accent with it."""
+    creation_id = CreationId()
+    info = AgentCreationInfo(
+        creation_id=creation_id,
+        status=AgentCreationStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+        color="#cecd0c",
+    )
+    html = render_creating_page(creation_id=creation_id, info=info)
+    assert "--demo-accent: #cecd0c;" in html
+    swatch_index = html.index('data-color="#cecd0c"')
+    tag_start = html.rindex("<button", 0, swatch_index)
+    tag_end = html.index(">", swatch_index)
+    assert 'aria-checked="true"' in html[tag_start:tag_end]
 
 
 def test_render_creating_page_step3_copy_matches_launch_mode() -> None:

@@ -124,3 +124,12 @@ def test_multiple_settings_coexist(tmp_path: Path) -> None:
 
     config.set_default_account_id("user-new")
     assert config.get_auto_open_requests_panel() is False
+
+
+def test_create_onboarding_seen_defaults_false_and_persists(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.get_create_onboarding_seen() is False
+    config.set_create_onboarding_seen(True)
+    assert config.get_create_onboarding_seen() is True
+    # Persisted: a fresh instance over the same dir sees it.
+    assert _make_config(tmp_path).get_create_onboarding_seen() is True

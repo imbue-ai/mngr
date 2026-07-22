@@ -56,6 +56,7 @@ from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import UnknownCreationError
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_auth import handle_invalid_random_id as _handle_invalid_random_id
@@ -128,6 +129,7 @@ from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import normalize_host_name_slug
 from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.templates import status_text_for
+from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
@@ -1714,6 +1716,46 @@ def _handle_patch_workspace(agent_id: str) -> Response:
     return _json_response(applied)
 
 
+@require_api_or_cookie_auth
+def _handle_update_create_operation_color(operation_id: str) -> Response:
+    """Update the workspace color for an in-flight (or just-finished) creation.
+
+    Backs the onboarding walkthrough's theme-color picker on the creating
+    page. Body: ``{"color": "#rrggbb"}``. While the creation is in flight the
+    color is recorded on the creator and applied as the ``color`` label just
+    before DONE; if the creation already finished, the label is written
+    immediately (best-effort -- an unreachable host still returns the stored
+    pick with ``applied: false``).
+    """
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    if agent_creator is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    body = request.get_json(silent=True, force=True) or {}
+    normalized = normalize_workspace_color(str(body.get("color", "")))
+    if normalized is None:
+        return _json_error("invalid_hex", 400)
+    try:
+        already_created_agent_id = agent_creator.set_pending_color(CreationId(operation_id), normalized)
+    except UnknownCreationError:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    applied = False
+    if already_created_agent_id is not None:
+        state = get_state()
+        try:
+            workspace_settings.set_workspace_color(
+                already_created_agent_id,
+                normalized,
+                state.backend_resolver,
+                state.mngr_binary,
+                state.mngr_host_dir,
+                state.root_concurrency_group,
+            )
+            applied = True
+        except workspace_settings.WorkspaceColorError as exc:
+            logger.warning("Post-creation color apply failed for {}: {}", already_created_agent_id, exc.code)
+    return _json_response({"color": normalized, "applied": applied})
+
+
 # -- Workspace operation dismissal --
 
 
@@ -2013,6 +2055,12 @@ def create_api_v1_blueprint() -> Blueprint:
         view_func=_handle_restart_operation_status,
         endpoint="restart_operation_status",
         methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/create/<operation_id>/color",
+        view_func=_handle_update_create_operation_color,
+        endpoint="update_create_operation_color",
+        methods=["PUT"],
     )
     blueprint.add_url_rule(
         "/workspaces/operations/create/<operation_id>/logs",

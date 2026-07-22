@@ -18,6 +18,24 @@
   var onboarding = document.getElementById('onboarding');
   if (!root || !onboarding) return;
 
+  // Walkthrough-first (first-ever creation) vs plain loading screen with a
+  // "Learn more about Minds" button. data-walkthrough-active tells
+  // creating.js whether Begin gates entry (walkthrough open) or the page
+  // should auto-redirect when ready (plain screen).
+  var walkthroughOpen = root.getAttribute('data-show-walkthrough') === 'true';
+  var plainLoading = document.getElementById('plain-loading');
+  var learnMoreBtn = document.getElementById('learn-more');
+  if (walkthroughOpen) root.setAttribute('data-walkthrough-active', 'true');
+  if (learnMoreBtn) {
+    learnMoreBtn.addEventListener('click', function () {
+      walkthroughOpen = true;
+      root.setAttribute('data-walkthrough-active', 'true');
+      if (plainLoading) plainLoading.classList.add('hidden');
+      onboarding.classList.remove('hidden');
+      render();
+    });
+  }
+
   var TOTAL_STEPS = 9;
   var LAST_STEP = TOTAL_STEPS;
   var step = 1;
@@ -57,7 +75,7 @@
     });
   }
 
-  var errorsSurfaced = false;
+  var errorsSurfaced = root.getAttribute('data-surface-errors') === 'true';
   function render() {
     var phase = phaseForStep(step);
     for (var p = 1; p <= 3; p++) {
@@ -75,10 +93,13 @@
     setDemoTab(DEMO_TAB_BY_STEP[step]);
 
     var onLastStep = step === LAST_STEP;
-    // The loading bar, stage caption, and logs only surface on the last
-    // step -- so do errors: creating.js holds any failure back until the
-    // 'minds:surface-errors' signal below.
-    if (topStrip) topStrip.classList.toggle('hidden', !onLastStep);
+    // In walkthrough-first mode, the loading bar, stage caption, and logs
+    // only surface on the last step -- so do errors: creating.js holds any
+    // failure back until the 'minds:surface-errors' signal below. On the
+    // plain loading screen the strip is visible (and errors unlocked) from
+    // the start, and stays visible if the walkthrough is opened.
+    var walkthroughFirst = root.getAttribute('data-show-walkthrough') === 'true';
+    if (topStrip && walkthroughFirst) topStrip.classList.toggle('hidden', !onLastStep);
     if (onLastStep && !errorsSurfaced) {
       errorsSurfaced = true;
       root.setAttribute('data-surface-errors', 'true');
@@ -163,10 +184,12 @@
     });
   }
 
-  // ---- Theme-color demo (step 5) ----
-  // Picking a swatch restyles the demo tab-space via --demo-accent. This is
-  // a learning toy only: the pick is not persisted anywhere (the real
-  // workspace color was chosen on the create form).
+  // ---- Theme-color picker (step 5) ----
+  // Picking a swatch restyles the demo tab-space via --demo-accent AND
+  // persists the pick to the in-flight creation: the color endpoint
+  // records it on the creator, which applies it as the workspace's color
+  // label (during creation, or immediately if it already finished).
+  var creationIdForColor = root.getAttribute('data-agent-id');
   var picker = document.getElementById('onboarding-color-picker');
   if (demo && picker) {
     picker.addEventListener('click', function (event) {
@@ -178,12 +201,12 @@
       picker.querySelectorAll('.color-swatch').forEach(function (other) {
         other.setAttribute('aria-checked', other === swatch ? 'true' : 'false');
       });
+      fetch('/api/v1/workspaces/operations/create/' + creationIdForColor + '/color', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ color: color })
+      }).catch(function () {});
     });
-    // Seed the demo with the initially selected swatch.
-    var selected = picker.querySelector('.color-swatch[aria-checked="true"]');
-    if (selected && selected.getAttribute('data-color')) {
-      demo.style.setProperty('--demo-accent', selected.getAttribute('data-color'));
-    }
   }
 
   render();

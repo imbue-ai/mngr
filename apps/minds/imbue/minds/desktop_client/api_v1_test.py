@@ -487,6 +487,84 @@ def test_create_workspace_auto_names_next_workspace_when_host_name_omitted(
     assert str(creator.last_call["host_name"]) == "workspace-2"
 
 
+def test_update_create_operation_color_stores_pending_pick(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # The onboarding walkthrough's color pick is normalized and stored on the
+    # creator while the creation is in flight (applied as the color label by
+    # the worker before DONE), so it is not applied yet here.
+    creation_id = CreationId()
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    with creator._lock:
+        creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.put(
+        f"/api/v1/workspaces/operations/create/{creation_id}/color",
+        headers=_auth_header(),
+        json={"color": "9FBBD3"},
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body == {"color": "#9fbbd3", "applied": False}
+    info = creator.get_creation_info(creation_id)
+    assert info is not None
+    assert info.color == "#9fbbd3"
+
+
+def test_update_create_operation_color_rejects_invalid_hex(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    creation_id = CreationId()
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    with creator._lock:
+        creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.put(
+        f"/api/v1/workspaces/operations/create/{creation_id}/color",
+        headers=_auth_header(),
+        json={"color": "not-a-color"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_update_create_operation_color_404s_for_unknown_creation(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+
+    response = client.put(
+        f"/api/v1/workspaces/operations/create/{CreationId()}/color",
+        headers=_auth_header(),
+        json={"color": "#9fbbd3"},
+    )
+
+    assert response.status_code == 404
+
+
 def test_create_operation_status_includes_status_text(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,

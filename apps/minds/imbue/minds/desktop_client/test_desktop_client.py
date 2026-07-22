@@ -616,6 +616,51 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
+def test_creating_page_walkthrough_only_on_first_creation(tmp_path: Path) -> None:
+    """The walkthrough auto-shows on the first-ever creation only.
+
+    With a MindsConfig wired, the first creating-page render shows the
+    walkthrough and flips the persistent seen flag; a reload of the SAME
+    creation keeps the walkthrough (per-creation memory), while a second
+    creation gets the plain loading screen with the Learn-more button.
+    """
+    root_cg = ConcurrencyGroup(name="test-root")
+    root_cg.__enter__()
+    agent_creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_cg,
+        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    minds_config = MindsConfig(data_dir=tmp_path)
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        agent_creator=agent_creator,
+        minds_config=minds_config,
+    )
+    client = app.test_client()
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    first_creation = agent_creator.start_creation("file:///nonexistent-repo")
+    response = client.get(f"/creating/{first_creation}")
+    assert 'data-show-walkthrough="true"' in response.text
+    assert minds_config.get_create_onboarding_seen() is True
+
+    # Reloading the same creation keeps the walkthrough.
+    response = client.get(f"/creating/{first_creation}")
+    assert 'data-show-walkthrough="true"' in response.text
+
+    # A second creation gets the plain loading screen + Learn-more button.
+    second_creation = agent_creator.start_creation("file:///nonexistent-repo")
+    response = client.get(f"/creating/{second_creation}")
+    assert 'data-show-walkthrough="false"' in response.text
+    assert "Learn more about Minds" in response.text
+    agent_creator.wait_for_all()
+
+
 def test_creating_page_redirects_to_landing_for_unknown(tmp_path: Path) -> None:
     """GET /creating/{agent_id} falls back to the landing page for an unknown creation.
 
