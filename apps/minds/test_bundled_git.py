@@ -27,8 +27,10 @@ offload CI even the asset is hermetic -- sandboxes have no network, so the mngr
 Dockerfile pre-fetches it into ``MINDS_DUGITE_NATIVE_CACHE_DIR`` at image build
 time; on dev machines the test downloads it live instead.
 
-Design: specs/minds-managed-git/concise.md. Runs on linux-x64 in offload CI and
-on macs locally; skips on platforms with no mapped manifest target (e.g. Windows).
+Design: specs/minds-managed-git/concise.md. CI runs it on both shipped targets:
+linux-x64 in offload and darwin-arm64 on a GitHub-hosted macOS runner
+(test-minds-bundled-git-macos in ci.yml); it can also run locally on a mac. It
+skips on platforms with no mapped manifest target (e.g. Windows).
 
 Run from the repo root:
     just test apps/minds/test_bundled_git.py::test_bundled_git_payload_end_to_end

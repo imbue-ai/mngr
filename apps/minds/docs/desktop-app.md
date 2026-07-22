@@ -113,7 +113,7 @@ git tracks upstream security releases, so the pinned dugite-native payload needs
 1. Pick the new dugite-native tag from the freshness tracking issue (or, for an urgent CVE, directly -- you may bump before the cooldown window at your discretion; the automated nag waits it out).
 2. Update `apps/minds/scripts/git-manifest.json`: the `dugiteNativeTag`, the `gitVersion`, all five asset names (each embeds a dugite-native commit short-SHA, so record them verbatim), and each target's hash taken from the release's `.sha256` companion asset.
 3. Independently download each tarball and recompute its SHA256, then compare against the values you just recorded (pinning defends against future substitution, not against copying a wrong value in).
-4. Run the bundled-git acceptance test locally on a mac; CI covers linux-x64.
+4. CI runs the bundled-git acceptance test on both shipped targets -- linux-x64 via offload and darwin-arm64 via a GitHub-hosted macOS runner (`test-minds-bundled-git-macos` in `ci.yml`) -- so a green PR proves the bump. Run it locally on a mac as well if you touch any of the unshipped manifest targets (darwin-x64, linux-arm64).
 5. Ship through the normal release process; the freshness workflow closes the tracking issue on its next run.
 
 ## Data directory
