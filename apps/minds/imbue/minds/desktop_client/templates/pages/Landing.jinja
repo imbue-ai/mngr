@@ -438,60 +438,7 @@
       // clearBackupChecking set (a `.hidden` class can't hide this inline-flex
       // pill, so we drive visibility through style.display).
       badge.style.display = '';
-      var download = row.querySelector('.landing-backup-download');
-      if (download) {
-        if (state === 'BACKED_UP') {
-          download.textContent = 'download';
-          download.classList.remove('hidden');
-          download.onclick = function (ev) { return window.backupExport(ev, agentId); };
-        } else {
-          download.classList.add('hidden');
-          download.onclick = null;
-        }
-      }
     }
-
-    window.backupExport = function (ev, agentId) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      var link = ev.currentTarget;
-      if (link.getAttribute('data-exporting') === '1') return false;
-      link.setAttribute('data-exporting', '1');
-      link.style.pointerEvents = 'none';
-      var original = link.textContent;
-      link.innerHTML = '<span class="spinner spinner-accent inline-block w-3 h-3 align-middle"></span> exporting…';
-      function restore(text) {
-        link.textContent = text;
-        link.style.pointerEvents = '';
-        link.removeAttribute('data-exporting');
-      }
-      // The export route passes the snapshot id to restic verbatim, so
-      // restic's own 'latest' addressing exports the newest snapshot without
-      // listing them first.
-      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId)
-        + '/backups/latest/export', { method: 'POST' }).then(function (resp) {
-        if (!resp.ok) throw new Error('export failed: ' + resp.status);
-        var disp = resp.headers.get('Content-Disposition') || '';
-        var match = /filename="?([^"]+)"?/.exec(disp);
-        var name = match ? match[1] : (agentId + '-backup.zip');
-        return resp.blob().then(function (blob) { return { blob: blob, name: name }; });
-      }).then(function (result) {
-        var url = URL.createObjectURL(result.blob);
-        var anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = result.name;
-        document.body.appendChild(anchor);
-        anchor.click();
-        document.body.removeChild(anchor);
-        URL.revokeObjectURL(url);
-        restore(original);
-      }).catch(function (err) {
-        console.error('Backup export failed:', err);
-        link.textContent = 'export failed';
-        setTimeout(function () { restore(original); }, 3000);
-      });
-      return false;
-    };
 
     function showBackupChecking() {
       document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
@@ -559,7 +506,7 @@
           if (pending <= 0) clearBackupChecking();
         }
         renderedIds.forEach(function (agentId) {
-          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups').then(function (response) {
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=1').then(function (response) {
             return response.ok ? response.json() : null;
           }).catch(function () { return null; }).then(function (data) {
             var snapshots = (data && data.snapshots) || [];
@@ -771,7 +718,6 @@
                 <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">{{ provider_label }}</span>
               {% endif %}
               <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
-              <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="type-helper">download</Link>
               <span class="landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
               <span class="landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
               {% if supports_shutdown %}
@@ -822,9 +768,9 @@
 
         {# Workspaces known only from synced records (hosted on another device,
            or otherwise not in local discovery). Greyed and non-clickable --
-           their hosts aren't reachable from here -- but backup status and
-           download still work via the synced credentials, and the X removes
-           the record for good. #}
+           their hosts aren't reachable from here -- but backup status still
+           shows via the synced credentials, and the X removes the record for
+           good. Per-snapshot download lives on Workspace Settings. #}
         {% for remote in remote_workspaces %}
           {% set remote_accent_style = "--workspace-accent: " ~ remote.accent ~ ";" %}
           <Card layout="row"
@@ -845,7 +791,6 @@
               <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important" data-tooltip="{{ remote.state_detail or 'Could not apply the synced access material.' }}">sync error</span>
             {% endif %}
             <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
-            <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="type-helper">download</Link>
             <Button variant="ghost" size="icon"
                     onclick="window.landingRemoveRecord(event, this)"
                     :data-remove-host-id="remote.host_id"

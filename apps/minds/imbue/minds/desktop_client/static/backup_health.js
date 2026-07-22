@@ -58,7 +58,9 @@
           var agentId = workspace.agent_id || workspace.id;
           if (!agentId) return;
           currentIds[agentId] = true;
-          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups')
+          // This surface reads only check_state/problems, never snapshots, so
+          // limit=0 keeps the fanned-out per-workspace responses small.
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=0')
             .then(function (resp) { return resp.ok ? resp.json() : null; })
             .then(function (entry) { if (entry) ingestEntry(entry); })
             .catch(function () {});

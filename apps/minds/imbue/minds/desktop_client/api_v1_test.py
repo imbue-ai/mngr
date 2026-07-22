@@ -18,6 +18,7 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -27,6 +28,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PREFIX
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
@@ -46,6 +48,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import status_text_for
+from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -369,10 +372,89 @@ def test_workspace_backups_reports_unconfigured_as_an_ordinary_empty_listing(tmp
     body = json.loads(response.data)
     assert body["is_configured"] is False
     assert body["snapshots"] == []
+    assert body["snapshots_total"] == 0
     assert body["is_backing_up"] is False
     assert body["check_state"] == "OFFLINE"
     assert body["is_verification_enabled"] is True
     assert body["update_target_version"].startswith("minds-v")
+
+
+@pytest.mark.timeout(120)
+def test_workspace_backups_lists_snapshots_newest_first(tmp_path: Path) -> None:
+    # Against a real local restic repo with three snapshots: /backups returns
+    # them newest-first so settings and the full-history page need not re-sort.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    repo = str(tmp_path / "repo")
+    password = "workspace-key"
+    restic_cli.init_repo(repository=repo, backend_env={}, password=password)
+    write_canonical_env(
+        WorkspacePaths(data_dir=tmp_path / "minds"),
+        agent_id,
+        f"RESTIC_REPOSITORY={repo}\nRESTIC_PASSWORD={password}\n",
+    )
+    source = tmp_path / "data.txt"
+    for i in range(3):
+        source.write_text(f"content {i}")
+        restic_backup_a_file(repo, password, source)
+
+    body = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)
+    assert body["is_configured"] is True
+    assert len(body["snapshots"]) == 3
+    assert body["snapshots_total"] == 3
+    times = [s["time"] for s in body["snapshots"]]
+    assert times == sorted(times, reverse=True)
+
+
+@pytest.mark.timeout(120)
+def test_workspace_backups_limit_and_offset_page_the_newest_first_window(tmp_path: Path) -> None:
+    # limit/offset trim the serialized window while snapshots_total keeps the
+    # full count, so the full-history page can page without re-listing.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    repo = str(tmp_path / "repo")
+    password = "workspace-key"
+    restic_cli.init_repo(repository=repo, backend_env={}, password=password)
+    write_canonical_env(
+        WorkspacePaths(data_dir=tmp_path / "minds"),
+        agent_id,
+        f"RESTIC_REPOSITORY={repo}\nRESTIC_PASSWORD={password}\n",
+    )
+    source = tmp_path / "data.txt"
+    for i in range(3):
+        source.write_text(f"content {i}")
+        restic_backup_a_file(repo, password, source)
+
+    all_times = [
+        s["time"]
+        for s in json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)[
+            "snapshots"
+        ]
+    ]
+
+    first_page = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=2", headers=_auth_header()).data)
+    assert first_page["snapshots_total"] == 3
+    assert [s["time"] for s in first_page["snapshots"]] == all_times[:2]
+
+    second_page = json.loads(
+        client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=2&offset=2", headers=_auth_header()).data
+    )
+    assert second_page["snapshots_total"] == 3
+    assert [s["time"] for s in second_page["snapshots"]] == all_times[2:]
+
+    # limit=0 keeps the count but sends no rows (the badge/landing surfaces).
+    none_page = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=0", headers=_auth_header()).data)
+    assert none_page["snapshots"] == []
+    assert none_page["snapshots_total"] == 3
+
+
+def test_workspace_backups_rejects_a_negative_limit(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=-1", headers=_auth_header())
+
+    assert response.status_code == 400
 
 
 def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> None:
@@ -1856,7 +1938,7 @@ def test_backup_service_update_conflicts_with_a_running_operation(
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert "RESTART" in json.loads(response.data)["error"]
+    assert "restart is already in progress" in json.loads(response.data)["error"]
     # The dispatch did not replace the running record.
     record = registry.get(agent_id)
     assert record is not None
@@ -1885,7 +1967,7 @@ def test_workspace_restart_conflicts_with_a_running_backup_operation(
     )
 
     assert response.status_code == 409
-    assert "BACKUP_UPDATE" in json.loads(response.data)["error"]
+    assert "backup software update is already in progress" in json.loads(response.data)["error"]
     # The running backup operation's record was not replaced.
     record = registry.get(agent_id)
     assert record is not None
@@ -1918,6 +2000,162 @@ def test_backup_service_update_cancel_flags_a_running_update(tmp_path: Path) -> 
 
     assert response.status_code == 200
     assert registry.is_cancel_requested(agent_id) is True
+
+
+def test_backup_restore_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{AgentId()}/backups/abc123/restore", headers=_auth_header(), json={})
+
+    assert response.status_code == 404
+
+
+def test_backup_restore_unconfigured_workspace_returns_409(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Without a canonical restic.env there is no repository to restore from,
+    # so the dispatch is rejected up front instead of spawning a worker.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backups/abc123/restore", headers=_auth_header(), json={})
+
+    assert response.status_code == 409
+    assert "not configured" in json.loads(response.data)["error"]
+    # No operation record was created.
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
+
+
+def test_backup_restore_conflicts_with_a_running_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Any RUNNING operation (including a double-pressed restore) makes a
+    # second dispatch a 409 instead of stacking a second worker.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    write_canonical_env(
+        WorkspacePaths(data_dir=tmp_path / "minds"),
+        agent_id,
+        "RESTIC_REPOSITORY=/tmp/repo\nRESTIC_PASSWORD=pw\n",
+    )
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backups/abc123/restore", headers=_auth_header(), json={})
+
+    assert response.status_code == 409
+    assert "restore is already in progress" in json.loads(response.data)["error"]
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.BACKUP_RESTORE
+
+
+def test_backup_service_update_cancel_flags_a_running_restore(tmp_path: Path) -> None:
+    # The shared cancel route also covers a waiting restore (same slot, same
+    # cancellable waiting phase).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert registry.is_cancel_requested(agent_id) is True
+
+
+def test_backup_operation_status_reports_a_restore(tmp_path: Path) -> None:
+    # A BACKUP_RESTORE record is visible through the shared backup operations
+    # endpoint (the settings page polls it with the same code as update).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["kind"] == "backup_restore"
+    assert body["status"] == "RUNNING"
+
+
+def test_backup_operation_status_reports_the_snapshot_a_restore_targets(tmp_path: Path) -> None:
+    # A restore reports itself on its table row, so a page loaded mid-restore
+    # needs to be told which row: without the snapshot id it would show an idle
+    # table over a busy workspace.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    assert registry.start_if_idle(
+        agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc), "abc123"
+    )
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["snapshot_id"] == "abc123"
+
+
+def test_backup_operation_status_reports_no_snapshot_for_a_whole_workspace_operation(tmp_path: Path) -> None:
+    # An update acts on the workspace, not a snapshot, so it claims no row.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["snapshot_id"] is None
+
+
+def test_backup_operation_status_reports_cancellable_only_before_mutation(tmp_path: Path) -> None:
+    # The UI drives the Cancel button off is_cancellable: offered while the
+    # operation is still waiting, withdrawn the moment its worker claims the
+    # point of no return.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    waiting = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+    assert waiting["is_cancellable"] is True
+
+    assert registry.begin_mutation(agent_id) is True
+    mutating = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+    assert mutating["is_cancellable"] is False
+    assert mutating["status"] == "RUNNING"
+
+
+def test_backup_operation_status_reports_configure_as_never_cancellable(tmp_path: Path) -> None:
+    # Configure operations have no waiting phase, so a Cancel would always be
+    # a lie; the status must never offer it.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc))
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["is_cancellable"] is False
+
+
+def test_backup_service_update_cancel_rejects_a_too_late_cancel(tmp_path: Path) -> None:
+    # Once the operation started mutating, a cancel must fail loudly (409)
+    # instead of pretending it took effect while the restore runs on.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    assert registry.begin_mutation(agent_id) is True
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
+
+    assert response.status_code == 409
+    assert "no longer be cancelled" in json.loads(response.data)["error"]
+    assert registry.is_cancel_requested(agent_id) is False
 
 
 def test_backup_service_configure_rejects_configure_later_and_invalid_providers(

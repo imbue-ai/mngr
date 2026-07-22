@@ -108,16 +108,30 @@ class RestartOperationStatusResponse(FrozenModel):
 
 
 class BackupOperationStatusResponse(FrozenModel):
-    """Status of a backup update/configure operation (polled at /operations/backup/<id>)."""
+    """Status of a backup update/configure/restore operation (polled at /operations/backup/<id>)."""
 
     operation_id: str = Field(description="The workspace agent id the operation acts on")
-    kind: str = Field(description="'backup_update' or 'backup_configure'")
+    kind: str = Field(description="'backup_update', 'backup_configure', or 'backup_restore'")
     status: str = Field(description="Raw operation status (RUNNING/DONE/FAILED)")
     is_done: bool = Field(description="Whether the operation has finished successfully")
     error: str | None = Field(default=None, description="Failure message, when the operation failed")
     blocked_chats: tuple[str, ...] = Field(
         default=(),
         description="Chat agents whose RUNNING state blocked the update (offer 'Stop all chats and retry')",
+    )
+    is_cancellable: bool = Field(
+        default=False,
+        description=(
+            "Whether a cancel request can still take effect: only while an update/restore is waiting, "
+            "before it starts mutating the workspace (the UI hides Cancel once this goes false)"
+        ),
+    )
+    snapshot_id: str | None = Field(
+        default=None,
+        description=(
+            "The snapshot a restore is restoring to, so a page loaded mid-restore can mark the right "
+            "table row. None for operations that act on the whole workspace"
+        ),
     )
 
 
@@ -360,7 +374,13 @@ class WorkspaceBackupsResponse(FrozenModel):
     agent_id: str = Field(description="The workspace agent id")
     is_configured: bool = Field(description="Whether minds holds a canonical restic.env for this workspace")
     is_backing_up: bool = Field(description="Whether a (non-stale) restic backup is currently running")
-    snapshots: tuple[BackupSnapshotSummary, ...] = Field(default=(), description="All snapshots, newest-first")
+    snapshots: tuple[BackupSnapshotSummary, ...] = Field(
+        default=(),
+        description="The requested window of snapshots, newest-first (all of them when no limit is given)",
+    )
+    snapshots_total: int = Field(
+        default=0, description="Total snapshots available, ignoring limit/offset (for paging the full history)"
+    )
     snapshots_error: str | None = Field(
         default=None, description="Why the snapshot listing failed (e.g. restic error), when it did"
     )

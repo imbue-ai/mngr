@@ -627,7 +627,7 @@ def _assert_remote_row_visible(page: Page, origin: str, agent_id: str) -> None:
 
 
 def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path) -> Path:
-    """Click the landing row's download link and return the exported zip's path.
+    """Click Download on the workspace settings Recent backups table and return the zip path.
 
     Electron's content view does not surface Playwright download events over
     CDP (the click lands in Electron's own download handling), and the export
@@ -638,21 +638,17 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
     the browser. Waiting for it to appear (fresh mtime) proves the click ran
     the whole restore-and-zip path.
     """
-    link_selector = f'[data-agent-id="{agent_id}"] .landing-backup-download'
+    settings_url = f"{origin}/workspace/{agent_id}/settings"
+    download_selector = "#backup-history a"
 
-    def link_visible() -> bool | None:
-        # The link unhides only when the settled badge state is BACKED_UP, so
-        # let the per-load status fetch finish before reading (see
-        # _read_settled_badge for why reload-polling would starve it).
-        badge = _read_settled_badge(page, origin, agent_id)
-        logger.info("Post-unlock backup badge for {}: {!r}", agent_id, badge)
-        link = page.query_selector(link_selector)
-        if link is None:
-            return None
-        link_class = link.get_attribute("class") or ""
-        return True if "hidden" not in link_class.split() else None
+    def download_visible() -> bool | None:
+        page.goto(settings_url, wait_until="domcontentloaded")
+        # Recent backups rows appear once /backups returns; the first Download
+        # is the newest snapshot (same data the Landing badge used to gate on).
+        link = page.query_selector(download_selector)
+        return True if link is not None else None
 
-    _wait_until(f"the backup download link for {agent_id}", _DOWNLOAD_LINK_TIMEOUT_SECONDS, link_visible)
+    _wait_until(f"the backup Download link for {agent_id} on settings", _DOWNLOAD_LINK_TIMEOUT_SECONDS, download_visible)
 
     # The route keys the zip by the workspace's host id, falling back to the
     # agent id when local discovery does not know the workspace -- which is
@@ -660,8 +656,8 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
     candidate_paths = (export_zip_path_for_host(agent_id), *sorted(_EXPORT_ZIP_DIR.glob("minds-backup-export-*.zip")))
     stale_mtimes = {path: path.stat().st_mtime for path in candidate_paths if path.exists()}
     clicked_at = time.time()
-    page.click(link_selector)
-    logger.info("Clicked the backup download link for {}", agent_id)
+    page.click(download_selector)
+    logger.info("Clicked the backup Download link for {} on settings", agent_id)
 
     def exported() -> Path | None:
         for path in (export_zip_path_for_host(agent_id), *_EXPORT_ZIP_DIR.glob("minds-backup-export-*.zip")):
@@ -723,8 +719,8 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
     sync converge. Then simulate losing the machine (quit the app, delete the
     entire local data root and mngr host dir, remove the docker containers),
     reinstall (fresh app), sign back in, unlock with the master password via
-    the landing banner, and download the old workspace's backup from its
-    remote-row download link -- verifying a sentinel file round-tripped
+    the landing banner, and download the old workspace's backup from Workspace
+    Settings (per-snapshot Download) -- verifying a sentinel file round-tripped
     byte-for-byte through R2.
     """
     runtime = _prepare_runtime(tmp_path, monkeypatch, sync_e2e_env)
