@@ -476,20 +476,22 @@ button.section-head {
 .composer.dragover { outline: 1px dashed var(--border-strong); outline-offset: -3px; }
 
 /* Small screens: the textarea takes the full width on its own row and the buttons
-   drop to a row below it -- [+] [Esc] on the left, the auto-scroll toggle centered,
-   [send] on the right -- bigger tap targets, no cramped single line. */
+   drop to a row below it -- [+] [Esc] on the left, [send] on the right -- bigger tap
+   targets, no cramped single line. The auto-scroll toggle is absolutely centered on
+   the button row (relative to the two screen edges, NOT the leftover gap between the
+   flanking buttons, which shifts with their differing widths). */
 @media (max-width: 560px) {
-  .composer .inner { flex-wrap: wrap; }
+  .composer .inner { flex-wrap: wrap; position: relative; } /* anchor the centered toggle */
   .composer textarea { flex: 1 1 100%; order: 1; }
   .composer .attach-btn { order: 2; }
   .composer .esc-btn { order: 3; }
-  /* In the button row (not the desktop floating fixed button); margin auto centers it
-     between the [+ Esc] group and send. Sized to match the row's flat buttons. */
+  #send { order: 4; margin-left: auto; } /* far right */
   .composer .autoscroll-btn {
-    order: 4; position: static; right: auto; bottom: auto; margin: 0 auto;
-    width: 46px; height: 42px; min-height: 42px; border-radius: 0; z-index: auto;
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 0;
+    right: auto; margin: 0; z-index: auto;
+    width: 46px; height: 42px; min-height: 42px; border-radius: 0;
   }
-  #send { order: 5; }
+  .composer .autoscroll-btn:active { transform: translateX(-50%) scale(0.94); }
 }
 .composer-blocked {
   max-width: none;
