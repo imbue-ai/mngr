@@ -43,15 +43,13 @@ def _build_sigwinch_catcher_command(marker_file: Path, ready_file: Path) -> str:
     return f"trap 'echo received > {marker_file}' WINCH; echo ready > {ready_file}; sleep 60 & wait"
 
 
-def _start_catcher_session(session_name: str, tmp_path: Path) -> tuple[Path, Path]:
-    """Start a detached tmux SIGWINCH-catcher session and wait until its trap is installed.
+def _launch_catcher_session(session_name: str, catcher_command: str, ready_file: Path) -> None:
+    """Start a detached 200x50 tmux session running the catcher and wait until its trap is installed.
 
-    Creates a 200x50 session whose single ``agent`` window runs the catcher command,
-    then blocks until the pane has written its ready file (so a later signal is not
-    lost to bash's default WINCH action). Returns ``(marker_file, ready_file)``.
+    The session's single ``agent`` window runs the catcher command; this blocks until
+    the pane has written its ready file (so a later signal is not lost to bash's
+    default WINCH action).
     """
-    marker_file = tmp_path / "sigwinch_received"
-    ready_file = tmp_path / "catcher_ready"
     subprocess.run(
         [
             "tmux",
@@ -67,7 +65,7 @@ def _start_catcher_session(session_name: str, tmp_path: Path) -> tuple[Path, Pat
             "agent",
             "bash",
             "-c",
-            _build_sigwinch_catcher_command(marker_file, ready_file),
+            catcher_command,
         ],
         check=True,
     )
@@ -76,6 +74,16 @@ def _start_catcher_session(session_name: str, tmp_path: Path) -> tuple[Path, Pat
         timeout=5.0,
         error_message="catcher pane did not install its SIGWINCH trap",
     )
+
+
+def _start_catcher_session(session_name: str, tmp_path: Path) -> tuple[Path, Path]:
+    """Start a detached tmux SIGWINCH-catcher session and wait until its trap is installed.
+
+    Returns ``(marker_file, ready_file)``.
+    """
+    marker_file = tmp_path / "sigwinch_received"
+    ready_file = tmp_path / "catcher_ready"
+    _launch_catcher_session(session_name, _build_sigwinch_catcher_command(marker_file, ready_file), ready_file)
     return marker_file, ready_file
 
 
@@ -94,30 +102,7 @@ def _start_pinned_resilient_catcher_session(session_name: str, tmp_path: Path) -
     catcher = (
         f"trap 'echo received > {marker_file}' WINCH; echo ready > {ready_file}; while :; do sleep 3600 & wait; done"
     )
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-x",
-            "200",
-            "-y",
-            "50",
-            "-n",
-            "agent",
-            "bash",
-            "-c",
-            catcher,
-        ],
-        check=True,
-    )
-    wait_for(
-        lambda: ready_file.exists(),
-        timeout=5.0,
-        error_message="catcher pane did not install its SIGWINCH trap",
-    )
+    _launch_catcher_session(session_name, catcher, ready_file)
     subprocess.run(
         ["tmux", "set-option", "-t", f"={session_name}:agent", "window-size", "manual"],
         check=True,
