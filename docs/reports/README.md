@@ -4,6 +4,8 @@ Point-in-time analyses of this repository: audits, investigations, and state-of-
 
 This directory exists so that reports have a legible home and do not accumulate at the repo root (see `ELECTRON_BUNDLING_AUDIT.md` at the root for the failure mode this avoids). Living documentation belongs in the relevant project's `docs/` directory, not here.
 
+PDFs of these reports are rendered locally with a pandoc pipeline (pandoc, a graphviz filter that turns `dot` code blocks into diagrams, then xelatex). The markdown is the source of truth; the generated `*.pdf` files and the filter's `graphviz-images/` cache are gitignored.
+
 ## Index
 
 | Date | Report | Question it answers |

@@ -47,6 +47,74 @@ That is a coherent design philosophy: keep the shell dumb, outsource the parts w
 
 ## Part 2: The pipeline as built
 
+First, the schematic. The `dot` block below is the committed diagram — the local pandoc pipeline renders it as an image in the PDF via its graphviz filter, while on GitHub you get the grep-able source:
+
+```dot
+digraph minds_ship_path {
+    rankdir=LR;
+    newrank=true;
+    labelloc="t";
+    label="minds: source to running app (schematic, 2026-07-06)";
+    fontname="Helvetica";
+    fontsize=13;
+    node [shape=box, style="rounded,filled", fillcolor="white", color="#607080", fontname="Helvetica", fontsize=10, margin="0.18,0.12"];
+    edge [color="#607080", fontname="Helvetica", fontsize=9];
+
+    subgraph cluster_dev {
+        label="developer machine (mngr monorepo)";
+        style="filled"; fillcolor="#E8F0F7"; color="#9DB4C8";
+        "minds source" [label="apps/minds\nthin Electron shell + Python backend\n(server-rendered Jinja UI)"];
+        "release pins" [label="release pins (step 1, human)\npackage.json version +\nFALLBACK_BRANCH in templates.py"];
+        "build.js" [label="pnpm build (scripts/build.js)\nstages resources/: uv, git, Lima, restic,\nlatchkey, 16 wheels + regenerated uv.lock,\nper-tier client.toml"];
+    }
+
+    subgraph cluster_pin {
+        label="release pinning (release.md, human-run)";
+        style="filled"; fillcolor="#F3EEE3"; color="#C9BC9C";
+        "mngr tag" [label="mngr repo\nannotated tag minds-vX\non the verified SHA"];
+        "FCT tag" [label="forever-claude-template repo\nvendor/mngr = git archive of that SHA\nannotated tag minds-vX"];
+    }
+
+    subgraph cluster_td {
+        label="ToDesktop cloud (vendor holds the Apple identity)";
+        style="filled"; fillcolor="#EFE8F5"; color="#B7A6CB";
+        "sign and notarize" [label="build + codesign + notarize\nentitlements.mac.plist,\ndeep-signs limactl and restic"];
+        "latest channel" [label="hosted builds (dl.todesktop.com)\nlatest channel serves auto-updates"];
+    }
+
+    subgraph cluster_ci {
+        label="GitHub Actions (verification, never the ship button)";
+        style="filled"; fillcolor="#E9F3EA"; color="#9CBFA1";
+        "snapshot suite" [label="ci.yml, every PR:\nsnapshot-resume suite drives\nreal Electron (xvfb), chat round-trip"];
+        "launch-to-msg" [label="minds-launch-to-msg.yml\n(twice daily + release dispatch):\ninstalls the signed .app on real Macs,\nproves launch to first message"];
+    }
+
+    subgraph cluster_user {
+        label="user's Mac (arm64)";
+        style="filled"; fillcolor="#F7ECEC"; color="#CBA3A3";
+        "Minds.app" [label="Minds.app\n(@todesktop/runtime auto-update)"];
+        "backend venv" [label="first run: bundled uv fetches\nPython 3.12, installs the wheels\ninto ~/.minds/.venv, spawns minds run"];
+        "agent workspace" [label="agent workspace (Lima VM / Docker)\nclones FCT at the FALLBACK_BRANCH tag\n(optional prebaked Lima image,\nminisign-verified, from R2)"];
+    }
+
+    { rank=same; "sign and notarize"; "latest channel"; }
+    { rank=same; "Minds.app"; "backend venv"; "agent workspace"; }
+
+    "minds source" -> "build.js";
+    "minds source" -> "snapshot suite" [style=dashed, label="every PR"];
+    "minds source" -> "FCT tag" [style=dotted, label="dev loop only: rsync of the\nworking tree (just minds-start)"];
+    "release pins" -> "mngr tag" [label="bump, merge\n(merge commit, never squash)"];
+    "mngr tag" -> "FCT tag" [label="just sync-vendor-mngr\n(ls-tree compare proves the match)"];
+    "build.js" -> "sign and notarize" [label="pnpm dist\n(todesktop build)"];
+    "sign and notarize" -> "launch-to-msg" [label="artifact under test,\nbuilt from THIS SHA"];
+    "launch-to-msg" -> "latest channel" [style=dashed, label="green e2e gates step 9:\na human clicks Release"];
+    "latest channel" -> "Minds.app" [label="auto-update / download"];
+    "Minds.app" -> "backend venv";
+    "backend venv" -> "agent workspace";
+    "FCT tag" -> "agent workspace" [label="cloned at runtime\n(pinned, immutable)"];
+}
+```
+
 ### The dev loop
 
 `just minds-start` (justfile:416) is the entry point. Every startup, it rsyncs your *working tree* of mngr into the FCT checkout's `vendor/mngr/` (uncommitted changes included), exports operator-mode env vars, and runs `pnpm start`, which launches Electron directly against the monorepo's uv workspace — no `uv sync`, no wheels, Python edits picked up on restart (`desktop-app.md:218-226`). The dev-workflow skill is emphatic that "the vendor/mngr/ sync must happen BEFORE every Create" (`.claude/skills/minds-dev-workflow/SKILL.md:30`) — the running agent imports the vendored copy, so a stale vendor means your changes silently don't exist inside the container. `just propagate-changes <agent>` pushes edits into an already-running container.

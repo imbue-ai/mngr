@@ -367,3 +367,6 @@ apps/minds_workspace_server/package-lock.json
 # PDFs rendered from docs/reports markdown via the local pandoc pipeline
 # (pandoc -> graphviz filter -> xelatex); generated artifacts, sources are the .md files
 **/docs/reports/*.pdf
+
+# Render cache of that pipeline's graphviz filter (dot code blocks -> PNGs)
+**/graphviz-images/

@@ -5,3 +5,5 @@ Added `docs/reports/`, a dated home at the repo root for point-in-time analyses 
 - `2026-07-06-design-intent-landscape.md`: an inventory of where design intent lives across the repo (CLAUDE.md, style guide, docs, skills, hooks, CI gates, ratchets) arranged as an enforcement ladder, the finding that documentation truthfulness correlates with enforcement level, the catalog of stale or contradictory intent artifacts, and an enshrined META rule (discoverability, navigability, simplicity) with prioritized, small follow-up recommendations.
 
 Also gitignored `**/docs/reports/*.pdf`: PDFs rendered from these reports via a local pandoc/xelatex pipeline are generated artifacts and stay untracked.
+
+The build/sign/ship report now embeds a graphviz `dot` schematic of the ship-path (developer machine, release pinning, ToDesktop, CI verification, user's Mac), rendered into the PDF by the pipeline's graphviz filter; `**/graphviz-images/` (that filter's render cache) is gitignored as well.
