@@ -87,17 +87,13 @@ _MATCHES_TTL_SECONDS = 60.0
 _KEEPALIVE_TIMEOUT_SECONDS = 10.0
 # Cap the keepalive fan-out so a large fleet doesn't spawn a thread per host.
 _KEEPALIVE_MAX_WORKERS = 16
-# Turn on SSH-level keepalive on every warm connection: paramiko sends a keepalive
-# request this often, so a peer that vanished SILENTLY (a reverse tunnel that dropped
-# with no FIN/RST -- e.g. `ssh mac` cutting out) is detected within ~2 intervals and
-# its transport dies, instead of the reader thread blocking in read_all forever. That
-# silent-half-open case was the paramiko-thread leak (1000s of threads over hours).
+# SSH keepalive interval: paramiko pings this often so a SILENTLY-dropped peer (a
+# tunnel gone with no FIN/RST) is detected within ~2 intervals and its transport dies,
+# instead of the reader thread blocking in read_all forever (see _disconnect_host).
 _SSH_KEEPALIVE_SECONDS = 15
-# Longest a request will wait to acquire a host/handle lock before giving up with
-# HostBusyError. Generous enough that normal serialized commands (bounded by the ~10s
-# command timeout) never false-trip, but short enough that a hung host can't grow an
-# unbounded queue of blocked threads. High-frequency pollers (input-state) pass a much
-# shorter timeout so they skip a busy tick instead of queueing at all.
+# Default host/handle lock-acquire bound (see HostBusyError for why bounding matters).
+# Generous enough that a normal serialized command (~10s timeout) never false-trips;
+# high-frequency callers pass a much shorter timeout to skip a busy tick.
 _DEFAULT_LOCK_TIMEOUT_SECONDS = 20.0
 
 
@@ -176,9 +172,8 @@ class ConnectionPool:
             logger.trace("pool: host disconnect failed (ignored): {}", e)
 
     def _drop_handles(self, names: set[str]) -> None:
-        """Remove the named handles and disconnect any host no longer referenced by a
-        surviving handle -- so we reap the paramiko connection of an agent that left
-        (or a dead handle) without ever closing one another agent still shares. The
+        """Remove the named handles and disconnect (see _disconnect_host) any host no
+        surviving handle still references -- never one another agent shares. The
         disconnect (network I/O) runs OUTSIDE the pool lock.
         """
         to_close: list[OnlineHostInterface] = []
@@ -188,11 +183,8 @@ class ConnectionPool:
             for h in dropped:
                 if h.host is not None and id(h.host) not in surviving:
                     to_close.append(h.host)
-                    # Drop this host's serialization lock too: it's being disconnected
-                    # and no live handle references it, so the entry is dead. Without
-                    # this, _host_locks grows one permanent entry per re-resolved host
-                    # object forever -- an unbounded (slow) leak over a year of flaky
-                    # reconnects. A re-resolve later mints a fresh host + fresh lock.
+                    # Prune this host's now-dead lock too, else _host_locks grows one
+                    # permanent entry per re-resolved host object (a slow unbounded leak).
                     self._host_locks.pop(id(h.host), None)
         for host in to_close:
             self._disconnect_host(host)
@@ -230,9 +222,7 @@ class ConnectionPool:
     @staticmethod
     @contextmanager
     def _bounded(lock: threading.Lock, timeout: float, what: str) -> Iterator[None]:
-        """Acquire ``lock`` within ``timeout`` or raise HostBusyError -- never block
-        forever. This is what stops a hung host from wedging an unbounded pile of
-        werkzeug threads (each caller gives up and returns instead)."""
+        """Acquire ``lock`` within ``timeout`` or raise HostBusyError (see there)."""
         if not lock.acquire(timeout=timeout):
             raise HostBusyError(what)
         try:
@@ -248,15 +238,17 @@ class ConnectionPool:
     ) -> T:
         """Resolve (cached) and run ``fn(agent, host)`` serialized on the host lock.
 
-        Resolution happens under the per-agent handle lock; the command then runs
-        under the per-*host* lock, so two agents sharing one host connection can't
-        drive it concurrently. Both lock acquisitions are BOUNDED by ``lock_timeout``:
-        a hung host raises ``HostBusyError`` rather than blocking this thread forever
-        (which is what let threads pile up unboundedly). High-frequency callers pass a
-        short timeout to skip a busy tick; the default is generous so a normal
-        serialized command never false-trips. A transient command failure is *not*
+        Resolution runs under the per-agent handle lock; the command then runs under
+        the per-*host* lock, so two agents sharing one connection can't drive it at
+        once. BOTH acquisitions are bounded by ``lock_timeout`` (raising HostBusyError
+        rather than blocking forever) -- note the effective worst-case wait is ~2x
+        ``lock_timeout`` since it applies to each. A transient command failure is *not*
         invalidated here -- it propagates and the cached connection is left intact;
         reconnection is the keepalive's job (see ``_warm_one``).
+
+        Ceiling: the *first* resolution (find_one_agent / resolve) runs unbounded inside
+        the handle lock, so a hung discovery still parks this one thread -- but waiters
+        now bail with HostBusyError instead of piling up behind it.
         """
         handle = self._handle_for(agent_name)
         with self._bounded(handle.lock, lock_timeout, f"resolve {agent_name}"):
@@ -345,9 +337,8 @@ class ConnectionPool:
         # The registry already filters to live coding agents, so every card is one
         # we keep warm.
         live_names = {card["name"] for card in self._registry.snapshot()}
-        # Drop handles for agents that have left the live set (gone -> dropped), and
-        # CLOSE their SSH connection so the paramiko reader thread exits -- otherwise a
-        # destroyed/moved agent's warm connection leaks its thread for the process life.
+        # Drop + close handles for agents that left the live set (gone -> dropped),
+        # reaping their connection's reader thread (see _drop_handles / _disconnect_host).
         with self._lock:
             gone = {name for name in self._handles if name not in live_names}
         if gone:
@@ -398,11 +389,15 @@ def send_via_pool(pool: ConnectionPool, agent_name: str, message: str) -> list[t
 
     Imported lazily by the messaging module to avoid a circular import.
 
-    The tmux paste runs UNDER the per-host lock (via ``run_on_host``) so it can't drive
-    the shared paramiko connection concurrently with a transcript read or pane probe on
-    the same host -- concurrent use corrupts the SSH protocol and drops the connection
-    for every agent on that host. ``send_message_to_agents`` reuses the same
-    provider-cached host object the pool holds, so the same lock serializes them.
+    The send runs under the per-host lock (via ``run_on_host``) so it serializes with
+    the pool's other work on that host (transcript reads, pane probes, interrupts)
+    rather than driving one connection from two threads at once. Caveat by provider:
+    the docker provider caches its host object by id, so ``send_message_to_agents``
+    reuses the very connection this lock guards; the ssh/local providers mint a fresh
+    host per ``get_host``, so there the send opens its own connection -- the lock still
+    serializes foreman's threads but that send doesn't reuse the warm connection.
+    Threading the pool's resolved host into ``send_message_to_agents`` (to always reuse
+    the warm one) is a cross-package change, deferred until send-path cost shows up.
     """
     from imbue.mngr.api.message import send_message_to_agents
 

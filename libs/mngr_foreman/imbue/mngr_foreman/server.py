@@ -77,11 +77,11 @@ _HEARTBEAT_SECONDS: Final[float] = 5.0
 # adaptive-idle. Cheap because a stat-before-read skips the read when the file
 # hasn't grown (see TranscriptTailer), and the connection is always warm.
 _TRANSCRIPT_POLL_SECONDS: Final[float] = 0.5
-# Bound the transcript poll's host-lock wait BELOW the heartbeat interval: if another
-# command holds the host lock, this poll gives up fast (HostBusyError -> no new lines
-# this tick) instead of blocking up to the default 20s with no heartbeat, which would
-# trip the client's ~14s liveness watchdog into a needless reconnect (and stack a new
-# SSE thread on the same lock). One slow host must not flap every viewer offline.
+# Short host-lock wait for the transcript poll: a busy host makes it give up fast
+# (HostBusyError -> no new lines this tick) instead of blocking on the default 20s with
+# no heartbeat. Applied to BOTH lock acquisitions, so worst case is ~2x this (~6s); the
+# heartbeat-before-poll below keeps cadence across that, so one slow host never flaps a
+# viewer into a needless reconnect. One slow host must not flap every viewer offline.
 _TRANSCRIPT_LOCK_TIMEOUT_SECONDS: Final[float] = 3.0
 # Bound every foreground host command (stat/probe) so an unresponsive host can't
 # wedge an SSE poll or request thread indefinitely.
@@ -547,11 +547,10 @@ def _build_transcript_reader(agent: AgentDetails, subpath: str, pool: Connection
 
     def reader() -> bytes:
         def _read(_agent: AgentInterface, host: OnlineHostInterface) -> bytes:
-            # BOUND the SFTP read: a host whose TCP is up but whose SFTP has wedged
-            # would otherwise block here forever WHILE HOLDING THE HOST LOCK (keepalive
-            # only rescues a genuinely-dead peer, not a live-but-stuck channel). The
-            # concrete SSH host self-terminates the transfer on a stall; fall back to a
-            # plain read only if a host type lacks the bounded variant.
+            # Bound the SFTP read: a live-but-wedged SFTP channel would otherwise block
+            # here forever while holding the host lock (keepalive only rescues a dead
+            # peer). The SSH host self-terminates a stalled transfer; plain read is a
+            # fallback for a host type without the bounded variant.
             bounded_read = getattr(host, "read_file_within_timeout", None)
             if bounded_read is not None:
                 return bounded_read(_abs_path(host), _HOST_COMMAND_TIMEOUT_SECONDS)

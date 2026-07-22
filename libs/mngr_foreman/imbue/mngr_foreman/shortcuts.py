@@ -16,7 +16,8 @@ import json
 import threading
 from pathlib import Path
 
-from loguru import logger
+from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.file_utils import read_json_dict
 
 
 class ShortcutStore:
@@ -27,20 +28,12 @@ class ShortcutStore:
         self._lock = threading.Lock()  # serialize this process's read-modify-writes
 
     def _read(self) -> dict[str, str]:
-        try:
-            data = json.loads(self._path.read_text())
-        except FileNotFoundError:
-            return {}
-        except Exception as e:  # noqa: BLE001 - a corrupt/unreadable file must not wedge foreman
-            logger.warning("Could not read shortcuts {}: {}", self._path, e)
-            return {}
-        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        # read_json_dict: missing/malformed/non-object -> {} (a bad file can't wedge foreman).
+        return {str(k): str(v) for k, v in read_json_dict(self._path).items()}
 
     def _write(self, shortcuts: dict[str, str]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(shortcuts, indent=2, sort_keys=True))
-        tmp.replace(self._path)  # atomic
+        atomic_write(self._path, json.dumps(shortcuts, indent=2, sort_keys=True))
 
     def all(self) -> list[dict[str, str]]:
         """All shortcuts as ``[{"name", "cmd"}, ...]`` sorted by name."""

@@ -14,6 +14,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from imbue.mngr.utils.file_utils import atomic_write
+
 
 class BackburnerStore:
     """Thread-safe, file-backed set of parked agent IDs."""
@@ -34,11 +36,9 @@ class BackburnerStore:
         return {str(x) for x in data} if isinstance(data, list) else set()
 
     def _save(self) -> None:
-        # Atomic write so a crash mid-write can't corrupt the set.
+        # fsync-atomic write so a crash/power-loss mid-write can't corrupt the set.
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(sorted(self._ids)))
-        tmp.replace(self._path)
+        atomic_write(self._path, json.dumps(sorted(self._ids)))
 
     def is_backburner(self, agent_id: str) -> bool:
         with self._lock:

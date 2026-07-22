@@ -109,12 +109,9 @@ _TAIL_LINES = 25
 
 # Bound the capture-pane probe so an unresponsive host can't wedge the poll.
 _HOST_COMMAND_TIMEOUT_SECONDS = 10.0
-# The input-state poll fires every ~1s per agent. If the host's connection is busy
-# (another command holds its lock) we must NOT queue -- skip this tick and let the
-# client keep its last state. A short lock wait means these high-frequency probes can
-# never build a backlog of blocked threads (that backlog was the "everything offline"
-# cascade). Slightly above one command timeout so a probe still lands when the host is
-# merely finishing a normal command, not truly stuck.
+# Lock-wait bound for the ~1s input-state poll: short so a busy host makes it skip the
+# tick (client keeps its last state) rather than queue a blocked thread. Just above one
+# command timeout so a probe still lands when the host is merely finishing a command.
 _POLL_LOCK_TIMEOUT_SECONDS = 12.0
 # The one generic label -- the UI shows a single "interactive prompt" state
 # regardless of which dialog it is.
