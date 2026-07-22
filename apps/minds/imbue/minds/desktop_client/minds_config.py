@@ -168,6 +168,19 @@ class MindsConfig(MutableModel):
         """Set whether unexpected errors are reported to Sentry automatically."""
         self._set_bool("report_unexpected_errors", enabled)
 
+    def migrate_alpha_error_reporting(self) -> None:
+        """One-time alpha migration: force error reporting back on for installs that opted out.
+
+        An install that explicitly opted out on the old consent screen still has
+        ``report_unexpected_errors`` persisted as False. During the alpha there is no opt-out, so flip
+        it back on and re-show the informational notice (by clearing the consent-given flag). Needs no
+        migration marker: nothing sets the flag back to False anymore, so once it is on -- including on
+        every fresh install (default True) -- this is a no-op.
+        """
+        if not self.get_report_unexpected_errors():
+            self.set_report_unexpected_errors(True)
+            self.set_error_reporting_consent_given(False)
+
     def get_auto_open_requests_panel(self) -> bool:
         """Return whether the inbox should auto-open on new pending requests. Default: True.
 

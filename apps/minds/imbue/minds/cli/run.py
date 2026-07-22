@@ -196,6 +196,9 @@ def run(
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
+    # Force error reporting back on for any install that opted out before it became always-on for the
+    # alpha (a no-op otherwise). Runs before Sentry setup so the flipped value is what gets reported.
+    minds_config.migrate_alpha_error_reporting()
     paths = WorkspacePaths(data_dir=data_directory)
 
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran

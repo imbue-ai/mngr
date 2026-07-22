@@ -71,6 +71,35 @@ def test_error_reporting_defaults(tmp_path: Path) -> None:
     assert config.get_report_unexpected_errors() is True
 
 
+def test_migrate_alpha_error_reporting_flips_prior_opt_out_and_reprompts(tmp_path: Path) -> None:
+    """A prior explicit opt-out is forced back on and the notice is re-shown; opt-ins are untouched."""
+    # Simulate an install that opted out on the old consent screen.
+    opted_out = _make_config(tmp_path)
+    opted_out.set_report_unexpected_errors(False)
+    opted_out.set_error_reporting_consent_given(True)
+
+    _make_config(tmp_path).migrate_alpha_error_reporting()
+
+    migrated = _make_config(tmp_path)
+    assert migrated.get_report_unexpected_errors() is True
+    # Consent-given is cleared so the informational notice is shown again to inform the user.
+    assert migrated.get_error_reporting_consent_given() is False
+
+    # Idempotent: a second run (reporting already on) changes nothing, including consent-given.
+    migrated.set_error_reporting_consent_given(True)
+    migrated.migrate_alpha_error_reporting()
+    assert _make_config(tmp_path).get_error_reporting_consent_given() is True
+
+
+def test_migrate_alpha_error_reporting_leaves_opt_in_untouched(tmp_path: Path) -> None:
+    """An install that already reports (opt-in or fresh default) is not re-prompted by the migration."""
+    config = _make_config(tmp_path)
+    config.set_error_reporting_consent_given(True)
+    config.migrate_alpha_error_reporting()
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_error_reporting_consent_given() is True
+
+
 def test_error_reporting_settings_round_trip(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config.set_error_reporting_consent_given(True)
