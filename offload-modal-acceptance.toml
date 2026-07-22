@@ -28,8 +28,7 @@ enable_docker = true
 # (any per-package dependency change necessarily also changes uv.lock).
 # Per-package pyproject.toml files are deliberately NOT build inputs --
 # see offload-modal.toml for the full rationale (post_patch_cmd reruns
-# `uv sync --all-packages` after every thin diff, and test batches invoke
-# .venv/bin/pytest directly instead of `uv run pytest`).
+# `uv sync --all-packages` after every thin diff, refreshing dist-info).
 build_inputs = [
     "libs/mngr/imbue/mngr/resources/Dockerfile",
     "pyproject.toml",
@@ -38,19 +37,14 @@ build_inputs = [
 
 [framework]
 type = "pytest"
-# See offload-modal.toml for why this is a bash wrapper around
-# .venv/bin/pytest instead of `uv run pytest`.
-command = "bash -c 'export PATH=\"$PWD/.venv/bin:$PATH\" VIRTUAL_ENV=\"$PWD/.venv\"; exec .venv/bin/pytest \"$@\"' --"
+command = "uv run pytest"
 run_args = "--no-cov -p no:xdist"
 
 [groups.all]
 retry_count = 1
 # Exclude docker/docker_sdk tests -- they need a Docker daemon which Modal sandboxes don't have.
 # Those tests run in a separate GitHub runner job (test-docker) until offload Docker-in-Docker support lands.
-# --no-cov is discovery-only: it keeps pytest-cov from tracing module
-# imports during `pytest --collect-only`, which otherwise dominates
-# discovery time (this suite runs with --no-cov at execution anyway).
-filters = "--no-cov -m 'acceptance and not docker and not docker_sdk and not minds_deployment and not minds_services and not minds_snapshot_resume'"
+filters = "-m 'acceptance and not docker and not docker_sdk and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 [history]
 path = "offload-history-modal-acceptance.jsonl"
