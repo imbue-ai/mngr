@@ -233,7 +233,7 @@
         setSubmitting(false);
         if (data && data.url) {
           document.getElementById('share-url').value = data.url;
-          startReadinessPolling(data.url);
+          startReadinessPolling(data.url, true);
         }
       })
       .catch(function (err) { showError('Could not save sharing changes: ' + err.message); setSubmitting(false); });
@@ -257,36 +257,51 @@
 
   // Cloudflare needs time to publish a (re)created hostname at the edge --
   // empirically 1-2 minutes is normal, and a hostname that was just deleted
-  // (a disable -> enable cycle) can take longer than a brand-new one. The
-  // URL and copy button are shown immediately (so the link can be sent
-  // ahead), with an explicit "waiting for Cloudflare" line until a probe
-  // actually succeeds. Poll fast at first, then back off; at the deadline
-  // swap the waiting line for a still-not-live warning instead of quietly
-  // pretending success.
+  // (a disable -> enable cycle) can take longer than a brand-new one. While
+  // waiting, a prominent warning box replaces the URL entirely (so nobody
+  // copies a link that does not work yet); "Show anyway" reveals it early
+  // for users who want to send it ahead. Poll fast at first, then back off;
+  // at the deadline reveal the URL with a still-not-live warning instead of
+  // quietly pretending success.
   var READINESS_FAST_INTERVAL_MS = 2000;
   var READINESS_SLOW_INTERVAL_MS = 5000;
   var READINESS_FAST_PHASE_MS = 30 * 1000;
   var READINESS_DEADLINE_MS = 5 * 60 * 1000;
 
-  function showShareUrlSection() {
-    document.getElementById('url-section').classList.remove('hidden');
+  var isUrlRevealedEarly = false;
+
+  window.showUrlAnyway = function () {
+    isUrlRevealedEarly = true;
     document.getElementById('url-ready').classList.remove('hidden');
-  }
+    var btn = document.getElementById('show-url-anyway-btn');
+    if (btn) btn.classList.add('hidden');
+  };
 
   function markShareUrlLive() {
     document.getElementById('url-provisioning').classList.add('hidden');
     document.getElementById('url-fallback-note').classList.add('hidden');
+    document.getElementById('url-ready').classList.remove('hidden');
   }
 
   function markShareUrlStillNotLive() {
     document.getElementById('url-provisioning').classList.add('hidden');
     document.getElementById('url-fallback-note').classList.remove('hidden');
+    document.getElementById('url-ready').classList.remove('hidden');
   }
 
-  function startReadinessPolling(url) {
-    showShareUrlSection();
+  // ``isFreshlyEnabled`` distinguishes the two callers: right after an
+  // enable, the hostname was just (re)created so the URL is hidden behind
+  // the warning until a probe confirms it. On plain page load of an
+  // existing share the link is probably long-live, so it shows immediately
+  // and only the warning line rides along until the first probe passes.
+  function startReadinessPolling(url, isFreshlyEnabled) {
+    document.getElementById('url-section').classList.remove('hidden');
     document.getElementById('url-provisioning').classList.remove('hidden');
     document.getElementById('url-fallback-note').classList.add('hidden');
+    var isUrlHidden = isFreshlyEnabled && !isUrlRevealedEarly;
+    var showAnywayBtn = document.getElementById('show-url-anyway-btn');
+    if (showAnywayBtn) showAnywayBtn.classList.toggle('hidden', !isUrlHidden);
+    document.getElementById('url-ready').classList.toggle('hidden', isUrlHidden);
     var startedAt = Date.now();
     function poll() {
       var probeUrl = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName + '/readiness?url=' + encodeURIComponent(url);
@@ -340,7 +355,7 @@
         setHeading(true);
         if (data.url) {
           document.getElementById('share-url').value = data.url;
-          startReadinessPolling(data.url);
+          startReadinessPolling(data.url, false);
         }
         var disableBtn = document.getElementById('disable-btn');
         if (disableBtn) disableBtn.classList.remove('hidden');
