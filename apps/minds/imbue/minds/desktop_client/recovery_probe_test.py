@@ -142,14 +142,14 @@ def test_container_running_probe_says_no_when_host_state_is_stopped() -> None:
     assert _answer(response, "container running") == ProbeAnswer.NO
 
 
-def test_container_running_probe_says_yes_when_host_state_is_unauthenticated() -> None:
-    """UNAUTHENTICATED means the container was observed running but inner SSH is dead.
+def test_container_running_probe_says_yes_when_host_state_is_unreachable() -> None:
+    """UNREACHABLE means the host was observed up but its inner sshd is dead.
 
     Both producers (docker's connection-error fallback hook and imbue_cloud's
     listing path; PR #2247) emit it only after observing a running container, so
     the "is the container running?" answer is an observed YES.
     """
-    response = _response(host_state="UNAUTHENTICATED")
+    response = _response(host_state="UNREACHABLE")
     assert _answer(response, "container running") == ProbeAnswer.YES
 
 
@@ -420,22 +420,22 @@ def test_dispatch_tier_host_unresponsive_for_failed_host_state() -> None:
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
-def test_dispatch_tier_backend_unreachable_for_unreachable_host_state_with_canned_reason() -> None:
-    """UNREACHABLE (host rejected this machine's access) is terminal: retry/report only.
+def test_dispatch_tier_backend_unreachable_for_unauthenticated_host_state_with_canned_reason() -> None:
+    """UNAUTHENTICATED (host rejected this machine's access) is terminal: retry/report only.
 
     A restart routes through the same rejected credential, so the page must not
     offer one. Discovery carries no per-host failure detail, so the response
     carries the canned access-rejected reason and the provider label.
     """
-    response = _response(host_state="UNREACHABLE", in_container_stdout=None, provider_label="Imbue Cloud")
+    response = _response(host_state="UNAUTHENTICATED", in_container_stdout=None, provider_label="Imbue Cloud")
     assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
     assert response.unreachable_reason == HOST_ACCESS_REJECTED_REASON
     assert response.provider_label == "Imbue Cloud"
 
 
-def test_dispatch_tier_unreachable_host_state_is_subject_to_the_freshness_gate() -> None:
-    """A stale UNREACHABLE reading is a negative verdict like any other -> INDETERMINATE first."""
-    response = _response(host_state="UNREACHABLE", in_container_stdout=None, classification_is_trustworthy=False)
+def test_dispatch_tier_unauthenticated_host_state_is_subject_to_the_freshness_gate() -> None:
+    """A stale UNAUTHENTICATED reading is a negative verdict like any other -> INDETERMINATE first."""
+    response = _response(host_state="UNAUTHENTICATED", in_container_stdout=None, classification_is_trustworthy=False)
     assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
@@ -451,16 +451,16 @@ def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() 
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
-def test_dispatch_tier_host_unresponsive_for_unauthenticated_host_state() -> None:
+def test_dispatch_tier_host_unresponsive_for_unreachable_host_state() -> None:
     """Dead inner sshd (`pkill sshd` in the container) -> consent-gated host restart.
 
     The provider observed the container running but could not get inside, so it
-    reported UNAUTHENTICATED. The consent-gated host restart is the engineered
+    reported UNREACHABLE. The consent-gated host restart is the engineered
     recovery for this state (PR #2247): its stop step is not skipped, so the
     stop/start relaunches the inner sshd. This must NOT classify INDETERMINATE --
     a dead sshd never self-heals, so "keep checking" would strand the user.
     """
-    response = _response(host_state="UNAUTHENTICATED", in_container_stdout=None)
+    response = _response(host_state="UNREACHABLE", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 

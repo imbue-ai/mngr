@@ -189,8 +189,8 @@ class DispatchTier(str, Enum):
     not answer GET / with 200 (and supervisord is not mid-self-heal); an exec
     that *completed* without reaching the container (a dead inner sshd, a
     container that turned out not to be running -- direct fresh evidence that
-    needs no snapshot corroboration, including the UNAUTHENTICATED state, which
-    providers report when the container was observed running but inner SSH is
+    needs no snapshot corroboration, including the UNREACHABLE state, which
+    providers report when the host was observed up but its inner sshd is
     unreachable; see PR #2247 -- the consent-gated restart is the engineered
     recovery, since the stop step is not skipped the relaunch brings sshd back);
     and the FAILED host state (a failed-to-create host, where a plain start
@@ -203,11 +203,11 @@ class DispatchTier(str, Enum):
     """The provider/backend hosting this workspace can't be reached, or refused us
     -- the connector is down, the local docker daemon is stopped or paused, the
     provider rejected us (e.g. an expired login), or the host itself rejected this
-    machine's access (the UNREACHABLE host state, e.g. imbue_cloud's outer SSH
+    machine's access (the UNAUTHENTICATED host state, e.g. imbue_cloud's outer SSH
     refusing our key). Whatever the cause, a host restart routes through that same
     backend, so it cannot help: the page offers only a Retry, surfaces the
     provider's own error verbatim (or the canned access-rejected reason for
-    UNREACHABLE, since discovery carries no per-host failure detail), and arms
+    UNAUTHENTICATED, since discovery carries no per-host failure detail), and arms
     a background poll that returns the user to the workspace the moment it
     recovers. The page also keeps re-probing on a slow cadence: a provider
     error can be transient (e.g. one failed discovery cycle during app
@@ -226,7 +226,7 @@ class HostHealthResponse(FrozenModel):
     ``Probe`` in ``probes``, and the page's branching reads only
     ``dispatch_tier``. The two provider-error fields below are the sole
     exception: the BACKEND_UNREACHABLE tier is not derived from in-container
-    probes (a provider error short-circuits before those run; the UNREACHABLE
+    probes (a provider error short-circuits before those run; the UNAUTHENTICATED
     host state precludes them), so the reason and provider label travel
     alongside the tier instead.
     """
@@ -242,7 +242,7 @@ class HostHealthResponse(FrozenModel):
         default="",
         description=(
             "Human-readable reason for the BACKEND_UNREACHABLE tier (the provider's own error "
-            "message, or the canned access-rejected reason for the UNREACHABLE host state); "
+            "message, or the canned access-rejected reason for the UNAUTHENTICATED host state); "
             "empty for all other tiers."
         ),
     )
@@ -356,14 +356,14 @@ def _coerce_optional_int(value: object) -> int | None:
 
 
 _RUNNING_STATE: Final[str] = "RUNNING"
-# UNAUTHENTICATED is, by provider convention (docker's connection-error fallback
-# hook and imbue_cloud's listing path; see PR #2247), "the container was observed
-# running but inner SSH is unreachable" -- so for the "is the container running?"
+# UNREACHABLE is, by provider convention (docker's connection-error fallback
+# hook and imbue_cloud's listing path; see PR #2247), "the host was observed up
+# but its inner sshd is not answering" -- so for the "is the container running?"
 # question it is an observed YES. This routes the dead-inner-sshd case to the
 # consent-gated HOST_UNRESPONSIVE restart that actually fixes it. The
 # outer-SSH-auth-rejected case that once shared this state now has its own
-# UNREACHABLE host state (resolving the deferral flagged in PR #2247).
-_OBSERVED_RUNNING_STATES: Final[frozenset[str]] = frozenset({_RUNNING_STATE, "UNAUTHENTICATED"})
+# UNAUTHENTICATED host state (resolving the deferral flagged in PR #2247).
+_OBSERVED_RUNNING_STATES: Final[frozenset[str]] = frozenset({_RUNNING_STATE, "UNREACHABLE"})
 # Display vocabulary for the "is the container running?" probe: states that are
 # a truthful "observed not running". The classifier does NOT branch on this
 # collapsed answer -- it consults the raw host state, because these states
@@ -372,9 +372,9 @@ _OBSERVED_RUNNING_STATES: Final[frozenset[str]] = frozenset({_RUNNING_STATE, "UN
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
 _OBSERVED_STOPPED_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "CRASHED"})
 _FAILED_STATE: Final[str] = "FAILED"
-_UNREACHABLE_STATE: Final[str] = "UNREACHABLE"
+_UNAUTHENTICATED_STATE: Final[str] = "UNAUTHENTICATED"
 
-# Canned reason for the UNREACHABLE host state's BACKEND_UNREACHABLE page.
+# Canned reason for the UNAUTHENTICATED host state's BACKEND_UNREACHABLE page.
 # Discovery carries only the host state (DiscoveredHost has no failure_reason
 # field), so the page cannot show the provider's verbatim error; this canned
 # text covers the class of causes instead.
@@ -727,10 +727,10 @@ def _classify_dispatch_tier(
       rather than the collapsed "is it running?" probe answer, because the
       states diverge in display treatment: STOPPED / CRASHED -> HOST_OFFLINE
       (container observed fully stopped); FAILED -> HOST_UNRESPONSIVE (a
-      failed-to-create host, where a plain start mostly re-fails); UNREACHABLE
+      failed-to-create host, where a plain start mostly re-fails); UNAUTHENTICATED
       -> BACKEND_UNREACHABLE (the host rejected this machine's access; a
       restart routes through the same rejected credential); RUNNING /
-      UNAUTHENTICATED -> HOST_UNRESPONSIVE (observed running but the exec could
+      UNREACHABLE -> HOST_UNRESPONSIVE (observed up but the exec could
       not get inside). A trusted UNKNOWN / transitional / absent state says
       nothing either way and falls through. Every tier is display-only -- the
       recovery flow's start-only restart is dispatched unconditionally on page
@@ -771,7 +771,7 @@ def _classify_dispatch_tier(
     if classification_is_trustworthy:
         if upper_state in _OBSERVED_STOPPED_STATES:
             return DispatchTier.HOST_OFFLINE
-        if upper_state == _UNREACHABLE_STATE:
+        if upper_state == _UNAUTHENTICATED_STATE:
             return DispatchTier.BACKEND_UNREACHABLE
         if upper_state == _FAILED_STATE:
             return DispatchTier.HOST_UNRESPONSIVE
@@ -862,7 +862,7 @@ def build_host_health_response(
     )
     is_backend_unreachable = dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
     # BACKEND_UNREACHABLE has two sources: a provider-level discovery error
-    # (surface its message verbatim) and the UNREACHABLE host state, where
+    # (surface its message verbatim) and the UNAUTHENTICATED host state, where
     # discovery carries no per-host failure detail -- show the canned reason.
     if provider_error_message is not None:
         unreachable_reason = provider_error_message
