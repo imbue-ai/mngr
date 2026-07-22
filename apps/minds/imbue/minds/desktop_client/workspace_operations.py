@@ -42,6 +42,7 @@ class WorkspaceOperationKind(UpperCaseStrEnum):
     RESTART = auto()
     BACKUP_UPDATE = auto()
     BACKUP_CONFIGURE = auto()
+    BACKUP_RESTORE = auto()
 
 
 class WorkspaceOperationStatus(UpperCaseStrEnum):
@@ -60,6 +61,17 @@ class WorkspaceOperationRecord(FrozenModel):
     status: WorkspaceOperationStatus = Field(description="Current lifecycle status")
     error: str | None = Field(description="Failure detail when status is FAILED, else None")
     started_at: datetime = Field(description="When the operation was registered")
+    is_mutating: bool = Field(
+        default=False,
+        description="Whether the operation has started mutating the workspace (a cancel can no longer take effect)",
+    )
+    target: str | None = Field(
+        default=None,
+        description=(
+            "What the operation acts on, when it needs one to be identifiable: the snapshot id for a restore, "
+            "so a page loaded mid-restore can find the row it belongs to. None for whole-workspace operations."
+        ),
+    )
 
 
 class WorkspaceOperationRegistryInterface(MutableModel, ABC):
@@ -70,12 +82,16 @@ class WorkspaceOperationRegistryInterface(MutableModel, ABC):
         """Register a new RUNNING operation for ``agent_id``, replacing any prior record."""
 
     @abstractmethod
-    def start_if_idle(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> bool:
+    def start_if_idle(
+        self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime, target: str | None = None
+    ) -> bool:
         """Atomically register a new RUNNING operation unless one is already RUNNING.
 
         Returns whether this caller won the claim. Dispatch routes use this
         (instead of a separate get + ``start``) so two concurrent requests
-        cannot both spawn a worker for the same workspace.
+        cannot both spawn a worker for the same workspace. ``target`` records
+        what the operation acts on, for operations that need one (a restore's
+        snapshot id).
         """
 
     @abstractmethod
@@ -99,8 +115,24 @@ class WorkspaceOperationRegistryInterface(MutableModel, ABC):
         """Return the operation's log queue for streaming, or None if the operation is unknown."""
 
     @abstractmethod
+    def begin_mutation(self, agent_id: AgentId) -> bool:
+        """Atomically mark the RUNNING operation as past its point of no return; returns whether it may proceed.
+
+        Cancellation is only honest while an operation is still waiting:
+        workers call this immediately before dispatching their mutating step,
+        and a cancel that raced the worker's last poll wins here (the worker
+        must then end the operation as cancelled instead of mutating). Once
+        this returns True, ``request_cancel`` refuses further cancels.
+        """
+
+    @abstractmethod
     def request_cancel(self, agent_id: AgentId) -> bool:
-        """Ask the RUNNING operation for ``agent_id`` to stop; returns whether one was running."""
+        """Ask the still-waiting RUNNING operation for ``agent_id`` to stop; returns whether it will.
+
+        Refused (returning False) once the operation has begun mutating --
+        the caller should tell the user it is too late rather than pretending
+        the cancel took effect.
+        """
 
     @abstractmethod
     def is_cancel_requested(self, agent_id: AgentId) -> bool:
@@ -129,15 +161,19 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
         with self.lock:
             self._register_locked(agent_id, kind, now)
 
-    def start_if_idle(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> bool:
+    def start_if_idle(
+        self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime, target: str | None = None
+    ) -> bool:
         with self.lock:
             existing = self.record_by_agent_id.get(agent_id)
             if existing is not None and existing.status == WorkspaceOperationStatus.RUNNING:
                 return False
-            self._register_locked(agent_id, kind, now)
+            self._register_locked(agent_id, kind, now, target)
             return True
 
-    def _register_locked(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> None:
+    def _register_locked(
+        self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime, target: str | None = None
+    ) -> None:
         """Register a fresh RUNNING record; the caller must hold ``self.lock``."""
         self.record_by_agent_id[agent_id] = WorkspaceOperationRecord(
             agent_id=agent_id,
@@ -145,6 +181,7 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
             status=WorkspaceOperationStatus.RUNNING,
             error=None,
             started_at=now,
+            target=target,
         )
         self.log_queue_by_agent_id[agent_id] = queue.Queue()
         self.cancel_event_by_agent_id[agent_id] = threading.Event()
@@ -181,14 +218,36 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
         with self.lock:
             return self.log_queue_by_agent_id.get(agent_id)
 
+    def begin_mutation(self, agent_id: AgentId) -> bool:
+        with self.lock:
+            record = self.record_by_agent_id.get(agent_id)
+            cancel_event = self.cancel_event_by_agent_id.get(agent_id)
+            if record is None or record.status != WorkspaceOperationStatus.RUNNING:
+                return False
+            # A cancel that arrived before this claim wins: the worker must
+            # honor it instead of mutating. Decided under the same lock that
+            # request_cancel sets the event under, so exactly one of the two
+            # can win a race.
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            self.record_by_agent_id[agent_id] = record.model_copy_update(
+                to_update(record.field_ref().is_mutating, True)
+            )
+            return True
+
     def request_cancel(self, agent_id: AgentId) -> bool:
         with self.lock:
             record = self.record_by_agent_id.get(agent_id)
             cancel_event = self.cancel_event_by_agent_id.get(agent_id)
-        if record is None or record.status != WorkspaceOperationStatus.RUNNING or cancel_event is None:
-            return False
-        cancel_event.set()
-        return True
+            if record is None or record.status != WorkspaceOperationStatus.RUNNING or cancel_event is None:
+                return False
+            # Too late: the operation is already mutating the workspace.
+            # Setting the event happens under the lock so this decision and
+            # begin_mutation's are strictly ordered.
+            if record.is_mutating:
+                return False
+            cancel_event.set()
+            return True
 
     def is_cancel_requested(self, agent_id: AgentId) -> bool:
         with self.lock:

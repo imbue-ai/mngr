@@ -128,6 +128,7 @@ from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
+from imbue.minds.desktop_client.templates import render_workspace_backup_history
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -2353,6 +2354,20 @@ def _handle_workspace_settings(
     return make_html_response(content=html)
 
 
+def _handle_workspace_backup_history(agent_id: str) -> Response:
+    """Render the client-filled backup-history page for one workspace."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    backend_resolver = get_state().backend_resolver
+    parsed_agent_id = AgentId(agent_id)
+    ws_name = backend_resolver.get_workspace_name(parsed_agent_id)
+    if not ws_name:
+        info = backend_resolver.get_agent_display_info(parsed_agent_id)
+        ws_name = info.agent_name if info else agent_id
+    html = render_workspace_backup_history(agent_id=agent_id, ws_name=ws_name)
+    return make_html_response(content=html)
+
+
 # -- Inbox routes --
 
 
@@ -2924,6 +2939,9 @@ def create_desktop_client(
     # Workspace settings page (the account-association and color writes it drives
     # now go through PATCH /api/v1/workspaces/<id>).
     app.add_url_rule("/workspace/<agent_id>/settings", view_func=_handle_workspace_settings)
+    # Full backup-history page, reached from the settings page's
+    # "View all N backups" footer.
+    app.add_url_rule("/workspace/<agent_id>/backups", view_func=_handle_workspace_backup_history)
 
     # Request inbox routes
     app.add_url_rule("/inbox", view_func=_handle_inbox_page)

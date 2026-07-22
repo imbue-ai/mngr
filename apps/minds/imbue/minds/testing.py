@@ -135,21 +135,40 @@ def run_git_for_backup_test(repo: Path, *args: str) -> str:
     return result.stdout
 
 
-def write_stub_supervisorctl(stub_bin: Path, *, is_restart_ok: bool = True) -> Path:
+def write_stub_supervisorctl(
+    stub_bin: Path,
+    *,
+    is_restart_ok: bool = True,
+    call_log_path: Path | None = None,
+    hook_script: str = "",
+) -> Path:
     """Write a stub ``supervisorctl`` into ``stub_bin`` and return its path.
 
     The healthy variant always reports ``host-backup`` RUNNING; the
     ``is_restart_ok=False`` variant fails ``restart`` and reports the program
     STOPPED, for exercising the update script's rollback path.
+
+    ``call_log_path`` appends each invocation's arguments as one line, so tests
+    can assert on service-lifecycle ordering (e.g. ``stop all`` before
+    ``restart all``). ``hook_script`` is raw bash injected before the response
+    logic, for deterministic race simulation (e.g. append a BACKUP_STARTED
+    journal line when ``stop all`` arrives, standing in for a tick the stop
+    killed mid-flight).
     """
     stub = stub_bin / "supervisorctl"
+    lines = ["#!/bin/bash"]
+    if call_log_path is not None:
+        lines.append(f'echo "$@" >> "{call_log_path}"')
+    if hook_script:
+        lines.append(hook_script)
     if is_restart_ok:
-        stub.write_text('#!/bin/bash\necho "host-backup RUNNING pid 123, uptime 0:00:01"\nexit 0\n')
+        lines.append('echo "host-backup RUNNING pid 123, uptime 0:00:01"')
+        lines.append("exit 0")
     else:
-        stub.write_text(
-            '#!/bin/bash\nif [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi\n'
-            'echo "host-backup STOPPED"\nexit 0\n'
-        )
+        lines.append('if [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi')
+        lines.append('echo "host-backup STOPPED"')
+        lines.append("exit 0")
+    stub.write_text("\n".join(lines) + "\n")
     stub.chmod(0o755)
     return stub
 

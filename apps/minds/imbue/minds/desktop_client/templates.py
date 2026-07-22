@@ -222,7 +222,7 @@ CATALOG: Final[Catalog] = _build_catalog()
 class RemoteWorkspaceTile(FrozenModel):
     """A workspace known only from another device's synced record, for the landing list."""
 
-    agent_id: str = Field(description="The workspace agent id (drives backup status/download)")
+    agent_id: str = Field(description="The workspace agent id (drives backup status)")
     name: str = Field(description="Display name from the record")
     accent: str = Field(description="Accent color hex")
     location: str = Field(description="Where it lives (the other device's label, or a provider name)")
@@ -1750,6 +1750,16 @@ def render_workspace_settings(
         is_stale=is_stale,
         has_account=has_account,
         palette=WORKSPACE_PALETTE,
+    )
+
+
+@pure
+def render_workspace_backup_history(agent_id: str, ws_name: str) -> str:
+    """Render the client-filled backup-history page for one workspace."""
+    return CATALOG.render(
+        "pages.WorkspaceBackupHistory",
+        agent_id=agent_id,
+        ws_name=ws_name,
     )
 
 
