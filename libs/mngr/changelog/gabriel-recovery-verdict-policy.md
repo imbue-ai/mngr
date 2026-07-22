@@ -1,6 +1,6 @@
 Diagnostics for docker discovery reporting existing hosts/agents as absent (observed live: `mngr start <agent>` failed with "Agent not found" during a minds app launch, against a stopped host whose records another process read successfully one second later):
 
-- `DockerVolume.listdir` now distinguishes a genuinely-missing directory (still `FileNotFoundError`, the normal fresh-env case) from any other `ls` failure inside the state container, which now raises `OSError` carrying the exit code and output.
+- `DockerVolume.listdir` now distinguishes a genuinely-missing directory (still `FileNotFoundError`, the normal fresh-env case) from any other `ls` failure inside the state container, which now raises `VolumeListingError` (an `MngrError` that is also an `OSError`) carrying the exit code and output.
 
 - The docker host store logs a warning (instead of silently returning an empty list) when listing host records or a host's persisted agent data fails for any reason other than the directory not existing -- an empty result there makes hosts/agents invisible to discovery.
 

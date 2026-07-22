@@ -229,6 +229,16 @@ class AgentStartError(AgentError):
         super().__init__(f"Failed to start agent {agent_name}: {reason}")
 
 
+class VolumeListingError(MngrError, OSError):
+    """Raised when listing a directory on a provider-backed volume fails.
+
+    Covers every failure other than the directory not existing (which stays
+    ``FileNotFoundError``): e.g. a failed exec against the docker state
+    container. Inherits ``OSError`` so callers that treat any volume I/O
+    failure as "no entries" keep working unchanged.
+    """
+
+
 class ProviderError(MngrError):
     """Base class for all provider-related errors."""
 
