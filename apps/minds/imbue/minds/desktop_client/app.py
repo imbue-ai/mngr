@@ -97,7 +97,6 @@ from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
@@ -2679,24 +2678,6 @@ def _handle_sharing_page(
         account_email=account_email,
     )
     return make_html_response(content=html)
-
-
-_SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
-
-
-def _probe_share_url_readiness(http_client: httpx.Client, url: str) -> bool:
-    """Fetch ``url`` once and report whether the Cloudflare Access app is live.
-
-    Uses the app's shared (``follow_redirects=False``) client so the Access
-    login redirect is observed rather than followed. Any transport error or
-    timeout is treated as "not ready yet".
-    """
-    try:
-        response = http_client.get(url, timeout=_SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
-    except httpx.HTTPError as exc:
-        logger.debug("Probed share URL {} but it is not ready yet: {}", url, exc)
-        return False
-    return is_share_ready_from_edge_response(response.status_code, response.headers.get("location"))
 
 
 def _handle_request_grant(

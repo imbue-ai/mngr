@@ -65,7 +65,13 @@ class DesktopClientState(MutableModel):
     auth_store: AuthStoreInterface = Field(frozen=True, description="Cookie/session auth store")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Agent/host discovery resolver")
     http_client: httpx.Client | None = Field(
-        default=None, description="Shared sync HTTP client (created by the runtime; injected in tests)"
+        default=None,
+        description=(
+            "HTTP client for the share-URL readiness probe (its only consumer), created by the "
+            "runtime with TLS verification disabled -- Python's ssl cannot wildcard-match "
+            "underscore hostnames like system_interface--..., so a verifying probe never goes "
+            "ready on links browsers accept. Injected in tests."
+        ),
     )
     agent_creator: AgentCreator | None = Field(
         default=None, frozen=True, description="In-flight agent creation manager"
