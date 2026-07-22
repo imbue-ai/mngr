@@ -145,6 +145,31 @@ MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
 MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
 
 
+def _resolve_client_config_path(config_file: Path | None) -> Path:
+    """Validate the ``--config-file`` value, raising click errors with actionable guidance.
+
+    ``None`` means no env was activated. A path that does not resolve to a file means
+    the env's ``client.toml`` was never written -- almost always a dev env that was
+    activated (``--create``) but never deployed, which is the common first-run wedge:
+    ``client.toml`` is only produced by a successful ``minds env deploy``.
+    """
+    if config_file is None:
+        raise click.ClickException(
+            "No client config file is set. Activate an env first: "
+            '`eval "$(uv run minds env activate <name>)"` (e.g. '
+            "`dev-<your-user>`, `staging`, or `production`), then re-run."
+        )
+    if not config_file.is_file():
+        raise click.ClickException(
+            f"Client config file not found: {config_file}. For a dev env, its "
+            "client.toml is written only by a successful deploy -- run "
+            '`eval "$(uv run minds env activate --deploy <name>)"` then '
+            "`uv run minds env deploy`, then re-launch. For staging / production "
+            "the committed in-repo client.toml should already exist -- check your checkout."
+        )
+    return config_file
+
+
 @click.command()
 @click.option(
     "--host",
@@ -167,7 +192,7 @@ MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
 @click.option(
     "--config-file",
     "config_file",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     envvar="MINDS_CLIENT_CONFIG_PATH",
     help=(
@@ -187,12 +212,7 @@ def run(
     config_file: Path | None,
 ) -> None:
     """Run the minds bare-origin server with `mngr forward` as a subprocess."""
-    if config_file is None:
-        raise click.ClickException(
-            "No client config file is set. Activate an env first: "
-            '`eval "$(uv run minds env activate <name>)"` (e.g. '
-            "`dev-<your-user>`, `staging`, or `production`), then re-run."
-        )
+    client_config_path = _resolve_client_config_path(config_file)
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
@@ -236,7 +256,6 @@ def run(
         latchkey_plugin_data_dir=latchkey.plugin_data_dir,
         discovery_events_dir=get_discovery_events_dir(MngrConfig(default_host_dir=mngr_host_dir)),
     )
-    client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
