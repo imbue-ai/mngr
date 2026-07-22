@@ -43,10 +43,6 @@ _MAX_IMAGE_DATA_CHARS = 12_000_000
 
 _SOURCE = "claude/foreman_transcript"
 
-# Sentinel Claude writes to the user channel when the user interrupts a turn
-# (e.g. Esc mid-tool-use). It is a control marker, not real user input.
-_INTERRUPT_SENTINEL_TEXT = "[Request interrupted by user]"
-
 # Claude Code's resume bookkeeping: an ``isMeta`` user message with exactly this
 # text, answered by a synthetic-model "No response requested." assistant
 # message. The pair is inert and hidden by Claude Code's own UI, so we hide it.
@@ -291,51 +287,60 @@ def parse_claude_session_lines(
         line = line.strip()
         if not line:
             continue
+        # One malformed or oddly-shaped record must never kill the whole stream: the
+        # transcript is external data, backfill re-reads it from byte 0 on every fresh
+        # connection, so an uncaught error here would poison every future reconnect too.
+        # Catch broadly, log, and skip the single line (covers non-dict JSON, a null
+        # nested "message", and any future shape surprise in one place).
         try:
             raw = json.loads(line)
-        except json.JSONDecodeError as e:
-            logger.debug("Skipping malformed JSONL line: {}", e)
+            if not isinstance(raw, dict):
+                # Valid JSON that isn't an object (a bare null / number / list) carries
+                # no record; skip rather than AttributeError on raw.get below.
+                continue
+
+            event_type: str = raw.get("type", "")
+            timestamp: str = raw.get("timestamp", "")
+
+            # queue-operation records track the live message queue in real time
+            # (enqueue/remove/dequeue/popAll). They carry a timestamp but NO uuid, so
+            # they must be handled BEFORE the uuid guard below.
+            if event_type == "queue-operation":
+                _parse_queue_operation(raw, timestamp, existing_event_ids, queue_state, new_events, session_id)
+                continue
+
+            uuid: str = raw.get("uuid", "")
+            if not uuid or not timestamp:
+                continue
+
+            if event_type == "assistant":
+                _parse_assistant_message(
+                    raw,
+                    uuid,
+                    timestamp,
+                    existing_event_ids,
+                    tool_name_by_call_id,
+                    new_events,
+                    max_tool_output_chars,
+                    session_id,
+                )
+            elif event_type == "user":
+                _parse_user_message(
+                    raw,
+                    uuid,
+                    timestamp,
+                    existing_event_ids,
+                    tool_name_by_call_id,
+                    new_events,
+                    max_tool_output_chars,
+                    session_id,
+                )
+            elif event_type == "attachment":
+                _parse_queued_command_attachment(raw, uuid, timestamp, existing_event_ids, new_events, session_id)
+            # Skip: progress, file-history-snapshot, system, result, etc.
+        except Exception as e:  # noqa: BLE001 - one bad line must not kill the whole transcript stream
+            logger.debug("Skipping unparseable transcript line: {}", e)
             continue
-
-        event_type: str = raw.get("type", "")
-        timestamp: str = raw.get("timestamp", "")
-
-        # queue-operation records track the live message queue in real time
-        # (enqueue/remove/dequeue/popAll). They carry a timestamp but NO uuid, so
-        # they must be handled BEFORE the uuid guard below.
-        if event_type == "queue-operation":
-            _parse_queue_operation(raw, timestamp, existing_event_ids, queue_state, new_events, session_id)
-            continue
-
-        uuid: str = raw.get("uuid", "")
-        if not uuid or not timestamp:
-            continue
-
-        if event_type == "assistant":
-            _parse_assistant_message(
-                raw,
-                uuid,
-                timestamp,
-                existing_event_ids,
-                tool_name_by_call_id,
-                new_events,
-                max_tool_output_chars,
-                session_id,
-            )
-        elif event_type == "user":
-            _parse_user_message(
-                raw,
-                uuid,
-                timestamp,
-                existing_event_ids,
-                tool_name_by_call_id,
-                new_events,
-                max_tool_output_chars,
-                session_id,
-            )
-        elif event_type == "attachment":
-            _parse_queued_command_attachment(raw, uuid, timestamp, existing_event_ids, new_events, session_id)
-        # Skip: progress, file-history-snapshot, system, result, etc.
 
     new_events.sort(key=lambda x: x[0])
     return [event for _, event in new_events]

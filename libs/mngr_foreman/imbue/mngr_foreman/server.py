@@ -25,9 +25,6 @@ from flask.typing import ResponseReturnValue
 from flask_sock import Sock
 from loguru import logger
 
-from imbue.mngr.api.events import EventsTarget
-from imbue.mngr.api.events import refresh_events_target
-from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -67,7 +64,6 @@ _STATIC_PACKAGE: Final[str] = "imbue.mngr_foreman.static"
 _SAFE_IMAGE_ID_CHARS: Final[frozenset[str]] = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
 )
-_TARGET_REFRESH_SECONDS: Final[float] = 30.0
 # Frequent heartbeats so the client's liveness watchdog notices a dead stream
 # fast (a silently-dropped SSE otherwise looks "connected" but shows stale state).
 # Sent as a real data event, not a ": comment" -- EventSource never dispatches
@@ -260,7 +256,7 @@ def create_app(
             )
 
         return Response(
-            _transcript_stream(mngr_ctx, agent, strategy, max_tool_output_chars, pool),
+            _transcript_stream(agent, strategy, max_tool_output_chars, pool),
             mimetype="text/event-stream",
             headers=_sse_headers(),
         )
@@ -439,56 +435,38 @@ def _sse_headers() -> dict[str, str]:
     }
 
 
-def _build_transcript_reader(
-    mngr_ctx: MngrContext, agent: AgentDetails, subpath: str, pool: ConnectionPool
-) -> tuple[ReaderFn, SizeFn] | None:
-    """Build ``(reader, size_fn)`` over the agent's mirrored transcript file.
+def _build_transcript_reader(agent: AgentDetails, subpath: str, pool: ConnectionPool) -> tuple[ReaderFn, SizeFn]:
+    """Build ``(reader, size_fn)`` over the agent's transcript, read through the warm pool.
 
-    ``reader() -> bytes`` reads the transcript file at ``subpath`` beneath the
-    resolved ``EventsTarget``'s ``events_path`` parent (the agent state dir);
-    ``size_fn() -> int | None`` cheaply stats its byte size over the warm
-    connection pool so the poll can skip the read when nothing changed. The target
-    is refreshed periodically so both survive a host stop/start.
+    Both go through ``pool.run_on_host`` so they reuse the always-warm, already-resolved
+    host connection the keepalive maintains. Resolving a fresh readable host per open
+    (``provider.get_host`` runs a live online probe) cost ~5s of cold latency on *every*
+    transcript load; the pool already holds a hot handle for every live agent, so we drop
+    straight onto it (the same path the input-state probe takes in ~20ms). The transcript
+    lives at ``<host_dir>/agents/<id>/<subpath>`` -- the exact location the events target
+    resolves to. A dropped connection surfaces as an empty read here and is re-resolved by
+    the pool's keepalive, so the next poll recovers with no per-reader refresh bookkeeping.
     """
-    initial_target = try_build_events_target_for_agent(
-        mngr_ctx=mngr_ctx,
-        agent_id=agent.id,
-        agent_name=str(agent.name),
-        host_id=agent.host.id,
-        provider_name=agent.host.provider_name,
-    )
-    if initial_target is None:
-        return None
-
-    target: EventsTarget = initial_target
-    refreshed_at: float = time.monotonic()
     agent_name = str(agent.name)
+    rel_path = Path("agents") / str(agent.id) / subpath
 
-    def _transcript_path(t: EventsTarget) -> Path:
-        assert t.events_path is not None
-        return t.events_path.parent / subpath
+    def _abs_path(host: OnlineHostInterface) -> Path:
+        return host.host_dir / rel_path
 
     def reader() -> bytes:
-        nonlocal target, refreshed_at
-        now = time.monotonic()
-        if now - refreshed_at >= _TARGET_REFRESH_SECONDS:
-            try:
-                target = refresh_events_target(target)
-            except Exception as e:  # noqa: BLE001 - keep last good target
-                logger.trace("refresh_events_target failed (keeping previous): {}", e)
-            refreshed_at = now
-        if target.host is None or target.events_path is None:
+        def _read(_agent: AgentInterface, host: OnlineHostInterface) -> bytes:
+            return host.read_file(_abs_path(host))
+
+        try:
+            return pool.run_on_host(agent_name, _read)
+        except Exception as e:  # noqa: BLE001 - a failed read just yields no new lines this poll
+            logger.trace("transcript read for {} failed (retrying next poll): {}", agent_name, e)
             return b""
-        return target.host.read_file(_transcript_path(target))
 
     def size_fn() -> int | None:
-        if target.events_path is None:
-            return None
-        path = _transcript_path(target)
-
-        def _stat(_a: AgentInterface, host: OnlineHostInterface) -> int | None:
+        def _stat(_agent: AgentInterface, host: OnlineHostInterface) -> int | None:
             result = host.execute_stateful_command(
-                f"stat -c %s {shlex.quote(str(path))} 2>/dev/null",
+                f"stat -c %s {shlex.quote(str(_abs_path(host)))} 2>/dev/null",
                 timeout_seconds=_HOST_COMMAND_TIMEOUT_SECONDS,
             )
             out = (result.stdout or "").strip()
@@ -503,7 +481,6 @@ def _build_transcript_reader(
 
 
 def _transcript_stream(
-    mngr_ctx: MngrContext,
     agent: AgentDetails,
     strategy: TranscriptStrategy,
     max_tool_output_chars: int,
@@ -511,7 +488,7 @@ def _transcript_stream(
 ) -> Iterator[str]:
     """SSE generator: full backfill, then live events, with periodic heartbeats."""
     try:
-        yield from _transcript_stream_inner(mngr_ctx, agent, strategy, max_tool_output_chars, pool)
+        yield from _transcript_stream_inner(agent, strategy, max_tool_output_chars, pool)
     finally:
         # This generator runs for the whole connection on its own thread and pops
         # its request context early, so teardown_request won't fire for it: destroy
@@ -520,17 +497,12 @@ def _transcript_stream(
 
 
 def _transcript_stream_inner(
-    mngr_ctx: MngrContext,
     agent: AgentDetails,
     strategy: TranscriptStrategy,
     max_tool_output_chars: int,
     pool: ConnectionPool,
 ) -> Iterator[str]:
-    built = _build_transcript_reader(mngr_ctx, agent, strategy.subpath, pool)
-    if built is None:
-        yield _sse({"type": "error", "message": "Agent host is not readable (offline and no volume)."})
-        return
-    reader, size_fn = built
+    reader, size_fn = _build_transcript_reader(agent, strategy.subpath, pool)
 
     tailer = TranscriptTailer(reader, size_fn=size_fn)
     existing_event_ids: set[str] = set()

@@ -358,7 +358,7 @@
     // transcript echo later confirms it IN PLACE (pending class removed) rather
     // than duplicating, since userBubbles dedups by content-key. A failed POST
     // rolls the bubble back and restores the text. userBubbles also flips a
-    // queued_command (purple) to a delivered user_message (green) in place.
+    // queued_command (dark green) to a delivered user_message (green) in place.
     const userBubbles = new Map(); // content-key -> { node, queued, pending }
     let pendingSend = null; // text of a sent message awaiting its transcript echo
     let pendingSendTimer = null; // safety: confirm the pending bubble if echo never matches
@@ -917,7 +917,7 @@
     // ---- send lifecycle (the transcript is the source of truth) ----
     // We do NOT optimistically draw a bubble. On send the message stays in the
     // textbox and the whole input region locks ("awaiting") until the transcript
-    // echoes it back -- queued (purple) or delivered (green). Only then do we
+    // echoes it back -- queued (dark green) or delivered (green). Only then do we
     // clear the box. So a bubble exists only once claude has actually recorded the
     // message: no guessing, no colour flip-flop.
     function setAwaiting(on) {

@@ -49,9 +49,18 @@ def render_unit_file(*, user: str, exec_start: str, working_dir: str, path_env: 
         f"User={user}\n"
         f"WorkingDirectory={working_dir}\n"
         f"Environment=PATH={path_env}\n"
+        # Cap glibc malloc arenas (default = 8 x CPU cores). werkzeug runs a thread per
+        # request; each thread otherwise gets its own arena that glibc never returns to
+        # the OS, so RSS ratchets to the peak-concurrent footprint. 2 arenas keeps memory
+        # low for this low-QPS single-user tool; malloc lock contention is irrelevant here.
+        "Environment=MALLOC_ARENA_MAX=2\n"
         f"ExecStart={exec_start}\n"
         "Restart=always\n"
         "RestartSec=3\n"
+        # foreman holds many long-lived SSE + WebSocket + SSH-control-master fds at once;
+        # the default 1024 soft limit runs out and terminals start failing with
+        # "Too many open files". Raise it so an always-on server never hits that wall.
+        "LimitNOFILE=1048576\n"
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"

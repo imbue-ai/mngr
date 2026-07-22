@@ -33,7 +33,12 @@ from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr_foreman.harness import transcript_strategy_for
 
 # How often the discovery loop re-lists agents (the interval *between* passes).
-POLL_INTERVAL_SECONDS: Final[float] = 3.0
+# Discovery only tracks *membership* (which agents exist), which changes on the order
+# of minutes; per-agent live status (WORKING / NEEDS INPUT / READY) is computed
+# on-demand from the tmux pane, not here. So a slow cadence is plenty fresh and keeps
+# the box quiet -- a 3s cadence re-ran docker ps + per-container probes 20x/minute for
+# no benefit. A newly-appeared agent still warms within one interval via on_change.
+POLL_INTERVAL_SECONDS: Final[float] = 10.0
 # How often to re-enumerate the configured providers (cheap, config-based).
 _PROVIDER_REFRESH_SECONDS: Final[float] = 30.0
 
@@ -49,6 +54,11 @@ LIVE_STATES: Final[frozenset[str]] = frozenset({"RUNNING", "WAITING"})
 # Bound each subscriber queue so a dead/slow SSE client cannot grow memory
 # without limit; on overflow we drop the client (it reconnects and re-seeds).
 _SUBSCRIBER_QUEUE_MAXSIZE: Final[int] = 256
+# How often an idle subscriber stream yields a heartbeat. Bounds the blocking
+# ``queue.get`` so a client that dropped mid-idle-period (membership rarely changes,
+# and SSE is write-only so a dead socket is invisible until we write) is detected
+# within one interval instead of leaking its handler thread + fd forever.
+_SUBSCRIBER_HEARTBEAT_SECONDS: Final[float] = 5.0
 
 
 def _state_of(agent: AgentDetails) -> str:
@@ -102,7 +112,13 @@ class AgentRegistry:
 
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
-            self._poll_once()
+            # A single bad pass (e.g. Thread.start() raising under OS resource pressure)
+            # must never kill the only discovery loop -- the whole agent list would then
+            # freeze until a process restart. Mirror the warm pool's _safe_tick guard.
+            try:
+                self._poll_once()
+            except Exception as e:  # noqa: BLE001 - keep polling; one bad pass is not fatal
+                logger.warning("Discovery poll pass failed (continuing): {}", e)
             self._stop.wait(POLL_INTERVAL_SECONDS)
 
     def _provider_names_cached(self) -> tuple[str, ...]:
@@ -131,9 +147,16 @@ class AgentRegistry:
                 if self._provider_inflight.get(pname):
                     continue
                 self._provider_inflight[pname] = True
-            threading.Thread(
-                target=self._poll_provider, args=(pname,), name=f"foreman-registry-{pname}", daemon=True
-            ).start()
+            try:
+                threading.Thread(
+                    target=self._poll_provider, args=(pname,), name=f"foreman-registry-{pname}", daemon=True
+                ).start()
+            except Exception as e:  # noqa: BLE001 - a failed spawn must not strand the provider
+                # The thread never ran, so its finally-clause never resets the guard;
+                # clear it here or this provider would stay "in flight" forever.
+                with self._lock:
+                    self._provider_inflight[pname] = False
+                logger.warning("Could not start discovery thread for provider {}: {}", pname, e)
 
     def _poll_provider(self, pname: str) -> None:
         """List one provider's agents and republish; never blocks the other providers."""
@@ -152,7 +175,12 @@ class AgentRegistry:
                 is_streaming=False,
                 provider_names=(pname,),
                 error_behavior=ErrorBehavior.CONTINUE,
-                reset_caches=True,
+                # Reuse provider caches (SSH connections, listing snapshots) across polls
+                # instead of a full re-probe every pass -- that full re-probe was the CPU
+                # hog. Discovery still runs each poll (finds new/dropped agents); a stale
+                # connection self-heals via the provider's on_connection_error eviction.
+                # ponytail: no periodic hard reset; add one if IP-change staleness ever bites.
+                reset_caches=False,
             )
             live = {str(a.id): a for a in result.agents if _is_live_coding(a)}
         except Exception as e:  # noqa: BLE001 - a bad provider must not kill its slot
@@ -201,14 +229,25 @@ class AgentRegistry:
         return None
 
     def subscribe(self) -> Iterator[dict]:
-        """Yield an initial snapshot then live snapshots until the client leaves."""
+        """Yield an initial snapshot, then live snapshots, with periodic heartbeats.
+
+        The ``queue.get`` is bounded by a heartbeat interval so a client that dropped
+        its connection during an idle stretch (no membership change to push, no OS-level
+        SSE probe) is noticed when the next yield fails, instead of leaking a handler
+        thread + fd blocked forever -- and a subscriber whose queue overflowed and was
+        discarded by ``_broadcast`` still gets woken to exit rather than hanging on a
+        queue nothing will ever fill again.
+        """
         q: queue.Queue[dict] = queue.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
         with self._lock:
             self._subscribers.add(q)
         try:
             yield {"type": "snapshot", "agents": self.snapshot()}
             while True:
-                yield q.get()
+                try:
+                    yield q.get(timeout=_SUBSCRIBER_HEARTBEAT_SECONDS)
+                except queue.Empty:
+                    yield {"type": "heartbeat"}
         finally:
             with self._lock:
                 self._subscribers.discard(q)
