@@ -112,6 +112,12 @@ class AgentReleaseProfile(abc.ABC):
     # Slash command used by the message-delivery journey's relaxed-policy step
     # (e.g. "/clear"); None skips the step for agents without a suitable one.
     clear_slash_command: str | None = None
+    # An unrecognized slash command (e.g. "/zzz-not-a-command") for the
+    # journey's rejection step; None skips it. Only meaningful for agents that
+    # supply rejection evidence probes: the step asserts a
+    # send_rejected_by_agent event was recorded, which is the canary for the
+    # TUI changing the shape of its rejection record.
+    unknown_slash_command: str | None = None
 
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
@@ -519,6 +525,33 @@ def _wait_for_user_message(host_dir: Path, subdir: str, token: str, *, descripti
     )
 
 
+def _wait_for_rejection_event(host_dir: Path, message: str) -> None:
+    """Wait for a send_rejected_by_agent delivery event mentioning ``message``.
+
+    The rejection probe fires only when the TUI's structured rejection record
+    appears in the transcript, so this failing on a previously green setup
+    means the TUI changed that record's shape and the agent's rejection filter
+    (for Claude: ``_REJECTED_COMMAND_JQ_FILTER``) must be updated to match.
+    """
+
+    def has_rejection_event() -> bool:
+        for events_path in host_dir.glob("agents/*/events/messages/events.jsonl"):
+            for line in events_path.read_text().splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "send_rejected_by_agent" and message in event.get("detail", ""):
+                    return True
+        return False
+
+    assert poll_until(has_rejection_event, timeout=30.0), (
+        f"no send_rejected_by_agent event recorded for {message!r}: the rejection probe never fired. "
+        "If the TUI changed its rejection record (e.g. the 'Unknown command' warning), "
+        "update the agent's rejection filter to match the new shape."
+    )
+
+
 def _send_expecting_success(
     profile: AgentReleaseProfile, ctx: AgentReleaseContext, agent_name: str, message: str
 ) -> None:
@@ -615,6 +648,13 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
         #    but the send must still exit 0.
         if profile.clear_slash_command is not None:
             _send_expecting_success(profile, ctx, agent_name, profile.clear_slash_command)
+
+        # 6. Unknown slash command: the send still exits 0 (delivery semantics),
+        #    and the rejection probe must catch the TUI's structured rejection
+        #    record and record a send_rejected_by_agent event.
+        if profile.unknown_slash_command is not None:
+            _send_expecting_success(profile, ctx, agent_name, profile.unknown_slash_command)
+            _wait_for_rejection_event(host_dir, profile.unknown_slash_command)
 
         # Exactly-once: no token was delivered twice (the engine re-sends Enter,
         # never the text, so duplicates would mean the gating is broken).

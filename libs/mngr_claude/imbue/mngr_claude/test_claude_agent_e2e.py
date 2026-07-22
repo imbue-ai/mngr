@@ -94,6 +94,11 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
     # /clear exercises the relaxed slash-command policy end to end (claude records
     # its effect durably as a session-id change, but the send must not depend on it).
     clear_slash_command = "/clear"
+    # Exercises the rejection probe end to end: claude writes a structured
+    # "Unknown command" warning the instant it rejects this, and the journey
+    # asserts the resulting send_rejected_by_agent event -- the canary for
+    # upstream changes to that record (see _REJECTED_COMMAND_JQ_FILTER).
+    unknown_slash_command = "/zzz-mngr-release-probe"
     # This is the store the adopt-from-preserved arc adopts: after destroy, a fresh agent
     # in a new worktree adopts the just-preserved session and must recall the pre-destroy
     # secret -- proving the store resumes and the cross-cwd re-filing works.
