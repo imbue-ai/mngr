@@ -206,28 +206,33 @@
   // Prefix the tab title with the agent's live state so background tabs show
   // status at a glance. Mapping: blocked (dialog/permissions) -> NEEDS INPUT,
   // busy/RUNNING -> WORKING, otherwise (running & idle) -> WAITING.
-  // Reduce a live input-state read to the three-state status shown in tab titles
-  // AND on the home-screen cards. "" = not running / unknown. Single source of
-  // truth so home and chat never drift.
+  // THE single source of truth: reduce a live input-state read to ONE status, shown
+  // verbatim in all three spots (home card, tab title, chat dot) -- they call these
+  // and nothing else, so they can never drift. "" = not running / unknown (caller keeps
+  // its last shown value). Four real cases; the backend already computed them off the
+  // live pane glyph (never mngr's coarse state), including WORKING_BACKGROUND (a subagent
+  // / backgrounded shell is generating while the main loop is free for input).
   function statusKey(d) {
     if (!d || !d.running) return "";
-    // Drive PURELY from the backend's live-pane read. NEVER derive from mngr's coarse
-    // state -- it lies (WAITING mid-turn). UNKNOWN (pane unreadable this poll) or a
-    // missing status means "don't know right now" -> "" so the caller KEEPS the last
-    // dot rather than ever showing a wrong one. (Callers also drop UNKNOWN responses
-    // outright, but this keeps the mapping honest.)
-    if (d.status === "NEEDS_INPUT") return "NEEDS_INPUT";
-    if (d.status === "WORKING") return "WORKING";
-    if (d.status === "READY") return "READY";
+    const s = d.status;
+    if (s === "NEEDS_INPUT" || s === "WORKING" || s === "READY" || s === "WORKING_BACKGROUND") return s;
+    return ""; // UNKNOWN / missing -> keep last
+  }
+  // The exact label text for each status -- the ONE place these strings live.
+  function statusLabel(k) {
+    if (k === "NEEDS_INPUT") return "NEEDS INPUT";
+    if (k === "WORKING") return "WORKING";
+    if (k === "WORKING_BACKGROUND") return "WORKING IN BACKGROUND, READY";
+    if (k === "READY") return "READY";
     return "";
   }
+  // CSS class suffix for the status colour (working / needs-input / ready / working-background).
+  function statusClass(k) {
+    return k ? k.toLowerCase().replace(/_/g, "-") : "";
+  }
   function statusTitle(d, base) {
-    const k = statusKey(d);
-    const prefix =
-      k === "NEEDS_INPUT" ? "[NEEDS INPUT] " :
-      k === "WORKING" ? "[WORKING] " :
-      k === "READY" ? "[READY] " : "";
-    return prefix + base;
+    const label = statusLabel(statusKey(d));
+    return label ? "[" + label + "] " + base : base;
   }
 
   // Poll an agent's input-state and call onState(d) each tick, at a steady rate
@@ -261,9 +266,6 @@
     document.title = "foreman — home";
     const listEl = document.getElementById("list");
 
-    function stateClass(state) {
-      return String(state || "").toLowerCase();
-    }
     function relTime(iso) {
       if (!iso) return "";
       const d = new Date(iso);
@@ -278,11 +280,11 @@
       card.href = "/a/" + encodeURIComponent(a.name);
       card.dataset.name = a.name; // read back by the shared status poller
       const row1 = el("div", "row1");
-      // Live WORKING/NEEDS INPUT/READY dot (from input-state polling), same signal
-      // + colours as the chat page. Starts dim; the poller fills it in.
-      row1.appendChild(el("span", "status-dot", ""));
       row1.appendChild(el("span", "name", a.name));
-      row1.appendChild(el("span", "chip " + stateClass(a.state), a.state));
+      // OUR status -- the single source of truth, identical to the tab title + chat
+      // dot. This REPLACES the old mngr-state chip AND the separate dot (those were two
+      // duplicate, drifting signals). The ~1s poller fills its label text + colour.
+      row1.appendChild(el("span", "status-badge", ""));
       card.appendChild(row1);
       const row2 = el("div", "row2");
       row2.appendChild(el("span", null, a.type));
@@ -323,10 +325,12 @@
         fetch("/api/agents/" + encodeURIComponent(name) + "/input-state")
           .then((r) => r.json())
           .then((d) => {
-            if (d && d.status === "UNKNOWN") return; // pane unreadable -> keep the last dot
-            const dot = card.querySelector(".status-dot");
-            // same statusKey as the chat page -- one derivation, so home + chat agree.
-            if (dot) dot.className = "status-dot " + statusKey(d).toLowerCase().replace("_", "-");
+            if (d && d.status === "UNKNOWN") return; // pane unreadable -> keep last badge
+            const badge = card.querySelector(".status-badge");
+            if (!badge) return;
+            const k = statusKey(d); // the ONE derivation the tab title + chat dot also use
+            badge.className = "status-badge " + statusClass(k);
+            badge.textContent = statusLabel(k);
           })
           .catch(() => {})
           .finally(() => { inFlightCards.delete(name); });
@@ -580,18 +584,23 @@
     const workingEl = el("div", "working");
     workingEl.hidden = true;
     workingEl.appendChild(el("span", "dot"));
-    workingEl.appendChild(el("span", null, "working…"));
+    const workingText = el("span", null, "working…");
+    workingEl.appendChild(workingText);
     // The dot lives permanently in the transcript as a fixed anchor: main content
     // is inserted BEFORE it, queued bubbles are appended AFTER it. Just toggle its
     // visibility; never move it.
     tEl.appendChild(workingEl);
 
-    // mngr's busy flag is the whole story. null/undefined (no state yet) leaves it
-    // unchanged; true/false set it directly.
-    function applyMngrBusy(busy) {
-      if (busy !== true && busy !== false) return;
-      if (busy === working) return;
-      working = busy;
+    // Spot 3 of the single status (home card + tab title are the other two): the chat
+    // "dot" is driven by the same statusKey, so all three always match. WORKING and
+    // WORKING_BACKGROUND show the dot (the latter a distinct colour + label); READY
+    // hides it (an active composer IS "ready"); NEEDS INPUT is shown by the composer-
+    // blocked UI, not here. "" (unknown this poll) leaves it unchanged.
+    function applyStatus(k) {
+      if (k === "") return;
+      working = k === "WORKING" || k === "WORKING_BACKGROUND";
+      workingEl.classList.toggle("bg", k === "WORKING_BACKGROUND");
+      workingText.textContent = k === "WORKING_BACKGROUND" ? "working in background · ready" : "working…";
       refreshWorking();
     }
     function refreshWorking() {
@@ -995,7 +1004,7 @@
       const k = statusKey(d);
       document.title = statusTitle(d, name + " — chat");
       if (k === "NEEDS_INPUT") setBlocked(); else clearBlocked();
-      applyMngrBusy(k === "WORKING");
+      applyStatus(k);
     });
 
     // Grow with the text up to ~5 lines, then stop and let the textarea scroll --

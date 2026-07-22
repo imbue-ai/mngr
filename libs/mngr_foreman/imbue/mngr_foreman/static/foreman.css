@@ -28,6 +28,7 @@
   --chip-run: #6ee7a0;
   --chip-wait: #ffcf5c;
   --chip-stop: #7a7a7a;
+  --chip-bg: #62c6d6; /* WORKING IN BACKGROUND, READY -- teal, distinct from foreground green */
   --prose: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "Atkinson Hyperlegible Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -136,20 +137,27 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
 .chip.waiting { color: var(--chip-wait); border-color: #3a3016; }
 .chip.stopped, .chip.done, .chip.replaced { color: var(--chip-stop); }
 .empty, .loading { color: var(--fg-faint); padding: 30px 0; text-align: center; }
-/* home-card live status dot: WORKING/NEEDS INPUT/READY from input-state polling.
-   Same colours as the chat page (green/amber/dim) + the shared working-pulse. */
-.agent-card .status-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  flex: none;
-  background: var(--chip-stop); /* unknown / not-running: dim */
+/* home-card status BADGE -- OUR single status (WORKING / NEEDS INPUT / READY /
+   WORKING IN BACKGROUND, READY), same derivation + colours as the tab title and the
+   chat dot. This replaced the old mngr-state chip AND the separate status dot (two
+   duplicate, drifting signals). The ~1s poller sets its label text + colour class. */
+.status-badge {
+  margin-left: auto; /* sit at the right edge of the row, after the name */
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  padding: 2px 9px; border-radius: 999px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--chip-stop); border: 1px solid #2a2a2a;
 }
-.agent-card .status-dot.ready { background: var(--chip-stop); }
-.agent-card .status-dot.needs-input { background: var(--chip-wait); }
-.agent-card .status-dot.working {
-  background: var(--chip-run);
-  animation: working-pulse 1.1s ease-in-out infinite;
+.status-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.status-badge.ready { color: var(--chip-stop); }
+.status-badge.needs-input { color: var(--chip-wait); border-color: #3a3016; }
+.status-badge.working { color: var(--chip-run); border-color: #24361f; }
+.status-badge.working::before { animation: working-pulse 1.1s ease-in-out infinite; }
+.status-badge.working-background { color: var(--chip-bg); border-color: #1f3138; }
+.status-badge.working-background::before { animation: working-pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .status-badge.working::before, .status-badge.working-background::before { animation: none; }
 }
-@media (prefers-reduced-motion: reduce) { .agent-card .status-dot.working { animation: none; } }
 
 /* ---- transcript ---- */
 .transcript { padding-bottom: 120px; }
@@ -587,6 +595,10 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
   background: var(--accent);
   animation: working-pulse 1.1s ease-in-out infinite;
 }
+/* WORKING IN BACKGROUND, READY -- a subagent / backgrounded shell is generating while
+   the main loop is free. Distinct teal + slower pulse, same colour as the home badge. */
+.working.bg { color: var(--chip-bg); }
+.working.bg .dot { background: var(--chip-bg); animation-duration: 1.6s; }
 @keyframes working-pulse {
   0%, 100% { opacity: 0.25; transform: scale(0.8); }
   50%      { opacity: 1;    transform: scale(1.1); }

@@ -373,7 +373,18 @@ def create_app(
             reason = "permission prompt" if is_permissions_blocked(agent) else None
             busy = is_busy_state(state)
         blocked = reason is not None
-        status = "NEEDS_INPUT" if blocked else ("WORKING" if busy else "READY")
+        # Single source of truth: ONE status the UI shows verbatim in all three spots
+        # (home card, tab title, chat dot). Four cases:
+        if blocked:
+            status = "NEEDS_INPUT"
+        elif busy:
+            # The glyph says generating. If mngr's own turn-marker also says RUNNING it's
+            # the foreground turn -> WORKING. If mngr says WAITING, the main loop is idle
+            # but something (a subagent / a backgrounded shell) is still generating ->
+            # "working in background", yet the agent is free for your input.
+            status = "WORKING" if state == "RUNNING" else "WORKING_BACKGROUND"
+        else:
+            status = "READY"
         return jsonify(
             {"blocked": blocked, "reason": reason, "running": True, "busy": busy, "status": status, "state": state}
         )
