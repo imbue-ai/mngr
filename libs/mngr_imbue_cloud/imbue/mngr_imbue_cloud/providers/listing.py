@@ -27,7 +27,7 @@ def derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
     if container_state == "running":
         # Container is up but docker exec didn't give us data -- we know
         # the host exists but can't read its state from inside.
-        return HostState.UNAUTHENTICATED
+        return HostState.UNREACHABLE
     state, _note = map_docker_status_to_host_state(container_state, exit_code)
     return state
 
@@ -55,12 +55,11 @@ def map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostSt
 
     Returns ``(state, note)`` where ``note`` is a short human-readable
     diagnostic appended to ``HostDetails.failure_reason``. If the docker
-    container is ``running`` but inner SSH was unreachable we treat that
-    as an authentication problem -- the host is up; we just can't get
-    inside it.
+    container is ``running`` but inner SSH was unreachable we report
+    ``UNREACHABLE`` -- the host is up; we just can't get inside it.
     """
     if status == "running":
-        return HostState.UNAUTHENTICATED, "container is running on outer host but inner SSH was unreachable"
+        return HostState.UNREACHABLE, "container is running on outer host but inner SSH was unreachable"
     if status == "exited":
         if exit_code == 0:
             return HostState.STOPPED, "container exited cleanly"

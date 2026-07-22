@@ -278,7 +278,7 @@ def test_connection_error_fallback_applies_provider_state_override(
 
     Mirrors a docker container that is still running but whose inner sshd has
     died: the connection-error fallback must report the provider's override
-    (UNAUTHENTICATED) on both the host and every agent's nested host, not the
+    (UNREACHABLE) on both the host and every agent's nested host, not the
     default offline-derived CRASHED that would make minds skip a host restart's
     stop step.
     """
@@ -288,7 +288,7 @@ def test_connection_error_fallback_applies_provider_state_override(
     offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
     provider.mock_hosts = [online_host, offline_host]
     provider.mock_offline_hosts = {str(host_id): offline_host}
-    provider.mock_connection_error_fallback_state = HostState.UNAUTHENTICATED
+    provider.mock_connection_error_fallback_state = HostState.UNREACHABLE
 
     host_ref = DiscoveredHost(
         host_id=host_id,
@@ -299,9 +299,9 @@ def test_connection_error_fallback_applies_provider_state_override(
 
     host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
 
-    assert host_details.state == HostState.UNAUTHENTICATED
+    assert host_details.state == HostState.UNREACHABLE
     assert len(agent_details_list) == 1
-    assert agent_details_list[0].host.state == HostState.UNAUTHENTICATED
+    assert agent_details_list[0].host.state == HostState.UNREACHABLE
 
 
 def test_connection_error_fallback_without_override_uses_offline_state(

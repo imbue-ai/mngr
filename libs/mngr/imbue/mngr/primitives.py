@@ -253,11 +253,16 @@ class HostState(UpperCaseStrEnum):
     CRASHED = auto()
     FAILED = auto()
     DESTROYED = auto()
+    # Our access credential was rejected at the host's access boundary: observation of the workspace
+    # is impossible and retrying through the same path cannot help (e.g. imbue_cloud's outer SSH
+    # rejected this machine's key), so consumers should treat it as terminal rather than restart-worthy.
+    # Distinct from UNREACHABLE (the host was observed up but its inner sshd is not answering) and
+    # UNKNOWN (transient / could not observe).
     UNAUTHENTICATED = auto()
-    # The host answered but rejected our access: observation of the workspace is impossible and
-    # retrying through the same path cannot help (e.g. imbue_cloud's outer SSH rejected this
-    # machine's key). Distinct from UNKNOWN (transient / could not observe) and UNAUTHENTICATED
-    # (the workspace was observed running but its inner SSH is not accepting our key).
+    # The host was observed up but its inner sshd is not answering, so we cannot enumerate inside it
+    # (e.g. a running container whose inner sshd died, or an inner-SSH connection error). A host
+    # restart can revive it. Distinct from UNAUTHENTICATED (our credential was rejected at the access
+    # boundary, where a restart routes through the same rejected key) and UNKNOWN (transient).
     UNREACHABLE = auto()
     # The host could not be observed during the most recent discovery attempt, so its actual state
     # is unknown: either the provider that owns it could not be accessed (emitted by AgentObserver
