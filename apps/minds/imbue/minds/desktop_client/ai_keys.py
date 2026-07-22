@@ -18,8 +18,6 @@ listing/revocation stays a CLI concern
 (``mngr imbue_cloud keys litellm list/delete``).
 """
 
-from __future__ import annotations
-
 from loguru import logger
 from pydantic import Field
 

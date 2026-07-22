@@ -1,7 +1,5 @@
 """Tests for the workspace AI-key mint helpers (see ai_keys.py)."""
 
-from __future__ import annotations
-
 from collections.abc import Mapping
 from pathlib import Path
 
