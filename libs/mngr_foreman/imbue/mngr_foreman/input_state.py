@@ -186,10 +186,15 @@ def probe_pane_state(pool: ConnectionPool, agent_name: str) -> tuple[bool | None
 
     def _probe(agent: AgentInterface, host: OnlineHostInterface) -> tuple[bool | None, str | None]:
         tgt = TmuxWindowTarget(session_name=agent.session_name, window=window).as_shell_arg()
+        # `tmux -u` forces UTF-8 output. Without it, when the probe runs over a pooled
+        # connection whose client env doesn't advertise UTF-8 (common for remote docker
+        # agents), tmux substitutes EVERY non-ASCII glyph with `_` -- so the spinner
+        # braille, the idle ✳, and the ❯ dialog marker all read as `_` and the state is
+        # always misread as READY. Local reads happened to preserve UTF-8, hiding this.
         command = (
-            f"tmux display-message -p -t {tgt} '#{{pane_title}}'; "
+            f"tmux -u display-message -p -t {tgt} '#{{pane_title}}'; "
             f"printf '%s\\n' {shlex.quote(_PANE_PROBE_SEP)}; "
-            f"tmux capture-pane -p -t {tgt}"
+            f"tmux -u capture-pane -p -t {tgt}"
         )
         result = host.execute_stateful_command(command, timeout_seconds=_HOST_COMMAND_TIMEOUT_SECONDS)
         if not result.success:
