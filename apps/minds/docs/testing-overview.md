@@ -141,7 +141,9 @@ then cheap test sandboxes fan out from the baked image.
   `offload -c offload-modal-minds-snapshot.toml run --override-image-id <id>`.
   The config boots straight from the override image (no Dockerfile/post-patch),
   `cpu_cores=4.0`, `memory_gb=8`, `vm_runtime=true` (must match the producer),
-  one `[groups.all]` with `filters="-m 'minds_snapshot_resume'"`,
+  one `[groups.all]` with `filters="-m 'minds_snapshot_resume' -c pyproject.toml"`,
+  and `[framework].paths` scoped to the two snapshot-resume test files so local
+  discovery takes seconds instead of a ~90s full-monorepo collection.
   `max_parallel=10`. The image is deleted on success. Both jobs are gated by the
   `DISABLE_MINDS_SNAPSHOT_CI` repo variable and skipped on fork PRs.
 - **Currently runs:** every `minds_snapshot_resume` test in

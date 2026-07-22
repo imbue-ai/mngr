@@ -63,6 +63,27 @@ vm_runtime = true
 
 [framework]
 type = "pytest"
+# Scope discovery to exactly the files that carry the
+# `minds_snapshot_resume` mark. Without this, offload's local
+# `pytest --collect-only` collects the ENTIRE monorepo (~90s on the CI
+# runner) just to find the ~12 marked tests; scoped paths bring that down
+# to a few seconds. The mark is only ever applied in these two files, and
+# scripts/snapshot_minds_e2e_state_test.py asserts this list stays in sync
+# with reality -- if you add a snapshot-resume test in a new file, that
+# test fails until you add the file here (otherwise the new test would
+# silently never run in CI).
+#
+# Scoping has one subtlety: passing only paths under apps/minds makes
+# pytest pick apps/minds as its rootdir (apps/minds/pyproject.toml has a
+# pytest section), which would make the discovered test ids
+# `test_snapshot_resume.py::...` instead of
+# `apps/minds/test_snapshot_resume.py::...`. Those ids are passed VERBATIM
+# as argv to pytest at execution time, where the cwd is the repo root
+# (/code/mngr) -- so an unprefixed id would not resolve and every test
+# would error. The `-c pyproject.toml` in the group filters below
+# (discovery-only args) pins the root config so discovery emits
+# repo-root-relative ids, exactly as unscoped discovery did.
+paths = ["apps/minds/test_snapshot_resume.py", "apps/minds/test_sync_e2e.py"]
 # Bash-wrapped command with a conditional cd so the same string works in
 # both offload contexts:
 # - Local discovery: offload's pytest framework `shell_words::split`s the
@@ -97,20 +118,25 @@ run_args = "--no-cov -p no:xdist"
 # treats as a discovery failure and fails the whole run. With no flaky
 # snapshot test, a `flaky` group would always be empty and break CI.
 # When the first @pytest.mark.flaky snapshot test is added, switch to the
-# two-group split below (then the `flaky` group is non-empty and safe):
+# two-group split below (then the `flaky` group is non-empty and safe).
+# Keep the `-c pyproject.toml` arg on BOTH groups' filters (see the
+# [framework] paths comment above for why discovery needs it):
 #     [groups.all]
 #     retry_count = 0
-#     filters = "-m 'minds_snapshot_resume and not flaky'"
+#     filters = "-m 'minds_snapshot_resume and not flaky' -c pyproject.toml"
 #     [groups.flaky]
 #     retry_count = 4
-#     filters = "-m 'minds_snapshot_resume and flaky'"
+#     filters = "-m 'minds_snapshot_resume and flaky' -c pyproject.toml"
 [groups.all]
 # Only tests carrying the snapshot-resume mark. Everything else is scoped
 # out of this run (and `minds_snapshot_resume` is itself scoped out of the
 # other offload configs, so a test with this mark is only ever collected
-# here).
+# here). `-c pyproject.toml` is a discovery-only arg (offload passes group
+# filters only to `pytest --collect-only`, not to execution) that pins the
+# repo-root pytest config so the scoped `paths` above still yield
+# repo-root-relative test ids -- see the [framework] comment.
 retry_count = 0
-filters = "-m 'minds_snapshot_resume'"
+filters = "-m 'minds_snapshot_resume' -c pyproject.toml"
 
 [history]
 path = "offload-history-modal-minds-snapshot.jsonl"
