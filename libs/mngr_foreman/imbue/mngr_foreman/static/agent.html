@@ -32,6 +32,15 @@
     </div>
     <input type="file" id="file-input" multiple hidden />
   </div>
+  <!-- Auto-scroll toggle: filled blue = following the tail; blue outline = detached
+       (you scrolled up). Tap to resume following at the bottom. Double chevron ⌄⌄. -->
+  <button id="autoscroll" class="autoscroll-btn on" title="Auto-scroll" aria-label="Toggle auto-scroll">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+         stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="6 5 12 11 18 5"></polyline>
+      <polyline points="6 12 12 18 18 12"></polyline>
+    </svg>
+  </button>
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/app.js"></script>
   <script>foreman.initAgent();</script>

@@ -597,6 +597,22 @@
     function scrollDown(force) {
       if (force) stick = true;
       if (stick) scrollToBottom();
+      updateAutoBtn();
+    }
+    // The auto-scroll toggle button IS the visible face of `stick`: solid blue when
+    // following the tail, outline when the user has scrolled away. Tap = resume.
+    const autoBtn = document.getElementById("autoscroll");
+    function updateAutoBtn() { if (autoBtn) autoBtn.classList.toggle("on", stick); }
+    if (autoBtn) {
+      autoBtn.addEventListener("click", () => { stick = true; scrollToBottom(); updateAutoBtn(); });
+      // Float it just above the composer whatever the composer's height (grows with
+      // typed lines / upload strip / blocked banner).
+      const composerEl = document.getElementById("composer");
+      if (composerEl && typeof ResizeObserver !== "undefined") {
+        new ResizeObserver(() => {
+          document.body.style.setProperty("--composer-h", composerEl.offsetHeight + "px");
+        }).observe(composerEl);
+      }
     }
     // stick = "auto-follow the bottom". User drags UP -> detach (always honored). Re-
     // attach ONLY when the USER scrolls back to the tail -- NOT when our own
@@ -608,6 +624,7 @@
       if (t < lastTop - 2) stick = false;
       else if (atBottom() && Date.now() - lastProg > 120) stick = true;
       lastTop = t;
+      updateAutoBtn();
     }, { passive: true });
     // While a finger is down, NEVER auto-scroll (the backfill chunks honor this too):
     // iOS batches scroll events during a drag, so `stick` may still read true mid-drag.

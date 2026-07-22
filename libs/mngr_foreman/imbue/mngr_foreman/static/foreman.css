@@ -97,6 +97,29 @@ body:not(.term-body) .composer { position: static; flex: 0 0 auto; }
 /* no fixed composer to clear anymore -- it's a sibling below the scroll area */
 body:not(.term-body) .transcript { padding-bottom: 16px; }
 
+/* ---- auto-scroll toggle button ----
+   Floats just above the composer. ON (following the tail) = solid blue fill;
+   OFF (user scrolled up, detached) = blue outline only. Lines always white. On
+   desktop it sits bottom-right; on mobile it centers above the chat bar. */
+.autoscroll-btn {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--composer-h, 60px) + 12px);
+  width: 40px; height: 40px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px; cursor: pointer; z-index: 50;
+  color: #fff;                    /* the chevrons: always white */
+  border: 2px solid #2f6bff;      /* blue */
+  background: transparent;        /* OFF = outline only */
+  transition: background 0.12s, opacity 0.12s;
+}
+.autoscroll-btn.on { background: #2f6bff; }   /* ON = solid blue */
+.autoscroll-btn:active { transform: scale(0.94); }
+@media (max-width: 620px) {
+  .autoscroll-btn { right: auto; left: 50%; transform: translateX(-50%); }
+  .autoscroll-btn:active { transform: translateX(-50%) scale(0.94); }
+}
+
 /* ---- agent list ---- */
 .agent-list { display: flex; flex-direction: column; gap: 8px; }
 .agent-card {
