@@ -155,7 +155,7 @@ def test_hung_provider_does_not_freeze_others(monkeypatch: pytest.MonkeyPatch) -
     started = threading.Event()
 
     def _list(*_a: object, **kwargs: object) -> Any:
-        names = kwargs.get("provider_names") or ()
+        names = cast("tuple[str, ...]", kwargs.get("provider_names") or ())
         if "slow" in names:
             started.set()
             time.sleep(30)  # simulate a hung provider (never returns during the test)

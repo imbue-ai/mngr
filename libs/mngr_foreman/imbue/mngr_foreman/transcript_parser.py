@@ -221,7 +221,7 @@ def _framework_label_and_detail(raw: dict[str, Any], text: str) -> tuple[str, st
     for _wrap_tag in ("system-reminder", "task-notification", "task_notification"):
         if stripped.startswith("<" + _wrap_tag + ">"):
             m = re.match(r"<" + _wrap_tag + r">\s*(.*?)\s*(?:</" + _wrap_tag + r">)?\s*\Z", stripped, re.DOTALL)
-            inner = (m.group(1).strip() if m else "")
+            inner = m.group(1).strip() if m else ""
             return _wrap_tag.replace("_", "-"), (inner or _wrap_tag)
     # A slash-command invocation: "<command-name>login</command-name>...".
     if _COMMAND_NAME_PATTERN.search(text):

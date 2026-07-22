@@ -137,9 +137,21 @@ def test_meta_and_resume_markers_dropped() -> None:
 def test_interrupt_and_wrappers_render_as_framework_chips() -> None:
     lines = [
         _line(type="user", uuid="i1", timestamp="t1", message={"content": "[Request interrupted by user]"}),
-        _line(type="user", uuid="i2", timestamp="t2", message={"content": "[Request interrupted by user for tool use]"}),
-        _line(type="user", uuid="i3", timestamp="t3", message={"content": "<task_notification>agent X finished</task_notification>"}),
-        _line(type="user", uuid="i4", timestamp="t4", message={"content": "<system-reminder>be concise</system-reminder>"}),
+        _line(
+            type="user", uuid="i2", timestamp="t2", message={"content": "[Request interrupted by user for tool use]"}
+        ),
+        _line(
+            type="user",
+            uuid="i3",
+            timestamp="t3",
+            message={"content": "<task_notification>agent X finished</task_notification>"},
+        ),
+        _line(
+            type="user",
+            uuid="i4",
+            timestamp="t4",
+            message={"content": "<system-reminder>be concise</system-reminder>"},
+        ),
         _line(type="user", uuid="i5", timestamp="t5", message={"content": "here is 1. my real message"}),
     ]
     events = parse_claude_session_lines(lines)
@@ -444,8 +456,18 @@ def test_queue_remove_is_graceful_accept() -> None:
 
 def test_queue_dequeue_accepts_fifo_head_without_content() -> None:
     # Interrupt path: dequeue carries no content -> pop the FIFO head.
-    lines = [_qop("enqueue", "t1", "first"), _qop("enqueue", "t2", "second"), _qop("dequeue", "t3"), _qop("dequeue", "t4")]
-    assert _queue_view(parse_claude_session_lines(lines)) == [("Q", "first"), ("Q", "second"), ("A", "first"), ("A", "second")]
+    lines = [
+        _qop("enqueue", "t1", "first"),
+        _qop("enqueue", "t2", "second"),
+        _qop("dequeue", "t3"),
+        _qop("dequeue", "t4"),
+    ]
+    assert _queue_view(parse_claude_session_lines(lines)) == [
+        ("Q", "first"),
+        ("Q", "second"),
+        ("A", "first"),
+        ("A", "second"),
+    ]
 
 
 def test_queue_popall_removes_all_pending() -> None:

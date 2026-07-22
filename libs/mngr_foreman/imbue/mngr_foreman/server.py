@@ -341,10 +341,14 @@ def create_app(
         agent = registry.get_agent(name)
         strategy = transcript_strategy_for(agent.type) if agent is not None else None
         if agent is None or strategy is None:
-            return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "status": "READY", "state": None})
+            return jsonify(
+                {"blocked": False, "reason": None, "running": False, "busy": False, "status": "READY", "state": None}
+            )
         state = str(agent.state.value if hasattr(agent.state, "value") else agent.state).upper()
         if state not in ("RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"):
-            return jsonify({"blocked": False, "reason": None, "running": False, "busy": False, "status": "READY", "state": state})
+            return jsonify(
+                {"blocked": False, "reason": None, "running": False, "busy": False, "status": "READY", "state": state}
+            )
         # Three clean states, read from the LIVE pane for a pane-driven harness
         # (claude): NEEDS INPUT (a ❯ dialog on screen) beats WORKING (the title's
         # spinner glyph), else READY. Both come from ONE pane read, fresh every
