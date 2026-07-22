@@ -5566,17 +5566,13 @@ def _count_active_sync_records(user_id: str) -> int:
     return sum(1 for r in records if r["state"] == WorkspaceRecordState.ACTIVE.value)
 
 
-def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str) -> AccountUsage:
-    """Compute the account's live usage numbers, one upstream call per source.
+def _summarize_owner_bucket_usage(ops: CloudflareOps, username_prefix: str) -> tuple[int, int]:
+    """Return the owner's (bucket_count, total_bytes) from live REST usage reads.
 
-    Bucket byte counts come from the real-time per-bucket REST usage endpoint
-    (bounded by the account's bucket quota, read concurrently); a failed
-    usage call for one bucket logs a warning and counts that bucket as zero
-    rather than failing the whole (display-only) request.
+    Display-only semantics: a failed read for one bucket logs a warning and
+    counts that bucket as zero rather than failing the whole request.
     """
-    tunnel_count = count_user_tunnels(ops, username_prefix)
-    owned_buckets = _list_owned_buckets(ops, username_prefix)
-    bucket_names = [str(bucket.get("name", "")) for bucket in owned_buckets]
+    bucket_names = [str(bucket.get("name", "")) for bucket in _list_owned_buckets(ops, username_prefix)]
     total_bucket_bytes = 0
     for bucket_name, result in zip(
         bucket_names, _read_bucket_usage_bytes_concurrently(ops, bucket_names), strict=False
@@ -5585,15 +5581,36 @@ def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str
             logger.warning("Failed to read usage for bucket %s: %s", bucket_name, result)
         else:
             total_bucket_bytes += result
-    spend, reset_at = get_litellm_user_spend(user_id)
+    return len(bucket_names), total_bucket_bytes
+
+
+def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str) -> AccountUsage:
+    """Compute the account's live usage numbers, one upstream call per source.
+
+    The three network-backed sources (Cloudflare tunnel count, per-bucket
+    REST usage, LiteLLM spend) are independent and run concurrently; the two
+    DB-backed counts stay on the request thread because the stores' psycopg2
+    connections are not shared-safe across threads. Bucket byte counts come
+    from the real-time per-bucket REST usage endpoint (bounded by the
+    account's bucket quota, itself read concurrently).
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        tunnel_count_future = pool.submit(count_user_tunnels, ops, username_prefix)
+        bucket_summary_future = pool.submit(_summarize_owner_bucket_usage, ops, username_prefix)
+        llm_spend_future = pool.submit(get_litellm_user_spend, user_id)
+        leased_host_count = _count_leased_hosts(username_prefix)
+        active_sync_count = _count_active_sync_records(user_id)
+        bucket_count, total_bucket_bytes = bucket_summary_future.result()
+        spend, reset_at = llm_spend_future.result()
+        tunnel_count = tunnel_count_future.result()
     return AccountUsage(
-        remote_workspaces=_count_leased_hosts(username_prefix),
+        remote_workspaces=leased_host_count,
         tunnels=tunnel_count,
-        buckets=len(owned_buckets),
+        buckets=bucket_count,
         total_bucket_bytes=total_bucket_bytes,
         llm_spend_usd_this_period=spend,
         llm_budget_resets_at=reset_at,
-        active_synced_workspaces=_count_active_sync_records(user_id),
+        active_synced_workspaces=active_sync_count,
     )
 
 
