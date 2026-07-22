@@ -11,13 +11,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Optional `name` parameter on `RunningProcess` and the `run_process_to_completion` / `run_process_in_background` / `run_background` spawn APIs — a log-safe label used as the reader thread's name and as the display command in any `ProcessError` / `TimeoutExpired` raised. Callers whose command carries secret argument values (e.g. `--host-env PASSWORD=...`) can pass a masked/friendly `name` so those secrets never reach the JSONL log's `thread_name` field or an error message; the real argv still executes. Defaults to the joined command. `ProcessError` gains a `display_name` (and a `display_command` property) used for its rendered message while `.command` keeps the real argv; `FinishedProcess` gains a matching `display_name`.
 - Added: Optional `pass_fds` parameter on `ConcurrencyGroup.run_process_in_background`, `run_background`, and `run_local_command_modern_version`, forwarded to `subprocess.Popen(pass_fds=...)` so callers can hand an already-connected `socketpair` endpoint to a child process without a rendezvous file on disk.
 
-### Changed
-
-- Changed: Force-terminate log message now states the reason explicitly ("it exceeded its <N>s timeout" or "a shutdown was requested (shutdown_event was set)"), so a routine cancellation is no longer misread as a timeout.
-
 ### Fixed
 
-- Fixed: Subprocess shutdown logging no longer misreports routine cleanup as a forced kill. A process that already exited by the time its shutdown is requested (the common case for single-use workers) is reaped quietly with a debug line stating its actual exit code, instead of logging "Terminating subprocess ... with SIGTERM because a shutdown was requested". A process that is genuinely still alive logs the explicit "Stopping subprocess ... because the parent requested cleanup" wording; the timeout path keeps its "exceeded its Ns timeout" message.
+- Fixed: Subprocess shutdown logging no longer misreports routine cleanup as a forced kill. A process that already exited by the time its shutdown is requested (the common case for single-use workers) is reaped quietly with a debug line stating its actual exit code, instead of logging a SIGTERM. When a live process is genuinely stopped, the log message now states the reason explicitly ("Stopping subprocess (pid ...) with SIGTERM because it exceeded its <N>s timeout" or "... because the parent requested cleanup (shutdown_event was set)"), so a routine cancellation is no longer misread as a timeout.
 
 ## [v0.1.20] - 2026-06-13
 
