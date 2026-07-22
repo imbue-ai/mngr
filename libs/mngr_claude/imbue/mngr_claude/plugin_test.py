@@ -1428,7 +1428,7 @@ def test_unknown_command_rejection_probe_fires_only_on_post_baseline_warning(
     not fire it; the warning record for THIS submission must.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    probes = agent._build_submission_evidence_probes("/zzztypo", SubmissionConfirmationPolicy.RELAXED)
+    probes = agent._build_submission_evidence_probes("/mngr-invalid-command", SubmissionConfirmationPolicy.RELAXED)
     rejection_probe = next(probe for probe in probes if probe.name == "unknown-command-raw-transcript")
     assert rejection_probe.is_rejection is True
 
@@ -1451,7 +1451,9 @@ def test_unknown_command_rejection_probe_fires_only_on_post_baseline_warning(
 
     # Accepted records and non-warning system records do not fire it.
     with log_path.open("a") as log_file:
-        log_file.write(json.dumps({"type": "queue-operation", "operation": "enqueue", "content": "/zzztypo"}) + "\n")
+        log_file.write(
+            json.dumps({"type": "queue-operation", "operation": "enqueue", "content": "/mngr-invalid-command"}) + "\n"
+        )
         log_file.write(json.dumps({"type": "system", "level": "info", "content": "Unknown command: /decoy"}) + "\n")
     assert host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip() == ""
 
@@ -1463,7 +1465,7 @@ def test_unknown_command_rejection_probe_fires_only_on_post_baseline_warning(
                     "type": "system",
                     "subtype": "informational",
                     "level": "warning",
-                    "content": "Unknown command: /zzztypo",
+                    "content": "Unknown command: /mngr-invalid-command",
                 }
             )
             + "\n"

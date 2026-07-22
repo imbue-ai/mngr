@@ -103,7 +103,7 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
     # "Unknown command" warning the instant it rejects this, and the journey
     # asserts the resulting send_rejected_by_agent event -- the canary for
     # upstream changes to that record (see _REJECTED_COMMAND_JQ_FILTER).
-    unknown_slash_command = "/zzz-mngr-release-probe"
+    unknown_slash_command = "/mngr-invalid-command-probe"
     # This is the store the adopt-from-preserved arc adopts: after destroy, a fresh agent
     # in a new worktree adopts the just-preserved session and must recall the pre-destroy
     # secret -- proving the store resumes and the cross-cwd re-filing works.
@@ -256,6 +256,13 @@ _CONTRACT_RECORD_TIMEOUT_SECONDS = 90.0
 _CONTRACT_BUSY_ATTEMPTS = 3
 
 
+def _contract_send(
+    profile: _ClaudeReleaseProfile, ctx: AgentReleaseContext, agent_name: str, message: str, label: str
+) -> None:
+    send = profile.run_mngr(ctx, "message", agent_name, "--message", message, timeout=_CONTRACT_SEND_TIMEOUT_SECONDS)
+    assert send.returncode == 0, f"{label} send failed:\n{send.stdout}\n{send.stderr}"
+
+
 def _contract_read_records(session_file: Path) -> list[dict[str, Any]]:
     records = []
     for line in session_file.read_text().splitlines():
@@ -280,13 +287,13 @@ def _contract_wait_for_record(
                 return True
         return False
 
-    assert poll_until(has_match, timeout=_CONTRACT_RECORD_TIMEOUT_SECONDS), failure
+    assert poll_until(has_match, timeout=_CONTRACT_RECORD_TIMEOUT_SECONDS, poll_interval=2.0), failure
     return found[0]
 
 
 def _contract_message_text(record: dict[str, Any]) -> str:
     """Flatten a user/assistant record's message.content (str or block-array) to text."""
-    content = record.get("message", {}).get("content")
+    content = (record.get("message") or {}).get("content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -343,15 +350,9 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
 
         # Contract 1: an idle prompt lands as {"type":"user","message":{"content":...}}.
         idle_token = f"contract-idle-{run_id}"
-        send = profile.run_mngr(
-            ctx,
-            "message",
-            agent_name,
-            "--message",
-            f"Remember this exact value: {idle_token}. Reply with just OK.",
-            timeout=_CONTRACT_SEND_TIMEOUT_SECONDS,
+        _contract_send(
+            profile, ctx, agent_name, f"Remember this exact value: {idle_token}. Reply with just OK.", "idle"
         )
-        assert send.returncode == 0, f"idle send failed:\n{send.stdout}\n{send.stderr}"
 
         # Contract 5: the native session JSONL lives at
         # <config-dir>/projects/<encoded-cwd>/<session-id>.jsonl with the file
@@ -359,11 +360,13 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
         # expression depends on this layout. Claude writes the file lazily on
         # the first prompt, so this is checked after the idle send, with a poll.
         session_glob = f"plugin/claude/anthropic/projects/*/{session_id}.jsonl"
-        assert poll_until(lambda: len(list(agent_dir.glob(session_glob))) == 1, timeout=60.0), (
+        assert poll_until(lambda: len(list(agent_dir.glob(session_glob))) == 1, timeout=60.0, poll_interval=2.0), (
             f"native session JSONL not at <config-dir>/projects/<encoded-cwd>/{session_id}.jsonl "
             f"{drift}; consumers: every probe's native-transcript path expression"
         )
-        session_file = list(agent_dir.glob(session_glob))[0]
+        session_files = list(agent_dir.glob(session_glob))
+        assert len(session_files) == 1, f"expected exactly one session JSONL, found {session_files}"
+        session_file = session_files[0]
         user_record = _contract_wait_for_record(
             session_file,
             lambda r: r.get("type") == "user" and idle_token in _contract_message_text(r),
@@ -393,24 +396,14 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             # The starter must still be generating when the next send lands, or
             # nothing enqueues; a long counting task keeps the turn open far
             # longer than a short completion would.
-            starter = profile.run_mngr(
+            _contract_send(
+                profile,
                 ctx,
-                "message",
                 agent_name,
-                "--message",
                 "Count from 1 to 200, one number per line. Do not use tools. End with DONE.",
-                timeout=_CONTRACT_SEND_TIMEOUT_SECONDS,
+                "busy-starter",
             )
-            assert starter.returncode == 0, f"busy-starter send failed:\n{starter.stdout}\n{starter.stderr}"
-            queued = profile.run_mngr(
-                ctx,
-                "message",
-                agent_name,
-                "--message",
-                f"Also remember: {busy_token}. Reply with just OK.",
-                timeout=_CONTRACT_SEND_TIMEOUT_SECONDS,
-            )
-            assert queued.returncode == 0, f"queued send failed:\n{queued.stdout}\n{queued.stderr}"
+            _contract_send(profile, ctx, agent_name, f"Also remember: {busy_token}. Reply with just OK.", "queued")
 
             def is_enqueue_with_token(record: dict[str, Any], token: str = busy_token) -> bool:
                 return (
@@ -422,6 +415,7 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             if poll_until(
                 lambda: any(is_enqueue_with_token(r) for r in _contract_read_records(session_file)),
                 timeout=30.0,
+                poll_interval=2.0,
             ):
                 enqueue_found = True
                 break
@@ -459,11 +453,8 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
 
         # Contract 3: an unknown slash command lands as
         # {"type":"system","level":"warning","content":"Unknown command: ..."}.
-        typo = f"/contract-zzz-{run_id}"
-        typo_send = profile.run_mngr(
-            ctx, "message", agent_name, "--message", typo, timeout=_CONTRACT_SEND_TIMEOUT_SECONDS
-        )
-        assert typo_send.returncode == 0, f"typo send failed:\n{typo_send.stdout}\n{typo_send.stderr}"
+        typo = f"/mngr-invalid-command-{run_id}"
+        _contract_send(profile, ctx, agent_name, typo, "typo")
         _contract_wait_for_record(
             session_file,
             lambda r: r.get("type") == "system"

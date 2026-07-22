@@ -112,7 +112,7 @@ class AgentReleaseProfile(abc.ABC):
     # Slash command used by the message-delivery journey's relaxed-policy step
     # (e.g. "/clear"); None skips the step for agents without a suitable one.
     clear_slash_command: str | None = None
-    # An unrecognized slash command (e.g. "/zzz-not-a-command") for the
+    # An unrecognized slash command (e.g. "/mngr-invalid-command-probe") for the
     # journey's rejection step; None skips it. Only meaningful for agents that
     # supply rejection evidence probes: the step asserts a
     # send_rejected_by_agent event was recorded, which is the canary for the
@@ -572,9 +572,9 @@ def _wait_for_rejection_event(host_dir: Path, message: str) -> None:
     The rejection probe fires only when the TUI's structured rejection record
     appears in the transcript, so this failing on a previously green setup
     means the TUI changed that record's shape and the agent's rejection filter
-    (for Claude: ``_REJECTED_COMMAND_JQ_FILTER``) must be updated to match.
+    must be updated to match.
     """
-    assert poll_until(lambda: _has_rejection_event(host_dir, message), timeout=30.0), (
+    assert poll_until(lambda: _has_rejection_event(host_dir, message), timeout=30.0, poll_interval=2.0), (
         f"no send_rejected_by_agent event recorded for {message!r}: the rejection probe never fired. "
         "If the TUI changed its rejection record (e.g. the 'Unknown command' warning), "
         "update the agent's rejection filter to match the new shape."
