@@ -981,16 +981,27 @@
 
     // ---- blocking-dialog state: one generic greyed state, point at terminal ----
     let blocked = false;
+    let awaiting = false;
+    // The textbox is unusable while EITHER a dialog blocks the agent (NEEDS INPUT --
+    // a paste would be eaten by the dialog) OR a send is awaiting its echo. Lock on
+    // the union so clearing one state never re-enables the box while the other holds.
+    function syncComposerLock() {
+      const lock = blocked || awaiting;
+      input.disabled = lock;
+      sendBtn.disabled = lock;
+    }
     function setBlocked() {
       blocked = true;
       composer.classList.add("blocked");
       if (composerBlocked) composerBlocked.hidden = false;
+      syncComposerLock();
       refreshWorking(); // BLOCKED hides the dot immediately, not on the next event
     }
     function clearBlocked() {
       blocked = false;
       composer.classList.remove("blocked");
       if (composerBlocked) composerBlocked.hidden = true;
+      syncComposerLock();
       refreshWorking(); // unblocking may reveal the dot again if still working
     }
 
@@ -1034,9 +1045,9 @@
     // clear the box. So a bubble exists only once claude has actually recorded the
     // message: no guessing, no colour flip-flop.
     function setAwaiting(on) {
+      awaiting = on;
       composer.classList.toggle("awaiting", on);
-      input.disabled = on;
-      sendBtn.disabled = on;
+      syncComposerLock();
     }
     // Message landed in the transcript: clear the box + unlock for the next one.
     function confirmSend() {
