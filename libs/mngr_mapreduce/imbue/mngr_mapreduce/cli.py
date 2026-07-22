@@ -79,6 +79,7 @@ class MapReduceCliOptions(CommonCliOptions):
     agent_template: tuple[str, ...]
     provider: str
     env: tuple[str, ...]
+    reducer_env: tuple[str, ...]
     label: tuple[str, ...]
     snapshot: str | None
     max_parallel_launch: int
@@ -201,6 +202,13 @@ def add_mapreduce_options(command: TDecorated) -> TDecorated:
         help="Environment variable KEY=VALUE to pass to agents [repeatable]",
     )(command)
     command = click.option(
+        "--reducer-env",
+        multiple=True,
+        help="Environment variable KEY=VALUE to pass to the reducer ONLY, not to mappers. For credentials "
+        "the reducer needs but mappers must not receive (e.g. a token that can push and open pull "
+        "requests) [repeatable]",
+    )(command)
+    command = click.option(
         "--provider",
         default="local",
         show_default=True,
@@ -313,6 +321,11 @@ def build_launch_config(
     agents later.
     """
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
+    # None rather than an empty options object when unset, so the launcher can
+    # tell "no reducer-only env" from "reducer-only env that happens to be empty".
+    reducer_env_options = (
+        AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.reducer_env)) if opts.reducer_env else None
+    )
     label_options = resolve_labels(opts.label)
     run_labels = dict(label_options.labels)
     run_labels[RUN_NAME_LABEL_KEY] = run_name
@@ -324,6 +337,7 @@ def build_launch_config(
         agent_type=AgentTypeName(opts.agent_type),
         provider_name=ProviderInstanceName(opts.provider),
         env_options=env_options,
+        reducer_env_options=reducer_env_options,
         label_options=label_options,
         snapshot=SnapshotName(opts.snapshot) if opts.snapshot is not None else None,
         templates=opts.agent_template,
