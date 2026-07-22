@@ -281,17 +281,46 @@ def disable_sharing(
         raise SharingError(f"Failed to disable sharing: {exc}") from exc
 
 
-def probe_share_url_readiness(http_client: httpx.Client, url: str) -> bool:
-    """Fetch ``url`` once and report whether the Cloudflare Access app is live.
+# Body marker of Cloudflare Access's transient error page: the edge can start
+# redirecting to the Access login URL before the login service knows the
+# just-created application, and during that window the login URL serves a
+# 200 page saying "Unable to find your Access application!". Observed live on
+# a fresh share; it clears on its own once Access finishes propagating.
+_ACCESS_APP_MISSING_MARKER: Final[str] = "Unable to find your Access application"
 
-    Uses the app's shared (``follow_redirects=False``) client so the Access login
-    redirect is observed rather than followed. Any transport error or timeout is
-    treated as "not ready yet". The caller is responsible for first validating
-    ``url`` with :func:`is_probeable_share_url`.
+
+def probe_share_url_readiness(http_client: httpx.Client, url: str) -> bool:
+    """Report whether the shared URL is genuinely live at the Cloudflare edge.
+
+    Two-stage check, both required:
+
+    1. ``url`` answers with the Access login redirect (the edge route + app
+       association exist).
+    2. The login URL itself resolves to a real login page -- NOT the
+       transient "Unable to find your Access application" error the login
+       service serves before the new app has propagated. (Both are HTTP
+       200s, so only the body distinguishes them.)
+
+    Uses the app's probe (``follow_redirects=False``) client so the redirect
+    is observed rather than followed. Any transport error or timeout is
+    treated as "not ready yet". The caller is responsible for first
+    validating ``url`` with :func:`is_probeable_share_url`.
     """
     try:
         response = http_client.get(url, timeout=SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
     except httpx.HTTPError as exc:
         logger.debug("Probed share URL {} but it is not ready yet: {}", url, exc)
         return False
-    return is_share_ready_from_edge_response(response.status_code, response.headers.get("location"))
+    login_url = response.headers.get("location")
+    if not is_share_ready_from_edge_response(response.status_code, login_url):
+        return False
+    if login_url is None or not is_probeable_share_url(login_url):
+        return False
+    try:
+        login_response = http_client.get(login_url, timeout=SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
+    except httpx.HTTPError as exc:
+        logger.debug("Probed Access login URL {} but it is not ready yet: {}", login_url, exc)
+        return False
+    if login_response.status_code >= 400:
+        return False
+    return _ACCESS_APP_MISSING_MARKER not in login_response.text
