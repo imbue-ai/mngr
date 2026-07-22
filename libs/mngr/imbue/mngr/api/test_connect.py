@@ -79,6 +79,52 @@ def _start_catcher_session(session_name: str, tmp_path: Path) -> tuple[Path, Pat
     return marker_file, ready_file
 
 
+def _start_pinned_resilient_catcher_session(session_name: str, tmp_path: Path) -> Path:
+    """Start a manual-pinned 200x50 catcher session whose pane survives repeated SIGWINCH.
+
+    Unlike ``_start_catcher_session``'s single-``wait`` catcher (which exits on the first
+    trapped signal, destroying the session), this catcher re-enters ``wait`` after each
+    trapped WINCH, so the script's repaint signal cannot kill the pane -- and with it the
+    session -- before the window size is read back. The single ``agent`` window is pinned
+    to window-size=manual to reproduce the default fit-mode policy (so resize-window
+    sticks). Returns the marker file the trap writes on each received WINCH.
+    """
+    marker_file = tmp_path / "sigwinch_received"
+    ready_file = tmp_path / "catcher_ready"
+    catcher = (
+        f"trap 'echo received > {marker_file}' WINCH; echo ready > {ready_file}; while :; do sleep 3600 & wait; done"
+    )
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "-n",
+            "agent",
+            "bash",
+            "-c",
+            catcher,
+        ],
+        check=True,
+    )
+    wait_for(
+        lambda: ready_file.exists(),
+        timeout=5.0,
+        error_message="catcher pane did not install its SIGWINCH trap",
+    )
+    subprocess.run(
+        ["tmux", "set-option", "-t", f"={session_name}:agent", "window-size", "manual"],
+        check=True,
+    )
+    return marker_file
+
+
 @pytest.mark.flaky
 @pytest.mark.tmux
 def test_sigwinch_panes_script_delivers_to_pane_process(mngr_test_prefix: str, tmp_path) -> None:
@@ -193,45 +239,10 @@ def test_sigwinch_panes_script_fit_mode_resizes_pinned_window_to_client(
     session_name = f"{mngr_test_prefix}sigwinch-fit"
 
     try:
-        # A resilient catcher: it re-enters `wait` after each trapped WINCH (unlike the shared
-        # single-`wait` catcher, which exits on the signal and would destroy the session before
-        # we read its window size). This lets us assert both the resize and the repaint.
-        marker_file = tmp_path / "sigwinch_received"
-        ready_file = tmp_path / "catcher_ready"
-        catcher = (
-            f"trap 'echo received > {marker_file}' WINCH; "
-            f"echo ready > {ready_file}; "
-            "while :; do sleep 3600 & wait; done"
-        )
-        subprocess.run(
-            [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "-n",
-                "agent",
-                "bash",
-                "-c",
-                catcher,
-            ],
-            check=True,
-        )
-        wait_for(
-            lambda: ready_file.exists(),
-            timeout=5.0,
-            error_message="catcher pane did not install its SIGWINCH trap",
-        )
-        # Reproduce the default policy's pinned state so resize-window sticks.
-        subprocess.run(
-            ["tmux", "set-option", "-t", f"={session_name}:agent", "window-size", "manual"],
-            check=True,
-        )
+        # The resilient catcher lets us assert both the resize and the repaint (a
+        # single-`wait` catcher would exit on the signal, destroying the session
+        # before we read its window size back).
+        marker_file = _start_pinned_resilient_catcher_session(session_name, tmp_path)
         subprocess.run(
             ["tmux", "resize-window", "-t", f"={session_name}:agent", "-x", "200", "-y", "50"],
             check=True,
@@ -280,39 +291,9 @@ def test_sigwinch_panes_script_fit_mode_converges_on_live_client_size(mngr_test_
     master_fd = None
     attach_proc = None
     try:
-        # Resilient catcher pane (re-enters `wait` after each trapped WINCH) so the
-        # script's repaint signal cannot kill the pane -- and with it the session --
-        # before the window size is read back.
-        ready_file = tmp_path / "catcher_ready"
-        catcher = f"trap : WINCH; echo ready > {ready_file}; while :; do sleep 3600 & wait; done"
-        subprocess.run(
-            [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "-n",
-                "agent",
-                "bash",
-                "-c",
-                catcher,
-            ],
-            check=True,
-        )
-        wait_for(
-            lambda: ready_file.exists(),
-            timeout=5.0,
-            error_message="catcher pane did not install its SIGWINCH trap",
-        )
-        subprocess.run(
-            ["tmux", "set-option", "-t", f"={session_name}:agent", "window-size", "manual"],
-            check=True,
-        )
+        # The resilient catcher keeps the session alive through the script's repaint
+        # signal; this test ignores the returned repaint marker (asserted elsewhere).
+        _start_pinned_resilient_catcher_session(session_name, tmp_path)
 
         # Attach a real client through a pty pre-sized to the target geometry. The
         # attach must not run inside any ambient tmux (nested-session guard).
