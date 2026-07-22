@@ -454,6 +454,7 @@ def render_create_form(
     selected_preset: str | None = None,
     start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
+    is_landing_fallback: bool = False,
 ) -> str:
     """Render the agent creation form page.
 
@@ -487,6 +488,15 @@ def render_create_form(
     palette entry); ``color`` is the ``#rrggbb`` hex carried in the hidden
     ``color`` input the form POSTs, defaulting to ``DEFAULT_WORKSPACE_COLOR`` so
     callers that don't care about color (e.g. some tests) can omit it.
+
+    ``is_landing_fallback`` marks this form as the landing fallback rendered at
+    ``/`` when no workspace exists (as opposed to the explicit ``/create``
+    page). When True the page wires a chrome-SSE subscription that navigates to
+    ``/`` once a workspace appears, so a user who was shown the create form on a
+    cold-start race (discovery hadn't re-surfaced their workspace yet) is taken
+    to their workspace list instead of being trapped. It is left False on the
+    explicit ``/create`` page so a deliberate "create another workspace" flow is
+    never bounced away by the user's existing workspaces.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
@@ -545,6 +555,7 @@ def render_create_form(
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,
+        is_landing_fallback=is_landing_fallback,
     )
 
 
