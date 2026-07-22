@@ -7,6 +7,13 @@ CI run. The correctness risk of scoping is that a snapshot-resume test added
 in a NEW file would silently never be discovered (and thus never run) in CI.
 The test below pins the config's path list to exactly the set of test files
 that apply the mark, so that drift fails loudly here instead.
+
+The remaining tests pin the dependency-manifest staging used to make the
+snapshot image's third-party-install layers cacheable across CI runs: the
+python manifests tree must cover every uv workspace member's pyproject.toml
+(a missing member manifest breaks the manifests-only
+``uv sync --no-install-workspace`` layer), and the pnpm tree must contain
+exactly what ``pnpm install --frozen-lockfile`` reads.
 """
 
 import re
@@ -15,6 +22,10 @@ import tomllib
 from pathlib import Path
 from typing import Any
 from typing import Final
+
+from scripts.snapshot_minds_e2e_state import _PNPM_MANIFEST_RELATIVE_PATHS
+from scripts.snapshot_minds_e2e_state import _python_manifest_relative_paths
+from scripts.snapshot_minds_e2e_state import _stage_dep_manifest_trees
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 _OFFLOAD_CONFIG_PATH: Final[Path] = _REPO_ROOT / "offload-modal-minds-snapshot.toml"
@@ -115,3 +126,47 @@ def test_offload_discovery_filters_pin_repo_root_pytest_config() -> None:
             f"Group {group_name!r} filters must pass the REPO-ROOT pyproject.toml to `-c` "
             "(relative to the repo root, which is the discovery cwd)."
         )
+
+
+def test_python_manifest_paths_cover_all_workspace_members() -> None:
+    """The staged python manifests must include every uv workspace member's pyproject.toml.
+
+    The manifests-only image layer runs ``uv sync --all-packages --no-install-workspace``,
+    which constructs the workspace from the member manifests. A member added
+    under a directory pattern not covered by the script's globs (e.g. a new
+    ``tools/*`` entry in ``[tool.uv.workspace].members``) would be missing
+    from that layer and break the image build -- so the script's globs must
+    cover every member pattern the root pyproject declares.
+    """
+    root_pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
+    member_patterns: list[str] = root_pyproject["tool"]["uv"]["workspace"]["members"]
+    expected_member_manifests = {
+        path.relative_to(_REPO_ROOT).as_posix()
+        for pattern in member_patterns
+        for path in _REPO_ROOT.glob(f"{pattern}/pyproject.toml")
+    }
+    assert expected_member_manifests, "no uv workspace members found -- is the test reading the right repo?"
+    staged_paths = set(_python_manifest_relative_paths(_REPO_ROOT))
+    assert "pyproject.toml" in staged_paths
+    assert "uv.lock" in staged_paths
+    missing_manifests = expected_member_manifests - staged_paths
+    assert not missing_manifests, (
+        "These uv workspace member manifests are NOT staged into the snapshot image's python "
+        f"manifests layer: {sorted(missing_manifests)}. Update _PY_WORKSPACE_MEMBER_MANIFEST_GLOBS "
+        "in scripts/snapshot_minds_e2e_state.py to cover them."
+    )
+
+
+def test_stage_dep_manifest_trees_copy_only_manifest_files(tmp_path: Path) -> None:
+    """The staged trees must contain ONLY dependency manifests (else the cache key wobbles).
+
+    The whole point of the manifests trees is that their Modal layer hash is
+    stable across source-only commits; a stray source file copied into them
+    would bust the cached install layers on every commit.
+    """
+    python_tree, pnpm_tree = _stage_dep_manifest_trees(_REPO_ROOT, tmp_path)
+    python_files = {path.relative_to(python_tree).as_posix() for path in python_tree.rglob("*") if path.is_file()}
+    assert python_files == set(_python_manifest_relative_paths(_REPO_ROOT))
+    assert all(Path(path).name in ("pyproject.toml", "uv.lock") for path in python_files)
+    pnpm_files = {path.relative_to(pnpm_tree).as_posix() for path in pnpm_tree.rglob("*") if path.is_file()}
+    assert pnpm_files == set(_PNPM_MANIFEST_RELATIVE_PATHS)
