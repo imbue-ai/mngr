@@ -34,7 +34,7 @@
           <p class="font-semibold mb-1">Shared URL</p>
           <div id="url-provisioning" class="hidden flex gap-2 items-center type-body text-secondary my-2">
             <Spinner size="sm" />
-            <span>Provisioning share&hellip;</span>
+            <span>Waiting for Cloudflare to publish this link &mdash; it will not work yet (usually takes 1&ndash;2 minutes)&hellip;</span>
           </div>
           <div id="url-ready" class="hidden">
             <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 my-2">
@@ -43,8 +43,9 @@
                      onclick="this.select()">
               <Button variant="secondary" id="copy-btn" onclick="copyUrl()">Copy</Button>
             </div>
-            <p id="url-fallback-note" class="hidden type-helper text-tertiary mt-1">
-              This link may take a moment to become reachable.
+            <p id="url-fallback-note" class="hidden type-helper text-important mt-1">
+              Cloudflare still has not published this link after several minutes &mdash; it may not work yet.
+              Re-open this page to check again, or re-share if it stays unreachable.
             </p>
           </div>
         </div>

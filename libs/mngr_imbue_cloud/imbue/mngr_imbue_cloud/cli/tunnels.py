@@ -112,6 +112,58 @@ def find_by_agent(agent_id: str, account: str | None, connector_url: str | None)
     )
 
 
+@tunnels.command(name="enable-sharing")
+@click.argument("agent_id")
+@click.argument("service_name")
+@click.argument("service_url")
+@click.option(
+    "--policy",
+    required=True,
+    help='Cloudflare Access policy as JSON, e.g. \'{"emails":["a@example.com"]}\'',
+)
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def enable_sharing(
+    agent_id: str,
+    service_name: str,
+    service_url: str,
+    policy: str,
+    account: str | None,
+    connector_url: str | None,
+) -> None:
+    """Enable sharing for AGENT_ID's SERVICE_NAME in one connector call.
+
+    Ensures the tunnel, adds the service, and applies the Access policy in a
+    single request; emits the resulting tunnel (with cloudflared token) and
+    service JSON so no follow-up status reads are needed.
+    """
+    parsed_policy = _parse_policy_arg(policy)
+    if parsed_policy is None:
+        fail_with_json("--policy is required for enable-sharing", error_class="UsageError")
+        return
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    tunnel_info, service_info = client.enable_sharing(token, agent_id, service_name, service_url, parsed_policy)
+    emit_json(
+        {
+            "tunnel": {
+                "tunnel_name": tunnel_info.tunnel_name,
+                "tunnel_id": tunnel_info.tunnel_id,
+                "token": tunnel_info.token.get_secret_value() if tunnel_info.token else None,
+                "services": list(tunnel_info.services),
+            },
+            "service": {
+                "service_name": service_info.service_name,
+                "service_url": service_info.service_url,
+                "hostname": service_info.hostname,
+            },
+        }
+    )
+
+
 @tunnels.command(name="delete")
 @click.argument("tunnel_name")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")

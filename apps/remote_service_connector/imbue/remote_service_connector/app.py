@@ -411,6 +411,13 @@ class AddServiceRequest(BaseModel):
     service_url: str = Field(description="Local service URL (e.g. http://localhost:8080)")
 
 
+class EnableSharingRequest(BaseModel):
+    agent_id: str = Field(description="The mngr agent ID whose tunnel hosts the service")
+    service_name: str = Field(description="User-chosen name for the service")
+    service_url: str = Field(description="Local service URL (e.g. http://localhost:8080)")
+    auth_policy: AuthPolicy = Field(description="Access policy applied to the shared service; must carry identity")
+
+
 class ServiceInfo(BaseModel):
     service_name: str = Field(description="User-chosen service name")
     hostname: str = Field(description="Public hostname for this service")
@@ -1697,6 +1704,12 @@ class ForwardingCtx:
         # default are absent the add is refused: a service must never go up
         # without an Access Application.
         fallback_policy: AuthPolicy | None = None,
+        # When provided, the authoritative policy for this service's Access
+        # Application: it wins over the stored tunnel default, and on a
+        # re-add it REPLACES a pre-existing app's policies. The combined
+        # enable-sharing path passes this so the caller's requested ACL
+        # always lands in the same call that brings the service up.
+        service_policy: AuthPolicy | None = None,
     ) -> ServiceInfo:
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
@@ -1709,19 +1722,34 @@ class ForwardingCtx:
         # add outright, so a failed Access call can never leave a service
         # publicly reachable.
         stored_default = self.ops.kv_get(tunnel_name)
-        policy = AuthPolicy.model_validate_json(stored_default) if stored_default is not None else fallback_policy
+        if service_policy is not None:
+            policy: AuthPolicy | None = service_policy
+        elif stored_default is not None:
+            policy = AuthPolicy.model_validate_json(stored_default)
+        else:
+            policy = fallback_policy
         if policy is None:
             raise ServicePolicyMissingError(tunnel_name)
         created_access_app_id: str | None = None
         is_dns_created_here = False
         try:
-            if self.ops.get_access_app_by_domain(hostname) is None:
-                # A pre-existing app means the service was configured before (with a
-                # possibly customized policy) -- leave it untouched on re-add.
+            existing_access_app = self.ops.get_access_app_by_domain(hostname)
+            if existing_access_app is None:
                 access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
                 created_access_app_id = access_app["id"]
                 for cf_policy in policy_to_cf_rules(policy):
                     self.ops.create_access_policy(access_app["id"], cf_policy)
+            elif service_policy is not None:
+                # An explicit service policy replaces whatever the pre-existing
+                # app carried, so a re-enable always ends at the requested ACL.
+                for existing_policy in self.ops.list_access_policies(existing_access_app["id"]):
+                    self.ops.delete_access_policy(existing_access_app["id"], existing_policy["id"])
+                for cf_policy in policy_to_cf_rules(service_policy):
+                    self.ops.create_access_policy(existing_access_app["id"], cf_policy)
+            else:
+                # A pre-existing app means the service was configured before (with a
+                # possibly customized policy) -- leave it untouched on re-add.
+                pass
 
             cname_target = f"{tid}.cfargotunnel.com"
             existing_dns = self.ops.list_dns_records(name=hostname)
@@ -3344,6 +3372,60 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
         validate_auth_policy_has_identity(body)
         get_ctx().set_service_auth(tunnel_name, admin.username, service_name, body)
         return {"status": "updated"}
+
+
+@web_app.post("/sharing/enable")
+def enable_sharing_endpoint(request: Request, body: EnableSharingRequest) -> dict[str, object]:
+    """Enable (or update) sharing for one service in a single call.
+
+    Collapses the client's previous create-tunnel + add-service +
+    set-service-auth sequence -- three round trips, each paying CLI and
+    network overhead -- into one request: ensure the tunnel exists
+    (idempotent), add the service with the caller's Access policy applied
+    directly to its Access Application (replacing a pre-existing app's
+    policies on re-enable), and return the resulting tunnel (with token)
+    plus the service info, so the caller needs no follow-up status reads.
+
+    Enforces the same quotas as the individual endpoints: the tunnel count
+    when a new tunnel would be created, and services-per-tunnel when a new
+    service would be added.
+    """
+    with handle_endpoint_errors():
+        ctx = get_ctx()
+        auth = authenticate_request(request, ctx.ops)
+        admin = require_admin(auth)
+        entitlements = resolve_entitlements_for_admin(request, admin)
+        validate_auth_policy_has_identity(body.auth_policy)
+        tunnel_name = make_tunnel_name(admin.username, body.agent_id)
+        if ctx.ops.get_tunnel_by_name(tunnel_name) is None:
+            current = count_user_tunnels(ctx.ops, admin.username)
+            if current >= entitlements.max_tunnels:
+                raise_quota_exceeded("max_tunnels", entitlements.max_tunnels, current, "tunnels")
+        fallback = owner_email_auth_policy(admin.email) if admin.email else None
+        tunnel_info = ctx.create_tunnel(
+            admin.username,
+            body.agent_id,
+            default_auth_policy=None,
+            fallback_auth_policy=fallback,
+        )
+        existing_services = ctx.list_services(tunnel_name, admin.username)
+        is_new_service = body.service_name not in {s.service_name for s in existing_services}
+        if is_new_service and len(existing_services) >= entitlements.max_services_per_tunnel:
+            raise_quota_exceeded(
+                "max_services_per_tunnel",
+                entitlements.max_services_per_tunnel,
+                len(existing_services),
+                "services on this tunnel",
+            )
+        service = ctx.add_service(
+            tunnel_name,
+            admin.username,
+            body.service_name,
+            body.service_url,
+            fallback_policy=fallback,
+            service_policy=body.auth_policy,
+        )
+        return {"tunnel": tunnel_info.model_dump(), "service": service.model_dump()}
 
 
 # ---------------------------------------------------------------------------

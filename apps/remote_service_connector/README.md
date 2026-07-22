@@ -168,6 +168,7 @@ When `CLOUDFLARE_ALLOWED_IDPS` is set, Access Applications created for forwarded
 - `GET /tunnels` -- List your tunnels with their configured services.
 - `GET /tunnels/by-agent/{agent_id}` -- Resolve your tunnel for a single agent (O(1)): looks the tunnel up by its exact name (`<username>--<agent-prefix>`) via Cloudflare's server-side name filter plus one config fetch, instead of enumerating every tunnel like `GET /tunnels`. Returns the tunnel info (no token), or HTTP 200 with `null` when no tunnel exists for that agent yet. 404 is reserved for "this connector predates the endpoint" (an unknown route), which lets clients that are newer than the connector fall back to enumerating `GET /tunnels`.
 - `DELETE /tunnels/{tunnel_name}` -- Delete a tunnel and all its DNS records, Access Applications, ingress rules, and KV entries.
+- `POST /sharing/enable` -- Enable (or update) sharing for one service in a single call. Body: `{"agent_id": "...", "service_name": "...", "service_url": "...", "auth_policy": {...}}`. Ensures the tunnel (idempotent), adds the service, and applies the Access policy directly to its Access Application (replacing a pre-existing app's policies on re-enable). Returns `{"tunnel": {...with token}, "service": {...}}` so the caller needs no follow-up reads. Enforces the same `max_tunnels` / `max_services_per_tunnel` quotas as the individual endpoints.
 
 ### Services (admin or agent)
 

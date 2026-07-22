@@ -574,6 +574,23 @@ mngr imbue_cloud tunnels find-by-agent [OPTIONS] AGENT_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud tunnels enable-sharing
+
+**Usage:**
+
+```text
+mngr imbue_cloud tunnels enable-sharing [OPTIONS] AGENT_ID SERVICE_NAME SERVICE_URL
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--policy` | text | Cloudflare Access policy as JSON, e.g. '{"emails":["a@example.com"]}' | None |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud tunnels delete
 
 **Usage:**

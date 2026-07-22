@@ -919,6 +919,7 @@ class FakeSharingCli(FakeImbueCloudCli):
     service_auth: dict[str, Any] = Field(default_factory=dict)
     removed_services: list[str] = Field(default_factory=list)
     added_services: list[str] = Field(default_factory=list)
+    enabled_policies: list[dict[str, Any]] = Field(default_factory=list)
 
     def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
         return self.tunnel
@@ -927,12 +928,23 @@ class FakeSharingCli(FakeImbueCloudCli):
         assert self.tunnel is not None
         return self.tunnel
 
-    def add_service(self, *, account: str, tunnel_name: str, service_name: str, service_url: str) -> dict[str, Any]:
+    def enable_sharing(
+        self,
+        *,
+        account: str,
+        agent_id: str,
+        service_name: str,
+        service_url: str,
+        policy: Any,
+    ) -> tuple[TunnelInfo, dict[str, Any]]:
+        assert self.tunnel is not None
         self.added_services.append(service_name)
-        return {}
-
-    def set_service_auth(self, account: str, tunnel_name: str, service_name: str, policy: Any) -> None:
-        return None
+        self.enabled_policies.append(dict(policy))
+        hostname = next(
+            (e.get("hostname") for e in self.service_entries if e.get("service_name") == service_name),
+            "share.example.com",
+        )
+        return self.tunnel, {"service_name": service_name, "service_url": service_url, "hostname": hostname}
 
     def list_services(self, account: str, tunnel_name: str) -> list[dict[str, Any]]:
         return list(self.service_entries)
@@ -1381,7 +1393,11 @@ def test_sharing_enable_returns_json(tmp_path: Path) -> None:
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["enabled"] is True
+    # The enable response carries the share URL so the editor can start the
+    # readiness poll without a follow-up status fetch.
+    assert body["url"] == "https://share.example.com"
     assert "web" in cli.added_services
+    assert cli.enabled_policies == [{"emails": ["viewer@example.com"]}]
 
 
 def test_sharing_enable_rejects_empty_emails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

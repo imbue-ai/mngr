@@ -217,7 +217,25 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ emails: getFinalEmails() }),
     })
-      .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        // The enable response carries the final state (including the share
+        // URL), so render it in place -- no page reload, no follow-up
+        // status fetch.
+        existing = getFinalEmails();
+        added = [];
+        removed = [];
+        document.getElementById('action-btn').textContent = 'Update';
+        setHeading(true);
+        var disableBtn = document.getElementById('disable-btn');
+        if (disableBtn) disableBtn.classList.remove('hidden');
+        renderACL();
+        setSubmitting(false);
+        if (data && data.url) {
+          document.getElementById('share-url').value = data.url;
+          startReadinessPolling(data.url);
+        }
+      })
       .catch(function (err) { showError('Could not save sharing changes: ' + err.message); setSubmitting(false); });
   };
 
@@ -237,41 +255,53 @@
     setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
   };
 
-  // Cloudflare can take a few seconds after sharing is enabled to publish the
-  // Access app at the edge. Until then the hostname does not return the Access
-  // login redirect, so revealing the URL immediately makes forwarding look
-  // broken. Poll the minds-side readiness probe (which checks for the Access
-  // 302) and only reveal the link once the edge is live, or after a short
-  // timeout with a "may take a moment" note so the user is never stuck.
-  var READINESS_POLL_INTERVAL_MS = 2000;
-  var READINESS_MAX_ATTEMPTS = 12;
+  // Cloudflare needs time to publish a (re)created hostname at the edge --
+  // empirically 1-2 minutes is normal, and a hostname that was just deleted
+  // (a disable -> enable cycle) can take longer than a brand-new one. The
+  // URL and copy button are shown immediately (so the link can be sent
+  // ahead), with an explicit "waiting for Cloudflare" line until a probe
+  // actually succeeds. Poll fast at first, then back off; at the deadline
+  // swap the waiting line for a still-not-live warning instead of quietly
+  // pretending success.
+  var READINESS_FAST_INTERVAL_MS = 2000;
+  var READINESS_SLOW_INTERVAL_MS = 5000;
+  var READINESS_FAST_PHASE_MS = 30 * 1000;
+  var READINESS_DEADLINE_MS = 5 * 60 * 1000;
 
-  function revealShareUrl(showFallbackNote) {
-    document.getElementById('url-provisioning').classList.add('hidden');
+  function showShareUrlSection() {
+    document.getElementById('url-section').classList.remove('hidden');
     document.getElementById('url-ready').classList.remove('hidden');
-    if (showFallbackNote) {
-      document.getElementById('url-fallback-note').classList.remove('hidden');
-    }
+  }
+
+  function markShareUrlLive() {
+    document.getElementById('url-provisioning').classList.add('hidden');
+    document.getElementById('url-fallback-note').classList.add('hidden');
+  }
+
+  function markShareUrlStillNotLive() {
+    document.getElementById('url-provisioning').classList.add('hidden');
+    document.getElementById('url-fallback-note').classList.remove('hidden');
   }
 
   function startReadinessPolling(url) {
-    document.getElementById('url-section').classList.remove('hidden');
+    showShareUrlSection();
     document.getElementById('url-provisioning').classList.remove('hidden');
-    document.getElementById('url-ready').classList.add('hidden');
-    var attempts = 0;
+    document.getElementById('url-fallback-note').classList.add('hidden');
+    var startedAt = Date.now();
     function poll() {
-      attempts++;
       var probeUrl = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName + '/readiness?url=' + encodeURIComponent(url);
       fetch(probeUrl)
         .then(function (r) { return r.ok ? r.json() : { ready: false }; })
         .catch(function () { return { ready: false }; })
         .then(function (data) {
+          var elapsedMs = Date.now() - startedAt;
           if (data && data.ready) {
-            revealShareUrl(false);
-          } else if (attempts >= READINESS_MAX_ATTEMPTS) {
-            revealShareUrl(true);
+            markShareUrlLive();
+          } else if (elapsedMs >= READINESS_DEADLINE_MS) {
+            markShareUrlStillNotLive();
           } else {
-            setTimeout(poll, READINESS_POLL_INTERVAL_MS);
+            var interval = elapsedMs < READINESS_FAST_PHASE_MS ? READINESS_FAST_INTERVAL_MS : READINESS_SLOW_INTERVAL_MS;
+            setTimeout(poll, interval);
           }
         });
     }

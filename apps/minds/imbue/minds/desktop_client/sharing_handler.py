@@ -136,14 +136,17 @@ def enable_sharing_via_cloudflare(
     service_name: ServiceName,
     emails: Sequence[str],
     backend_resolver: BackendResolverInterface,
-) -> TunnelInfo:
+) -> tuple[TunnelInfo, str | None]:
     """Perform the plugin-side work to enable or update sharing.
 
-    Used by the direct sharing editor route. On success, returns the
-    (idempotently created) tunnel; the caller can use ``tunnel.tunnel_name``
-    for any follow-up. On any soft failure -- missing CLI, no account,
-    no backend URL, plugin error -- raises :class:`SharingError` with a
-    user-presentable message.
+    A single connector call (``tunnels enable-sharing``) ensures the tunnel,
+    registers the service, and applies the Access policy -- replacing the
+    previous create-tunnel + add-service + set-service-auth sequence, which
+    paid three CLI round trips. The returned tunnel token is then injected
+    into the agent for cloudflared. Returns the tunnel and the service's
+    public URL so the caller needs no follow-up status reads. On any soft
+    failure -- missing CLI, no account, no backend URL, plugin error --
+    raises :class:`SharingError` with a user-presentable message.
     """
     # Require at least one email: sharing with an empty Access policy would leave
     # the service publicly reachable (and the readiness probe would never go green,
@@ -167,35 +170,20 @@ def enable_sharing_via_cloudflare(
         )
 
     try:
-        tunnel = cli.create_tunnel(account=account_email, agent_id=str(agent_id))
-    except ImbueCloudCliError as exc:
-        raise SharingError(f"Failed to create or fetch the tunnel: {exc}") from exc
-    if tunnel.token is None:
-        raise SharingError("Tunnel created but the connector did not return a Cloudflare token.")
-    inject_tunnel_token_into_agent(agent_id, tunnel.token.get_secret_value(), cli.mngr_caller)
-
-    try:
-        cli.add_service(
+        tunnel, service = cli.enable_sharing(
             account=account_email,
-            tunnel_name=tunnel.tunnel_name,
+            agent_id=str(agent_id),
             service_name=str(service_name),
             service_url=backend_url,
-        )
-    except ImbueCloudCliError as exc:
-        raise SharingError(f"Failed to register service '{service_name}' on the tunnel: {exc}") from exc
-
-    # ``emails`` is guaranteed non-empty (checked at the top), so the Access policy
-    # is always applied -- a share is never created without one.
-    try:
-        cli.set_service_auth(
-            account=account_email,
-            tunnel_name=tunnel.tunnel_name,
-            service_name=str(service_name),
             policy={"emails": list(emails)},
         )
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Failed to apply the access policy: {exc}") from exc
-    return tunnel
+        raise SharingError(f"Failed to enable sharing for '{service_name}': {exc}") from exc
+    if tunnel.token is None:
+        raise SharingError("Sharing enabled but the connector did not return a Cloudflare token.")
+    inject_tunnel_token_into_agent(agent_id, tunnel.token.get_secret_value(), cli.mngr_caller)
+    hostname = str(service.get("hostname") or "")
+    return tunnel, f"https://{hostname}" if hostname else None
 
 
 def get_sharing_status(

@@ -499,19 +499,43 @@ class ImbueCloudCli(MutableModel):
         )
         self._expect_success(result, "tunnels delete")
 
-    def add_service(
+    def enable_sharing(
         self,
         *,
         account: str,
-        tunnel_name: str,
+        agent_id: str,
         service_name: str,
         service_url: str,
-    ) -> dict[str, Any]:
+        policy: Mapping[str, Any],
+    ) -> tuple[TunnelInfo, dict[str, Any]]:
+        """Enable (or update) sharing for one service via a single connector call.
+
+        Wraps ``tunnels enable-sharing``: the connector ensures the tunnel,
+        adds the service, and applies the Access policy in one request.
+        Returns the tunnel (with cloudflared token) and the service dict
+        (``service_name`` / ``service_url`` / ``hostname``), so the caller
+        needs no follow-up status reads.
+        """
         result = self._run(
-            ["tunnels", "services", "add", tunnel_name, service_name, service_url, "--account", account],
-            cg_name="imbue-cloud-services-add",
+            [
+                "tunnels",
+                "enable-sharing",
+                agent_id,
+                service_name,
+                service_url,
+                "--policy",
+                _json.dumps(dict(policy)),
+                "--account",
+                account,
+            ],
+            cg_name="imbue-cloud-enable-sharing",
         )
-        return self._expect_success(result, "tunnels services add")
+        body = self._expect_success(result, "tunnels enable-sharing")
+        tunnel_raw = body.get("tunnel") if isinstance(body, dict) else None
+        service_raw = body.get("service") if isinstance(body, dict) else None
+        if not isinstance(tunnel_raw, dict) or not isinstance(service_raw, dict):
+            raise ImbueCloudCliError(f"Malformed enable-sharing output: {body!r}")
+        return TunnelInfo.model_validate(tunnel_raw), service_raw
 
     def list_services(self, account: str, tunnel_name: str) -> list[dict[str, Any]]:
         result = self._run(
@@ -543,35 +567,6 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-tunnel-auth-get",
         )
         return self._expect_success(result, "tunnels auth get")
-
-    def set_service_auth(
-        self,
-        account: str,
-        tunnel_name: str,
-        service_name: str,
-        policy: Mapping[str, Any],
-    ) -> None:
-        """Set the per-service auth policy on a tunnel.
-
-        Wraps ``mngr imbue_cloud tunnels auth set <tunnel_name> <policy_json> --service <name>``.
-        Pass ``policy`` as ``{"emails": [...], "email_domains": [...], "require_idp": ...}``;
-        empty fields are accepted as defaults by the plugin.
-        """
-        result = self._run(
-            [
-                "tunnels",
-                "auth",
-                "set",
-                tunnel_name,
-                _json.dumps(dict(policy)),
-                "--service",
-                service_name,
-                "--account",
-                account,
-            ],
-            cg_name="imbue-cloud-service-auth-set",
-        )
-        self._expect_success(result, "tunnels auth set --service")
 
     def get_service_auth(self, account: str, tunnel_name: str, service_name: str) -> dict[str, Any]:
         """Read the per-service auth policy from a tunnel.

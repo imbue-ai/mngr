@@ -996,3 +996,48 @@ def test_find_tunnel_for_agent_fallback_returns_none_when_no_match(monkeypatch: 
 
     client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
     assert client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123") is None
+
+
+def test_enable_sharing_posts_combined_body_and_parses_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/sharing/enable"
+        body = _json.loads(request.content)
+        assert body["agent_id"] == "agent-abc123"
+        assert body["service_name"] == "web"
+        assert body["service_url"] == "http://localhost:8080"
+        assert body["auth_policy"]["rules"][0]["include"] == [{"email": {"email": "guest@y.com"}}]
+        return httpx.Response(
+            200,
+            json={
+                "tunnel": {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "token": "tok-1", "services": ["web"]},
+                "service": {
+                    "service_name": "web",
+                    "hostname": "web--abc123--owner.example.com",
+                    "service_url": "http://localhost:8080",
+                },
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    tunnel, service = client.enable_sharing(
+        SecretStr("tok"),
+        "agent-abc123",
+        "web",
+        "http://localhost:8080",
+        AuthPolicy(emails=("guest@y.com",)),
+    )
+    assert tunnel.tunnel_name == "owner--abc123"
+    assert tunnel.token is not None
+    assert tunnel.token.get_secret_value() == "tok-1"
+    assert service.hostname == "web--abc123--owner.example.com"
+
+
+def test_enable_sharing_raises_on_malformed_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"tunnel": "nope"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudTunnelError):
+        client.enable_sharing(
+            SecretStr("tok"), "agent-abc123", "web", "http://localhost:8080", AuthPolicy(emails=("a@b.com",))
+        )

@@ -3486,6 +3486,92 @@ def test_route_add_service_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPa
     assert re_add.status_code == 200
 
 
+def _enable_sharing_body(service_name: str = "web", email: str = "guest@y.com") -> dict[str, Any]:
+    return {
+        "agent_id": "agent1",
+        "service_name": service_name,
+        "service_url": "http://localhost:8080",
+        "auth_policy": {"rules": [{"action": "allow", "include": [{"email": {"email": email}}]}]},
+    }
+
+
+def test_route_enable_sharing_creates_tunnel_service_and_policy_in_one_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    resp = client.post("/sharing/enable", json=_enable_sharing_body(), headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tunnel"]["tunnel_name"] == "testuser--agent1"
+    assert body["tunnel"]["token"] is not None
+    assert body["service"]["service_name"] == "web"
+    assert body["service"]["hostname"]
+    # The requested policy landed on the service's Access Application.
+    auth = client.get("/tunnels/testuser--agent1/services/web/auth", headers=_admin_headers()).json()
+    assert "guest@y.com" in json.dumps(auth)
+
+
+def test_route_enable_sharing_re_enable_replaces_the_service_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    assert (
+        client.post(
+            "/sharing/enable", json=_enable_sharing_body(email="a@x.com"), headers=_admin_headers()
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/sharing/enable", json=_enable_sharing_body(email="b@y.com"), headers=_admin_headers()
+        ).status_code
+        == 200
+    )
+    services = client.get("/tunnels/testuser--agent1/services", headers=_admin_headers()).json()
+    assert len(services) == 1
+    auth = json.dumps(client.get("/tunnels/testuser--agent1/services/web/auth", headers=_admin_headers()).json())
+    assert "b@y.com" in auth
+    assert "a@x.com" not in auth
+
+
+def test_route_enable_sharing_enforces_tunnel_quota(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, "explorer", max_tunnels=1)
+    client.post("/tunnels", json={"agent_id": "other"}, headers=_admin_headers())
+    resp = client.post("/sharing/enable", json=_enable_sharing_body(), headers=_admin_headers())
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["entitlement"] == "max_tunnels"
+
+
+def test_route_enable_sharing_enforces_service_quota_but_allows_re_enable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    _seed_entitlements_row(entitlements_store, "explorer", max_services_per_tunnel=1)
+    assert (
+        client.post("/sharing/enable", json=_enable_sharing_body("web"), headers=_admin_headers()).status_code == 200
+    )
+    blocked = client.post("/sharing/enable", json=_enable_sharing_body("api"), headers=_admin_headers())
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"]["entitlement"] == "max_services_per_tunnel"
+    assert (
+        client.post("/sharing/enable", json=_enable_sharing_body("web"), headers=_admin_headers()).status_code == 200
+    )
+
+
+def test_route_enable_sharing_rejects_identityless_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    body = _enable_sharing_body()
+    body["auth_policy"] = {"rules": []}
+    resp = client.post("/sharing/enable", json=body, headers=_admin_headers())
+    assert resp.status_code == 400
+
+
+def test_route_enable_sharing_requires_admin_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
+    created = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).json()
+    resp = client.post("/sharing/enable", json=_enable_sharing_body(), headers=_agent_headers(created["tunnel_id"]))
+    assert resp.status_code == 403
+
+
 def test_route_add_service_agent_auth_respects_owner_quota_by_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     """Agent (tunnel-token) auth resolves the owner's quota via the tunnel-name prefix."""
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)

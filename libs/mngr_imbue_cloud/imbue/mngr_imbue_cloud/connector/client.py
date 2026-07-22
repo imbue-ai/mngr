@@ -655,6 +655,43 @@ class ImbueCloudConnectorClient(MutableModel):
             return []
         return [_parse_service_info(entry) for entry in body if isinstance(entry, dict)]
 
+    def enable_sharing(
+        self,
+        access_token: SecretStr,
+        agent_id: str,
+        service_name: str,
+        service_url: str,
+        policy: AuthPolicy,
+    ) -> tuple[TunnelInfo, ServiceInfo]:
+        """Enable (or update) sharing for one service in a single connector call.
+
+        Wraps ``POST /sharing/enable``, which ensures the tunnel exists
+        (idempotent), adds the service, and applies ``policy`` directly to
+        its Access Application -- replacing the previous create-tunnel +
+        add-service + set-service-auth three-call sequence. The returned
+        tunnel carries the cloudflared token, so no follow-up reads are
+        needed.
+        """
+        response = self._send(
+            "POST",
+            self._url("/sharing/enable"),
+            exc_cls=ImbueCloudTunnelError,
+            headers=self._bearer(access_token),
+            json={
+                "agent_id": agent_id,
+                "service_name": service_name,
+                "service_url": service_url,
+                "auth_policy": _auth_policy_to_connector_body(policy),
+            },
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudTunnelError)
+        tunnel_raw = body.get("tunnel")
+        service_raw = body.get("service")
+        if not isinstance(tunnel_raw, dict) or not isinstance(service_raw, dict):
+            raise ImbueCloudTunnelError(f"Malformed /sharing/enable response: {body!r}")
+        return _parse_tunnel_info(tunnel_raw), _parse_service_info(service_raw)
+
     def remove_service(self, access_token: SecretStr, tunnel_name: str, service_name: str) -> None:
         response = self._send(
             "DELETE",
