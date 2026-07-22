@@ -27,6 +27,7 @@ enable Docker-in-Docker (mirroring ``offload-modal-acceptance.toml``).
 """
 
 import json
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -158,7 +159,7 @@ def _submit_credentials_via_workspace_endpoint(container_name: str, credential_b
     submit = _exec_in_container(
         container_name,
         "curl -s -X POST http://localhost:8000/api/claude-auth/submit-credentials "
-        f"-H 'Content-Type: application/json' -d {json.dumps(payload)}",
+        f"-H 'Content-Type: application/json' -d {shlex.quote(payload)}",
         timeout=600,
         logged_command=(
             "curl -s -X POST http://localhost:8000/api/claude-auth/submit-credentials "
