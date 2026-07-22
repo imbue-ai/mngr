@@ -1541,11 +1541,21 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // reading, passed for display only (it may be stale at a cold launch;
         // maybeUpgradeToOfflineCopy corrects the copy when discovery lands).
         var hostOffline = root.dataset.hostOffline === '1';
+        // The flavor of an in-flight restart, from the tracker: start-only (the
+        // page's own entry dispatch, a possible no-op) vs a full manual bounce
+        // (the right-click "Restart workspace" click, which POSTs the restart and
+        // then navigates here fresh). Display-only.
+        var restartStartOnly = root.dataset.restartStartOnly === '1';
         if (initialStatus === 'restarting') {
-          // A restart is in flight but this page instance doesn't know its
-          // flavor (a reload lands here for the entry dispatch and the manual
-          // bounce alike), so claim nothing beyond what the offline hint knows.
-          (hostOffline ? renderRestartingOffline : renderLoading)();
+          // A restart is in flight (a reload lands here for the entry dispatch
+          // and the manual bounce alike). The offline hint wins -- a cold boot
+          // reads as "Bringing your workspace back online". Otherwise the flavor
+          // decides: a full manual bounce is a deliberate, known restart, so name
+          // it "Restarting your workspace"; a start-only entry dispatch may be a
+          // no-op, so it stays on the neutral "Loading workspace" spinner.
+          (hostOffline
+            ? renderRestartingOffline
+            : (restartStartOnly ? renderLoading : renderRestarting))();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
           // Show the failure reason AND the diagnostic together: run the
@@ -1596,6 +1606,7 @@ def render_recovery_page(
     initial_error: str,
     ssh_command: str | None = None,
     initial_offline: bool = False,
+    restart_is_start_only: bool = False,
 ) -> str:
     """Render the workspace-recovery page shown when the system interface is unresponsive.
 
@@ -1609,6 +1620,14 @@ def render_recovery_page(
     currently reads as offline (STOPPED/CRASHED), which selects the "Bringing
     your workspace back online" copy for the restarting state; it never
     affects what is dispatched.
+
+    ``restart_is_start_only`` is the display-only flavor of an in-flight restart
+    when ``initial_status`` is ``"restarting"``: True for the recovery page's own
+    start-only entry dispatch (a possible no-op -> the neutral "Loading workspace"
+    spinner), False for a full manual bounce reloaded here (the right-click
+    "Restart workspace" click POSTs the restart and then navigates to this page
+    fresh -> the known "Restarting your workspace" copy). Ignored unless the host
+    reads offline (the offline copy wins) and unless the status is restarting.
 
     ``ssh_command`` is the copy-pasteable SSH command for the agent's host. When
     provided, a "Copy SSH command" button sits beside "Copy diagnostics" in the
@@ -1664,6 +1683,7 @@ def render_recovery_page(
         f' data-return-to="{html.escape(return_to)}"'
         f' data-initial-status="{html.escape(initial_status)}"'
         f' data-host-offline="{"1" if initial_offline else "0"}"'
+        f' data-restart-start-only="{"1" if restart_is_start_only else "0"}"'
     )
     return render_loading_page(
         style_extra=_RECOVERY_STYLE,

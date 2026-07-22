@@ -177,7 +177,7 @@ def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp
     """With no system-services agent discovered, the sequence ends in RESTART_FAILED."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     registry = _started_registry(workspace_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
@@ -205,7 +205,7 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
@@ -231,7 +231,7 @@ def test_run_restart_sequence_fails_when_start_command_errors(tmp_path: Path) ->
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
@@ -262,7 +262,7 @@ def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
@@ -295,7 +295,7 @@ def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Pa
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     missing_binary = str(tmp_path / "definitely_not_a_real_mngr")
 
@@ -321,7 +321,7 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
@@ -350,7 +350,7 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
     # A fake mngr whose ``stop`` fails with the host-shutdown-not-supported message (as Modal
@@ -391,7 +391,7 @@ def test_run_restart_sequence_skips_stop_for_start_only_dispatch(tmp_path: Path)
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=True)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_fake_mngr(tmp_path)
 
@@ -420,7 +420,7 @@ def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> N
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_fake_mngr(tmp_path)
 

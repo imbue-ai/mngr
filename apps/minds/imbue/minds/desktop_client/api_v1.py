@@ -951,20 +951,21 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         return _json_error(
             f"Another operation ({existing_operation.kind.value}) is already running for {agent_id}", 409
         )
+    # start_only makes the restart a pure ``mngr start`` (the recovery page's
+    # unconditional entry dispatch, which must never bounce a live container);
+    # a manual restart keeps the stop step, since it may target a running but
+    # wedged container that only a bounce fixes. Resolved before the claim so
+    # the tracker can record the restart's flavor for the recovery page's copy.
+    skip_stop = bool(body.get("start_only", False))
+
     # A restart already in flight for this workspace -- don't stack a second
     # worker racing the first's stop/start commands. mark_restarting decides the
     # RESTARTING transition under its own lock and reports whether this caller won
     # it, so this is an atomic check-and-claim against concurrent requests.
-    if not tracker.mark_restarting(parsed_id):
+    if not tracker.mark_restarting(parsed_id, start_only=skip_stop):
         return handle, 202
 
     registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
-
-    # start_only makes the restart a pure ``mngr start`` (the recovery page's
-    # unconditional entry dispatch, which must never bounce a live container);
-    # a manual restart keeps the stop step, since it may target a running but
-    # wedged container that only a bounce fixes.
-    skip_stop = bool(body.get("start_only", False))
 
     # is_checked=False + on_failure: a crash of the one-shot worker transitions
     # the tracker to RESTART_FAILED and the registry to FAILED (so neither the

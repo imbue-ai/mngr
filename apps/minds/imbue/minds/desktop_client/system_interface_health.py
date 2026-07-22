@@ -142,6 +142,16 @@ class _AgentRecord(MutableModel):
         default=None,
         description="Failure reason carried while health is RESTART_FAILED, for the recovery page to render.",
     )
+    restart_is_start_only: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the in-flight RESTARTING restart is start-only (an idempotent ``mngr start`` "
+            "that may be a no-op) rather than a full stop+start bounce. Set when a restart wins the "
+            "RESTARTING transition and read only while RESTARTING -- the recovery page picks its "
+            "restarting-state copy from it (a full manual bounce reads as 'Restarting your workspace', "
+            "a start-only entry dispatch as the neutral 'Loading workspace'). None outside a restart."
+        ),
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -313,11 +323,15 @@ class SystemInterfaceHealthTracker(MutableModel):
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
 
-    def mark_restarting(self, agent_id: AgentId) -> bool:
+    def mark_restarting(self, agent_id: AgentId, start_only: bool) -> bool:
         """Mark ``agent_id`` as RESTARTING (called from the restart endpoint).
 
         Clears any in-progress probe-failure run (the agent is already
         known-bad) and fires on-change so the recovery page can re-label.
+        ``start_only`` records the restart's flavor (an idempotent ``mngr start``
+        vs a full stop+start bounce) so the recovery page can name the wait; it
+        is recorded only when this call wins the transition, so a deduped later
+        request never rewrites the flavor of the restart already in flight.
 
         Returns ``True`` if this call transitioned the agent into RESTARTING
         (the agent was not already RESTARTING), and ``False`` if it was already
@@ -335,6 +349,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             record.last_restart_error = None
             if record.health != AgentHealth.RESTARTING:
                 record.health = AgentHealth.RESTARTING
+                record.restart_is_start_only = start_only
                 fire_health = AgentHealth.RESTARTING
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
@@ -374,6 +389,21 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record is None:
                 return None
             return record.last_restart_error
+
+    def get_restart_is_start_only(self, agent_id: AgentId) -> bool | None:
+        """Return whether the in-flight restart is start-only, or None if not RESTARTING.
+
+        Only meaningful while the agent is RESTARTING; returns None otherwise so a
+        stale value from a prior restart is never read. The recovery page uses it
+        to pick the restarting-state copy -- a full manual bounce reads as
+        "Restarting your workspace", a start-only entry dispatch (which may be a
+        no-op) as the neutral "Loading workspace".
+        """
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            if record is None or record.health != AgentHealth.RESTARTING:
+                return None
+            return record.restart_is_start_only
 
     def get_failure_run_started_wall_at(self, agent_id: AgentId) -> datetime | None:
         """Return the wall-clock (UTC) start of the current probe-failure run, or None.

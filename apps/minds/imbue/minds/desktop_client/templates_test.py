@@ -903,6 +903,43 @@ def test_render_recovery_page_restarting_status() -> None:
     assert 'data-initial-status="restarting"' in html
 
 
+def test_render_recovery_page_restarting_copy_reflects_restart_flavor() -> None:
+    """The RESTARTING branch names a full manual bounce but stays neutral for a start-only dispatch.
+
+    A reload during an in-flight restart lands in the RESTARTING branch. A full
+    manual bounce (the right-click "Restart workspace", which POSTs the restart
+    and then navigates here fresh) is a known restart, so the page reads
+    "Restarting your workspace"; the page's own start-only entry dispatch may be
+    a no-op, so it stays on the neutral "Loading workspace" spinner. The offline
+    hint wins over both. Regression: the branch previously rendered the neutral
+    spinner for every non-offline restart, so a deliberate right-click restart
+    showed only "Loading workspace".
+    """
+    full_html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restarting",
+        initial_error="",
+        restart_is_start_only=False,
+    )
+    start_only_html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restarting",
+        initial_error="",
+        restart_is_start_only=True,
+    )
+    # The flavor rides to the client as a data attribute the branch reads.
+    assert 'data-restart-start-only="0"' in full_html
+    assert 'data-restart-start-only="1"' in start_only_html
+    # The RESTARTING branch selects the copy off the flavor, with the offline
+    # hint taking precedence over both.
+    entry = full_html[full_html.rfind("if (initialStatus === 'restarting')") :]
+    restarting_branch = entry[: entry.find("else if")]
+    assert "restartStartOnly ? renderLoading : renderRestarting" in restarting_branch
+    assert "hostOffline" in restarting_branch
+
+
 def test_render_recovery_page_carries_restart_failed_error() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_B,
@@ -1037,11 +1074,13 @@ def test_render_recovery_page_fresh_entry_dispatches_start_only_unconditionally(
     # host reads offline, else the neutral loading spinner -- never
     # "Restarting your workspace", since the start may be a no-op.
     assert "hostOffline ? renderRestartingOffline : renderLoading" in entry
-    # A page load that lands on the RESTARTING tracker state likewise claims
-    # nothing beyond the offline hint.
+    # A page load that lands on the RESTARTING tracker state picks its copy from
+    # the restart's flavor: a start-only dispatch stays on the neutral loading
+    # spinner, a full manual bounce names the restart. The offline hint wins over
+    # both (a cold boot reads as the offline revival copy).
     restarting_entry = entry[: entry.find("else if")]
-    assert "(hostOffline ? renderRestartingOffline : renderLoading)()" in restarting_entry
-    assert "renderRestarting()" not in restarting_entry
+    assert "restartStartOnly ? renderLoading : renderRestarting" in restarting_entry
+    assert "hostOffline" in restarting_entry
 
 
 def test_render_recovery_page_offline_copy_is_display_only() -> None:

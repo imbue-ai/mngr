@@ -1957,6 +1957,11 @@ def _handle_recovery_page(
     tracker: SystemInterfaceHealthTracker | None = get_state().system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
+    # Whether an in-flight restart is start-only (a possible-no-op entry
+    # dispatch) vs a full manual bounce; None outside a restart. Selects the
+    # restarting-state copy on the page ("Loading workspace" vs "Restarting
+    # your workspace"). Read only while RESTARTING, so it never gates dispatch.
+    restart_is_start_only = tracker.get_restart_is_start_only(aid) if tracker is not None else None
     return_to = _sanitize_recovery_return_to(request.args.get("return_to", ""))
     is_explicit_restart = request.args.get("intent", "") == "restart"
     # The recovery page renders from ``render_status`` and then polls itself in
@@ -2007,6 +2012,7 @@ def _handle_recovery_page(
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
         initial_offline=is_host_offline,
+        restart_is_start_only=bool(restart_is_start_only),
     )
     # Expose the rendered status so the page's background convergence poll can
     # tell "still restarting" (keep waiting, no reload) from a state change

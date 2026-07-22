@@ -2473,13 +2473,18 @@ def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path
     """A user landing on the recovery page during an in-flight restart must see RESTARTING."""
     tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
-    tracker.mark_restarting(agent_id)
+    # A full manual bounce (the right-click "Restart workspace"), so the page
+    # renders the known "Restarting your workspace" copy rather than the neutral
+    # start-only "Loading workspace" spinner.
+    tracker.mark_restarting(agent_id, start_only=False)
     assert tracker.get_health(agent_id) == AgentHealth.RESTARTING
 
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
 
     assert response.status_code == 200
     assert 'data-initial-status="restarting"' in response.text
+    # The full-bounce flavor rides to the page so it names the restart.
+    assert 'data-restart-start-only="0"' in response.text
     # The page's background convergence poll keys off this header to tell "still
     # restarting" (keep waiting, no focus-stealing reload) from a state change.
     assert response.headers["X-Recovery-Status"] == "restarting"
