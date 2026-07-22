@@ -5,12 +5,14 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.utils.testing import allow_warnings
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
@@ -213,3 +215,32 @@ def test_clear_cache(store: DockerHostStore) -> None:
     assert result2 is not None
     assert result2 is not result1
     assert result2.certified_host_data.host_id == result1.certified_host_data.host_id
+
+
+class _FailingListdirVolume(LocalVolume):
+    """Volume whose directory listing fails like an unreadable state container (not a missing dir)."""
+
+    def listdir(self, path: str) -> list[VolumeFile]:
+        raise OSError("exec failed: state container not responding")
+
+
+def test_list_all_host_records_warns_and_reports_empty_when_listing_fails(tmp_path: Path) -> None:
+    """A failed host-record listing reports zero records (discovery's contract) but must warn.
+
+    The empty result makes every non-running host invisible to discovery, so
+    the swallowed cause has to reach the log.
+    """
+    store = DockerHostStore(volume=_FailingListdirVolume(root_path=tmp_path / "docker-store"))
+    with allow_warnings(match="Host-record listing failed"):
+        assert store.list_all_host_records() == []
+
+
+def test_list_persisted_agent_data_warns_and_reports_empty_when_listing_fails(tmp_path: Path) -> None:
+    """A failed persisted-agent listing reports zero agents but must warn.
+
+    The empty result makes the host's agents read as nonexistent (an
+    explicitly-named agent then fails lookup), so the cause has to reach the log.
+    """
+    store = DockerHostStore(volume=_FailingListdirVolume(root_path=tmp_path / "docker-store"))
+    with allow_warnings(match="Persisted-agent listing"):
+        assert store.list_persisted_agent_data_for_host(HostId(HOST_ID_A)) == []

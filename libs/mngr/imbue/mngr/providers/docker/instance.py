@@ -1979,6 +1979,21 @@ kill -TERM 1
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
 
+        # Zero host records while labeled host containers exist is the
+        # signature of an unreadable record store (a failed listing is reported
+        # as empty; see list_all_host_records), not of a genuinely-empty
+        # environment. Name it, because this cycle will silently report every
+        # non-running host -- and its agents -- as nonexistent.
+        host_containers = [
+            c for c in containers if (c.labels or {}).get(STATE_CONTAINER_TYPE_LABEL) != STATE_CONTAINER_TYPE_VALUE
+        ]
+        if not all_host_records and host_containers:
+            logger.warning(
+                "Docker discovery read zero host records while {} labeled host container(s) exist; "
+                "non-running hosts will be invisible this cycle",
+                len(host_containers),
+            )
+
         # Map running containers by host_id, and harvest host names from labels.
         # We use this map below instead of h.get_name() so building DiscoveredHosts
         # does not trigger a per-host SSH read of data.json.

@@ -38,6 +38,7 @@ from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import allow_warnings
 
 
 def test_parse_host_location_address_with_agent_only() -> None:
@@ -707,7 +708,8 @@ def test__find_agents_by_identifiers_or_state_raises_on_unknown_identifier(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """_find_agents_by_identifiers_or_state should raise AgentNotFoundError for unrecognized identifiers."""
-    with pytest.raises(AgentNotFoundError, match="No agent"):
+    # The not-found path logs a discovery-summary warning by design.
+    with allow_warnings(match="Agent lookup failed"), pytest.raises(AgentNotFoundError, match="No agent"):
         _find_agents_by_identifiers_or_state(
             agent_identifiers=[AgentName("nonexistent-agent-xyz")],
             filter_all=False,

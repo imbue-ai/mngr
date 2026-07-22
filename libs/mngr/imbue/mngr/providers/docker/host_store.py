@@ -159,7 +159,15 @@ class DockerHostStore(MutableModel):
         records: list[HostRecord] = []
         try:
             entries = self.volume.listdir("host_state")
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError:
+            # Normal for a fresh environment: no host has ever been created,
+            # so the host_state directory does not exist yet.
+            return []
+        except OSError as e:
+            # An empty result is indistinguishable from "no hosts exist" to
+            # every caller (discovery reports the hosts as absent), so the
+            # swallowed cause must at least be visible in the log.
+            logger.warning("Host-record listing failed; reporting zero host records: {}", e)
             return []
 
         for entry in entries:
@@ -192,7 +200,14 @@ class DockerHostStore(MutableModel):
         agent_dir = self._agent_data_dir(host_id)
         try:
             entries = self.volume.listdir(agent_dir)
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError:
+            # Normal: the host has never persisted any agent data.
+            return []
+        except OSError as e:
+            # An empty result makes the host's agents invisible to offline
+            # discovery (an explicitly-named agent then reads as "not found"),
+            # so the swallowed cause must at least be visible in the log.
+            logger.warning("Persisted-agent listing for host {} failed; reporting zero agents: {}", host_id, e)
             return []
 
         agent_records: list[dict[str, Any]] = []
