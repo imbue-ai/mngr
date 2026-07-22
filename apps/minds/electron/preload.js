@@ -135,4 +135,9 @@ contextBridge.exposeInMainWorld('minds', {
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
+
+  // Bring the whole Minds app to the front (stealing focus back from the
+  // browser) after OAuth sign-in finished in the external browser. The main
+  // process only activates/raises if the window isn't already focused.
+  bringAppToFront: () => ipcRenderer.send('bring-app-to-front'),
 });

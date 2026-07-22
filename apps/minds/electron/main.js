@@ -3348,6 +3348,25 @@ ipcMain.on('go-home', (event) => {
   }
 });
 
+// OAuth sign-in finished in the external browser (which stole OS focus); the
+// login page asks us to bring the Minds app to the front. Only do so if the
+// window isn't already focused, so we never yank the user out of the app when
+// they stayed put. Fires from the login page in either the content view (via
+// the content-relay `minds:bring-app-to-front` message) or the sign-in modal
+// overlay (via window.minds.bringAppToFront()); getBundleFromEvent resolves
+// both.
+ipcMain.on('bring-app-to-front', (event) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (bundle.window.isFocused()) return;
+  // On macOS, window.focus() alone can't pull a backgrounded app in front of
+  // the frontmost app (the OAuth browser) -- the OS blocks focus-stealing.
+  // app.focus({steal:true}) activates Minds over the browser; focusBundle then
+  // raises and focuses the specific window within the app.
+  if (isMac) app.focus({ steal: true });
+  focusBundle(bundle);
+});
+
 ipcMain.on('navigate-content', (event, url) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle) return;
