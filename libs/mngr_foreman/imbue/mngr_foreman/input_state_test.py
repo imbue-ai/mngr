@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import cast
 
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr_foreman.connection_pool import ConnectionPool
+from imbue.mngr_foreman.input_state import PaneStateCache
 from imbue.mngr_foreman.input_state import classify_blocking_pane
 from imbue.mngr_foreman.input_state import is_busy_state
 from imbue.mngr_foreman.input_state import is_permissions_blocked
@@ -200,3 +203,45 @@ def test_non_dict_plugin_is_safe() -> None:
     # Defensive: a malformed plugin payload must not raise, just read as unknown.
     assert waiting_reason_of(_agent_with_plugin(None)) is None
     assert is_permissions_blocked(_agent_with_plugin("oops")) is False
+
+
+def test_pane_state_cache_single_flight() -> None:
+    # Five concurrent callers for one agent must collapse to a SINGLE probe (the
+    # amplification fix): the winner runs the SSH probe, the rest read its cached value.
+    calls = {"n": 0}
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_probe(_pool: ConnectionPool, _name: str) -> tuple[bool | None, str | None]:
+        calls["n"] += 1
+        started.set()
+        release.wait(2.0)  # hold the flight open so the others pile onto the lock
+        return (True, None)
+
+    cache = PaneStateCache(ttl_seconds=10.0, probe_fn=fake_probe)
+    pool = cast(ConnectionPool, None)
+    out: list[object] = []
+    threads = [threading.Thread(target=lambda: out.append(cache.probe(pool, "a"))) for _ in range(5)]
+    for t in threads:
+        t.start()
+    assert started.wait(2.0)
+    release.set()
+    for t in threads:
+        t.join(2.0)
+    assert calls["n"] == 1  # 5 concurrent callers -> 1 SSH probe
+    assert out == [(True, None)] * 5
+
+
+def test_pane_state_cache_ttl_expires() -> None:
+    # A fresh call after the TTL lapses re-probes (a single tab still reads live ~1s).
+    calls = {"n": 0}
+
+    def fake_probe(_pool: ConnectionPool, _name: str) -> tuple[bool | None, str | None]:
+        calls["n"] += 1
+        return (calls["n"] == 1, None)
+
+    cache = PaneStateCache(ttl_seconds=0.0, probe_fn=fake_probe)  # every entry already expired
+    pool = cast(ConnectionPool, None)
+    cache.probe(pool, "a")
+    cache.probe(pool, "a")
+    assert calls["n"] == 2

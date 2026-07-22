@@ -188,6 +188,12 @@ class ConnectionPool:
             for h in dropped:
                 if h.host is not None and id(h.host) not in surviving:
                     to_close.append(h.host)
+                    # Drop this host's serialization lock too: it's being disconnected
+                    # and no live handle references it, so the entry is dead. Without
+                    # this, _host_locks grows one permanent entry per re-resolved host
+                    # object forever -- an unbounded (slow) leak over a year of flaky
+                    # reconnects. A re-resolve later mints a fresh host + fresh lock.
+                    self._host_locks.pop(id(h.host), None)
         for host in to_close:
             self._disconnect_host(host)
 
@@ -195,7 +201,7 @@ class ConnectionPool:
         """Turn on SSH keepalive so a silently-dropped peer is detected and its reader
         thread exits on its own (proactive backstop to _drop_handles' explicit close)."""
         try:
-            host._get_paramiko_transport().set_keepalive(_SSH_KEEPALIVE_SECONDS)
+            host._get_paramiko_transport().set_keepalive(_SSH_KEEPALIVE_SECONDS)  # ty: ignore[unresolved-attribute]
         except Exception as e:  # noqa: BLE001 - local agents have no transport; best effort
             logger.trace("pool: set_keepalive failed (ignored): {}", e)
 
@@ -391,6 +397,12 @@ def send_via_pool(pool: ConnectionPool, agent_name: str, message: str) -> list[t
     """Send ``message`` using the pool's cached matches. Returns failed (name, error) pairs.
 
     Imported lazily by the messaging module to avoid a circular import.
+
+    The tmux paste runs UNDER the per-host lock (via ``run_on_host``) so it can't drive
+    the shared paramiko connection concurrently with a transcript read or pane probe on
+    the same host -- concurrent use corrupts the SSH protocol and drops the connection
+    for every agent on that host. ``send_message_to_agents`` reuses the same
+    provider-cached host object the pool holds, so the same lock serializes them.
     """
     from imbue.mngr.api.message import send_message_to_agents
 
@@ -398,13 +410,17 @@ def send_via_pool(pool: ConnectionPool, agent_name: str, message: str) -> list[t
     if not matches:
         pool.invalidate(agent_name)
         raise LookupError(f"No agent found matching {agent_name!r}")
-    result = send_message_to_agents(
-        mngr_ctx=pool.mngr_ctx,
-        message_content=message,
-        agents_to_message=matches,
-        error_behavior=ErrorBehavior.CONTINUE,
-        # Foreman never resurrects a stopped agent: it only ever shows and targets
-        # running agents, so a send must not auto-start anything.
-        is_start_desired=False,
-    )
-    return list(result.failed_agents)
+
+    def _send(_agent: AgentInterface, _host: OnlineHostInterface) -> list[tuple[str, str]]:
+        result = send_message_to_agents(
+            mngr_ctx=pool.mngr_ctx,
+            message_content=message,
+            agents_to_message=matches,
+            error_behavior=ErrorBehavior.CONTINUE,
+            # Foreman never resurrects a stopped agent: it only ever shows and targets
+            # running agents, so a send must not auto-start anything.
+            is_start_desired=False,
+        )
+        return list(result.failed_agents)
+
+    return pool.run_on_host(agent_name, _send)

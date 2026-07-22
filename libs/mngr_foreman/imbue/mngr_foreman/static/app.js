@@ -235,17 +235,18 @@
     return label ? "[" + label + "] " + base : base;
   }
 
-  // Poll an agent's input-state and call onState(d) each tick, at a steady rate
-  // (faster in a short burst right after a send).
+  // Poll an agent's input-state and call onState(d) each tick, ~1s.
   function installStatePolling(agentName, onState) {
     // Greedy ~1s poll, COALESCED: at most one probe outstanding per agent, so a slow
-    // remote/docker probe can't stack up requests. UNKNOWN responses (pane unreadable
-    // this poll) are DROPPED so the caller keeps its last state -- mngr's coarse/stale
-    // state never enters. onState is the ONE place the tab title + working dot +
-    // composer state all derive from (all via statusKey), so they can't drift.
+    // remote/docker probe can't stack up requests. SKIPPED while the tab is hidden
+    // (backgrounded) -- a phone in your pocket must not keep hammering SSH probes
+    // forever; the poll resumes on foreground. UNKNOWN responses (pane unreadable this
+    // poll) are DROPPED so the caller keeps its last state -- mngr's coarse/stale state
+    // never enters. onState is the ONE place the tab title + working dot + composer
+    // state all derive from (all via statusKey), so they can't drift.
     let inFlight = false;
     function tick() {
-      if (inFlight) return;
+      if (inFlight || document.hidden) return;
       inFlight = true;
       fetch("/api/agents/" + encodeURIComponent(agentName) + "/input-state")
         .then((r) => r.json())
@@ -464,6 +465,7 @@
     // this query, so its polling stops with no per-card bookkeeping/leak.
     const inFlightCards = new Set(); // coalesce: at most one probe outstanding per agent
     function pollStatuses() {
+      if (document.hidden) return; // don't hammer SSH probes while backgrounded
       listEl.querySelectorAll(".agent-card").forEach((card) => {
         const name = card.dataset.name;
         if (!name || inFlightCards.has(name)) return;
@@ -482,7 +484,10 @@
           .finally(() => { inFlightCards.delete(name); });
       });
     }
-    setInterval(pollStatuses, 1000);
+    // ~1.5s home-card cadence (a touch slower than a focused chat's 1s): the server
+    // cache already collapses concurrent probes, and a home overview doesn't need
+    // sub-second freshness. Skipped entirely while the tab is hidden.
+    setInterval(pollStatuses, 1500);
 
     let pollTimer = null;
     function startPolling() {
@@ -522,9 +527,15 @@
       };
       es.onerror = () => { setConn("reconnecting"); startPolling(); };
     }
+    let reconnectTimer = null;
     function reconnectList() {
       if (es) { try { es.close(); } catch (_e) {} es = null; }
-      connect();
+      // Small random delay (jitter) before reconnecting so that when the server
+      // restarts and every open tab/phone drops at once, they don't all reconnect on
+      // the same instant and thundering-herd the fresh process. Coalesced so repeated
+      // wake triggers don't stack timers.
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 250 + Math.random() * 750);
     }
     connect();
     // Reconnect a dead/stale stream: on foreground (mobile freezes the tab + kills the
@@ -1099,7 +1110,9 @@
       if (now - lastReconnectAt < 5000) return; // don't storm reconnects
       lastReconnectAt = now;
       if (es) { try { es.close(); } catch (_e) {} es = null; }
-      connect(true);
+      // Jitter so every open chat tab doesn't reconnect on the same instant after a
+      // server restart (thundering herd onto the fresh process).
+      setTimeout(() => connect(true), Math.random() * 750);
     }
 
     function connect(isReconnect) {

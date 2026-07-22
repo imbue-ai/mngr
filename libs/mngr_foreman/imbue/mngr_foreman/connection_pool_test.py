@@ -85,6 +85,10 @@ def test_send_via_pool_never_auto_starts(monkeypatch: pytest.MonkeyPatch) -> Non
     handle = pool._handle_for("a")
     handle.matches = ["m"]  # seed cached matches so no resolution runs
     handle.matches_at = time.monotonic()
+    # Seed the resolved (agent, host) too: the send now runs under the per-host lock via
+    # run_on_host, which resolves only if these are None.
+    handle.agent = cast(Any, SimpleNamespace())
+    handle.host = cast(Any, SimpleNamespace())
     assert cp.send_via_pool(pool, "a", "hello") == []
     assert captured["is_start_desired"] is False
 

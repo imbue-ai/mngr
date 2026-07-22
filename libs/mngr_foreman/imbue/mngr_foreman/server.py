@@ -39,9 +39,9 @@ from imbue.mngr_foreman.backburner import BackburnerStore
 from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.harness import TranscriptStrategy
 from imbue.mngr_foreman.harness import transcript_strategy_for
+from imbue.mngr_foreman.input_state import PaneStateCache
 from imbue.mngr_foreman.input_state import is_busy_state
 from imbue.mngr_foreman.input_state import is_permissions_blocked
-from imbue.mngr_foreman.input_state import probe_pane_state
 from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
@@ -77,6 +77,12 @@ _HEARTBEAT_SECONDS: Final[float] = 5.0
 # adaptive-idle. Cheap because a stat-before-read skips the read when the file
 # hasn't grown (see TranscriptTailer), and the connection is always warm.
 _TRANSCRIPT_POLL_SECONDS: Final[float] = 0.5
+# Bound the transcript poll's host-lock wait BELOW the heartbeat interval: if another
+# command holds the host lock, this poll gives up fast (HostBusyError -> no new lines
+# this tick) instead of blocking up to the default 20s with no heartbeat, which would
+# trip the client's ~14s liveness watchdog into a needless reconnect (and stack a new
+# SSE thread on the same lock). One slow host must not flap every viewer offline.
+_TRANSCRIPT_LOCK_TIMEOUT_SECONDS: Final[float] = 3.0
 # Bound every foreground host command (stat/probe) so an unresponsive host can't
 # wedge an SSE poll or request thread indefinitely.
 _HOST_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -220,6 +226,10 @@ def create_app(
     backburner = BackburnerStore(state_dir / "backburner.json")
     registry.set_backburner_predicate(backburner.is_backburner)
     shortcuts = ShortcutStore(state_dir / "shortcuts.json")
+    # Collapses the many 1s input-state pollers (every card on every device) into
+    # <=1 SSH pane probe per agent per ~750ms -- the fix that makes input-state scale
+    # to 50 agents x many tabs instead of hundreds of capture-panes/sec.
+    pane_cache = PaneStateCache()
 
     # ---- pages ------------------------------------------------------------
 
@@ -357,12 +367,13 @@ def create_app(
         # for a harness that uses it.
         agent = registry.get_agent(name)
         strategy = transcript_strategy_for(agent.type) if agent is not None else None
-        if agent is None or strategy is None:
-            return jsonify(
-                {"blocked": False, "reason": None, "running": False, "busy": False, "status": "READY", "state": None}
-            )
-        state = str(agent.state.value if hasattr(agent.state, "value") else agent.state).upper()
-        if state not in ("RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"):
+        state = (
+            str(agent.state.value if hasattr(agent.state, "value") else agent.state).upper()
+            if agent is not None
+            else None
+        )
+        # Not chat-capable, or not in a state that could be busy/blocked -> plain READY.
+        if agent is None or strategy is None or state not in ("RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"):
             return jsonify(
                 {"blocked": False, "reason": None, "running": False, "busy": False, "status": "READY", "state": state}
             )
@@ -373,7 +384,9 @@ def create_app(
         # (fixing the stuck-blocked bug from mngr's stale permissions marker), and
         # WORKING tracks the real generating state (not the interrupt-stale marker).
         if strategy.uses_pane_dialog_detection:
-            working, reason = probe_pane_state(pool, name)
+            # Through the cache: concurrent pollers (many tabs/devices on the same
+            # agent) collapse to one SSH probe per ~TTL, so load scales with #agents.
+            working, reason = pane_cache.probe(pool, name)
             if working is None and reason is None:
                 # Pane unreadable THIS poll (slow/cold connection -- common for remote
                 # docker agents). NEVER fall back to mngr's coarse state: it lies (reads
@@ -410,7 +423,7 @@ def create_app(
     def api_interrupt(name: str) -> ResponseReturnValue:
         # Send Escape to the agent's tmux pane (claude's "stop generating").
         try:
-            send_interrupt_to_agent(mngr_ctx, name)
+            send_interrupt_to_agent(pool, name)
         except InterruptError as e:
             logger.info("Interrupt of {} failed: {}", name, e)
             return _error(str(e), 502)
@@ -534,11 +547,19 @@ def _build_transcript_reader(agent: AgentDetails, subpath: str, pool: Connection
 
     def reader() -> bytes:
         def _read(_agent: AgentInterface, host: OnlineHostInterface) -> bytes:
+            # BOUND the SFTP read: a host whose TCP is up but whose SFTP has wedged
+            # would otherwise block here forever WHILE HOLDING THE HOST LOCK (keepalive
+            # only rescues a genuinely-dead peer, not a live-but-stuck channel). The
+            # concrete SSH host self-terminates the transfer on a stall; fall back to a
+            # plain read only if a host type lacks the bounded variant.
+            bounded_read = getattr(host, "read_file_within_timeout", None)
+            if bounded_read is not None:
+                return bounded_read(_abs_path(host), _HOST_COMMAND_TIMEOUT_SECONDS)
             return host.read_file(_abs_path(host))
 
         try:
-            return pool.run_on_host(agent_name, _read)
-        except Exception as e:  # noqa: BLE001 - a failed read just yields no new lines this poll
+            return pool.run_on_host(agent_name, _read, lock_timeout=_TRANSCRIPT_LOCK_TIMEOUT_SECONDS)
+        except Exception as e:  # noqa: BLE001 - a failed/busy read just yields no new lines this poll
             logger.trace("transcript read for {} failed (retrying next poll): {}", agent_name, e)
             return b""
 
@@ -552,8 +573,8 @@ def _build_transcript_reader(agent: AgentDetails, subpath: str, pool: Connection
             return int(out) if result.success and out.isdigit() else None
 
         try:
-            return pool.run_on_host(agent_name, _stat)
-        except Exception:  # noqa: BLE001 - a failed stat just means "read anyway"
+            return pool.run_on_host(agent_name, _stat, lock_timeout=_TRANSCRIPT_LOCK_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001 - a failed/busy stat just means "read anyway"
             return None
 
     return reader, size_fn
@@ -637,6 +658,14 @@ def _transcript_stream_inner(
     # and a stat-before-read keeps a poll cheap when the file hasn't grown.
     last_heartbeat = time.monotonic()
     while True:
+        # Emit the heartbeat the moment it's due -- BEFORE the poll -- so even a poll
+        # that blocks (up to the short transcript lock timeout on a busy host) can never
+        # starve the client's liveness watchdog into a false "reconnecting". The poll is
+        # bounded, so the loop keeps cycling and the heartbeat stays on cadence.
+        now = time.monotonic()
+        if now - last_heartbeat >= _HEARTBEAT_SECONDS:
+            yield _sse({"type": "heartbeat"})
+            last_heartbeat = now
         time.sleep(_TRANSCRIPT_POLL_SECONDS)
         try:
             new_lines = tailer.poll()
@@ -644,10 +673,6 @@ def _transcript_stream_inner(
             logger.trace("Transcript poll error (continuing): {}", e)
             new_lines = []
         yield from _frames(_parse(new_lines, queue_state), "event")
-        now = time.monotonic()
-        if now - last_heartbeat >= _HEARTBEAT_SECONDS:
-            yield _sse({"type": "heartbeat"})
-            last_heartbeat = now
 
 
 def run_server(

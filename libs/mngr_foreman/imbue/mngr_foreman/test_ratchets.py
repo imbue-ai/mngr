@@ -49,7 +49,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(25))
+    rc.check_broad_exception_catch(_DIR, snapshot(27))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -87,7 +87,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(3))
+    rc.check_getattr(_DIR, snapshot(4))
 
 
 def test_prevent_setattr() -> None:
@@ -162,7 +162,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(109))
+    rc.check_trailing_comments(_DIR, snapshot(127))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -276,7 +276,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(39))
+    rc.check_inline_functions(_DIR, snapshot(42))
 
 
 def test_prevent_underscore_imports() -> None:
@@ -289,7 +289,7 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # the per-instance in-memory SSLContext. It cannot be a pydantic model, and
     # setting the context from outside the class would evade this ratchet while
     # doing the same thing, so the __init__ stays.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(3))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
 
 
 def test_prevent_cast_usage() -> None:

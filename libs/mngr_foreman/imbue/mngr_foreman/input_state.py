@@ -33,6 +33,9 @@ from __future__ import annotations
 
 import re
 import shlex
+import threading
+import time
+from collections.abc import Callable
 
 from loguru import logger
 
@@ -133,34 +136,6 @@ def classify_blocking_pane(content: str) -> str | None:
     return None
 
 
-def detect_blocking_dialog(pool: ConnectionPool, agent_name: str) -> str | None:
-    """Capture the agent's tmux pane (via the warm pool) and classify it.
-
-    Resolves through the connection pool -- a cached, warm SSH connection -- so
-    the 4s poll no longer pays mngr's ~3s discovery each time. Any failure (agent
-    not found, host offline, capture error) returns None: an indeterminate probe
-    must not grey a usable composer.
-    """
-    window = pool.mngr_ctx.config.tmux.primary_window_name
-
-    def _capture(agent: AgentInterface, host: OnlineHostInterface) -> str | None:
-        target = TmuxWindowTarget(session_name=agent.session_name, window=window)
-        result = host.execute_stateful_command(
-            f"tmux capture-pane -p -t {target.as_shell_arg()}",
-            timeout_seconds=_HOST_COMMAND_TIMEOUT_SECONDS,
-        )
-        if not result.success:
-            logger.trace("input-state capture-pane for {} failed: {}", agent_name, result.stderr or result.stdout)
-            return None
-        return classify_blocking_pane(result.stdout)
-
-    try:
-        return pool.run_on_host(agent_name, _capture, lock_timeout=_POLL_LOCK_TIMEOUT_SECONDS)
-    except Exception as e:  # noqa: BLE001 - a failed/busy probe is "unknown", not "blocked"
-        logger.trace("input-state probe for {} failed: {}", agent_name, e)
-        return None
-
-
 def is_working_title(title: str) -> bool | None:
     """True if the tmux pane title's leading glyph is Claude's animated spinner.
 
@@ -217,3 +192,70 @@ def probe_pane_state(pool: ConnectionPool, agent_name: str) -> tuple[bool | None
     except Exception as e:  # noqa: BLE001 - a failed/busy probe is "unknown", not a state
         logger.trace("input-state pane probe for {} failed: {}", agent_name, e)
         return None, None
+
+
+# Serve concurrent pollers from one probe for this long. The client polls each agent
+# ~1s, so a single tab still gets a fresh read every second; this only collapses the
+# OVERLAP -- many tabs/devices probing the same agent in the same window.
+_PANE_CACHE_TTL_SECONDS = 0.75
+# Above this many cached agents, drop entries not refreshed in _PANE_CACHE_STALE_AFTER
+# (that agent stopped being polled -- destroyed or every viewer left). Keeps the maps
+# bounded by the live-and-watched agent count over a year, not by every name ever seen.
+_PANE_CACHE_PRUNE_THRESHOLD = 256
+_PANE_CACHE_STALE_AFTER_SECONDS = 60.0
+
+
+class PaneStateCache:
+    """Collapse the many input-state pollers into <=1 SSH pane probe per agent per TTL.
+
+    The home page polls ``/input-state`` for every visible card every ~1s, and every
+    open chat tab polls its agent every ~1s. At 50 agents x several devices that is
+    hundreds of ``tmux capture-pane``-over-SSH per second -- each a werkzeug thread
+    taking the host lock and contending with transcript reads. That polling
+    amplification, not the per-probe cost, is the 50-agent scaling wall.
+
+    This serves all callers within a short window from one probe, and a per-agent
+    single-flight lock means only ONE probe is ever in flight per agent -- so SSH load
+    scales with the number of AGENTS, not agents x tabs.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: float = _PANE_CACHE_TTL_SECONDS,
+        probe_fn: Callable[[ConnectionPool, str], tuple[bool | None, str | None]] = probe_pane_state,
+    ) -> None:
+        self._ttl = ttl_seconds
+        self._probe_fn = probe_fn  # injectable so a test drives it without monkeypatch
+        self._lock = threading.Lock()  # guards the maps only (never held across a probe)
+        self._values: dict[str, tuple[float, tuple[bool | None, str | None]]] = {}
+        self._flights: dict[str, threading.Lock] = {}
+
+    def probe(self, pool: ConnectionPool, agent_name: str) -> tuple[bool | None, str | None]:
+        now = time.monotonic()
+        with self._lock:
+            hit = self._values.get(agent_name)
+            if hit is not None and hit[0] > now:
+                return hit[1]
+            flight = self._flights.setdefault(agent_name, threading.Lock())
+        # Single-flight: only one probe per agent runs at a time. Concurrent callers
+        # wait on `flight`, then read the value the winner cached -- no extra SSH hit.
+        with flight:
+            now = time.monotonic()
+            with self._lock:
+                hit = self._values.get(agent_name)
+                if hit is not None and hit[0] > now:
+                    return hit[1]
+            value = self._probe_fn(pool, agent_name)  # the one real SSH round-trip
+            with self._lock:
+                self._values[agent_name] = (now + self._ttl, value)
+                self._prune(now)
+            return value
+
+    def _prune(self, now: float) -> None:
+        if len(self._values) <= _PANE_CACHE_PRUNE_THRESHOLD:
+            return
+        # Stale = not refreshed in a minute, so no probe is in flight for it -> safe to
+        # drop its flight lock too. Bounds both maps by the watched-agent count.
+        for n in [n for n, (exp, _) in self._values.items() if exp < now - _PANE_CACHE_STALE_AFTER_SECONDS]:
+            self._values.pop(n, None)
+            self._flights.pop(n, None)

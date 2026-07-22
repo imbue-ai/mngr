@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -12,6 +14,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_foreman.agent_registry import AgentRegistry
 from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.server import create_app
+
+# foreman-local state (backburner/shortcuts) lives under mngr_ctx.config.default_host_dir;
+# point it at a throwaway temp dir for the route tests.
+_STATE_DIR = Path(tempfile.mkdtemp(prefix="foreman-test-state-"))
 
 _CARD = {
     "id": "agent-1",
@@ -37,11 +43,18 @@ class _FakeRegistry:
     def get_agent(self, name: str) -> Any:
         return self._agents.get(name)
 
+    def set_backburner_predicate(self, _pred: Any) -> None:
+        pass
+
+    def republish(self) -> None:
+        pass
+
 
 def _client(registry: _FakeRegistry | None = None) -> Any:
     reg = registry or _FakeRegistry([_CARD], agents={"worker": SimpleNamespace(type="claude", name="worker")})
     pool = SimpleNamespace(mngr_ctx=SimpleNamespace())
-    app = create_app(cast(MngrContext, SimpleNamespace()), cast(AgentRegistry, reg), cast(ConnectionPool, pool), 20000)
+    ctx = SimpleNamespace(config=SimpleNamespace(default_host_dir=_STATE_DIR))
+    app = create_app(cast(MngrContext, ctx), cast(AgentRegistry, reg), cast(ConnectionPool, pool), 20000)
     app.config["TESTING"] = True
     return app.test_client()
 
