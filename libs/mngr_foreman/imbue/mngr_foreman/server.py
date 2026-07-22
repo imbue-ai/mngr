@@ -152,6 +152,18 @@ def create_app(
     # Reject oversize uploads at the framework edge (a little headroom over the
     # 25MB file cap for multipart overhead); write_upload re-checks the raw bytes.
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + 1024 * 1024
+    # Server-side WS ping/pong (flask_sock -> simple_websocket), off by default.
+    # Without it, ws.receive() blocks on a plain socket.recv() with NO timeout: a
+    # phone that drops off the network while backgrounded (radio killed, NAT/
+    # carrier timeout -- no FIN or RST ever reaches us) leaves the terminal's
+    # thread pair + forked tmux/ssh child + pty fds pinned forever (nothing times
+    # them out; Linux's own idle-TCP keepalive is off by default too). Repeated
+    # background/foreground cycles over a long session would accumulate one such
+    # zombie per unclean drop. 25s ping (simple_websocket's own recommended
+    # value) bounds a dead connection's lifetime to ~2 missed pongs (~50s worst
+    # case) and needs no client change -- Ping/Pong are protocol-level control
+    # frames the browser answers automatically, invisible to app.js.
+    app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
     sock = Sock(app)
 
     # The dev server runs a fresh thread per request, and any request that touches

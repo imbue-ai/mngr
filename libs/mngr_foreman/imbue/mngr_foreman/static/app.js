@@ -320,19 +320,42 @@
     // One long-lived SSE that stays open; each message is a full snapshot the
     // registry pushes whenever the live-agent set changes.
     let es = null;
+    // Timestamp the last frame (snapshot OR heartbeat -- the server heartbeats this
+    // stream every ~5s) so we can detect a silently-dead connection whose readyState
+    // never flips to CLOSED (mobile radio drop / NAT timeout leaves a zombie OPEN
+    // socket). CLOSED-only detection misses that case; staleness catches it.
+    let listLastMsgAt = Date.now();
+    const LIST_STALE_MS = 15000;
     function connect() {
       if (typeof EventSource === "undefined") { startPolling(); return; }
       if (es) return;
       es = new EventSource("/api/agents/stream");
-      es.onopen = () => { stopPolling(); setConn("live"); };
+      es.onopen = () => { stopPolling(); setConn("live"); listLastMsgAt = Date.now(); };
       es.onmessage = (ev) => {
+        listLastMsgAt = Date.now(); // any frame (snapshot or heartbeat) proves liveness
         let msg;
         try { msg = JSON.parse(ev.data); } catch (_e) { return; }
         if (msg.type === "snapshot") renderAll(msg.agents || []);
       };
       es.onerror = () => { setConn("reconnecting"); startPolling(); };
     }
+    function reconnectList() {
+      if (es) { try { es.close(); } catch (_e) {} es = null; }
+      connect();
+    }
     connect();
+    // Reconnect a dead/stale stream: on foreground (mobile freezes the tab + kills the
+    // socket while hidden) and on a periodic staleness check (a zombie OPEN socket that
+    // has silently stopped delivering -- readyState never flips, so we lean on the
+    // heartbeat-derived staleness signal instead).
+    function wakeList() {
+      if (document.hidden) return;
+      if (!es || es.readyState === EventSource.CLOSED || Date.now() - listLastMsgAt > LIST_STALE_MS) reconnectList();
+    }
+    document.addEventListener("visibilitychange", wakeList);
+    window.addEventListener("pageshow", wakeList);
+    window.addEventListener("focus", wakeList);
+    setInterval(() => { if (!document.hidden && Date.now() - listLastMsgAt > LIST_STALE_MS) reconnectList(); }, 5000);
   }
 
   // ==========================================================================
@@ -834,10 +857,14 @@
           if (backfilling) backfillBuffer.push(msg.event); // buffer the initial load
           else renderEvent(msg.event);
         } else if (msg.type === "backfill_complete") {
+          const wasInitial = backfilling;
           if (backfilling) { backfilling = false; flushInitialBackfill(); }
           clearStatus();
           composer.hidden = false;
-          scrollDown(true);
+          // Jump to the bottom only on the first load, or if the user is already there.
+          // A background reconnect re-sends backfill_complete; without this guard it
+          // would yank someone who has scrolled up reading history back to the bottom.
+          if (wasInitial || stick) scrollDown(true);
         } else if (msg.type === "unsupported") {
           clearStatus();
           addMain(el("div", "unsupported", "No transcript for agent type '" + msg.agent_type + "'."));
@@ -859,6 +886,15 @@
       setConnState(gap < OFFLINE_MS ? "reconnecting" : "offline");
       forceReconnect();
     }, 3000);
+    // On mobile the tab is frozen while backgrounded: this watchdog's timer stops
+    // and the socket is usually killed. Recover the instant the tab is foregrounded
+    // instead of waiting for the next tick (and a possibly-wedged EventSource).
+    function wakeChat() {
+      if (!document.hidden && Date.now() - lastMsgAt > STALE_MS) forceReconnect();
+    }
+    document.addEventListener("visibilitychange", wakeChat);
+    window.addEventListener("pageshow", wakeChat);
+    window.addEventListener("focus", wakeChat);
     schedulePrefetch(); // warm highlight/katex/mermaid during idle
 
     // ---- composer ----
@@ -1346,25 +1382,73 @@
     fit.fit();
 
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(proto + "//" + location.host + tgt.wsPath);
-    ws.binaryType = "arraybuffer";
+    const wsUrl = proto + "//" + location.host + tgt.wsPath;
     const encoder = new TextEncoder();
+    // The pane is a persistent tmux session, so a dropped socket loses nothing --
+    // reconnecting just re-attaches (tmux redraws the current screen). Phones kill
+    // the socket whenever the tab is backgrounded / the screen locks, so a terminal
+    // with no reconnect looks "randomly disconnected". Reconnect on close with a
+    // capped backoff, and -- crucially on mobile -- the instant the tab is
+    // foregrounded again (the backoff timer is frozen while the tab is hidden).
+    let ws = null;
+    let reconnectTimer = null;
+    let backoff = 1000;
+    let closing = false;
 
     function wsSend(data) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(typeof data === "string" ? encoder.encode(data) : data);
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(typeof data === "string" ? encoder.encode(data) : data);
     }
     function sendResize() {
-      if (ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
     }
+    function scheduleReconnect() {
+      if (reconnectTimer || closing) return;
+      reconnectTimer = setTimeout(() => { reconnectTimer = null; connectTerm(); }, backoff);
+      backoff = Math.min(backoff * 2, 15000);
+    }
+    function connectTerm() {
+      if (closing) return;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      setConn("reconnecting");
+      // Bind handlers to this specific socket (via `sock`) rather than reading the
+      // outer `ws`: wakeTerm() reconnects while the old socket is still CLOSING
+      // (not just CLOSED), so its onclose can otherwise fire AFTER a new socket has
+      // already replaced `ws` and stomp "live" back to "closed" / queue a spurious
+      // reconnect for a connection that's already up.
+      const sock = new WebSocket(wsUrl);
+      ws = sock;
+      sock.binaryType = "arraybuffer";
+      sock.onopen = () => { if (ws !== sock) return; backoff = 1000; setConn("live"); fit.fit(); sendResize(); term.focus(); };
+      sock.onmessage = (ev) => {
+        if (ws !== sock) return;
+        if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+        else if (typeof ev.data === "string") term.write(ev.data);
+      };
+      sock.onclose = () => { if (ws !== sock) return; setConn("closed"); scheduleReconnect(); };
+      sock.onerror = () => { if (ws !== sock) return; setConn("error"); };
+    }
+    connectTerm();
 
-    ws.onopen = () => { setConn("live"); fit.fit(); sendResize(); term.focus(); };
-    ws.onmessage = (ev) => {
-      if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
-      else if (typeof ev.data === "string") term.write(ev.data);
-    };
-    ws.onclose = () => { setConn("closed"); term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n"); };
-    ws.onerror = () => setConn("error");
+    // Reconnect the moment the tab returns to the foreground (phone unlock / app
+    // switch / bfcache restore): the socket is usually already dead but the frozen
+    // backoff timer may be minutes from firing.
+    function wakeTerm() {
+      if (document.hidden) return;
+      // A bfcache restore fires pagehide (closing=true) then later pageshow on the
+      // *same* JS context -- closing must not stick past that, or a foregrounded
+      // tab can never reconnect its terminal again.
+      closing = false;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        backoff = 1000;
+        connectTerm();
+      }
+    }
+    document.addEventListener("visibilitychange", wakeTerm);
+    window.addEventListener("pageshow", wakeTerm);
+    window.addEventListener("focus", wakeTerm);
+    window.addEventListener("pagehide", () => { closing = true; if (ws) { try { ws.close(); } catch (_e) {} } });
 
     term.onData((data) => wsSend(data));
 
@@ -1437,6 +1521,48 @@
       document.getElementById("pp-cancel").addEventListener("click", hidePastePopover);
       popover.addEventListener("click", (e) => { if (e.target === popover) hidePastePopover(); });
     }
+
+    // ---- highlight-to-copy ----
+    // Selecting text in xterm doesn't copy on its own. Copy the selection once it
+    // settles: a debounced onSelectionChange covers mouse-drag, touch, and
+    // keyboard Shift-select in one hook (it fires continuously mid-drag, so wait
+    // for it to go quiet). navigator.clipboard.writeText needs a secure context --
+    // true on https + http://localhost, FALSE over http://<remote-ip>:8700 -- so
+    // auto-copy works via localhost/https and quietly no-ops elsewhere; the
+    // browser's native long-press / right-click copy still works on the xterm
+    // selection either way.
+    // tmux nuance: a pane with `mouse on` captures a plain drag into tmux
+    // copy-mode, so on those the user must Shift+drag to make a browser selection.
+    // term.getSelection() returns whatever the browser selected regardless, so
+    // copy works either way. (This box's ~/.mngr/tmux.conf leaves mouse off, so a
+    // plain drag selects here.)
+    const canCopy = !!(navigator.clipboard && window.isSecureContext);
+    if (canCopy) {
+      let copyTimer = null;
+      term.onSelectionChange(() => {
+        if (copyTimer) clearTimeout(copyTimer);
+        copyTimer = setTimeout(() => {
+          if (term.hasSelection()) {
+            const sel = term.getSelection();
+            if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+          }
+        }, 250);
+      });
+    } else {
+      // Remote-IP over plain http: auto-copy is unavailable. Leave a hover hint so
+      // the "selecting doesn't copy" surprise is explained; native copy still works.
+      const termEl = document.getElementById("term");
+      if (termEl) termEl.title = "Auto-copy needs https or localhost. Use your browser's copy (long-press / right-click) on the selection.";
+    }
+
+    // Ctrl+Shift+V pastes (mirrors the Paste button); the shell keeps plain Ctrl+V.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === "keydown" && e.ctrlKey && e.shiftKey && (e.key === "v" || e.key === "V")) {
+        doPaste();
+        return false;
+      }
+      return true;
+    });
   }
 
   window.foreman = { initIndex: initIndex, initAgent: initAgent, initTerminal: initTerminal };
