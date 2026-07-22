@@ -1,10 +1,12 @@
 # Reflection: witnessing the minds authentication corpus with tmr-specs
 
 Layer-3 of the spec-anchored testing stack. This document reflects on Phase 1
-(hand audit), the Phase 2 hand-witnessing pass, and the Phase 2 fleet run
-(`tmr-specs-minds` on Modal), across the three axes the task asks for: the
-quality of the generated witnesses, whether witnessing surfaced implementation
-problems, and what the run teaches about the tmr-specs machinery itself.
+(the hand audit), Phase 2 (a hand-witnessing pass, two `tmr-specs-minds` fleet
+runs on Modal that both failed to produce witnesses, a blocked `local` pilot,
+and a final local hand-generation batch), across the three axes the task asks
+for: the quality of the generated witnesses, whether witnessing surfaced
+implementation problems, and what the runs teach about the tmr-specs machinery
+itself.
 
 Companion document: `audit.md` (the Phase 1 map and before/after matrix).
 
@@ -39,14 +41,24 @@ Companion document: `audit.md` (the Phase 1 map and before/after matrix).
 | Baseline (pre-audit) | 0 | 0 | 32 |
 | After Phase 1 hand audit | 5 | 17 | 10 |
 | After Phase 2 hand-witnessing | 8 | 17 | 7 |
-| After fleet adoption | 8 | 17 | 7 | (unchanged: the fleet produced nothing adoptable) |
+| After the two fleet runs | 8 | 17 | 7 | (unchanged: both runs produced nothing adoptable) |
+| After local hand-generation | 14 | 12 | 6 |
 
-The Phase 2 hand-witnessing added three tests: a full end-to-end `fresh-code`
-sign-in, a `prefetch` / `fetch-never-spends` scriptless-fetch test, and a
-`survives-restart` cross-instance session test. Of the 7 remaining `none`, six
-are the `mngr_forward` bridge units (out of scope) and one is `expired-token`
-(needs control over the 30-day `max_age` clock, deliberately left for the
-fleet to see how it handles a time-dependent unit).
+The **6 remaining `none` are exactly the six `mngr_forward` bridge units** we
+dropped from scope (`open-from-landing`, `direct-navigation`,
+`signed-out-workspace`, `non-html-refused`, and the `single-credential` /
+`credential-not-forwarded` rules). Every unit implemented on the `apps/minds`
+side is now witnessed (full or an honest partial).
+
+The 12 partials are honest, not gaps to churn on: the universally-quantified
+invariant Rules (`single-use-codes`, `no-data-without-session`,
+`sessions-unforgeable`, `signing-key-minted-once`, `no-open-redirects`,
+`fetch-never-spends`); the two unit-level token-integrity witnesses
+(`tampered-token`, `foreign-token`, whose HTTP-surface half is unwitnessed);
+`consent-first` (only the no-return-destination case); and the three units that
+are behaviourally complete but read as `partial` only because of the matrix's
+per-marker aggregation (`missing-code`, `default-destination`, `consent-gate` —
+see section 3).
 
 ## Fleet run outcome: two Modal runs, zero adoptable witnesses
 
@@ -90,27 +102,66 @@ run-killing bug is the hanging coverage command, which no timeout or concurrency
 change addresses. This is why the layer-3 direction became: **run locally**,
 where that command works.
 
-This is the dominant machinery finding and is expanded in section 3. Because
-neither run yielded witnesses, sections 1 and 2 have no fleet material to assess.
+This is the dominant machinery finding and is expanded in section 3.
+
+## Local provider outcome: blocked by the Claude Code trust dialog
+
+The direction after the Modal failures was to run locally. A single-agent
+`--provider local` pilot (scoped to `expired-token`) failed at launch: the local
+provider copies the checkout to `~/.mngr/copies/agent-<id>/` and Claude Code
+refuses to start there — "Source directory ... is not trusted by Claude Code" — a
+trust dialog that `--headless` cannot answer. Trust is stored per-directory in
+`~/.claude.json`, so the fleet's dynamically-named copy dirs cannot be
+pre-trusted without either interactive acceptance or a global trust-bypass change
+to the user's Claude config (out of scope, security-sensitive). Net: the fleet is
+blocked on *both* providers by distinct environment issues — Modal by the hanging
+coverage command, local by the trust dialog — neither a fault in the specs,
+prompts, or recipe logic. So the remaining witnesses were **hand-generated
+locally**, which is what "generate the tests locally" ultimately meant here.
 
 ## 1. Quality of the generated witnesses
 
-No witnesses were generated: every mapper timed out before publishing. There is
-nothing to assess for adoption. The apps/minds authentication coverage reported
-above (8 full / 17 partial / 7 none) is entirely from the Phase 1 audit and the
-Phase 2 hand-witnessing, both of which stand on their own.
+No *fleet* witnesses exist to assess — both runs produced none. What follows
+assesses the witnesses I hand-generated locally (the Phase 2 hand pass plus the
+post-Modal batch), held to the bar the mapper prompt sets for the fleet:
 
-_[If a corrected re-run is authorized, complete this section: assess each
-generated witness test-by-test — honest witnessing vs gold-plating, accurate
-`partial=` notes, `PARTIAL_STEADY` only for residue untestable *in kind* (watch
-`expired-token`, which IS testable via a backdated token, and the invariant
-Rules), and correct placement per the repo test taxonomy.]_
+- **`fresh-code` (full):** drives the real `/login` -> JS redirect -> `/authenticate`
+  flow; asserts landing on `/`, a signed-in follow-up request, and the code now
+  spent. Every assertion traces to a step; no gold-plating.
+- **`prefetch` + `fetch-never-spends`:** a scriptless fetch of the login URL sets
+  no session and leaves the code spendable. `fetch-never-spends` keeps an honest
+  `partial=` — a universally-quantified Rule ("any URL the system hands out")
+  that one preloader scenario cannot fully witness.
+- **`survives-restart` (full):** a cookie minted on one app instance still
+  authenticates against a fresh instance on the same data directory — the actual
+  observable, not just the signing-key-persistence mechanism.
+- **`expired-token` (full):** the time-dependent unit. Rather than dodge it as
+  `PARTIAL_STEADY` (it is *not* untestable in kind — only awkward without a
+  clock), I mint a backdated cookie via a `TimestampSigner` subclass (no
+  monkeypatch, no `freezegun`) and assert the HTTP surface treats the bearer as
+  signed out. An `age_seconds=0` sanity assertion guards the construction against
+  salt/payload drift, so the rejection is provably due to age. Helper in
+  `testing.py`.
+- **`used-code` / `unknown-code` (full):** tightened to also assert the refusal
+  sets no session cookie (the "no session is established" step), not just the 403.
+- **`signed-out-home` (full):** asserts the login-URL/terminal guidance *and* that
+  a known workspace id is absent ("reveals nothing about existing workspaces").
+- **`already-signed-in` (full):** proves the fresh code is still redeemable after
+  opening `/login` while signed in (the "code remains unspent" step).
+- **`deep-link-prefill` (full):** asserts branch prefill and advanced-fields-open,
+  not just the git URL.
+
+No gold-plating was introduced: every added assertion traces to a unit step or an
+in-scope invariant. The partials left standing are honest — I did not force
+behaviourally-complete outline/compound units to `full` by writing a redundant
+single test just to satisfy the matrix's per-marker rule.
 
 ## 2. Implementation problems surfaced by witnessing
 
-The fleet surfaced none (it produced no commits or escalations). The
-hand-witnessing pass surfaced no implementation bugs either — every
-hand-written witness passed against the current implementation.
+The fleet surfaced none (it produced no commits or escalations). Hand-generation
+surfaced no implementation bugs either — every hand-written witness passed
+against the current implementation on its first green run, and no `partial=`
+residue traced to a divergence rather than an untestable quantifier.
 
 One divergence noted during the audit (for cross-checking against any
 fleet escalation): the `mngr_forward` sign-in bridge returns **403** for a
@@ -176,6 +227,14 @@ Run-time friction observed across the two runs:
   self-bound their own wall-clock. `--reintegrate` *does* re-pull each agent's
   outputs and re-run the reducer (a good recovery primitive) — but only once the
   mappers actually finish, which here they never did.
+- **The `local` provider is unusable headless due to Claude Code's trust
+  dialog.** Each local agent runs in a fresh `~/.mngr/copies/agent-<id>/` copy
+  that Claude Code treats as untrusted; `--headless` cannot accept the trust
+  prompt, so every launch fails ("Source directory ... is not trusted"). Because
+  trust is keyed per-directory in `~/.claude.json` and the copy dirs are minted
+  per run, there is no non-interactive, non-global way to pre-trust them. For a
+  headless fleet the provider (or `mngr`) needs to seed trust for the copy dir it
+  just created before starting Claude there.
 - **A clean exit hides a total failure.** Run 1 exited 0 with an all-`FAILED`
   report; a caller scripting on exit code alone would not notice zero units were
   witnessed. A non-zero exit (or a summary line) when no mapper succeeds would

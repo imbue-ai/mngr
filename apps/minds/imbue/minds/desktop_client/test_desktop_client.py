@@ -34,6 +34,8 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.testing import make_backdated_session_cookie
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
 from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
@@ -127,17 +129,18 @@ def _authenticate_client(
     client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
 
 
-@pytest.mark.witnesses(
-    "authentication.signed-out-home",
-    partial="asserts a sign-in prompt is served; not the 'login URL printed in the terminal' text nor that the page reveals nothing about existing workspaces",
-)
+@pytest.mark.witnesses("authentication.signed-out-home")
 def test_landing_page_shows_login_when_unauthenticated(tmp_path: Path) -> None:
-    client, _, _ = _setup_test_server(tmp_path)
+    client, _, agent_id = _setup_test_server(tmp_path)
 
     response = client.get("/")
 
     assert response.status_code == 200
+    # A sign-in prompt directing the user to the login URL printed in the terminal...
     assert "Login" in response.text
+    assert "login url" in response.text.lower()
+    # ...that reveals nothing about the workspace the resolver already knows.
+    assert str(agent_id) not in response.text
 
 
 def test_login_redirects_to_authenticate_via_js(tmp_path: Path) -> None:
@@ -203,10 +206,7 @@ def test_authenticate_redirects_to_landing_page(tmp_path: Path) -> None:
     assert response.headers["location"] == "/"
 
 
-@pytest.mark.witnesses(
-    "authentication.unknown-code",
-    partial="asserts the refusal and explanation text; does not assert that no session cookie is set on the refusal",
-)
+@pytest.mark.witnesses("authentication.unknown-code")
 def test_authenticate_with_invalid_code_returns_403(tmp_path: Path) -> None:
     client, _, _ = _setup_test_server(tmp_path)
 
@@ -218,12 +218,11 @@ def test_authenticate_with_invalid_code_returns_403(tmp_path: Path) -> None:
 
     assert response.status_code == 403
     assert "invalid or has already been used" in response.text
+    # No session is established on the refusal.
+    assert not any(SESSION_COOKIE_NAME in header for header in response.headers.getlist("Set-Cookie"))
 
 
-@pytest.mark.witnesses(
-    "authentication.used-code",
-    partial="asserts the reused code is refused (403); not the explanation text or that no session cookie is set",
-)
+@pytest.mark.witnesses("authentication.used-code")
 @pytest.mark.witnesses(
     "authentication.single-use-codes",
     partial="only the sequential reuse case at the HTTP boundary; not concurrent interleavings",
@@ -246,6 +245,9 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
         follow_redirects=False,
     )
     assert second_response.status_code == 403
+    assert "invalid or has already been used" in second_response.text
+    # No session is established when the spent code is presented again.
+    assert not any(SESSION_COOKIE_NAME in header for header in second_response.headers.getlist("Set-Cookie"))
 
 
 @pytest.mark.witnesses("authentication.fresh-code")
@@ -334,6 +336,33 @@ def test_session_survives_a_desktop_client_restart(tmp_path: Path) -> None:
     response = client_after.get("/")
     assert response.status_code == 200
     assert str(agent_id) in response.text
+
+
+@pytest.mark.witnesses("authentication.expired-token")
+def test_expired_session_token_is_treated_as_signed_out(tmp_path: Path) -> None:
+    """A session token older than the 30-day max age is treated as signed out."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    signing_key = auth_store.get_signing_key()
+
+    # Sanity: a just-minted cookie from the same construction verifies, so the
+    # rejection below is due to age, not a salt/payload mismatch with production.
+    assert (
+        verify_session_cookie(
+            cookie_value=make_backdated_session_cookie(signing_key, age_seconds=0), signing_key=signing_key
+        )
+        is True
+    )
+
+    # A cookie whose signature is 31 days old exceeds the 30-day max age.
+    expired_cookie = make_backdated_session_cookie(signing_key, age_seconds=31 * 24 * 60 * 60)
+    client.set_cookie(SESSION_COOKIE_NAME, expired_cookie)
+
+    response = client.get("/")
+    # The bearer is treated as signed out: the sign-in prompt is served and no
+    # workspace is revealed.
+    assert response.status_code == 200
+    assert "Login" in response.text
+    assert str(agent_id) not in response.text
 
 
 def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
@@ -489,10 +518,7 @@ def _setup_test_server_without_backend(
     return client, auth_store, agent_id
 
 
-@pytest.mark.witnesses(
-    "authentication.already-signed-in",
-    partial="asserts the redirect to /; does not assert that the fresh code remains unspent afterward",
-)
+@pytest.mark.witnesses("authentication.already-signed-in")
 def test_login_redirects_if_already_authenticated(tmp_path: Path) -> None:
     client, auth_store, _ = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
@@ -507,6 +533,15 @@ def test_login_redirects_if_already_authenticated(tmp_path: Path) -> None:
     )
     assert response.status_code == 307
     assert response.headers["location"] == "/"
+
+    # The fresh code was not spent by opening /login while already signed in:
+    # it can still be redeemed at /authenticate.
+    redeem_response = client.get(
+        "/authenticate",
+        query_string={"one_time_code": str(new_code)},
+        follow_redirects=False,
+    )
+    assert redeem_response.status_code == 307
 
 
 # -- Multi-server proxy tests --
@@ -571,12 +606,9 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
     assert "git_url" in response.text
 
 
-@pytest.mark.witnesses(
-    "authentication.deep-link-prefill",
-    partial="asserts git_url prefill only; not branch prefill and not that the advanced fields open",
-)
+@pytest.mark.witnesses("authentication.deep-link-prefill")
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
-    """The create form pre-fills the git URL from a query parameter."""
+    """A deep link pre-fills the create form with the git URL and branch, advanced fields open."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -585,9 +617,14 @@ def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get("/", query_string={"git_url": "file:///nonexistent-repo"})
+    response = client.get(
+        "/", query_string={"git_url": "file:///nonexistent-repo", "branch": "feature/deep-link"}
+    )
     assert response.status_code == 200
     assert "file:///nonexistent-repo" in response.text
+    assert "feature/deep-link" in response.text
+    # A repo/branch deep link opens the form with its advanced fields visible.
+    assert "showAdvanced(true)" in response.text
 
 
 def test_create_page_shows_form(tmp_path: Path) -> None:

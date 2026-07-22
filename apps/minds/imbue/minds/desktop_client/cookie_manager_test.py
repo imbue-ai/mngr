@@ -3,6 +3,7 @@ import pytest
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.testing import make_backdated_session_cookie
 from imbue.minds.primitives import CookieSigningKey
 
 
@@ -65,3 +66,17 @@ def test_verify_session_cookie_returns_false_for_empty_value() -> None:
         signing_key=key,
     )
     assert result is False
+
+
+@pytest.mark.witnesses(
+    "authentication.sessions-unforgeable",
+    partial="unit-level: the 'tokens older than 30 days are invalid' clause via the predicate, not at the HTTP surface",
+)
+def test_verify_session_cookie_rejects_a_token_older_than_the_max_age() -> None:
+    key = CookieSigningKey("test-key-expiry-40192")
+    # A just-minted cookie from the same construction verifies, isolating age as
+    # the reason the backdated one below is rejected.
+    assert verify_session_cookie(cookie_value=make_backdated_session_cookie(key, age_seconds=0), signing_key=key) is True
+
+    expired = make_backdated_session_cookie(key, age_seconds=31 * 24 * 60 * 60)
+    assert verify_session_cookie(cookie_value=expired, signing_key=key) is False
