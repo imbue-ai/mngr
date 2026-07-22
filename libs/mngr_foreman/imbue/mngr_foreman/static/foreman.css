@@ -117,26 +117,8 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
 }
 .composer .autoscroll-btn.on { background: #2f6bff; }   /* ON = solid blue */
 .composer .autoscroll-btn:active { transform: scale(0.94); }
-/* Mobile composer: two rows. Row 1 = [+] [textarea]. Row 2 = [send] [⌄⌄ centered] [Esc],
-   so the auto-scroll toggle sits BELOW the input, in the button row, dead center. */
-@media (max-width: 620px) {
-  .composer .inner {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: end;
-    column-gap: 8px; row-gap: 8px;
-  }
-  .composer .inner .attach-btn { grid-column: 1; grid-row: 1; }
-  .composer .inner textarea    { grid-column: 2 / 4; grid-row: 1; }
-  .composer .inner #send       { grid-column: 1; grid-row: 2; justify-self: start; }
-  .composer .inner .autoscroll-btn {
-    grid-column: 2; grid-row: 2; justify-self: center;
-    position: static; right: auto; bottom: auto;   /* in flow, not the desktop float */
-    width: 46px; height: 42px; min-height: 42px;    /* match the row's button height */
-    border-radius: 0;                               /* match the flat composer buttons */
-  }
-  .composer .inner .esc-btn    { grid-column: 3; grid-row: 2; justify-self: end; }
-}
+/* Mobile placement lives in the max-width:560px composer block below (so it wins the
+   cascade against the base .composer .inner flex rule, which is later in this file). */
 
 /* ---- agent list ---- */
 .agent-list { display: flex; flex-direction: column; gap: 8px; }
@@ -493,15 +475,21 @@ button.section-head {
 /* drag-and-drop target: a file is hovering over the composer. */
 .composer.dragover { outline: 1px dashed var(--border-strong); outline-offset: -3px; }
 
-/* Small screens: the textarea takes the full width on its own row and the
-   buttons drop to a row below it (+ and Esc on the left, send on the right) --
-   bigger tap targets, no cramped single line. */
+/* Small screens: the textarea takes the full width on its own row and the buttons
+   drop to a row below it -- [+] [Esc] on the left, the auto-scroll toggle centered,
+   [send] on the right -- bigger tap targets, no cramped single line. */
 @media (max-width: 560px) {
   .composer .inner { flex-wrap: wrap; }
   .composer textarea { flex: 1 1 100%; order: 1; }
   .composer .attach-btn { order: 2; }
   .composer .esc-btn { order: 3; }
-  #send { order: 4; margin-left: auto; }
+  /* In the button row (not the desktop floating fixed button); margin auto centers it
+     between the [+ Esc] group and send. Sized to match the row's flat buttons. */
+  .composer .autoscroll-btn {
+    order: 4; position: static; right: auto; bottom: auto; margin: 0 auto;
+    width: 46px; height: 42px; min-height: 42px; border-radius: 0; z-index: auto;
+  }
+  #send { order: 5; }
 }
 .composer-blocked {
   max-width: none;
