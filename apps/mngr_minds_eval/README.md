@@ -32,7 +32,7 @@ port mappings — the CLI only makes API calls and prints https URLs.
 
 ## Setup
 
-One-time: an R2 bucket + scoped key (one `mngr imbue_cloud bucket create`) written to `~/.minds-eval/r2.env`. See [SETUP.md](SETUP.md).
+One-time: run `./setup-r2.sh` -- it creates an R2 bucket + scoped key and writes `~/.minds-eval/r2.env`. See [SETUP.md](SETUP.md).
 
 ## Commands
 
