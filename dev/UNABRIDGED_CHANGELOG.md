@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-21
+
+Add three dev skills under `.claude/skills/`:
+
+- `post-pr-to-slack`: announce this repo's PRs in `#project-minds-internal-product` with a one-line message, and mark the announcement `:merged:` when the PR merges.
+
+- `crispy-comments`: prune code comments on the current branch down to what helps future maintainers (copied from its canonical repo, which is noted in the skill).
+
+- `address-pr-comments`: apply `CLAUDE:`/`SCULPTOR:`-prefixed PR comments, and critically evaluate feedback from automated reviewers (Vet, Copilot, or any bot) against the repo's conventions and the PR's goals rather than following it blindly.
+
+Added a concise implementation plan under `blueprint/login-auth-flow-polish/` describing the Minds OAuth login-flow UX improvements (button spinner/fade, staged status messaging, raise-window-on-success, and in-page error handling).
+
+Removed the root `.minds/policies/` directory (and its `.gitignore` un-ignore block): the minds-tier Vault ACL policy text now lives in the imbue-ai/vault repo's terraform (`terraform/employee.tf` and `terraform/minds_operators.tf`), which is the single source of truth. Keeping a second copy here is what let the live policies drift from the vault repo's config in the first place.
+
+`test_no_gitignored_files_are_tracked` now skips files that are deleted in the working tree: offload sandboxes reconstruct branch state as a base commit plus an unstaged diff, which made the test misfire on commits that delete files and gitignore their path at the same time.
+
 ## 2026-07-18
 
 Fixed minor minds dev-setup papercuts:
