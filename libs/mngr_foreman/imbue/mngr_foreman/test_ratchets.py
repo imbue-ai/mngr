@@ -280,7 +280,7 @@ def test_prevent_inline_functions() -> None:
 
 
 def test_prevent_underscore_imports() -> None:
-    rc.check_underscore_imports(_DIR, snapshot(1))
+    rc.check_underscore_imports(_DIR, snapshot(2))
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:

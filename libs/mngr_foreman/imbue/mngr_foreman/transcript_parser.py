@@ -168,6 +168,18 @@ def _make_event_id(uuid: str, suffix: str) -> str:
     return f"{uuid}-{suffix}"
 
 
+def _emit(
+    new_events: list[tuple[str, dict[str, Any]]],
+    timestamp: str,
+    event: dict[str, Any],
+    session_id: str | None,
+) -> None:
+    """Stamp ``session_id`` onto ``event`` (if given) and queue it for output."""
+    if session_id is not None:
+        event["session_id"] = session_id
+    new_events.append((timestamp, event))
+
+
 def _truncate(content: str, max_chars: int) -> str:
     """Head-truncate ``content`` to ``max_chars`` (0 means unlimited)."""
     if max_chars <= 0 or len(content) <= max_chars:
@@ -431,10 +443,8 @@ def _parse_assistant_message(
         "usage": usage,
         "message_uuid": uuid,
     }
-    if session_id is not None:
-        event["session_id"] = session_id
     existing_event_ids.add(event_id)
-    new_events.append((timestamp, event))
+    _emit(new_events, timestamp, event, session_id)
 
 
 def _capped_input(tool_input: dict[str, Any], max_chars: int) -> dict[str, Any]:
@@ -476,11 +486,9 @@ def _parse_user_message(
             stripped = raw_text.strip()
             # Human-pasted images ride alongside the text in the same content list.
             paste_images = _extract_images_from_content(content, f"{uuid}-u")
-            # Fully hidden: the interrupt sentinel and Claude Code's resume marker
-            # (its own UI hides the latter, so we do too).
-            # The interrupt marker is no longer hidden -- it now renders as an
-            # "interrupted" chip (see _framework_label_and_detail). Only Claude
-            # Code's synthetic resume-continuation marker stays fully hidden.
+            # Only Claude Code's synthetic resume-continuation marker is fully hidden
+            # (its own UI hides it too); the interrupt sentinel instead renders as an
+            # "interrupted" chip (see _framework_label_and_detail).
             is_hidden = _is_resume_continuation_marker(raw)
             if (stripped or paste_images) and not is_hidden:
                 # Framework detection applies only to text-bearing messages.
@@ -511,10 +519,8 @@ def _parse_user_message(
                     }
                     if paste_images:
                         event["images"] = paste_images
-                if session_id is not None:
-                    event["session_id"] = session_id
                 existing_event_ids.add(event_id)
-                new_events.append((timestamp, event))
+                _emit(new_events, timestamp, event, session_id)
 
     # Emit tool result events for any tool_result blocks.
     if isinstance(content, list):
@@ -562,10 +568,8 @@ def _parse_user_message(
             }
             if images:
                 event["images"] = images
-            if session_id is not None:
-                event["session_id"] = session_id
             existing_event_ids.add(event_id)
-            new_events.append((timestamp, event))
+            _emit(new_events, timestamp, event, session_id)
 
 
 def _make_queue_event_id(timestamp: str, key: str, prefix: str) -> str:
@@ -610,7 +614,16 @@ def _parse_queue_operation(
     if op == "enqueue":
         if not key:
             return
-        queue_state.append({"key": key, "text": text})
+        # A framework message delivered THROUGH the queue while the agent is busy (a
+        # <task-notification>/<system-reminder> the harness injects) already renders as
+        # a collapsed chip when its real record arrives -- don't ALSO draw it as a raw
+        # queued user bubble, that's the duplicate "spam". Start-anchored so a real user
+        # message that merely quotes such a tag is still shown. Tracked in queue_state
+        # regardless so the FIFO dequeue/accept below stays aligned with Claude's queue.
+        is_framework = _framework_label_and_detail(raw, text) is not None
+        queue_state.append({"key": key, "text": text, "framework": is_framework})
+        if is_framework:
+            return
         event_id = _make_queue_event_id(timestamp, key, "enq")
         if event_id in existing_event_ids:
             return
@@ -624,9 +637,7 @@ def _parse_queue_operation(
             "content": text,
             "queued": True,
         }
-        if session_id is not None:
-            event["session_id"] = session_id
-        new_events.append((timestamp, event))
+        _emit(new_events, timestamp, event, session_id)
     elif op in ("remove", "dequeue"):
         # Accepted: the model now sees this message. `remove` names it; the
         # interrupt-path `dequeue` carries no content, so pop the FIFO head.
@@ -640,6 +651,8 @@ def _parse_queue_operation(
             popped = queue_state.pop(0)
         if popped is None:
             return
+        if popped.get("framework"):
+            return  # no bubble was ever drawn for it -> nothing to mark accepted
         event_id = _make_queue_event_id(timestamp, popped["key"], "acc")
         if event_id in existing_event_ids:
             return
@@ -650,14 +663,14 @@ def _parse_queue_operation(
             "event_id": event_id,
             "key": popped["key"],
         }
-        if session_id is not None:
-            accepted["session_id"] = session_id
-        new_events.append((timestamp, accepted))
+        _emit(new_events, timestamp, accepted, session_id)
     elif op == "popAll":
         # The whole queue was yanked back into the editor (the user is editing a
         # queued message); drop every pending bubble. Edited text re-arrives as a
         # fresh enqueue.
         for i, item in enumerate(list(queue_state)):
+            if item.get("framework"):
+                continue  # never rendered a bubble -> nothing to remove
             event_id = _make_queue_event_id(timestamp, item["key"], f"rm{i}")
             if event_id in existing_event_ids:
                 continue
@@ -668,9 +681,7 @@ def _parse_queue_operation(
                 "event_id": event_id,
                 "key": item["key"],
             }
-            if session_id is not None:
-                removed["session_id"] = session_id
-            new_events.append((timestamp, removed))
+            _emit(new_events, timestamp, removed, session_id)
         queue_state.clear()
 
 
@@ -723,7 +734,5 @@ def _parse_queued_command_attachment(
     }
     if images:
         event["images"] = images
-    if session_id is not None:
-        event["session_id"] = session_id
     existing_event_ids.add(event_id)
-    new_events.append((timestamp, event))
+    _emit(new_events, timestamp, event, session_id)

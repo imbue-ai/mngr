@@ -136,6 +136,20 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
 .chip.waiting { color: var(--chip-wait); border-color: #3a3016; }
 .chip.stopped, .chip.done, .chip.replaced { color: var(--chip-stop); }
 .empty, .loading { color: var(--fg-faint); padding: 30px 0; text-align: center; }
+/* home-card live status dot: WORKING/NEEDS INPUT/READY from input-state polling.
+   Same colours as the chat page (green/amber/dim) + the shared working-pulse. */
+.agent-card .status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex: none;
+  background: var(--chip-stop); /* unknown / not-running: dim */
+}
+.agent-card .status-dot.ready { background: var(--chip-stop); }
+.agent-card .status-dot.needs-input { background: var(--chip-wait); }
+.agent-card .status-dot.working {
+  background: var(--chip-run);
+  animation: working-pulse 1.1s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .agent-card .status-dot.working { animation: none; } }
 
 /* ---- transcript ---- */
 .transcript { padding-bottom: 120px; }
@@ -631,6 +645,12 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
 }
 .ctrlbar button:active { background: var(--accent); color: #000; }
 .ctrlbar button.paste { color: var(--accent); }
+/* Select mode ON: same solid highlight as an active press, but sticky. */
+.ctrlbar button.selmode.active { background: var(--accent); color: #000; }
+/* Desktop-only reminder of the Shift/Option bypass (no room / no need on
+   narrow screens, where the Select button is the only option anyway). */
+.ctrl-hint { flex: 0 0 auto; align-self: center; color: var(--fg-faint); font-size: 11px; padding: 0 6px; white-space: nowrap; }
+@media (max-width: 560px) { .ctrl-hint { display: none; } }
 
 #term {
   position: fixed;
@@ -639,6 +659,9 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
   background: var(--bg-inset);
 }
 #term .xterm { height: 100%; }
+/* Select mode ON: outline the pane so it's obvious touches are selecting, not
+   reaching the app underneath. */
+#term.selecting { outline: 2px dashed var(--accent); outline-offset: -2px; }
 
 /* paste fallback popover (clipboard API blocked on insecure origins) */
 .paste-popover {

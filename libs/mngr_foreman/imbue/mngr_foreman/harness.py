@@ -80,27 +80,24 @@ def _common_transcript_subpath(agent_type: str) -> str:
     return f"events/{agent_type}/common_transcript/events.jsonl"
 
 
+# Agent types that share the one common-transcript envelope + parser (see class
+# docstring point 2); each just needs its own subpath.
+_COMMON_TRANSCRIPT_AGENT_TYPES: Final[tuple[str, ...]] = ("codex", "opencode", "pi-coding")
+
 _STRATEGIES: Final[dict[str, TranscriptStrategy]] = {
     "claude": TranscriptStrategy(
         subpath=TRANSCRIPT_SUBPATH,
         parse=parse_claude_session_lines,
         uses_pane_dialog_detection=True,
     ),
-    "codex": TranscriptStrategy(
-        subpath=_common_transcript_subpath("codex"),
-        parse=parse_common_transcript_lines,
-        uses_pane_dialog_detection=False,
-    ),
-    "opencode": TranscriptStrategy(
-        subpath=_common_transcript_subpath("opencode"),
-        parse=parse_common_transcript_lines,
-        uses_pane_dialog_detection=False,
-    ),
-    "pi-coding": TranscriptStrategy(
-        subpath=_common_transcript_subpath("pi-coding"),
-        parse=parse_common_transcript_lines,
-        uses_pane_dialog_detection=False,
-    ),
+    **{
+        agent_type: TranscriptStrategy(
+            subpath=_common_transcript_subpath(agent_type),
+            parse=parse_common_transcript_lines,
+            uses_pane_dialog_detection=False,
+        )
+        for agent_type in _COMMON_TRANSCRIPT_AGENT_TYPES
+    },
 }
 
 

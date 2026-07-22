@@ -83,13 +83,11 @@ def waiting_reason_of(agent: AgentDetails) -> str | None:
 
 
 def is_permissions_blocked(agent: AgentDetails) -> bool:
-    """True if mngr already knows the agent is blocked on a permission dialog.
+    """True if mngr's ``waiting_reason`` field reports a permission dialog.
 
-    A free, pane-less signal (``waiting_reason == PERMISSIONS``): the
-    permissions_waiting marker is set during a live turn. For claude it is OR'd
-    with the pane ``❯`` rule so a permission prompt greys the composer even
-    before / without a capture; for codex and opencode (which run no other blocking
-    menus) it is the sole needs-input signal.
+    The free, pane-less signal described in the module docstring. For claude it
+    is OR'd with the pane ``❯`` rule; for codex and opencode, which drive no other
+    blocking dialog, it is the sole needs-input signal.
     """
     reason = waiting_reason_of(agent)
     return reason is not None and "PERMISSIONS" in reason

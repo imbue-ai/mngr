@@ -42,16 +42,11 @@ from typing import Final
 
 from loguru import logger
 
+from imbue.mngr_foreman.transcript_parser import _truncate
+
 # The common-transcript record types foreman renders. Any other line (an unknown
 # future record type, or a malformed one) is skipped rather than emitted.
 _RENDERED_RECORD_TYPES: Final[frozenset[str]] = frozenset({"user_message", "assistant_message", "tool_result"})
-
-
-def _truncate(content: str, max_chars: int) -> str:
-    """Cap ``content`` to ``max_chars`` (0 = unlimited), appending an ellipsis when clipped."""
-    if max_chars <= 0 or len(content) <= max_chars:
-        return content
-    return content[:max_chars] + "..."
 
 
 def parse_common_transcript_lines(

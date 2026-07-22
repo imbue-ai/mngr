@@ -12,6 +12,7 @@ import json
 import shlex
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -94,10 +95,8 @@ def _read_static(rel_path: str, asset_dir: Path | None) -> tuple[bytes, str] | N
     neither cached nor packaged returns None (404) -- the frontend degrades.
     """
     # Guard against path traversal: only allow simple forward-slashed names.
-    if rel_path.startswith("/") or ".." in rel_path.split("/"):
-        return None
     parts = [p for p in rel_path.split("/") if p]
-    if not parts:
+    if rel_path.startswith("/") or not parts or ".." in parts:
         return None
     if parts[0] == "vendor" and asset_dir is not None and len(parts) > 1:
         cached = asset_dir.joinpath(*parts[1:])
@@ -145,6 +144,33 @@ def _sse(event_dict: dict) -> str:
     return f"data: {json.dumps(event_dict)}\n\n"
 
 
+def _not_found() -> Response:
+    return Response("Not found", status=404, mimetype="text/plain")
+
+
+def _typed_response(data: bytes, content_type: str, headers: dict[str, str] | None = None) -> Response:
+    """A Response with ``mimetype`` split from a ``type/subtype[; params]`` string."""
+    return Response(data, mimetype=content_type.split(";")[0], content_type=content_type, headers=headers)
+
+
+def _error(message: str, status: int) -> ResponseReturnValue:
+    return jsonify({"ok": False, "error": message}), status
+
+
+@contextmanager
+def _thread_hub_cleanup() -> Iterator[None]:
+    """Destroy this thread's gevent Hub when the wrapped block exits.
+
+    SSE generators and WS handlers run for the life of the connection on their own
+    thread and pop their request context early, so ``app.teardown_request`` (which
+    handles this for ordinary requests) never fires for them.
+    """
+    try:
+        yield
+    finally:
+        cleanup_thread_local_resources()
+
+
 def create_app(
     mngr_ctx: MngrContext,
     registry: AgentRegistry,
@@ -179,7 +205,7 @@ def create_app(
     # can't pile up (which eventually pushes fd numbers past select()'s 1024 cap
     # and breaks terminals). No-op on threads that never touched gevent. Streaming
     # SSE generators and WS handlers pop their request context early, so they clean
-    # up in their own finally blocks instead (see below); this covers the rest.
+    # up via _thread_hub_cleanup instead (see below); this covers the rest.
     @app.teardown_request
     def _cleanup_thread_hub(_exc: BaseException | None) -> None:
         cleanup_thread_local_resources()
@@ -219,7 +245,7 @@ def create_app(
     def _serve_static_or_404(rel_path: str) -> Response:
         result = _read_static(rel_path, asset_dir)
         if result is None:
-            return Response("Not found", status=404, mimetype="text/plain")
+            return _not_found()
         data, content_type = result
         headers: dict[str, str] = {}
         # Vendored libs are pinned/versioned -> cache hard (the 3-4MB one-time cost
@@ -236,7 +262,7 @@ def create_app(
             data = gzip.compress(data, 6)
             headers["Content-Encoding"] = "gzip"
             headers["Vary"] = "Accept-Encoding"
-        return Response(data, mimetype=content_type.split(";")[0], content_type=content_type, headers=headers)
+        return _typed_response(data, content_type, headers)
 
     # ---- agent list -------------------------------------------------------
 
@@ -247,11 +273,9 @@ def create_app(
     @app.route("/api/agents/stream")
     def api_agents_stream() -> Response:
         def generate() -> Iterator[str]:
-            try:
+            with _thread_hub_cleanup():
                 for message in registry.subscribe():
                     yield _sse(message)
-            finally:
-                cleanup_thread_local_resources()  # destroy this thread's gevent Hub
 
         return Response(generate(), mimetype="text/event-stream", headers=_sse_headers())
 
@@ -285,14 +309,12 @@ def create_app(
         # Serve a large transcript image that was externalized out of its SSE
         # frame. Bytes come from the in-memory cache keyed by the parser's id.
         if not image_id or any(c not in _SAFE_IMAGE_ID_CHARS for c in image_id):
-            return Response("Not found", status=404, mimetype="text/plain")
+            return _not_found()
         cached = get_cached_image(image_id)
         if cached is None:
-            return Response("Not found", status=404, mimetype="text/plain")
+            return _not_found()
         media_type, raw = cached
-        return Response(
-            raw, mimetype=media_type.split(";")[0], content_type=media_type, headers={"Cache-Control": "no-cache"}
-        )
+        return _typed_response(raw, media_type, {"Cache-Control": "no-cache"})
 
     # ---- send message -----------------------------------------------------
 
@@ -301,14 +323,14 @@ def create_app(
         payload = request.get_json(silent=True) or {}
         message = payload.get("message", "")
         if not isinstance(message, str) or not message.strip():
-            return jsonify({"ok": False, "error": "Message is empty"}), 400
+            return _error("Message is empty", 400)
         try:
             send_message_to_agent(pool, name, message)
         except MessageSendError as e:
             # A blocking TUI dialog (permission / login) lands here -- surface it
             # so the UI can hint at the terminal page (phase 2).
             logger.info("Message to {} failed: {}", name, e)
-            return jsonify({"ok": False, "error": str(e)}), 502
+            return _error(str(e), 502)
         return jsonify({"ok": True})
 
     @app.route("/api/agents/<name>/input-state")
@@ -355,7 +377,7 @@ def create_app(
             send_interrupt_to_agent(mngr_ctx, name)
         except InterruptError as e:
             logger.info("Interrupt of {} failed: {}", name, e)
-            return jsonify({"ok": False, "error": str(e)}), 502
+            return _error(str(e), 502)
         return jsonify({"ok": True})
 
     # ---- attachments ------------------------------------------------------
@@ -365,35 +387,30 @@ def create_app(
         # Multipart: the file plus the client-generated "<uuid>.<ext>" name. We
         # write it to <agent work_dir>/chat_uploads/ on the agent's host.
         if registry.get_agent(name) is None:
-            return jsonify({"ok": False, "error": f"No agent named {name!r}"}), 404
+            return _error(f"No agent named {name!r}", 404)
         upload = request.files.get("file")
         stored_name = (request.form.get("filename") or "").strip()
         if upload is None or not stored_name:
-            return jsonify({"ok": False, "error": "missing file or filename"}), 400
+            return _error("missing file or filename", 400)
         try:
             path = write_upload(pool, name, stored_name, upload.read())
         except UploadError as e:
             logger.info("Upload to {} failed: {}", name, e)
-            return jsonify({"ok": False, "error": str(e)}), 400
+            return _error(str(e), 400)
         return jsonify({"ok": True, "path": path})
 
     @app.route("/api/agents/<name>/upload/<stored_name>", methods=["GET"])
     def api_get_upload(name: str, stored_name: str) -> ResponseReturnValue:
         # Serve an uploaded file's bytes back for inline rendering (image chips).
         if registry.get_agent(name) is None:
-            return Response("Not found", status=404, mimetype="text/plain")
+            return _not_found()
         try:
             data = read_upload(pool, name, stored_name)
         except UploadNotFound:
-            return Response("Not found", status=404, mimetype="text/plain")
+            return _not_found()
         except UploadError as e:
-            return jsonify({"ok": False, "error": str(e)}), 400
-        return Response(
-            data,
-            mimetype=content_type_for_name(stored_name).split(";")[0],
-            content_type=content_type_for_name(stored_name),
-            headers={"Cache-Control": "no-cache"},
-        )
+            return _error(str(e), 400)
+        return _typed_response(data, content_type_for_name(stored_name), {"Cache-Control": "no-cache"})
 
     @app.route("/api/agents/<name>/upload/<stored_name>", methods=["DELETE"])
     def api_delete_upload(name: str, stored_name: str) -> ResponseReturnValue:
@@ -401,41 +418,32 @@ def create_app(
             delete_upload(pool, name, stored_name)
         except UploadError as e:
             logger.info("Upload delete for {} failed: {}", name, e)
-            return jsonify({"ok": False, "error": str(e)}), 400
+            return _error(str(e), 400)
         return jsonify({"ok": True})
 
     # ---- terminal websocket ----------------------------------------------
 
-    # Each WS handler runs on its own per-connection thread and touches SSH while
-    # building the terminal, so it leaves a thread-local gevent Hub that must be
-    # destroyed when the connection ends (teardown_request doesn't fire for these).
+    # Each WS handler touches SSH while building the terminal, on its own
+    # per-connection thread -- see _thread_hub_cleanup.
     @sock.route("/ws/agents/<name>/terminal")
     def terminal_ws(ws: object, name: str) -> None:
         # Bridge the socket to the agent's tmux (direct ssh, mngr-connect fallback).
-        try:
+        with _thread_hub_cleanup():
             handle_terminal_ws(ws, name, pool)
-        finally:
-            cleanup_thread_local_resources()
 
     @sock.route("/ws/hosts/<host>/terminal")
     def host_shell_ws(ws: object, host: str) -> None:
         # A plain login shell on a known host (resolved via any agent on it).
-        # Resolve to any agent on this host; handle_host_shell_ws closes the ws
-        # itself if the host can't be reached, so a missing agent is the only case
-        # we short-circuit here (pass a sentinel the handler treats as unavailable).
-        try:
-            agent_name = _first_agent_on_host(host) or ""
-            handle_host_shell_ws(ws, agent_name, host, pool)
-        finally:
-            cleanup_thread_local_resources()
+        # handle_host_shell_ws closes the ws itself if the host can't be reached,
+        # so a missing agent is passed through as an empty sentinel.
+        with _thread_hub_cleanup():
+            handle_host_shell_ws(ws, _first_agent_on_host(host) or "", host, pool)
 
     @sock.route("/ws/terminal")
     def orchestrator_ws(ws: object) -> None:
         # Bridge the socket to a plain `bash -l` on the foreman server machine.
-        try:
+        with _thread_hub_cleanup():
             handle_orchestrator_ws(ws)
-        finally:
-            cleanup_thread_local_resources()
 
     def _first_agent_on_host(host_name: str) -> str | None:
         for card in registry.snapshot():
@@ -506,13 +514,8 @@ def _transcript_stream(
     pool: ConnectionPool,
 ) -> Iterator[str]:
     """SSE generator: full backfill, then live events, with periodic heartbeats."""
-    try:
+    with _thread_hub_cleanup():
         yield from _transcript_stream_inner(agent, strategy, max_tool_output_chars, pool)
-    finally:
-        # This generator runs for the whole connection on its own thread and pops
-        # its request context early, so teardown_request won't fire for it: destroy
-        # its thread-local gevent Hub here when the client disconnects.
-        cleanup_thread_local_resources()
 
 
 def _transcript_stream_inner(

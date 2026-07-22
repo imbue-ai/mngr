@@ -81,10 +81,17 @@ def _control_master_opts() -> list[str]:
     ]
 
 
-def _ssh_env() -> dict[str, str]:
+def _child_env() -> dict[str, str]:
+    """Base env for a forked child: no TMUX (a foreman server inside tmux must not
+    nest-attach) and a default TERM."""
     env = dict(os.environ)
-    env.pop("TMUX", None)  # a foreman server inside tmux must not nest-attach
+    env.pop("TMUX", None)
     env.setdefault("TERM", "xterm-256color")
+    return env
+
+
+def _ssh_env() -> dict[str, str]:
+    env = _child_env()
     # kitty's TERM isn't known on remote hosts; fall back like mngr connect does.
     if env.get("TERM") == "xterm-kitty":
         env["TERM"] = "xterm-256color"
@@ -207,10 +214,7 @@ def _spawn_connect_pty(agent_name: str) -> tuple[int, int]:
     child_pid, master_fd = pty.fork()
     if child_pid == 0:
         # --- child ---
-        env = dict(os.environ)
-        # Strip TMUX so `tmux attach` does not refuse a nested attach.
-        env.pop("TMUX", None)
-        env.setdefault("TERM", "xterm-256color")
+        env = _child_env()
         mngr_binary = resolve_mngr_binary()
         try:
             os.execvpe(mngr_binary, [mngr_binary, "connect", agent_name], env)
@@ -276,9 +280,7 @@ def _spawn_bash_pty() -> tuple[int, int]:
     child_pid, master_fd = pty.fork()
     if child_pid == 0:
         # --- child ---
-        env = dict(os.environ)
-        env.pop("TMUX", None)
-        env.setdefault("TERM", "xterm-256color")
+        env = _child_env()
         try:
             os.execvpe("bash", ["bash", "-l"], env)
         except OSError:

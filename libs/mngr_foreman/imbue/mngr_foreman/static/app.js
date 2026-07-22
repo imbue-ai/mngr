@@ -206,16 +206,24 @@
   // Prefix the tab title with the agent's live state so background tabs show
   // status at a glance. Mapping: blocked (dialog/permissions) -> NEEDS INPUT,
   // busy/RUNNING -> WORKING, otherwise (running & idle) -> WAITING.
+  // Reduce a live input-state read to the three-state status shown in tab titles
+  // AND on the home-screen cards. "" = not running / unknown. Single source of
+  // truth so home and chat never drift.
+  function statusKey(d) {
+    if (!d || !d.running) return "";
+    // Three clean states from the backend's live-pane read (status), with a
+    // blocked/busy fallback for older responses.
+    const s = d.status;
+    if (s === "NEEDS_INPUT" || (!s && d.blocked)) return "NEEDS_INPUT";
+    if (s === "WORKING" || (!s && d.busy)) return "WORKING";
+    return "READY";
+  }
   function statusTitle(d, base) {
-    let prefix = "";
-    if (d && d.running) {
-      // Three clean states from the backend's live-pane read (status), with a
-      // blocked/busy fallback for older responses.
-      const s = d.status;
-      if (s === "NEEDS_INPUT" || (!s && d.blocked)) prefix = "[NEEDS INPUT] ";
-      else if (s === "WORKING" || (!s && d.busy)) prefix = "[WORKING] ";
-      else prefix = "[READY] ";
-    }
+    const k = statusKey(d);
+    const prefix =
+      k === "NEEDS_INPUT" ? "[NEEDS INPUT] " :
+      k === "WORKING" ? "[WORKING] " :
+      k === "READY" ? "[READY] " : "";
     return prefix + base;
   }
 
@@ -272,7 +280,11 @@
     function cardEl(a) {
       const card = el("a", "agent-card");
       card.href = "/a/" + encodeURIComponent(a.name);
+      card.dataset.name = a.name; // read back by the shared status poller
       const row1 = el("div", "row1");
+      // Live WORKING/NEEDS INPUT/READY dot (from input-state polling), same signal
+      // + colours as the chat page. Starts dim; the poller fills it in.
+      row1.appendChild(el("span", "status-dot", ""));
       row1.appendChild(el("span", "name", a.name));
       row1.appendChild(el("span", "chip " + stateClass(a.state), a.state));
       card.appendChild(row1);
@@ -299,7 +311,28 @@
         return;
       }
       agents.forEach((a) => listEl.appendChild(cardEl(a)));
+      pollStatuses(); // populate the new cards' dots right away, don't wait a tick
     }
+
+    // Live status dots: one shared interval, one input-state fetch per visible
+    // card. The card DOM is the source of truth for "which cards are live" -- a
+    // card that left the set (renderAll wiped + rebuilt) is simply no longer in
+    // this query, so its polling stops with no per-card bookkeeping/leak.
+    function pollStatuses() {
+      listEl.querySelectorAll(".agent-card").forEach((card) => {
+        const name = card.dataset.name;
+        if (!name) return;
+        fetch("/api/agents/" + encodeURIComponent(name) + "/input-state")
+          .then((r) => r.json())
+          .then((d) => {
+            const dot = card.querySelector(".status-dot");
+            // reuse statusKey (== the chat page's mapping); "" -> dim/unknown.
+            if (dot) dot.className = "status-dot " + statusKey(d).toLowerCase().replace("_", "-");
+          })
+          .catch(() => {});
+      });
+    }
+    setInterval(pollStatuses, 4000);
 
     let pollTimer = null;
     function startPolling() {
@@ -1406,6 +1439,13 @@
       fontFamily: '"Atkinson Hyperlegible Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 13,
       theme: { background: "#000000", foreground: "#ffffff" },
+      // xterm's own bypass for "app has mouse tracking on, plain drag goes to
+      // the app instead of making a selection": holding a modifier during the
+      // drag forces a local selection instead (SelectionService.shouldForceSelection).
+      // Non-Mac checks Shift unconditionally; on Mac it checks Option/Alt but
+      // ONLY if this option is on (off by default) -- so this is required for
+      // Option+drag-to-select to do anything on a Mac.
+      macOptionClickForcesSelection: true,
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
@@ -1507,6 +1547,7 @@
           e.preventDefault();
           const key = btn.getAttribute("data-seq");
           if (key === "paste") { doPaste(); return; }
+          if (key === "selmode") { setSelectMode(!selectMode); return; }
           const seq = CTRL_SEQ[key];
           if (seq) wsSend(seq);
           // Don't yank focus back to the hidden xterm textarea on touch -- that
@@ -1588,6 +1629,55 @@
     if (termElForCopy) {
       termElForCopy.addEventListener("mouseup", copySelection);
       termElForCopy.addEventListener("touchend", copySelection);
+    }
+
+    // ---- mobile "Select" mode: drag-select while the TUI has mouse tracking on ----
+    // Desktop gets this for free: xterm's SelectionService forces a local selection
+    // (instead of reporting the drag to the pty) whenever the drag is held with
+    // Shift (any OS) or Option (Mac, via macOptionClickForcesSelection above) --
+    // see the "Shift+drag to select" ctrlbar hint. Touch has no modifier key, so
+    // the Select button retargets raw touch coordinates into the SAME
+    // forced-modifier synthetic mouse events, reusing xterm's own selection +
+    // drag-autoscroll instead of reimplementing hit-testing. While off, touch
+    // behaves exactly as before (forwarded to the pane).
+    let selectMode = false;
+    const selBtn = bar && bar.querySelector('[data-seq="selmode"]');
+    function setSelectMode(on) {
+      selectMode = on;
+      if (selBtn) selBtn.classList.toggle("active", on);
+      if (termElForCopy) termElForCopy.classList.toggle("selecting", on);
+    }
+    function synthMouse(type, touch) {
+      const target = term.element || termElForCopy;
+      if (!target) return;
+      target.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, view: window,
+        clientX: touch.clientX, clientY: touch.clientY,
+        button: 0, buttons: type === "mouseup" ? 0 : 1,
+        shiftKey: true, altKey: true, // force-selection bypass on every platform at once
+      }));
+    }
+    if (termElForCopy) {
+      termElForCopy.addEventListener("touchstart", (e) => {
+        if (!selectMode || e.touches.length !== 1) return;
+        e.preventDefault();
+        synthMouse("mousedown", e.touches[0]);
+      }, { passive: false });
+      termElForCopy.addEventListener("touchmove", (e) => {
+        if (!selectMode || e.touches.length !== 1) return;
+        e.preventDefault();
+        synthMouse("mousemove", e.touches[0]);
+      }, { passive: false });
+      termElForCopy.addEventListener("touchend", (e) => {
+        if (!selectMode) return;
+        e.preventDefault();
+        const t = e.changedTouches[0];
+        // Final mousemove pins the exact lift-off point before mouseup finalizes
+        // the selection; the mouseup then bubbles into the mouseup->copySelection
+        // listener above (the pre-existing touchend->copySelection listener also
+        // still fires right after -- harmless, copySelection() is idempotent).
+        if (t) { synthMouse("mousemove", t); synthMouse("mouseup", t); }
+      }, { passive: false });
     }
 
     // Ctrl+Shift+V pastes (mirrors the Paste button); the shell keeps plain Ctrl+V.

@@ -93,6 +93,10 @@ def sanitize_stored_name(name: str) -> str:
     return name
 
 
+def _remote_upload_path(agent: AgentInterface, stored_name: str) -> Path:
+    return agent.work_dir / UPLOAD_DIR_NAME / stored_name
+
+
 def write_upload(pool: ConnectionPool, agent_name: str, stored_name: str, data: bytes) -> str:
     """Write ``data`` to ``<work_dir>/chat_uploads/<stored_name>`` on the agent host.
 
@@ -106,7 +110,7 @@ def write_upload(pool: ConnectionPool, agent_name: str, stored_name: str, data: 
 
     def _write(agent: AgentInterface, host: OnlineHostInterface) -> None:
         # write_file writes bytes verbatim (binary-safe) and creates parent dirs.
-        host.write_file(agent.work_dir / UPLOAD_DIR_NAME / safe, data)
+        host.write_file(_remote_upload_path(agent, safe), data)
 
     try:
         pool.run_on_host(agent_name, _write)
@@ -144,7 +148,7 @@ def read_upload(pool: ConnectionPool, agent_name: str, stored_name: str) -> byte
         return cached[1]
 
     def _read(agent: AgentInterface, host: OnlineHostInterface) -> bytes:
-        return host.read_file(agent.work_dir / UPLOAD_DIR_NAME / safe)
+        return host.read_file(_remote_upload_path(agent, safe))
 
     try:
         data = pool.run_on_host(agent_name, _read)
@@ -160,7 +164,7 @@ def delete_upload(pool: ConnectionPool, agent_name: str, stored_name: str) -> No
     _SERVE_CACHE.pop((agent_name, safe), None)
 
     def _rm(agent: AgentInterface, host: OnlineHostInterface) -> Any:
-        return host.execute_stateful_command(f"rm -f {shlex.quote(str(agent.work_dir / UPLOAD_DIR_NAME / safe))}")
+        return host.execute_stateful_command(f"rm -f {shlex.quote(str(_remote_upload_path(agent, safe)))}")
 
     result = pool.run_on_host(agent_name, _rm)
     if not result.success:

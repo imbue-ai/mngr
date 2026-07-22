@@ -115,11 +115,7 @@ class ConnectionPool:
 
     def _handle_for(self, agent_name: str) -> _Handle:
         with self._lock:
-            handle = self._handles.get(agent_name)
-            if handle is None:
-                handle = _Handle()
-                self._handles[agent_name] = handle
-            return handle
+            return self._handles.setdefault(agent_name, _Handle())
 
     def _get_executor(self) -> ThreadPoolExecutor:
         """Return the pool's persistent keepalive executor, creating it on first use.
@@ -136,13 +132,8 @@ class ConnectionPool:
 
     def _host_lock_for(self, host: OnlineHostInterface) -> threading.Lock:
         """Return the lock that serializes all commands to ``host``'s connection."""
-        key = id(host)
         with self._lock:
-            lock = self._host_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._host_locks[key] = lock
-            return lock
+            return self._host_locks.setdefault(id(host), threading.Lock())
 
     def invalidate(self, agent_name: str) -> None:
         """Forget a cached handle so the next access re-resolves (e.g. after error)."""
@@ -262,9 +253,7 @@ class ConnectionPool:
         live_names = {card["name"] for card in self._registry.snapshot()}
         # Drop handles for agents that have left the live set (gone -> dropped).
         with self._lock:
-            for name in list(self._handles):
-                if name not in live_names:
-                    self._handles.pop(name, None)
+            self._handles = {name: h for name, h in self._handles.items() if name in live_names}
         if not live_names:
             return
         # Warm agents concurrently on the persistent executor: each SSH touch is
