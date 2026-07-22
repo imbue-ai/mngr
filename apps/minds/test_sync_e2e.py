@@ -648,7 +648,9 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
         link = page.query_selector(download_selector)
         return True if link is not None else None
 
-    _wait_until(f"the backup Download link for {agent_id} on settings", _DOWNLOAD_LINK_TIMEOUT_SECONDS, download_visible)
+    _wait_until(
+        f"the backup Download link for {agent_id} on settings", _DOWNLOAD_LINK_TIMEOUT_SECONDS, download_visible
+    )
 
     # The route keys the zip by the workspace's host id, falling back to the
     # agent id when local discovery does not know the workspace -- which is
