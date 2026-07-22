@@ -1,4 +1,4 @@
-{#def accounts, default_account_id, enabled_by_user_id, plan_view_by_user_id={}, plan_error="", trim_status_by_user_id={}, is_any_trim_running=False #}
+{#def accounts, default_account_id, enabled_by_user_id, plan_error="" #}
 {#
   Manage accounts page. Lists each signed-in account with its
   workspace count, default-account marker, per-account
@@ -11,12 +11,12 @@
   in sessions.json) but the user disabled the block via the providers
   panel.
 
-  plan_view_by_user_id maps user_id -> the view model from
-  build_account_plan_view (plan_name, available_plans, usage_rows), or
-  None when the connector could not be reached -- usage numbers are
-  computed live server-side on every page load. plan_error carries the
-  reason a plan switch was refused (e.g. ally requires partner access);
-  switching to an ineligible plan simply errors with that reason.
+  The plan/usage section renders as a loading placeholder and is filled
+  in asynchronously by accounts.js from GET /accounts/<user_id>/plan-view
+  (see AccountPlanSection.jinja) -- computing live usage takes a connector
+  round trip per account, so it must not block the page render. plan_error
+  carries the reason a plan switch was refused (e.g. ally requires partner
+  access); switching to an ineligible plan simply errors with that reason.
 
   The per-machine error-reporting toggles live on the dedicated Settings
   page (reachable from the sidebar), not here -- they are global to the
@@ -24,9 +24,7 @@
 #}
 {% set _scripts %}
 <script src="/_static/sync_status_banner.js" defer></script>
-{% if is_any_trim_running %}
-<script>setTimeout(function () { window.location.reload(); }, 4000);</script>
-{% endif %}
+<script src="/_static/accounts.js" defer></script>
 {% endset %}
 <Base title="Manage Accounts" scripts={{ _scripts }}>
   <PageContainer>
@@ -40,7 +38,6 @@
       <div class="flex flex-col gap-2">
       {% for acct in accounts %}
         {% set acct_enabled = enabled_by_user_id.get(acct.user_id | string, True) %}
-        {% set plan_view = plan_view_by_user_id.get(acct.user_id | string) %}
         <Card>
           <div class="flex items-center justify-between">
             <div>
@@ -73,56 +70,11 @@
             </div>
           </div>
 
-          {% if plan_view %}
-            <div class="mt-3 pt-3 border-t border-default">
-              <div class="flex items-center justify-between mb-2">
-                <div class="type-label text-secondary">
-                  Plan: <span class="font-semibold text-primary">{{ plan_view.plan_display_name }}</span>
-                </div>
-                {% if plan_view.available_plans | length > 1 %}
-                  <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/plan" }} class="flex items-center gap-2">
-                    <select name="plan" class="rounded-md border border-default bg-surface px-2 py-1 type-label">
-                      {% for plan in plan_view.available_plans %}
-                        <option value="{{ plan }}"{% if plan == plan_view.plan_name %} selected{% endif %}>{{ plan | capitalize }}</option>
-                      {% endfor %}
-                    </select>
-                    <ButtonSubmit variant="secondary">Switch plan</ButtonSubmit>
-                  </form>
-                {% endif %}
-              </div>
-              <table class="w-full type-helper">
-                <tbody>
-                  {% for row in plan_view.usage_rows %}
-                    <tr>
-                      <td class="py-0.5 pr-4 text-secondary">{{ row.label }}</td>
-                      <td class="py-0.5 pr-4 text-primary whitespace-nowrap">{{ row.used }} of {{ row.limit }}</td>
-                      <td class="py-0.5 text-tertiary">{{ row.note }}</td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-              {% set trim_status = trim_status_by_user_id.get(acct.user_id | string) %}
-              {% set is_trim_running = trim_status and trim_status.is_running %}
-              {% if plan_view.is_over_storage_quota or trim_status %}
-                <div class="mt-2 flex items-center gap-3">
-                  {% if plan_view.is_over_storage_quota and not is_trim_running %}
-                    <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/trim-backups" }}>
-                      <ButtonSubmit variant="secondary">Free up backup space</ButtonSubmit>
-                    </form>
-                  {% endif %}
-                  {% if trim_status %}
-                    <span class="type-helper text-tertiary">{{ trim_status.detail }}</span>
-                  {% elif plan_view.is_over_storage_quota %}
-                    <span class="type-helper text-tertiary">Removes the oldest backups (each workspace keeps its latest) until you are back under the limit.</span>
-                  {% endif %}
-                </div>
-              {% endif %}
+          <div class="mt-3 pt-3 border-t border-default" data-plan-section data-user-id="{{ acct.user_id }}">
+            <div class="flex items-center gap-2 type-helper text-tertiary">
+              <Spinner size="sm" /> Loading plan and usage&hellip;
             </div>
-          {% else %}
-            <div class="mt-3 pt-3 border-t border-default type-helper text-tertiary">
-              Plan and usage are unavailable right now (could not reach Imbue Cloud).
-            </div>
-          {% endif %}
+          </div>
         </Card>
       {% endfor %}
       </div>

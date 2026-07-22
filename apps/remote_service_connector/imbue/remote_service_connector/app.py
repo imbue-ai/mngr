@@ -12,6 +12,7 @@ This keeps deployment simple: `modal deploy app.py` ships just this file.
 
 import base64
 import binascii
+import concurrent.futures
 import contextlib
 import functools
 import hashlib
@@ -4409,6 +4410,38 @@ def _owned_bucket_exists(ops: CloudflareOps, username: str, full_name: str) -> b
     return any(b.get("name") == full_name for b in _list_owned_buckets(ops, username))
 
 
+# Bound on simultaneous per-bucket usage REST calls. Reads were previously
+# sequential, which made every live-usage measurement O(bucket_count) in
+# Cloudflare round trips (~0.45s each -- ~19s for a 42-bucket account).
+_BUCKET_USAGE_MAX_PARALLEL_READS: Final = 8
+
+
+def _read_one_bucket_usage_bytes(ops: CloudflareOps, bucket_name: str) -> "int | CloudflareApiError | httpx.HTTPError":
+    """Read one bucket's live usage bytes, returning (not raising) a failed read's exception."""
+    try:
+        return ops.get_bucket_usage_bytes(bucket_name)
+    except (CloudflareApiError, httpx.HTTPError) as exc:
+        return exc
+
+
+def _read_bucket_usage_bytes_concurrently(
+    ops: CloudflareOps, bucket_names: list[str]
+) -> "list[int | CloudflareApiError | httpx.HTTPError]":
+    """Read each bucket's live usage bytes via concurrent REST calls.
+
+    Results align positionally with ``bucket_names``. A failed read yields its
+    exception instead of raising, so each caller keeps its own error
+    semantics (display warns and counts zero; enforcement raises).
+    """
+    if not bucket_names:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(_BUCKET_USAGE_MAX_PARALLEL_READS, len(bucket_names))
+    ) as pool:
+        futures = [pool.submit(_read_one_bucket_usage_bytes, ops, bucket_name) for bucket_name in bucket_names]
+        return [future.result() for future in futures]
+
+
 def _measure_live_owner_usage_bytes(ops: CloudflareOps, username_prefix: str) -> int:
     """Sum the owner's bucket bytes via the real-time REST usage endpoint.
 
@@ -4416,9 +4449,13 @@ def _measure_live_owner_usage_bytes(ops: CloudflareOps, username_prefix: str) ->
     read -- callers decide whether that fails open (sweep, creation gate) or
     fails the request (grant baseline, recheck).
     """
-    return sum(
-        ops.get_bucket_usage_bytes(str(bucket.get("name", ""))) for bucket in _list_owned_buckets(ops, username_prefix)
-    )
+    bucket_names = [str(bucket.get("name", "")) for bucket in _list_owned_buckets(ops, username_prefix)]
+    total_bytes = 0
+    for result in _read_bucket_usage_bytes_concurrently(ops, bucket_names):
+        if isinstance(result, (CloudflareApiError, httpx.HTTPError)):
+            raise result
+        total_bytes += result
+    return total_bytes
 
 
 def _is_owner_enforced_over_quota(store: KeyStore, owner_user_id: str) -> bool:
@@ -5533,19 +5570,21 @@ def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str
     """Compute the account's live usage numbers, one upstream call per source.
 
     Bucket byte counts come from the real-time per-bucket REST usage endpoint
-    (bounded by the account's bucket quota); a failed usage call for one
-    bucket logs a warning and counts that bucket as zero rather than failing
-    the whole (display-only) request.
+    (bounded by the account's bucket quota, read concurrently); a failed
+    usage call for one bucket logs a warning and counts that bucket as zero
+    rather than failing the whole (display-only) request.
     """
     tunnel_count = count_user_tunnels(ops, username_prefix)
     owned_buckets = _list_owned_buckets(ops, username_prefix)
+    bucket_names = [str(bucket.get("name", "")) for bucket in owned_buckets]
     total_bucket_bytes = 0
-    for bucket in owned_buckets:
-        bucket_name = str(bucket.get("name", ""))
-        try:
-            total_bucket_bytes += ops.get_bucket_usage_bytes(bucket_name)
-        except (CloudflareApiError, httpx.HTTPError) as exc:
-            logger.warning("Failed to read usage for bucket %s: %s", bucket_name, exc)
+    for bucket_name, result in zip(
+        bucket_names, _read_bucket_usage_bytes_concurrently(ops, bucket_names), strict=False
+    ):
+        if isinstance(result, (CloudflareApiError, httpx.HTTPError)):
+            logger.warning("Failed to read usage for bucket %s: %s", bucket_name, result)
+        else:
+            total_bucket_bytes += result
     spend, reset_at = get_litellm_user_spend(user_id)
     return AccountUsage(
         remote_workspaces=_count_leased_hosts(username_prefix),

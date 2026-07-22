@@ -2,6 +2,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import threading
 from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
@@ -3702,6 +3703,69 @@ def test_route_get_account_reports_plan_entitlements_and_usage(monkeypatch: pyte
     assert body["usage"]["llm_spend_usd_this_period"] == 12.5
     assert body["usage"]["llm_budget_resets_at"] == "2026-08-01T00:00:00Z"
     assert sorted(body["available_plans"]) == ["ally", "explorer"]
+
+
+class _FailForNamedBucketOps(FakeCloudflareOps):
+    """FakeCloudflareOps whose usage read fails only for one named bucket."""
+
+    def __init__(self, failing_bucket_name: str) -> None:
+        super().__init__()
+        self.failing_bucket_name = failing_bucket_name
+
+    def get_bucket_usage_bytes(self, bucket_name: str) -> int:
+        if bucket_name == self.failing_bucket_name:
+            raise CloudflareApiError(status_code=500, errors=[{"message": "simulated per-bucket failure"}])
+        return super().get_bucket_usage_bytes(bucket_name)
+
+
+def test_read_bucket_usage_bytes_concurrently_aligns_results_and_errors_positionally() -> None:
+    ops = _FailForNamedBucketOps("u1prefix--broken")
+    ops.usage_bytes_by_bucket["u1prefix--a"] = 111
+    ops.usage_bytes_by_bucket["u1prefix--b"] = 222
+    results = app_mod._read_bucket_usage_bytes_concurrently(ops, ["u1prefix--a", "u1prefix--broken", "u1prefix--b"])
+    assert results[0] == 111
+    assert isinstance(results[1], CloudflareApiError)
+    assert results[2] == 222
+
+
+def test_read_bucket_usage_bytes_concurrently_returns_empty_for_no_buckets() -> None:
+    assert app_mod._read_bucket_usage_bytes_concurrently(FakeCloudflareOps(), []) == []
+
+
+class _BarrierUsageOps(FakeCloudflareOps):
+    """FakeCloudflareOps whose usage reads block until all expected readers arrive.
+
+    Proves the reads overlap: sequential reads would deadlock on the barrier
+    (surfacing as a BrokenBarrierError after the wait timeout) instead of all
+    arriving together.
+    """
+
+    def __init__(self, expected_reader_count: int) -> None:
+        super().__init__()
+        self.reader_barrier = threading.Barrier(expected_reader_count)
+
+    def get_bucket_usage_bytes(self, bucket_name: str) -> int:
+        self.reader_barrier.wait(timeout=10)
+        return super().get_bucket_usage_bytes(bucket_name)
+
+
+def test_read_bucket_usage_bytes_concurrently_overlaps_reads() -> None:
+    bucket_count = app_mod._BUCKET_USAGE_MAX_PARALLEL_READS
+    ops = _BarrierUsageOps(expected_reader_count=bucket_count)
+    bucket_names = [f"u1prefix--bucket{i}" for i in range(bucket_count)]
+    for i, name in enumerate(bucket_names):
+        ops.usage_bytes_by_bucket[name] = i + 1
+    results = app_mod._read_bucket_usage_bytes_concurrently(ops, bucket_names)
+    assert results == [i + 1 for i in range(bucket_count)]
+
+
+def test_measure_live_owner_usage_bytes_raises_when_any_read_fails() -> None:
+    ops = _FailForNamedBucketOps("u1prefix--broken")
+    ops.buckets["u1prefix--ok"] = {"name": "u1prefix--ok"}
+    ops.buckets["u1prefix--broken"] = {"name": "u1prefix--broken"}
+    ops.usage_bytes_by_bucket["u1prefix--ok"] = 10
+    with pytest.raises(CloudflareApiError):
+        app_mod._measure_live_owner_usage_bytes(ops, "u1prefix")
 
 
 def test_route_set_account_plan_same_plan_is_noop_preserving_bumps(monkeypatch: pytest.MonkeyPatch) -> None:

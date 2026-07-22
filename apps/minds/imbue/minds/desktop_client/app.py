@@ -7,7 +7,6 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -109,6 +108,7 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
+from imbue.minds.desktop_client.templates import render_account_plan_section
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -1986,32 +1986,14 @@ def _handle_recovery_page(
 # -- Account management routes --
 
 
-def _fetch_plan_views_for_accounts(accounts: Sequence[Any]) -> dict[str, dict[str, Any] | None]:
-    """Fetch each signed-in account's plan/usage view model (None on any failure).
-
-    Usage is computed live by the connector on every page load (a deliberate
-    freshness choice), so a slow or offline connector must degrade to a
-    "usage unavailable" section rather than breaking the page.
-    """
-    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    plan_view_by_user_id: dict[str, dict[str, Any] | None] = {}
-    for account in accounts:
-        user_id = str(account.user_id)
-        if cli is None:
-            plan_view_by_user_id[user_id] = None
-            continue
-        try:
-            info = cli.get_account_info(str(account.email))
-        except ImbueCloudCliError as exc:
-            logger.debug("Could not fetch account info for {}: {}", account.email, exc)
-            plan_view_by_user_id[user_id] = None
-            continue
-        plan_view_by_user_id[user_id] = build_account_plan_view(info)
-    return plan_view_by_user_id
-
-
 def _handle_accounts_page(plan_error: str | None = None) -> Response:
-    """Render the manage accounts page."""
+    """Render the manage accounts page.
+
+    The per-account plan/usage sections are NOT fetched here -- computing
+    live usage takes a connector round trip per account, so the page renders
+    loading placeholders that accounts.js fills in from
+    ``GET /accounts/<user_id>/plan-view``.
+    """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = get_state().session_store
@@ -2021,21 +2003,40 @@ def _handle_accounts_page(plan_error: str | None = None) -> Response:
     enabled_by_user_id = {
         str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
     }
-    trim_manager = get_state().backup_trim_manager
-    trim_status_by_user_id = {
-        str(account.user_id): status
-        for account in accounts
-        if (status := trim_manager.get_status(str(account.user_id))) is not None
-    }
     html = render_accounts_page(
         accounts=accounts,
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
-        plan_view_by_user_id=_fetch_plan_views_for_accounts(accounts),
         plan_error=plan_error,
-        trim_status_by_user_id=trim_status_by_user_id,
-        is_any_trim_running=trim_manager.is_any_running(),
     )
+    return make_html_response(content=html)
+
+
+def _handle_account_plan_view(user_id: str) -> Response:
+    """Render one account's plan/usage fragment (fetched asynchronously by the accounts page).
+
+    A connector failure degrades to the fragment's "usage unavailable"
+    message rather than an error status, mirroring the old page-level
+    behavior.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    plan_view: dict[str, Any] | None = None
+    if account is not None and cli is not None:
+        try:
+            info = cli.get_account_info(str(account.email))
+        except ImbueCloudCliError as exc:
+            logger.debug("Could not fetch account info for {}: {}", account.email, exc)
+        else:
+            plan_view = build_account_plan_view(info)
+    trim_status = get_state().backup_trim_manager.get_status(user_id)
+    html = render_account_plan_section(acct_user_id=user_id, plan_view=plan_view, trim_status=trim_status)
     return make_html_response(content=html)
 
 
@@ -2977,6 +2978,7 @@ def create_desktop_client(
         methods=["POST"],
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
+    app.add_url_rule("/accounts/<user_id>/plan-view", view_func=_handle_account_plan_view)
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])

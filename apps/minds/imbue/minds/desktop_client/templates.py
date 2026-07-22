@@ -1764,14 +1764,7 @@ def render_accounts_page(
     accounts: Sequence[object],
     default_account_id: str | None = None,
     enabled_by_user_id: Mapping[str, bool] | None = None,
-    # Per-account plan/usage view models (built by build_account_plan_view);
-    # None for an account whose info could not be fetched.
-    plan_view_by_user_id: Mapping[str, Mapping[str, object] | None] | None = None,
     plan_error: str | None = None,
-    # Per-account backup-trim progress (BackupTrimStatus objects); the page
-    # auto-reloads while any trim is running so progress stays visible.
-    trim_status_by_user_id: Mapping[str, object] | None = None,
-    is_any_trim_running: bool = False,
 ) -> str:
     """Render the manage accounts page.
 
@@ -1780,16 +1773,38 @@ def render_accounts_page(
     The template renders a "Signed out" indicator when an account is
     present (still in sessions.json) but the user disabled the block
     via the providers panel.
+
+    The per-account plan/usage sections render as loading placeholders;
+    accounts.js fills them in from ``GET /accounts/<user_id>/plan-view``
+    (see :func:`render_account_plan_section`) so the connector's live
+    usage computation never blocks the page render.
     """
     return CATALOG.render(
         "pages.Accounts",
         accounts=accounts,
         default_account_id=default_account_id or "",
         enabled_by_user_id=dict(enabled_by_user_id or {}),
-        plan_view_by_user_id=dict(plan_view_by_user_id or {}),
         plan_error=plan_error or "",
-        trim_status_by_user_id=dict(trim_status_by_user_id or {}),
-        is_any_trim_running=is_any_trim_running,
+    )
+
+
+@pure
+def render_account_plan_section(
+    acct_user_id: str,
+    # The view model from build_account_plan_view, or None when the account's
+    # info could not be fetched (renders the "unavailable" message).
+    plan_view: Mapping[str, object] | None = None,
+    # The account's backup-trim progress (a BackupTrimStatus), if any; while
+    # running, the fragment carries data-trim-running="1" so accounts.js
+    # keeps polling it.
+    trim_status: object | None = None,
+) -> str:
+    """Render one account's plan/usage fragment for the async accounts-page fetch."""
+    return CATALOG.render(
+        "AccountPlanSection",
+        acct_user_id=acct_user_id,
+        plan_view=dict(plan_view) if plan_view is not None else None,
+        trim_status=trim_status,
     )
 
 
