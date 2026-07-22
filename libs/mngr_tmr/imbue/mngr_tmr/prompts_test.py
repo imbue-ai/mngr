@@ -54,7 +54,7 @@ def test_build_agent_prompt_uses_override_template(tmp_path: Path) -> None:
     override = tmp_path / "custom_mapper.j2"
     override.write_text("CUSTOM MAPPER for {{ run_cmd }}\n")
     prompt = build_test_agent_prompt("tests/test_x.py::test_y", ("-m", "release"), template_path=override)
-    assert prompt.startswith("CUSTOM MAPPER for pytest tests/test_x.py::test_y -m release")
+    assert prompt.startswith("CUSTOM MAPPER for pytest --timeout=120 tests/test_x.py::test_y -m release")
 
 
 def test_build_agent_prompt_override_can_extend_packaged_template(tmp_path: Path) -> None:

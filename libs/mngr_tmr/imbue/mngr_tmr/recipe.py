@@ -8,6 +8,7 @@ that interprets each mapper's outcome JSON. The framework
 extraction, and CLI plumbing.
 """
 
+import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -30,10 +31,13 @@ from imbue.mngr_mapreduce.data_types import MapReduceRecipe
 from imbue.mngr_mapreduce.data_types import MapReduceTask
 from imbue.mngr_mapreduce.data_types import MapperInfo
 from imbue.mngr_mapreduce.data_types import ReducerInfo
+from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
+from imbue.mngr_tmr.report import EXTRACTED_TEST_OUTPUT_DIR
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.report_upload import maybe_upload_report
+from imbue.mngr_tmr.report_upload import report_url_for_run
 
 _BRANCH_BUNDLE_NAME = "branch.bundle"
 
@@ -217,7 +221,13 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         )
 
     def build_reducer_prompt(self, ctx: MapReduceContext) -> str:
-        return build_integrator_prompt(template_path=self.reducer_prompt_path)
+        # The reducer opens the run's PR, so it needs the report link in its
+        # prompt. The URL is derived from the run name, so it is known now even
+        # though the final report is uploaded after the reducer finishes.
+        return build_integrator_prompt(
+            report_url=report_url_for_run(ctx.run_name),
+            template_path=self.reducer_prompt_path,
+        )
 
     def on_mapper_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: MapperInfo) -> None:
         bundle = agent_dir / _BRANCH_BUNDLE_NAME
@@ -225,6 +235,12 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
             _apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg)
 
     def on_reducer_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: ReducerInfo) -> None:
+        # The reducer opens the run's PR itself, so surface the URL it reported
+        # even when no bundle came back: a run that integrated nothing still
+        # opens a PR (on an empty commit) to carry the escalations.
+        outcome_path = agent_dir / EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
+        _emit_pull_request_url(_read_pull_request_url(outcome_path), ctx.output_opts)
+
         bundle = agent_dir / _BRANCH_BUNDLE_NAME
         if not bundle.is_file():
             logger.warning("Reducer agent '{}' did not produce a branch bundle", info.agent_name)
@@ -277,6 +293,38 @@ def _build_run_commands(
     if integrated_branch is not None:
         commands.append(("Push integrated branch", f"git push origin {integrated_branch}"))
     return commands
+
+
+def _read_pull_request_url(outcome_path: Path) -> str | None:
+    """Read ``pull_request_url`` from the reducer's outcome file, if present.
+
+    Tolerant by design: the reducer may have failed before writing the file, or
+    written one without the key (it records ``pull_request_error`` instead when
+    opening the PR failed). Either way there is simply no URL to emit.
+    """
+    try:
+        data = json.loads(outcome_path.read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read reducer outcome at {}: {}", outcome_path, exc)
+        return None
+    url = data.get("pull_request_url")
+    error = data.get("pull_request_error")
+    if error:
+        logger.warning("Reducer reported it could not open a pull request: {}", error)
+    return url if isinstance(url, str) and url else None
+
+
+def _emit_pull_request_url(url: str | None, output_opts: OutputOptions) -> None:
+    """Emit the URL of the pull request the reducer opened, when it opened one."""
+    if url is None:
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            emit_event("pull_request_url", {"url": url}, output_opts.output_format)
+        case OutputFormat.HUMAN:
+            write_human_line("Pull request: {}", url)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _emit_reducer_branch(branch_name: str, output_opts: OutputOptions) -> None:

@@ -157,6 +157,8 @@ jobs:
       - name: Run TMR orchestrator
         env:
           ADDITIONAL_AUTHORIZED_HOSTS: ${{ inputs.additional_authorized_hosts }}
+          IS_SCHEDULED: ${{ inputs.is_scheduled }}
+          PERIODIC_LABEL: ${{ inputs.periodic_label }}
         run: |
           mkdir -p tmr-report
           # The "yolo" agent type is normally defined in the user's personal
@@ -201,6 +203,17 @@ jobs:
           if [ -n "${{ inputs.reducer_prompt }}" ]; then
             variant_args+=(--reducer-prompt "${{ inputs.reducer_prompt }}")
           fi
+          # The reducer opens this run's PR itself, so it -- and only it --
+          # receives GH_TOKEN plus the context needed to write a useful
+          # description. Mappers are the untrusted bulk of the run and must not
+          # get a token that can push to the repo, hence --reducer-env.
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          pr_assignees=""
+          pr_label=""
+          if [ "$IS_SCHEDULED" = "true" ]; then
+            pr_label="$PERIODIC_LABEL"
+            pr_assignees="qi-imbue,joshalbrecht"
+          fi
           uv run --project libs/mngr_tmr mngr tmr -vv \
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
@@ -209,6 +222,12 @@ jobs:
             --env "MODAL_TOKEN_ID=${MODAL_TOKEN_ID}" \
             --env "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}" \
             --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
+            --reducer-env "GH_TOKEN=${GH_TOKEN}" \
+            --reducer-env "TMR_GITHUB_REPOSITORY=${{ github.repository }}" \
+            --reducer-env "TMR_BASE_BRANCH=${{ github.ref_name }}" \
+            --reducer-env "TMR_RUN_URL=${run_url}" \
+            --reducer-env "TMR_PR_LABEL=${pr_label}" \
+            --reducer-env "TMR_PR_ASSIGNEES=${pr_assignees}" \
             "${authorized_host_args[@]}" \
             "${run_name_args[@]}" \
             "${variant_args[@]}" \
@@ -230,49 +249,20 @@ jobs:
           path: tmr-report/
           retention-days: 30
 
-      - name: Push integrator branch and open PR
-        if: success()
+      # The PR itself is opened by the reducer agent (see the "Open the pull
+      # request" section of reducer.j2), which has the run's outcomes in hand
+      # and so can write a description carrying the actual findings. This step
+      # only leaves the breadcrumb on a superseded PR, which the reducer has no
+      # way to know about.
+      - name: Link superseded periodic PR
+        if: success() && inputs.supersedes_pr != ''
         env:
-          IS_SCHEDULED: ${{ inputs.is_scheduled }}
           SUPERSEDES_PR: ${{ inputs.supersedes_pr }}
-          PERIODIC_LABEL: ${{ inputs.periodic_label }}
         run: |
           set -euo pipefail
-          branch=$(jq -r 'select(.event == "integrator_branch") | .branch_name' < tmr-report/events.jsonl | tail -n 1)
-          if [ -z "$branch" ]; then
-            echo "No integrator branch was produced (no fixes to integrate); skipping PR."
+          new_pr_url=$(jq -r 'select(.event == "pull_request_url") | .url' < tmr-report/events.jsonl | tail -n 1)
+          if [ -z "$new_pr_url" ]; then
+            echo "Reducer did not report a pull request URL; nothing to link."
             exit 0
           fi
-          echo "Integrator branch: $branch"
-          git push --set-upstream origin "$branch"
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          report_url=$(jq -r 'select(.event == "report_url") | .url' < tmr-report/events.jsonl | tail -n 1)
-          if [ -n "$report_url" ]; then
-            report_line="HTML report: $report_url (also attached as the \`tmr-report\` artifact on the workflow run)."
-          else
-            report_line="HTML report: attached as the \`tmr-report\` artifact on the workflow run; download and open \`index.html\`. (AWS credentials missing, so no s3 mirror was published.)"
-          fi
-          # Scheduled runs label the auto-opened PR so the next day's gate
-          # can find it, and assign it to the periodic-run owners. Manual
-          # runs leave it unlabeled and unassigned.
-          scheduled_args=()
-          if [ "$IS_SCHEDULED" = "true" ]; then
-            scheduled_args+=(--label "$PERIODIC_LABEL")
-            scheduled_args+=(--assignee qi-imbue --assignee joshalbrecht)
-          fi
-          new_pr_url=$(gh pr create \
-            --base "${{ github.ref_name }}" \
-            --head "$branch" \
-            --title "TMR: $branch" \
-            --body "Automated PR from TMR workflow run [#${{ github.run_id }}]($run_url).
-
-          $report_line" \
-            --draft \
-            "${scheduled_args[@]}")
-          echo "Opened $new_pr_url"
-          # If this scheduled run superseded a stale prior periodic PR
-          # (closed up front by the gate), leave a breadcrumb on it pointing
-          # at the replacement.
-          if [ -n "$SUPERSEDES_PR" ]; then
-            gh pr comment "$SUPERSEDES_PR" --body "Superseded by $new_pr_url from a fresh scheduled TMR run."
-          fi
+          gh pr comment "$SUPERSEDES_PR" --body "Superseded by $new_pr_url from a fresh scheduled TMR run."

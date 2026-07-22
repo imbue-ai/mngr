@@ -11,14 +11,16 @@ from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.report import Change
 from imbue.mngr_tmr.report import ChangeKind
 from imbue.mngr_tmr.report import ChangeStatus
+from imbue.mngr_tmr.report import Escalation
+from imbue.mngr_tmr.report import EscalationKind
 from imbue.mngr_tmr.report import IntegratorResult
 from imbue.mngr_tmr.report import ReportSection
 from imbue.mngr_tmr.report import TestMapReduceResult
 from imbue.mngr_tmr.report import TestResult
 from imbue.mngr_tmr.report import _merged_status_html
 from imbue.mngr_tmr.report import _render_markdown
-from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report import report_section_of
 
 SUCCEEDED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
 FAILED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="failed")}
@@ -29,6 +31,7 @@ def make_test_result(
     errored: bool = False,
     before: bool | None = None,
     after: bool | None = None,
+    escalations: tuple[Escalation, ...] = (),
 ) -> TestMapReduceResult:
     """Build a minimal TestMapReduceResult for testing render-internal helpers."""
     return TestMapReduceResult(
@@ -38,6 +41,7 @@ def make_test_result(
         errored=errored,
         tests_passing_before=before,
         tests_passing_after=after,
+        escalations=escalations,
     )
 
 
@@ -123,13 +127,12 @@ def test_change_kind_values() -> None:
 def test_change_status_values() -> None:
     assert ChangeStatus.SUCCEEDED == "SUCCEEDED"
     assert ChangeStatus.FAILED == "FAILED"
-    assert ChangeStatus.BLOCKED == "BLOCKED"
 
 
 def test_report_section_values() -> None:
     assert ReportSection.NON_IMPL_FIXES == "NON_IMPL_FIXES"
     assert ReportSection.IMPL_FIXES == "IMPL_FIXES"
-    assert ReportSection.BLOCKED == "BLOCKED"
+    assert ReportSection.UNRESOLVED == "UNRESOLVED"
     assert ReportSection.CLEAN_PASS == "CLEAN_PASS"
     assert ReportSection.RUNNING == "RUNNING"
 
@@ -143,7 +146,7 @@ def test_test_result_empty() -> None:
 def test_test_result_with_changes() -> None:
     changes = {
         ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed"),
-        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="Needs work"),
+        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="Needs work"),
     }
     result = TestResult(changes=changes, tests_passing_before=False, tests_passing_after=True)
     assert len(result.changes) == 2
@@ -176,47 +179,57 @@ def test_test_map_reduce_result_without_branch() -> None:
 
 
 def test_report_section_errored() -> None:
-    assert _report_section_of(make_test_result(errored=True)) == ReportSection.FAILED
+    assert report_section_of(make_test_result(errored=True)) == ReportSection.FAILED
 
 
 def test_report_section_running() -> None:
-    assert _report_section_of(make_test_result()) == ReportSection.RUNNING
+    assert report_section_of(make_test_result()) == ReportSection.RUNNING
 
 
 def test_report_section_clean_pass() -> None:
-    assert _report_section_of(make_test_result(before=True, after=True)) == ReportSection.CLEAN_PASS
+    assert report_section_of(make_test_result(before=True, after=True)) == ReportSection.CLEAN_PASS
 
 
 def test_report_section_non_impl_fixes() -> None:
     assert (
-        _report_section_of(make_test_result(changes=SUCCEEDED_FIX, before=False, after=True))
+        report_section_of(make_test_result(changes=SUCCEEDED_FIX, before=False, after=True))
         == ReportSection.NON_IMPL_FIXES
     )
 
 
 def test_report_section_impl_fixes() -> None:
     impl_fix = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
-    assert _report_section_of(make_test_result(changes=impl_fix, before=False, after=True)) == ReportSection.IMPL_FIXES
+    assert report_section_of(make_test_result(changes=impl_fix, before=False, after=True)) == ReportSection.IMPL_FIXES
 
 
-def test_report_section_blocked_all_changes_blocked() -> None:
-    blocked_changes = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked")}
+def test_report_section_all_changes_failed_is_unresolved() -> None:
+    """Every attempted change having failed means the agent landed nothing."""
     assert (
-        _report_section_of(make_test_result(changes=blocked_changes, before=False, after=False))
-        == ReportSection.BLOCKED
+        report_section_of(make_test_result(changes=FAILED_FIX, before=False, after=False)) == ReportSection.UNRESOLVED
     )
 
 
-def test_report_section_failed_changes_are_non_impl() -> None:
-    """FAILED (not BLOCKED) changes route to NON_IMPL_FIXES, not BLOCKED."""
-    assert (
-        _report_section_of(make_test_result(changes=FAILED_FIX, before=False, after=False))
-        == ReportSection.NON_IMPL_FIXES
+def test_report_section_partial_failure_keeps_fix_section() -> None:
+    """A failed change alongside a succeeded one still counts as a fix."""
+    mixed = {
+        ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed"),
+        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="could not"),
+    }
+    assert report_section_of(make_test_result(changes=mixed, before=False, after=True)) == ReportSection.NON_IMPL_FIXES
+
+
+def test_report_section_no_changes_tests_failing_is_unresolved() -> None:
+    assert report_section_of(make_test_result(before=False, after=False)) == ReportSection.UNRESOLVED
+
+
+def test_report_section_ignores_escalations() -> None:
+    """Escalations are orthogonal: a clean pass carrying one is still a clean pass."""
+    escalated = make_test_result(
+        before=True,
+        after=True,
+        escalations=(Escalation(title="t", detail_markdown="d", kind=EscalationKind.SHARED_PATTERN),),
     )
-
-
-def test_report_section_blocked_no_changes_tests_failing() -> None:
-    assert _report_section_of(make_test_result(before=False, after=False)) == ReportSection.BLOCKED
+    assert report_section_of(escalated) == ReportSection.CLEAN_PASS
 
 
 # --- render_markdown tests ---
@@ -345,7 +358,7 @@ def test_generate_html_report_creates_output_dir(tmp_path: Path) -> None:
 def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     impl_fix = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed impl")}
-    blocked_changes = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked")}
+    unresolved_changes = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="could not fix")}
     agents = [
         make_metadata_and_outcome(output_dir, "running-agent", write_outcome=False),
         make_metadata_and_outcome(
@@ -355,7 +368,7 @@ def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
             output_dir, "impl-fix", changes=impl_fix, tests_passing_before=False, tests_passing_after=True
         ),
         make_metadata_and_outcome(
-            output_dir, "blocked", changes=blocked_changes, tests_passing_before=False, tests_passing_after=False
+            output_dir, "unresolved", changes=unresolved_changes, tests_passing_before=False, tests_passing_after=False
         ),
         make_metadata_and_outcome(output_dir, "failed", error_summary="boom"),
         make_metadata_and_outcome(output_dir, "clean", tests_passing_before=True, tests_passing_after=True),
@@ -366,7 +379,7 @@ def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
         label = {
             ReportSection.NON_IMPL_FIXES: "Non-implementation fixes",
             ReportSection.IMPL_FIXES: "Implementation fixes",
-            ReportSection.BLOCKED: "Blocked",
+            ReportSection.UNRESOLVED: "Unresolved",
             ReportSection.FAILED: "Failed",
             ReportSection.CLEAN_PASS: "Clean pass",
             ReportSection.RUNNING: "Running",

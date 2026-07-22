@@ -59,8 +59,10 @@ printf '%s\n' "${FETCHED_BRANCHES[@]}"
 ```
 
 The branches you must cherry-pick are exactly the printed ones. If no
-branches qualify, write an outcome describing that (no squashed/impl
-commits) and proceed straight to publishing the outputs archive.
+branches qualify, skip the cherry-pick and normalization steps, and go
+straight to "# Write the unified changelog entry" -- you still open a pull
+request for the run, because the escalations the test agents reported are
+worth surfacing even when there is no code to integrate.
 
 # Cherry-pick strategy
 
@@ -104,8 +106,14 @@ touched -- not the whole suite. Run them the same way the test agents did: their
 node ids, with the same `-m` marker. For example:
 
 ```bash
-uv run pytest <affected_test_node_id> [<more_node_ids>...] -m release
+uv run pytest --timeout={{ test_timeout_seconds }} <affected_test_node_id> [<more_node_ids>...] -m release
 ```
+
+Always pass `--timeout={{ test_timeout_seconds }}`: it is the same budget the
+test agents ran at. Verifying at a smaller budget would fail their good fixes;
+verifying at a larger one would accept fixes that do not hold. Never "fix" a
+timeout failure by adding a `@pytest.mark.timeout` to a test -- if a test truly
+needs longer than this, escalate it instead.
 
 Exit code 0 with no failures confirms the change. Otherwise read the output to see
 what broke. If you cannot run a given test in this environment, mark the affected
@@ -143,26 +151,135 @@ Two more guardrails:
 
 Record each extraction under "normalizations" in the outcome.
 
-## Resolve or escalate cross-cutting blockers
+## Resolve or escalate what the test agents raised
 
-Test agents flag setup they could not fix suite-wide with `# FIXME(tmr): ...`
-comments (and a BLOCKED change in their outcome). Collect them from the integrated
-tree:
+Every test agent reports an `escalations` list in its outcome, independent of
+whether its own test passed. Two kinds matter here:
+
+- `BLOCKER`: the agent could not proceed without a shared change. These also
+  carry a `# FIXME(tmr): ...` comment in the tree.
+- `SHARED_PATTERN`: the agent's local fix worked, but it found the same fix
+  already present on sibling tests. Several agents independently applying the
+  same patch is the signal that ONE shared change should replace all of them.
+
+Collect both -- the escalations from every outcome file, and the FIXMEs:
 
 ```bash
+for outcome in {{ inputs_dirname }}/*/test_output/{{ mapper_outcome_filename }}; do
+    python3 -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+for e in data.get("escalations") or []:
+    print(f"{e.get(\"kind\", \"BLOCKER\")}\t{sys.argv[2]}\t{e.get(\"title\", \"\")}")
+' "$outcome" "$(basename "$(dirname "$(dirname "$outcome")")")"
+done | sort
+
 grep -rn "FIXME(tmr):" . || true
 ```
 
-For each distinct blocker:
+Group them by the underlying problem -- many agents will report the same one in
+different words. For each distinct problem:
 
 - If you can resolve it suite-wide AND verify it by running the affected tests
-  (e.g. add a shared fake-claude fixture and switch tests onto it), do so, remove
-  the FIXME comment, commit as `[NORMALIZE]`, and record it under
-  "normalizations".
+  (e.g. add a shared fixture and switch tests onto it, or hoist a repeated
+  per-test setting into the shared conftest), do so. Where a `SHARED_PATTERN`
+  fix lets you *delete* the N local copies the agents applied, delete them --
+  replacing N local patches with one shared change is the single most valuable
+  thing you do here. Remove any resolved FIXME comment, commit as
+  `[NORMALIZE]`, and record it under "normalizations".
 - If it requires the environment to provide something absent (e.g. OpenAI
   credentials for codex), or is otherwise beyond what you can verify here, leave
   the FIXME in place and record it under "escalations" so it reaches the user. Do
   NOT apply an unverifiable cross-cutting change.
+
+Carry every unresolved escalation through to your own "escalations" field, even
+the ones that came from a test agent whose test passed. That field is what the
+pull request body reports to the user.
+
+# Write the unified changelog entry
+
+The test agents do not write changelog entries -- you write one for the whole
+run, so the PR carries a single coherent entry instead of one file per agent.
+
+The repo requires one entry per project the PR touches. Determine which
+projects your integrated commits touched:
+
+```bash
+git diff --name-only "$MNGR_GIT_BASE_BRANCH"..HEAD | sed -n 's#^\(libs/[^/]*\|apps/[^/]*\)/.*#\1#p' | sort -u
+```
+
+A path outside `libs/` and `apps/` (e.g. `scripts/`, `.github/`) belongs to the
+synthetic `dev` project, whose directory is `dev/`.
+
+For each project, write `<project_dir>/changelog/<branch>.md`, where `<branch>`
+is your branch name with slashes replaced by dashes. Describe the user-visible
+changes that pertain to *that* project, drawing on the mapper summaries you
+integrated. Group them by theme rather than listing one bullet per agent; a
+reader wants to know what changed about the suite, not which agent did it.
+Separate bullets with a blank line. Commit this as `[CHANGELOG]`.
+
+If you integrated no code at all, still write an entry for the project whose
+tests the run targeted, saying the run found no changes to integrate and
+summarizing what was escalated.
+
+# Open the pull request
+
+Open the run's pull request yourself, so its description can carry the run's
+findings. Do this even when you integrated nothing.
+
+These environment variables are provided to you:
+
+- `GH_TOKEN` -- token authorized to push and open a PR on this repo
+- `TMR_GITHUB_REPOSITORY` -- `owner/repo`
+- `TMR_BASE_BRANCH` -- the branch to target
+- `TMR_RUN_URL` -- the CI run that launched this TMR run
+- `TMR_PR_LABEL`, `TMR_PR_ASSIGNEES` -- may be empty; apply only if set
+
+First make sure there is something to open a PR from. GitHub rejects a pull
+request whose head and base are identical, so if you integrated no commits,
+create an empty one:
+
+```bash
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ -z "$(git rev-list --max-count=1 "$TMR_BASE_BRANCH..$BRANCH")" ]; then
+    git commit --allow-empty -m "[TMR] No changes to integrate from this run"
+fi
+git push "https://x-access-token:$GH_TOKEN@github.com/$TMR_GITHUB_REPOSITORY.git" "HEAD:refs/heads/$BRANCH"
+```
+
+Build the title and the findings section with the helper rather than by hand --
+it reads the same outcome files and will not miscount:
+
+```bash
+INPUTS={{ inputs_dirname }}
+TITLE=$(uv run --project libs/mngr_tmr python -m imbue.mngr_tmr.pr_summary --title "$BRANCH" "$INPUTS")
+FINDINGS=$(uv run --project libs/mngr_tmr python -m imbue.mngr_tmr.pr_summary "$INPUTS")
+```
+
+Then open the PR as a draft, against `$TMR_BASE_BRANCH`, with that title and a
+body containing, in order:
+
+1. The mechanical provenance line: that this is an automated PR from TMR run
+   `$TMR_RUN_URL`, followed by the report link:
+{% if report_url %}   `HTML report: {{ report_url }} (also attached as the tmr-report artifact on the workflow run).`
+{% else %}   `HTML report: attached as the tmr-report artifact on the workflow run; download and open index.html.`
+{% endif %}
+2. `$FINDINGS` verbatim -- the mapper status breakdown and escalations table.
+3. A short prose paragraph of your own: the themes you saw across the run, what
+   you normalized, and anything a reviewer should look at first. This is the one
+   part that is yours to write; keep it to a few sentences.
+
+Use the `gh` CLI if it is available (`gh pr create --draft --base ... --head ...
+--title ... --body ...`, plus `--label`/`--assignee` when those variables are
+set). If `gh` is not installed, POST to
+`https://api.github.com/repos/$TMR_GITHUB_REPOSITORY/pulls` with
+`Authorization: Bearer $GH_TOKEN` using python3's urllib, then apply any label
+and assignees via the issues API.
+
+Record the resulting PR URL in your outcome as `pull_request_url`. If opening
+the PR fails, do not abort the run: record the failure in
+`pull_request_error` and continue to publishing the outputs archive, so the
+orchestrator still gets your results.
 
 # Writing the outcome and publishing outputs
 
@@ -180,7 +297,8 @@ The schema is:
  "impl_commit_hashes": {"branch3": "def5678"},
  "failed": ["branch4"],
  "normalizations": [{"summary_markdown": "Extracted the mngr-list agent-running check into e2e.assert_agent_running (verified across 6 tests)"}],
- "escalations": [{"title": "codex tests need OpenAI credentials", "detail_markdown": "test_create_codex mocks codex with sleep because OPENAI_API_KEY is absent from the test env; a real fake-codex fixture or credentials are needed."}]}
+ "escalations": [{"kind": "BLOCKER", "title": "codex tests need OpenAI credentials", "detail_markdown": "test_create_codex mocks codex with sleep because OPENAI_API_KEY is absent from the test env; a real fake-codex fixture or credentials are needed."}],
+ "pull_request_url": "https://github.com/owner/repo/pull/1234"}
 
 Fields:
 - squashed_branches: branch names whose test/doc commits were squashed
@@ -189,7 +307,9 @@ Fields:
 - impl_commit_hashes: mapping of impl branch name to its commit hash on the integrated branch
 - failed: branch names that could not be integrated
 - normalizations: suite-wide cleanups you applied and verified (each with summary_markdown). Omit or use [] if none.
-- escalations: cross-cutting blockers you could NOT resolve or verify, to surface to the user (each with title and detail_markdown). Omit or use [] if none.
+- escalations: everything you could NOT resolve or verify, to surface to the user -- both your own findings and the unresolved ones carried through from the test agents. Each has kind ("BLOCKER" or "SHARED_PATTERN"), title, and detail_markdown. Omit or use [] if none.
+- pull_request_url: URL of the pull request you opened.
+- pull_request_error: present only if opening the PR failed; describe what went wrong.
 
 Then, finally, publish the outputs archive. Run this from the git repo root:
 
