@@ -63,6 +63,13 @@ if ! grep -q "opened&&this.fitAddon.fit()" "$_BUILT"; then
     echo "error: built client is missing the reconnect refit patch" >&2
     exit 1
 fi
+# The minds workspace UI (default-workspace-template's system_interface) refits
+# terminal iframes from the host page via the client's exposed window.term.fit;
+# that reach degrades to a silent no-op if the client stops exposing it.
+if ! grep -q "window.term.fit" "$_BUILT"; then
+    echo "error: built client no longer exposes window.term.fit (the minds workspace UI depends on it)" >&2
+    exit 1
+fi
 
 # Ship it gzip-compressed (the plugin decompresses on install); this also keeps
 # the vendored artifact under the repo's added-large-file limit.

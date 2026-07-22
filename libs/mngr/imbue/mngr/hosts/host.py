@@ -3955,6 +3955,9 @@ def _build_start_agent_shell_command(
     # it so the attach is never blocked, and the script delays before signaling so the
     # window has settled first. This uses a distinct hook slot ([98]) from the onboarding
     # hook ([99]) and, unlike that one-shot hook, is persistent (no `set-hook -u`).
+    # Slot coordination: [97]-[99] belong to mngr (here); the minds workspace template
+    # sets global client-attached/client-resized hooks at [96] for its terminal-N
+    # sessions (default-workspace-template scripts/terminal_tmux.conf).
     sigwinch_script_path = host_dir / "commands" / _SIGWINCH_PANES_SCRIPT_NAME
     sigwinch_argv = shlex.join(["bash", str(sigwinch_script_path), session_name, primary_window_name, sigwinch_mode])
     if sigwinch_mode == _SIGWINCH_MODE_FIT:
