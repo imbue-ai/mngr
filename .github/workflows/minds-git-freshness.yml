@@ -63,13 +63,10 @@ jobs:
           fi
           echo "Pinned: $pinned_tag (git $pinned_gitver)"
 
-          # Fetch releases and pick the one with the HIGHEST git version among
-          # those that have cleared the cooldown window (published at least
-          # COOLDOWN_DAYS ago), excluding drafts and prereleases. A younger
-          # release is deliberately ignored until vetted. Sorting by git
-          # version -- not published date -- matters because upstream may cut
-          # a patch release for an older git line after a newer line ships;
-          # date-sorting would then hide the newer git from the nag.
+          # Pick the highest git version among cooldown-cleared releases -- not
+          # the newest by date: upstream may cut a patch for an older git line
+          # after a newer line ships, and date-sorting would then hide the
+          # newer git from the nag.
           releases_json=$(mktemp)
           gh api "repos/desktop/dugite-native/releases?per_page=100" > "$releases_json"
 
@@ -82,8 +79,7 @@ jobs:
               | select(.draft == false and .prerelease == false)
               | select((.published_at | fromdateiso8601) <= (now - (env.COOLDOWN_DAYS | tonumber) * 86400))
             ]
-            # Highest git version wins; among equal git versions (same-git
-            # rebuilds like v2.53.0 vs v2.53.0-3) prefer the newest published.
+            # Tie-break equal git versions (v2.53.0 vs v2.53.0-3) by newest published.
             | sort_by([gitver_parts, .published_at]) | reverse | (.[0] // null)
           ' "$releases_json" > "$candidate"
 
