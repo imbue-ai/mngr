@@ -1,1 +1,3 @@
 Removed the root `.minds/policies/` directory (and its `.gitignore` un-ignore block): the minds-tier Vault ACL policy text now lives in the imbue-ai/vault repo's terraform (`terraform/employee.tf` and `terraform/minds_operators.tf`), which is the single source of truth. Keeping a second copy here is what let the live policies drift from the vault repo's config in the first place.
+
+`test_no_gitignored_files_are_tracked` now skips files that are deleted in the working tree: offload sandboxes reconstruct branch state as a base commit plus an unstaged diff, which made the test misfire on commits that delete files and gitignore their path at the same time.
