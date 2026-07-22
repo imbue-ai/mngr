@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -474,7 +475,15 @@ class _LastGoodAgentTopology(FrozenModel):
     out of discovery entirely (the SSH-dead failure mode) -- retain their
     last complete record rather than being clobbered by a partial view. This
     is what lets the system-services fallback survive a discovery loss.
+
+    Unknown fields are ignored rather than rejected: this is a persisted cache
+    read back across app versions, and a file written by a build with an extra
+    field must not void the whole topology (losing the system-services
+    fallback exactly on the first launch after an upgrade).
     """
+
+    # Pydantic merges this with FrozenModel's config, so frozen=True is kept.
+    model_config = ConfigDict(extra="ignore")
 
     agents_by_host: Mapping[str, tuple[_AgentRecord, ...]] = Field(
         default_factory=dict, description="Host id -> the agents last seen on that host with a complete enumeration"

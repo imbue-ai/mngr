@@ -961,6 +961,33 @@ def test_last_good_topology_ignores_malformed_persisted_file(tmp_path: Path) -> 
     assert resolver.get_system_services_agent_id(AgentId.generate()) is None
 
 
+def test_last_good_topology_tolerates_unknown_fields_from_other_versions(tmp_path: Path) -> None:
+    """A topology file carrying fields this version does not know still loads its agents.
+
+    The file is a persisted cache read back across app versions (e.g. a build
+    that persisted offline host states alongside the topology). Rejecting the
+    unknown field would void the whole topology and lose the system-services
+    fallback exactly on the first launch after an upgrade.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    seed = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    seed.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
+        )
+    )
+    raw = json.loads(topology_path.read_text(encoding="utf-8"))
+    raw["offline_host_state_by_host_id"] = {str(host): "STOPPED"}
+    topology_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    assert reloaded.get_system_services_agent_id(workspace_agent) == services_agent
+
+
 def test_last_good_topology_prefers_live_discovery_when_host_present(tmp_path: Path) -> None:
     """Last-good is a fallback, not an override: live discovery wins when the host is visible."""
     topology_path = tmp_path / "last_good_agent_topology.json"
