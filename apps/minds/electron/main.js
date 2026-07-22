@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -9,6 +9,7 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { computeBundleViewBounds } = require('./view-layout');
+const { shouldWriteSessionState, createDebouncedSaver } = require('./session-persistence');
 
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
 // main-process failures BEFORE anything else runs, so startup output (including
@@ -310,6 +311,34 @@ function rendererNameForWebContents(contents) {
   return undefined;
 }
 
+// After the machine wakes from sleep (or the screen unlocks), a WebContentsView's
+// renderer can survive but stop painting: Electron leaves its GPU/compositor
+// surface detached, so the view keeps showing its pinned-white background until
+// something forces a repaint (historically only a manual window move, focus
+// change, or Home-and-back navigation would). This is distinct from a renderer
+// *death* -- that fires `render-process-gone`, which wireContentViewEvents already
+// recovers with the crash page. Here the renderer is alive, no event fires, and
+// nothing recovers it (Sentry event fc1dc9eb: "came back from sleep and was on a
+// blank white screen"). `webContents.invalidate()` schedules a full repaint -- the
+// programmatic equivalent of that window-move nudge -- reattaching the surface
+// without a reload, so no scroll, websocket, or terminal state is lost. It is
+// non-destructive and idempotent, so firing it across every live view on each
+// wake (macOS emits resume AND unlock-screen for a single wake) is safe.
+function repaintAllBundleViewsAfterWake(trigger) {
+  let repainted = 0;
+  for (const b of bundles) {
+    if (b.window.isDestroyed()) continue;
+    for (const view of [b.chromeView, b.contentView, b.modalView]) {
+      if (!view || view.webContents.isDestroyed()) continue;
+      view.webContents.invalidate();
+      repainted += 1;
+    }
+  }
+  // Log unconditionally: wake events are rare, and this trail is what makes the
+  // otherwise-invisible blank-after-sleep failure diagnosable in electron.log.
+  console.log(`[wake-repaint] ${trigger}: forced repaint of ${repainted} view(s)`);
+}
+
 function getMostRecentWindow() {
   for (const b of mruWindows) {
     if (!b.window.isDestroyed()) return b;
@@ -541,7 +570,14 @@ function wireBundleWindowEvents(bundle) {
 
   win.on('maximize', () => { bundle._maximizedByUs = true; });
   win.on('unmaximize', () => { bundle._maximizedByUs = false; });
-  win.on('resize', () => updateBundleBounds(bundle));
+  // Reflow the child views on resize, and persist the new geometry (debounced)
+  // so a non-graceful quit still restores the last-known bounds. Moves don't
+  // affect layout, but they do change the saved x/y, so they persist too.
+  win.on('resize', () => {
+    updateBundleBounds(bundle);
+    scheduleSessionSave();
+  });
+  win.on('move', () => scheduleSessionSave());
 
   // Run cleanup on `close` (before views are detached) rather than `closed`
   // so we can still reach the child webContents. BaseWindow does not guarantee
@@ -748,6 +784,9 @@ function wireContentViewEvents(bundle, contentView) {
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
+      // The persisted url is derived from these fields, so re-persist the
+      // session (debounced) whenever a navigation changes them.
+      scheduleSessionSave();
     }
     const newAgentId = parseWorkspaceId(url);
     // Recompute workspace reachability from the HTTP status. The mngr_forward
@@ -1502,6 +1541,9 @@ function loadUrlIntoBundleContentView(bundle, url) {
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
+    // The persisted url is derived from these fields, so re-persist the session
+    // (debounced) whenever we stamp a new intended workspace url.
+    scheduleSessionSave();
   }
   // Stamp the accent source from the URL (the wider
   // ``parseAccentSourceAgentId`` set), so workspace-scoped settings / sharing
@@ -1864,12 +1906,42 @@ function saveSessionState() {
         displayId: display ? display.id : null,
       });
     }
+    // Empty-clobber guard: never let an empty snapshot overwrite a non-empty
+    // on-disk file. Saves now run continuously (debounced on move/resize/nav),
+    // so a save can land while windows are being torn down by a non-graceful
+    // quit (ToDesktop "Install and Restart", crash, force-quit) -- the live
+    // window set momentarily reads empty, and writing it would drop the user on
+    // the create screen next launch. shouldWriteSessionState only permits an
+    // empty write when the persisted file is already empty. See
+    // session-persistence.js for the full reasoning (the normal last-window
+    // close saves through the quit sequence while the window is still alive, so
+    // it produces a non-empty snapshot and is unaffected).
+    const persistedWindowCount = loadSessionState().windows.length;
+    if (!shouldWriteSessionState({ computedWindowCount: windows.length, persistedWindowCount })) {
+      console.log(`[session] Skipping empty save; ${persistedWindowCount} window(s) already persisted (teardown race guard)`);
+      return;
+    }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, JSON.stringify({ windows }, null, 2));
   } catch (err) {
     console.log('[session] Failed to save state:', err.message);
   }
+}
+
+// Continuously persist window-state.json (debounced) so the saved set reflects
+// the live windows regardless of how the app exits. The trailing-throttle
+// coalesces bursts (a window drag fires move/resize every frame) into at most
+// one write per interval, keeping disk churn negligible. Callers schedule via
+// scheduleSessionSave(), which is suppressed once a quit has committed
+// (isShuttingDown) -- the quit sequence performs its own authoritative save and
+// we must not race a debounced write against the teardown.
+const SESSION_SAVE_DEBOUNCE_MS = 1000;
+const debouncedSessionSaver = createDebouncedSaver({ save: saveSessionState, delayMs: SESSION_SAVE_DEBOUNCE_MS });
+
+function scheduleSessionSave() {
+  if (isShuttingDown) return;
+  debouncedSessionSaver.schedule();
 }
 
 // Update a single bundle's ``currentAccentAgentId`` (the accent source of its
@@ -2810,6 +2882,12 @@ async function onReady() {
   installApplicationMenu();
   installDockMenu();
   installDevDockIcon();
+  // Repaint views that survive sleep but stop painting (see
+  // repaintAllBundleViewsAfterWake). powerMonitor is only usable after the app is
+  // ready, which onReady guarantees. Both events can fire for one wake on macOS;
+  // the repaint is idempotent, so the redundant call is harmless.
+  powerMonitor.on('resume', () => repaintAllBundleViewsAfterWake('resume'));
+  powerMonitor.on('unlock-screen', () => repaintAllBundleViewsAfterWake('unlock-screen'));
   setupContentPartitionCookieSync();
   await syncContentCookiesToDefaultSession();
 
@@ -3150,6 +3228,14 @@ async function startBackendWithRetry() {
         workspaceCount: workspaceList.length,
         restorableCount: restorable.length,
       });
+      // Headline diagnostic for "why did I land on create/welcome instead of my
+      // restored workspace": logs every input to the routing decision and the
+      // chosen route, so a bad restore can be traced from ~/.minds/logs.
+      console.log(
+        `[startup] Startup route: ${startupRoute} ` +
+          `(authenticated=${authenticated}, hasAccounts=${!!(chromeState && chromeState.hasAccounts)}, ` +
+          `workspaceCount=${workspaceList.length}, restorableCount=${restorable.length})`,
+      );
 
       const loadInitialContent = (relativePath) => {
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
@@ -3345,6 +3431,25 @@ ipcMain.on('go-home', (event) => {
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
     bundle.contentView.webContents.loadURL(backendBaseUrl + '/');
   }
+});
+
+// OAuth sign-in finished in the external browser (which stole OS focus); the
+// login page asks us to bring the Minds app to the front. Only do so if the
+// window isn't already focused, so we never yank the user out of the app when
+// they stayed put. Fires from the login page in either the content view (via
+// the content-relay `minds:bring-app-to-front` message) or the sign-in modal
+// overlay (via window.minds.bringAppToFront()); getBundleFromEvent resolves
+// both.
+ipcMain.on('bring-app-to-front', (event) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (bundle.window.isFocused()) return;
+  // On macOS, window.focus() alone can't pull a backgrounded app in front of
+  // the frontmost app (the OAuth browser) -- the OS blocks focus-stealing.
+  // app.focus({steal:true}) activates Minds over the browser; focusBundle then
+  // raises and focuses the specific window within the app.
+  if (isMac) app.focus({ steal: true });
+  focusBundle(bundle);
 });
 
 ipcMain.on('navigate-content', (event, url) => {
@@ -3844,6 +3949,11 @@ async function runQuitSequence() {
   // snapshot session state before teardown (the per-window `close` handler
   // skips saving once isShuttingDown is set).
   isShuttingDown = true;
+  // Drop any pending debounced save: the windows are still alive here, so this
+  // save is the authoritative pre-teardown snapshot. A later debounced write
+  // would only race the teardown (the empty-clobber guard would reject it, but
+  // cancelling is cleaner).
+  debouncedSessionSaver.cancel();
   if (!isHeadlessQuit) showQuittingInAllWindows();
   if (bundles.size > 0) saveSessionState();
 

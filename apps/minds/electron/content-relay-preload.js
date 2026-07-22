@@ -100,4 +100,13 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('preview-workspace-accent', agentId, accent);
     return;
   }
+  // Login page: OAuth sign-in just finished in the external browser (which
+  // stole OS focus). Ask the shell to bring the whole app to the front so the
+  // user lands back in Minds. No payload -- the main process activates the app
+  // and focuses the window that owns this view, and only if it isn't already
+  // focused.
+  if (data.type === 'minds:bring-app-to-front') {
+    ipcRenderer.send('bring-app-to-front');
+    return;
+  }
 });
