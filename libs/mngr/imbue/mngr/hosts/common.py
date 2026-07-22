@@ -54,6 +54,23 @@ def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
 
 
 @pure
+def bracket_ipv6_host(hostname: str) -> str:
+    """Wrap a bare IPv6 literal in [] so it is safe inside an rsync ``user@host:path``
+    target.
+
+    IPv6 addresses contain ':' (e.g. ``2a01:4f9:c013:978c::1``), which collides with
+    the ``host:path`` separator -- rsync/ssh read the first colon-group as the whole
+    hostname ("Could not resolve hostname 2a01"). Brackets tell the parser the host is
+    everything inside ``[]``. Only used where the host is glued into a string; paramiko
+    takes the host as a separate arg and must keep it unbracketed. Already-bracketed
+    hosts and ordinary hostnames / IPv4 addresses pass through unchanged.
+    """
+    if ":" in hostname and not hostname.startswith("["):
+        return f"[{hostname}]"
+    return hostname
+
+
+@pure
 def build_ssh_transport_command(
     key_path: Path,
     port: int,

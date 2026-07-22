@@ -114,6 +114,25 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
 .agent-card .row2 { color: var(--fg-dim); font-size: 12px; margin-top: 4px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 .agent-card .host-shell { color: var(--link); cursor: pointer; }
 .agent-card .host-shell:hover { text-decoration: underline; }
+/* ⬇ send-to-backburner / ⬆ restore -- a small square button at the right of row1. */
+.backburner-btn {
+  flex: none; margin-left: auto; /* park it at the row's right edge (card bottom-right) */
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; line-height: 1; cursor: pointer;
+  color: var(--fg-faint); background: var(--bg-raised);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.backburner-btn:hover { color: var(--fg); border-color: var(--border-strong); }
+/* Parked cards: dimmed + no left accent so the live list reads first. */
+.agent-card.backburner { opacity: 0.55; border-left-color: transparent; }
+.agent-card.backburner:hover { opacity: 0.85; }
+/* Divider heading the parked-agents section. */
+.section-head {
+  margin: 16px 2px 2px; padding-top: 12px; border-top: 1px solid var(--border);
+  color: var(--fg-faint); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
 .chip {
   font-size: 11px;
   padding: 1px 7px;

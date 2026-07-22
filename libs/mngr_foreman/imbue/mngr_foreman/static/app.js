@@ -275,6 +275,27 @@
       if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
       return Math.floor(secs / 86400) + "d ago";
     }
+    // Backburner: agents the user has parked. Marked by the `foreman.backburner`
+    // mngr label (persisted server-side); the home page files them under their own
+    // section instead of the live list.
+    let lastAgents = [];
+    function isBackburner(a) { return !!(a.labels && a.labels["foreman.backburner"] === "true"); }
+    function withBackburner(labels, on) {
+      const out = {};
+      for (const k in (labels || {})) if (k !== "foreman.backburner") out[k] = labels[k];
+      if (on) out["foreman.backburner"] = "true";
+      return out;
+    }
+    // Move the card now (snappy), persist the label, let the next snapshot reconcile.
+    function setBackburner(name, on) {
+      lastAgents = lastAgents.map((a) => a.name === name
+        ? Object.assign({}, a, { labels: withBackburner(a.labels, on) }) : a);
+      renderAll(lastAgents);
+      fetch("/api/agents/" + encodeURIComponent(name) + "/backburner", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: on }),
+      }).catch(() => {}); // a failed POST self-heals on the next discovery snapshot
+    }
     function cardEl(a) {
       const card = el("a", "agent-card");
       card.href = "/a/" + encodeURIComponent(a.name);
@@ -285,6 +306,8 @@
       // dot. This REPLACES the old mngr-state chip AND the separate dot (those were two
       // duplicate, drifting signals). The ~1s poller fills its label text + colour.
       row1.appendChild(el("span", "status-badge", ""));
+      const bb = isBackburner(a);
+      if (bb) card.classList.add("backburner");
       card.appendChild(row1);
       const row2 = el("div", "row2");
       row2.appendChild(el("span", null, a.type));
@@ -299,16 +322,34 @@
         location.href = "/h/" + encodeURIComponent(a.host_name) + "/terminal";
       });
       row2.appendChild(shell);
+      // ⬇ send to Backburner / ⬆ restore, parked at the card's bottom-right (CSS
+      // margin-left:auto). The card is an <a>, so stop it navigating.
+      const demote = el("button", "backburner-btn", bb ? "⬆" : "⬇");
+      demote.type = "button";
+      demote.title = bb ? "Restore from backburner" : "Send to backburner";
+      demote.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        setBackburner(a.name, !bb);
+      });
+      row2.appendChild(demote);
       card.appendChild(row2);
       return card;
     }
     function renderAll(agents) {
+      lastAgents = agents;
       listEl.innerHTML = "";
       if (!agents.length) {
         listEl.appendChild(el("div", "empty", "no agents"));
         return;
       }
-      agents.forEach((a) => listEl.appendChild(cardEl(a)));
+      // Live agents up top; parked ones under a Backburner divider.
+      agents.filter((a) => !isBackburner(a)).forEach((a) => listEl.appendChild(cardEl(a)));
+      const back = agents.filter(isBackburner);
+      if (back.length) {
+        listEl.appendChild(el("div", "section-head", "Backburner"));
+        back.forEach((a) => listEl.appendChild(cardEl(a)));
+      }
       pollStatuses(); // populate the new cards' dots right away, don't wait a tick
     }
 

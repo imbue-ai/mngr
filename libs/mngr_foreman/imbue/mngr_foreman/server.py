@@ -144,6 +144,13 @@ def _sse(event_dict: dict) -> str:
     return f"data: {json.dumps(event_dict)}\n\n"
 
 
+# Label that marks an agent as "backburner" -- the home page files it under a
+# Backburner section instead of the main list. Stored in the agent's mngr labels
+# (persisted to its data.json), so it survives restarts and is one signal both the
+# home render and this endpoint agree on.
+_BACKBURNER_LABEL = "foreman.backburner"
+
+
 def _not_found() -> Response:
     return Response("Not found", status=404, mimetype="text/plain")
 
@@ -398,6 +405,39 @@ def create_app(
             logger.info("Interrupt of {} failed: {}", name, e)
             return _error(str(e), 502)
         return jsonify({"ok": True})
+
+    @app.route("/api/agents/<name>/backburner", methods=["POST"])
+    def api_backburner(name: str) -> ResponseReturnValue:
+        """Toggle the backburner label on an agent (persisted in its mngr labels).
+
+        Body: ``{"on": true|false}`` (defaults to true). Mirrors mngr's own ``label``
+        command: set the label on a fresh agent object from the host so its
+        ``set_labels`` writes through to the agent's ``data.json``. The registry's
+        next discovery poll re-reads that and re-broadcasts, so every home page moves
+        the card into / out of the Backburner section.
+        """
+        agent = registry.get_agent(name)
+        if agent is None:
+            return _not_found()
+        on = bool((request.get_json(silent=True) or {}).get("on", True))
+
+        def _apply(_agent: AgentInterface, host: OnlineHostInterface) -> None:
+            for live in host.get_agents():
+                if str(live.id) == str(agent.id):
+                    labels = dict(live.get_labels())
+                    if on:
+                        labels[_BACKBURNER_LABEL] = "true"
+                    else:
+                        labels.pop(_BACKBURNER_LABEL, None)
+                    live.set_labels(labels)
+                    return
+
+        try:
+            pool.run_on_host(name, _apply)
+        except Exception as e:  # noqa: BLE001 - surface the failure to the UI, don't crash the route
+            logger.info("Backburner toggle for {} failed: {}", name, e)
+            return _error(str(e), 502)
+        return jsonify({"ok": True, "backburner": on})
 
     # ---- attachments ------------------------------------------------------
 

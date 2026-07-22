@@ -57,6 +57,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import bracket_ipv6_host
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
@@ -2285,7 +2286,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         user, hostname, port, key_path = ssh_info
         known_hosts = get_ssh_known_hosts_file(self)
         rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, known_hosts)])
-        rsync_args.extend([source_str, f"{user}@{hostname}:{target_str}"])
+        rsync_args.extend([source_str, f"{user}@{bracket_ipv6_host(hostname)}:{target_str}"])
         with log_span("rsync: local dir -> {}@{}:{}", user, hostname, port):
             try:
                 self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
@@ -2371,7 +2372,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             user, hostname, port, key_path = target_ssh_info
             target_known_hosts = get_ssh_known_hosts_file(self)
             rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, target_known_hosts)])
-            rsync_args.extend([source_path_str, f"{user}@{hostname}:{target_path_str}"])
+            rsync_args.extend([source_path_str, f"{user}@{bracket_ipv6_host(hostname)}:{target_path_str}"])
             rsync_description = f"rsync: local to remote {user}@{hostname}:{port}"
         elif not source_host.is_local and self.is_local:
             # Remote to local
@@ -2380,7 +2381,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             user, hostname, port, key_path = source_ssh_info
             source_known_hosts = get_ssh_known_hosts_file(source_host)
             rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, source_known_hosts)])
-            rsync_args.extend([f"{user}@{hostname}:{source_path_str}", target_path_str])
+            rsync_args.extend([f"{user}@{bracket_ipv6_host(hostname)}:{source_path_str}", target_path_str])
             rsync_description = f"rsync: remote to local {user}@{hostname}:{port}"
         else:
             # Remote to remote: sync via local temp directory as intermediary
@@ -2408,7 +2409,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     pull_args = list(rsync_args)
                     src_known_hosts = get_ssh_known_hosts_file(source_host)
                     pull_args.extend(["-e", build_ssh_transport_command(src_key_path, src_port, src_known_hosts)])
-                    pull_args.extend([f"{src_user}@{src_hostname}:{source_path_str}", temp_path_str])
+                    pull_args.extend([f"{src_user}@{bracket_ipv6_host(src_hostname)}:{source_path_str}", temp_path_str])
                     try:
                         self.mngr_ctx.concurrency_group.run_process_to_completion(pull_args)
                     except ProcessError as e:
@@ -2424,7 +2425,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         push_args.extend(shlex.split(extra_args))
                     tgt_known_hosts = get_ssh_known_hosts_file(self)
                     push_args.extend(["-e", build_ssh_transport_command(tgt_key_path, tgt_port, tgt_known_hosts)])
-                    push_args.extend([temp_path_str, f"{tgt_user}@{tgt_hostname}:{target_path_str}"])
+                    push_args.extend([temp_path_str, f"{tgt_user}@{bracket_ipv6_host(tgt_hostname)}:{target_path_str}"])
                     try:
                         self.mngr_ctx.concurrency_group.run_process_to_completion(push_args)
                     except ProcessError as e:
