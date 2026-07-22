@@ -37,8 +37,11 @@ from imbue.mngr.utils.polling import poll_until
 
 _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
 # This can take a while, especially on Modal -- the process needs to actually
-# start and render the TUI before the indicator appears.
-_TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
+# start and render the TUI before the indicator appears. Public so an agent whose
+# startup renders the composer late (e.g. codex replays the whole rollout on resume
+# before its header appears) can override the wait upward via
+# ``InteractiveTuiAgent.get_tui_ready_timeout_seconds``.
+TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
 # Default confirmation window: how long to poll for durable evidence that the
 # agent accepted the message. Needs to be fairly long: a message sent to a busy
 # codex/antigravity agent leaves no evidence until the prompt is dequeued at
@@ -184,7 +187,7 @@ def wait_for_tui_ready(
     agent: BaseAgent[Any],
     tmux_target: TmuxWindowTarget,
     indicator: str | re.Pattern[str],
-    timeout_seconds: float = _TUI_READY_TIMEOUT_SECONDS,
+    timeout_seconds: float = TUI_READY_TIMEOUT_SECONDS,
 ) -> None:
     """Wait until the TUI is ready by polling the pane for ``indicator``.
 

@@ -146,6 +146,7 @@ from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import MARKER_LOCK_DIRNAME
 from imbue.mngr_codex.codex_config import MARKER_STATE_LIB_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_codex.codex_config import PROCESS_STARTED_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_ACTIVE_FILENAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
@@ -158,10 +159,14 @@ from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import extract_latest_codex_version
 from imbue.mngr_codex.codex_config import get_codex_auth_path
+from imbue.mngr_codex.codex_config import RUST_LOG_VALUE
 from imbue.mngr_codex.codex_config import get_codex_config_path
+from imbue.mngr_codex.codex_config import get_codex_tui_log_dir
+from imbue.mngr_codex.codex_config import get_codex_global_instructions_path
 from imbue.mngr_codex.codex_config import get_codex_home
 from imbue.mngr_codex.codex_config import get_codex_hooks_path
 from imbue.mngr_codex.codex_config import get_codex_personality_migration_path
+from imbue.mngr_codex.codex_config import get_repo_codex_instructions_path
 from imbue.mngr_codex.codex_config import get_codex_version_cache_path
 from imbue.mngr_codex.codex_config import is_codex_update_available
 from imbue.mngr_codex.codex_config import is_project_trusted
@@ -370,6 +375,18 @@ class CodexAgent(
     # (auth is a file), so the header box is a safe indicator: it appears only
     # with the rendered, ready composer.
     TUI_READY_INDICATOR: ClassVar[str] = "/model to change"
+
+    # Codex resume replays the *entire* rollout before the header/composer renders, so
+    # a long conversation's banner can appear well past the generic 30s default. That
+    # is a slow-but-fine resume, not a failure, so we wait longer here -- otherwise the
+    # readiness poll times out and turns the resume into a hard send failure. The
+    # system_interface send endpoint no longer blocks the user on this (it acks after a
+    # short budget and delivers in the background), so a longer wait costs the user
+    # nothing and just makes the eventual delivery reliable.
+    _TUI_READY_TIMEOUT_SECONDS: ClassVar[float] = 90.0
+
+    def get_tui_ready_timeout_seconds(self) -> float:
+        return self._TUI_READY_TIMEOUT_SECONDS
 
     def get_expected_process_name(self) -> str:
         # The codex CLI is a single Rust binary; ps/tmux show the literal name.
@@ -592,7 +609,9 @@ class CodexAgent(
 
         Provisions the auth.json symlink, config.toml (model/sandbox/approval +
         the credential-store pin + the trusted work-dir + notice suppressors +
-        overrides), hooks.json, and the personality-migration NUX-skip marker.
+        overrides), hooks.json, the personality-migration NUX-skip marker, and --
+        when the repo commits one at ``<work_dir>/.codex/AGENTS.md`` -- codex's
+        global ``AGENTS.md`` (its private system-prompt delta).
         ``host.write_text_file`` creates intermediate dirs; codex-owned
         ``sessions/`` is left intact across re-provision.
         """
@@ -607,6 +626,7 @@ class CodexAgent(
             approval_policy=approval_policy,
             trusted_projects=[canonical_work_dir],
             config_overrides=self.agent_config.config_overrides,
+            log_dir=str(get_codex_tui_log_dir(codex_home)),
         )
         config_path = get_codex_config_path(codex_home)
         with log_span("Writing per-agent codex config to {}", config_path):
@@ -615,6 +635,18 @@ class CodexAgent(
         hooks_path = get_codex_hooks_path(codex_home)
         with log_span("Installing codex hooks at {}", hooks_path):
             host.write_text_file(hooks_path, serialize_codex_hooks(build_codex_hooks_config()))
+
+        # Codex's private system-prompt delta: if the repo commits codex-only
+        # instructions at <work_dir>/.codex/AGENTS.md, copy them into
+        # CODEX_HOME/AGENTS.md so codex concatenates them ahead of the shared
+        # project-root AGENTS.md. Absent source -> nothing to inject (never blocks).
+        repo_codex_instructions_path = get_repo_codex_instructions_path(Path(canonical_work_dir))
+        if host.path_exists(repo_codex_instructions_path):
+            global_instructions_path = get_codex_global_instructions_path(codex_home)
+            with log_span("Installing codex global instructions at {}", global_instructions_path):
+                host.write_text_file(
+                    global_instructions_path, host.read_text_file(repo_codex_instructions_path)
+                )
 
         # Empty marker: codex skips the personality-migration prompt when it exists.
         host.write_text_file(get_codex_personality_migration_path(codex_home), "")
@@ -927,9 +959,13 @@ class CodexAgent(
         extra_str = (" " + " ".join(extra_args)) if extra_args else ""
 
         background_cmd = self._build_background_tasks_command()
-        mkdir_cmd = f"mkdir -p {shlex.quote(str(codex_home))}"
+        # Make the TUI-log dir too, so codex's file layer can open the heartbeat log.
+        mkdir_cmd = f"mkdir -p {shlex.quote(str(get_codex_tui_log_dir(codex_home)))}"
         cd_cmd = f"cd {shlex.quote(str(self.work_dir))}"
-        home_prefix = f"env CODEX_HOME={shlex.quote(str(codex_home))}"
+        # RUST_LOG=...,codex_otel=info makes codex write `codex.sse_event` delta lines
+        # into the TUI log (log_dir is set in config.toml); the system_interface tails
+        # those to drive "Thinking...". CODEX_HOME points codex at the per-agent home.
+        home_prefix = f"env CODEX_HOME={shlex.quote(str(codex_home))} RUST_LOG={shlex.quote(RUST_LOG_VALUE)}"
 
         # Resume the root conversation via `codex resume <id>`, shell-evaluated
         # because the stored command is replayed on each restart. `set --` / "$@"
@@ -956,10 +992,16 @@ class CodexAgent(
             f'rm -rf "{state}/{ACTIVE_MARKER_FILENAME}" "{state}/{ROOT_ACTIVE_FILENAME}" '
             f'"{state}/{SUBAGENTS_DIRNAME}" "{state}/{MARKER_LOCK_DIRNAME}" 2>/dev/null || true'
         )
+        # Stamp the process-start boundary on every launch/resume. The system_interface
+        # activity tracker compares transcript timestamps against this marker's mtime to
+        # ignore a tail left over from a turn a prior process abandoned mid-flight (which
+        # would otherwise pin "Running.../Thinking..." forever after a restart). Mirrors
+        # mngr_claude's `claude_process_started`. `|| true` so it can't block the launch.
+        process_started_cmd = f'touch "{state}/{PROCESS_STARTED_MARKER_FILENAME}" 2>/dev/null || true'
 
         return CommandString(
             f"{background_cmd} {mkdir_cmd} && {cd_cmd} "
-            f'&& {{ {reset_marker_cmd}; {resume_prelude}; {codex_invocation} "$@"{extra_str} ; }}'
+            f'&& {{ {reset_marker_cmd}; {process_started_cmd}; {resume_prelude}; {codex_invocation} "$@"{extra_str} ; }}'
         )
 
     def on_after_provisioning(
