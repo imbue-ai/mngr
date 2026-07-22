@@ -42,7 +42,7 @@ def maybe_upload_report(html_path: Path, run_name: str) -> str | None:
     are not configured. Logs a warning and returns ``None`` on upload
     failure -- a failed upload should not break the pipeline.
     """
-    if not (os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")):
+    if report_url_for_run(run_name) is None:
         return None
 
     key = f"{_KEY_PREFIX}/{run_name}.html"
@@ -58,4 +58,4 @@ def maybe_upload_report(html_path: Path, run_name: str) -> str | None:
         logger.warning("Failed to upload report to s3://{}/{}: {}", _BUCKET, key, exc)
         return None
 
-    return f"{_URL_BASE}/{run_name}.html"
+    return report_url_for_run(run_name)

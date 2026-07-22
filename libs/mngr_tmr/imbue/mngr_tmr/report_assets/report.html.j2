@@ -82,7 +82,7 @@
 {%- for section in sections %}
     <h2 id="{{ section.anchor }}" style="color: {{ section.color }};">{{ section.label }} ({{ section.rows|length }})</h2>
 {%- if section.kind == "UNRESOLVED" %}
-    <div class="blocked-hint">
+    <div class="unresolved-hint">
       <p>To resolve issues with an agent that could not land its fix:</p>
       <ol>
         <li><code>mngr connect $agent_name</code></li>

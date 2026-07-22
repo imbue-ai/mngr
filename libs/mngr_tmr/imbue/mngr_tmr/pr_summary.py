@@ -23,9 +23,12 @@ from pathlib import Path
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.report import EXTRACTED_TEST_OUTPUT_DIR
+from imbue.mngr_tmr.report import Escalation
 from imbue.mngr_tmr.report import EscalationKind
 from imbue.mngr_tmr.report import ReportSection
 from imbue.mngr_tmr.report import TestMapReduceResult
+from imbue.mngr_tmr.report import escalation_kind_label
+from imbue.mngr_tmr.report import load_integrator_outcome_file
 from imbue.mngr_tmr.report import load_testing_agent_outcome
 from imbue.mngr_tmr.report import report_section_of
 from imbue.mngr_tmr.report import section_label
@@ -42,11 +45,6 @@ _BREAKDOWN_ORDER: list[ReportSection] = [
 ]
 
 _ESCALATION_KIND_ORDER: list[EscalationKind] = [EscalationKind.BLOCKER, EscalationKind.SHARED_PATTERN]
-
-_ESCALATION_KIND_LABELS: dict[EscalationKind, str] = {
-    EscalationKind.BLOCKER: "Blocker",
-    EscalationKind.SHARED_PATTERN: "Shared pattern",
-}
 
 
 def _escape_cell(text: str) -> str:
@@ -124,8 +122,16 @@ def build_status_breakdown(results: list[TestMapReduceResult]) -> str:
     return "\n".join(lines)
 
 
-def build_escalations_table(results: list[TestMapReduceResult]) -> str:
-    """Render every mapper escalation as a markdown table, blockers first."""
+def build_escalations_table(
+    results: list[TestMapReduceResult],
+    reducer_escalations: tuple[Escalation, ...] = (),
+) -> str:
+    """Render every escalation as a markdown table, blockers first.
+
+    Covers both the test agents' escalations and the reducer's own -- the latter
+    include the repeated-change groups it found, which are the most actionable
+    thing the run produces and must not be omitted from the PR.
+    """
     rows: list[tuple[EscalationKind, str, str, str]] = []
     for result in results:
         for escalation in result.escalations:
@@ -137,6 +143,8 @@ def build_escalations_table(results: list[TestMapReduceResult]) -> str:
                     _first_line(escalation.detail_markdown),
                 )
             )
+    for escalation in reducer_escalations:
+        rows.append((escalation.kind, "integrator", escalation.title, _first_line(escalation.detail_markdown)))
     if not rows:
         return "### Escalations\n\nNone reported."
 
@@ -149,16 +157,25 @@ def build_escalations_table(results: list[TestMapReduceResult]) -> str:
     ]
     for kind, source, title, detail in rows:
         lines.append(
-            f"| {_ESCALATION_KIND_LABELS[kind]} | `{_escape_cell(source)}` "
+            f"| {escalation_kind_label(kind)} | `{_escape_cell(source)}` "
             f"| {_escape_cell(title)} | {_escape_cell(detail)} |"
         )
     return "\n".join(lines)
 
 
-def build_pr_summary(inputs_dir: Path) -> str:
-    """Build the full markdown summary block for the PR description."""
+def build_pr_summary(inputs_dir: Path, reducer_outcome_path: Path | None = None) -> str:
+    """Build the full markdown summary block for the PR description.
+
+    ``reducer_outcome_path`` is the integrator's own outcome file, when it has
+    already been written; its escalations join the table.
+    """
     results = collect_results(inputs_dir)
-    return "\n\n".join([build_status_breakdown(results), build_escalations_table(results)])
+    reducer_escalations: tuple[Escalation, ...] = ()
+    if reducer_outcome_path is not None:
+        reducer_outcome = load_integrator_outcome_file(reducer_outcome_path)
+        if reducer_outcome is not None:
+            reducer_escalations = reducer_outcome.escalations
+    return "\n\n".join([build_status_breakdown(results), build_escalations_table(results, reducer_escalations)])
 
 
 def _format_run_date(run_name: str) -> str:
@@ -209,6 +226,11 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Build TMR pull request title/body from mapper outcomes.")
     parser.add_argument("inputs_dir", type=Path, help="Directory of per-mapper output directories")
     parser.add_argument(
+        "--reducer-outcome",
+        type=Path,
+        help="Path to the integrator's own outcome file, so its escalations join the table",
+    )
+    parser.add_argument(
         "--title",
         metavar="BRANCH",
         help="Print the PR title for this reducer branch instead of the body summary",
@@ -218,7 +240,7 @@ def main(argv: list[str]) -> int:
     if args.title:
         print(build_pr_title(args.title, collect_results(args.inputs_dir)))
     else:
-        print(build_pr_summary(args.inputs_dir))
+        print(build_pr_summary(args.inputs_dir, args.reducer_outcome))
     return 0
 
 

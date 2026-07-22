@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--name <VARIANT>] [--mapper-prompt <FILE>] [--reducer-prompt <FILE>] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]
+mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--name <VARIANT>] [--mapper-prompt <FILE>] [--reducer-prompt <FILE>] [--provider <PROVIDER>] [--env KEY=VALUE] [--reducer-env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]
 ```
 
 Run and fix tests in parallel using agents (test map-reduce).
@@ -21,9 +21,17 @@ This command implements a map-reduce pattern for tests:
 4. For successful fixes, pulls the agent's code changes into branches
    named tmr/<run>/*.
 5. If any fixes succeeded, launches a reducer agent to merge all fix
-   branches into a single integrated branch (tmr/<run>/reducer).
+   branches into a single integrated branch (tmr/<run>/reducer). The reducer
+   also collapses changes many agents made identically into one shared fix,
+   writes the run's changelog entry, and -- when given a GH_TOKEN via
+   --reducer-env -- opens the run's pull request.
 6. Generates a final HTML report summarizing all outcomes with markdown
    summaries, including the integrated branch name if applicable.
+
+Each agent reports an outcome JSON with the changes it made (each SUCCEEDED or
+FAILED) and an `escalations` list. Escalations are independent of the outcome:
+an agent whose test passes cleanly still raises one when it finds a problem
+beyond its own test, such as the same fix already present on sibling tests.
 
 Arguments before -- are test paths/patterns (positional). Arguments after -- are
 pytest testing flags shared between discovery and individual test runs. For example:
@@ -31,7 +39,9 @@ pytest testing flags shared between discovery and individual test runs. For exam
 mngr tmr tests/e2e -- -m release
 
 This discovers tests with `pytest --collect-only tests/e2e -m release` and runs
-each test with `pytest tests/e2e/test_foo.py::test_bar -m release`.
+each test with `pytest --timeout=120 tests/e2e/test_foo.py::test_bar -m release`.
+The explicit timeout is the same budget the reducer verifies at, so agents do
+not have to add per-test timeout markers (a test needing longer is escalated).
 
 Use --name to give a run its own variant prefix (agent/branch/host names), so
 distinct suites stay separable and reviewable on their own. For example, run the

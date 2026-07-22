@@ -20,6 +20,7 @@ from imbue.mngr_tmr.report import TestResult
 from imbue.mngr_tmr.report import _merged_status_html
 from imbue.mngr_tmr.report import _render_markdown
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report import load_testing_agent_outcome
 from imbue.mngr_tmr.report import report_section_of
 
 SUCCEEDED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
@@ -58,6 +59,9 @@ def _serialize_outcome(outcome: TestResult) -> dict[str, object]:
         "test_runs": [
             {"run_name": r.run_name, "description_markdown": r.description_markdown} for r in outcome.test_runs
         ],
+        "escalations": [
+            {"kind": e.kind.value, "title": e.title, "detail_markdown": e.detail_markdown} for e in outcome.escalations
+        ],
     }
 
 
@@ -86,6 +90,7 @@ def make_metadata_and_outcome(
     tests_passing_before: bool | None = None,
     tests_passing_after: bool | None = None,
     summary_markdown: str = "",
+    escalations: tuple[Escalation, ...] = (),
     write_outcome: bool = True,
 ) -> AgentMetadata:
     """Build an ``AgentMetadata`` and (unless ``write_outcome`` is False) write
@@ -109,6 +114,7 @@ def make_metadata_and_outcome(
             tests_passing_before=tests_passing_before,
             tests_passing_after=tests_passing_after,
             summary_markdown=summary_markdown,
+            escalations=escalations,
         )
         _write_test_outcome(output_dir, name, outcome)
     return metadata
@@ -524,3 +530,97 @@ def test_generate_html_report_html_escaped(tmp_path: Path) -> None:
     content = result_path.read_text()
     assert "<script>alert" not in content
     assert "&lt;script&gt;" in content
+
+
+# --- escalation aggregation into the report ---
+
+
+def test_report_includes_mapper_escalations(tmp_path: Path) -> None:
+    """A mapper's escalation must reach the report even though its test passed."""
+    output_dir = tmp_path / "out"
+    agents = [
+        make_metadata_and_outcome(
+            output_dir,
+            "clean-but-escalating",
+            test_node_id="tests/test_a.py::test_a",
+            tests_passing_before=True,
+            tests_passing_after=True,
+            escalations=(
+                Escalation(
+                    title="rsync mark superfluous suite-wide",
+                    detail_markdown="Six siblings carry it.",
+                    kind=EscalationKind.SHARED_PATTERN,
+                ),
+            ),
+        )
+    ]
+    content = generate_html_report(agents, output_dir).read_text()
+    assert "rsync mark superfluous suite-wide" in content
+    assert "Shared pattern" in content
+    assert "tests/test_a.py::test_a" in content
+
+
+def test_report_sorts_blockers_before_shared_patterns(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    agents = [
+        make_metadata_and_outcome(
+            output_dir,
+            "pattern-agent",
+            tests_passing_before=True,
+            tests_passing_after=True,
+            escalations=(Escalation(title="PATTERN-ONE", detail_markdown="d", kind=EscalationKind.SHARED_PATTERN),),
+        ),
+        make_metadata_and_outcome(
+            output_dir,
+            "blocker-agent",
+            tests_passing_before=True,
+            tests_passing_after=True,
+            escalations=(Escalation(title="BLOCKER-ONE", detail_markdown="d", kind=EscalationKind.BLOCKER),),
+        ),
+    ]
+    content = generate_html_report(agents, output_dir).read_text()
+    assert content.index("BLOCKER-ONE") < content.index("PATTERN-ONE")
+
+
+def test_report_labels_integrator_escalations_by_source(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    agents = [make_metadata_and_outcome(output_dir, "m", tests_passing_before=True, tests_passing_after=True)]
+    integrator = AgentMetadata(
+        kind=AgentKind.REDUCER, agent_name=AgentName("red"), task_id=None, branch_name="b", error_summary=None
+    )
+    write_integrator_outcome(
+        output_dir,
+        AgentName("red"),
+        {"escalations": [{"kind": "SHARED_PATTERN", "title": "REDUCER-FOUND", "detail_markdown": "d"}]},
+    )
+    content = generate_html_report(agents, output_dir, integrator_metadata=integrator).read_text()
+    assert "REDUCER-FOUND" in content
+    assert "integrator" in content
+
+
+def test_outcome_without_escalations_still_parses(tmp_path: Path) -> None:
+    """An outcome written before the field existed must not be discarded."""
+    output_dir = tmp_path / "out"
+    target = output_dir / "legacy" / "test_output" / TESTING_AGENT_OUTCOME_FILENAME
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"changes": {}, "tests_passing_before": True, "tests_passing_after": True}))
+    outcome = load_testing_agent_outcome(AgentName("legacy"), output_dir)
+    assert outcome is not None
+    assert outcome.escalations == ()
+
+
+def test_outcome_cache_is_keyed_by_output_dir(tmp_path: Path) -> None:
+    """The same agent name under two output dirs must not return the first one's outcome.
+
+    The reducer's inputs directory and the orchestrator's output directory both
+    hold per-agent outcomes under the same agent names.
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    name = AgentName("shared-name")
+    _write_test_outcome(first, name, TestResult(summary_markdown="FROM-FIRST"))
+    _write_test_outcome(second, name, TestResult(summary_markdown="FROM-SECOND"))
+    from_first = load_testing_agent_outcome(name, first)
+    from_second = load_testing_agent_outcome(name, second)
+    assert from_first is not None and from_second is not None
+    assert from_first.summary_markdown == "FROM-FIRST"
+    assert from_second.summary_markdown == "FROM-SECOND"

@@ -2,7 +2,9 @@
 
 Test map-reduce plugin for [mngr](https://github.com/imbue-ai/mngr).
 
-Collects tests via pytest, launches one agent per test to run and optionally fix failures, polls for completion, and generates an HTML report. Successful fixes are pulled into local branches and optionally merged by an integrator agent.
+Collects tests via pytest, launches one agent per test to run and optionally fix failures, polls for completion, and generates an HTML report. Successful fixes are pulled into local branches and merged by an integrator (reducer) agent.
+
+Agents report escalations independently of their own outcome, so a passing test can still flag a problem that needs a suite-wide fix. The reducer collapses changes that many agents made identically into one shared fix, writes a single changelog entry for the run, and -- when given a `GH_TOKEN` via `--reducer-env` -- opens the run's pull request with the mapper status breakdown and escalations table in its description.
 
 ## Variants
 
@@ -20,6 +22,9 @@ reviewable runs. A variant is just a set of CLI flags:
   prompt templates. An override template may `{% extends %}` or `{% include %}`
   the packaged `mapper.j2` / `reducer.j2` by name to reuse the shared body.
 - `--env` supplies any credentials a variant needs.
+- `--reducer-env` supplies credentials to the reducer ONLY, never to the
+  mappers. `GH_TOKEN` goes here: it is what lets the reducer open the run's PR,
+  and the mappers must not hold a token that can push.
 
 Example (two variants):
 

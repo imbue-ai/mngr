@@ -3,10 +3,14 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr_tmr.pr_summary import build_escalations_table
+from imbue.mngr_tmr.pr_summary import build_pr_summary
 from imbue.mngr_tmr.pr_summary import build_pr_title
 from imbue.mngr_tmr.pr_summary import build_status_breakdown
 from imbue.mngr_tmr.pr_summary import collect_results
+from imbue.mngr_tmr.pr_summary import main
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 
 
@@ -134,3 +138,45 @@ def test_pr_title_for_an_all_clean_run(tmp_path: Path) -> None:
 def test_pr_title_tolerates_an_unexpected_branch_shape() -> None:
     """A non-timestamp run name is passed through rather than mangled."""
     assert build_pr_title("weird-branch", []) == "TMR weird-branch: 0 tests clean"
+
+
+def test_reducer_escalations_join_the_table(tmp_path: Path) -> None:
+    """The reducer's own findings -- the repeated-change groups -- must reach the PR."""
+    inputs = tmp_path / "inputs"
+    write_outcome(inputs, "a", _fix_outcome())
+    outcome_path = tmp_path / "integrator_outcome.json"
+    outcome_path.write_text(
+        json.dumps(
+            {
+                "escalations": [
+                    {"kind": "SHARED_PATTERN", "title": "39 tests added a timeout marker", "detail_markdown": "d"}
+                ]
+            }
+        )
+    )
+    summary = build_pr_summary(inputs, outcome_path)
+    assert "39 tests added a timeout marker" in summary
+    assert "`integrator`" in summary
+
+
+def test_pr_summary_without_a_reducer_outcome(tmp_path: Path) -> None:
+    write_outcome(tmp_path, "a", _fix_outcome())
+    assert "None reported." in build_pr_summary(tmp_path)
+
+
+def test_pr_summary_tolerates_an_unreadable_reducer_outcome(tmp_path: Path) -> None:
+    """A reducer that died before writing its outcome must not break the PR body."""
+    write_outcome(tmp_path, "a", _fix_outcome())
+    assert "Mapper outcomes" in build_pr_summary(tmp_path, tmp_path / "nonexistent.json")
+
+
+def test_main_prints_the_body(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    write_outcome(tmp_path, "a", _fix_outcome())
+    assert main(["pr_summary", str(tmp_path)]) == 0
+    assert "### Mapper outcomes (1 total)" in capsys.readouterr().out
+
+
+def test_main_prints_the_title(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    write_outcome(tmp_path, "a", _fix_outcome())
+    assert main(["pr_summary", str(tmp_path), "--title", "tmr-mngr/20260721085455/reducer"]) == 0
+    assert capsys.readouterr().out.strip().startswith("TMR tmr-mngr 2026-07-21:")

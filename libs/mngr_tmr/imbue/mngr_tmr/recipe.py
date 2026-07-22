@@ -8,7 +8,6 @@ that interprets each mapper's outcome JSON. The framework
 extraction, and CLI plumbing.
 """
 
-import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -36,6 +35,7 @@ from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.report import EXTRACTED_TEST_OUTPUT_DIR
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report import load_integrator_outcome_file
 from imbue.mngr_tmr.report_upload import maybe_upload_report
 from imbue.mngr_tmr.report_upload import report_url_for_run
 
@@ -181,6 +181,11 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         default=None,
         description="Optional override template for the reducer prompt (falls back to the packaged reducer.j2)",
     )
+    is_pull_request_enabled: bool = Field(
+        default=False,
+        description="Whether the reducer should open a pull request for this run. Only true when the reducer "
+        "was given a GH_TOKEN, so plain local runs and the reintegrate workflow do not try to push.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -226,6 +231,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         # though the final report is uploaded after the reducer finishes.
         return build_integrator_prompt(
             report_url=report_url_for_run(ctx.run_name),
+            is_pull_request_enabled=self.is_pull_request_enabled,
             template_path=self.reducer_prompt_path,
         )
 
@@ -296,22 +302,18 @@ def _build_run_commands(
 
 
 def _read_pull_request_url(outcome_path: Path) -> str | None:
-    """Read ``pull_request_url`` from the reducer's outcome file, if present.
+    """Read the PR URL the reducer recorded, if it recorded one.
 
     Tolerant by design: the reducer may have failed before writing the file, or
     written one without the key (it records ``pull_request_error`` instead when
     opening the PR failed). Either way there is simply no URL to emit.
     """
-    try:
-        data = json.loads(outcome_path.read_text())
-    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
-        logger.warning("Could not read reducer outcome at {}: {}", outcome_path, exc)
+    outcome = load_integrator_outcome_file(outcome_path)
+    if outcome is None:
         return None
-    url = data.get("pull_request_url")
-    error = data.get("pull_request_error")
-    if error:
-        logger.warning("Reducer reported it could not open a pull request: {}", error)
-    return url if isinstance(url, str) and url else None
+    if outcome.pull_request_error:
+        logger.warning("Reducer reported it could not open a pull request: {}", outcome.pull_request_error)
+    return outcome.pull_request_url or None
 
 
 def _emit_pull_request_url(url: str | None, output_opts: OutputOptions) -> None:

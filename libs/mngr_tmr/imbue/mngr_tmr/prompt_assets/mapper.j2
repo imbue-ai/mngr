@@ -1,11 +1,15 @@
 Run the test with: {{ run_cmd }}
 
-Run it exactly that way. The `--timeout={{ test_timeout_seconds }}` is already
-set to a budget that comfortably covers a real `mngr` invocation, and the
-integration step verifies at the same budget. So do NOT add or raise a
-`@pytest.mark.timeout` on the test: if the test needs more than
-{{ test_timeout_seconds }}s, that is a genuine finding worth an escalation, not
-something to absorb with a bigger marker.
+Run it exactly that way. The `--timeout={{ test_timeout_seconds }}` covers a
+real `mngr` invocation comfortably, and the integration step verifies with the
+same flag, so your fix is checked at the budget you fixed it under.
+
+If the test declares its own `@pytest.mark.timeout`, that marker wins over the
+flag (pytest-timeout gives the marker precedence) and the test runs at the
+marker's value instead. Either way, do NOT add, raise, or lower a timeout
+marker: a test that cannot pass within its budget -- whether that budget comes
+from the flag or from its own marker -- is a genuine finding worth an
+escalation, not something to absorb by editing the marker.
 
 # The docstring is the contract
 

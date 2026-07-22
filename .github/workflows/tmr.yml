@@ -116,9 +116,11 @@ jobs:
       id-token: write
     env:
       MNGR_USER_ID: ${{ inputs.mngr_user_id != '' && inputs.mngr_user_id || 'tmr-ci' }}
-      # The automatic per-run token, used for `git push` + `gh pr create` on this
-      # same repo. Intentionally NOT migrated to Vault (it can't meaningfully
-      # live there and the automatic token is the right fit for same-repo pushes).
+      # The automatic per-run token. Handed to the reducer agent (via
+      # --reducer-env below) which pushes the integrated branch and opens the
+      # PR; the workflow itself only uses it for the superseded-PR comment.
+      # Intentionally NOT migrated to Vault (it can't meaningfully live there
+      # and the automatic token is the right fit for same-repo pushes).
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:

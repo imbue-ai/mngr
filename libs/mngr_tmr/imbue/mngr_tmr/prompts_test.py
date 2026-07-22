@@ -7,6 +7,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_mapreduce.launching import REDUCER_INPUTS_DIRNAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
+from imbue.mngr_tmr.prompts import TEST_TIMEOUT_SECONDS
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.recipe import CollectTestsError
@@ -122,3 +123,29 @@ def test_integrator_prompt_interpolates_framework_constants() -> None:
     prompt = build_integrator_prompt()
     assert REDUCER_INPUTS_DIRNAME in prompt
     assert TESTING_AGENT_OUTCOME_FILENAME in prompt
+
+
+def test_reducer_prompt_verifies_at_the_mapper_timeout() -> None:
+    """Mapper and reducer must run at the same budget, or good fixes get rejected."""
+    mapper = build_test_agent_prompt("tests/test_x.py::test_y", ())
+    reducer = build_integrator_prompt()
+    assert f"--timeout={TEST_TIMEOUT_SECONDS}" in mapper
+    assert f"--timeout={TEST_TIMEOUT_SECONDS}" in reducer
+
+
+def test_reducer_prompt_omits_pr_instructions_without_a_token() -> None:
+    """A local run and the reintegrate workflow must not be told to push."""
+    prompt = build_integrator_prompt(is_pull_request_enabled=False)
+    assert "GH_TOKEN" not in prompt
+    assert "allow-empty" not in prompt
+    assert "Do not open a pull request" in prompt
+
+
+def test_reducer_prompt_includes_pr_instructions_with_a_token() -> None:
+    prompt = build_integrator_prompt(is_pull_request_enabled=True)
+    assert "GH_TOKEN" in prompt
+    assert "git commit --allow-empty" in prompt
+
+
+def test_reducer_prompt_uses_the_artifact_fallback_without_a_report_url() -> None:
+    assert "tmr-report artifact" in build_integrator_prompt(report_url=None, is_pull_request_enabled=True)

@@ -12,4 +12,9 @@ The reducer now opens the run's pull request itself, rather than the workflow do
 
 The HTML report's "Blocked" section is renamed "Unresolved" (results where the agent tried and could not land a change), and the escalations block now aggregates escalations from every test agent as well as the integrator, labelled by kind and source.
 
+
+The minds variant's mapper prompt (`apps/minds/tmr/mapper.j2`) is updated in step with the packaged one. It is a self-contained copy, and leaving it emitting the removed `BLOCKED` status would have made every minds mapper's outcome unparseable and silently discarded from the report.
+
+The reducer is only told to open a pull request when it was actually given a token to do it with, so plain local `mngr tmr` runs and the reintegrate workflow no longer receive push-and-open-PR instructions they cannot act on.
+
 Fixed a latent bug in report generation: parsed outcomes were cached by agent name alone, so the same agent name under two different output directories would return the first directory's outcome.

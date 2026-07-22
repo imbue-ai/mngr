@@ -59,10 +59,10 @@ printf '%s\n' "${FETCHED_BRANCHES[@]}"
 ```
 
 The branches you must cherry-pick are exactly the printed ones. If no
-branches qualify, skip the cherry-pick and normalization steps, and go
-straight to "# Write the unified changelog entry" -- you still open a pull
-request for the run, because the escalations the test agents reported are
-worth surfacing even when there is no code to integrate.
+branches qualify, skip the cherry-pick and normalization steps and go straight
+to "# Write the unified changelog entry".{% if is_pull_request_enabled %} You still open a pull request for
+the run, because the escalations the test agents reported are worth surfacing
+even when there is no code to integrate.{% endif %}
 
 # Cherry-pick strategy
 
@@ -109,11 +109,13 @@ node ids, with the same `-m` marker. For example:
 uv run pytest --timeout={{ test_timeout_seconds }} <affected_test_node_id> [<more_node_ids>...] -m release
 ```
 
-Always pass `--timeout={{ test_timeout_seconds }}`: it is the same budget the
-test agents ran at. Verifying at a smaller budget would fail their good fixes;
-verifying at a larger one would accept fixes that do not hold. Never "fix" a
-timeout failure by adding a `@pytest.mark.timeout` to a test -- if a test truly
-needs longer than this, escalate it instead.
+Always pass `--timeout={{ test_timeout_seconds }}`: it is the same flag the test
+agents ran with, so you verify each test at exactly the budget it was fixed
+under. Note a test that declares its own `@pytest.mark.timeout` keeps that
+marker's value -- in pytest-timeout a marker takes precedence over the
+command-line flag -- which is true for the agents' runs too, so the two still
+agree. Never "fix" a timeout failure by adding or raising a marker: a test that
+cannot pass within its budget is a finding to escalate, not to absorb.
 
 Exit code 0 with no failures confirms the change. Otherwise read the output to see
 what broke. If you cannot run a given test in this environment, mark the affected
@@ -213,12 +215,13 @@ Collect both -- the escalations from every outcome file, and the FIXMEs:
 
 ```bash
 for outcome in {{ inputs_dirname }}/*/test_output/{{ mapper_outcome_filename }}; do
+    agent=$(basename "$(dirname "$(dirname "$outcome")")")
     python3 -c '
 import json, sys
 data = json.load(open(sys.argv[1]))
 for e in data.get("escalations") or []:
-    print(f"{e.get(\"kind\", \"BLOCKER\")}\t{sys.argv[2]}\t{e.get(\"title\", \"\")}")
-' "$outcome" "$(basename "$(dirname "$(dirname "$outcome")")")"
+    print("{}\t{}\t{}".format(e.get("kind", "BLOCKER"), sys.argv[2], e.get("title", "")))
+' "$outcome" "$agent"
 done | sort
 
 grep -rn "FIXME(tmr):" . || true
@@ -240,8 +243,9 @@ different words. For each distinct problem:
   NOT apply an unverifiable cross-cutting change.
 
 Carry every unresolved escalation through to your own "escalations" field, even
-the ones that came from a test agent whose test passed. That field is what the
-pull request body reports to the user.
+the ones that came from a test agent whose test passed. Both your escalations
+and theirs are rendered into the run's report, and into the pull request body
+when one is opened.
 
 # Write the unified changelog entry
 
@@ -269,7 +273,7 @@ If you integrated no code at all, still write an entry for the project whose
 tests the run targeted, saying the run found no changes to integrate and
 summarizing what was escalated.
 
-# Open the pull request
+{% if is_pull_request_enabled %}# Open the pull request
 
 Open the run's pull request yourself, so its description can carry the run's
 findings. Do this even when you integrated nothing.
@@ -294,13 +298,20 @@ fi
 git push "https://x-access-token:$GH_TOKEN@github.com/$TMR_GITHUB_REPOSITORY.git" "HEAD:refs/heads/$BRANCH"
 ```
 
-Build the title and the findings section with the helper rather than by hand --
-it reads the same outcome files and will not miscount:
+First write your outcome file (see "# Writing the outcome and publishing
+outputs" below for its schema) -- including every escalation you are carrying,
+especially the repeated-change groups from the step above. The PR body is built
+from it, so the file must exist before you build the body. You may amend it
+afterwards with the resulting PR url.
+
+Then build the title and the findings section with the helper rather than by
+hand -- it reads the same outcome files and will not miscount:
 
 ```bash
 INPUTS={{ inputs_dirname }}
+OUTCOME=.test_output/{{ reducer_outcome_filename }}
 TITLE=$(uv run --project libs/mngr_tmr python -m imbue.mngr_tmr.pr_summary --title "$BRANCH" "$INPUTS")
-FINDINGS=$(uv run --project libs/mngr_tmr python -m imbue.mngr_tmr.pr_summary "$INPUTS")
+FINDINGS=$(uv run --project libs/mngr_tmr python -m imbue.mngr_tmr.pr_summary --reducer-outcome "$OUTCOME" "$INPUTS")
 ```
 
 Then open the PR as a draft, against `$TMR_BASE_BRANCH`, with that title and a
@@ -311,7 +322,8 @@ body containing, in order:
 {% if report_url %}   `HTML report: {{ report_url }} (also attached as the tmr-report artifact on the workflow run).`
 {% else %}   `HTML report: attached as the tmr-report artifact on the workflow run; download and open index.html.`
 {% endif %}
-2. `$FINDINGS` verbatim -- the mapper status breakdown and escalations table.
+2. `$FINDINGS` verbatim -- the mapper status breakdown and the escalations
+   table, which covers both the test agents' escalations and your own.
 3. A short prose paragraph of your own: the themes you saw across the run, what
    you normalized, and anything a reviewer should look at first. This is the one
    part that is yours to write; keep it to a few sentences.
@@ -328,7 +340,13 @@ the PR fails, do not abort the run: record the failure in
 `pull_request_error` and continue to publishing the outputs archive, so the
 orchestrator still gets your results.
 
-# Writing the outcome and publishing outputs
+{% else %}# Do not open a pull request
+
+This run was not given the credentials to push, so do NOT attempt to push a
+branch, create an empty commit, or open a pull request. Publish your outputs and
+stop; the caller handles integration from here.
+
+{% endif %}# Writing the outcome and publishing outputs
 
 After cherry-picking, write the result atomically to avoid races with the
 orchestrator reading it:

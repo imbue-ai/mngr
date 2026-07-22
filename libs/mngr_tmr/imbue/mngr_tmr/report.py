@@ -218,9 +218,9 @@ class TestMapReduceResult(FrozenModel):
 # Subdirectory of each agent's extracted output archive holding its .test_output contents.
 EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 
-# Outcome JSON for a given agent is immutable once present. Cache keyed by
-# agent_name so generate_html_report can be called many times during polling
-# without re-parsing.
+# Outcome JSON for a given agent is immutable once present, so parses are cached
+# and generate_html_report can be called many times during polling without
+# re-parsing.
 # Keyed by (output_dir, agent_name), not agent name alone: the same agent name
 # can appear under two different output directories (the orchestrator's own
 # output dir and the reducer's inputs dir), and those are different outcomes.
@@ -245,6 +245,11 @@ _SECTION_LABELS: dict[ReportSection, str] = {
     ReportSection.RUNNING: "Running",
 }
 
+_ESCALATION_KIND_LABELS: dict[EscalationKind, str] = {
+    EscalationKind.BLOCKER: "Blocker",
+    EscalationKind.SHARED_PATTERN: "Shared pattern",
+}
+
 _SECTION_COLORS: dict[ReportSection, str] = {
     ReportSection.NON_IMPL_FIXES: "rgb(33, 150, 243)",
     ReportSection.IMPL_FIXES: "rgb(76, 175, 80)",
@@ -253,6 +258,15 @@ _SECTION_COLORS: dict[ReportSection, str] = {
     ReportSection.CLEAN_PASS: "rgb(158, 158, 158)",
     ReportSection.RUNNING: "rgb(3, 169, 244)",
 }
+
+
+def escalation_kind_label(kind: EscalationKind) -> str:
+    """Human-readable label for an escalation kind.
+
+    Public so the PR-summary builder labels kinds the same way the HTML report
+    does; a third kind must not be able to render differently in the two places.
+    """
+    return _ESCALATION_KIND_LABELS[kind]
 
 
 def section_label(section: ReportSection) -> str:
@@ -271,11 +285,6 @@ _NON_IMPL_CHANGE_KINDS = frozenset({ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST
 _CHANGE_STATUS_ICONS: dict[ChangeStatus, str] = {
     ChangeStatus.SUCCEEDED: "&#10003;",
     ChangeStatus.FAILED: "&#10007;",
-}
-
-_ESCALATION_KIND_LABELS: dict[EscalationKind, str] = {
-    EscalationKind.BLOCKER: "Blocker",
-    EscalationKind.SHARED_PATTERN: "Shared pattern",
 }
 
 
@@ -380,27 +389,21 @@ def load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> TestR
     return outcome
 
 
-def _load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> IntegratorResult:
-    """Read and cache the integrator's outcome, returning an empty result on miss."""
-    empty = IntegratorResult(agent_name=meta.agent_name, branch_name=meta.branch_name)
-    cache_key = (output_dir, meta.agent_name)
-    cached = _INTEGRATOR_OUTCOME_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    path = _outcome_path_for_integrator(output_dir, meta.agent_name)
-    try:
-        data = json.loads(path.read_text())
-    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to read integrator outcome for '{}': {}", meta.agent_name, exc)
-        return empty
-    result = IntegratorResult(
-        agent_name=meta.agent_name,
+def parse_integrator_outcome(data: Any, agent_name: AgentName | None, branch_name: str | None) -> IntegratorResult:
+    """Build an ``IntegratorResult`` from already-decoded outcome JSON.
+
+    Public so callers that hold the outcome file directly (the recipe, the PR
+    summary builder) go through the same model rather than re-deriving fields
+    from the raw dict.
+    """
+    return IntegratorResult(
+        agent_name=agent_name,
         squashed_branches=tuple(data.get("squashed_branches", ())),
         squashed_commit_hash=data.get("squashed_commit_hash"),
         impl_priority=tuple(data.get("impl_priority", ())),
         impl_commit_hashes=data.get("impl_commit_hashes", {}),
         failed=tuple(data.get("failed", ())),
-        branch_name=meta.branch_name,
+        branch_name=branch_name,
         normalizations=tuple(
             Normalization(summary_markdown=entry.get("summary_markdown", ""))
             for entry in data.get("normalizations", ())
@@ -409,6 +412,32 @@ def _load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> Integrato
         pull_request_url=data.get("pull_request_url"),
         pull_request_error=data.get("pull_request_error"),
     )
+
+
+def load_integrator_outcome_file(
+    outcome_path: Path, agent_name: AgentName | None = None, branch_name: str | None = None
+) -> IntegratorResult | None:
+    """Read and parse an integrator outcome file, or None if it is unreadable."""
+    try:
+        data = json.loads(outcome_path.read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read integrator outcome at {}: {}", outcome_path, exc)
+        return None
+    return parse_integrator_outcome(data, agent_name, branch_name)
+
+
+def _load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> IntegratorResult:
+    """Read and cache the integrator's outcome, returning an empty result on miss."""
+    empty = IntegratorResult(agent_name=meta.agent_name, branch_name=meta.branch_name)
+    cache_key = (output_dir, meta.agent_name)
+    cached = _INTEGRATOR_OUTCOME_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    result = load_integrator_outcome_file(
+        _outcome_path_for_integrator(output_dir, meta.agent_name), meta.agent_name, meta.branch_name
+    )
+    if result is None:
+        return empty
     _INTEGRATOR_OUTCOME_CACHE[cache_key] = result
     return result
 
