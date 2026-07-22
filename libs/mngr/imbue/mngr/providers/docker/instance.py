@@ -1862,14 +1862,14 @@ kill -TERM 1
         return self._create_host_from_host_record(host_record)
 
     def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
-        """Report a still-running container as UNAUTHENTICATED rather than CRASHED.
+        """Report a still-running container as UNREACHABLE rather than CRASHED.
 
         The docker daemon is ground truth for container lifecycle and is
         reachable without inner SSH. When agent enumeration fails with a
         connection error (e.g. the inner sshd died -- "Error reading SSH
         protocol banner") but the daemon still reports the container as running,
         the host is up; we just cannot get inside it. Reporting
-        ``HostState.UNAUTHENTICATED`` keeps consumers such as minds' recovery
+        ``HostState.UNREACHABLE`` keeps consumers such as minds' recovery
         flow from misclassifying a live container as offline and skipping the
         stop step of a host restart. This deliberately follows the convention
         ``mngr_imbue_cloud`` established for the identical condition (a running
@@ -1885,7 +1885,7 @@ kill -TERM 1
         try:
             container = self._find_container_by_host_id(host_id)
             if container is not None and self._is_container_running(container):
-                return HostState.UNAUTHENTICATED
+                return HostState.UNREACHABLE
         except (
             docker.errors.DockerException,
             requests.exceptions.ConnectionError,

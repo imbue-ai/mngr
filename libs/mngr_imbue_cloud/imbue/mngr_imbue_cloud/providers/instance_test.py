@@ -945,8 +945,8 @@ def test_cached_identity_survives_a_fresh_provider_instance(temp_mngr_ctx: MngrC
     assert agents[0].certified_data.get("stale") is True
 
 
-def test_outer_auth_rejection_mints_unreachable_and_reattaches_cached_agents(temp_mngr_ctx: MngrContext) -> None:
-    """An outer-SSH auth rejection mints UNREACHABLE (not UNAUTHENTICATED: the
+def test_outer_auth_rejection_mints_unauthenticated_and_reattaches_cached_agents(temp_mngr_ctx: MngrContext) -> None:
+    """An outer-SSH auth rejection mints UNAUTHENTICATED (not UNREACHABLE: the
     container was never observed, and a restart routes through the same rejected
     key) and re-attaches cached identity just like UNKNOWN does."""
     host_id = HostId.generate()
@@ -964,7 +964,7 @@ def test_outer_auth_rejection_mints_unreachable_and_reattaches_cached_agents(tem
     provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
     host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
 
-    assert host_ref.host_state == HostState.UNREACHABLE
+    assert host_ref.host_state == HostState.UNAUTHENTICATED
     assert [str(agent.agent_name) for agent in agents] == ["primary-agent"]
     assert agents[0].certified_data.get("stale") is True
 

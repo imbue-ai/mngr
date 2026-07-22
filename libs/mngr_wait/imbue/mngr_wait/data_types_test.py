@@ -28,7 +28,7 @@ def test_default_agent_states_include_host_terminal_states() -> None:
     assert "CRASHED" in states
     assert "FAILED" in states
     assert "DESTROYED" in states
-    assert "UNAUTHENTICATED" in states
+    assert "UNREACHABLE" in states
     assert "PAUSED" in states
 
 
@@ -43,7 +43,7 @@ def test_default_host_states_include_terminal_states() -> None:
     assert "CRASHED" in states
     assert "FAILED" in states
     assert "DESTROYED" in states
-    assert "UNAUTHENTICATED" in states
+    assert "UNREACHABLE" in states
     assert "PAUSED" in states
 
 

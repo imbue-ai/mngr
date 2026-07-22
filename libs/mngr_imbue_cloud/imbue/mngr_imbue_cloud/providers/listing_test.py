@@ -11,10 +11,10 @@ from imbue.mngr_imbue_cloud.providers.listing import map_docker_status_to_host_s
     "status,exit_code,expected_state",
     [
         # Running container with unreachable inner SSH should report as
-        # UNAUTHENTICATED (host is up; we just can't get inside).
-        ("running", 0, HostState.UNAUTHENTICATED),
+        # UNREACHABLE (host is up; we just can't get inside).
+        ("running", 0, HostState.UNREACHABLE),
         # exit_code is ignored when running.
-        ("running", 137, HostState.UNAUTHENTICATED),
+        ("running", 137, HostState.UNREACHABLE),
         # Cleanly-exited containers map to STOPPED.
         ("exited", 0, HostState.STOPPED),
         # Non-zero exit means the container crashed.

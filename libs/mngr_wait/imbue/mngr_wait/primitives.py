@@ -32,7 +32,7 @@ TERMINAL_HOST_STATES: Final[frozenset[HostState]] = frozenset(
         HostState.CRASHED,
         HostState.FAILED,
         HostState.DESTROYED,
-        HostState.UNAUTHENTICATED,
+        HostState.UNREACHABLE,
     }
 )
 
