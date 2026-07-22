@@ -570,13 +570,11 @@
     const composer = document.getElementById("composer");
     const toolBodies = new Map(); // tool_call_id -> {body, toolName, resolved}
     const pendingResults = new Map(); // tool_call_id -> result event (arrived early)
-    // Optimistic send: on send we render the message bubble immediately (class
-    // "pending") and clear the composer at once, so the send feels instant. The
-    // transcript echo later confirms it IN PLACE (pending class removed) rather
-    // than duplicating, since userBubbles dedups by content-key. A failed POST
-    // rolls the bubble back and restores the text. userBubbles also flips a
-    // queued_command (dark green) to a delivered user_message (green) in place.
-    const userBubbles = new Map(); // content-key -> { node, queued, pending }
+    // Dedups user bubbles by content-key so the transcript echo of a message we sent
+    // lands in place instead of duplicating, and flips a queued_command (dark green)
+    // to a delivered user_message (green) in place. (The composer waits for that echo
+    // rather than optimistically drawing a bubble -- see send().)
+    const userBubbles = new Map(); // content-key -> { node, queued }
     let pendingSend = null; // text of a sent message awaiting its transcript echo
     let pendingSendTimer = null; // safety: confirm the pending bubble if echo never matches
     // The upload token: "[FILE: ./chat_uploads/<uuid>.<ext>]". Captured group 1
@@ -794,7 +792,7 @@
     // authoritative signal the homescreen chips use (is_busy_state, set by claude's
     // own UserPromptSubmit/Stop hooks). No transcript-tail guessing, so no "dot on
     // when idle" / "dot stuck after interrupt" mismatches. `busy` arrives from the
-    // input-state poll (0.8s bursts after a send, 4s at rest).
+    // steady ~1s input-state poll.
     let working = false;
     const escBtn = document.getElementById("esc");
     const workingEl = el("div", "working");
@@ -1006,11 +1004,10 @@
       if (!before) scrollDown(); // live/tail: follow the bottom. older: caller manages scroll.
     }
 
-    // ---- initial-load rendering: tail now, older filled in above during idle ----
-    // The server ships the whole transcript in ~0.2s; painting hundreds of messages
-    // up front is the slow part. So buffer the first backfill, paint only the last
-    // TAIL_RENDER_COUNT immediately, and prepend the rest in idle chunks.
-    const TAIL_RENDER_COUNT = 40;
+    // ---- initial-load rendering ----
+    // The server already trims the initial "event" burst to its most-recent
+    // _BACKFILL_PAINT_EVENTS (the rest arrives as "older" frames on the stream below),
+    // so the buffered tail is small -- paint it in one go, then jump to the bottom.
     let backfilling = true;
     let backfillBuffer = [];
     function scheduleIdle(fn) {
@@ -1018,33 +1015,11 @@
       else setTimeout(fn, 16);
     }
     function flushInitialBackfill() {
-      // Drop the "loading…" status line FIRST -- otherwise it's tEl.firstChild and
-      // would be captured as the insert-anchor, then removed, so the async older-
-      // fill's insertBefore(...) would throw against a detached node and stop
-      // (the "last 40, can't scroll further" bug).
-      clearStatus();
+      clearStatus(); // drop "loading…" before rendering
       const buf = backfillBuffer;
       backfillBuffer = [];
-      const cut = Math.max(0, buf.length - TAIL_RENDER_COUNT);
-      const older = buf.slice(0, cut);
-      for (let i = cut; i < buf.length; i++) renderEvent(buf[i]); // tail -> instant paint
-      const anchor = tEl.firstChild; // first tail node -- stable (won't be removed)
+      buf.forEach((ev) => renderEvent(ev));
       scrollDown(true);
-      if (older.length && anchor) fillOlder(older, anchor);
-    }
-    function fillOlder(older, anchor) {
-      let idx = 0;
-      function chunk() {
-        if (!anchor.parentNode) return; // anchor detached -> nothing to anchor older content to
-        const oldH = scroller.scrollHeight;
-        for (let n = 0; idx < older.length && n < 15; n++, idx++) renderEvent(older[idx], anchor);
-        // following -> stay glued to the tail; reading history -> hold the viewport by
-        // the height just added above it (older content is prepended above the anchor).
-        if (following) scroller.scrollTop = scroller.scrollHeight;
-        else scroller.scrollTop += scroller.scrollHeight - oldH;
-        if (idx < older.length) scheduleIdle(chunk);
-      }
-      scheduleIdle(chunk);
     }
 
     // Older history streamed newest-first by the server's tail-first backfill: prepend
