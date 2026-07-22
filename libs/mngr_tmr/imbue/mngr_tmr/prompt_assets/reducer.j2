@@ -123,6 +123,53 @@ Whenever you have applied ANY change to the tree (an integrated cherry-pick, an
 extraction, or a FIXME resolution), verify the affected tests before publishing. If
 verification fails, back the change out or record it as unverified.
 
+## Find and collapse repeated changes
+
+Do this FIRST, before the other normalizations. You are the only step that sees
+every agent's diff at once, so you are the only one who can tell that twenty
+agents made the same change twenty times. Each of them thought they were fixing
+their own test; you can see that they were all working around one problem.
+
+Read the whole integrated diff:
+
+```bash
+git diff -U0 "$MNGR_GIT_BASE_BRANCH..HEAD"
+```
+
+Group the changes by *what they do*, not by which file they are in, and not by
+whether the text matches exactly. Two changes belong to the same group when one
+shared fix would make both unnecessary. That includes:
+
+- The same marker or decorator added or removed (a budget differing between
+  tests does not make them different changes).
+- The same argument or flag added to commands that are otherwise worded
+  differently.
+- The same assertion or setup step added or deleted across tests.
+
+Write out the groups, with EXACT occurrence counts and the file list for each,
+before you change anything. Do this even if you think none of them matter -- the
+counting is what makes the pattern visible, and a group spread thinly over
+fifteen files is easy to miss while reading.
+
+Any group with 3 or more occurrences across 2 or more files is systemic by
+definition: the underlying problem was never specific to any one test. For each
+such group, do exactly one of:
+
+- **Replace it.** If you can identify a single shared change that makes all N
+  local edits unnecessary (a conftest default, a shared fixture, a config value,
+  a fix to whatever the tests are working around) AND verify it by running the
+  affected tests, apply it, DELETE the N local edits, commit as `[NORMALIZE]`,
+  and record it under "normalizations". This is the highest-value thing you do
+  in the whole run: N local patches become one real fix.
+- **Escalate it.** If you cannot identify or cannot verify such a change, record
+  an escalation of kind "SHARED_PATTERN" whose detail_markdown gives the group's
+  description, its exact occurrence count, and the affected files. A reviewer
+  seeing "39 tests independently added a timeout marker" will know what to do
+  even when you do not.
+
+Never leave a group of this size untouched and unmentioned. Silently shipping N
+copies of one change is the specific failure this step exists to prevent.
+
 ## Extract shared scaffolding -- but keep each test's core action explicit
 
 Test functions often repeat the same *scaffolding* step: a setup or verification
