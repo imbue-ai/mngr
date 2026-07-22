@@ -506,7 +506,12 @@ _OAUTH_FLOW_TTL_SECONDS = 10 * 60
 class _OAuthFlowStatus(FrozenModel):
     """Status snapshot for a single in-flight OAuth subprocess.
 
-    ``state`` is one of ``"running"``, ``"done"``, or ``"error"``.
+    ``state`` is one of ``"running"``, ``"finishing"``, ``"done"``, or
+    ``"error"``. ``"finishing"`` means the sign-in was written to disk but the
+    desktop client is still mirroring it (registering the provider, bouncing the
+    latchkey-forward supervisor); the frontend brings the app to the front and
+    shows "Finishing up..." during it, then navigates once the state is
+    ``"done"``.
     """
 
     state: str
@@ -579,12 +584,27 @@ def _run_oauth_subprocess(
         return
 
     # The signin itself is complete at this point (the plugin subprocess wrote
-    # the session to disk). Anything that goes wrong while mirroring it into
-    # the desktop client must still resolve the flow status -- the frontend
-    # long-polls it, so an unresolved crash here would leave the user stuck on
-    # the "waiting for the browser" page forever. Nothing is caught: a
-    # mirroring crash propagates to the CG's ObservableThread (which logs it),
-    # while the finally block flips a still-"running" status to "error".
+    # the session to disk), so mark the flow "finishing": the frontend brings
+    # the app to the front and shows "Finishing up..." while we mirror the
+    # session below, rather than leaving the user on the "waiting for the
+    # browser" page until the provider registration + supervisor bounce finish.
+    _record_oauth_status(
+        flow_id,
+        _OAuthFlowStatus(
+            state="finishing",
+            user_id=str(result.user_id),
+            email=str(result.email),
+            display_name=result.display_name,
+            deadline=time.monotonic() + _OAUTH_FLOW_TTL_SECONDS,
+        ),
+    )
+
+    # Anything that goes wrong while mirroring the signin into the desktop
+    # client must still resolve the flow status -- the frontend long-polls it,
+    # so an unresolved crash here would leave the user stuck. Nothing is caught:
+    # a mirroring crash propagates to the CG's ObservableThread (which logs it),
+    # while the finally block flips a still-unresolved ("running"/"finishing")
+    # status to "error".
     try:
         _mirror_oauth_signin_result(
             result=result,
@@ -607,7 +627,7 @@ def _run_oauth_subprocess(
         )
     finally:
         latest_status = _read_oauth_status(flow_id)
-        if latest_status is not None and latest_status.state == "running":
+        if latest_status is not None and latest_status.state in ("running", "finishing"):
             _record_oauth_status(
                 flow_id,
                 _OAuthFlowStatus(

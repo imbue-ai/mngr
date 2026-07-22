@@ -24,6 +24,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -63,7 +64,10 @@ from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
@@ -451,6 +455,79 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
     assert response.status_code == 200
     assert "Where should it run?" in response.text
     assert "git_url" in response.text
+
+
+def _make_cold_start_resolver_with_only_restorable_workspace() -> MngrCliBackendResolver:
+    """A resolver whose live snapshot is empty but whose last-good topology remembers a workspace.
+
+    Models the cold-start race the landing fallback must survive: a complete
+    enumeration lands the workspace in the last-good topology, then a subsequent
+    empty snapshot (a slow provider hasn't re-listed it yet) drops it from the
+    live/active set while keeping it in the restorable set. Discovery has
+    completed, so the raw fallback would wrongly show the terminal create form.
+    """
+    host = HostId.generate()
+    agent = AgentId.generate()
+    primary_agent = DiscoveredAgent(
+        host_id=host,
+        agent_id=agent,
+        agent_name=AgentName("system-services"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+    )
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent,), discovered_agents=(primary_agent,)))
+    resolver.update_agents(ParsedAgentsResult())
+    return resolver
+
+
+def test_landing_page_shows_discovering_when_only_restorable_workspaces_remain(tmp_path: Path) -> None:
+    """A cold-start race (live empty, last-good remembers a workspace) shows the discovering page.
+
+    The user HAS a workspace (known via the persisted last-good topology), so
+    the auto-refreshing "Discovering agents..." page -- which self-heals into the
+    workspace list -- must be shown instead of the terminal create form.
+    """
+    backend_resolver = _make_cold_start_resolver_with_only_restorable_workspace()
+    # Precondition: active/known live set is empty but the workspace is restorable.
+    assert backend_resolver.list_active_workspace_ids() == ()
+    assert backend_resolver.list_restorable_workspace_ids() != ()
+    assert backend_resolver.has_completed_initial_discovery() is True
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Discovering agents" in response.text
+    assert "Where should it run?" not in response.text
+
+
+def test_landing_page_shows_create_form_when_restorable_set_is_empty(tmp_path: Path) -> None:
+    """Discovery complete with a genuinely empty restorable set still shows the create form.
+
+    The first-run case: nothing is known live, remote, or in the last-good
+    topology, so the terminal create form (unchanged behavior) is correct.
+    """
+    backend_resolver = MngrCliBackendResolver()
+    # Complete discovery with an empty snapshot: nothing known anywhere.
+    backend_resolver.update_agents(ParsedAgentsResult())
+    assert backend_resolver.has_completed_initial_discovery() is True
+    assert backend_resolver.list_restorable_workspace_ids() == ()
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Where should it run?" in response.text
+    assert "Discovering agents" not in response.text
 
 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
