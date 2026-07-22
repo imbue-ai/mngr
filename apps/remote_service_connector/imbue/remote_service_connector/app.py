@@ -5714,7 +5714,7 @@ def _summarize_owner_bucket_usage(ops: CloudflareOps, username_prefix: str) -> t
 
 
 def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str) -> AccountUsage:
-    """Compute the account's live usage numbers, one upstream call per source.
+    """Compute the account's live usage numbers, querying the upstream sources concurrently.
 
     The three network-backed sources (Cloudflare tunnel count, per-bucket
     REST usage, LiteLLM spend) are independent and run concurrently; the two
