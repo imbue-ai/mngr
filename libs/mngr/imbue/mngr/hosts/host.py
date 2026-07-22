@@ -3153,6 +3153,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "set -g set-titles on",
             f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"',
             "",
+            "# Bridge in-pane copies out to the OUTER terminal's clipboard via OSC 52 --",
+            "# Claude's TUI and tmux copy-mode both copy this way, so without this a copy",
+            "# lands only in a tmux buffer and never reaches the user's real clipboard.",
+            "# 'on' also mirrors into a tmux buffer; terminal-features advertises OSC 52",
+            "# support so tmux forwards it even when the client's TERM doesn't declare it",
+            "# (the foreman web terminal's xterm.js registers an OSC 52 handler to catch it).",
+            "set -g set-clipboard on",
+            'set -ga terminal-features "*:clipboard"',
+            "",
         ]
 
         # Source the user's extra mngr-specific tmux config if one is configured.

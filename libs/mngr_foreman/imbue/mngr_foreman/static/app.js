@@ -1452,6 +1452,40 @@
     term.open(document.getElementById("term"));
     fit.fit();
 
+    // ---- OSC 52 clipboard bridge ----
+    // Claude's TUI (and tmux copy-mode) copy text OUT OF BAND via an OSC 52 escape
+    // sequence (base64), NOT by making an xterm selection -- that's the "it went to
+    // the tmux buffer but never my clipboard" case. xterm registers no OSC 52 handler
+    // by default, so it was dropped on the floor. Catch it and put it on the real
+    // system clipboard. Secure contexts (localhost/https) write immediately; over
+    // plain http a clipboard write needs a user gesture but OSC 52 arrives async, so
+    // stash it and flush on the next tap/keypress in the terminal.
+    let pendingClip = null;
+    function flushPendingClip() {
+      if (pendingClip == null) return;
+      copyViaTextarea(pendingClip); // execCommand path -- allowed, we're in a gesture
+      pendingClip = null;
+    }
+    term.parser.registerOscHandler(52, (data) => {
+      const semi = data.indexOf(";");
+      const b64 = semi < 0 ? data : data.slice(semi + 1); // "c;<base64>" -> "<base64>"
+      if (!b64 || b64 === "?") return true; // clipboard-READ request / empty -> ignore
+      let text;
+      try {
+        text = decodeURIComponent(escape(atob(b64)));
+      } catch (_e) {
+        try { text = atob(b64); } catch (_e2) { return true; }
+      }
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).catch(() => { pendingClip = text; });
+      } else {
+        pendingClip = text; // http: no async clipboard -> flush on next gesture
+      }
+      return true;
+    });
+    document.getElementById("term").addEventListener("pointerdown", flushPendingClip);
+    document.addEventListener("keydown", flushPendingClip);
+
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = proto + "//" + location.host + tgt.wsPath;
     const encoder = new TextEncoder();
