@@ -211,12 +211,15 @@
   // truth so home and chat never drift.
   function statusKey(d) {
     if (!d || !d.running) return "";
-    // Three clean states from the backend's live-pane read (status), with a
-    // blocked/busy fallback for older responses.
-    const s = d.status;
-    if (s === "NEEDS_INPUT" || (!s && d.blocked)) return "NEEDS_INPUT";
-    if (s === "WORKING" || (!s && d.busy)) return "WORKING";
-    return "READY";
+    // Drive PURELY from the backend's live-pane read. NEVER derive from mngr's coarse
+    // state -- it lies (WAITING mid-turn). UNKNOWN (pane unreadable this poll) or a
+    // missing status means "don't know right now" -> "" so the caller KEEPS the last
+    // dot rather than ever showing a wrong one. (Callers also drop UNKNOWN responses
+    // outright, but this keeps the mapping honest.)
+    if (d.status === "NEEDS_INPUT") return "NEEDS_INPUT";
+    if (d.status === "WORKING") return "WORKING";
+    if (d.status === "READY") return "READY";
+    return "";
   }
   function statusTitle(d, base) {
     const k = statusKey(d);
@@ -230,32 +233,25 @@
   // Poll an agent's input-state and call onState(d) each tick, at a steady rate
   // (faster in a short burst right after a send).
   function installStatePolling(agentName, onState) {
-    let timer = null;
-    let burstUntil = 0;
+    // Greedy ~1s poll, COALESCED: at most one probe outstanding per agent, so a slow
+    // remote/docker probe can't stack up requests. UNKNOWN responses (pane unreadable
+    // this poll) are DROPPED so the caller keeps its last state -- mngr's coarse/stale
+    // state never enters. onState is the ONE place the tab title + working dot +
+    // composer state all derive from (all via statusKey), so they can't drift.
+    let inFlight = false;
     function tick() {
+      if (inFlight) return;
+      inFlight = true;
       fetch("/api/agents/" + encodeURIComponent(agentName) + "/input-state")
         .then((r) => r.json())
-        .then(onState)
-        .catch(() => {});
-    }
-    function interval() {
-      return Date.now() < burstUntil ? 800 : 4000;
-    }
-    function schedule() {
-      if (timer) clearInterval(timer);
-      timer = setInterval(tick, interval());
-    }
-    // After a send, poll input-state rapidly for a short window so the composer's
-    // working/blocked state (and any API-key/permission dialog) shows up fast.
-    function burst() {
-      burstUntil = Date.now() + 12000;
-      tick();
-      schedule();
-      setTimeout(schedule, 12000);
+        .then((d) => { if (!d || d.status !== "UNKNOWN") onState(d); })
+        .catch(() => {})
+        .finally(() => { inFlight = false; });
     }
     tick();
-    schedule();
-    return { burst: burst };
+    setInterval(tick, 1000);
+    // "burst after send" is just an immediate extra poll now; the steady 1s covers the rest.
+    return { burst: tick };
   }
 
   // ==========================================================================
@@ -318,21 +314,25 @@
     // card. The card DOM is the source of truth for "which cards are live" -- a
     // card that left the set (renderAll wiped + rebuilt) is simply no longer in
     // this query, so its polling stops with no per-card bookkeeping/leak.
+    const inFlightCards = new Set(); // coalesce: at most one probe outstanding per agent
     function pollStatuses() {
       listEl.querySelectorAll(".agent-card").forEach((card) => {
         const name = card.dataset.name;
-        if (!name) return;
+        if (!name || inFlightCards.has(name)) return;
+        inFlightCards.add(name);
         fetch("/api/agents/" + encodeURIComponent(name) + "/input-state")
           .then((r) => r.json())
           .then((d) => {
+            if (d && d.status === "UNKNOWN") return; // pane unreadable -> keep the last dot
             const dot = card.querySelector(".status-dot");
-            // reuse statusKey (== the chat page's mapping); "" -> dim/unknown.
+            // same statusKey as the chat page -- one derivation, so home + chat agree.
             if (dot) dot.className = "status-dot " + statusKey(d).toLowerCase().replace("_", "-");
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => { inFlightCards.delete(name); });
       });
     }
-    setInterval(pollStatuses, 4000);
+    setInterval(pollStatuses, 1000);
 
     let pollTimer = null;
     function startPolling() {
@@ -989,9 +989,13 @@
     // title. Keeps polling (slower) while hidden so the title stays live in a
     // background tab. Each poll is a tmux pane capture over SSH.
     const statePoll = installStatePolling(name, (d) => {
+      // ONE derivation (statusKey) drives all three renderers on this page -- the tab
+      // title, the composer's blocked state, and the working dot -- so they can never
+      // disagree. Same statusKey the home cards use, so home + chat stay in lockstep.
+      const k = statusKey(d);
       document.title = statusTitle(d, name + " — chat");
-      if (d.blocked) setBlocked(); else clearBlocked();
-      applyMngrBusy(d.busy);
+      if (k === "NEEDS_INPUT") setBlocked(); else clearBlocked();
+      applyMngrBusy(k === "WORKING");
     });
 
     // Grow with the text up to ~5 lines, then stop and let the textarea scroll --

@@ -358,11 +358,15 @@ def create_app(
         if strategy.uses_pane_dialog_detection:
             working, reason = probe_pane_state(pool, name)
             if working is None and reason is None:
-                # Pane unreadable -> fall back to mngr's markers (no worse than before).
-                reason = "permission prompt" if is_permissions_blocked(agent) else None
-                busy = is_busy_state(state)
-            else:
-                busy = bool(working) and reason is None
+                # Pane unreadable THIS poll (slow/cold connection -- common for remote
+                # docker agents). NEVER fall back to mngr's coarse state: it lies (reads
+                # WAITING mid-turn), which is exactly the wrong dot we're replacing.
+                # Return UNKNOWN and let the client keep the last-read dot until the next
+                # poll reads the pane. The client polls ~1s, so the gap is tiny.
+                return jsonify(
+                    {"blocked": False, "reason": None, "running": True, "busy": False, "status": "UNKNOWN", "state": state}
+                )
+            busy = bool(working) and reason is None
         else:
             # codex/opencode/pi surface a permission block via mngr's field and
             # drive no run-time dialogs; use the marker signals for them.
