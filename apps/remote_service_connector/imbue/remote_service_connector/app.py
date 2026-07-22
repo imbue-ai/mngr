@@ -3305,6 +3305,19 @@ def _service_quota_and_owner_email(request: Request, auth: AuthResult, tunnel_na
     return int(plan["max_services_per_tunnel"]), None
 
 
+def enforce_service_quota(existing_services: list[ServiceInfo], service_name: str, limit: int) -> None:
+    """Refuse adding ``service_name`` when the tunnel is at ``limit`` services.
+
+    Re-adding an existing service is always allowed. Shared by ``POST
+    /tunnels/{tunnel_name}/services`` and ``POST /sharing/enable`` so the two
+    enforcement points cannot drift.
+    """
+    if service_name in {s.service_name for s in existing_services}:
+        return
+    if len(existing_services) >= limit:
+        raise_quota_exceeded("max_services_per_tunnel", limit, len(existing_services), "services on this tunnel")
+
+
 @web_app.post("/tunnels/{tunnel_name}/services")
 def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> dict[str, object]:
     """Add a service to a tunnel. Works with both admin and agent auth.
@@ -3320,10 +3333,7 @@ def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> 
         auth = authenticate_request(request, ctx.ops)
         username = require_tunnel_access(auth, tunnel_name)
         limit, owner_email = _service_quota_and_owner_email(request, auth, tunnel_name)
-        existing_services = ctx.list_services(tunnel_name, username)
-        is_new_service = body.service_name not in {s.service_name for s in existing_services}
-        if is_new_service and len(existing_services) >= limit:
-            raise_quota_exceeded("max_services_per_tunnel", limit, len(existing_services), "services on this tunnel")
+        enforce_service_quota(ctx.list_services(tunnel_name, username), body.service_name, limit)
         fallback = owner_email_auth_policy(owner_email) if owner_email else None
         return ctx.add_service(
             tunnel_name,
@@ -3451,15 +3461,9 @@ def enable_sharing_endpoint(request: Request, body: EnableSharingRequest) -> dic
             default_auth_policy=None,
             fallback_auth_policy=fallback,
         )
-        existing_services = ctx.list_services(tunnel_name, admin.username)
-        is_new_service = body.service_name not in {s.service_name for s in existing_services}
-        if is_new_service and len(existing_services) >= entitlements.max_services_per_tunnel:
-            raise_quota_exceeded(
-                "max_services_per_tunnel",
-                entitlements.max_services_per_tunnel,
-                len(existing_services),
-                "services on this tunnel",
-            )
+        # ``create_tunnel`` already returned the tunnel's current services
+        # (empty for a fresh tunnel), so no extra Cloudflare fetch is needed.
+        enforce_service_quota(tunnel_info.services, body.service_name, entitlements.max_services_per_tunnel)
         service = ctx.add_service(
             tunnel_name,
             admin.username,
