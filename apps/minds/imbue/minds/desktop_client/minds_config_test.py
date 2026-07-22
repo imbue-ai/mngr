@@ -85,10 +85,11 @@ def test_migrate_alpha_error_reporting_flips_prior_opt_out_and_reprompts(tmp_pat
     # Consent-given is cleared so the informational notice is shown again to inform the user.
     assert migrated.get_error_reporting_consent_given() is False
 
-    # Idempotent: a second run (reporting already on) changes nothing, including consent-given.
-    migrated.set_error_reporting_consent_given(True)
+    # One-shot marker: a future explicit opt-out (as could exist once opt-out is reintroduced after the
+    # alpha) is NOT flipped back on, because the migration already ran once for this install.
+    migrated.set_report_unexpected_errors(False)
     migrated.migrate_alpha_error_reporting()
-    assert _make_config(tmp_path).get_error_reporting_consent_given() is True
+    assert _make_config(tmp_path).get_report_unexpected_errors() is False
 
 
 def test_migrate_alpha_error_reporting_leaves_opt_in_untouched(tmp_path: Path) -> None:

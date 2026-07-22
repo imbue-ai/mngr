@@ -173,13 +173,18 @@ class MindsConfig(MutableModel):
 
         An install that explicitly opted out on the old consent screen still has
         ``report_unexpected_errors`` persisted as False. During the alpha there is no opt-out, so flip
-        it back on and re-show the informational notice (by clearing the consent-given flag). Needs no
-        migration marker: nothing sets the flag back to False anymore, so once it is on -- including on
-        every fresh install (default True) -- this is a no-op.
+        it back on and re-show the informational notice (by clearing the consent-given flag).
+
+        Guarded by a one-shot marker so the migration runs at most once per install. This keeps it
+        forward-compatible with reintroducing an opt-out after the alpha: a later explicit opt-out must
+        not be flipped back on at the next startup, which a bare ``if not reporting`` guard would do.
         """
+        if self._get_bool("alpha_error_reporting_migrated", default=False):
+            return
         if not self.get_report_unexpected_errors():
             self.set_report_unexpected_errors(True)
             self.set_error_reporting_consent_given(False)
+        self._set_bool("alpha_error_reporting_migrated", True)
 
     def get_auto_open_requests_panel(self) -> bool:
         """Return whether the inbox should auto-open on new pending requests. Default: True.
