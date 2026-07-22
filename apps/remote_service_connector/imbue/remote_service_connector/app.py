@@ -4545,7 +4545,7 @@ def _owned_bucket_exists(ops: CloudflareOps, username: str, full_name: str) -> b
 _BUCKET_USAGE_MAX_PARALLEL_READS: Final = 8
 
 
-def _read_one_bucket_usage_bytes(ops: CloudflareOps, bucket_name: str) -> "int | CloudflareApiError | httpx.HTTPError":
+def _read_one_bucket_usage_bytes(ops: CloudflareOps, bucket_name: str) -> int | CloudflareApiError | httpx.HTTPError:
     """Read one bucket's live usage bytes, returning (not raising) a failed read's exception."""
     try:
         return ops.get_bucket_usage_bytes(bucket_name)
@@ -4555,7 +4555,7 @@ def _read_one_bucket_usage_bytes(ops: CloudflareOps, bucket_name: str) -> "int |
 
 def _read_bucket_usage_bytes_concurrently(
     ops: CloudflareOps, bucket_names: list[str]
-) -> "list[int | CloudflareApiError | httpx.HTTPError]":
+) -> list[int | CloudflareApiError | httpx.HTTPError]:
     """Read each bucket's live usage bytes via concurrent REST calls.
 
     Results align positionally with ``bucket_names``. A failed read yields its
