@@ -1,8 +1,18 @@
 import json
+import queue
+import subprocess
+import threading
+import time
+from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
+import psutil
 import pytest
 
+from imbue.imbue_common.event_envelope import EventEnvelope
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -10,9 +20,10 @@ from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import make_discovered_provider
-from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
+from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.api.observe import AGENT_STATES_EVENT_SOURCE
 from imbue.mngr.api.observe import AgentObserver
+from imbue.mngr.api.observe import AgentRemovedEvent
 from imbue.mngr.api.observe import AgentStateChangeEvent
 from imbue.mngr.api.observe import AgentStateEvent
 from imbue.mngr.api.observe import FullAgentStateEvent
@@ -31,14 +42,21 @@ from imbue.mngr.api.observe import get_observe_events_dir
 from imbue.mngr.api.observe import get_observe_events_path
 from imbue.mngr.api.observe import get_observe_lock_path
 from imbue.mngr.api.observe import load_base_state_from_history
+from imbue.mngr.api.observe import make_agent_removed_event
 from imbue.mngr.api.observe import make_agent_state_change_event
 from imbue.mngr.api.observe import make_agent_state_event
 from imbue.mngr.api.observe import make_full_agent_state_event
+from imbue.mngr.api.observe import parse_observe_event_line
 from imbue.mngr.api.observe import release_observe_lock
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -393,38 +411,104 @@ def _make_observer(temp_mngr_ctx: MngrContext, noop_binary: str) -> AgentObserve
     )
 
 
-def test_agent_observer_handle_full_snapshot_tracks_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """Verify that _handle_full_snapshot correctly populates known hosts from host records."""
+def _make_provider_snapshot_line(
+    provider_name: ProviderInstanceName,
+    agents: Sequence[DiscoveredAgent] = (),
+    hosts: Sequence[DiscoveredHost] = (),
+    provider: DiscoveredProvider | None = None,
+    error: DiscoveryError | None = None,
+    unknown_host_ids: Sequence[HostId] = (),
+) -> str:
+    """Serialize a per-provider discovery snapshot event to a JSONL line for the discovery stream."""
+    now = datetime.now(timezone.utc)
+    event = make_provider_discovery_snapshot_event(
+        provider_name,
+        agents,
+        hosts,
+        discovery_started_at=now,
+        discovery_finished_at=now,
+        provider=provider,
+        error=error,
+        unknown_host_ids=unknown_host_ids,
+    )
+    return json.dumps(event.model_dump(mode="json"))
+
+
+def _feed_provider_snapshot(
+    observer: AgentObserver,
+    provider_name: ProviderInstanceName,
+    agents: Sequence[DiscoveredAgent] = (),
+    hosts: Sequence[DiscoveredHost] = (),
+    provider: DiscoveredProvider | None = None,
+    error: DiscoveryError | None = None,
+    unknown_host_ids: Sequence[HostId] = (),
+) -> None:
+    """Feed a per-provider discovery snapshot through the observer's discovery stream handler."""
+    line = _make_provider_snapshot_line(
+        provider_name,
+        agents=agents,
+        hosts=hosts,
+        provider=provider,
+        error=error,
+        unknown_host_ids=unknown_host_ids,
+    )
+    observer._on_discovery_stream_output(line, is_stdout=True)
+
+
+def test_agent_observer_provider_snapshot_tracks_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A per-provider snapshot populates known hosts from its host records and starts activity streams."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     host1 = make_test_discovered_host()
     host2 = make_test_discovered_host()
     agent1 = make_test_discovered_agent()
 
-    snapshot = make_full_discovery_snapshot_event([agent1], [host1, host2])
-
     with observer._concurrency_group:
-        observer._handle_full_snapshot(snapshot)
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent1], hosts=[host1, host2])
         assert len(observer._known_hosts) == 2
         assert str(host1.host_id) in observer._known_hosts
         assert str(host2.host_id) in observer._known_hosts
         assert observer._known_hosts[str(host1.host_id)].host_name == host1.host_name
+        # Newly-known hosts get activity streams started.
+        assert str(host1.host_id) in observer._events_processes
+        assert str(host2.host_id) in observer._events_processes
 
 
-def test_agent_observer_handle_full_snapshot_removes_stale_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """Verify that hosts from a prior snapshot are removed when not in a new snapshot."""
+def test_agent_observer_provider_snapshot_removes_stale_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A host present in a prior snapshot for the same provider is removed when absent from a new one."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     host_a = make_test_discovered_host()
     host_b = make_test_discovered_host()
 
     with observer._concurrency_group:
-        snapshot1 = make_full_discovery_snapshot_event([], [host_a])
-        observer._handle_full_snapshot(snapshot1)
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[host_a])
         assert str(host_a.host_id) in observer._known_hosts
 
-        snapshot2 = make_full_discovery_snapshot_event([], [host_b])
-        observer._handle_full_snapshot(snapshot2)
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[host_b])
         assert str(host_a.host_id) not in observer._known_hosts
         assert str(host_b.host_id) in observer._known_hosts
+        # The dropped host's activity stream is stopped; the new host's is started.
+        assert str(host_a.host_id) not in observer._events_processes
+        assert str(host_b.host_id) in observer._events_processes
+
+
+def test_agent_observer_provider_snapshot_scopes_removal_per_provider(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A snapshot for one provider does not remove hosts attributed to a different provider."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    local_host = make_test_discovered_host()
+    modal_host = make_test_discovered_host()
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[local_host])
+        _feed_provider_snapshot(observer, ProviderInstanceName("modal"), hosts=[modal_host])
+        assert str(local_host.host_id) in observer._known_hosts
+        assert str(modal_host.host_id) in observer._known_hosts
+
+        # A fresh empty snapshot for "modal" only drops modal's host; local's is untouched.
+        _feed_provider_snapshot(observer, ProviderInstanceName("modal"), hosts=[])
+        assert str(local_host.host_id) in observer._known_hosts
+        assert str(modal_host.host_id) not in observer._known_hosts
 
 
 def test_agent_observer_on_activity_event_queues_host(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
@@ -714,44 +798,20 @@ def test_agent_observer_process_snapshot_agents_detects_host_state_change(
     assert data["new_state"] == "RUNNING"
 
 
-def test_agent_observer_handle_host_destroyed_removes_host(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """Verify that _handle_host_destroyed removes the host from known_hosts."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
-    host = make_test_discovered_host()
-
-    with observer._concurrency_group:
-        # Populate known_hosts via a full snapshot
-        snapshot = make_full_discovery_snapshot_event([], [host])
-        observer._handle_full_snapshot(snapshot)
-        assert str(host.host_id) in observer._known_hosts
-
-        # Destroy the host
-        timestamp, event_id = _make_envelope_fields()
-        destroyed_event = HostDestroyedEvent(
-            timestamp=timestamp,
-            event_id=event_id,
-            source=DISCOVERY_EVENT_SOURCE,
-            host_id=host.host_id,
-            agent_ids=(),
-        )
-        observer._handle_host_destroyed(destroyed_event)
-        assert str(host.host_id) not in observer._known_hosts
-
-
 def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
-    """Verify that _on_discovery_stream_output dispatches HostDestroyedEvent correctly."""
+    """A HostDestroyedEvent on the discovery stream removes the host and stops its activity stream."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     host = make_test_discovered_host()
 
     with observer._concurrency_group:
-        # Populate known_hosts
-        snapshot = make_full_discovery_snapshot_event([], [host])
-        observer._handle_full_snapshot(snapshot)
+        # Populate known_hosts (and start the activity stream) via a per-provider snapshot.
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[host])
         assert str(host.host_id) in observer._known_hosts
+        assert str(host.host_id) in observer._events_processes
 
-        # Feed a serialized HostDestroyedEvent through _on_discovery_stream_output
+        # Feed a serialized HostDestroyedEvent through _on_discovery_stream_output.
         timestamp, event_id = _make_envelope_fields()
         destroyed_event = HostDestroyedEvent(
             timestamp=timestamp,
@@ -763,6 +823,7 @@ def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
         line = json.dumps(destroyed_event.model_dump(mode="json"), separators=(",", ":"))
         observer._on_discovery_stream_output(line, is_stdout=True)
         assert str(host.host_id) not in observer._known_hosts
+        assert str(host.host_id) not in observer._events_processes
 
 
 # === UNKNOWN State Tests ===
@@ -792,52 +853,35 @@ def test_make_unknown_agent_details_sets_state_unknown_and_preserves_identity() 
     assert unknown.host.state == HostState.UNKNOWN
 
 
-def test_agent_observer_handle_full_snapshot_records_errored_providers(
+def test_agent_observer_errored_provider_snapshot_records_errored_providers(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
-    """A snapshot with error_by_provider_name populates _currently_errored_providers."""
+    """A per-provider snapshot carrying an error populates _currently_errored_providers and wakes the loop."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     errored = ProviderInstanceName("modal")
-    snapshot = make_full_discovery_snapshot_event(
-        [],
-        [],
-        providers=(_make_provider("local"),),
-        error_by_provider_name={
-            errored: DiscoveryError(
+
+    with observer._concurrency_group:
+        # A healthy provider snapshot establishes "local" as a known provider.
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), provider=_make_provider("local"))
+        assert not observer._snapshot_trigger.is_set()
+
+        # An errored provider snapshot records the error and wakes the periodic loop.
+        _feed_provider_snapshot(
+            observer,
+            errored,
+            error=DiscoveryError(
                 type_name="ImbueCloudAuthError",
                 message="token missing",
                 provider_name=errored,
             ),
-        },
-    )
-
-    with observer._concurrency_group:
-        observer._handle_full_snapshot(snapshot)
+        )
         assert observer._currently_errored_providers == {errored}
         assert observer._known_provider_names == {ProviderInstanceName("local"), errored}
-        # Trigger should fire so the periodic loop wakes early
+        # Trigger should fire so the periodic loop wakes early.
         assert observer._snapshot_trigger.is_set()
 
 
-def test_agent_observer_handle_full_snapshot_clears_polling_loop_crashed(
-    temp_mngr_ctx: MngrContext, noop_binary: str
-) -> None:
-    """A successful snapshot clears any prior _polling_loop_crashed flag."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
-    observer._polling_loop_crashed = True
-
-    with observer._concurrency_group:
-        snapshot = make_full_discovery_snapshot_event(
-            [],
-            [],
-            providers=(_make_provider("local"),),
-            error_by_provider_name={},
-        )
-        observer._handle_full_snapshot(snapshot)
-        assert observer._polling_loop_crashed is False
-
-
-def test_agent_observer_handle_discovery_error_event_with_provider_name_adds_to_errored_set(
+def test_agent_observer_discovery_error_event_with_provider_name_adds_to_errored_set(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """A DiscoveryErrorEvent with provider_name adds it to the errored set and triggers a snapshot."""
@@ -854,30 +898,9 @@ def test_agent_observer_handle_discovery_error_event_with_provider_name_adds_to_
     )
 
     with observer._concurrency_group:
-        observer._handle_discovery_error_event(event)
+        line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+        observer._on_discovery_stream_output(line, is_stdout=True)
         assert ProviderInstanceName("modal-prod") in observer._currently_errored_providers
-        assert observer._snapshot_trigger.is_set()
-
-
-def test_agent_observer_handle_discovery_error_event_without_provider_name_marks_polling_crashed(
-    temp_mngr_ctx: MngrContext, noop_binary: str
-) -> None:
-    """A DiscoveryErrorEvent with provider_name=None sets _polling_loop_crashed."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
-    timestamp, event_id = _make_envelope_fields()
-    event = DiscoveryErrorEvent(
-        timestamp=timestamp,
-        event_id=event_id,
-        source=DISCOVERY_EVENT_SOURCE,
-        error_type="RuntimeError",
-        error_message="polling loop exploded",
-        source_name="discovery_poll",
-        provider_name=None,
-    )
-
-    with observer._concurrency_group:
-        observer._handle_discovery_error_event(event)
-        assert observer._polling_loop_crashed is True
         assert observer._snapshot_trigger.is_set()
 
 
@@ -999,19 +1022,305 @@ def test_process_snapshot_agents_unknown_is_sticky_until_reappearance(
         assert observer._last_known_details_by_id[str(running_agent.id)].state == AgentLifecycleState.RUNNING
 
 
-def test_process_snapshot_agents_polling_crashed_makes_all_agents_unknown(
+def test_process_snapshot_agents_unknown_scoped_to_errored_provider(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
-    """While _polling_loop_crashed is set, every previously-tracked agent gets UNKNOWN."""
+    """Only agents on a currently-errored provider go UNKNOWN; a healthy provider's absent agent is dropped."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
-    agent_a = make_test_agent_details(name="a", provider_name=ProviderInstanceName("local"))
-    agent_b = make_test_agent_details(name="b", provider_name=ProviderInstanceName("modal"))
+    errored_provider = ProviderInstanceName("modal")
+    healthy_provider = ProviderInstanceName("local")
+    errored_agent = make_test_agent_details(name="errored", provider_name=errored_provider)
+    healthy_agent = make_test_agent_details(name="healthy", provider_name=healthy_provider)
 
     with observer._concurrency_group:
-        observer._process_snapshot_agents([agent_a, agent_b])
-        observer._polling_loop_crashed = True
-        observer._known_provider_names = {ProviderInstanceName("local"), ProviderInstanceName("modal")}
+        observer._process_snapshot_agents([errored_agent, healthy_agent])
+        # Only "modal" is errored this poll; both providers remain configured.
+        observer._currently_errored_providers = {errored_provider}
+        observer._known_provider_names = {errored_provider, healthy_provider}
         observer._process_snapshot_agents([])
 
-    assert observer._last_known_details_by_id[str(agent_a.id)].state == AgentLifecycleState.UNKNOWN
-    assert observer._last_known_details_by_id[str(agent_b.id)].state == AgentLifecycleState.UNKNOWN
+    # The errored provider's agent is retained as UNKNOWN.
+    assert observer._last_known_details_by_id[str(errored_agent.id)].state == AgentLifecycleState.UNKNOWN
+    # The healthy provider's absent agent is dropped (implicit destroy).
+    assert str(healthy_agent.id) not in observer._last_known_details_by_id
+
+
+# === Observe-event parsing (agents stream) ===
+
+
+def test_parse_observe_event_line_round_trips_agent_state() -> None:
+    agent = make_test_agent_details(name="parsed")
+    line = json.dumps(make_agent_state_event(agent).model_dump(mode="json"))
+    parsed = parse_observe_event_line(line)
+    assert isinstance(parsed, AgentStateEvent)
+    assert parsed.agent.name == "parsed"
+
+
+def test_parse_observe_event_line_round_trips_full_state() -> None:
+    agents = [make_test_agent_details(name="a"), make_test_agent_details(name="b")]
+    line = json.dumps(make_full_agent_state_event(agents).model_dump(mode="json"))
+    parsed = parse_observe_event_line(line)
+    assert isinstance(parsed, FullAgentStateEvent)
+    assert {a.name for a in parsed.agents} == {"a", "b"}
+
+
+def test_parse_observe_event_line_round_trips_agent_removed() -> None:
+    agent_id = AgentId.generate()
+    event = make_agent_removed_event(agent_id, AgentName("gone"))
+    line = json.dumps(event.model_dump(mode="json"))
+    parsed = parse_observe_event_line(line)
+    assert isinstance(parsed, AgentRemovedEvent)
+    assert parsed.agent_id == agent_id
+    assert parsed.agent_name == "gone"
+
+
+def test_parse_observe_event_line_returns_none_for_state_change_and_unknown() -> None:
+    # AGENT_STATE_CHANGE lives on the separate agent_states stream and is not part
+    # of the agents stream; an unknown/forward-compatible type is also ignored.
+    agent = make_test_agent_details()
+    change_line = json.dumps(make_agent_state_change_event(agent, None, None).model_dump(mode="json"))
+    assert parse_observe_event_line(change_line) is None
+    assert parse_observe_event_line('{"type":"SOMETHING_NEW"}') is None
+    assert parse_observe_event_line("   ") is None
+
+
+# === agents_event_sink forwarding (drives --stream-events) ===
+
+
+def _make_observer_with_sink(
+    temp_mngr_ctx: MngrContext, noop_binary: str, sink_events: list[EventEnvelope]
+) -> AgentObserver:
+    return AgentObserver(
+        mngr_ctx=temp_mngr_ctx,
+        events_base_dir=get_default_events_base_dir(temp_mngr_ctx.config),
+        mngr_binary=noop_binary,
+        agents_event_sink=sink_events.append,
+    )
+
+
+def test_agents_event_sink_receives_only_agents_stream_events(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """The sink gets AGENT_STATE but not the AGENT_STATE_CHANGE (which is on the agent_states stream)."""
+    sink_events: list[EventEnvelope] = []
+    observer = _make_observer_with_sink(temp_mngr_ctx, noop_binary, sink_events)
+    agent = make_test_agent_details(name="streamed", state=AgentLifecycleState.RUNNING)
+
+    # This emit also writes an AGENT_STATE_CHANGE (None -> RUNNING) to the agent_states
+    # stream, which must NOT reach the agents-stream sink.
+    observer._emit_agent_state(agent)
+
+    assert [e.type for e in sink_events] == [ObserveEventType.AGENT_STATE]
+    assert isinstance(sink_events[0], AgentStateEvent)
+    assert sink_events[0].agent.name == "streamed"
+
+
+def test_agents_event_sink_receives_full_state_and_removed_events(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A snapshot forwards AGENTS_FULL_STATE, and a discovery removal forwards AGENT_REMOVED."""
+    sink_events: list[EventEnvelope] = []
+    observer = _make_observer_with_sink(temp_mngr_ctx, noop_binary, sink_events)
+    agent = make_test_discovered_agent()
+
+    with observer._concurrency_group:
+        observer._process_snapshot_agents([])
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[])
+
+    forwarded_types = [e.type for e in sink_events]
+    assert ObserveEventType.AGENTS_FULL_STATE in forwarded_types
+    assert ObserveEventType.AGENT_REMOVED in forwarded_types
+
+
+def test_no_sink_does_not_error(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """With no sink (the default), emitting still writes the file and does not raise."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer._emit_agent_state(make_test_agent_details(name="silent"))
+    assert get_observe_events_path(observer.events_base_dir).exists()
+
+
+# === Agent membership deltas (AGENT_REMOVED + added enqueues host) ===
+
+
+def test_discovery_added_agent_enqueues_its_host_for_reprobe(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A newly discovered agent enqueues its host so the observer re-probes and emits real state."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    agent = make_test_discovered_agent()
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+
+    queued_hosts = _drain_activity_queue(observer)
+    assert str(agent.host_id) in queued_hosts
+
+
+def test_discovery_removed_agent_emits_agent_removed_and_drops_tracking(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """An agent absent from a later snapshot for its provider yields an AGENT_REMOVED event."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    agent = make_test_discovered_agent()
+    # Seed per-agent tracking so we can assert it is dropped on removal.
+    observer._last_tracked_state_by_id[str(agent.agent_id)] = _TrackedState(
+        agent_state="RUNNING", host_state="RUNNING"
+    )
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[])
+
+    events_path = get_observe_events_path(observer.events_base_dir)
+    removed = [
+        data
+        for line in events_path.read_text().splitlines()
+        if line.strip()
+        for data in [json.loads(line)]
+        if data["type"] == "AGENT_REMOVED"
+    ]
+    assert len(removed) == 1
+    assert removed[0]["agent_id"] == str(agent.agent_id)
+    assert removed[0]["agent_name"] == str(agent.agent_name)
+    assert str(agent.agent_id) not in observer._last_tracked_state_by_id
+
+
+# === PID watchers (local agents) ===
+
+
+def _drain_activity_queue(observer: AgentObserver) -> set[str]:
+    """Return every host id currently queued, draining the queue."""
+    drained: set[str] = set()
+    while not observer._activity_queue.empty():
+        try:
+            drained.add(observer._activity_queue.get_nowait())
+        except queue.Empty:
+            break
+    return drained
+
+
+def _spawn_sleeper() -> subprocess.Popen[bytes]:
+    """Start a long-lived child process to be watched by PID, killed by the test."""
+    return subprocess.Popen(["sleep", "60"])
+
+
+def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """The watcher registry opens on first sighting, replaces on PID change, and closes when the PID is gone."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    proc_a = _spawn_sleeper()
+    proc_b = _spawn_sleeper()
+    host_id = HostId.generate()
+    try:
+        with observer._concurrency_group:
+            agent_a = make_test_agent_details(name="watched", host_id=host_id, pid=proc_a.pid)
+            agent_id_str = str(agent_a.id)
+
+            # First sighting opens a watcher bound to proc_a.
+            observer._reconcile_watcher_for_agent(agent_a)
+            assert observer._watchers[agent_id_str].pid == proc_a.pid
+            first_thread = observer._watchers[agent_id_str].thread
+
+            # Same PID: no replacement (same watcher thread kept).
+            observer._reconcile_watcher_for_agent(agent_a)
+            assert observer._watchers[agent_id_str].thread is first_thread
+
+            # PID changed: watcher is replaced and the old thread is stopped.
+            agent_b = agent_a.model_copy_update(to_update(agent_a.field_ref().pid, proc_b.pid))
+            observer._reconcile_watcher_for_agent(agent_b)
+            assert observer._watchers[agent_id_str].pid == proc_b.pid
+            assert not first_thread.is_alive()
+
+            # No live process (pid None): watcher closed and removed.
+            observer._reconcile_watcher_for_agent(agent_a.model_copy_update(to_update(agent_a.field_ref().pid, None)))
+            assert agent_id_str not in observer._watchers
+    finally:
+        for proc in (proc_a, proc_b):
+            proc.terminate()
+            proc.wait()
+
+
+def test_reconcile_watcher_skips_remote_agents(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A remote agent is never watched, even though it carries a pid.
+
+    The PID is in the remote host's namespace; watching it here would bind to an
+    unrelated same-numbered local process. A remote sighting also closes any
+    watcher left over from when the agent was local.
+    """
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    proc = _spawn_sleeper()
+    try:
+        with observer._concurrency_group:
+            local_agent = make_test_agent_details(name="roaming", pid=proc.pid)
+            remote_host = local_agent.host.model_copy_update(
+                to_update(local_agent.host.field_ref().provider_name, ProviderInstanceName("modal"))
+            )
+            remote_agent = local_agent.model_copy_update(to_update(local_agent.field_ref().host, remote_host))
+            agent_id_str = str(local_agent.id)
+
+            # A remote agent carrying a pid does not open a watcher.
+            observer._reconcile_watcher_for_agent(remote_agent)
+            assert agent_id_str not in observer._watchers
+
+            # A remote sighting closes a watcher opened while the agent was local.
+            observer._reconcile_watcher_for_agent(local_agent)
+            assert agent_id_str in observer._watchers
+            observer._reconcile_watcher_for_agent(remote_agent)
+            assert agent_id_str not in observer._watchers
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+def test_pid_watcher_enqueues_host_when_watched_process_dies(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """Killing a watched local agent's process enqueues its host, driving the re-probe that emits death."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    proc = _spawn_sleeper()
+    host_id = HostId.generate()
+    try:
+        with observer._concurrency_group:
+            agent = make_test_agent_details(name="dying", host_id=host_id, pid=proc.pid)
+            observer._reconcile_watcher_for_agent(agent)
+            assert str(agent.id) in observer._watchers
+
+            # The process dies on its own; the watcher should notice via psutil and
+            # enqueue the agent's host for a re-probe.
+            proc.terminate()
+
+            host_id_str = str(agent.host.id)
+            deadline = time.monotonic() + 10.0
+            got_host = False
+            while time.monotonic() < deadline:
+                try:
+                    if observer._activity_queue.get(timeout=0.5) == host_id_str:
+                        got_host = True
+                        break
+                except queue.Empty:
+                    continue
+            assert got_host, "watcher did not enqueue the host after the process died"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        # Reap if psutil's wait did not already (avoids a lingering zombie).
+        try:
+            proc.wait(timeout=1.0)
+        except (subprocess.TimeoutExpired, ChildProcessError):
+            pass
+
+
+class _RaisingWaitProcess(psutil.Process):
+    """Concrete psutil.Process double whose wait() raises OSError, as pidfd_open/kqueue can."""
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        raise OSError("simulated pidfd_open failure")
+
+
+def test_watch_pid_treats_wait_oserror_as_exit_and_enqueues(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A bare OSError from process.wait() is treated as exit (re-probe), not a crash.
+
+    psutil.Process.wait() can surface a plain OSError (not a psutil.Error) from its
+    os.pidfd_open/kqueue/poll backend; _watch_pid must handle it like any other exit
+    and enqueue a re-probe rather than let it escape and kill the watcher thread.
+    """
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+
+    # Runs inline here: it must return normally (no OSError escaping) and enqueue the host.
+    observer._watch_pid("agent-1", "host-9", _RaisingWaitProcess(), 4321, threading.Event())
+
+    assert observer._activity_queue.get_nowait() == "host-9"

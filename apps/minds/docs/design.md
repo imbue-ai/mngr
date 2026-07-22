@@ -19,7 +19,7 @@ Each workspace is created from a template repository (or local directory). The r
 
 Within a workspace, the "primary" agent (carrying `is_primary=true`) is dedicated to running the bootstrap and background services -- its window-0 command is `sleep infinity && claude`, so claude never actually starts there. The user's chat agents are separate `mngr` agents; the bootstrap creates the first one on initial container boot and writes `CLAUDE_CONFIG_DIR` to the host env file so every agent (chat, worktree, worker) shares the services agent's Claude config dir (auth, plugins, marketplaces, sessions). The services agent is hidden from the UI agent list and the system_interface destroy endpoint refuses to tear it down. See [the swap-primary-agent spec](../../../specs/swap-primary-agent/spec.md) for the design rationale.
 
-Some workspace dependencies (currently Playwright's Chromium browser + its apt system libraries) are intentionally installed *after* container boot via the `[program:deferred-install]` section in the FCT `supervisord.conf` (a one-shot `autorestart=false` service), gated by a per-package marker file. This keeps the Docker image build fast: nothing required to start the chat agent or any boot-time service depends on the deferred packages. See the forever-claude-template's `libs/bootstrap/README.md` for the deferral contract.
+Some workspace dependencies (currently Playwright's Chromium browser + its apt system libraries) are intentionally installed *after* container boot via the `[program:deferred-install]` section in the DEFAULT_WORKSPACE_TEMPLATE `supervisord.conf` (a one-shot `autorestart=false` service), gated by a per-package marker file. This keeps the Docker image build fast: nothing required to start the chat agent or any boot-time service depends on the deferred packages. See the default-workspace-template's `libs/bootstrap/README.md` for the deferral contract.
 
 ## Configuration
 
@@ -42,7 +42,7 @@ See [the desktop client design doc](../imbue/minds/desktop_client/README.md) for
 When a user visits the desktop client and no agents exist, they are shown a creation form where they can provide a git repository URL or local path. The desktop client:
 
 1. Clones the repository to a temp directory (if a URL) or uses the local path directly
-2. Runs `mngr create <name> --no-connect --label workspace=<name> --template main --template <mode>` to create the agent (the agent id is read back from the `created` JSONL event; minds does not pre-generate one)
+2. Runs `mngr create system-services@<host> --new-host --no-connect --label workspace_display_name=<name> --label is_primary=true --template main --template <mode>` to create the workspace host and its primary agent (the agent id is read back from the `created` JSONL event; minds does not pre-generate one)
 3. Creates a Cloudflare tunnel (if configured) and injects the tunnel token into the agent via `mngr exec`
 4. Redirects the user to the newly created agent (the user is already authenticated via the global session)
 

@@ -68,6 +68,12 @@ _SCALEDOWN_WINDOW = int(os.environ.get("MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW", "
 # predates a model (e.g. claude-opus-4-8 only landed in litellm's price map
 # in the 1.88.0 pre-release line). MUST stay in sync with
 # litellm_proxy/config.yaml -- config_drift_test.py enforces this.
+_FABLE_PRICING = {
+    "input_cost_per_token": 0.00001,
+    "output_cost_per_token": 0.00005,
+    "cache_creation_input_token_cost": 0.0000125,
+    "cache_read_input_token_cost": 0.000001,
+}
 _OPUS_PRICING = {
     "input_cost_per_token": 0.000005,
     "output_cost_per_token": 0.000025,
@@ -108,6 +114,8 @@ def _model_entry(model_name: str, pricing: dict[str, float]) -> dict[str, object
 
 LITELLM_CONFIG = {
     "model_list": [
+        # Fable line.
+        _model_entry("claude-fable-5", _FABLE_PRICING),
         # Current Opus line.
         _model_entry("claude-opus-4-8", _OPUS_PRICING),
         _model_entry("claude-opus-4-7", _OPUS_PRICING),

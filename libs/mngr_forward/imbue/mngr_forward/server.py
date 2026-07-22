@@ -161,7 +161,7 @@ def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
         return None
 
 
-def _unauthenticated_subdomain_response(request: Request, port: int) -> Response:
+def _unauthenticated_subdomain_response(request: Request, port: int, use_http2: bool) -> Response:
     """Redirect HTML navigations to the agent's /goto/ bridge; 403 for everything else.
 
     The bridge re-mints a fresh subdomain auth token using the bare-origin
@@ -178,12 +178,13 @@ def _unauthenticated_subdomain_response(request: Request, port: int) -> Response
     accept = request.headers.get("accept", "")
     if "text/html" not in accept:
         return Response(status_code=403, content="Not authenticated")
+    scheme = "https" if use_http2 else "http"
     host_header = request.headers.get("host", "")
     agent_id = _parse_workspace_subdomain(host_header)
     if agent_id is None:
-        location = f"http://localhost:{port}/"
+        location = f"{scheme}://localhost:{port}/"
     else:
-        location = f"http://localhost:{port}/goto/{agent_id}/"
+        location = f"{scheme}://localhost:{port}/goto/{agent_id}/"
     return Response(status_code=302, headers={"Location": location})
 
 
@@ -208,6 +209,23 @@ def _connect_backend_websocket(
     return websockets.connect(ws_url, subprotocols=ws_subprotocols)
 
 
+def _select_ws_receive_payload(event: Mapping[str, Any]) -> str | bytes | None:
+    """Return the payload of an ASGI ``websocket.receive`` event (text or bytes), or None.
+
+    Per the ASGI spec exactly one of ``text``/``bytes`` is non-None. We select by
+    value rather than key presence because hypercorn always includes BOTH keys
+    (setting the unused one to None), so a key-presence check would pick the
+    co-present ``text: None`` on a binary frame and forward ``None`` -- which
+    raises ``TypeError`` in the ``websockets`` client and kills the socket
+    (uvicorn omitted the unused key, which masked this). Returns None for an
+    event carrying neither payload, which the caller skips.
+    """
+    text = event.get("text")
+    if text is not None:
+        return text
+    return event.get("bytes")
+
+
 async def _forward_client_to_backend(
     client_websocket: WebSocket,
     backend_ws: ClientConnection,
@@ -218,10 +236,9 @@ async def _forward_client_to_backend(
             msg_type = data.get("type", "")
             if msg_type == "websocket.disconnect":
                 break
-            if "text" in data:
-                await backend_ws.send(data["text"])
-            elif "bytes" in data:
-                await backend_ws.send(data["bytes"])
+            payload = _select_ws_receive_payload(data)
+            if payload is not None:
+                await backend_ws.send(payload)
     except WebSocketDisconnect:
         logger.trace("Client WebSocket disconnected")
     except RuntimeError as e:
@@ -450,11 +467,44 @@ def _emit_backend_failure(
         logger.trace("Could not emit system_interface_backend_failure envelope for {}: {}", agent_id, e)
 
 
-# The proxy loader: the canonical "Loading workspace" page with a 1s meta
-# refresh so it re-attempts the workspace until the backend answers. A
-# downstream consumer can reuse ``render_loading_page`` so its own loading
-# page renders identically.
-_SERVICE_UNAVAILABLE_HTML = render_loading_page(head_extra='    <meta http-equiv="refresh" content="1">\n')
+# The proxy loader: the canonical "Loading workspace" page that re-attempts the
+# workspace until the backend answers. A downstream consumer can reuse
+# ``render_loading_page`` so its own loading page renders identically.
+#
+# It polls in the background (fetch) rather than full-reloading via a
+# ``<meta http-equiv="refresh">``. A full-page reload of this view steals OS
+# focus from any sibling Electron WebContentsView overlaying it -- e.g. the
+# minds bug-report modal -- on every tick, which makes the overlay's inputs
+# impossible to type into (the text already entered survives, but the textarea
+# loses focus each second). Electron has no per-view focus-on-navigation /
+# focusable control for WebContentsView to opt out of this; see
+# https://github.com/electron/electron/issues/42578. Polling leaves the page
+# (and so the focused overlay) untouched while waiting and only navigates once
+# the workspace is actually reachable -- which also keeps the spinner smooth.
+_LOADING_POLL_SCRIPT: Final[str] = """\
+    <script>
+      (function () {
+        var INTERVAL_MS = 1000;
+        function poll() {
+          fetch(window.location.href, { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' })
+            .then(function (resp) {
+              // 503 is this loader (the backend is still unreachable): keep
+              // waiting. Any other status -- or an opaque redirect -- means the
+              // workspace is answering, so navigate to render it for real.
+              if (resp.status === 503) {
+                setTimeout(poll, INTERVAL_MS);
+              } else {
+                window.location.reload();
+              }
+            }, function () {
+              setTimeout(poll, INTERVAL_MS);
+            });
+        }
+        setTimeout(poll, INTERVAL_MS);
+      })();
+    </script>
+"""
+_SERVICE_UNAVAILABLE_HTML = render_loading_page(body_extra=_LOADING_POLL_SCRIPT)
 
 
 def _service_unavailable_response(request: Request) -> Response:
@@ -465,7 +515,8 @@ def _service_unavailable_response(request: Request) -> Response:
     separation keeps the plugin origin-agnostic: it does not need to know
     where any consumer is listening. For browsers that hit the plugin
     directly (including users landing here mid-restart), we serve a styled
-    auto-refreshing loader so the experience is not a blank flash.
+    loading page that polls the workspace in the background and reloads once
+    it answers, so the experience is not a blank flash.
     """
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html:
@@ -496,6 +547,7 @@ def _handle_subdomain_auth_bridge(
     request: Request,
     agent_id: AgentId,
     auth_store: AuthStoreInterface,
+    use_http2: bool,
 ) -> Response:
     token = request.query_params.get("token", "")
     next_url = _sanitize_next_url(request.query_params.get("next", "/"))
@@ -510,6 +562,7 @@ def _handle_subdomain_auth_bridge(
         path="/",
         httponly=True,
         samesite="lax",
+        secure=use_http2,
     )
     return response
 
@@ -526,6 +579,7 @@ async def _handle_workspace_forward_http(
     listen_port: int,
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
+    use_http2: bool,
 ) -> Response:
     host_header = request.headers.get("host", "")
     agent_id = _parse_workspace_subdomain(host_header)
@@ -533,14 +587,14 @@ async def _handle_workspace_forward_http(
         return Response(status_code=404)
 
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
-        return _handle_subdomain_auth_bridge(request, agent_id, auth_store)
+        return _handle_subdomain_auth_bridge(request, agent_id, auth_store, use_http2)
 
     if not _is_authenticated(
         cookies=request.cookies,
         auth_store=auth_store,
         preauth_cookie_value=preauth_cookie_value,
     ):
-        return _unauthenticated_subdomain_response(request, listen_port)
+        return _unauthenticated_subdomain_response(request, listen_port, use_http2)
 
     target = resolver.resolve(agent_id)
     if target is None:
@@ -723,6 +777,7 @@ def _handle_authenticate(
     one_time_code: str,
     auth_store: AuthStoreInterface,
     env: Environment,
+    use_http2: bool,
 ) -> Response:
     if not one_time_code or not one_time_code.strip():
         html = _render_auth_error_page(env, message="This login code is invalid or has already been used.")
@@ -741,6 +796,7 @@ def _handle_authenticate(
         path="/",
         httponly=True,
         samesite="lax",
+        secure=use_http2,
     )
     return response
 
@@ -783,6 +839,7 @@ def _handle_goto_workspace(
     auth_store: AuthStoreInterface,
     preauth_cookie_value: str | None,
     listen_port: int,
+    use_http2: bool,
 ) -> Response:
     if not _is_authenticated(
         cookies=request.cookies,
@@ -798,7 +855,10 @@ def _handle_goto_workspace(
     token = create_subdomain_auth_token(signing_key=signing_key, agent_id=str(parsed_id))
     next_url = _sanitize_next_url(request.query_params.get("next", "/"))
     encoded_next = quote(next_url, safe="")
-    location = f"http://{parsed_id}.localhost:{listen_port}{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
+    scheme = "https" if use_http2 else "http"
+    location = (
+        f"{scheme}://{parsed_id}.localhost:{listen_port}{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
+    )
     return Response(status_code=302, headers={"Location": location})
 
 
@@ -848,6 +908,7 @@ def create_forward_app(
     preauth_cookie_value: str | None = None,
     on_listening: Callable[[], None] | None = None,
     allow_host_loopback: bool = False,
+    use_http2: bool = False,
 ) -> FastAPI:
     """Create the FastAPI app for ``mngr forward``.
 
@@ -858,6 +919,12 @@ def create_forward_app(
     bound on the host's loopback at the registered port. Pass ``True`` only
     for setups that intentionally run agents directly on the host (the
     legacy ``LaunchMode.DEV`` flow).
+
+    ``use_http2`` reflects whether the server terminates TLS (and negotiates
+    HTTP/2); when set, the client-facing URLs this app constructs use
+    ``https``/``wss`` and its session cookie is marked ``Secure``. It does not
+    itself enable TLS -- the serve path does -- but the two must agree so the
+    URLs the browser is told to visit match the scheme the socket speaks.
     """
     env = _build_jinja_env()
 
@@ -873,6 +940,7 @@ def create_forward_app(
     app.state.listen_port = listen_port
     app.state.preauth_cookie_value = preauth_cookie_value
     app.state.allow_host_loopback = allow_host_loopback
+    app.state.use_http2 = use_http2
 
     @app.middleware("http")
     async def _subdomain_routing_middleware(request: Request, call_next: Any) -> Response:
@@ -892,6 +960,7 @@ def create_forward_app(
             listen_port=listen_port,
             allow_host_loopback=allow_host_loopback,
             envelope_writer=envelope_writer,
+            use_http2=use_http2,
         )
 
     @app.get("/login")
@@ -910,6 +979,7 @@ def create_forward_app(
             one_time_code=one_time_code,
             auth_store=auth_store,
             env=env,
+            use_http2=use_http2,
         )
 
     @app.get("/")
@@ -932,6 +1002,7 @@ def create_forward_app(
             auth_store=auth_store,
             preauth_cookie_value=preauth_cookie_value,
             listen_port=listen_port,
+            use_http2=use_http2,
         )
 
     @app.websocket("/{path:path}")

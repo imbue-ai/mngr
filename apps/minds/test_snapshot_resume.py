@@ -6,7 +6,7 @@ Run via::
 
 where ``<snapshot-image-id>`` is the Modal image id printed by
 ``scripts/snapshot_minds_e2e_state.py``. That script captures a Modal
-sandbox in which the FCT workspace's ``system_interface`` UI has
+sandbox in which the DEFAULT_WORKSPACE_TEMPLATE workspace's ``system_interface`` UI has
 rendered, then ``docker stop``s the workspace containers so the
 filesystem snapshot represents a deterministic stopped state.
 
@@ -17,19 +17,42 @@ from every other offload config (see ``offload-modal*.toml``) so a
 of sandbox.
 """
 
+import bz2
+import hashlib
 import json
 import os
+import pwd
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import Final
 
+import httpx
 import pytest
 import tomlkit
 from loguru import logger
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import mngr_prefix_for
+from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client import restic_cli
+from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_provisioning import change_backup_destination_for_host
+from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
+from imbue.minds.desktop_client.backup_provisioning import disable_backups_for_host
+from imbue.minds.desktop_client.backup_provisioning import reinject_canonical_env
+from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
+from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
+from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import _send_message_and_await_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
@@ -37,14 +60,14 @@ from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
-from imbue.minds.desktop_client.e2e_workspace_runner import materialize_isolated_fct
-from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
+from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
+from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
+from imbue.minds.primitives import BackupProvider
+from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import get_short_random_string
-
-_START_DOCKERD_SCRIPT: Final[Path] = Path("/code/mngr/libs/mngr/imbue/mngr/resources/start-dockerd.sh")
-_DOCKERD_STARTUP_TIMEOUT_SECONDS: Final[int] = 180
 
 # The minds workspace container name prefix (mngr names docker hosts
 # ``{mngr_prefix}-{host_name}`` and minds defaults to the ``minds-staging``
@@ -224,38 +247,14 @@ def running_workspace() -> Iterator[_ResumedWorkspace]:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _ensure_dockerd_after_snapshot_resume() -> None:
-    """Bring ``dockerd`` back up in a snapshot-resumed sandbox.
+def _ensure_dockerd_after_snapshot_resume(snapshot_sandbox_dockerd: None) -> None:
+    """Every test in this module needs the snapshot sandbox's dockerd back up.
 
-    ``sandbox.snapshot_filesystem`` only captures the disk, not running
-    processes -- so a sandbox booted from the minds-workspace snapshot
-    has ``/var/lib/docker`` populated (with the stopped workspace
-    container's image layers + on-disk state) but no ``dockerd`` running.
-    Re-run the same script the snapshot itself used to bring dockerd up,
-    so subsequent ``docker`` invocations in these tests can talk to the
-    daemon.
-
-    Mirrors ``_ensure_dockerd_for_release`` in
-    ``libs/mngr/imbue/mngr/conftest.py`` but for our snapshot's script
-    location (the release image lives at ``/start-dockerd.sh``; the
-    snapshot tree puts the same script at its in-tree path).
+    The actual bring-up lives in the shared ``snapshot_sandbox_dockerd``
+    session fixture in ``conftest.py`` (also used by ``test_sync_e2e.py``);
+    this module-autouse wrapper preserves the original apply-to-all behavior
+    for the resume sanity tests.
     """
-    docker_info = subprocess.run(["docker", "info"], capture_output=True)
-    if docker_info.returncode == 0:
-        return
-
-    if not _START_DOCKERD_SCRIPT.is_file():
-        raise FileNotFoundError(
-            f"start-dockerd.sh not found at {_START_DOCKERD_SCRIPT}; this fixture is "
-            "only useful inside a sandbox booted from scripts/snapshot_minds_e2e_state.py."
-        )
-
-    subprocess.run(["chmod", "+x", str(_START_DOCKERD_SCRIPT)], check=True, timeout=5)
-    subprocess.run(
-        [str(_START_DOCKERD_SCRIPT)],
-        check=True,
-        timeout=_DOCKERD_STARTUP_TIMEOUT_SECONDS,
-    )
 
 
 # @pytest.mark.docker tells the host-side pytest resource guard that this
@@ -269,7 +268,7 @@ def _ensure_dockerd_after_snapshot_resume() -> None:
 @pytest.mark.docker
 @pytest.mark.timeout(60)
 def test_workspace_docker_container_is_present_and_stopped() -> None:
-    """The snapshot captured a stopped FCT workspace Docker container.
+    """The snapshot captured a stopped DEFAULT_WORKSPACE_TEMPLATE workspace Docker container.
 
     Asserts:
     - dockerd sees at least one container (``docker ps -a`` non-empty)
@@ -359,12 +358,19 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
     """After resume, the bootstrap re-registered the core services in applications.toml.
 
     The app-watcher / bootstrap respawns the standard services on restart and
-    each registers its port into ``runtime/applications.toml``; the core set
-    (system_interface, web, terminal) must be present.
+    each registers its port into ``runtime/applications.toml``; the always-on
+    core services (``system_interface`` and ``terminal``) must be present.
+
+    ``web`` was intentionally dropped: default-workspace-template removed the
+    blank example web service (its ``[program:web]`` supervisord entry and the
+    ``libs/web_server`` scaffold), so it no longer registers. ``browser`` does
+    autostart now, but it is memory-heavy and expendable (earlyoom can shed it
+    under pressure), so requiring it would make this test flaky -- we only
+    assert the services guaranteed to survive a resume.
     """
     result = _exec_in_container(running_workspace.container_name, "cat /code/runtime/applications.toml", timeout=30)
     assert result.returncode == 0, f"Could not read runtime/applications.toml: {result.stderr}"
-    for service_name in ("system_interface", "web", "terminal"):
+    for service_name in ("system_interface", "terminal"):
         assert service_name in result.stdout, (
             f"Service {service_name!r} not registered in applications.toml after resume:\n{result.stdout}"
         )
@@ -449,7 +455,7 @@ def _opt_into_pytest_config_guard(settings_path: Path) -> None:
 
     mngr's config guard refuses to run under ``PYTEST_CURRENT_TEST`` unless every
     config file it loads opts in. This writes the file in place with no restore,
-    so ``settings_path`` must live under a throwaway tree (``tmp_path`` or an FCT
+    so ``settings_path`` must live under a throwaway tree (``tmp_path`` or a DEFAULT_WORKSPACE_TEMPLATE
     clone) -- never a real checkout.
     """
     doc = tomlkit.parse(settings_path.read_text()) if settings_path.exists() else tomlkit.document()
@@ -479,9 +485,9 @@ def _isolated_host_config_root(scratch_dir: Path) -> Path:
 
 
 def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    """Set the minds env + provider overrides and materialize the throwaway FCT + host config.
+    """Set the minds env + provider overrides and materialize the throwaway DEFAULT_WORKSPACE_TEMPLATE + host config.
 
-    Returns ``(fct_path, host_config_root)`` for ``create_workspace_via_electron``.
+    Returns ``(default_workspace_template_path, host_config_root)`` for ``create_workspace_via_electron``.
     """
     configure_logging()
     # Route env-var defaults through monkeypatch so injected MINDS_ROOT_NAME /
@@ -490,17 +496,24 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
-    # FCT pins docker_runtime = "runsc" (gVisor), absent in CI / the sandbox;
-    # override to the default runtime (FCT names this exact escape-hatch env var).
-    monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
+    # Pin the local-docker workspace to runc; gVisor (runsc) is absent in CI /
+    # the sandbox. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form / API default
+    # to runc so minds never stacks the `docker_runsc` create-template -- the only
+    # way runsc gets selected, now that the pinned DEFAULT_WORKSPACE_TEMPLATE `docker` template already
+    # defaults to runc. (A provider-config env var like
+    # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME cannot help: an explicitly stacked
+    # template's docker_runtime outranks it.)
+    monkeypatch.setenv("MINDS_DOCKER_RUNTIME_DEFAULT", "RUNC")
     # The Electron-spawned mngr loads two project-config trees under
-    # PYTEST_CURRENT_TEST (host-side + the FCT checkout); both must opt into the
-    # pytest config guard, and neither opt-in lives in committed state, so point
-    # at throwaway opted-in copies.
-    fct_path = materialize_isolated_fct(resolve_fct_path(tmp_path), tmp_path)
-    _opt_into_pytest_config_guard(fct_path / ".mngr" / "settings.toml")
+    # PYTEST_CURRENT_TEST: the host-side config (a throwaway opted-in copy built
+    # here) and the DEFAULT_WORKSPACE_TEMPLATE worktree. The DEFAULT_WORKSPACE_TEMPLATE worktree is materialized ahead of time
+    # by ``materialize_paired_default_workspace_template_worktree`` (baked into the snapshot image in
+    # CI, or created by the local test recipe) with its pytest opt-in already
+    # committed, so this only resolves it -- and errors loudly if the materialize
+    # step never ran.
+    default_workspace_template_path = resolve_default_workspace_template_path()
     host_config_root = _isolated_host_config_root(tmp_path)
-    return fct_path, host_config_root
+    return default_workspace_template_path, host_config_root
 
 
 @pytest.mark.minds_snapshot_resume
@@ -515,7 +528,7 @@ def test_create_apikey_workspace_and_chat_via_electron(
     """Drive Electron to create a manual-API-key Docker workspace, then chat with it.
 
     The product-level round-trip: pick the ``api_key`` AI provider, type a raw
-    Anthropic key, create a local Docker workspace from FCT, and assert the agent
+    Anthropic key, create a local Docker workspace from DEFAULT_WORKSPACE_TEMPLATE, and assert the agent
     in the workspace's ``system_interface`` answers a chat message (echoes a
     unique token) -- end-to-end through the real Electron app and the desktop
     client proxy.
@@ -533,7 +546,7 @@ def test_create_apikey_workspace_and_chat_via_electron(
     if not anthropic_api_key:
         pytest.skip("ANTHROPIC_API_KEY is required for the manual-key workspace chat round-trip")
 
-    fct_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
+    default_workspace_template_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
 
     workspace_name = f"forever-{get_short_random_string()}"
     token = get_short_random_string()
@@ -548,7 +561,7 @@ def test_create_apikey_workspace_and_chat_via_electron(
 
     try:
         create_workspace_via_electron(
-            fct_path,
+            default_workspace_template_path,
             workspace_name,
             debug_port,
             host_config_dir=host_config_root,
@@ -557,3 +570,380 @@ def test_create_apikey_workspace_and_chat_via_electron(
         )
     finally:
         destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")
+
+
+# -- Backup-update chat gate against a live, LLM-authenticated chat agent -----
+#
+# The backup update's chat gate must (a) classify a claude agent that is
+# actively generating as a running chat, (b) block the mutating update on it,
+# and (c) stop it for real when the "Stop all chats and retry" flow passes
+# --stop-chats. The unit tests in backup_workspace_scripts_test.py drive these
+# paths with a stubbed `mngr list`; this test drives them against the resumed
+# snapshot workspace's real chat agent, which has working LLM credentials
+# baked in -- asking it for a long story keeps it RUNNING long enough for the
+# gate to observe it.
+
+
+def _find_chat_agent(container_name: str) -> dict[str, Any]:
+    """Return the workspace's (claude-type) chat agent record from mngr list."""
+    agents = _list_agents_in_container(container_name)
+    chats = [agent for agent in agents if agent.get("type") == "claude"]
+    assert chats, f"No claude chat agent among {[a.get('name') for a in agents]!r}"
+    return chats[0]
+
+
+def _wait_for_agent_state(container_name: str, agent_id: str, expected_state: str, *, attempts: int = 40) -> bool:
+    """Poll (shell-side, no python sleeps) until the agent reports the state, or time out."""
+    read_state = (
+        "cd /code && mngr list --format json --on-error continue | "
+        f'python3 -c \'import json,sys; print(next((a["state"] for a in json.load(sys.stdin)["agents"] '
+        f'if a["id"] == "{agent_id}"), ""))\''
+    )
+    poll = (
+        f"for i in $(seq 1 {attempts}); do "
+        f'state=$({read_state}); [ "$state" = "{expected_state}" ] && exit 0; '
+        "sleep 3; done; exit 1"
+    )
+    return _exec_in_container(container_name, poll, timeout=attempts * 3 + 120).returncode == 0
+
+
+def _run_backup_script_in_container(
+    container_name: str, script: str, args: tuple[str, ...], *, timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """Run one of the minds backup workspace scripts inside the container at /code."""
+    command = build_workspace_script_command(script, args)
+    return _exec_in_container(container_name, f"cd /code && {command}", timeout=timeout)
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.timeout(900)
+def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
+    running_workspace: _ResumedWorkspace,
+) -> None:
+    """The chat gate blocks on a genuinely generating claude agent and --stop-chats stops it."""
+    container_name = running_workspace.container_name
+    chat = _find_chat_agent(container_name)
+    chat_id = str(chat["id"])
+    chat_name = str(chat["name"])
+
+    # Wake the chat and give it work that takes a while: a real LLM generation
+    # (the baked workspace carries working credentials). `mngr message`
+    # delivers the keystrokes and returns; claude then reads as RUNNING while
+    # it generates.
+    started = _exec_in_container(container_name, f"cd /code && mngr start {chat_id} --quiet", timeout=180)
+    assert started.returncode == 0, f"`mngr start` failed for the chat agent: {started.stderr}"
+    story_marker = get_short_random_string()
+    messaged = _exec_in_container(
+        container_name,
+        f'cd /code && mngr message {chat_id} -m "Please tell me a really long story about {story_marker}. '
+        'Make it as long and detailed as you possibly can."',
+        timeout=120,
+    )
+    assert messaged.returncode == 0, f"`mngr message` failed for the chat agent: {messaged.stderr}"
+    assert _wait_for_agent_state(container_name, chat_id, "RUNNING"), (
+        "The chat agent never reached RUNNING after being asked for a long story."
+    )
+
+    # The gate probe classifies the generating chat as a running chat.
+    probe = _run_backup_script_in_container(
+        container_name,
+        BACKUP_GATE_PROBE_SCRIPT,
+        ("--agent-id", running_workspace.services_agent_id),
+        timeout=300,
+    )
+    probe_payload = extract_marker_json(probe.stdout, GATE_RESULT_MARKER)
+    assert probe_payload is not None, (probe.stdout, probe.stderr)
+    probe_chats = probe_payload["running_chats"]
+    assert isinstance(probe_chats, list) and chat_name in probe_chats, probe_payload
+
+    # The mutating update refuses to run while the chat is generating.
+    blocked = _run_backup_script_in_container(
+        container_name,
+        BACKUP_APPLY_UPDATE_SCRIPT,
+        ("--minds-version", "0.0.0-snapshot-test", "--agent-id", running_workspace.services_agent_id),
+        timeout=600,
+    )
+    blocked_payload = extract_marker_json(blocked.stdout, UPDATE_RESULT_MARKER)
+    assert blocked_payload is not None, (blocked.stdout, blocked.stderr)
+    assert blocked_payload["status"] == "blocked", blocked_payload
+    blocked_chats = blocked_payload["running_chats"]
+    assert isinstance(blocked_chats, list) and chat_name in blocked_chats, blocked_payload
+
+    # "Stop all chats and retry": the script stops the live chat itself and
+    # proceeds past the gate. Whether the rest of the update succeeds depends
+    # on the baked repo's tags; the contract under test is that the outcome is
+    # anything but blocked and the chat agent is genuinely stopped.
+    retried = _run_backup_script_in_container(
+        container_name,
+        BACKUP_APPLY_UPDATE_SCRIPT,
+        ("--minds-version", "0.0.0-snapshot-test", "--agent-id", running_workspace.services_agent_id, "--stop-chats"),
+        timeout=600,
+    )
+    retried_payload = extract_marker_json(retried.stdout, UPDATE_RESULT_MARKER)
+    assert retried_payload is not None, (retried.stdout, retried.stderr)
+    assert retried_payload["status"] != "blocked", retried_payload
+    assert _wait_for_agent_state(container_name, chat_id, "STOPPED"), (
+        "The chat agent was not stopped by the --stop-chats gate."
+    )
+
+
+# -- Backup service: check / update / converge against the resumed workspace --
+#
+# These replace the old test_backup_service_release.py release tests (which
+# ran against a fake default-workspace-template-shaped repo with a stub supervisorctl). Here
+# everything is real: the baked workspace's git history (shared with the
+# official template repo on GitHub, so the check's `official`-remote tag
+# fetch runs for real), the actual supervisord + host-backup program inside
+# the container, real `uv sync`, and real restic provisioning from the
+# sandbox host into the container.
+
+
+def _git_in_workspace(container_name: str, args: str) -> subprocess.CompletedProcess[str]:
+    return _exec_in_container(container_name, f"cd /code && git {args}", timeout=60)
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.timeout(900)
+def test_backup_service_check_update_and_force_update_converge(running_workspace: _ResumedWorkspace) -> None:
+    """Check against the shipped minimum tag, update to it, verify convergence + force-update idempotence.
+
+    The check fetches the minimum tag from the official GitHub remote when it
+    is missing locally (exactly the production path) and reads the real
+    supervisord state of the real host-backup program; the update does the
+    real git converge + `uv sync` + `supervisorctl restart` inside the
+    container, and a second (force) update at the same version must be an ok
+    no-op commit-wise -- the idempotent "reset the backup service" action.
+    """
+    container_name = running_workspace.container_name
+    agent_id = running_workspace.services_agent_id
+    minimum_tag = MINIMUM_BACKUP_SERVICE_TAG
+    minimum_version = minimum_tag.removeprefix("minds-v")
+
+    # 1. The check runs end to end: official remote ensured (and pointed at
+    # the canonical URL), tags fetched from GitHub when missing, real
+    # supervisord state reported.
+    check = _run_backup_script_in_container(
+        container_name, BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_tag, "--agent-id", agent_id), timeout=600
+    )
+    check_payload = extract_marker_json(check.stdout, CHECK_RESULT_MARKER)
+    assert check_payload is not None, (check.stdout, check.stderr)
+    assert check_payload["target_tag"] == minimum_tag, check_payload
+    assert check_payload["code_state"] in ("matches", "newer", "outdated"), check_payload
+    assert check_payload["service_state"] == "running", check_payload
+    remote_url = _git_in_workspace(container_name, "remote get-url official")
+    assert remote_url.stdout.strip() == OFFICIAL_REMOTE_URL, remote_url
+
+    # 2. Update (converge) to the minimum tag's content. Whether a commit
+    # lands depends on how far the baked template has moved past the tag;
+    # either way the script must succeed and restart the service.
+    update = _run_backup_script_in_container(
+        container_name,
+        BACKUP_APPLY_UPDATE_SCRIPT,
+        ("--minds-version", minimum_version, "--agent-id", agent_id),
+        timeout=800,
+    )
+    update_payload = extract_marker_json(update.stdout, UPDATE_RESULT_MARKER)
+    assert update_payload is not None, (update.stdout, update.stderr)
+    assert update_payload["status"] == "ok", update_payload
+    assert update_payload["tag"] == minimum_tag, update_payload
+    if update_payload["committed"]:
+        subject = _git_in_workspace(container_name, "log -1 --format=%s").stdout.strip()
+        assert subject == f"backup-update: {minimum_tag}", subject
+
+    # 3. Re-check: the code now matches the minimum tag exactly and the
+    # service came back RUNNING.
+    recheck = _run_backup_script_in_container(
+        container_name, BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_tag, "--agent-id", agent_id), timeout=600
+    )
+    recheck_payload = extract_marker_json(recheck.stdout, CHECK_RESULT_MARKER)
+    assert recheck_payload is not None, (recheck.stdout, recheck.stderr)
+    assert recheck_payload["code_state"] == "matches", recheck_payload
+    assert recheck_payload["service_state"] == "running", recheck_payload
+
+    # 4. Force update at the already-converged version: ok, nothing to
+    # commit, service restarted/verified again.
+    forced = _run_backup_script_in_container(
+        container_name,
+        BACKUP_APPLY_UPDATE_SCRIPT,
+        ("--minds-version", minimum_version, "--agent-id", agent_id),
+        timeout=800,
+    )
+    forced_payload = extract_marker_json(forced.stdout, UPDATE_RESULT_MARKER)
+    assert forced_payload is not None, (forced.stdout, forced.stderr)
+    assert forced_payload["status"] == "ok", forced_payload
+    assert forced_payload["committed"] is False, forced_payload
+
+
+# -- Backup enable / env repair / destination change (minds-side, real exec) --
+
+# Pinned restic download for sandboxes whose snapshot image predates the
+# bundled binary; must track scripts/download-binaries.js.
+_RESTIC_DOWNLOAD_URL: Final[str] = (
+    "https://github.com/restic/restic/releases/download/v0.18.1/restic_0.18.1_linux_amd64.bz2"
+)
+_RESTIC_DOWNLOAD_SHA256: Final[str] = "680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d"
+
+
+def _ensure_restic_on_sandbox_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point MINDS_RESTIC_BINARY at a usable restic, downloading one when absent.
+
+    The snapshot image only carries the bundled binary when its build ran the
+    download step; rather than skipping (silently losing coverage), fetch the
+    pinned release and verify its published checksum.
+    """
+    try:
+        restic_cli.ensure_restic_available()
+        return
+    except ResticNotInstalledError:
+        logger.info("No restic on the sandbox host; downloading the pinned release for this test")
+    response = httpx.get(_RESTIC_DOWNLOAD_URL, follow_redirects=True, timeout=180.0)
+    response.raise_for_status()
+    digest = hashlib.sha256(response.content).hexdigest()
+    assert digest == _RESTIC_DOWNLOAD_SHA256, f"restic download checksum mismatch: {digest}"
+    binary_path = tmp_path / "restic"
+    binary_path.write_bytes(bz2.decompress(response.content))
+    binary_path.chmod(0o755)
+    monkeypatch.setenv("MINDS_RESTIC_BINARY", str(binary_path))
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.timeout(900)
+def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
+    running_workspace: _ResumedWorkspace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enable backups, repair a corrupted env, and change the destination -- minds-side, for real.
+
+    Drives the actual provisioning entry points from the sandbox host: real
+    `restic init` against local repositories (keyed by the per-workspace
+    password), and real
+    `mngr exec` injection/rotation of `runtime/secrets/restic.env` inside the
+    resumed workspace container.
+    """
+    _ensure_restic_on_sandbox_host(tmp_path, monkeypatch)
+    # The provisioning path shells out to `mngr exec <agent>` from this
+    # process. Give that mngr the snapshot's real container prefix AND the
+    # snapshot's real desktop-side host dir: the docker provider reaches its
+    # host records through a state container named after the profile's user id
+    # under MNGR_HOST_DIR, so the autouse fixture's throwaway host dir (fresh
+    # profile, different user id) would make the baked workspace invisible
+    # ("Agent not found"). The baked host dir lives under the *real* home --
+    # the autouse fixture monkeypatches HOME to a temp dir, so resolve it via
+    # /etc/passwd (same trick as deployment_tests/conftest.py) using the
+    # mngr_host_dir_for layout. Its baked profile settings get the pytest
+    # config-guard opt-in (throwaway sandbox state, per the helper's contract),
+    # and the project config is an isolated pytest-opted-in copy (the repo's
+    # own .mngr would fail the config guard). Use a neutral cwd and silence
+    # providers that would need cloud credentials during discovery.
+    root_name = os.environ.get("MINDS_ROOT_NAME", "minds-staging")
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    baked_mngr_host_dir = real_home / f".{root_name}" / "mngr"
+    assert baked_mngr_host_dir.is_dir(), f"No baked desktop-side mngr host dir at {baked_mngr_host_dir}"
+    baked_profile_dir = find_profile_dir_lightweight(baked_mngr_host_dir)
+    assert baked_profile_dir is not None, f"No mngr profile under {baked_mngr_host_dir} in the snapshot"
+    _opt_into_pytest_config_guard(baked_profile_dir / "settings.toml")
+    monkeypatch.setenv("MNGR_HOST_DIR", str(baked_mngr_host_dir))
+    monkeypatch.setenv("MNGR_PREFIX", mngr_prefix_for(root_name))
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(_isolated_host_config_root(tmp_path) / ".mngr"))
+    monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
+    monkeypatch.setenv("MNGR__PROVIDERS__AWS__IS_ENABLED", "false")
+    monkeypatch.chdir(tmp_path)
+
+    container_name = running_workspace.container_name
+    agent_id = AgentId(running_workspace.services_agent_id)
+
+    data_dir = tmp_path / "minds-data"
+    data_dir.mkdir()
+    paths = WorkspacePaths(data_dir=data_dir)
+    repo_one = tmp_path / "restic-repo-1"
+    repo_two = tmp_path / "restic-repo-2"
+
+    def read_workspace_env() -> str:
+        result = _exec_in_container(container_name, "cat /code/runtime/secrets/restic.env", timeout=30)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    # Enable backups on the (configure-later) workspace: real restic init +
+    # random per-workspace password + injection into the real container.
+    configure_backups_for_host(
+        agent_id=agent_id,
+        host_id="host-snapshot-test",
+        request=BackupSetupRequest(
+            backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_one}"
+        ),
+        imbue_cloud_cli=None,
+        paths=paths,
+    )
+    canonical_one = read_canonical_env(paths, agent_id)
+    assert canonical_one is not None
+    assert f"RESTIC_REPOSITORY={repo_one}" in canonical_one
+    assert "RESTIC_PASSWORD=" in canonical_one
+    assert (repo_one / "config").is_file()
+    assert read_workspace_env() == canonical_one
+
+    # Repair: corrupt the workspace copy, re-inject, and confirm the drifted
+    # copy was rotated aside inside the container rather than lost.
+    corrupted = _exec_in_container(
+        container_name, "printf 'RESTIC_REPOSITORY=garbage\n' > /code/runtime/secrets/restic.env", timeout=30
+    )
+    assert corrupted.returncode == 0, corrupted.stderr
+    reinject_canonical_env(agent_id=agent_id, paths=paths)
+    assert read_workspace_env() == canonical_one
+    rotated = _exec_in_container(container_name, "grep -l garbage /code/runtime/secrets/restic.env.*", timeout=30)
+    assert rotated.returncode == 0 and rotated.stdout.strip(), (rotated.stdout, rotated.stderr)
+
+    # Destination change: fresh provisioning against repo two; the old
+    # canonical env is archived minds-side and the workspace copy replaced.
+    change_backup_destination_for_host(
+        agent_id=agent_id,
+        host_id="host-snapshot-test",
+        request=BackupSetupRequest(
+            backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_two}"
+        ),
+        imbue_cloud_cli=None,
+        paths=paths,
+    )
+    canonical_two = read_canonical_env(paths, agent_id)
+    assert canonical_two is not None
+    assert f"RESTIC_REPOSITORY={repo_two}" in canonical_two
+    assert canonical_two != canonical_one
+    assert (repo_two / "config").is_file()
+    assert read_workspace_env() == canonical_two
+    archived = list((data_dir / "backup_envs").glob(f"{agent_id}.env.*"))
+    assert len(archived) == 1
+    assert archived[0].read_text() == canonical_one
+    # The old repository is untouched and still reachable via the archive.
+    assert (repo_one / "config").is_file()
+
+    # Disable: the canonical env is archived and the workspace copy rotated
+    # aside, so the backup service reads "not configured" again.
+    disable_backups_for_host(agent_id=agent_id, paths=paths)
+    assert read_canonical_env(paths, agent_id) is None
+    gone = _exec_in_container(container_name, "test -f /code/runtime/secrets/restic.env", timeout=30)
+    assert gone.returncode != 0, "the workspace restic.env should be rotated aside after disabling"
+    archived_after_disable = list((data_dir / "backup_envs").glob(f"{agent_id}.env.*"))
+    assert len(archived_after_disable) == 2
+    # Disabling again is an idempotent no-op.
+    disable_backups_for_host(agent_id=agent_id, paths=paths)
+
+    # Re-enable after the disable: fresh provisioning works again (the
+    # disable/enable loop is the intended way to reset a workspace's backups).
+    repo_three = tmp_path / "restic-repo-3"
+    configure_backups_for_host(
+        agent_id=agent_id,
+        host_id="host-snapshot-test",
+        request=BackupSetupRequest(
+            backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_three}"
+        ),
+        imbue_cloud_cli=None,
+        paths=paths,
+    )
+    canonical_three = read_canonical_env(paths, agent_id)
+    assert canonical_three is not None
+    assert f"RESTIC_REPOSITORY={repo_three}" in canonical_three
+    assert (repo_three / "config").is_file()
+    assert read_workspace_env() == canonical_three

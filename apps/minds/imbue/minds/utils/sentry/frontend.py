@@ -30,10 +30,10 @@ frontend report under the same environment, release, and ``git_sha`` tag.
 from collections.abc import Mapping
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.sentry.core import fixup_release_id
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
-from imbue.minds.utils.sentry.core import fixup_release_id
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 
 # Keep these in sync with the Sentry projects declared in apps/minds/electron/sentry.js.
@@ -68,6 +68,7 @@ class FrontendSentryConfig(FrozenModel):
     environment: str
     release: str
     git_sha: str
+    anonymous_user_id: str
 
     def to_browser_payload(self) -> dict[str, str] | None:
         """Return the JSON-safe payload for the browser SDK, or ``None`` if off.
@@ -82,17 +83,22 @@ class FrontendSentryConfig(FrozenModel):
             "environment": self.environment,
             "release": self.release,
             "git_sha": self.git_sha,
+            # Attach the same anonymous user id (no PII) the backend reports so the browser web UI's
+            # events count as the same install in Sentry's per-issue user counts.
+            "anonymous_user_id": self.anonymous_user_id,
         }
 
 
-def resolve_frontend_sentry_config(is_error_reporting_enabled: bool) -> FrontendSentryConfig:
+def resolve_frontend_sentry_config(is_error_reporting_enabled: bool, anonymous_user_id: str) -> FrontendSentryConfig:
     """Resolve the frontend Sentry config for the current process.
 
     ``is_error_reporting_enabled`` is the user's ``report_unexpected_errors``
     setting, so the web UI reports to Sentry exactly when the user has opted in.
     The environment selection is shared with the backend so frontend and backend
     events line up; the release id + git sha come from the same Electron-passed
-    env vars the backend uses.
+    env vars the backend uses. ``anonymous_user_id`` is the install's stable,
+    PII-free id (shared with the backend) so frontend events count as the same
+    install in Sentry's per-issue user counts.
     """
     environment = resolve_sentry_environment()
     dsn = _FRONTEND_DSN_BY_ENVIRONMENT[environment]
@@ -102,16 +108,17 @@ def resolve_frontend_sentry_config(is_error_reporting_enabled: bool) -> Frontend
         environment=environment.value,
         release=fixup_release_id(resolve_release_id()),
         git_sha=resolve_git_sha(),
+        anonymous_user_id=anonymous_user_id,
     )
 
 
-def frontend_sentry_browser_payload(is_error_reporting_enabled: bool) -> dict[str, str] | None:
+def frontend_sentry_browser_payload(is_error_reporting_enabled: bool, anonymous_user_id: str) -> dict[str, str] | None:
     """Browser-ready Sentry payload for the current process, or ``None`` if off.
 
     ``is_error_reporting_enabled`` is the user's ``report_unexpected_errors``
     setting. This is the entry point the JinjaX ``Base`` layout reaches (via the
     Catalog global registered in ``desktop_client/templates.py``, which supplies
-    the live setting) to decide whether -- and with what config -- to emit the
-    Sentry bootstrap on every page.
+    the live setting and the install's anonymous user id) to decide whether --
+    and with what config -- to emit the Sentry bootstrap on every page.
     """
-    return resolve_frontend_sentry_config(is_error_reporting_enabled).to_browser_payload()
+    return resolve_frontend_sentry_config(is_error_reporting_enabled, anonymous_user_id).to_browser_payload()

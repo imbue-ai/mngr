@@ -1,25 +1,51 @@
 import json
+import os
 import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
 from imbue.mngr_lima.errors import LimaCommandError
+from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
 from imbue.mngr_lima.errors import LimaNotInstalledError
 from imbue.mngr_lima.errors import LimaVersionError
+
+# Lima rejects a VM whose SSH control-socket path would reach UNIX_PATH_MAX. In
+# pkg/instance/create.go it forms that path as
+# `filepath.Join(LIMA_HOME, instance_name, filenames.LongestSock)` and fails
+# when `len(path) >= osutil.UnixPathMax`, so the path must be strictly shorter.
+#
+# UnixPathMax is 104 on macOS (osutil_others.go) and 108 on Linux
+# (osutil_linux.go); use the smaller macOS value so a name generated on either
+# platform stays valid. Ref: lima-vm/lima pkg/osutil/osutil_{others,linux}.go.
+_UNIX_PATH_MAX: Final[int] = 104
+# The longest socket filename Lima may create, from pkg/limatype/filenames:
+# `LongestSock = SSHSock + ".1234567890123456"`, i.e. "ssh.sock." + a 16-digit
+# suffix. This is what limactl joins onto the instance dir for the length check.
+_LIMA_LONGEST_SOCK_NAME: Final[str] = "ssh.sock.1234567890123456"
+# Fixed bytes around the instance name in that path: the two `/` separators plus
+# the socket filename. So socket-path length == len(LIMA_HOME) + len(name) + this.
+_LIMA_SOCKET_PATH_OVERHEAD: Final[int] = 2 + len(_LIMA_LONGEST_SOCK_NAME)
+# Never truncate the random hex tail below this many chars: 8 hex chars is 32
+# bits of entropy, which keeps collisions among one machine's VMs negligible.
+_MIN_INSTANCE_NAME_HEX_CHARS: Final[int] = 8
 
 
 def _log_lima_output(line: str, is_stdout: bool) -> None:
@@ -93,6 +119,30 @@ def _stop_serial_tailer() -> None:
         _active_serial_tailer = None
 
 
+def _run_limactl(
+    cg: ConcurrencyGroup,
+    subcommand: str,
+    cmd: list[str],
+    timeout: float | None,
+    on_output: Callable[[str, bool], None] | None = None,
+) -> FinishedProcess:
+    """Run a limactl command, translating any non-zero exit into LimaCommandError.
+
+    Every limactl invocation funnels through here so the ConcurrencyGroup's
+    checked run (which raises a raw ProcessError on a non-zero exit) is always
+    converted to the domain LimaCommandError that callers catch. Without this,
+    disabling the check and re-testing the exit code by hand at each call site
+    was fragile -- a forgotten check would leak a ProcessError straight past
+    callers that only handle LimaCommandError. ``subcommand`` labels the limactl
+    subcommand in the raised error (e.g. "stop", "list"); an OSError from failing
+    to spawn limactl at all is left to propagate.
+    """
+    try:
+        return cg.run_process_to_completion(cmd, timeout=timeout, on_output=on_output)
+    except ProcessError as e:
+        raise LimaCommandError(subcommand, e.returncode, e.stderr, e.stdout) from e
+
+
 def check_lima_installed(provider_name: ProviderInstanceName) -> None:
     """Verify that limactl is on PATH. Raises LimaNotInstalledError if not."""
     if shutil.which("limactl") is None:
@@ -104,7 +154,7 @@ def get_lima_version(cg: ConcurrencyGroup) -> tuple[int, int, int]:
 
     Parses the output of `limactl --version`.
     """
-    result = cg.run_process_to_completion(["limactl", "--version"], timeout=10.0)
+    result = _run_limactl(cg, "--version", ["limactl", "--version"], timeout=10.0)
     version_str = result.stdout.strip()
     # limactl --version outputs something like "limactl version 1.0.2"
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
@@ -126,18 +176,69 @@ def check_lima_version(
         raise LimaVersionError(provider_name, installed_str, minimum_str)
 
 
-def lima_instance_name(host_name: HostName, prefix: str) -> str:
-    """Build the Lima instance name from a mngr host name.
+def resolve_lima_home() -> Path:
+    """Resolve LIMA_HOME the way limactl does: the ``LIMA_HOME`` env var, else ``~/.lima``.
 
-    The prefix is the mngr config prefix (default 'mngr-').
+    Call this at the provider boundary and pass the result into
+    :func:`lima_instance_name_from_host_id`. limactl runs as a local subprocess
+    that inherits this process's environment, so the value resolved here is the
+    same one Lima uses to build the socket path it length-checks.
+    """
+    lima_home_env = os.environ.get("LIMA_HOME")
+    if lima_home_env:
+        return Path(lima_home_env).expanduser()
+    return Path.home() / ".lima"
+
+
+def lima_instance_name_from_host_id(host_id: HostId, prefix: str, lima_home: Path) -> str:
+    """Build the Lima instance name from a mngr host id, short enough for Lima to accept.
+
+    New VMs derive their instance name from the immutable host id (not the
+    mutable host name) so a host can be renamed without the limactl instance
+    name drifting from the host name -- limactl has no native rename. The
+    instance name is persisted on the host record and used for all lifecycle
+    operations, so existing legacy ``<prefix><host_name>`` instances keep
+    working unchanged (discovery reads the stored instance name, never parses
+    it). The prefix is the mngr config prefix (default 'mngr-').
+
+    The full ``<prefix>host-<32 hex>`` name can exceed what Lima allows: Lima
+    rejects a VM whose derived SSH socket path reaches UNIX_PATH_MAX, and that
+    ceiling shrinks as ``lima_home`` grows. To stay under it, the random hex
+    tail is truncated just enough to fit, keeping the full 32-char id whenever
+    it already fits (so short home paths are unchanged). Nothing parses the id
+    back out of the instance name, so truncation is safe. ``lima_home`` is the
+    resolved LIMA_HOME (see :func:`resolve_lima_home`). Raises
+    :class:`LimaInstanceNameTooLongError` if the prefix plus ``lima_home`` leave
+    no room for even a minimal id.
+    """
+    # Everything in the name except the shortenable random hex tail.
+    fixed_part = f"{prefix}{host_id.PREFIX}-"
+    # Longest instance name that keeps the socket path strictly under the max:
+    # len(lima_home) + len(name) + overhead <= _UNIX_PATH_MAX - 1.
+    max_name_length = (_UNIX_PATH_MAX - 1) - _LIMA_SOCKET_PATH_OVERHEAD - len(str(lima_home))
+    available_for_hex = max_name_length - len(fixed_part)
+    if available_for_hex < _MIN_INSTANCE_NAME_HEX_CHARS:
+        raise LimaInstanceNameTooLongError(prefix, str(lima_home))
+    # Slicing past the end just yields the whole 32-char hex, so the common
+    # (fits) case reproduces the original ``f"{prefix}{host_id}"`` verbatim.
+    return f"{fixed_part}{host_id.get_uuid().hex[:available_for_hex]}"
+
+
+def lima_instance_name(host_name: HostName, prefix: str) -> str:
+    """Build the legacy Lima instance name from a mngr host name.
+
+    Deprecated: new VMs use :func:`lima_instance_name_from_host_id`. Retained
+    because some already-created VMs were named under this scheme; their
+    instance name is persisted on the host record, so they continue to work.
     """
     return f"{prefix}{host_name}"
 
 
 def host_name_from_instance_name(instance_name: str, prefix: str) -> HostName | None:
-    """Extract the mngr host name from a Lima instance name.
+    """Extract the mngr host name from a legacy Lima instance name.
 
     Returns None if the instance name does not start with the prefix.
+    Deprecated alongside :func:`lima_instance_name`.
     """
     if not instance_name.startswith(prefix):
         return None
@@ -164,16 +265,9 @@ def limactl_start_new(
     effective_callback = on_output or _SerialLogTailerCallback(cg=cg)
     try:
         with log_span("Running limactl start for new instance: {}", instance_name):
-            result = cg.run_process_to_completion(
-                cmd,
-                timeout=timeout,
-                on_output=effective_callback,
-                is_checked_after=False,
-            )
+            _run_limactl(cg, "start", cmd, timeout=timeout, on_output=effective_callback)
     finally:
         _stop_serial_tailer()
-    if result.returncode != 0:
-        raise LimaCommandError("start", result.returncode, result.stderr)
 
 
 def limactl_start_existing(
@@ -188,14 +282,7 @@ def limactl_start_existing(
     """
     cmd = ["limactl", "--log-level=info", "start", instance_name]
     with log_span("Running limactl start for existing instance: {}", instance_name):
-        result = cg.run_process_to_completion(
-            cmd,
-            timeout=timeout,
-            on_output=on_output or _log_lima_output,
-            is_checked_after=False,
-        )
-    if result.returncode != 0:
-        raise LimaCommandError("start", result.returncode, result.stderr)
+        _run_limactl(cg, "start", cmd, timeout=timeout, on_output=on_output or _log_lima_output)
 
 
 def limactl_stop(
@@ -209,9 +296,7 @@ def limactl_stop(
     """
     cmd = ["limactl", "stop", instance_name]
     with log_span("Running limactl stop: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("stop", result.returncode, result.stderr)
+        _run_limactl(cg, "stop", cmd, timeout=timeout)
 
 
 def limactl_delete(
@@ -229,9 +314,7 @@ def limactl_delete(
         cmd.append("--force")
     cmd.append(instance_name)
     with log_span("Running limactl delete: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("delete", result.returncode, result.stderr)
+        _run_limactl(cg, "delete", cmd, timeout=timeout)
 
 
 def limactl_disk_create(
@@ -253,9 +336,7 @@ def limactl_disk_create(
     """
     cmd = ["limactl", "disk", "create", disk_name, "--size", size]
     with log_span("Running limactl disk create: {} (size {})", disk_name, size):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("disk create", result.returncode, result.stderr)
+        _run_limactl(cg, "disk create", cmd, timeout=timeout)
 
 
 def limactl_disk_delete(
@@ -278,13 +359,14 @@ def limactl_disk_delete(
         cmd.append("--force")
     cmd.append(disk_name)
     with log_span("Running limactl disk delete: {}", disk_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        stderr_lower = result.stderr.lower()
-        if "not found" in stderr_lower or "does not exist" in stderr_lower:
-            logger.debug("Lima disk {} already absent, skipping", disk_name)
-            return
-        raise LimaCommandError("disk delete", result.returncode, result.stderr)
+        try:
+            _run_limactl(cg, "disk delete", cmd, timeout=timeout)
+        except LimaCommandError as e:
+            stderr_lower = e.stderr.lower()
+            if "not found" in stderr_lower or "does not exist" in stderr_lower:
+                logger.debug("Lima disk {} already absent, skipping", disk_name)
+                return
+            raise
 
 
 def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, Any]]:
@@ -293,9 +375,7 @@ def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, 
     Runs: limactl list --json
     """
     cmd = ["limactl", "list", "--json"]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("list", result.returncode, result.stderr)
+    result = _run_limactl(cg, "list", cmd, timeout=timeout)
 
     output = result.stdout.strip()
     if not output:
@@ -341,9 +421,7 @@ def limactl_show_ssh(
     Parses the output of: limactl show-ssh --format config <instance_name>
     """
     cmd = ["limactl", "show-ssh", "--format", "config", instance_name]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("show-ssh", result.returncode, result.stderr)
+    result = _run_limactl(cg, "show-ssh", cmd, timeout=timeout)
 
     hostname = "127.0.0.1"
     port = 22
@@ -369,12 +447,17 @@ def limactl_shell(
     instance_name: str,
     command: str,
     timeout: float = 60.0,
-) -> tuple[int | None, str, str]:
-    """Execute a command inside a Lima instance.
+) -> str:
+    """Execute a command inside a Lima instance and return its stdout.
 
     Runs: limactl shell <instance_name> -- sh -c <command>
-    Returns: (returncode, stdout, stderr)
+
+    Raises LimaCommandError if limactl (or the command) exits non-zero, so a
+    limactl that cannot reach the instance surfaces like every other limactl
+    failure instead of being silently returned as a non-zero code the caller may
+    ignore. Callers that want to tolerate a non-zero command exit should make the
+    inner command itself return zero (e.g. append ``|| true``).
     """
     cmd = ["limactl", "shell", instance_name, "--", "sh", "-c", command]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
-    return result.returncode, result.stdout, result.stderr
+    result = _run_limactl(cg, "shell", cmd, timeout=timeout)
+    return result.stdout

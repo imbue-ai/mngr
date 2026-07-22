@@ -11,13 +11,18 @@ from unittest.mock import patch
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
+from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -25,6 +30,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
+from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
 from imbue.mngr_modal.instance import HostRecord
 from imbue.mngr_modal.instance import MODAL_VOLUME_NAME_MAX_LENGTH
@@ -41,8 +47,11 @@ from imbue.mngr_modal.instance import build_sandbox_tags
 from imbue.mngr_modal.instance import check_host_name_is_unique
 from imbue.mngr_modal.instance import parse_sandbox_tags
 from imbue.modal_proxy.errors import ModalProxyAuthError
+from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.testing import FakeModalInterface
+from imbue.modal_proxy.testing import FakeSandbox
 
 # =============================================================================
 # Unit tests for sandbox tag helper functions
@@ -260,6 +269,21 @@ def test_modal_provider_supports_volumes(modal_provider: ModalProviderInstance) 
 def test_modal_provider_supports_mutable_tags(modal_provider: ModalProviderInstance) -> None:
     """Modal provider supports mutable tags via Modal's sandbox.set_tags() API."""
     assert modal_provider.supports_mutable_tags is True
+
+
+def test_vm_runtime_disabled_by_default(modal_provider: ModalProviderInstance) -> None:
+    """The provider config defaults to Modal's gVisor runtime, so no experimental_options are sent."""
+    assert modal_provider.config.is_vm_runtime_enabled is False
+    assert modal_provider._build_experimental_options() is None
+
+
+def test_build_experimental_options_requests_vm_runtime_when_enabled(modal_provider: ModalProviderInstance) -> None:
+    """When the VM runtime is enabled, sandboxes are created with experimental_options={'vm_runtime': True}."""
+    enabled_config = modal_provider.config.model_copy_update(
+        to_update(modal_provider.config.field_ref().is_vm_runtime_enabled, True)
+    )
+    enabled = modal_provider.model_copy_update(to_update(modal_provider.field_ref().config, enabled_config))
+    assert enabled._build_experimental_options() == {"vm_runtime": True}
 
 
 def test_get_host_volume_name_uses_config_prefix(modal_provider: ModalProviderInstance) -> None:
@@ -1903,3 +1927,110 @@ def test_check_host_name_is_unique_raises_when_name_exists_on_failed_host() -> N
         check_host_name_is_unique(
             _TEST_PROVIDER_NAME, HostName("failed-host"), host_records=[failed_record], running_host_ids=set()
         )
+
+
+# =============================================================================
+# Tests for terminate-failure surfacing in stop_host / destroy_host
+# =============================================================================
+
+
+class _TerminateFailingSandbox(FakeSandbox):
+    """A FakeSandbox whose terminate() always fails, simulating a Modal sandbox
+    that could not be torn down (and is thus still running -- a billing orphan)."""
+
+    def terminate(self) -> None:
+        raise ModalProxyError("simulated terminate failure")
+
+
+def _cache_failing_sandbox(
+    testing_provider: ModalProviderInstance,
+    host_id: HostId,
+    host_name: str,
+) -> None:
+    """Write a host record and cache a terminate-failing sandbox for the host."""
+    testing_provider._write_host_record(_make_host_record(host_id, host_name=host_name))
+    sandbox = _TerminateFailingSandbox(sandbox_id=f"sb-{host_id}")
+    sandbox.set_tags({TAG_HOST_ID: str(host_id), TAG_HOST_NAME: host_name})
+    testing_provider._cache_sandbox(host_id, HostName(host_name), sandbox)
+
+
+def test_stop_host_surfaces_terminate_failure(
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
+) -> None:
+    """A failed sandbox.terminate() must surface from stop_host rather than be swallowed."""
+    host_id = HostId.generate()
+    _cache_failing_sandbox(testing_provider, host_id, "stuck-host")
+
+    with pytest.raises(ModalMngrError):
+        testing_provider.stop_host(host_id, create_snapshot=False)
+
+
+def test_destroy_host_surfaces_terminate_failure(
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
+) -> None:
+    """A failed terminate during destroy must surface as a CleanupFailedGroup so the
+    destroy reports failure (billing orphan left behind) rather than false success."""
+    host_id = HostId.generate()
+    _cache_failing_sandbox(testing_provider, host_id, "stuck-host")
+
+    with pytest.raises(CleanupFailedGroup):
+        testing_provider.destroy_host(host_id)
+
+
+# =============================================================================
+# Agent-ref resolution: live for running hosts, state volume for offline hosts.
+# (The core of the destroy/start resolution fix -- agents created in-sandbox are
+# never written to the volume, so a running host must be read live.)
+# =============================================================================
+
+
+def test_discover_agent_refs_reads_live_for_running_host(modal_provider: ModalProviderInstance) -> None:
+    """A RUNNING host's agents are read live off the sandbox; the live result wins over
+    the state volume (which lacks agents created in-sandbox, e.g. the user's workspace)."""
+    host_id = HostId.generate()
+    host_record = _make_host_record(host_id)
+    # discover_agents() result is returned verbatim by the helper.
+    live_agents = [MagicMock()]
+    fake_host = MagicMock(spec=Host)
+    fake_host.discover_agents.return_value = live_agents
+    # Volume has a DIFFERENT agent -- it must be ignored in favor of the live read.
+    volume_data = [{"id": str(AgentId.generate()), "name": "stale-from-volume"}]
+
+    with patch.object(modal_provider, "_get_host", return_value=fake_host) as mock_get_host:
+        refs = modal_provider._discover_agent_refs_for_host(host_id, host_record, True, volume_data)
+
+    assert refs == live_agents
+    mock_get_host.assert_called_once()
+    fake_host.discover_agents.assert_called_once()
+
+
+def test_discover_agent_refs_reads_volume_for_offline_host(modal_provider: ModalProviderInstance) -> None:
+    """An offline host falls back to the persisted state-volume records (no live read)."""
+    host_id = HostId.generate()
+    host_record = _make_host_record(host_id)
+    volume_data = [{"id": str(AgentId.generate()), "name": "system-services"}]
+
+    with patch.object(modal_provider, "_get_host") as mock_get_host:
+        refs = modal_provider._discover_agent_refs_for_host(host_id, host_record, False, volume_data)
+
+    mock_get_host.assert_not_called()
+    assert len(refs) == 1
+    assert isinstance(refs[0], DiscoveredAgent)
+
+
+def test_discover_agent_refs_falls_back_to_volume_when_live_read_fails(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """If the live read fails for a running host, fall back to the volume so the host
+    still lists (offline-ish) rather than disappearing."""
+    host_id = HostId.generate()
+    host_record = _make_host_record(host_id)
+    volume_data = [{"id": str(AgentId.generate()), "name": "system-services"}]
+
+    with patch.object(modal_provider, "_get_host", side_effect=HostConnectionError("unreachable")):
+        refs = modal_provider._discover_agent_refs_for_host(host_id, host_record, True, volume_data)
+
+    assert len(refs) == 1
+    assert isinstance(refs[0], DiscoveredAgent)

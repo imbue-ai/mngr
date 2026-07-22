@@ -86,7 +86,6 @@ from imbue.minds.desktop_client.templates_auth import render_forgot_password_pag
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -250,11 +249,9 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_create_form(launch_mode=LaunchMode.LIMA, ai_provider=AIProvider.SUBSCRIPTION),
         ),
         Scenario(
-            name="create_with_master_password",
+            name="create_with_imbue_cloud_backups",
             builder=lambda: render_create_form(
                 backup_provider=BackupProvider.IMBUE_CLOUD,
-                backup_encryption_method=BackupEncryptionMethod.MASTER_PASSWORD,
-                has_saved_backup_password=False,
                 accounts=(account_a,),
                 default_account_id="user-aaaaaa",
             ),

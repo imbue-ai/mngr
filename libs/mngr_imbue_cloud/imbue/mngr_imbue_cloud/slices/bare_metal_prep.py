@@ -1,7 +1,7 @@
 from typing import Final
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr_imbue_cloud.slices.bare_metal import box_fct_cache_dir
+from imbue.mngr_imbue_cloud.slices.bare_metal import box_default_workspace_template_cache_dir
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_base_image_path
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_APT_VERSION
 
@@ -56,7 +56,7 @@ def build_box_prep_script(
     lima_tarball = f"lima-{lima_version}-Linux-x86_64.tar.gz"
     lima_url = f"https://github.com/lima-vm/lima/releases/download/v{lima_version}/{lima_tarball}"
     base_image_path = slice_base_image_path(lima_service_user)
-    fct_cache_dir = box_fct_cache_dir(lima_service_user)
+    default_workspace_template_cache_dir = box_default_workspace_template_cache_dir(lima_service_user)
     swapfile_path = _SWAPFILE_PATH
     swapfile_size_gib = _SWAPFILE_SIZE_GIB
     return f"""\
@@ -142,9 +142,9 @@ MNGR_SLICE_CUSTOMIZE
     mv "$img.tmp" "$img"
 fi
 
-# 6b. Create the per-box FCT image cache dir (owned by the lima user) where the box
+# 6b. Create the per-box DEFAULT_WORKSPACE_TEMPLATE image cache dir (owned by the lima user) where the box
 #     keeps the single ``docker save`` tar slices ``docker load`` instead of rebuilding.
-install -d -m 755 -o {lima_service_user} -g {lima_service_user} {fct_cache_dir}
+install -d -m 755 -o {lima_service_user} -g {lima_service_user} {default_workspace_template_cache_dir}
 
 # 7. Provision a real swapfile (idempotent). Slice hosts run RAM near capacity; the
 #    OS-install default swap (two ~0.5GiB partitions) is too small to cushion spikes.

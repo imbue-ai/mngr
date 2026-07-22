@@ -55,7 +55,6 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
-from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_SCOPE
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 # Label shown on the inbox list card (lower-case, short).
@@ -171,9 +170,12 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
         # Pre-check the verbs the agent requested (intersected with the known
         # verb catalog); the user may broaden or narrow in the dialog.
         checked = tuple(verb.permission for verb in WORKSPACE_VERBS if verb.permission in requested)
-        # Offer the all-vs-selected choice whenever the request names a target
-        # workspace; the targeted verbs (if any are granted) honor it, and the
-        # non-targeted verbs ignore it.
+        # The dialog splits the verbs into a "general" (non-targeted) group and
+        # a "workspace-specific" (targeted) group; both always appear. Offer the
+        # all-vs-selected choice only when the request names a target workspace.
+        # With no named target the targeted verbs can still be granted, but only
+        # broadly ("all"), which the dialog makes explicit via a caution notice
+        # and a single pre-selected "All workspaces" option.
         return render_workspace_permission_dialog(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
@@ -296,13 +298,17 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
         The gateway record is removed out of band: the ``/approve`` endpoint
         deletes it on a successful grant, and :meth:`apply_deny_request` issues
         the ``DELETE`` for a denial. Mirrors the file-sharing handler.
+
+        The response event's ``scope`` is left unset: it is informational only
+        and redundant with ``request_type`` here (the cross-workspace verbs no
+        longer live under a dedicated detent scope -- they attach to
+        ``latchkey-self``), mirroring the accounts handler which also omits it.
         """
         response_event = create_request_response_event(
             request_event_id=request_event_id,
             status=status,
             agent_id=str(agent_id),
             request_type=str(RequestType.WORKSPACE_PERMISSION),
-            scope=MINDS_WORKSPACES_SCOPE,
         )
         append_response_event(self.data_dir, response_event)
         self.mngr_message_sender.send(agent_id, message)

@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 from collections.abc import Callable
@@ -9,7 +10,6 @@ import httpx
 import psycopg2
 import pytest
 from fastapi import HTTPException
-from ovh.exceptions import ResourceNotFoundError as OvhResourceNotFoundError
 from starlette.testclient import TestClient
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
@@ -19,44 +19,48 @@ from imbue.remote_service_connector.app import AdminAuth
 from imbue.remote_service_connector.app import AuthPolicy
 from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import HttpCloudflareOps
-from imbue.remote_service_connector.app import HttpOvhOps
 from imbue.remote_service_connector.app import InvalidR2BucketNameError
 from imbue.remote_service_connector.app import InvalidTunnelComponentError
+from imbue.remote_service_connector.app import PostgresSyncStore
 from imbue.remote_service_connector.app import R2BucketOwnershipError
 from imbue.remote_service_connector.app import ServiceNotFoundError
+from imbue.remote_service_connector.app import SyncActiveAgentConflictError
+from imbue.remote_service_connector.app import SyncRevisionConflictError
+from imbue.remote_service_connector.app import SyncStoreConsistencyError
 from imbue.remote_service_connector.app import TunnelComponentTooLongError
 from imbue.remote_service_connector.app import TunnelNotFoundError
 from imbue.remote_service_connector.app import TunnelOwnershipError
 from imbue.remote_service_connector.app import _MAX_BUCKETS_PER_ACCOUNT
+from imbue.remote_service_connector.app import _MAX_ENCRYPTED_SECRETS_BYTES
+from imbue.remote_service_connector.app import _MAX_KEY_BUNDLE_FIELD_BYTES
 from imbue.remote_service_connector.app import _authenticate_supertokens
 from imbue.remote_service_connector.app import _default_email_getter
 from imbue.remote_service_connector.app import cf_check
 from imbue.remote_service_connector.app import cf_list_all_pages
-from imbue.remote_service_connector.app import clean_up_pool_host_in_ovh
 from imbue.remote_service_connector.app import clear_paid_status_cache
 from imbue.remote_service_connector.app import derive_s3_secret_access_key
 from imbue.remote_service_connector.app import extract_service_name
 from imbue.remote_service_connector.app import extract_username_from_tunnel_name
+from imbue.remote_service_connector.app import get_sync_store
 from imbue.remote_service_connector.app import is_email_paid
 from imbue.remote_service_connector.app import is_email_paid_in_db
 from imbue.remote_service_connector.app import make_bucket_name
 from imbue.remote_service_connector.app import make_hostname
 from imbue.remote_service_connector.app import make_tunnel_name
 from imbue.remote_service_connector.app import require_paid_account
-from imbue.remote_service_connector.app import run_pool_host_cleanup_sweep
 from imbue.remote_service_connector.app import slugify_r2_name
 from imbue.remote_service_connector.app import verify_bucket_ownership
-from imbue.remote_service_connector.app import vps_urn_for
 from imbue.remote_service_connector.app import web_app
 from imbue.remote_service_connector.testing import FakeCloudflareOps
-from imbue.remote_service_connector.testing import FakeOvhOps
 from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
 from imbue.remote_service_connector.testing import InMemoryKeyStore
+from imbue.remote_service_connector.testing import InMemorySyncStore
 from imbue.remote_service_connector.testing import make_fake_forwarding_ctx
 from imbue.remote_service_connector.testing import make_fake_key_store
 from imbue.remote_service_connector.testing import make_fake_pool_backend
 from imbue.remote_service_connector.testing import make_fake_supertokens_backend
+from imbue.remote_service_connector.testing import make_fake_sync_store
 from imbue.remote_service_connector.testing import make_fake_tunnel_token
 
 _ADMIN_STUB_TOKEN = "admin-stub-jwt"
@@ -594,58 +598,47 @@ def test_authenticate_supertokens_returns_admin_auth_with_user_id_prefix(
     assert result.email == "alice@example.com"
 
 
-def test_authenticate_supertokens_returns_admin_auth_with_none_email_when_lookup_returns_none(
+def test_authenticate_supertokens_raises_401_when_no_verified_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A successful auth with no resolvable email leaves ``AdminAuth.email`` as None."""
-    user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
-    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
-    result = _authenticate_supertokens(
-        "valid-token",
-        session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
-        email_getter=lambda _user_id: None,
-    )
-    assert isinstance(result, AdminAuth)
-    assert result.email is None
+    """When the live lookup finds no verified email, auth is rejected with 401.
 
-
-def test_authenticate_supertokens_raises_401_when_email_not_verified(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the email is not verified, raises 401."""
+    ``email_getter`` (``_default_email_getter`` in production) returns None both
+    when the user has no email and when their only emails are unverified; either
+    way the caller has proven no verified identity, so the guard denies access.
+    """
     user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
     monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
     with pytest.raises(HTTPException) as exc_info:
         _authenticate_supertokens(
             "valid-token",
-            session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=False),
-            email_getter=lambda _user_id: "alice@example.com",
-        )
-    assert exc_info.value.status_code == 401
-    assert "verified" in exc_info.value.detail
-
-
-def test_authenticate_supertokens_raises_401_when_email_verification_claim_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the email verification claim is absent from the payload, raises 401."""
-    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
-
-    class _SessionNoClaim:
-        def get_user_id(self) -> str:
-            return "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
-
-        def get_access_token_payload(self) -> dict[str, object]:
-            return {}
-
-    with pytest.raises(HTTPException) as exc_info:
-        _authenticate_supertokens(
-            "valid-token",
-            session_getter=lambda **kwargs: _SessionNoClaim(),
+            session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
             email_getter=lambda _user_id: None,
         )
     assert exc_info.value.status_code == 401
     assert "verified" in exc_info.value.detail
+
+
+def test_authenticate_supertokens_ignores_stale_unverified_token_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token minted while unverified still authenticates once the core reports the email verified.
+
+    The access token carries a cached ``email_verified=False`` claim, but the
+    live ``email_getter`` lookup returns a verified email (e.g. the user was
+    just added to the paid list and auto-verified). The guard must trust the
+    live result, not the stale token claim, so the request succeeds without the
+    user having to refresh their token first.
+    """
+    user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    result = _authenticate_supertokens(
+        "stale-token",
+        session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=False),
+        email_getter=lambda _user_id: "alice@example.com",
+    )
+    assert isinstance(result, AdminAuth)
+    assert result.email == "alice@example.com"
 
 
 def test_authenticate_supertokens_raises_401_when_connection_uri_not_set() -> None:
@@ -925,6 +918,48 @@ def test_auth_signup_returns_error_on_sdk_outage(monkeypatch: pytest.MonkeyPatch
         "tokens": None,
         "needs_email_verification": False,
     }
+
+
+def _install_paid_pool_backend(monkeypatch: pytest.MonkeyPatch, *paid_emails: str) -> FakePoolBackend:
+    """Install a fake pool backend (so ``is_email_paid`` works) seeding the given paid emails."""
+    monkeypatch.setenv("MINDS_PAID_LIST_CACHE_TTL_SECONDS", "0")
+    pool_backend = make_fake_pool_backend()
+    for paid_email in paid_emails:
+        pool_backend.add_paid_email(paid_email)
+    pool_backend.install_on_app_module(app_mod, monkeypatch)
+    return pool_backend
+
+
+def test_auth_signup_paid_email_is_auto_verified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A paid user's email/password signup is auto-verified: no email sent, account already verified."""
+    st_backend = _install_fake_supertokens(monkeypatch)
+    _install_paid_pool_backend(monkeypatch, "paid@example.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+
+    resp = client.post("/auth/signup", json={"email": "paid@example.com", "password": "password123"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "OK"
+    # The paid account skips the verification round trip entirely.
+    assert body["needs_email_verification"] is False
+    assert st_backend.sent_verification_emails == []
+    assert st_backend.accounts_by_email["paid@example.com"].is_verified is True
+
+
+def test_auth_signup_unpaid_email_still_requires_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-paid signup keeps the verify-by-email flow (control for the paid case)."""
+    st_backend = _install_fake_supertokens(monkeypatch)
+    _install_paid_pool_backend(monkeypatch, "someone-else@example.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+
+    resp = client.post("/auth/signup", json={"email": "free@example.com", "password": "password123"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["needs_email_verification"] is True
+    assert len(st_backend.sent_verification_emails) == 1
+    assert st_backend.accounts_by_email["free@example.com"].is_verified is False
 
 
 def test_auth_signin_happy_path_with_verified_email(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1829,28 +1864,99 @@ def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -
     assert backend.pool_rows[0].status == "available"
 
 
-def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """POST /hosts/{id}/release strips OVH tags, cancels the VPS, and drops the row."""
+def test_rename_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename updates the mutable host_name for the owning user."""
     client, backend = _make_pool_test_client(monkeypatch)
-    row = backend.add_leased_host(
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000051"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000051/rename",
+        json={"host_name": "renamed-host"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["host_name"] == "renamed-host"
+    assert backend.pool_rows[0].host_name == "renamed-host"
+
+
+def test_rename_host_rejects_invalid_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename rejects a host_name that fails the SafeName regex (422)."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000052"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    original_name = backend.pool_rows[0].host_name
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000052/rename",
+        json={"host_name": "bad.name"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 422
+    # The name is unchanged since validation rejected the request before the UPDATE.
+    assert backend.pool_rows[0].host_name == original_name
+
+
+def test_rename_host_404_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename returns 404 when no such host row exists."""
+    client, _backend = _make_pool_test_client(monkeypatch)
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-0000000000ff/rename",
+        json={"host_name": "whatever"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 404
+
+
+def test_rename_host_403_for_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename returns 403 when the host is leased by another user."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000053"), version="v0.1.0", leased_to_user="someone-else"
+    )
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000053/rename",
+        json={"host_name": "renamed-host"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 403
+    assert backend.pool_rows[0].host_name != "renamed-host"
+
+
+def test_rename_host_404_when_not_leased(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename returns 404 when the requester owns the row but it is not leased."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_removing_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000054"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000054/rename",
+        json={"host_name": "renamed-host"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 404
+    assert backend.pool_rows[0].host_name != "renamed-host"
+
+
+def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/release destroys the slice's lima VM and drops the row."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
     )
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
     assert resp.status_code == 200
     assert resp.json()["status"] == "released"
-    # Row fully cleaned up (deleted), VPS cancelled, stale tags stripped.
+    # Row fully cleaned up (deleted) after the slice VM teardown ran.
     assert backend.pool_rows == []
-    assert backend.ovh_ops.cancelled == [row.vps_instance_id]
-    stripped_keys = {key for _urn, key in backend.ovh_ops.deleted_tags}
-    assert stripped_keys == {"minds_env", "mngr-host-id"}
-    # The provider tag is never stripped.
-    assert all(key != "mngr-provider" for _urn, key in backend.ovh_ops.deleted_tags)
+    assert len(backend.slice_teardowns) == 1
 
 
 def test_release_host_idempotent_when_already_removing(monkeypatch: pytest.MonkeyPatch) -> None:
     """A release on a row already in 'removing' re-drives cleanup and returns 200."""
     client, backend = _make_pool_test_client(monkeypatch)
-    row = backend.add_removing_host(
+    backend.add_removing_host(
         host_id=UUID("00000000-0000-0000-0000-000000000077"),
         version="v0.1.0",
         leased_to_user=_ADMIN_STUB_USERNAME,
@@ -1859,24 +1965,23 @@ def test_release_host_idempotent_when_already_removing(monkeypatch: pytest.Monke
     assert resp.status_code == 200
     assert resp.json()["status"] == "released"
     assert backend.pool_rows == []
-    assert backend.ovh_ops.cancelled == [row.vps_instance_id]
+    assert len(backend.slice_teardowns) == 1
 
 
-def test_release_host_fails_loudly_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed OVH cancel makes release return an error -- never a false success.
+def test_release_host_fails_loudly_when_slice_teardown_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed slice VM teardown makes release return an error -- never a false success.
 
-    Synchronous release contract: a "released" 200 must mean the VPS is actually
-    cancelled. When the cancel fails the endpoint returns 5xx and keeps the row
-    as 'removing' so the client (or the sweep backstop) retries -- the opposite
-    of the old behavior, which returned 200 and silently stranded the VPS.
+    Synchronous release contract: a "released" 200 must mean the slice VM is actually
+    destroyed. When the teardown fails the endpoint returns 5xx and keeps the row as
+    'removing' so the client retries -- never a 200 that silently strands the VM.
     """
     client, backend = _make_pool_test_client(monkeypatch)
-    backend.ovh_ops.fail_on_cancel = True
+    backend.slice_teardown_should_fail = True
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000099"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
     )
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000099/release", headers=_admin_headers())
-    assert resp.status_code == 502
+    assert resp.status_code == 500
     # The row is NOT deleted; it stays 'removing' so the teardown is retryable.
     assert len(backend.pool_rows) == 1
     assert backend.pool_rows[0].status == "removing"
@@ -1930,67 +2035,6 @@ def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(hosts) == 2
     host_ids = {h["host_db_id"] for h in hosts}
     assert host_ids == {"00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000003"}
-
-
-# -- OVH cleanup tests --
-
-
-def test_clean_up_pool_host_in_ovh_strips_tags_then_cancels() -> None:
-    """The per-host OVH cleanup strips the stale tags and cancels by service name."""
-    ovh_ops = FakeOvhOps()
-    clean_up_pool_host_in_ovh(ovh_ops, "vps-test.vps.ovh.us", "us")
-    expected_urn = vps_urn_for("vps-test.vps.ovh.us", "us")
-    assert ovh_ops.deleted_tags == [(expected_urn, "minds_env"), (expected_urn, "mngr-host-id")]
-    assert ovh_ops.cancelled == ["vps-test.vps.ovh.us"]
-
-
-def test_cleanup_sweep_cleans_only_removing_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The sweep cleans every 'removing' row and leaves leased/available rows alone."""
-    _client, backend = _make_pool_test_client(monkeypatch)
-    removing = backend.add_removing_host(host_id=UUID("00000000-0000-0000-0000-0000000000a1"), version="v0.1.0")
-    backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-0000000000a2"), version="v0.1.0", leased_to_user="someone"
-    )
-    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-0000000000a3"), version="v0.1.0")
-
-    conn = backend.get_connection()
-    success_count, failure_count = run_pool_host_cleanup_sweep(conn, backend.ovh_ops, "us")
-
-    assert (success_count, failure_count) == (1, 0)
-    # The removing row is gone; the leased + available rows remain.
-    remaining_ids = {row.host_id for row in backend.pool_rows}
-    assert remaining_ids == {
-        UUID("00000000-0000-0000-0000-0000000000a2"),
-        UUID("00000000-0000-0000-0000-0000000000a3"),
-    }
-    assert backend.ovh_ops.cancelled == [removing.vps_instance_id]
-
-
-def test_http_ovh_ops_set_delete_at_expiration_is_idempotent_for_gone_vps() -> None:
-    """A 404 from OVH (VPS already removed) is treated as success, not an error."""
-
-    class _NotFoundClient:
-        def call(self, method: str, path: str, data: object, need_auth: bool) -> object:
-            raise OvhResourceNotFoundError(f"{method} {path} not found")
-
-    ops = HttpOvhOps(application_key="ak", application_secret="as", consumer_key="ck", endpoint="ovh-us")
-    ops.client = _NotFoundClient()
-    # Must not raise: a missing service means there is nothing left to cancel.
-    ops.set_delete_at_expiration("vps-gone.vps.ovh.us", True)
-
-
-def test_cleanup_sweep_keeps_row_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A removing row whose OVH cancel fails is kept for the next run."""
-    _client, backend = _make_pool_test_client(monkeypatch)
-    backend.ovh_ops.fail_on_cancel = True
-    backend.add_removing_host(host_id=UUID("00000000-0000-0000-0000-0000000000b1"), version="v0.1.0")
-
-    conn = backend.get_connection()
-    success_count, failure_count = run_pool_host_cleanup_sweep(conn, backend.ovh_ops, "us")
-
-    assert (success_count, failure_count) == (0, 1)
-    assert len(backend.pool_rows) == 1
-    assert backend.pool_rows[0].status == "removing"
 
 
 # -- PAID_ACCOUNT_SUFFIXES gate tests --
@@ -2369,6 +2413,49 @@ def test_add_paid_email_then_gate_allows(monkeypatch: pytest.MonkeyPatch) -> Non
     assert client.get("/hosts", headers=_admin_headers()).status_code == 200
 
 
+def test_add_paid_email_verifies_existing_unverified_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding an email to the paid list verifies a pre-existing (unverified) account for it."""
+    client, _pool_backend = _make_paid_crud_test_client(monkeypatch)
+    st_backend = make_fake_supertokens_backend()
+    st_backend.install_on_app_module(app_mod, monkeypatch)
+    # A user who signed up earlier but never verified their email.
+    st_backend.sign_up(tenant_id="public", email="waiting@example.com", password="password123")
+    assert st_backend.accounts_by_email["waiting@example.com"].is_verified is False
+
+    resp = client.post("/paid/emails/add", json={"value": "waiting@example.com"}, headers=_paid_admin_headers())
+
+    assert resp.status_code == 200
+    assert st_backend.accounts_by_email["waiting@example.com"].is_verified is True
+
+
+def test_add_paid_email_with_no_existing_account_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding a paid email with no matching account still succeeds; there is nothing to verify."""
+    client, _pool_backend = _make_paid_crud_test_client(monkeypatch)
+    st_backend = make_fake_supertokens_backend()
+    st_backend.install_on_app_module(app_mod, monkeypatch)
+
+    resp = client.post("/paid/emails/add", json={"value": "nobody@example.com"}, headers=_paid_admin_headers())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "added", "email": "nobody@example.com"}
+    assert "nobody@example.com" not in st_backend.accounts_by_email
+
+
+def test_add_paid_email_succeeds_when_supertokens_uninitialized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SuperTokens outage during the auto-verify side effect must not fail the paid-list write.
+
+    No SuperTokens fake is installed, so the real (uninitialized) SDK raises when
+    the handler tries to look the account up; that error must be swallowed and
+    the paid-list add must still succeed.
+    """
+    client, _pool_backend = _make_paid_crud_test_client(monkeypatch)
+
+    resp = client.post("/paid/emails/add", json={"value": "someone@example.com"}, headers=_paid_admin_headers())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "added", "email": "someone@example.com"}
+
+
 @pytest.mark.parametrize("bad_value", ["", "   ", "has space", "foo@bar.com"])
 def test_add_paid_domain_rejects_invalid(monkeypatch: pytest.MonkeyPatch, bad_value: str) -> None:
     client, _backend = _make_paid_crud_test_client(monkeypatch)
@@ -2643,3 +2730,394 @@ def test_slice_name_env_owner_returns_none_for_legacy_and_non_slice_names() -> N
     # Non-slice lima names are never attributed to an env.
     assert app_mod.slice_name_env_owner("default") is None
     assert app_mod.slice_name_env_owner("some-other-vm") is None
+
+
+# -- Workspace sync endpoint tests --
+
+
+def _make_sync_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, InMemorySyncStore, dict[str, str]]:
+    """Create a TestClient with the in-memory sync store installed.
+
+    Returns a mutable ``caller`` holder whose ``user_id`` entry the stubbed
+    token-decode reads on every request, so tests can switch the calling user
+    without another patch (keeps the monkeypatch ratchet at one occurrence,
+    mirroring the bucket-test helper's single-loop pattern).
+    """
+    client = _make_test_client(monkeypatch)
+    store = make_fake_sync_store()
+    caller = {"user_id": _ADMIN_STUB_USER_ID}
+    sync_fakes: dict[str, object] = {
+        "get_sync_store": lambda: store,
+        "_get_user_id_from_access_token": lambda token: caller["user_id"],
+    }
+    for name, fake_impl in sync_fakes.items():
+        monkeypatch.setattr(app_mod, name, fake_impl)
+    return client, store, caller
+
+
+def _sync_record_body(
+    host_id: str = "host-aaa111",
+    agent_id: str = "agent-bbb222",
+    revision: int = 1,
+    state: str = "active",
+    encrypted_secrets: str | None = None,
+) -> dict[str, object]:
+    return {
+        "host_id": host_id,
+        "agent_id": agent_id,
+        "display_name": "my workspace",
+        "color": "#aabbcc",
+        "provider_kind": "lima",
+        "hosting_device_id": "device-123",
+        "device_label": "joshs-laptop",
+        "state": state,
+        "restored_from_host_id": None,
+        "encrypted_secrets": encrypted_secrets,
+        "revision": revision,
+    }
+
+
+def test_put_and_list_workspace_records_round_trips(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    secrets_b64 = base64.b64encode(b"opaque-encrypted-payload").decode("ascii")
+
+    put_resp = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(encrypted_secrets=secrets_b64),
+        headers=_admin_headers(),
+    )
+    assert put_resp.status_code == 200
+    assert put_resp.json()["revision"] == 1
+
+    list_resp = client.get("/sync/records", headers=_admin_headers())
+    assert list_resp.status_code == 200
+    records = list_resp.json()["records"]
+    assert len(records) == 1
+    assert records[0]["host_id"] == "host-aaa111"
+    assert records[0]["agent_id"] == "agent-bbb222"
+    assert records[0]["display_name"] == "my workspace"
+    assert records[0]["encrypted_secrets"] == secrets_b64
+    assert records[0]["created_at"]
+
+
+def test_put_workspace_record_rejects_mismatched_path_host_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    resp = client.put("/sync/records/host-other", json=_sync_record_body(), headers=_admin_headers())
+    assert resp.status_code == 400
+
+
+def test_put_workspace_record_cas_conflict_returns_409_with_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    assert (
+        client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers()).status_code == 200
+    )
+
+    stale = client.put("/sync/records/host-aaa111", json=_sync_record_body(revision=1), headers=_admin_headers())
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["stored"]["revision"] == 1
+
+    fresh = client.put("/sync/records/host-aaa111", json=_sync_record_body(revision=2), headers=_admin_headers())
+    assert fresh.status_code == 200
+    assert fresh.json()["revision"] == 2
+
+
+def test_second_active_record_for_same_agent_id_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    assert (
+        client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers()).status_code == 200
+    )
+
+    conflicting = client.put(
+        "/sync/records/host-ccc333",
+        json=_sync_record_body(host_id="host-ccc333"),
+        headers=_admin_headers(),
+    )
+    assert conflicting.status_code == 409
+
+    # Tombstoning the first row frees the agent_id for a restored workspace.
+    tombstone = _sync_record_body(revision=2, state="destroyed")
+    assert client.put("/sync/records/host-aaa111", json=tombstone, headers=_admin_headers()).status_code == 200
+    restored = client.put(
+        "/sync/records/host-ccc333",
+        json=_sync_record_body(host_id="host-ccc333"),
+        headers=_admin_headers(),
+    )
+    assert restored.status_code == 200
+
+
+def test_scrub_secrets_strips_blobs_but_keeps_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    secrets_b64 = base64.b64encode(b"payload").decode("ascii")
+    client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(encrypted_secrets=secrets_b64),
+        headers=_admin_headers(),
+    )
+
+    scrub = client.post("/sync/scrub-secrets", headers=_admin_headers())
+    assert scrub.status_code == 200
+    assert scrub.json()["scrubbed"] == 1
+
+    records = client.get("/sync/records", headers=_admin_headers()).json()["records"]
+    assert records[0]["encrypted_secrets"] is None
+    assert records[0]["display_name"] == "my workspace"
+
+
+def test_put_workspace_record_rejects_invalid_base64_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    resp = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(encrypted_secrets="not-base64!!!"),
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400
+
+
+def test_put_workspace_record_rejects_oversized_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    oversized = base64.b64encode(b"x" * (_MAX_ENCRYPTED_SECRETS_BYTES + 1)).decode("ascii")
+    resp = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(encrypted_secrets=oversized),
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400
+
+
+def test_put_workspace_record_accepts_empty_provider_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    # minds' create-path seeds a record before discovery knows the provider,
+    # so an empty provider_kind must be accepted (enriched by a later push).
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    body = _sync_record_body()
+    body["provider_kind"] = ""
+
+    resp = client.put("/sync/records/host-aaa111", json=body, headers=_admin_headers())
+
+    assert resp.status_code == 200
+    records = client.get("/sync/records", headers=_admin_headers()).json()["records"]
+    assert records[0]["provider_kind"] == ""
+
+
+def test_put_workspace_record_rejects_unknown_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    resp = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(state="bogus"),
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 422
+
+
+def test_sync_records_require_admin_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    resp = client.get("/sync/records", headers={"Authorization": "Bearer wrong-token"})
+    assert resp.status_code == 401
+
+
+def test_sync_records_are_isolated_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, store, caller = _make_sync_test_client(monkeypatch)
+    client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers())
+
+    caller["user_id"] = "other-user-id"
+    other_list = client.get("/sync/records", headers=_admin_headers())
+    assert other_list.json()["records"] == []
+    assert len(store.records_by_key) == 1
+
+
+def test_key_bundle_round_trip_and_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    assert client.get("/sync/bundle", headers=_admin_headers()).status_code == 404
+
+    body = {
+        "kdf_salt": base64.b64encode(b"0123456789abcdef").decode("ascii"),
+        "kdf_time_cost": 3,
+        "kdf_memory_kib": 65536,
+        "kdf_parallelism": 4,
+        "wrapped_dek": base64.b64encode(b"wrapped-dek-bytes").decode("ascii"),
+        "key_epoch": 1,
+    }
+    assert client.put("/sync/bundle", json=body, headers=_admin_headers()).status_code == 200
+
+    fetched = client.get("/sync/bundle", headers=_admin_headers())
+    assert fetched.status_code == 200
+    assert fetched.json()["wrapped_dek"] == body["wrapped_dek"]
+    assert fetched.json()["kdf_salt"] == body["kdf_salt"]
+    assert fetched.json()["key_epoch"] == 1
+
+    assert client.delete("/sync/bundle", headers=_admin_headers()).status_code == 200
+    assert client.get("/sync/bundle", headers=_admin_headers()).status_code == 404
+
+
+def test_key_bundle_rejects_oversized_wrapped_dek(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    body = {
+        "kdf_salt": base64.b64encode(b"0123456789abcdef").decode("ascii"),
+        "kdf_time_cost": 3,
+        "kdf_memory_kib": 65536,
+        "kdf_parallelism": 4,
+        "wrapped_dek": base64.b64encode(b"x" * (_MAX_KEY_BUNDLE_FIELD_BYTES + 1)).decode("ascii"),
+        "key_epoch": 1,
+    }
+    assert client.put("/sync/bundle", json=body, headers=_admin_headers()).status_code == 400
+
+
+def test_delete_workspace_record_removes_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, store, _caller = _make_sync_test_client(monkeypatch)
+    client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers())
+
+    resp = client.delete("/sync/records/host-aaa111", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert client.get("/sync/records", headers=_admin_headers()).json()["records"] == []
+    # Idempotent: deleting again still succeeds.
+    assert client.delete("/sync/records/host-aaa111", headers=_admin_headers()).status_code == 200
+    assert len(store.records_by_key) == 0
+
+
+# -- PostgresSyncStore tests (against the in-memory SQL fake) --
+
+
+def _make_postgres_sync_store(monkeypatch: pytest.MonkeyPatch) -> tuple[PostgresSyncStore, FakePoolBackend]:
+    """Build a PostgresSyncStore whose connections hit the in-memory pool backend."""
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    return PostgresSyncStore(), backend
+
+
+def _store_record(
+    host_id: str = "host-aaa111",
+    agent_id: str = "agent-1",
+    display_name: str = "my-workspace",
+    state: str = "active",
+    encrypted_secrets: bytes | None = None,
+    revision: int = 1,
+) -> dict[str, Any]:
+    """A store-layer record dict (raw-bytes secrets), as the endpoints hand to put_record."""
+    return {
+        "host_id": host_id,
+        "agent_id": agent_id,
+        "display_name": display_name,
+        "color": None,
+        "provider_kind": "docker",
+        "hosting_device_id": "device-1",
+        "device_label": "laptop",
+        "state": state,
+        "restored_from_host_id": None,
+        "encrypted_secrets": encrypted_secrets,
+        "revision": revision,
+    }
+
+
+def test_postgres_sync_store_round_trips_a_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+
+    written = store.put_record("user-1", _store_record(encrypted_secrets=b"\x00opaque-blob"))
+
+    assert written["revision"] == 1
+    assert written["encrypted_secrets"] == base64.b64encode(b"\x00opaque-blob").decode("ascii")
+    listed = store.list_records("user-1")
+    assert [record["host_id"] for record in listed] == ["host-aaa111"]
+    assert listed[0]["created_at"] != ""
+    assert store.list_records("user-2") == []
+
+    updated = store.put_record("user-1", _store_record(display_name="renamed", revision=2))
+    assert updated["display_name"] == "renamed"
+    assert updated["revision"] == 2
+    # The metadata-only update carried no secrets, so the blob is now gone.
+    assert updated["encrypted_secrets"] is None
+
+
+def test_postgres_sync_store_raises_the_stored_row_on_a_stale_push(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    store.put_record("user-1", _store_record())
+
+    with pytest.raises(SyncRevisionConflictError) as conflict:
+        store.put_record("user-1", _store_record(display_name="stale", revision=1))
+
+    assert conflict.value.stored_record["revision"] == 1
+    assert conflict.value.stored_record["display_name"] == "my-workspace"
+
+
+def test_postgres_sync_store_enforces_one_active_record_per_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    store.put_record("user-1", _store_record())
+
+    with pytest.raises(SyncActiveAgentConflictError):
+        store.put_record("user-1", _store_record(host_id="host-bbb222"))
+
+    # A tombstone for the same agent on another host is allowed by the partial index.
+    tombstone = store.put_record("user-1", _store_record(host_id="host-bbb222", state="destroyed"))
+    assert tombstone["state"] == "destroyed"
+
+
+def test_postgres_sync_store_reports_an_insert_race_as_a_cas_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, backend = _make_postgres_sync_store(monkeypatch)
+    backend.sync_insert_race_winner = {"user_id": "user-1", **_store_record(display_name="winner")}
+
+    # The loser's INSERT hits the primary key after the winner commits; the
+    # retry then reports the race through the regular CAS path.
+    with pytest.raises(SyncRevisionConflictError) as conflict:
+        store.put_record("user-1", _store_record(display_name="loser"))
+
+    assert conflict.value.stored_record["display_name"] == "winner"
+
+
+def test_postgres_sync_store_surfaces_a_rowless_update_as_a_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, backend = _make_postgres_sync_store(monkeypatch)
+    store.put_record("user-1", _store_record())
+    backend.sync_update_returns_no_row = True
+
+    with pytest.raises(SyncStoreConsistencyError):
+        store.put_record("user-1", _store_record(revision=2))
+
+
+def test_postgres_sync_store_deletes_and_scrubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    store.put_record("user-1", _store_record(encrypted_secrets=b"blob"))
+    store.put_record("user-1", _store_record(host_id="host-bbb222", agent_id="agent-2"))
+
+    assert store.scrub_secrets("user-1") == 1
+    assert all(record["encrypted_secrets"] is None for record in store.list_records("user-1"))
+    # A second scrub finds nothing left to strip.
+    assert store.scrub_secrets("user-1") == 0
+
+    store.delete_record("user-1", "host-aaa111")
+    assert [record["host_id"] for record in store.list_records("user-1")] == ["host-bbb222"]
+
+
+def test_postgres_sync_store_bundle_crud(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    assert store.get_bundle("user-1") is None
+
+    bundle = {
+        "kdf_salt": b"salt-bytes",
+        "kdf_time_cost": 3,
+        "kdf_memory_kib": 65536,
+        "kdf_parallelism": 4,
+        "wrapped_dek": b"wrapped-dek-bytes",
+        "key_epoch": 1,
+    }
+    store.put_bundle("user-1", bundle)
+
+    fetched = store.get_bundle("user-1")
+    assert fetched is not None
+    assert fetched["kdf_salt"] == base64.b64encode(b"salt-bytes").decode("ascii")
+    assert fetched["wrapped_dek"] == base64.b64encode(b"wrapped-dek-bytes").decode("ascii")
+    assert fetched["key_epoch"] == 1
+
+    # The upsert path: a rewrapped bundle replaces the stored one in place.
+    store.put_bundle("user-1", {**bundle, "wrapped_dek": b"rewrapped", "key_epoch": 2})
+    refetched = store.get_bundle("user-1")
+    assert refetched is not None
+    assert refetched["key_epoch"] == 2
+
+    store.delete_bundle("user-1")
+    assert store.get_bundle("user-1") is None
+
+
+def test_get_sync_store_returns_a_cached_postgres_store() -> None:
+    assert isinstance(get_sync_store(), PostgresSyncStore)
+    assert get_sync_store() is get_sync_store()

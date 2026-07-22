@@ -172,6 +172,17 @@ PREVENT_ASYNCIO_IMPORT = RegexRatchetRule(
     pattern_string=r"\bimport\s+asyncio\b|\bfrom\s+asyncio\b",
 )
 
+PREVENT_ASYNC_AWAIT = RegexRatchetRule(
+    rule_name="async def / await usages",
+    rule_description=(
+        "Avoid async/await. We strongly prefer synchronous code: it is far easier to read, debug, and "
+        "reason about, and our software is intentionally low-scale, so async provides no benefit. There "
+        "are almost no valid exceptions. Write blocking, synchronous code instead (poll with wait_for, "
+        "use threads via ConcurrencyGroup if you need concurrency)."
+    ),
+    pattern_string=r"\basync\s+def\b|\bawait\b",
+)
+
 PREVENT_PANDAS_IMPORT = RegexRatchetRule(
     rule_name="pandas imports",
     rule_description="pandas is banned per style guide. Use polars instead",
@@ -225,9 +236,10 @@ PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     rule_name="trailing comments",
     rule_description=(
         "Comments should be on their own line, not trailing after code. Trailing comments make code harder to read. "
-        "`# ty: ignore[code]` is exempt."
+        "`# ty: ignore[code]` is exempt, as are hex colors, `PR #NNNN` references inside prose, and `#{...}` "
+        "interpolation/format tokens (e.g. tmux format strings), which are not comments."
     ),
-    pattern_string=r"[^\s#].*[ \t]#(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
+    pattern_string=r"[^\s#].*[ \t](?<![Pp][Rr] )#(?!\{)(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
 )
 
 PREVENT_INIT_DOCSTRINGS = RegexRatchetRule(

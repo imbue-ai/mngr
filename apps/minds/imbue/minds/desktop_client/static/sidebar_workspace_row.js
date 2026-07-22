@@ -19,7 +19,7 @@
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId, sizeClass);
 //
-// ``workspace`` is { id, name, accent?, is_stale? }. ``withOpenNew`` adds
+// ``workspace`` is { id, name, accent?, is_stale?, backup_warning? }. ``withOpenNew`` adds
 // the "open in new window" arrow (Electron only -- browser mode has no
 // multi-window concept and passes false). Both action icons are always
 // visible. ``isCurrent`` marks the row selected (highlighted background).
@@ -69,10 +69,13 @@
 
     // No outer margin: row-to-row spacing is the parent container's flex
     // ``gap``, keeping this element positioning-free and composable.
+    var isRemote = !!workspace.is_remote;
     var row = document.createElement('div');
     row.className =
-      'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-primary'
-      + (isCurrent ? ' is-current bg-fill-active' : ' hover:bg-fill-hover');
+      'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md type-body '
+      + (isRemote
+        ? 'is-remote text-secondary opacity-60 cursor-default'
+        : ('cursor-pointer text-primary' + (isCurrent ? ' is-current bg-fill-active' : ' hover:bg-fill-hover')));
     row.setAttribute('data-agent-id', workspace.id);
 
     var dot = document.createElement('span');
@@ -83,6 +86,29 @@
     label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
     label.textContent = workspace.name || workspace.id;
     row.appendChild(label);
+
+    // A workspace hosted on another device (known via its synced record):
+    // greyed, non-navigable, with a location badge instead of action icons.
+    if (isRemote) {
+      var locationBadge = document.createElement('span');
+      locationBadge.className = 'inline-flex items-center px-1.5 py-0.5 rounded-md type-label bg-fill-subtle text-tertiary shrink-0';
+      locationBadge.textContent = 'on ' + (workspace.location || 'another device');
+      row.appendChild(locationBadge);
+    }
+
+    // Backup-service problem detected for this workspace (outdated code,
+    // drifted credentials, service down, unconfigured, or unverifiable):
+    // one warning badge style for all causes; the tooltip carries the
+    // distinction. Fed by the shared /_static/backup_health.js cache.
+    var backupWarning = workspace.backup_warning ||
+      (window.mindsBackupHealth ? window.mindsBackupHealth.get(workspace.id) : null);
+    if (backupWarning) {
+      row.classList.add('has-backup-warning');
+      var backupDot = document.createElement('span');
+      backupDot.className = 'sidebar-backup-dot inline-block w-1.5 h-1.5 rounded-full bg-warning shrink-0';
+      backupDot.title = backupWarning;
+      row.appendChild(backupDot);
+    }
 
     // Retained-but-unverified workspace (its provider's last discovery poll
     // errored): show an amber dot. The row stays fully clickable.
@@ -101,8 +127,10 @@
       btn.classList.add('inline-flex');
       row.appendChild(btn);
     }
-    if (withOpenNew) addActionIcon(buildOpenNewBtn(workspace.id));
-    addActionIcon(buildSettingsBtn(workspace.id));
+    if (!isRemote) {
+      if (withOpenNew) addActionIcon(buildOpenNewBtn(workspace.id));
+      addActionIcon(buildSettingsBtn(workspace.id));
+    }
 
     // Accent: prefer the server-attached value; otherwise resolve it
     // asynchronously via the shared workspace_accent helper (if loaded).

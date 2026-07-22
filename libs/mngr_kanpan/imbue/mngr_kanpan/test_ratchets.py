@@ -122,6 +122,10 @@ def test_prevent_exit_stack() -> None:
     rc.check_exit_stack(_DIR, snapshot(0))
 
 
+def test_prevent_async_await() -> None:
+    rc.check_async_await(_DIR, snapshot(0))
+
+
 # --- Hardcoded paths ---
 
 
@@ -144,7 +148,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(9))
+    rc.check_trailing_comments(_DIR, snapshot(12))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -233,7 +237,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(4))
+    rc.check_direct_subprocess(_DIR, snapshot(7))
 
 
 def test_prevent_bare_tmux_targets() -> None:

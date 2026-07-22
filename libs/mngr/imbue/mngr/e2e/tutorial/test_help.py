@@ -11,6 +11,7 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_help_succeeds(e2e: E2eSession) -> None:
     """Tutorial block:
         # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
@@ -37,6 +38,7 @@ def test_help_succeeds(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_help_unknown_command_fails(e2e: E2eSession) -> None:
     """Tutorial block:
         # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
@@ -62,6 +64,7 @@ def test_help_unknown_command_fails(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_create_help_succeeds(e2e: E2eSession) -> None:
     """Tutorial block:
         # tons more arguments for anything you could want! As always, you can learn more via --help
@@ -90,6 +93,10 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("--type")
 
 
+# Each `mngr` invocation shells out to the CLI, whose startup import cost alone
+# runs many seconds; this test issues three such invocations, so the 10s default
+# pytest timeout is far too tight. Override it as the rest of the e2e suite does.
+@pytest.mark.timeout(120)
 @pytest.mark.release
 def test_create_help_short_form_and_alias_succeed(e2e: E2eSession) -> None:
     """Tutorial block:
@@ -111,3 +118,4 @@ def test_create_help_short_form_and_alias_succeed(e2e: E2eSession) -> None:
     expect(alias).to_succeed()
     expect(alias.stderr).to_be_empty()
     expect(alias.stdout).to_contain("mngr create - Create and run an agent")
+    expect(alias.stdout).to_contain("SYNOPSIS")

@@ -4,6 +4,7 @@ from datetime import timezone
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import classify_host_state
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
@@ -48,10 +49,11 @@ def _resolver_with_capable_agent(
 ) -> MngrCliBackendResolver:
     """Build a resolver carrying one docker-backed workspace whose host has ``host_state``."""
     resolver = MngrCliBackendResolver()
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_provider("docker", "docker"),),
         error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
     host_state_by_host_id = {str(host): host_state} if host_state is not None else {}
     resolver.update_agents(
@@ -98,10 +100,11 @@ def test_get_shutdown_capable_workspace_agent_ids_keeps_only_capable_backends() 
     resolver = MngrCliBackendResolver()
     capable_agent = AgentId.generate()
     remote_agent = AgentId.generate()
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_provider("docker", "docker"), _provider("modal", "modal")),
         error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
     resolver.update_agents(
         ParsedAgentsResult(
@@ -147,10 +150,11 @@ def test_compute_excludes_non_capable_minds() -> None:
     resolver = MngrCliBackendResolver()
     capable_agent = AgentId.generate()
     remote_agent = AgentId.generate()
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_provider("docker", "docker"), _provider("modal", "modal")),
         error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
     resolver.update_agents(
         ParsedAgentsResult(

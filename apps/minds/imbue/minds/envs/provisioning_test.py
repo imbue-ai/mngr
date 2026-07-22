@@ -28,18 +28,17 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.neon_db import NeonProviderError
-from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
+from imbue.minds.envs.provisioning import _assert_deploy_url_matches
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.envs.recover import RecoverTargetAlreadyExistsError
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import ServiceName
-from imbue.mngr_ovh.iam_tags import IamResource
 
 
 @pytest.fixture
@@ -120,11 +119,6 @@ def _credentials(*, neon_project_id: str | None = "proj-fake-shared") -> Provide
         neon_project_id=neon_project_id,
         supertokens_core_url="https://supertokens.example.com",
         supertokens_api_key=SecretStr("st-api-key"),
-        ovh_credentials=OvhCredentials(
-            application_key=SecretStr("ovh-ak"),
-            application_secret=SecretStr("ovh-as"),
-            consumer_key=SecretStr("ovh-ck"),
-        ),
     )
 
 
@@ -137,7 +131,6 @@ def _build_fake_providers(
     *,
     fail_step: str | None = None,
     fail_delete: set[str] | None = None,
-    ovh_instances: tuple[IamResource, ...] = (),
     vault_responses: dict[str, dict[str, str]] | None = None,
     cloudflare_tunnels: tuple[str, ...] = (),
 ) -> Providers:
@@ -202,13 +195,6 @@ def _build_fake_providers(
         call_log["calls"].append(("delete_supertokens_app", str(name)))
         if "supertokens_app" in fail_delete:
             raise SuperTokensProviderError("supertokens delete boom")
-
-    def list_ovh_instances(name, credentials):
-        call_log["calls"].append(("list_ovh_instances", str(name)))
-        return ovh_instances
-
-    def delete_ovh_instances(instances, credentials):
-        call_log["calls"].append(("delete_ovh_instances", len(instances)))
 
     def read_per_env_secret_values(service, tier_vault_prefix, overrides, cg):
         call_log["calls"].append(("read_per_env_secret_values", service))
@@ -353,8 +339,6 @@ def _build_fake_providers(
         delete_neon_project=delete_neon_project,
         create_supertokens_app=create_supertokens_app,
         delete_supertokens_app=delete_supertokens_app,
-        list_ovh_instances=list_ovh_instances,
-        delete_ovh_instances=delete_ovh_instances,
         read_per_env_secret_values=read_per_env_secret_values,
         push_per_env_modal_secret=push_per_env_modal_secret,
         deploy_litellm_proxy=deploy_litellm_proxy,
@@ -566,19 +550,17 @@ def test_destroy_env_dev_walks_providers_in_order_and_removes_root(
         # env root; no destroy_mngr_agents call.
         # Step 1b: state-container cleanup still runs (independent of agents).
         "cleanup_state_container",
-        # Step 2: OVH.
-        "list_ovh_instances",
-        # Step 3: read CF Vault entry + enumerate this env's tunnels.
+        # Step 2: read CF Vault entry + enumerate this env's tunnels.
         "read_per_env_secret_values",
         "list_cloudflare_tunnels_for_env",
         # (No `delete_cloudflare_tunnels` -- fake returns empty list.)
-        # Step 4: SuperTokens app (cascade-deletes its users).
+        # Step 3: SuperTokens app (cascade-deletes its users).
         "delete_supertokens_app",
-        # Step 5: Neon project (atomic teardown of all DBs / roles / endpoints).
+        # Step 4: Neon project (atomic teardown of all DBs / roles / endpoints).
         "delete_neon_project",
-        # Step 6: Modal env (cascade-deletes apps/secrets/volumes inside).
+        # Step 5: Modal env (cascade-deletes apps/secrets/volumes inside).
         "delete_modal_env",
-        # Step 7: env root removal happens after all provider calls succeed.
+        # Step 6: env root removal happens after all provider calls succeed.
     ]
     # Env root removed so subsequent commands fail fast on a dangling
     # activation rather than silently re-creating partial state.
@@ -615,9 +597,10 @@ def test_destroy_env_dev_destroys_mngr_agents_before_cloud_teardown(
         parent_concurrency_group=_root_cg,
     )
     # A single destroy_mngr_agents call (all ids at once) then the
-    # state-container cleanup, BEFORE any cloud-side teardown.
+    # state-container cleanup, BEFORE any cloud-side teardown (the first cloud
+    # step is the Cloudflare-tunnel Vault read).
     step_names = [c[0] for c in call_log["calls"]]
-    first_cloud_index = step_names.index("list_ovh_instances")
+    first_cloud_index = step_names.index("read_per_env_secret_values")
     assert step_names[:first_cloud_index] == ["destroy_mngr_agents", "cleanup_state_container"]
     agent_id_batches = [c[1] for c in call_log["calls"] if c[0] == "destroy_mngr_agents"]
     assert agent_id_batches == [("agent-1111", "agent-2222")]
@@ -683,45 +666,6 @@ def test_destroy_env_dev_leaves_env_root_when_step_fails(_isolated_home: Path, _
             parent_concurrency_group=_root_cg,
         )
     assert env_root_exists(DevEnvName("dev-matt"))
-
-
-def test_destroy_deletes_ovh_instances(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
-    instances = (
-        IamResource(
-            urn="urn:v1:us:resource:vps:vps-a.vps.ovh.us",
-            name="vps-a.vps.ovh.us",
-            type="vps",
-            tags={"minds_env": "hank"},
-        ),
-        IamResource(
-            urn="urn:v1:us:resource:vps:vps-b.vps.ovh.us",
-            name="vps-b.vps.ovh.us",
-            type="vps",
-            tags={"minds_env": "hank"},
-        ),
-    )
-    call_log = _make_call_log()
-    providers = _build_fake_providers(call_log, ovh_instances=instances)
-    deploy_env(
-        DevEnvName("dev-hank"),
-        tier="dev",
-        deploy_config=_deploy_config(),
-        credentials=_credentials(),
-        providers=providers,
-        parent_concurrency_group=_root_cg,
-    )
-    call_log["calls"].clear()
-
-    destroy_env(
-        DevEnvName("dev-hank"),
-        tier="dev",
-        deploy_config=_deploy_config(),
-        credentials=_credentials(),
-        providers=providers,
-        parent_concurrency_group=_root_cg,
-    )
-    delete_call = next(c for c in call_log["calls"] if c[0] == "delete_ovh_instances")
-    assert delete_call == ("delete_ovh_instances", 2)
 
 
 def test_destroy_missing_env_proceeds_with_cloud_cleanup(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -1062,7 +1006,7 @@ def test_destroy_env_tier_proceeds_when_env_root_missing(_isolated_home: Path, _
     See F22 in MANUAL_DEPLOY_FINDINGS.md: the env root is a convenience
     pointer, not authoritative -- the cloud-side resources are keyed
     off the env name (Modal env, Modal apps, Neon, SuperTokens,
-    Cloudflare tags, OVH tags), so destroy can converge purely by
+    Cloudflare tags), so destroy can converge purely by
     name. Refusing on missing-root would orphan cloud state for
     operators who manually nuke the directory.
     """
@@ -1217,18 +1161,16 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
         "destroy_mngr_agents",
         # 1b: state-container cleanup (independent of agents).
         "cleanup_state_container",
-        # 2: OVH (shared with dev, by env name).
-        "list_ovh_instances",
-        # 3: CF tunnels (shared with dev, by env name).
+        # 2: CF tunnels (shared with dev, by env name).
         "read_per_env_secret_values",
         "list_cloudflare_tunnels_for_env",
-        # 4: SuperTokens -- wipe path (tier-specific).
+        # 3: SuperTokens -- wipe path (tier-specific).
         "read_per_env_secret_values",
         "wipe_supertokens_app_data",
-        # 5: Neon -- wipe path (tier-specific).
+        # 4: Neon -- wipe path (tier-specific).
         "read_per_env_secret_values",
         "wipe_neon_db_schema",
-        # 6: Modal -- stop + list-then-delete-all-timestamped-secrets path.
+        # 5: Modal -- stop + list-then-delete-all-timestamped-secrets path.
         # Two deletes: ``cloudflare-staging-<id>`` (the one entry in this
         # _deploy_config's [secrets].services) and ``litellm-connector-
         # staging-<id>`` (always pushed separately by the deploy as a
@@ -1238,7 +1180,7 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
         "list_modal_secrets",
         "delete_modal_secret",
         "delete_modal_secret",
-        # 7: generation id (tier-only).
+        # 6: generation id (tier-only).
         "delete_generation_id",
     ]
     # And env root is gone after the full flow succeeds.
@@ -1481,3 +1423,52 @@ def test_f4_recover_target_write_failure_logs_but_propagates_when_cleanup_also_f
     # The cleanup attempt fired even though it ultimately failed.
     step_names = [c[0] for c in call_log["calls"]]
     assert "delete_neon_branch" in step_names
+
+
+# -- _assert_deploy_url_matches (workspace-mismatch diagnosis) --
+
+
+def test_assert_deploy_url_matches_passes_on_identical_url() -> None:
+    url = AnyUrl("https://minds-dev-dev-danver--rsc-dev-api.modal.run")
+    # No raise: the deployed URL is exactly what we computed.
+    _assert_deploy_url_matches(actual=url, expected=url, app="rsc-dev", modal_workspace="minds-dev")
+
+
+def test_assert_deploy_url_matches_flags_per_env_workspace_mismatch() -> None:
+    # Same env / app / function, but the token deployed under the `imbue`
+    # workspace instead of deploy.toml's `minds-dev` -- the exact misroute a
+    # `minds-dev`-named profile holding an `imbue`-workspace token produces.
+    expected = AnyUrl("https://minds-dev-dev-danver--rsc-dev-api.modal.run")
+    actual = AnyUrl("https://imbue-dev-danver--rsc-dev-api.modal.run")
+    with pytest.raises(ModalDeployError) as excinfo:
+        _assert_deploy_url_matches(actual=actual, expected=expected, app="rsc-dev", modal_workspace="minds-dev")
+    message = str(excinfo.value)
+    assert "bound to workspace 'imbue'" in message
+    assert "modal_workspace 'minds-dev'" in message
+    assert "modal token new --profile minds-dev" in message
+
+
+def test_assert_deploy_url_matches_flags_tier_workspace_mismatch() -> None:
+    # Tier URLs carry no `-<name>` segment, so the whole prefix is the workspace.
+    expected = AnyUrl("https://minds-production--rsc-production-api.modal.run")
+    actual = AnyUrl("https://imbue--rsc-production-api.modal.run")
+    with pytest.raises(ModalDeployError) as excinfo:
+        _assert_deploy_url_matches(
+            actual=actual, expected=expected, app="rsc-production", modal_workspace="minds-production"
+        )
+    message = str(excinfo.value)
+    assert "bound to workspace 'imbue'" in message
+    assert "modal token new --profile minds-production" in message
+
+
+def test_assert_deploy_url_matches_non_workspace_mismatch_keeps_formula_hint() -> None:
+    # Prefixes (and thus workspaces) match; only the app / function segment
+    # differs -- a genuine formula / hostname-scheme drift, not a misroute.
+    expected = AnyUrl("https://minds-dev-dev-danver--rsc-dev-api.modal.run")
+    actual = AnyUrl("https://minds-dev-dev-danver--rsc-dev-apiv2.modal.run")
+    with pytest.raises(ModalDeployError) as excinfo:
+        _assert_deploy_url_matches(actual=actual, expected=expected, app="rsc-dev", modal_workspace="minds-dev")
+    message = str(excinfo.value)
+    assert "workspace prefix matches" in message
+    assert "hostname scheme" in message
+    assert "bound to workspace" not in message

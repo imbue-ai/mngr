@@ -171,10 +171,12 @@ def test_garbage_stdin_still_sets_marker(tmp_path: Path) -> None:
 
 def test_signals_submit_channel_after_setting_the_marker() -> None:
     """The hook fires the `mngr-submit-<session>` wait-for channel AFTER the marker
-    recompute, so a `send_message` waiter wakes only once the agent reads RUNNING.
-    The prefix is pinned to codex_config's SUBMIT_WAIT_CHANNEL_PREFIX, which
-    CodexAgent._send_enter_and_validate waits on -- this keeps the two literals in
-    sync (the shell script can't import the constant)."""
+    recompute, so an OLD-version `send_message` waiter wakes only once the agent
+    reads RUNNING (current mngr confirms by polling the marker itself and never
+    listens; the signal is kept only for old senders and is scheduled for
+    removal). The prefix is pinned to codex_config's SUBMIT_WAIT_CHANNEL_PREFIX
+    -- this keeps the two literals in sync (the shell script can't import the
+    constant)."""
     script = (Path(__file__).parent / _SCRIPT).read_text()
     signal = f'tmux wait-for -S "{SUBMIT_WAIT_CHANNEL_PREFIX}'
     assert signal in script

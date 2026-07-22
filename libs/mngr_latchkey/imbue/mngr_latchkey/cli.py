@@ -24,6 +24,7 @@ surfaced as a non-zero exit (no ``--allow-degraded`` mode).
 import os
 import signal
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -35,7 +36,9 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -59,6 +62,7 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
+from imbue.mngr_latchkey.sentry import setup_forward_sentry
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import delete_forward_info
@@ -74,6 +78,18 @@ ENV_LATCHKEY_BINARY: Final[str] = "MNGR_LATCHKEY_BINARY"
 # Built-in fallback for the latchkey root directory when no override is
 # supplied via CLI flag, env var, or ``settings.toml``.
 _DEFAULT_LATCHKEY_DIRECTORY: Final[Path] = Path("~/.mngr/latchkey")
+
+# Rotated-log size cap (in MB) for the forward supervisor's dedicated
+# ``events.jsonl`` (pointed at via ``--log-file``). Smaller than the general
+# mngr default so this long-running daemon's log stays bounded, matching the
+# 10MB cap the minds desktop client uses for its own rotated logs.
+_FORWARD_LOG_MAX_SIZE_MB: Final[int] = 10
+
+# How often the supervisor's gateway health check polls the shared
+# ``latchkey gateway`` subprocess's liveness. A dead gateway takes all agent
+# traffic down, so we detect it quickly; the poll itself is cheap (a
+# non-blocking ``poll()`` on the tracked subprocess, no network I/O).
+_GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS: Final[float] = 10.0
 
 # Plugin-config registry key. Must match the name passed to
 # ``register_plugin_config`` in :mod:`imbue.mngr_latchkey.plugin`.
@@ -482,6 +498,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         command_name="latchkey.forward",
         command_class=_ForwardCliOptions,
         is_format_template_supported=False,
+        max_log_size_mb=_FORWARD_LOG_MAX_SIZE_MB,
     )
 
     # No parent-death watcher: ``LatchkeyForwardSupervisor`` spawns us
@@ -494,6 +511,50 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # dropping the gateway or any reverse tunnels.
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
+    # Initialize Sentry for this long-running daemon now that ``setup_command_context``
+    # has wired up the loguru sinks and the latchkey paths are known. Off unless opted
+    # in via ``MNGR_LATCHKEY_SENTRY_*`` env vars (published by the minds desktop client,
+    # derived from its own Sentry settings). The daemon's structured + raw logs live
+    # flat in the plugin data dir, so that is the folder Sentry attaches log files from.
+    setup_forward_sentry(log_folder=latchkey.plugin_data_dir)
+
+    # Run the supervisor body inside a single error-reporting boundary (logs unhandled errors through
+    # loguru so they reach Sentry with the daemon's logs attached, then flushes on every exit path).
+    _run_forward_with_error_reporting(lambda: _run_forward_supervisor(mngr_ctx=mngr_ctx, opts=opts, latchkey=latchkey))
+
+
+def _run_forward_with_error_reporting(run_supervisor: Callable[[], None]) -> None:
+    """Run the supervisor body, reporting an unhandled error to Sentry with logs, and always flushing.
+
+    A long-running daemon's unhandled exception would otherwise reach Sentry only via the SDK's
+    excepthook integration, which bypasses our loguru handler -- so the report would carry no logs.
+    Logging it through loguru here routes it through the loguru -> Sentry handler (which attaches the
+    daemon's logs + traceback), then we re-raise so the CLI still exits non-zero. ``click``
+    control-flow exceptions are expected exits, not faults, so they are surfaced without becoming
+    Sentry events. The ``finally`` flushes late-captured events and their pending S3 attachment
+    uploads once, on every exit path; it is a no-op when Sentry was never set up.
+    """
+    try:
+        run_supervisor()
+    except (click.ClickException, click.Abort):
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("mngr latchkey forward exited with an unhandled error")
+        raise
+    finally:
+        flush_sentry_on_shutdown()
+
+
+def _run_forward_supervisor(
+    mngr_ctx: MngrContext,
+    opts: _ForwardCliOptions,
+    latchkey: Latchkey,
+) -> None:
+    """Run the shared gateway + reverse-tunnel supervisor until shutdown is signalled.
+
+    Extracted from :func:`_forward_command` so the latter can wrap it in a single error-logging +
+    Sentry-flush boundary; see that function for why an unhandled error is logged through loguru.
+    """
     # Refuse to start if another forward is already alive for this
     # latchkey directory; two forwards would fight over the same
     # reverse tunnels and produce a confusing stream of failures.
@@ -579,9 +640,18 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     )
     logger.info("Waiting for discovery events; send SIGINT or SIGTERM to shut down, SIGHUP to refresh providers.")
     try:
-        # Block until shutdown is signalled. The signal handler sets the
-        # event from any thread, including the main thread itself.
-        shutdown_event.wait()
+        # Block until shutdown is signalled, meanwhile supervising the shared gateway
+        # subprocess: if it dies mid-session (leaving discovery + reverse tunnels up,
+        # so minds' discovery-freshness watchdog never notices), respawn it on its
+        # original port before agent traffic stays broken. This runs on the main
+        # thread, which would otherwise just block on ``shutdown_event``, so it needs
+        # no thread of its own; the loop returns as soon as shutdown is signalled.
+        _run_gateway_health_check_loop(
+            shutdown_event=shutdown_event,
+            latchkey=latchkey,
+            concurrency_group=mngr_ctx.concurrency_group,
+            health_check_interval_seconds=_GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS,
+        )
     finally:
         logger.info("Shutting down: terminating mngr observe, reverse tunnels, and shared gateway.")
         # Wake the SIGHUP watcher so it observes ``shutdown_event`` and exits;
@@ -593,7 +663,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         try:
             latchkey.stop_gateway()
         except LatchkeyError as e:
-            logger.warning("Failed to stop shared Latchkey gateway during shutdown: {}", e)
+            logger.opt(exception=e).error("Failed to stop shared Latchkey gateway during shutdown.")
         delete_forward_info(latchkey.plugin_data_dir)
 
 
@@ -673,6 +743,46 @@ def _run_sighup_bounce_watcher(
             logger.opt(exception=e).error("SIGHUP observe bounce failed; continuing to watch for further bounces")
 
 
+def _run_gateway_health_check_loop(
+    shutdown_event: threading.Event,
+    latchkey: Latchkey,
+    concurrency_group: ConcurrencyGroup,
+    health_check_interval_seconds: float,
+) -> None:
+    """Loop until shutdown: respawn the shared gateway whenever its subprocess has died.
+
+    ``mngr latchkey forward`` owns the single shared ``latchkey gateway``. If that
+    subprocess crashes mid-session, discovery and the reverse tunnels stay up -- so
+    minds' discovery-freshness watchdog reads the pipeline as healthy -- while every
+    agent's traffic to the gateway silently fails. This loop is the supervisor-side
+    counterpart to that watchdog: it polls the gateway's liveness on a fixed cadence
+    and respawns it (reusing its previous port, so the reverse tunnels and the
+    published ``gateway_port`` stay valid) the moment it finds it dead.
+
+    A single respawn failure never tears the loop down: it is logged and the loop
+    keeps polling, so a transient failure is retried on the next tick.
+    """
+    while not shutdown_event.is_set():
+        # Wait first, then check: the gateway was started eagerly just before this
+        # loop, so the first liveness check is due one interval later. Returns
+        # promptly when shutdown is signalled during the wait.
+        if shutdown_event.wait(timeout=health_check_interval_seconds):
+            return
+        if latchkey.is_gateway_running:
+            continue
+        logger.info("Shared Latchkey gateway subprocess is not running; respawning it.")
+        try:
+            gateway_port = latchkey.start_gateway(concurrency_group)
+        except LatchkeyError as e:
+            logger.opt(exception=e).error("Failed to respawn shared Latchkey gateway; will retry on the next check.")
+            continue
+        logger.info("Respawned shared Latchkey gateway at http://{}:{}", latchkey.listen_host, gateway_port)
+        try:
+            update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
+        except LatchkeyStoreError as e:
+            logger.opt(exception=e).error("Failed to publish respawned gateway port.")
+
+
 def _install_signal_handlers(shutdown_event: threading.Event, bounce_event: threading.Event) -> None:
     """Wire SIGINT / SIGTERM to shutdown and SIGHUP to an observe bounce.
 
@@ -707,7 +817,10 @@ CommandHelpMetadata(
 
 1. Initializes the configured ``Latchkey`` (version-checks the binary,
    adopts or discards any pre-existing detached gateway record).
-2. Eagerly spawns the shared ``latchkey gateway`` subprocess.
+2. Eagerly spawns the shared ``latchkey gateway`` subprocess and
+   supervises it: a background health check respawns it (reusing its
+   original port) if the subprocess dies mid-session, so a crashed
+   gateway does not silently take agent traffic down.
 3. Spawns ``mngr observe --discovery-only --quiet`` and, for every
    agent discovered, opens a reverse SSH tunnel that bridges the
    agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` to the host-side

@@ -16,22 +16,69 @@ from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import KNOWN_OVH_US_REGIONS
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import R2AccessKeyId
 from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
+from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 
-class SliceTeardownTarget(FrozenModel):
-    """A slice pool host to tear down: its lima resources and the box that hosts them."""
+class PoolHostDestroyTarget(FrozenModel):
+    """The teardown coordinates of a claimed pool_hosts row: its lima VM and the box hosting it."""
 
-    pool_host_row_id: str = Field(description="The pool_hosts row id (deleted after the VM is torn down)")
-    lima_instance_name: str = Field(description="The slice's lima instance name on the box")
-    lima_disk_name: str | None = Field(default=None, description="The slice's lima data-disk name, if recorded")
-    box_public_address: str = Field(description="SSH-reachable address of the bare-metal box hosting the slice")
-    lima_service_user: str = Field(description="The box's non-root lima user that owns the VMs")
-    box_host_public_key: str | None = Field(
-        default=None, description="The box's sshd host public key, pinned for the teardown SSH"
+    lima_instance_name: str | None = Field(description="The slice's lima instance name on the box, if recorded")
+    box_public_address: str | None = Field(description="SSH-reachable address of the box, if its record exists")
+    lima_service_user: str | None = Field(description="The box's non-root lima user that owns the VMs, if recorded")
+    box_host_public_key: str | None = Field(description="The box's sshd host public key, pinned for the teardown SSH")
+
+
+class PoolHostDestroyOutcome(FrozenModel):
+    """The result of destroying one pool host row (one entry in the destroy report)."""
+
+    pool_host_id: str = Field(description="The pool_hosts row id the destroy targeted")
+    status: PoolHostDestroyOutcomeStatus = Field(description="How the row/VM ended up")
+    detail: str | None = Field(default=None, description="Human-readable elaboration (failure reason, skip cause)")
+
+
+class PoolHostDestroyReport(FrozenModel):
+    """The summary the destroy commands emit: per-host outcomes plus counts.
+
+    ``already_gone`` counts as destroyed (the desired end state -- the row is gone --
+    so re-running the same id list after a partial failure converges cleanly).
+    """
+
+    requested: int = Field(description="Number of (unique) pool hosts the invocation targeted")
+    destroyed: int = Field(description="Hosts destroyed (including rows that were already gone)")
+    skipped: int = Field(description="Hosts skipped because their row is leased")
+    failed: int = Field(description="Hosts whose teardown failed (their rows stay 'removing' for retry)")
+    hosts: tuple[PoolHostDestroyOutcome, ...] = Field(description="Per-host outcomes, in input order")
+
+
+class SliceBakeOutcome(FrozenModel):
+    """The result of baking one slice pool host (one entry in the bake report)."""
+
+    host_name: str = Field(description="The baked host's generated name")
+    server_id: str = Field(description="The bare_metal_servers row id the slice was carved on")
+    status: SliceBakeOutcomeStatus = Field(description="Whether the bake succeeded")
+    host_id: str | None = Field(default=None, description="The baked mngr host id (succeeded only)")
+    agent_id: str | None = Field(default=None, description="The baked services agent id (succeeded only)")
+    vm_ssh_port: int | None = Field(default=None, description="Box port forwarded to the VM sshd (succeeded only)")
+    container_ssh_port: int | None = Field(
+        default=None, description="Box port forwarded to the container sshd (succeeded only)"
     )
+    attributes: dict[str, Any] | None = Field(
+        default=None, description="Lease attributes stamped on the pool row (succeeded only)"
+    )
+    error: str | None = Field(default=None, description="The failure description (failed only)")
+
+
+class SliceBakeReport(FrozenModel):
+    """The summary ``admin pool create`` emits: per-slice outcomes plus counts."""
+
+    requested: int = Field(description="Number of slices the invocation tried to bake")
+    succeeded: int = Field(description="Slices baked and inserted into the pool")
+    failed: int = Field(description="Slices that failed to bake (their VMs are rolled back/reaped)")
+    slices: tuple[SliceBakeOutcome, ...] = Field(description="Per-slice outcomes, in completion order")
 
 
 class PaidListEntry(FrozenModel):
@@ -186,9 +233,8 @@ class LeaseResult(FrozenModel):
     host_db_id: LeaseDbId = Field(description="Database id of the leased host (UUID)")
     vps_address: str = Field(
         description=(
-            "SSH-reachable address of the VPS -- either a public IPv4 or a DNS hostname, "
-            "depending on what the host's provider returned at bake time. OVH-backed "
-            "rows are DNS hostnames like ``vps-eec8860b.vps.ovh.us``."
+            "SSH-reachable address of the leased host's bare-metal box (the box's public "
+            "address that the slice VM is reached through)."
         )
     )
     ssh_port: int = Field(description="SSH port for the VPS itself (root)")
@@ -219,10 +265,7 @@ class LeasedHostInfo(FrozenModel):
 
     host_db_id: LeaseDbId
     vps_address: str = Field(
-        description=(
-            "SSH-reachable address of the VPS. Public IPv4 for Vultr-backed rows, "
-            "DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
-        )
+        description="SSH-reachable address of the leased host's bare-metal box (reaches the slice VM)."
     )
     ssh_port: int
     ssh_user: str
@@ -338,6 +381,46 @@ class R2BucketCreateResult(FrozenModel):
 
     bucket: R2BucketInfo = Field(description="The created bucket")
     key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
+
+
+class SyncWorkspaceRecord(FrozenModel):
+    """Wire form of one synced workspace record (transport-only; the plugin never decrypts).
+
+    Mirrors the connector's ``WorkspaceRecordModel``: plaintext metadata plus
+    the base64 of the client-side-encrypted secrets blob. ``state`` is passed
+    through as its lowercase wire string -- the producing (minds) and
+    validating (connector) ends own the vocabulary.
+    """
+
+    host_id: str = Field(description="Host the workspace is on (PK with the account)")
+    agent_id: str = Field(description="Logical workspace id (one ACTIVE record per agent_id)")
+    display_name: str = Field(default="", description="Workspace display name")
+    color: str | None = Field(default=None, description="Workspace accent color (#rrggbb)")
+    provider_kind: str = Field(description="mngr provider backend kind (e.g. 'lima', 'imbue_cloud')")
+    hosting_device_id: str | None = Field(
+        default=None, description="Install that hosts a local workspace (None for cloud rows)"
+    )
+    device_label: str = Field(default="", description="Human-readable device name")
+    state: str = Field(description="Lifecycle state: 'active' or 'destroyed' (tombstone)")
+    restored_from_host_id: str | None = Field(default=None, description="Lineage link for restored workspaces")
+    encrypted_secrets: str | None = Field(
+        default=None, description="Base64 of the client-encrypted secrets blob (opaque here)"
+    )
+    revision: int = Field(description="Per-row monotonic revision; pushes are CAS on this")
+    created_at: str = Field(default="", description="Server timestamp (response only)")
+    updated_at: str = Field(default="", description="Server timestamp (response only)")
+
+
+class SyncKeyBundle(FrozenModel):
+    """Wire form of the per-account password-wrapped data key (transport-only)."""
+
+    kdf_salt: str = Field(description="Base64 argon2id salt")
+    kdf_time_cost: int = Field(description="argon2id iteration count")
+    kdf_memory_kib: int = Field(description="argon2id memory (KiB)")
+    kdf_parallelism: int = Field(description="argon2id lane count")
+    wrapped_dek: str = Field(description="Base64 password-wrapped DEK (opaque here)")
+    key_epoch: int = Field(description="Bumped only on compromise recovery")
+    updated_at: str = Field(default="", description="Server timestamp (response only)")
 
 
 class BareMetalServer(FrozenModel):

@@ -20,7 +20,7 @@ Split into two deploy paths driven by the activated env's tier:
 
 The orchestration is pure logic; the CLI plumbing in
 ``imbue.minds.cli.env`` builds the :class:`Providers` bundle with the
-real Modal CLI / Neon HTTP / SuperTokens HTTP / OVH HTTP / Modal
+real Modal CLI / Neon HTTP / SuperTokens HTTP / Modal
 deploy callables, and dispatches to the right deploy function based
 on the activated env's name.
 
@@ -43,6 +43,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 from typing import assert_never
+from urllib.parse import urlparse
 
 from loguru import logger
 from pydantic import AnyUrl
@@ -77,6 +78,7 @@ from imbue.minds.envs.per_env_deploy import delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
+from imbue.minds.envs.per_env_deploy import modal_token_reprovision_hint
 from imbue.minds.envs.per_env_deploy import per_env_connector_url
 from imbue.minds.envs.per_env_deploy import per_env_litellm_proxy_url
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
@@ -86,7 +88,6 @@ from imbue.minds.envs.per_env_deploy import tier_litellm_proxy_url
 from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
-from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
 from imbue.minds.envs.recover import RecoverTarget
@@ -101,7 +102,6 @@ from imbue.minds.envs.secret_lifecycle import gc_old_per_tier_secrets
 from imbue.minds.envs.secret_lifecycle import make_deploy_id
 from imbue.minds.envs.secret_lifecycle import timestamped_secret_name
 from imbue.minds.errors import MindError
-from imbue.mngr_ovh.iam_tags import IamResource
 
 # Env var the deployed connector reads at startup to identify which
 # minds env it belongs to. Pushed alongside ``MINDS_TIER_GENERATION_ID``
@@ -159,7 +159,6 @@ class ProviderCredentials(FrozenModel):
     )
     supertokens_core_url: str = Field(description="Dev-tier SuperTokens core base URL.")
     supertokens_api_key: SecretStr = Field(description="Dev-tier SuperTokens admin API key.")
-    ovh_credentials: OvhCredentials = Field(description="Dev-tier OVH AK/AS/CK credentials (shared across dev envs).")
 
 
 # Tiers whose default deploy strategy is RECREATE: dev (every personal
@@ -221,8 +220,6 @@ CreateNeonProjectFn = Callable[[DevEnvName, str, SecretStr, ConcurrencyGroup], N
 DeleteNeonProjectFn = Callable[[DevEnvName, str, SecretStr], None]
 CreateSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], SuperTokensAppRecord]
 DeleteSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], None]
-ListOvhInstancesFn = Callable[[DevEnvName, OvhCredentials], tuple[IamResource, ...]]
-DeleteOvhInstancesFn = Callable[[tuple[IamResource, ...], OvhCredentials], None]
 ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
 # (modal_env, tier, min_containers, deploy_id, strategy, cg) -> deployed URL.
@@ -327,8 +324,6 @@ class Providers(FrozenModel):
     )
     create_supertokens_app: CreateSuperTokensAppFn = Field(description="Create the per-dev-env SuperTokens app.")
     delete_supertokens_app: DeleteSuperTokensAppFn = Field(description="Delete the per-dev-env SuperTokens app.")
-    list_ovh_instances: ListOvhInstancesFn = Field(description="List OVH VPSes tagged for this dev env.")
-    delete_ovh_instances: DeleteOvhInstancesFn = Field(description="Delete the listed OVH VPSes.")
     read_per_env_secret_values: ReadPerEnvSecretValuesFn = Field(
         description="(service, tier_vault_prefix, overrides, cg) -> merged values dict for one Modal Secret.",
     )
@@ -915,7 +910,12 @@ def _deploy_env_locked(
             deploy_strategy,
             parent_concurrency_group,
         )
-    _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
+    _assert_deploy_url_matches(
+        actual=litellm_proxy_url,
+        expected=expected_litellm_proxy_url,
+        app=f"llm-{tier}",
+        modal_workspace=modal_workspace,
+    )
 
     with info_span(
         "Deploying rsc-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
@@ -934,7 +934,9 @@ def _deploy_env_locked(
             deploy_strategy,
             parent_concurrency_group,
         )
-    _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
+    _assert_deploy_url_matches(
+        actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}", modal_workspace=modal_workspace
+    )
 
     # Step 6a: health check -- poll both apps' health endpoints until
     # they return 200. Failure raises ``HealthCheckFailedError`` which
@@ -1171,21 +1173,20 @@ def destroy_env(
        so their cloud resources (Docker containers, pool hosts,
        Cloudflare tunnels) stop cleanly before being torn down.
        Skipped when ``keep_agents=True``.
-    2. Delete every OVH VPS tagged ``minds_env=<name>``.
-    3. Enumerate + delete every Cloudflare tunnel with
+    2. Enumerate + delete every Cloudflare tunnel with
        ``metadata.env=<name>`` (filtered by env name; the tag the
        connector sets at create time encodes the owning env, not the
        tier).
-    4. Clear SuperTokens app data (tier-dependent: delete the app
+    3. Clear SuperTokens app data (tier-dependent: delete the app
        outright for dev / wipe its users for shared tiers).
-    5. Clear Neon DB data (tier-dependent: delete the DB outright for
+    4. Clear Neon DB data (tier-dependent: delete the DB outright for
        dev / DROP SCHEMA for shared tiers).
-    6. Clear Modal infra (tier-dependent: delete the Modal env outright
+    5. Clear Modal infra (tier-dependent: delete the Modal env outright
        for dev / stop apps + delete secrets for shared tiers).
-    7. For shared tiers only: delete the tier generation id from Vault
+    6. For shared tiers only: delete the tier generation id from Vault
        so the next deploy mints a fresh one + every dev's next
        ``activate`` sees a mismatch and auto-wipes their local state.
-    8. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
+    7. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
        succeeded. On any failure, the env root stays so the operator
        can re-run ``destroy`` to pick up where things broke (rather
        than silently leaking expensive cloud resources because the
@@ -1194,7 +1195,7 @@ def destroy_env(
     Proceeds even when the env root is missing on disk. The local env
     root is a convenience pointer; the cloud-side resources are keyed
     off the env *name* (Modal env, Neon project, SuperTokens app,
-    Cloudflare tunnel tags, OVH IAM tags), all of which we can clean
+    Cloudflare tunnel tags), all of which we can clean
     up by name without needing the local directory. This makes destroy
     safe to re-run after an operator who manually ``rm -rf``'d the env
     root would otherwise be locked out of the cloud cleanup.
@@ -1242,14 +1243,7 @@ def destroy_env(
         with info_span("Cleaning up Docker state container for env {!r}", str(name)):
             providers.cleanup_state_container(name, parent_concurrency_group)
 
-    # Step 2: OVH VPSes tagged with this env.
-    with info_span("Cleaning up OVH VPSes tagged for env {!r}", str(name)):
-        ovh_instances = providers.list_ovh_instances(name, credentials.ovh_credentials)
-        if ovh_instances:
-            providers.delete_ovh_instances(ovh_instances, credentials.ovh_credentials)
-            logger.info("Deleted {} OVH VPS(es) for env {!r}", len(ovh_instances), str(name))
-
-    # Step 3: Cloudflare tunnels tagged with this env. Keyed off env
+    # Step 2: Cloudflare tunnels tagged with this env. Keyed off env
     # NAME (not tier), since dev envs share the dev-tier CF account and
     # we want to find only this specific env's tunnels.
     with info_span("Cleaning up Cloudflare tunnels tagged for env {!r}", str(name)):
@@ -1265,7 +1259,7 @@ def destroy_env(
         if deleted_tunnels:
             logger.info("Deleted {} Cloudflare tunnel(s) for env {!r}", deleted_tunnels, str(name))
 
-    # Step 4: SuperTokens (dev deletes the per-env app outright; shared
+    # Step 3: SuperTokens (dev deletes the per-env app outright; shared
     # tiers wipe users via delete + recreate of the same app id).
     if lifecycle.creates_resources:
         with info_span("Deleting SuperTokens app for env {!r}", str(name)):
@@ -1284,7 +1278,7 @@ def destroy_env(
             )
             _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
 
-    # Step 5: Neon (dev deletes the per-env *project* outright -- atomic
+    # Step 4: Neon (dev deletes the per-env *project* outright -- atomic
     # teardown of both DBs + roles + endpoints; shared tiers DROP SCHEMA
     # on the operator-managed DB they keep across destroy/redeploy).
     if lifecycle.creates_resources:
@@ -1300,7 +1294,7 @@ def destroy_env(
             )
             _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
 
-    # Step 6: Modal (dev deletes the per-env Modal env outright which
+    # Step 5: Modal (dev deletes the per-env Modal env outright which
     # cascade-deletes its apps / secrets / volumes; shared tiers stop
     # the deployed apps + delete per-tier Modal Secrets so the next
     # deploy re-pushes fresh values from Vault).
@@ -1324,7 +1318,7 @@ def destroy_env(
                 parent_cg=parent_concurrency_group,
             )
 
-    # Step 7: generation id removal -- ONLY for tiers that use generation
+    # Step 6: generation id removal -- ONLY for tiers that use generation
     # tracking (driven by ``deploy_config.lifecycle.tracks_generation``).
     # For dev, there is no generation Vault entry to remove. Production
     # destroy is hard-refused at the CLI today, so this path is only
@@ -1333,7 +1327,7 @@ def destroy_env(
         with info_span("Deleting tier {!r} generation id from Vault", tier):
             providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
 
-    # Step 8: env root removal LAST, only on full success.
+    # Step 7: env root removal LAST, only on full success.
     delete_env_root(name)
 
 
@@ -1426,29 +1420,67 @@ def _read_litellm_master_key(
     return values.get("LITELLM_MASTER_KEY", "")
 
 
-def _assert_deploy_url_matches(*, actual: AnyUrl, expected: AnyUrl, app: str) -> None:
+def _modal_host_workspace_prefix(url_str: str) -> str:
+    """The ``<workspace>[-<name>]`` label before the ``--`` in a Modal host.
+
+    Modal hosts are ``<workspace>--<app>-<function>.modal.run`` (tier) or
+    ``<workspace>-<name>--<app>-<function>.modal.run`` (per-env), so the
+    label before the ``--`` is the only part carrying the workspace.
+    Everything after it (``<app>-<function>``) is computed identically on
+    both the expected and Modal-reported sides, so comparing this prefix
+    isolates a workspace mismatch from a genuine formula / scheme change.
+    """
+    host = urlparse(url_str).hostname or url_str
+    return host.split("--", 1)[0]
+
+
+def _assert_deploy_url_matches(*, actual: AnyUrl, expected: AnyUrl, app: str, modal_workspace: str) -> None:
     """Assert ``modal deploy`` reported the URL we computed up front.
 
     Under the shortened app + function names the natural Modal hostname
     always fits under DNS's 63-char limit, so Modal's URL is exactly
     what ``per_env_*_url`` / ``tier_*_url`` predict. A mismatch means
-    either we miscomputed (bug) or Modal changed its URL scheme on us
-    (real-world signal we need to know about immediately). Raise a
-    ``ModalDeployError`` so the deploy fails loudly rather than
-    silently shipping the wrong URLs into the per-env secrets.
+    either we miscomputed (bug), Modal changed its URL scheme on us, or
+    -- by far the most common cause -- the active Modal token is bound to
+    a different workspace than ``deploy.toml``'s ``modal_workspace``.
+    ``minds env activate --deploy`` only checks that a ``[<workspace>]``
+    section *exists* in ``~/.modal.toml``, not that its token belongs to
+    that workspace, so a mis-scoped token slips through to here. Raise a
+    ``ModalDeployError`` so the deploy fails loudly rather than silently
+    shipping the wrong URLs into the per-env secrets.
 
     Strips any trailing slash that either side may have appended so a
     cosmetic difference doesn't trip the check.
     """
     actual_str = str(actual).rstrip("/")
     expected_str = str(expected).rstrip("/")
-    if actual_str != expected_str:
+    if actual_str == expected_str:
+        return
+    expected_prefix = _modal_host_workspace_prefix(expected_str)
+    actual_prefix = _modal_host_workspace_prefix(actual_str)
+    if actual_prefix != expected_prefix:
+        # Only the workspace can differ (name/app/function are computed
+        # identically on both sides), so recover the token's actual
+        # workspace by stripping the shared ``-<name>`` suffix (empty for
+        # tier deploys, since the expected prefix is then the workspace).
+        name_suffix = expected_prefix.removeprefix(modal_workspace)
+        actual_workspace = actual_prefix.removesuffix(name_suffix)
         raise ModalDeployError(
-            f"`modal deploy` URL mismatch for {app!r}: "
-            f"computed {expected_str!r} but Modal reported {actual_str!r}. "
-            "Either the URL formula in `per_env_deploy.py` is stale or Modal "
-            "changed its hostname scheme; fix before continuing."
+            f"`modal deploy` URL mismatch for {app!r}: computed {expected_str!r} but Modal "
+            f"reported {actual_str!r}. Most likely the active Modal token is bound to "
+            f"workspace {actual_workspace!r}, not deploy.toml's modal_workspace "
+            f"{modal_workspace!r}: `minds env activate --deploy` only checks that a "
+            f"[{modal_workspace}] profile section exists in ~/.modal.toml, not that its "
+            f"token belongs to that workspace. {modal_token_reprovision_hint(modal_workspace)} "
+            f"If the workspaces do match, the URL formula in `per_env_deploy.py` is stale or "
+            f"Modal changed its hostname scheme."
         )
+    raise ModalDeployError(
+        f"`modal deploy` URL mismatch for {app!r}: computed {expected_str!r} but Modal "
+        f"reported {actual_str!r}. The workspace prefix matches, so either the URL formula "
+        f"in `per_env_deploy.py` is stale or Modal changed its hostname scheme; fix before "
+        f"continuing."
+    )
 
 
 def list_dev_envs() -> tuple[DevEnvSummary, ...]:

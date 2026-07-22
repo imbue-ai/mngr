@@ -940,6 +940,9 @@ def make_test_agent_details(
     provider_name: ProviderInstanceName | None = None,
     ssh: SSHInfo | None = None,
     host_state: HostState = HostState.RUNNING,
+    pid: int | None = None,
+    user_activity_time: datetime | None = None,
+    idle_seconds: float | None = None,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -966,6 +969,9 @@ def make_test_agent_details(
         create_time=create_time or datetime.now(timezone.utc),
         start_on_boot=False,
         state=state,
+        pid=pid,
+        user_activity_time=user_activity_time,
+        idle_seconds=idle_seconds,
         labels=labels or {},
         plugin=plugin or {},
         host=host_details,

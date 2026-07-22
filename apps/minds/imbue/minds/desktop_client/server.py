@@ -123,6 +123,12 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # Tear down any hub-brokered cross-workspace SSH tunnels (paramiko reverse
     # forwards + their connections) so their threads don't outlive the app.
     state.ssh_tunnel_manager.cleanup()
+    # Stop the workspace-record sync loop and wait for any in-flight pass to
+    # finish BEFORE tearing down the shared mngr caller below. The loop runs
+    # ``mngr`` through that caller, so stopping the caller first would let a
+    # mid-pass call race its teardown and crash the loop's thread.
+    if state.sync_scheduler is not None:
+        state.sync_scheduler.stop()
     # Terminate the idle pre-warmed mngr process so it doesn't wait out the
     # full shutdown timeout blocked reading its socket for the next request.
     get_default_mngr_caller().stop()

@@ -49,7 +49,9 @@ contextBridge.exposeInMainWorld('minds', {
   // Get-help modal (report a bug). ``agentId`` is the currently-displayed
   // workspace id (or '' on a general screen) so the help page can scope its
   // report to that workspace; it is packed into the help page URL by main.
-  toggleHelp: (agentId) => ipcRenderer.send('toggle-help', agentId),
+  // ``assistAvailable`` marks the workspace healthy enough to host an /assist
+  // chat, gating the "have an agent help" option (see chrome.js).
+  toggleHelp: (agentId, assistAvailable) => ipcRenderer.send('toggle-help', agentId, assistAvailable),
 
   // One-shot bug report from the full-app error takeover (shell.html) when the
   // backend is down and the normal /help flow is unreachable. Reports the
@@ -67,6 +69,29 @@ contextBridge.exposeInMainWorld('minds', {
   // Modal overlay close (used by the inbox shell and any one-off dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
 
+  // Overlay surface (the always-warm modal WebContentsView host page,
+  // /_chrome/overlay). The overlay manager (/_static/overlay.js) receives
+  // show/hide commands from main via ``onOverlayCommand`` and reports the
+  // overlay view's required bounds back via ``overlaySetBounds`` so main can
+  // size the view (Electron has no per-view click-through; bounds are the only
+  // lever). ``spec`` is { mode: 'hidden' } |
+  // { mode: 'rect', rect: {x, y, width, height} }.
+  onOverlayCommand: (callback) => {
+    ipcRenderer.on('overlay-command', (_event, cmd) => callback(cmd));
+  },
+  overlaySetBounds: (spec) => ipcRenderer.send('overlay-set-bounds', spec),
+  // Fired by the overlay host once a hosted modal iframe has loaded, so main can
+  // replay the cached chrome state into that frame (the sidebar's workspace list,
+  // the inbox's request count) without waiting for the next SSE push.
+  overlayModalLoaded: (id) => ipcRenderer.send('overlay-modal-loaded', id),
+
+  // Custom titlebar tooltips. The chrome view computes a trigger's
+  // viewport-relative rect and its label, and main forwards it to the overlay
+  // host to render above both chrome and content. ``payload`` is
+  // { rect: {x, y, width, height}, text, shortcut?, html? }.
+  showTooltip: (payload) => ipcRenderer.send('show-tooltip', payload),
+  hideTooltip: () => ipcRenderer.send('hide-tooltip'),
+
   // Native file/directory picker used by the file-sharing permission
   // dialog so the user can pick the path to share instead of typing it.
   // ``options.mode`` is 'file' or 'directory'; ``options.defaultPath``
@@ -81,8 +106,11 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.send('navigate-to-request', agentId, eventId),
   showWorkspaceContextMenu: (agentId, x, y) =>
     ipcRenderer.send('show-workspace-context-menu', agentId, x, y),
+  // ``contentReady`` is whether the content view is showing a reachable
+  // workspace (vs the mngr_forward "Loading workspace" 503 loader), so the
+  // titlebar can keep the "have an agent help" option disabled while loading.
   onCurrentWorkspaceChanged: (callback) => {
-    ipcRenderer.on('current-workspace-changed', (_event, agentId) => callback(agentId));
+    ipcRenderer.on('current-workspace-changed', (_event, agentId, contentReady) => callback(agentId, contentReady));
   },
 
   // The accent source for THIS window's current screen: the workspace id on
@@ -99,6 +127,9 @@ contextBridge.exposeInMainWorld('minds', {
   // Actions
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),
+  // Reload the chrome (titlebar) view after its renderer crashed -- the Reload
+  // button on the local chrome-crashed.html strip.
+  reloadChrome: () => ipcRenderer.send('reload-chrome'),
 
   // Window controls
   minimize: () => ipcRenderer.send('window-minimize'),

@@ -4,6 +4,36 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Fixed: a `limactl` invocation that fails at runtime (e.g. crashes at startup) is now reported correctly instead of leaking an opaque error. Every `limactl` wrapper helper (`list`, `stop`, `delete`, `disk create`, `disk delete`, `show-ssh`, `shell`, `start`, and `--version`) funnels through a single runner that translates the process runner's raw `ProcessError` into the intended `LimaCommandError` -- previously each helper disabled the runner's exit-code check and re-tested the return code by hand, which was dead code because the runner had already raised, so the error slipped past callers that catch `LimaCommandError`. Consolidating the translation makes it impossible for a new helper to reintroduce that leak, and the wrapped error now preserves the failed command's stdout as well as its stderr. As part of this, `limactl shell` (used to wait for cloud-init during host creation) now raises `LimaCommandError` when limactl itself cannot run the command, rather than silently returning a non-zero exit code that the caller ignored -- so a broken VM fails host creation with a clear error instead of proceeding.
+
+Changed: when `limactl` is installed and new enough but an invocation fails at runtime, Lima discovery now reports the provider as unavailable (`Provider 'lima' is not available: ...`), matching how other providers report an unreachable backend, and gets the same retry/backoff -- instead of silently marking every Lima host offline. A genuinely absent or too-old `limactl` still degrades gracefully to a local, all-offline host view.
+
+## 2026-07-13
+
+Creating a Lima VM no longer fails with a `UNIX_PATH_MAX=104 characters` error when your home path and mngr prefix are long. Lima names each VM's SSH socket after the instance name and rejects names that push that socket path over the OS limit; the instance name (`<prefix>host-<32-char id>`) could exceed it for longer usernames on longer-prefixed environments (e.g. `minds-staging-`). The random id portion is now shortened just enough to keep the socket path within the limit, leaving the name unchanged when it already fits. If the prefix plus `LIMA_HOME` leave no room at all, creation now fails early with a clear message instead of a cryptic limactl fatal error.
+
+## 2026-07-10
+
+Fixed a Lima workspace-creation failure that surfaced as a confusing `SSH host key error (Host key for 127.0.0.1 does not match.)`.
+
+The VM provisioning script installed the pre-trusted SSH host key *after* a network-dependent `apt-get install`, all under `set -e`. A transient Debian mirror hiccup (`apt-get` failing to fetch package indexes) would abort the whole script before the host key was installed, so the VM kept its default host key while mngr had already pinned the key it expected -- causing a strict host-key-check mismatch on connect.
+
+The host-key swap (and sshd tuning) now runs first, before any package fetch, so SSH host-key trust no longer depends on the network. The package install is additionally wrapped in a retry loop to ride out transient apt mirror failures; if it still fails, the error now surfaces clearly on an SSH-reachable host instead of as a host-key mismatch.
+
+## 2026-07-06
+
+Lima hosts can now be renamed. `LimaProviderInstance.rename_host` updates the logical host name on the host record (a local, offline-writable store), so it works whether or not the VM is running.
+
+New Lima VMs now derive their limactl instance name from the immutable host id (`<prefix><host_id>`) rather than the host name, so a rename never leaves the VM's instance name out of sync with the host name (limactl has no native rename). Existing VMs created under the old `<prefix><host_name>` scheme keep working unchanged, since discovery reads the host name and instance name from the persisted record rather than parsing the instance name.
+
+Integrates the "simple names" work: Lima hosts can now be renamed (`LimaProviderInstance.rename_host` updates the offline-writable host record), and new Lima VMs derive their limactl instance name from the immutable host id (`<prefix><host_id>`) so a rename never desyncs the instance name from the host name. Existing VMs created under the old scheme keep working.
+
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-22
 
 Add `flock` (the `util-linux` package) to the Lima VM provisioning script's required-package check.

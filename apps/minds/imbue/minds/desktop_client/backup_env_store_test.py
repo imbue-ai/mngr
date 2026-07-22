@@ -1,10 +1,14 @@
 """Unit tests for the canonical per-workspace restic env store."""
 
 import stat
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backup_env_store import archive_canonical_env
 from imbue.minds.desktop_client.backup_env_store import canonical_env_path
+from imbue.minds.desktop_client.backup_env_store import env_content_sha256
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
@@ -62,3 +66,29 @@ def test_parse_restic_env_handles_export_quotes_and_comments() -> None:
         "AWS_ACCESS_KEY_ID": "a b",
         "RESTIC_PASSWORD": "p",
     }
+
+
+def test_env_content_sha256_is_stable_hex() -> None:
+    first = env_content_sha256("RESTIC_REPOSITORY=s3:r\n")
+    second = env_content_sha256("RESTIC_REPOSITORY=s3:r\n")
+    assert first == second
+    assert len(first) == 64
+    assert first != env_content_sha256("RESTIC_REPOSITORY=s3:other\n")
+
+
+def test_archive_canonical_env_moves_the_file_aside(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    agent_id = AgentId.generate()
+    write_canonical_env(paths, agent_id, "RESTIC_REPOSITORY=s3:old\nRESTIC_PASSWORD=p\n")
+    now = datetime(2026, 7, 7, 12, 0, 0, tzinfo=timezone.utc)
+
+    archive_path = archive_canonical_env(paths, agent_id, now=now)
+
+    assert archive_path is not None
+    assert archive_path.name == f"{agent_id}.env.20260707T120000Z"
+    assert archive_path.read_text() == "RESTIC_REPOSITORY=s3:old\nRESTIC_PASSWORD=p\n"
+    assert read_canonical_env(paths, agent_id) is None
+
+
+def test_archive_canonical_env_returns_none_when_absent(tmp_path: Path) -> None:
+    assert archive_canonical_env(_paths(tmp_path), AgentId.generate(), now=datetime.now(timezone.utc)) is None

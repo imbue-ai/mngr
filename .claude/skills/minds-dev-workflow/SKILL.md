@@ -1,27 +1,27 @@
 ---
 name: minds-dev-workflow
-description: End-to-end dev workflow for the minds app stack -- first-time bring-up, every-startup vendor/mngr sync, and the iteration loop against a running Docker agent. Use this when starting or restarting the dev Electron app, or after changing any minds component (mngr, the system interface, the FCT template).
+description: End-to-end dev workflow for the minds app stack -- first-time bring-up, every-startup vendor/mngr sync, and the iteration loop against a running Docker agent. Use this when starting or restarting the dev Electron app, or after changing any minds component (mngr, the system interface, the default workspace template).
 ---
 
 # Minds Dev Workflow
 
-This skill covers the full minds dev cycle: standing up an FCT worktree, syncing the live mngr code into that worktree's `vendor/mngr/`, activating a per-developer dev env, starting the dev Electron app, and iterating against a running Docker agent. Use it whenever you're about to start the dev app (the vendor/mngr sync needs to happen *every* startup) or after editing any component (mngr, the system_interface, the FCT template).
+This skill covers the full minds dev cycle: standing up a DEFAULT_WORKSPACE_TEMPLATE worktree, syncing the live mngr code into that worktree's `vendor/mngr/`, activating a per-developer dev env, starting the dev Electron app, and iterating against a running Docker agent. Use it whenever you're about to start the dev app (the vendor/mngr sync needs to happen *every* startup) or after editing any component (mngr, the system_interface, the default workspace template).
 
 ## Architecture Overview
 
 The minds stack has four components that need to stay in sync:
 
 1. **minds desktop client** (`apps/minds/`) -- Electron app + FastAPI backend that runs locally, proxies to agent web servers
-2. **system_interface** (lives in `forever-claude-template/apps/system_interface/`, distributed as the `system-interface` CLI) -- FastAPI + web UI that runs INSIDE the agent's Docker container as a background service
+2. **system_interface** (lives in `default-workspace-template/apps/system_interface/`, distributed as the `system-interface` CLI) -- FastAPI + web UI that runs INSIDE the agent's Docker container as a background service
 3. **mngr core** (`libs/mngr/`) -- the agent management CLI
-4. **forever-claude-template** -- the template repo that defines the Docker container (Dockerfile, services.toml, skills, scripts)
+4. **default-workspace-template** -- the template repo that defines the Docker container (Dockerfile, services.toml, skills, scripts)
 
-The template contains a `vendor/mngr/` directory (a snapshot of the mngr repo). During development, we sidestep that snapshot by rsyncing the local mngr working tree directly into a parallel-named branch of an FCT worktree under `.external_worktrees/forever-claude-template/`.
+The template contains a `vendor/mngr/` directory (a snapshot of the mngr repo). During development, we sidestep that snapshot by rsyncing the local mngr working tree directly into a parallel-named branch of a DEFAULT_WORKSPACE_TEMPLATE worktree under `.external_worktrees/default-workspace-template/`.
 
 ### How changes propagate
 
 ```
-local mngr repo  -->  FCT worktree's vendor/mngr/  -->  Docker container's /code/
+local mngr repo  -->  DEFAULT_WORKSPACE_TEMPLATE worktree's vendor/mngr/  -->  Docker container's /code/
                       (under .external_worktrees/)     (via rsync over SSH)
 ```
 
@@ -29,7 +29,7 @@ The desktop client runs on the host (via Electron). The system interface + mngr 
 
 ### Critical: the vendor/mngr/ sync must happen BEFORE every Create
 
-When you click "Create" in the desktop client with a LOCAL-Docker provider, the desktop client (`apps/minds/.../agent_creator.py`) takes whatever's currently in the FCT worktree (including `vendor/mngr/`), shallow-clones it to a temp dir, rsyncs the worktree's working dir over the clone (so uncommitted FCT-side changes propagate), and ships the result into `/code/` in the Docker container. mngr inside the container is `uv tool install -e`'d from `/code/vendor/mngr/`.
+When you click "Create" in the desktop client with a LOCAL-Docker provider, the desktop client (`apps/minds/.../agent_creator.py`) takes whatever's currently in the DEFAULT_WORKSPACE_TEMPLATE worktree (including `vendor/mngr/`), shallow-clones it to a temp dir, rsyncs the worktree's working dir over the clone (so uncommitted default-workspace-template-side changes propagate), and ships the result into `/code/` in the Docker container. mngr inside the container is `uv tool install -e`'d from `/code/vendor/mngr/`.
 
 **The desktop client does NOT auto-sync live mngr code into the worktree.** If `vendor/mngr/` is stale relative to your live mngr working tree, the Docker container's mngr will be stale too -- and (depending on what you've changed) `mngr create` inside the container may reject your `.mngr/settings.toml` with errors like `Unknown fields in agent_types.claude: [...]`. The bootstrap's chat-agent-create step then fails, and you'll see an empty workspace with "No conversation data" in the chat panel.
 
@@ -37,24 +37,38 @@ When you click "Create" in the desktop client with a LOCAL-Docker provider, the 
 
 ## Quick start (first time and every time)
 
+> **First time on this machine?** Install the one-time prerequisites in
+> `apps/minds/docs/dev-setup.md` first (Docker, Node/pnpm, GNU rsync, GitHub
+> access, Vault login, Modal profile) -- the steps below assume they're in place.
+
 ```bash
 # 1. (Once) Install electron deps.
 cd apps/minds && pnpm install && cd ../..
 
-# 2. (Once) Stand up an FCT worktree at .external_worktrees/forever-claude-template/
+# 2. (Once) Stand up a DEFAULT_WORKSPACE_TEMPLATE worktree at .external_worktrees/default-workspace-template/
 #    on a branch named after your current mngr branch (so template-side
 #    edits stay parallel-named). Required by `just minds-start`.
-git -C ~/project/forever-claude-template worktree add \
-    -b "$(git rev-parse --abbrev-ref HEAD)" \
-    "$PWD/.external_worktrees/forever-claude-template" \
-    origin/main   # base branch/tag; origin/main is the safe default
+just default-workspace-template-worktree   # clones default_workspace_template on the current mngr branch; set DEFAULT_WORKSPACE_TEMPLATE_DIR to speed it up
 
-# 3. (Once) Bootstrap your personal dev env. Pick a name like
-#    "dev-<your-user>" (convention; the DevEnvName validator requires the
-#    tier prefix FIRST -- "dev-" or "ci-" -- so "dev-josh" is valid but
-#    "josh-dev" is not). --create idempotently mkdirs the env root
-#    ~/.minds-dev-<your-user>/ if it doesn't exist.
-eval "$(uv run minds env activate --create dev-<your-user>)"
+# 3. (Once) Bootstrap your personal dev env. `minds env deploy` reads
+#    dev-tier provisioning credentials (Neon, SuperTokens, ...) from HCP
+#    Vault at command time, so set up two prerequisites first (each fails
+#    with a clear error if missing):
+#      - Vault: `vault login -method=oidc` once per session (browser OIDC;
+#        token lands at ~/.vault-token). The deploy CLI applies the imbue
+#        HCP VAULT_ADDR / VAULT_NAMESPACE defaults itself (vault_reader.py),
+#        so login is all you need.
+#      - Modal: ~/.modal.toml needs a profile for the dev tier's Modal
+#        workspace. `minds env activate --deploy` validates it and, if
+#        missing, prints the exact `modal token set --profile <workspace>`.
+#    Then pick an env name like "dev-<your-user>" (convention; the DevEnvName
+#    validator requires the tier prefix FIRST -- "dev-" or "ci-" -- so
+#    "dev-josh" is valid but "josh-dev" is not). --create idempotently
+#    mkdirs the env root ~/.minds-dev-<your-user>/ if it doesn't exist;
+#    --deploy pins MODAL_PROFILE to the tier's Modal workspace, which the
+#    following `minds env deploy` refuses to run without.
+vault login -method=oidc   # once per session; token lands at ~/.vault-token
+eval "$(uv run minds env activate --create --deploy dev-<your-user>)"
 uv run minds env deploy
 
 # 4. (Every time you start the app, in a fresh shell) Activate the env
@@ -71,8 +85,8 @@ If you want to run against prod / staging instead of a personal dev env, use `ev
 ### What `just minds-start` does
 
 1. Verifies a minds env is activated in the shell (refuses with a helpful error if not).
-2. Verifies the FCT worktree exists at `.external_worktrees/forever-claude-template/` and bails with a helpful error if not.
-3. Rsyncs the live mngr working tree into the FCT worktree's `vendor/mngr/` using the same exclusions as the pool-bake's `--mngr-source` path (`.git`, `__pycache__`, `.venv`, `node_modules`, etc.). Uncommitted changes are included; nothing is committed in the FCT worktree.
+2. Verifies the DEFAULT_WORKSPACE_TEMPLATE worktree exists at `.external_worktrees/default-workspace-template/` and bails with a helpful error if not.
+3. Rsyncs the live mngr working tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `vendor/mngr/` using the same exclusions as the pool-bake's `--mngr-source` path (`.git`, `__pycache__`, `.venv`, `node_modules`, etc.). Uncommitted changes are included; nothing is committed in the DEFAULT_WORKSPACE_TEMPLATE worktree.
 4. Launches Electron with the right `MINDS_WORKSPACE_*` env vars so the create-form auto-fills "repository" and "branch". The workspace name is not prefilled -- the form generates a `mind-N` name unless you type one into its advanced "Name" field.
 
 ## Iterating on a running agent
@@ -89,7 +103,7 @@ apps/minds/scripts/propagate_changes \
 This:
 
 1. Verifies a minds env is activated in the shell (refuses without it).
-2. Rsyncs the mngr repo into the FCT worktree's `vendor/mngr/` (same step `just minds-start` does, idempotent)
+2. Rsyncs the mngr repo into the DEFAULT_WORKSPACE_TEMPLATE worktree's `vendor/mngr/` (same step `just minds-start` does, idempotent)
 3. Stops the agent (`mngr stop`)
 4. Rsyncs the full template (with updated vendor/mngr/) into `/code/` in the container
 5. Rebuilds the system interface frontend (`npm run build` via SSH)
@@ -130,17 +144,17 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 
 | Recipe | Purpose |
 |---|---|
-| `just minds-start` | **Preferred dev entry point.** Sync live mngr -> FCT vendor/mngr, then launch the Electron app. Requires an activated minds env in the shell. |
+| `just minds-start` | **Preferred dev entry point.** Sync live mngr -> DEFAULT_WORKSPACE_TEMPLATE vendor/mngr, then launch the Electron app. Requires an activated minds env in the shell. |
 | `just minds-stop` | Kill the desktop client started in this worktree by `just minds-start`. |
 | `just minds-build` | Build the desktop client distributable via `todesktop` (slow, only for releases). |
 | `apps/minds/scripts/propagate_changes ...` | Sync changes into a running container without restarting the Electron app from scratch. See "Iterating on a running agent". Requires an activated env. |
-| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake an OVH pool host (the imbue_cloud pool's VPS provider). `--mngr-source` rsyncs the monorepo into the FCT vendor/mngr/ for the duration of the bake. (For pool hosts only -- has no effect on Docker mode.) Requires an activated env. Typically driven via the `minds pool create` wrapper, which injects OVH + pool-ssh credentials from Vault. |
+| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake an OVH pool host (the imbue_cloud pool's VPS provider). `--mngr-source` rsyncs the monorepo into the DEFAULT_WORKSPACE_TEMPLATE vendor/mngr/ for the duration of the bake. (For pool hosts only -- has no effect on Docker mode.) Requires an activated env. Typically driven via the `minds pool create` wrapper, which injects OVH + pool-ssh credentials from Vault. |
 | `just deploy [--yes-i-mean-<tier>]` | Run `minds env deploy` on the activated env. For dev envs: provisions Modal env / Neon / SuperTokens + deploys both Modal apps + writes `~/.minds-<env>/{client.toml,secrets.toml}`. For tier deploys: pushes Vault secrets to Modal + deploys both Modal apps, no local state written. |
-| `just sync-vendor-mngr <fct-path>` | One-shot: snapshot mngr HEAD into FCT's vendor/mngr/ via `git archive` and commit in FCT. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
+| `just sync-vendor-mngr <default-workspace-template-path>` | One-shot: snapshot mngr HEAD into DEFAULT_WORKSPACE_TEMPLATE's vendor/mngr/ via `git archive` and commit in DEFAULT_WORKSPACE_TEMPLATE. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
 
-### Vault (for pool / slice bakes)
+### Vault (for `minds env deploy` and pool / slice bakes)
 
-Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets from Vault (the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.). (Baking new OVH classic VPS pool hosts is deprecated and no longer supported.) Two things to know:
+Both `minds env deploy` (which reads dev-tier provisioning credentials -- Neon, SuperTokens, etc. -- at command time) and slice bakes (`minds pool create`, `just bake-slice-{dev,prod}` -- the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.) read secrets from HCP Vault. (Baking new OVH classic VPS pool hosts is deprecated and no longer supported.) Two things to know:
 
 - **Login is interactive.** Run `vault login -method=oidc` once per session (browser OIDC); the token lands at `~/.vault-token`.
 - **`VAULT_ADDR` / `VAULT_NAMESPACE` are usually NOT set in a non-interactive shell.** The minds wrappers (`minds pool ...` and the `bake-*` recipes) apply the imbue HCP defaults automatically via `apps/minds/imbue/minds/envs/vault_reader.py`, so they "just work" with only the token -- **prefer them**. If you run a **raw** `vault` or `mngr imbue_cloud admin ...` command, a bare `vault` defaults to `https://127.0.0.1:8200` and fails with "connection refused" -- that is a missing address, **NOT** "logged out" (don't ask the operator to re-login, and don't ask them for `VAULT_ADDR`). Export the defaults first:
@@ -158,8 +172,8 @@ Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets fro
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists, else `~/project/forever-claude-template` |
-| `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
+| `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/default-workspace-template/` (create it with `just default-workspace-template-worktree`); `just minds-start` sets this. Absent it, `templates.py` falls back to the default-workspace-template remote URL |
+| `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The DEFAULT_WORKSPACE_TEMPLATE path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
 
 The desktop client reads these in `apps/minds/imbue/minds/desktop_client/templates.py`.
 
@@ -183,7 +197,7 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Editable installs
 
-The FCT Docker build installs mngr (`vendor/mngr/libs/mngr`) and the system_interface (`apps/system_interface/`) editable via `uv tool install -e`, run by `scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
+The DEFAULT_WORKSPACE_TEMPLATE Docker build installs mngr (`vendor/mngr/libs/mngr`) and the system_interface (`apps/system_interface/`) editable via `uv tool install -e`, run by `scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
 
 ### Template settings
 
@@ -209,20 +223,24 @@ If you used the pre-refactor layout (`~/.devminds/` for all dev iteration plus `
 
 If a recipe is broken or you want to run something the recipes don't cover, here are the underlying steps the recipes wrap.
 
-### Create the FCT worktree by hand
+### Create the DEFAULT_WORKSPACE_TEMPLATE worktree by hand
+
+Normally `just default-workspace-template-worktree` does this for you (clones default_workspace_template into
+`.external_worktrees/default-workspace-template` on the current mngr branch). To do it
+by hand from your own default_workspace_template clone instead:
 
 ```bash
-cd ~/project/forever-claude-template
-git worktree add /path/to/mngr/worktree/.external_worktrees/forever-claude-template -b <branch-name> origin/main
+cd "${DEFAULT_WORKSPACE_TEMPLATE_DIR:-$HOME/project/default-workspace-template}"
+git worktree add /path/to/mngr/worktree/.external_worktrees/default-workspace-template -b <branch-name> origin/main
 ```
 
-### Sync mngr code into the FCT worktree's vendor/mngr/ by hand
+### Sync mngr code into the DEFAULT_WORKSPACE_TEMPLATE worktree's vendor/mngr/ by hand
 
 ```bash
 rsync -a --delete \
     --filter=':- .gitignore' \
     --exclude=.git --exclude=uv.lock \
-    ./ .external_worktrees/forever-claude-template/vendor/mngr/
+    ./ .external_worktrees/default-workspace-template/vendor/mngr/
 ```
 
 This is what `just minds-start` does internally, what `mngr imbue_cloud admin pool create --mngr-source ...` does for the duration of the bake, and what `propagate_changes` does as step 1 on each iteration.
@@ -231,12 +249,12 @@ This is what `just minds-start` does internally, what `mngr imbue_cloud admin po
 
 ```bash
 eval "$(uv run minds env activate dev-<your-user>)"
-TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch --show-current)
+TEMPLATE_BRANCH=$(cd .external_worktrees/default-workspace-template && git branch --show-current)
 (
   set -a
   source .env
   set +a
-  export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
+  export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/default-workspace-template"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
   cd apps/minds && pnpm start
 )

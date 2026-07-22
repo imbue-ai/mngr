@@ -95,6 +95,23 @@ Deploy-mode adds:
   they operate against (`modal token set --profile <workspace>` once
   per tier).
 
+  For the **dev tier** the workspace is `minds-dev`, a *separate* Modal
+  workspace from `imbue`. Modal tokens are workspace-bound and there is no
+  shared dev token in Vault (nothing lives under `secrets/minds/dev/` for
+  this), so each developer provisions their own: you must be a member of
+  the `minds-dev` Modal workspace (ask in #project-minds-internal-product for
+  an invite), then run
+  `modal token new --profile minds-dev` and select the `minds-dev`
+  workspace in the browser. Verify with `modal profile list`: the
+  `minds-dev` profile must show workspace `minds-dev`. **Watch out:** a
+  profile *named* `minds-dev` that actually holds a token for a *different*
+  workspace (e.g. `imbue`) passes the activation-time check, which only
+  verifies the `[minds-dev]` section exists, not its token's workspace.
+  `minds env deploy` preflights the token's real workspace (via `modal
+  profile list`) and refuses with a clear error before touching any cloud
+  state, but running `modal profile list` yourself confirms the binding up
+  front.
+
 To deactivate:
 
 ```bash
@@ -237,11 +254,9 @@ resources". For staging destroy this means:
    `metadata.env = "staging"` (created via the connector's
    `cf_create_tunnel` -- see "Tier generation id + activate auto-wipe"
    below).
-7. Delete any bare-metal resource (currently OVH) tagged
-   `minds_env=staging`, including any legacy OVH VPS hosts.
-8. Delete the tier generation id from Vault (so the next deploy mints
+7. Delete the tier generation id from Vault (so the next deploy mints
    a fresh one).
-9. Only after every cloud-side step succeeds, `rmdir`
+8. Only after every cloud-side step succeeds, `rmdir`
    `~/.minds-staging/`. On any partial failure the env root stays so
    the operator can re-run `destroy` to pick up where things broke
    (rather than silently leaking expensive cloud resources because
@@ -250,8 +265,8 @@ resources". For staging destroy this means:
 Dev env destroy follows the same shape but operates on the per-dev
 Modal env / Neon DB / SuperTokens app (which deploy created outright,
 so destroy deletes them outright too rather than wiping data inside).
-The Cloudflare-tunnel + bare-metal-resource (currently OVH) +
-mngr-agent + env-root-removal steps are identical.
+The Cloudflare-tunnel + mngr-agent + env-root-removal steps are
+identical.
 
 ## Tier generation id + activate auto-wipe
 

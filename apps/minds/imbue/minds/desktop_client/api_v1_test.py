@@ -21,12 +21,16 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import CreationErrorKind
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PREFIX
+from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
+from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -40,16 +44,19 @@ from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
-from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TEST_KEY = "test-minds-api-key"
@@ -69,6 +76,10 @@ def _client_with_workspace(tmp_path: Path, agent_id: AgentId) -> FlaskClient:
         http_client=None,
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
+        # A recording caller so routes that shell out (e.g. the version route's
+        # in-workspace git read) are fast in-memory no-ops, never spawning a
+        # real ``mngr`` process.
+        mngr_caller=RecordingMngrCaller(),
     )
     return app.test_client()
 
@@ -92,6 +103,7 @@ class _RecordingAgentCreator(AgentCreator):
         self,
         repo_source: str,
         host_name: str = "",
+        display_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.DOCKER,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
@@ -99,14 +111,16 @@ class _RecordingAgentCreator(AgentCreator):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> CreationId:
         self._last_call = {
             "repo_source": repo_source,
             "host_name": host_name,
+            "display_name": display_name,
             "branch": branch,
             "launch_mode": launch_mode,
             "ai_provider": ai_provider,
@@ -115,6 +129,7 @@ class _RecordingAgentCreator(AgentCreator):
             "region": region,
             "anthropic_api_key": anthropic_api_key,
             "color": color,
+            "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
         }
         return CreationId()
@@ -325,8 +340,9 @@ def test_malformed_workspace_id_returns_400_not_500(tmp_path: Path) -> None:
 
 
 def test_workspace_version_returns_original_version_label(tmp_path: Path) -> None:
-    # The static resolver has no labels, so original is null and the git-derived
-    # fields default to null/[] (no concurrency group is wired in this test).
+    # The static resolver has no labels, so original is null; the git-derived
+    # fields default to null/[] because the recording caller returns empty
+    # stdout, which parses to no current version and no upgrade merges.
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
@@ -340,15 +356,23 @@ def test_workspace_version_returns_original_version_label(tmp_path: Path) -> Non
     assert body["upgrade_merges"] == []
 
 
-def test_workspace_backups_reports_not_found_without_canonical_env(tmp_path: Path) -> None:
-    # No restic.env was written for this workspace, so the backups route reports
-    # 404 (backups never configured) rather than 500.
+def test_workspace_backups_reports_unconfigured_as_an_ordinary_empty_listing(tmp_path: Path) -> None:
+    # No restic.env was written for this workspace: not an error -- the route
+    # returns an empty snapshot list, is_configured false, and the check half
+    # still reports its verdict (OFFLINE here: no discovery host-state data).
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
     response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
 
-    assert response.status_code == 404
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["is_configured"] is False
+    assert body["snapshots"] == []
+    assert body["is_backing_up"] is False
+    assert body["check_state"] == "OFFLINE"
+    assert body["is_verification_enabled"] is True
+    assert body["update_target_version"].startswith("minds-v")
 
 
 def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> None:
@@ -426,14 +450,15 @@ def test_create_workspace_invalid_host_name_returns_field_error(
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    # A submitted name that fails HostName validation surfaces as a 400 keyed to
-    # the host_name field (rather than a deferred FAILED on the creating page).
+    # A submitted name that normalizes to an empty slug (here all punctuation)
+    # surfaces as a 400 keyed to the host_name field (rather than a deferred
+    # FAILED on the creating page).
     client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
 
     response = client.post(
         "/api/v1/workspaces",
         headers=_auth_header(),
-        json={"git_url": "https://example/repo", "host_name": "bad.name"},
+        json={"git_url": "https://example/repo", "host_name": "!!!"},
     )
 
     assert response.status_code == 400
@@ -449,7 +474,7 @@ def test_create_workspace_auto_names_next_workspace_when_host_name_omitted(
     # next free ``workspace-N`` (workspace-2) before handing off to the creator.
     existing_id = AgentId()
     resolver = make_resolver_with_data(
-        make_agents_json(existing_id, labels={"workspace": "workspace-1", "is_primary": "true"}),
+        make_agents_json(existing_id, labels={"is_primary": "true"}, host_name="workspace-1"),
     )
     creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
     client = _client_with_agent_creator(
@@ -492,6 +517,44 @@ def test_create_operation_status_includes_status_text(
     assert body["kind"] == "create"
     assert body["status_text"] == status_text_for(str(AgentCreationStatus.INITIALIZING), launch_mode=LaunchMode.DOCKER)
     assert body["status_text"]
+    # An in-flight (non-failed) creation carries no failure classification.
+    assert body["error_kind"] is None
+
+
+def test_create_operation_status_carries_error_kind_for_classified_failures(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # A failed creation whose error was classified (e.g. a private GitHub repo
+    # the local git credentials cannot see) reports the machine-readable kind
+    # alongside the error message; the creating page gates its static sign-in
+    # guidance on it.
+    creation_id = CreationId()
+    creator = _StatusReportingAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        fixed_info=AgentCreationInfo(
+            creation_id=creation_id,
+            status=AgentCreationStatus.FAILED,
+            launch_mode=LaunchMode.DOCKER,
+            error="git clone failed:\nfatal: could not read Username for 'https://github.com'",
+            error_kind=CreationErrorKind.GITHUB_AUTH_REQUIRED,
+        ),
+    )
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["status"] == "FAILED"
+    assert body["error"]
+    assert body["error_kind"] == "GITHUB_AUTH_REQUIRED"
 
 
 def test_create_workspace_full_surface_returns_202_and_threads_fields(
@@ -518,6 +581,7 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
             "launch_mode": "DOCKER",
             "ai_provider": "SUBSCRIPTION",
             "backup_provider": "CONFIGURE_LATER",
+            "runtime": "RUNSC",
         },
     )
 
@@ -528,6 +592,7 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert str(creator.last_call["host_name"]) == "my-mind"
     assert str(creator.last_call["color"]) == "#0b292b"
     assert str(creator.last_call["branch"]) == "main"
+    assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
 
 
 def test_create_workspace_requires_api_key_for_api_key_provider(
@@ -827,6 +892,7 @@ def _build_client(
         imbue_cloud_cli=imbue_cloud_cli,
         session_store=session_store,
         system_interface_health_tracker=system_interface_health_tracker,
+        mngr_caller=RecordingMngrCaller(),
     )
     return app.test_client()
 
@@ -887,7 +953,14 @@ def _associated_session_store(
     """Build a session store with one signed-in account that owns ``agent_id``."""
     cli.add_account(user_id=user_id, email=email)
     store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
-    store.associate_workspace(user_id, str(agent_id))
+    store.associate_created_workspace(
+        user_id=user_id,
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
     return store
 
 
@@ -1249,7 +1322,6 @@ def _sharing_client(
 
 def _fake_sharing_cli(tunnel: TunnelInfo | None = None, **kwargs: Any) -> FakeSharingCli:
     return FakeSharingCli(
-        parent_concurrency_group=ConcurrencyGroup(name="fake-sharing-cli"),
         connector_url=FAKE_CONNECTOR_URL,
         tunnel=tunnel,
         **kwargs,
@@ -1285,16 +1357,14 @@ def test_sharing_status_disabled_when_no_tunnel(tmp_path: Path) -> None:
     assert json.loads(response.data)["enabled"] is False
 
 
-def test_sharing_enable_returns_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_sharing_enable_returns_json(tmp_path: Path) -> None:
     agent_id = AgentId()
     cli = _fake_sharing_cli(
         tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=("web",))
     )
-    # The tunnel-token injection shells out to `mngr exec` (resolved via PATH);
-    # a fake mngr on PATH keeps that a fast no-op.
-    fake_mngr_dir = tmp_path / "bin"
-    _write_fake_mngr(fake_mngr_dir)
-    monkeypatch.setenv("PATH", f"{fake_mngr_dir}{os.pathsep}{os.environ['PATH']}")
+    # The tunnel-token injection runs `mngr exec` through ``cli.mngr_caller``,
+    # which the fake CLI defaults to an in-memory RecordingMngrCaller -- a fast
+    # no-op, so no real ``mngr`` process is spawned.
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -1539,40 +1609,68 @@ def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def test_auto_dispatched_restart_skipped_when_workspace_already_recovered(
+def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: AgentId) -> dict[str, Any]:
+    """Drain the restart worker's log queue to its terminal sentinel, then fetch the status.
+
+    Waits for the dispatched restart worker to finish (condition-based, no arbitrary
+    sleeps) and returns the parsed body of the typed restart-operation resource,
+    asserting the resource responds 200.
+    """
+    registry = get_state(client.application).workspace_operation_registry
+    log_queue = registry.get_log_queue(agent_id)
+    assert log_queue is not None
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
+            break
+    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
+    assert status_resp.status_code == 200
+    return json.loads(status_resp.data)
+
+
+def test_restart_dispatches_for_never_probed_workspace(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """An auto-dispatched recovery restart must no-op once the workspace recovered.
+    """A recovery-page dispatch for a never-probed workspace must actually restart.
 
-    The recovery page's host-health probe is slow, so the background probe loop can
-    flip the tracker back to HEALTHY while it is in flight; firing the queued
-    restart then would bounce a healthy backend. With the ``auto_dispatched``
-    marker the endpoint must skip the restart -- leaving the tracker HEALTHY rather
-    than transitioning it to RESTARTING -- so the recovery page's refresh simply
-    sends the user back to the now-healthy workspace. A manual restart (no marker)
-    always proceeds.
+    A workspace whose host has been offline since before this process started is
+    never enrolled as a probe suspect, so the tracker reports default-HEALTHY for
+    it. A veto keyed on that reading would drop the recovery page's cold-boot
+    dispatch (host scope + ``host_already_stopped``), stranding the workspace on
+    the loader forever. The dispatch must proceed to a real restart operation --
+    self-recovery races are absorbed by ``mngr start`` only targeting STOPPED
+    agents, not by an endpoint-side veto.
     """
     agent_id = AgentId()
-    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
     tracker = SystemInterfaceHealthTracker()
     client = _build_client(
         tmp_path,
         resolver,
         root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
         system_interface_health_tracker=tracker,
     )
 
-    # Tracker reports HEALTHY for this workspace (it recovered / was never enrolled).
+    # Tracker has no record for this workspace (never probed): the dispatch must
+    # still go through rather than being vetoed off the default-HEALTHY reading.
     response = client.post(
         f"/api/v1/workspaces/{agent_id}/restart",
         headers=_auth_header(),
-        json={"scope": "services", "auto_dispatched": True},
+        json={"scope": "host", "host_already_stopped": True},
     )
 
     assert response.status_code == 202
     assert json.loads(response.data) == {"operation_id": str(agent_id), "kind": "restart"}
-    # The guard returned before mark_restarting, so no restart was dispatched.
-    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+
+    # Confirm a real restart operation ran to DONE (with no mngr_forward_port
+    # wired, a clean dispatch counts as success).
+    body = _wait_for_restart_worker_and_get_status(client, agent_id)
+    assert body["kind"] == "restart"
+    assert body["status"] == "DONE"
 
 
 def test_workspace_restart_registers_operation_reaching_done(
@@ -1600,19 +1698,7 @@ def test_workspace_restart_registers_operation_reaching_done(
     )
     assert dispatch.status_code == 202
 
-    # Wait for the worker to finish by draining its log queue to the terminal
-    # sentinel (condition-based, no arbitrary sleeps).
-    registry = get_state(client.application).workspace_operation_registry
-    log_queue = registry.get_log_queue(agent_id)
-    assert log_queue is not None
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
-            break
-
-    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
-    assert status_resp.status_code == 200
-    body = json.loads(status_resp.data)
+    body = _wait_for_restart_worker_and_get_status(client, agent_id)
     assert body["kind"] == "restart"
     assert body["is_done"] is True
     assert body["status"] == "DONE"
@@ -1635,6 +1721,20 @@ def test_restart_operation_status_reports_registry_record(tmp_path: Path) -> Non
     done = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
     assert done["is_done"] is True
     assert done["status"] == "DONE"
+
+
+def test_restart_operation_status_hides_backup_operation_records(tmp_path: Path) -> None:
+    # Kind segregation in the restart direction: a backup update record for the
+    # same workspace agent id must not read as a restart through the typed
+    # restart endpoint (mirrors the backup endpoint hiding restart records).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    response = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
+
+    assert response.status_code == 404
 
 
 def test_typed_operation_routes_report_independently_for_one_agent_id(tmp_path: Path) -> None:
@@ -1681,3 +1781,284 @@ def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
     text = response.get_data(as_text=True)
     assert "restarting now" in text
     assert '"done": true' in text
+
+
+# -- Backup service routes --
+
+
+def test_workspace_backups_reports_offline_workspace_with_verification_enabled(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # With no discovery host-state data the workspace reads OFFLINE, so the
+    # route answers from local data alone (no exec into the workspace).
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
+
+    assert response.status_code == 200
+    entry = json.loads(response.data)
+    assert entry["agent_id"] == str(agent_id)
+    assert entry["check_state"] == "OFFLINE"
+    assert entry["problems"] == []
+    assert entry["is_verification_enabled"] is True
+
+
+def test_workspace_backups_reports_disabled_verification_without_exec(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Verification disabled: no exec runs and the check half reports DISABLED.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    set_backup_verification_enabled(WorkspacePaths(data_dir=tmp_path / "minds"), agent_id, False)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
+
+    assert response.status_code == 200
+    entry = json.loads(response.data)
+    assert entry["check_state"] == "DISABLED"
+    assert entry["is_verification_enabled"] is False
+
+
+def test_backup_service_update_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{AgentId()}/backup-service/update", headers=_auth_header(), json={})
+
+    assert response.status_code == 404
+
+
+def test_backup_service_update_unavailable_without_concurrency_group_returns_503(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
+
+    assert response.status_code == 503
+
+
+def test_backup_service_update_conflicts_with_a_running_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Any RUNNING operation for the workspace (here a restart) makes a second
+    # dispatch a 409 instead of stacking a second worker.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
+
+    assert response.status_code == 409
+    assert "RESTART" in json.loads(response.data)["error"]
+    # The dispatch did not replace the running record.
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.RESTART
+
+
+def test_workspace_restart_conflicts_with_a_running_backup_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # The reverse serialization direction: a restart dispatched while a backup
+    # update is RUNNING must 409 instead of replacing the registry record (and
+    # bouncing the host under the in-flight backup mutation).
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
+    )
+
+    assert response.status_code == 409
+    assert "BACKUP_UPDATE" in json.loads(response.data)["error"]
+    # The running backup operation's record was not replaced.
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.BACKUP_UPDATE
+    assert record.status == WorkspaceOperationStatus.RUNNING
+
+
+def test_backup_service_update_cancel_without_an_update_returns_404(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    cancel_url = f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel"
+
+    # No operation at all.
+    assert client.post(cancel_url, headers=_auth_header()).status_code == 404
+
+    # A non-backup-update record (a restart) must not be cancellable through
+    # the backup route either.
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    assert client.post(cancel_url, headers=_auth_header()).status_code == 404
+
+
+def test_backup_service_update_cancel_flags_a_running_update(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert registry.is_cancel_requested(agent_id) is True
+
+
+def test_backup_service_configure_rejects_configure_later_and_invalid_providers(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    configure_url = f"/api/v1/workspaces/{agent_id}/backup-service/configure"
+
+    later = client.post(configure_url, headers=_auth_header(), json={"backup_provider": "CONFIGURE_LATER"})
+    assert later.status_code == 400
+
+    invalid = client.post(configure_url, headers=_auth_header(), json={"backup_provider": "NOT_A_PROVIDER"})
+    assert invalid.status_code == 400
+
+
+def test_backup_service_disable_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{AgentId()}/backup-service/disable", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_backup_service_disable_conflicts_with_a_running_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/disable", headers=_auth_header())
+
+    assert response.status_code == 409
+
+
+def test_backup_operation_status_unknown_or_wrong_kind_returns_404(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    status_url = f"/api/v1/workspaces/operations/backup/{agent_id}"
+
+    # No operation at all.
+    assert client.get(status_url, headers=_auth_header()).status_code == 404
+
+    # Kind segregation: a restart record is not visible through the backup
+    # operations endpoint.
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    assert client.get(status_url, headers=_auth_header()).status_code == 404
+
+
+def test_backup_operation_status_reports_running_then_done(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc))
+    status_url = f"/api/v1/workspaces/operations/backup/{agent_id}"
+
+    running = json.loads(client.get(status_url, headers=_auth_header()).data)
+    assert running["kind"] == "backup_configure"
+    assert running["status"] == "RUNNING"
+    assert running["is_done"] is False
+    assert running["blocked_chats"] == []
+
+    registry.complete(agent_id)
+    done = json.loads(client.get(status_url, headers=_auth_header()).data)
+    assert done["is_done"] is True
+    assert done["status"] == "DONE"
+
+
+def test_backup_operation_status_surfaces_blocked_chats(tmp_path: Path) -> None:
+    # A failure with the structured blocked-by-running-chats error exposes the
+    # chat names so the UI can offer "Stop all chats and retry".
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+    registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}chat-1,chat-2")
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["kind"] == "backup_update"
+    assert body["is_done"] is False
+    assert body["blocked_chats"] == ["chat-1", "chat-2"]
+
+
+def test_backup_verification_toggle_round_trips(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    toggle_url = f"/api/v1/workspaces/{agent_id}/backup-service/verification"
+
+    disabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": False})
+    assert disabled.status_code == 200
+    assert is_backup_verification_enabled(paths, agent_id) is False
+
+    enabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": True})
+    assert enabled.status_code == 200
+    assert is_backup_verification_enabled(paths, agent_id) is True
+
+
+def test_backup_verification_toggle_requires_the_enabled_field(tmp_path: Path) -> None:
+    # A missing ``enabled`` is a structural failure, so spectree rejects it up
+    # front with the uniform 422 contract.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/backup-service/verification", headers=_auth_header(), json={}
+    )
+
+    assert response.status_code == 422
+    errors = json.loads(response.data)["errors"]
+    assert any(error["field"] == "enabled" for error in errors)
+
+
+def test_backup_verification_toggle_unknown_workspace_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.post(
+        f"/api/v1/workspaces/{AgentId()}/backup-service/verification",
+        headers=_auth_header(),
+        json={"enabled": False},
+    )
+
+    assert response.status_code == 404
+
+
+def test_backup_routes_require_bearer(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    assert client.get(f"/api/v1/workspaces/{agent_id}/backups").status_code == 401
+    assert client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", json={}).status_code == 401
+    assert (
+        client.post(f"/api/v1/workspaces/{agent_id}/backup-service/verification", json={"enabled": False}).status_code
+        == 401
+    )

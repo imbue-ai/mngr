@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Add a Claude Fable family entry ($10 / $50 per 1M input / output tokens, cache write $12.50, cache read $1.00) to the Agent SDK per-model price table, so `ResultMessage.total_cost_usd` is populated for `claude-fable-5` sessions instead of being left unset.
+
+## 2026-07-01
+
+Added the `test_prevent_async_await` ratchet test for consistency with every other project. mngr_robinhood is intentionally exempt from the async/await cap because it is a thin wrapper around the fundamentally-async Claude Agent SDK, so its async usage is intrinsic and cannot be removed.
+
 ## 2026-06-26
 
 Added scope docstrings to this package's release tests so the TMR (test

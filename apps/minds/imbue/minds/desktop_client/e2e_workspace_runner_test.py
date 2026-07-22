@@ -7,7 +7,6 @@ from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreationFailedError
-from imbue.minds.desktop_client.e2e_workspace_runner import _current_mngr_branch
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import _wait_for_workspace_ready_or_failure
 
@@ -71,6 +70,17 @@ def test_wait_returns_when_workspace_url_reached() -> None:
     _wait_for_workspace_ready_or_failure(cast(Page, page), timeout_seconds=5)
 
 
+def test_wait_returns_for_https_workspace_url() -> None:
+    """The workspace origin is https when the proxy serves TLS + HTTP/2 (the default).
+
+    The ready-check must recognize that scheme, not just http -- otherwise the
+    waiter never sees the workspace as ready and times out even though it loaded.
+    """
+    https_ready_url = "https://agent-deadbeef.localhost:8421/"
+    page = _FakePage(urls=[https_ready_url], is_visible_results=[False])
+    _wait_for_workspace_ready_or_failure(cast(Page, page), timeout_seconds=5)
+
+
 def test_wait_raises_with_surfaced_error_on_failure_view() -> None:
     page = _FakePage(
         urls=[_PENDING_URL],
@@ -108,27 +118,3 @@ def test_read_failure_message_returns_trimmed_text() -> None:
 def test_read_failure_message_handles_missing_element() -> None:
     page = _FakePage(urls=[_PENDING_URL], is_visible_results=[False], error_message=None)
     assert "not present" in _read_failure_message(cast(Page, page))
-
-
-def test_current_mngr_branch_prefers_github_head_ref(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On a pull_request CI run the checkout is detached, so the PR source
-    branch must come from GITHUB_HEAD_REF rather than `git rev-parse HEAD`."""
-    monkeypatch.setenv("GITHUB_HEAD_REF", "mngr/some-feature")
-    monkeypatch.setenv("GITHUB_REF_NAME", "123/merge")
-    assert _current_mngr_branch() == "mngr/some-feature"
-
-
-def test_current_mngr_branch_uses_github_ref_name_for_push(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On a push CI run GITHUB_HEAD_REF is unset and GITHUB_REF_NAME is the branch."""
-    monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-    monkeypatch.setenv("GITHUB_REF_NAME", "main")
-    assert _current_mngr_branch() == "main"
-
-
-def test_current_mngr_branch_ignores_pr_merge_ref(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A PR's GITHUB_REF_NAME is a `<n>/merge` ref, not a real branch; it must be
-    ignored so resolution falls through to git rather than asking FCT for a
-    `<n>/merge` branch."""
-    monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-    monkeypatch.setenv("GITHUB_REF_NAME", "2065/merge")
-    assert _current_mngr_branch() != "2065/merge"

@@ -63,15 +63,18 @@ from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
@@ -92,6 +95,11 @@ _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 # assumption about which app that is or which routes it implements.
 _WORKSPACE_PROBE_PATH: Final[str] = "/"
 
+# Scheme of the `mngr forward` proxy origin. minds always runs the proxy with
+# `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
+# side builds are always `https`.
+_MNGR_FORWARD_SCHEME: Final[str] = "https"
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -99,11 +107,17 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     Callers that probe in a tight poll loop should construct one of these and
     pass it to ``probe_workspace_through_plugin`` on each iteration, instead
     of letting the helper construct a one-shot client per call.
+
+    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
+    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
+    hostname verification could never pass, and the cert is a self-signed
+    ephemeral one the probe is not positioned to validate anyway. Loopback-only.
     """
     return httpx.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
         cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+        verify=False,
     )
 
 
@@ -149,7 +163,7 @@ def probe_workspace_through_plugin(
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
     """
-    probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     host_header = f"{agent_id}.localhost"
     if client is not None:
         return _probe_once(client, probe_url, host_header)
@@ -206,6 +220,32 @@ class AgentCreationStatus(UpperCaseStrEnum):
     FAILED = auto()
 
 
+class CreationErrorKind(UpperCaseStrEnum):
+    """Machine-readable classification of a creation failure.
+
+    Carried alongside the human-readable ``error`` message so the creating
+    page can gate extra static guidance on the failure *type* instead of
+    substring-matching the message client-side. Only failure kinds that
+    change what the UI shows get a value here; unclassified failures carry
+    no kind and the UI shows just the error message.
+    """
+
+    # The clone of a github.com workspace source failed. By far the most
+    # common cause: the repo is private (or does not exist -- GitHub
+    # deliberately answers both the same way, to avoid leaking which private
+    # repos exist) and none of this machine's git credentials can see it, so
+    # the creating page shows GitHub sign-in guidance alongside the raw error.
+    # The clone mechanism is git, but the problem we surface is GitHub access.
+    GITHUB_AUTH_REQUIRED = auto()
+
+    # The clone of a NON-github remote git source (a URL on another host, or an
+    # ssh remote) failed -- same likely cause (private/nonexistent, no usable
+    # credentials on this machine) and same guidance, minus the GitHub-CLI
+    # advice, which only fits github.com. The creating page shows generic
+    # git-credentials guidance for this kind.
+    GIT_AUTH_REQUIRED = auto()
+
+
 class AgentCreationInfo(FrozenModel):
     """Snapshot of agent creation state, returned to callers for status polling.
 
@@ -241,6 +281,13 @@ class AgentCreationInfo(FrozenModel):
     )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
+    error_kind: CreationErrorKind | None = Field(
+        default=None,
+        description=(
+            "Machine-readable classification of the failure, set alongside ``error`` when the "
+            "failure is recognized (see ``classify_creation_error``); ``None`` otherwise"
+        ),
+    )
 
 
 def extract_repo_name(git_url: str) -> str:
@@ -268,6 +315,63 @@ def _is_local_path(repo_source: str) -> bool:
     if "://" in repo_source:
         return False
     return repo_source.startswith(("/", "./", "../", "~"))
+
+
+def _is_github_https_url(repo_source: str) -> bool:
+    """Check if a repo source is an http(s) URL on github.com.
+
+    Gates the private-repo failure classification (and the sign-in guidance
+    the creating page shows for it, which recommends the GitHub CLI) to
+    sources where that guidance is actually correct.
+    """
+    parts = urlsplit(repo_source)
+    if parts.scheme not in ("http", "https"):
+        return False
+    return parts.hostname in ("github.com", "www.github.com")
+
+
+def _is_remote_git_source(repo_source: str) -> bool:
+    """Check if a repo source is a REMOTE git source (a URL or ssh remote).
+
+    True for any ``scheme://`` URL (https/http/ssh/git) and for scp-style ssh
+    remotes (``user@host:path``). False for local paths and for bare strings
+    that are neither -- so a clone failure on a local path (not an access
+    problem) or on garbage input does not get the "you need access" guidance.
+    """
+    if "://" in repo_source:
+        return True
+    # scp-style ssh remote, e.g. git@gitlab.example.com:group/repo.git. The
+    # host part (before the first ':') must contain no '/', which distinguishes
+    # it from a local path like ``./a:b``.
+    return bool(re.match(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:", repo_source))
+
+
+def classify_creation_error(repo_source: str, error: Exception) -> CreationErrorKind | None:
+    """Classify a creation failure into a ``CreationErrorKind``, when recognizable.
+
+    Recognizes two cases, both for a failed clone (``GitCloneError``) of a
+    REMOTE git source -- the likely cause is the same (private/nonexistent,
+    no usable credentials on this machine). Deliberately no matching of git's
+    error text (git has no structured error output, and substring matching is
+    brittle across git versions and locales): a remote clone that failed at
+    all is overwhelmingly an access problem, and the creating page's guidance
+    covers it while the raw git error stays visible right above for anything
+    rarer.
+
+    - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
+      the GitHub CLI, which only fits github.com https).
+    - any other remote git source (a URL on another host, or an ssh remote)
+      -> ``GIT_AUTH_REQUIRED`` (generic git-credentials guidance, no GitHub CLI).
+
+    A local path or unrecognized input returns ``None`` (just the raw error).
+    """
+    if not isinstance(error, GitCloneError):
+        return None
+    if _is_github_https_url(repo_source):
+        return CreationErrorKind.GITHUB_AUTH_REQUIRED
+    if _is_remote_git_source(repo_source):
+        return CreationErrorKind.GIT_AUTH_REQUIRED
+    return None
 
 
 def _redact_url_credentials(url: str) -> str:
@@ -333,6 +437,26 @@ def _is_git_worktree(repo_dir: Path) -> bool:
     return dot_git.is_file()
 
 
+def _git_noninteractive_env() -> dict[str, str]:
+    """Environment for the desktop client's git calls: never prompt for credentials.
+
+    Git prompts for a username/password on the controlling terminal when a
+    remote needs auth and no credential is available -- but the desktop client
+    has no terminal for the user to answer on, and when minds is launched from
+    a dev shell the prompt would hang the creation thread forever. With
+    ``GIT_TERMINAL_PROMPT=0``, cloning a repo this machine lacks credentials
+    for fails fast with git's stable "could not read Username ... terminal
+    prompts disabled" error instead of hanging. Credential helpers (e.g. the
+    macOS keychain) still work as usual -- only interactive terminal
+    prompting is disabled.
+
+    Deliberately a small per-file copy of the same one-line helper the default
+    workspace template's ``bootstrap.manager`` and ``runtime_backup.runner``
+    carry (same name, same body), rather than a shared cross-package import.
+    """
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
 def clone_git_repo(
     git_url: GitUrl,
     clone_dir: Path,
@@ -391,6 +515,8 @@ def clone_git_repo(
     # which would otherwise leak tokens from credentialed URLs into logs.
     redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
+    git_env = _git_noninteractive_env()
+
     # All steps run under the same child concurrency group so cancellation is
     # uniform; the failure is raised AFTER the `with cg` block to keep
     # GitCloneError from being wrapped in a ConcurrencyExceptionGroup. For the
@@ -417,6 +543,7 @@ def clone_git_repo(
                 cwd=clone_dir,
                 is_checked_after=False,
                 on_output=redacted_on_output,
+                env=git_env,
             )
             if result.returncode != 0:
                 stderr = result.stderr.strip()
@@ -475,6 +602,56 @@ def checkout_branch(
         )
 
 
+def checkout_existing_branch(
+    repo_dir: Path,
+    branch: GitBranch,
+    on_output: OutputCallback | None = None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Check out ``branch`` by name in a repo that was NOT just fetched into.
+
+    Used for plain local-directory sources, where :func:`checkout_branch`'s
+    ``git checkout -B <branch> FETCH_HEAD`` would be wrong twice over: a fresh
+    clone has no FETCH_HEAD at all (the checkout fails with "'FETCH_HEAD' is
+    not a commit"), and a *stale* FETCH_HEAD left by an unrelated earlier fetch
+    would silently reset the user's branch tip to that old commit. This is the
+    user's own checkout, not a scratch clone, so the branch tip must never be
+    moved.
+
+    A no-op when the repo is already on ``branch``. Otherwise a plain
+    ``git checkout <branch>`` (git's remote-branch DWIM applies).
+
+    Raises GitOperationError if the checkout fails (e.g. no such branch).
+    """
+    cg = _make_child_cg("git-checkout-existing", parent_cg)
+    with cg:
+        head_result = cg.run_process_to_completion(
+            command=["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+        if head_result.returncode == 0 and head_result.stdout.strip() == str(branch):
+            logger.debug("Repo {} is already on branch {}; skipping checkout", repo_dir, branch)
+            return
+        logger.debug("Checking out existing branch {} in {}", branch, repo_dir)
+        result = cg.run_process_to_completion(
+            command=["git", "checkout", str(branch)],
+            cwd=repo_dir,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+    if result.returncode != 0:
+        raise GitOperationError(
+            "git checkout failed for branch '{}' (exit code {}):\n{}".format(
+                branch,
+                result.returncode,
+                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+            )
+        )
+
+
 def _rsync_worktree_over_clone(
     worktree_dir: Path,
     clone_dir: Path,
@@ -504,7 +681,7 @@ _DEFAULT_AGENT_NAME: Final[AgentName] = AgentName(SYSTEM_SERVICES_AGENT_NAME)
 
 # imbue_cloud create-path knobs forwarded as ``-b fast_mode=<value>``. ``require``
 # adopts an exact-attribute pre-baked pool host (fast); ``prevent`` leases any
-# available host and rebuilds it from the FCT Dockerfile (slow).
+# available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (slow).
 _FAST_MODE_REQUIRE: Final[str] = "require"
 _FAST_MODE_PREVENT: Final[str] = "prevent"
 
@@ -560,6 +737,10 @@ def provider_instance_name_for_launch(
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             return f"imbue_cloud_{_slugify_account(imbue_cloud_account)}"
+        case LaunchMode.MODAL:
+            # Single instance: the ``modal`` provider talks to Modal with the local
+            # token (``modal token new``).
+            return "modal"
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -567,6 +748,7 @@ def provider_instance_name_for_launch(
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     host_name: HostName,
+    display_name: str = "",
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
@@ -574,6 +756,7 @@ def _build_mngr_create_command(
     region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
@@ -587,7 +770,10 @@ def _build_mngr_create_command(
     id anyway, and pre-generating one led to bugs (e.g. keying gateway
     state under a fictional id).
 
-    DOCKER mode: --template main --template docker (runs in Docker container)
+    DOCKER mode: --template main --template docker (runs in a Docker container);
+        for ``docker_runtime == RUNSC`` the gVisor overlay is stacked on top
+        (--template docker_runsc) so the container runs under runsc. RUNC is the
+        docker template's default, so it adds no extra template.
     LIMA mode: --template main --template lima (runs in Lima VM)
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     AWS mode: --new-host on the aws-<region> provider, --template main
@@ -608,10 +794,10 @@ def _build_mngr_create_command(
     mngr's ``--reuse`` matches on agent name without host scope.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
-    the FCT template's own ``pass_(host_)env`` declarations, not by inline
+    the default workspace template's own ``pass_(host_)env`` declarations, not by inline
     flags here -- ``run_mngr_create`` populates them in the subprocess env
     when needed and the template-declared forwards pick them up. Keeping the
-    forwarding declaration in FCT means the same template works for ``mngr
+    forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
     create`` invocations from outside minds too.
 
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
@@ -632,7 +818,7 @@ def _build_mngr_create_command(
     )
     address = f"{_DEFAULT_AGENT_NAME}@{host_name}.{provider_instance}"
 
-    # The `/welcome` initial message is now baked into the FCT template's
+    # The `/welcome` initial message is now baked into the default workspace template's
     # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
@@ -679,8 +865,12 @@ def _build_mngr_create_command(
         "--no-connect",
         "--format",
         "jsonl",
+        # The workspace's arbitrary human-readable display name lives on the
+        # primary (system-services) agent; the host's normalized slug name lives
+        # on the host itself. There is no ``workspace`` label. Falls back to the
+        # host name when no separate display name is supplied.
         "--label",
-        f"workspace={host_name}",
+        f"workspace_display_name={display_name or host_name}",
         # Pin the agent's per-workspace branch to the host name. mngr's
         # default for ``--branch`` is ``:mngr/*`` where ``*`` expands to the
         # agent name, but our agent name is the constant ``system-services``
@@ -732,6 +922,11 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            if docker_runtime is DockerRuntime.RUNSC:
+                # gVisor overlay: reuses the docker template body and only flips
+                # the container runtime to runsc. runc is the docker template's
+                # default, so RUNC needs no extra template.
+                mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
@@ -774,7 +969,7 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
             # ``fast_mode`` selects the imbue_cloud create path: ``require``
             # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
-            # leases any available host and rebuilds it from the FCT Dockerfile
+            # leases any available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile
             # (slow, but always works). minds tries ``require`` first and falls
             # back to ``prevent`` on FastPathUnavailableError (see
             # ``_run_imbue_cloud_create_with_fallback``).
@@ -786,6 +981,11 @@ def _build_mngr_create_command(
             # "no capacity in <region>" error if none is available there.
             if region:
                 mngr_command.extend(["-b", f"region={region}"])
+        case LaunchMode.MODAL:
+            # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
+            # run the provisioning chain over SSH on the freshly-created sandbox.
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
+            mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -944,6 +1144,7 @@ def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path | None,
     host_name: HostName,
+    display_name: str = "",
     on_output: OutputCallback | None = None,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
@@ -954,6 +1155,7 @@ def run_mngr_create(
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
@@ -970,7 +1172,7 @@ def run_mngr_create(
     irrelevant.
 
     ``anthropic_api_key`` / ``anthropic_base_url`` are placed into the
-    subprocess env (not argv) so they don't show up in ``ps`` output; the FCT
+    subprocess env (not argv) so they don't show up in ``ps`` output; the DEFAULT_WORKSPACE_TEMPLATE
     template's own ``pass_(host_)env`` declarations cause mngr to forward them
     onto the host as appropriate.
 
@@ -986,6 +1188,7 @@ def run_mngr_create(
     mngr_command = _build_mngr_create_command(
         launch_mode,
         host_name,
+        display_name,
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
@@ -993,6 +1196,7 @@ def run_mngr_create(
         region=region,
         latchkey_env=latchkey_env,
         color=color,
+        docker_runtime=docker_runtime,
         original_minds_version=original_minds_version,
         original_branch=original_branch,
         prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
@@ -1011,7 +1215,13 @@ def run_mngr_create(
         if anthropic_base_url is not None:
             subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
 
-    logger.info("Running: {}", " ".join(mngr_command))
+    # The command carries the latchkey gateway password + permissions-override
+    # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
+    # so the persistent logs (uploaded with bug reports) never carry the raw
+    # secrets. The subprocess below still receives the unredacted command.
+    loggable_command = redact_secret_env_assignments(mngr_command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+    loggable_command_str = " ".join(loggable_command)
+    logger.info("Running: {}", loggable_command_str)
 
     capture = _CreateEventCapture(inner_on_output=on_output)
     cg = _make_child_cg("mngr-create", parent_cg)
@@ -1022,6 +1232,10 @@ def run_mngr_create(
             is_checked_after=False,
             on_output=capture,
             env=subprocess_env,
+            # Name the reader thread with the redacted command so the gateway
+            # password + JWT never reach the JSONL log's ``thread_name`` (nor any
+            # ProcessError message); the real command is still what executes.
+            name=loggable_command_str,
         )
 
     if result.returncode != 0:
@@ -1109,6 +1323,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     launch_mode: LaunchMode
     workspace_dir: Path | None
     host_name: HostName
+    display_name: str
     on_output: OutputCallback
     latchkey_env: Mapping[str, str] | None
     account_email: str | None
@@ -1119,6 +1334,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
+    docker_runtime: DockerRuntime
     original_minds_version: str | None
     original_branch: str | None
     # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
@@ -1137,6 +1353,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         launch_mode=params.launch_mode,
         workspace_dir=params.workspace_dir,
         host_name=params.host_name,
+        display_name=params.display_name,
         on_output=params.on_output,
         latchkey_env=params.latchkey_env,
         imbue_cloud_account=params.account_email if is_imbue_cloud else None,
@@ -1156,6 +1373,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
+        docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
         prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
@@ -1249,7 +1467,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
-            "default workspace (Lima + default FCT repo + current release tag), the create gates on "
+            "default workspace (Lima + default workspace template repo + current release tag), the create gates on "
             "the verified image and points Lima at it; None disables the path."
         ),
     )
@@ -1331,6 +1549,7 @@ class AgentCreator(MutableModel):
     _canonical_agent_ids: dict[str, AgentId] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
+    _error_kinds: dict[str, CreationErrorKind] = PrivateAttr(default_factory=dict)
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
@@ -1341,6 +1560,7 @@ class AgentCreator(MutableModel):
         self,
         repo_source: str,
         host_name: str = "",
+        display_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.DOCKER,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
@@ -1348,9 +1568,10 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
@@ -1367,6 +1588,10 @@ class AgentCreator(MutableModel):
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
 
+        ``docker_runtime`` selects the container runtime for
+        ``LaunchMode.DOCKER`` (runc vs gVisor's runsc); it is ignored by every
+        other launch mode, which pin their own runtime.
+
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
         ``ImbueCloudProvider.create_host`` runs the lease + SSH bootstrap
@@ -1376,10 +1601,12 @@ class AgentCreator(MutableModel):
         ask for.
 
         When ``on_created`` is provided, it is called with the canonical
-        ``AgentId`` once ``mngr create`` returns (immediately before the
-        status flips to ``DONE``). The id is parsed from the inner
-        ``mngr create``'s JSONL ``"event": "created"`` line, not pre-generated;
-        for imbue_cloud agents it's the leased pool host's pre-baked id.
+        ``AgentId`` and ``HostId`` once ``mngr create`` returns (immediately
+        after the status flips to ``DONE``, so consumers can rely on the
+        published canonical id). Both ids are parsed from the
+        inner ``mngr create``'s JSONL ``"event": "created"`` line, not
+        pre-generated; for imbue_cloud agents they are the leased pool
+        host's pre-baked ids.
 
         Returns a ``CreationId`` immediately for tracking the in-flight
         creation. Use ``get_creation_info()`` to poll status (and read
@@ -1396,6 +1623,10 @@ class AgentCreator(MutableModel):
         # input fails inside the background thread with an error_message
         # rather than crashing this synchronous entry point.
         effective_name = host_name.strip() if host_name.strip() else extract_repo_name(repo_source)
+        # The arbitrary human-readable display name. Falls back to the host-name
+        # slug when the caller did not supply a separate display name (e.g. an
+        # auto-generated ``workspace-N``).
+        effective_display_name = display_name.strip() if display_name.strip() else effective_name
         effective_branch = branch.strip()
 
         creation_id = CreationId()
@@ -1412,6 +1643,7 @@ class AgentCreator(MutableModel):
                 creation_id,
                 repo_source,
                 effective_name,
+                effective_display_name,
                 effective_branch,
                 log_queue,
                 launch_mode,
@@ -1423,6 +1655,7 @@ class AgentCreator(MutableModel):
                 on_created,
                 backup_request,
                 color,
+                docker_runtime,
                 original_minds_version,
             ),
             daemon=True,
@@ -1462,6 +1695,7 @@ class AgentCreator(MutableModel):
                 host_name=self._host_names.get(cid_str, ""),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
+                error_kind=self._error_kinds.get(cid_str),
             )
 
     def get_log_queue(self, creation_id: CreationId) -> queue.Queue[str] | None:
@@ -1474,6 +1708,7 @@ class AgentCreator(MutableModel):
         creation_id: CreationId,
         repo_source: str,
         host_name: str,
+        display_name: str,
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
@@ -1482,9 +1717,10 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
@@ -1579,8 +1815,10 @@ class AgentCreator(MutableModel):
                             parent_cg=self.root_concurrency_group,
                         )
                         workspace_dir = clone_target
+                        is_workspace_dir_scratch_clone = True
                     else:
                         workspace_dir = resolved_path
+                        is_workspace_dir_scratch_clone = False
                         log_queue.put("[minds] Using local directory: {}".format(workspace_dir))
                 else:
                     repo_name = extract_repo_name(repo_source)
@@ -1607,17 +1845,29 @@ class AgentCreator(MutableModel):
                         parent_cg=self.root_concurrency_group,
                     )
                     workspace_dir = clone_target
+                    is_workspace_dir_scratch_clone = True
 
                 if branch:
                     with self._lock:
                         self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
-                    checkout_branch(
-                        workspace_dir,
-                        GitBranch(branch),
-                        on_output=emit_log,
-                        parent_cg=self.root_concurrency_group,
-                    )
+                    # Scratch clones were just fetched into, so FETCH_HEAD is the
+                    # requested ref; a plain local directory has no such fetch, and
+                    # is the user's own checkout whose branch tip must not be reset.
+                    if is_workspace_dir_scratch_clone:
+                        checkout_branch(
+                            workspace_dir,
+                            GitBranch(branch),
+                            on_output=emit_log,
+                            parent_cg=self.root_concurrency_group,
+                        )
+                    else:
+                        checkout_existing_branch(
+                            workspace_dir,
+                            GitBranch(branch),
+                            on_output=emit_log,
+                            parent_cg=self.root_concurrency_group,
+                        )
 
                 # Resolve the Anthropic credentials according to the AI
                 # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;
@@ -1635,12 +1885,14 @@ class AgentCreator(MutableModel):
                             self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
                         log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
                         try:
+                            # No host_name metadata: the key is minted before the
+                            # host exists (so no host id is available), and the host
+                            # name is mutable, so it would only go stale on rename.
                             key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
                                 account=account_email,
                                 alias=None,
                                 max_budget=100.0,
                                 budget_duration="1d",
-                                metadata={"host_name": host_name},
                             )
                         except ImbueCloudCliError as exc:
                             raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
@@ -1696,7 +1948,7 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # Pre-baked Lima image gate (issue 2306): for the default
-                # workspace (Lima + default FCT repo + current release tag) wait on
+                # workspace (Lima + default workspace template repo + current release tag) wait on
                 # the prefetched, verified image and point Lima at it. Returns None
                 # (build in-VM) for any non-default create or unpublished version;
                 # raises a retryable error if a published image can't be readied.
@@ -1722,6 +1974,7 @@ class AgentCreator(MutableModel):
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     host_name=parsed_host,
+                    display_name=display_name or str(parsed_host),
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
                     account_email=account_email,
@@ -1732,6 +1985,7 @@ class AgentCreator(MutableModel):
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                     color=color,
+                    docker_runtime=docker_runtime,
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
                     prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
@@ -1816,7 +2070,7 @@ class AgentCreator(MutableModel):
                     self._redirect_urls[cid_str] = redirect_url
 
                 if on_created is not None:
-                    on_created(canonical_id)
+                    on_created(canonical_id, canonical_host_id)
 
                 # Configure restic backups asynchronously on a detached
                 # thread (mirrors the Cloudflare tunnel-token path): bucket
@@ -1842,9 +2096,12 @@ class AgentCreator(MutableModel):
         except (GitCloneError, GitOperationError, MngrCommandError, ImbueCloudCliError, ValueError, OSError) as e:
             logger.opt(exception=e).error("Failed to create agent for creation {}", creation_id)
             log_queue.put("[minds] ERROR: {}".format(e))
+            error_kind = classify_creation_error(repo_source, e)
             with self._lock:
                 self._statuses[cid_str] = AgentCreationStatus.FAILED
                 self._errors[cid_str] = str(e)
+                if error_kind is not None:
+                    self._error_kinds[cid_str] = error_kind
         finally:
             log_queue.put(LOG_SENTINEL)
 
@@ -1862,7 +2119,7 @@ class AgentCreator(MutableModel):
         ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
         minds matches on that ``error_class`` and retries with
         ``fast_mode=prevent``, which leases any available host and rebuilds it
-        from the FCT Dockerfile (full client-side setup). Any other failure
+        from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (full client-side setup). Any other failure
         (including a genuinely empty pool) propagates unchanged.
         """
         log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
@@ -1965,7 +2222,7 @@ class AgentCreator(MutableModel):
         """
         if self.mngr_forward_port == 0:
             return f"/goto/{agent_id}/"
-        return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
+        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.

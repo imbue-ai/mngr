@@ -4,6 +4,50 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-15
+
+Added workspace-sync storage and endpoints (migration 013): `workspace_records` (per-account plaintext workspace metadata plus an opaque client-encrypted secrets blob, compare-and-swap on a per-row revision, at most one ACTIVE row per agent id) and `account_key_bundles` (the password-wrapped per-account data key).
+
+New admin-authenticated (not paid-gated) routes: `GET /sync/records`, `PUT /sync/records/{host_id}`, `DELETE /sync/records/{host_id}`, `POST /sync/scrub-secrets`, and `GET`/`PUT`/`DELETE /sync/bundle`.
+
+The sync payload size caps are 10x more generous than the current payload needs (encrypted secrets 2.5 MiB, key-bundle fields 40 KiB, metadata text 5 KiB). They exist to bound a row, not to police its shape: the secrets blob is an opaque client-versioned envelope, so adding another secret to it later must not require a connector deploy to raise a limit.
+
+Paid users no longer get stuck behind email verification:
+
+- A paid user who signs up with email/password is now auto-verified at signup (no verification email, and their first session is already verified) instead of being asked to verify their email.
+
+- Adding an email to the paid list (`mngr imbue_cloud admin paid email add` / `minds paid add`) now also marks any pre-existing account for that email as verified, so a user who signed up before being made paid isn't left locked out. This is best-effort: it never fails the paid-list write.
+
+- The admin auth guard now determines email-verification from a live SuperTokens lookup rather than trusting the (possibly stale) claim baked into the access token. Verification now takes effect on the user's very next request instead of only after their token refreshes.
+
+## 2026-07-11
+
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+References in this project (comments, identifiers, docs) are mechanically updated by `scripts/rename_template_repo.py`.
+
+## 2026-07-06
+
+Added a `POST /hosts/{host_db_id}/rename` endpoint that updates a leased host's mutable `host_name` column. Ownership is enforced (a host leased by another user returns 403; a missing or not-leased host returns 404) and the new name is validated against mngr's SafeName regex. This backs the new workspace-rename flow; the host's durable identity (its lease id) is unchanged.
+
+Integrates the "simple names" work: adds `POST /hosts/{host_db_id}/rename` to update a leased host's mutable `host_name`. Ownership is enforced (403 for a host leased by another user, 404 for a missing or not-leased host) and the new name is validated against mngr's SafeName regex. This backs the workspace-rename flow; the host's durable identity (its lease id) is unchanged.
+
+## 2026-07-01
+
+Removed all OVH logic from the remote connector service. Pool hosts are now exclusively bare-metal slices, so releasing a host destroys its slice's lima VM and the connector makes no OVH API calls.
+
+- The `/hosts/{id}/release` route is slice-only (no OVH tag-strip/cancel); a failed teardown returns 5xx and leaves the row `removing`.
+
+- Removed the OVH cleanup sweep from the hourly `cleanup_removing_pool_hosts` cron; the cron now only runs the alert-only slice-box reconcile.
+
+- Dropped the `ovh` Python dependency and the `ovh-<env>` Modal secret from the deployment.
+
+- Added migration `012_drop_pool_host_backend_kind.sql`: deletes any residual `ovh_vps` rows and drops the `pool_hosts.backend_kind` column.
+
+Known follow-up: a slice row left in `removing` by a crashed inline release is no longer auto-swept (only alert-only reconcile remains).
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-26
 
 Added scope docstrings to this package's release tests so the TMR (test

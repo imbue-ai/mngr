@@ -10,7 +10,7 @@ which keeps "I'm activated against dev env A but accidentally typed
 ``minds env destroy production``" impossible.
 
 The CLI side constructs real provider callables (Modal CLI / Neon /
-SuperTokens / OVH HTTP / Modal deploy) and threads them into the
+SuperTokens / Modal deploy) and threads them into the
 pure orchestration in :mod:`imbue.minds.envs.provisioning`.
 
 Dev-tier credentials needed for provisioning come from HCP Vault at
@@ -64,12 +64,14 @@ from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agents
 from imbue.minds.envs.paths import active_env_name_or_none
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
+from imbue.minds.envs.per_env_deploy import active_modal_token_workspace
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
 from imbue.minds.envs.per_env_deploy import delete_modal_secret as real_delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env as real_ensure_modal_env
 from imbue.minds.envs.per_env_deploy import get_modal_app_latest_version as real_get_modal_app_latest_version
+from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import rollback_modal_app as real_rollback_modal_app
 from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
@@ -78,7 +80,6 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
 from imbue.minds.envs.primitives import VaultReadError
-from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real_delete_cloudflare_tunnels
 from imbue.minds.envs.providers.cloudflare_tunnels import list_tunnels_for_env as real_list_cloudflare_tunnels_for_env
 from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete_modal_env
@@ -93,9 +94,6 @@ from imbue.minds.envs.providers.neon_db import (
     verify_neon_token_has_restore_scope as real_verify_neon_token_has_restore_scope,
 )
 from imbue.minds.envs.providers.neon_db import wipe_neon_db_schema as real_wipe_neon_db_schema
-from imbue.minds.envs.providers.ovh_tags import OvhCredentials
-from imbue.minds.envs.providers.ovh_tags import delete_instances as delete_ovh_instances
-from imbue.minds.envs.providers.ovh_tags import list_env_instances as list_ovh_instances
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import create_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import delete_supertokens_app
@@ -121,7 +119,6 @@ from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import write_stdout_line
-from imbue.mngr_ovh.iam_tags import IamResource
 
 # Reserved env names that map to named tiers; names starting with
 # ``ci-`` map to the ``ci`` tier (CI-orchestrator-minted ephemeral envs),
@@ -131,7 +128,7 @@ from imbue.mngr_ovh.iam_tags import IamResource
 # ``_STAGING_ENV_NAME`` / ``_DEV_TIER`` / ``_CI_TIER`` constants + the
 # ``_tier_for_env_name`` mapper live in ``_activated_env.py`` so
 # ``minds pool`` (which also needs to derive the tier for its
-# Vault-scoped OVH credentials read) can share them without an
+# Vault-scoped pool-ssh / DSN reads) can share them without an
 # env.py -> pool.py back-reference.
 _RESERVED_TIER_ENV_NAMES: Final[frozenset[str]] = frozenset({"production", "staging"})
 
@@ -178,14 +175,6 @@ def _create_supertokens_for_provider(name: DevEnvName, core_base_url: str, api_k
 
 def _delete_supertokens_for_provider(name: DevEnvName, core_base_url: str, api_key: SecretStr) -> None:
     delete_supertokens_app(name, core_base_url=core_base_url, api_key=api_key)
-
-
-def _list_ovh_for_provider(name: DevEnvName, credentials: OvhCredentials) -> tuple[IamResource, ...]:
-    return list_ovh_instances(name, credentials=credentials)
-
-
-def _delete_ovh_for_provider(instances: tuple[IamResource, ...], credentials: OvhCredentials) -> None:
-    delete_ovh_instances(instances, credentials=credentials)
 
 
 def _read_per_env_secret_values_for_provider(
@@ -352,8 +341,6 @@ def _build_real_providers() -> Providers:
         delete_neon_project=_delete_neon_for_provider,
         create_supertokens_app=_create_supertokens_for_provider,
         delete_supertokens_app=_delete_supertokens_for_provider,
-        list_ovh_instances=_list_ovh_for_provider,
-        delete_ovh_instances=_delete_ovh_for_provider,
         read_per_env_secret_values=_read_per_env_secret_values_for_provider,
         push_per_env_modal_secret=_push_per_env_modal_secret_for_provider,
         deploy_litellm_proxy=_deploy_litellm_proxy_for_provider,
@@ -386,9 +373,9 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
 
     These credentials live in dedicated "admin" Vault entries that are
     intentionally separate from the Modal-pushed entries -- the connector's
-    runtime never needs API tokens for creating Neon DBs or VPS instances,
-    so co-mingling those tokens with the Modal-pushed Vault paths would
-    leak them into the connector's runtime env unnecessarily.
+    runtime never needs API tokens for creating Neon DBs, so co-mingling those
+    tokens with the Modal-pushed Vault paths would leak them into the connector's
+    runtime env unnecessarily.
 
     Paths read here (none are pushed to Modal):
 
@@ -400,23 +387,9 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     - ``<vault_prefix>/supertokens`` -- ``SUPERTOKENS_CONNECTION_URI``,
       ``SUPERTOKENS_API_KEY`` (read from the Modal-pushed entry; safe to
       read here because the connector also legitimately needs both keys)
-    - ``<vault_prefix>/ovh`` -- ``OVH_APPLICATION_KEY``, ``OVH_APPLICATION_SECRET``,
-      ``OVH_CONSUMER_KEY``
     """
     neon_admin = read_vault_kv(VaultPath(f"{vault_prefix}/neon-admin"), parent_concurrency_group=cg)
     supertokens = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"), parent_concurrency_group=cg)
-    # The ovh entry is optional -- a tier with no OVH provisioning yet may not
-    # have it populated. Treat a genuinely *missing* entry as empty so the
-    # deploy still progresses; per-env OVH-touching operations will fail later
-    # if/when the operator wires them up without populating Vault. Only catch
-    # VaultSecretNotFoundError here: a transient/auth VaultReadError must NOT be
-    # silently turned into empty OVH credentials (that would deploy a broken
-    # `ovh` Modal Secret on a Vault blip), so let those propagate.
-    try:
-        ovh_secret = read_vault_kv(VaultPath(f"{vault_prefix}/ovh"), parent_concurrency_group=cg)
-    except VaultSecretNotFoundError as exc:
-        logger.warning("No ovh Vault entry at {}/ovh ({}); proceeding with empty OVH credentials.", vault_prefix, exc)
-        ovh_secret = {}
 
     org_id = neon_admin.get("NEON_ORG_ID", "")
     api_token = neon_admin.get("NEON_API_TOKEN", "")
@@ -452,11 +425,6 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
         neon_project_id=neon_project_id,
         supertokens_core_url=core_url,
         supertokens_api_key=SecretStr(core_api_key),
-        ovh_credentials=OvhCredentials(
-            application_key=SecretStr(ovh_secret.get("OVH_APPLICATION_KEY", "")),
-            application_secret=SecretStr(ovh_secret.get("OVH_APPLICATION_SECRET", "")),
-            consumer_key=SecretStr(ovh_secret.get("OVH_CONSUMER_KEY", "")),
-        ),
     )
 
 
@@ -1101,6 +1069,28 @@ def env_list(ctx: click.Context) -> None:
         write_stdout_line(json.dumps(payload, indent=2, default=str))
 
 
+def _preflight_modal_token_workspace(tier: str) -> None:
+    """Refuse a deploy whose pinned Modal profile holds a wrong-workspace token.
+
+    ``minds env activate --deploy`` only checks the ``[<workspace>]`` profile
+    section exists; the token inside is workspace-bound and could belong to a
+    different workspace, silently misrouting every ``modal`` call. Read the
+    actual binding via ``modal profile list`` and fail here -- before any cloud
+    state is created -- rather than after the first (mis-scoped) ``modal
+    deploy``. Best-effort: an undeterminable binding (modal unreachable /
+    non-JSON) falls through to the deploy-time URL assertion in ``provisioning``.
+    Skipped for tiers with no committed ``modal_workspace``.
+    """
+    modal_workspace = modal_profile_for_tier_or_none(tier)
+    if modal_workspace is None:
+        return
+    with ConcurrencyGroup(name=f"minds-modal-profile-preflight-{tier}") as cg:
+        token_workspace = active_modal_token_workspace(modal_workspace, parent_cg=cg)
+    message = modal_token_workspace_mismatch_message(modal_workspace, token_workspace)
+    if message is not None:
+        raise click.ClickException(message)
+
+
 @env.command("deploy")
 @click.option(
     "--yes-i-mean-production",
@@ -1185,6 +1175,7 @@ def env_deploy(
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
     require_deploy_mode_activation(env_name=env_name, tier=tier)
+    _preflight_modal_token_workspace(tier)
     _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:

@@ -1,6 +1,4 @@
 {
-  "scope": "minds-workspaces",
-  "gateway_self_host": "latchkey-self.invalid",
   "path_prefix": "/minds-api-proxy/api/v1/workspaces",
   "verbs": [
     {
@@ -44,6 +42,13 @@
       "path": { "kind": "targeted", "suffix": "/ssh$" },
       "display_name": "Establish SSH access to a workspace",
       "description": "Establish SSH access into the selected workspace."
+    },
+    {
+      "permission": "minds-workspaces-backups-manage",
+      "method": "POST",
+      "path": { "kind": "targeted", "suffix": "/backup-service/(update(/cancel)?|configure|disable|verification)$" },
+      "display_name": "Manage a workspace's backups",
+      "description": "Update the selected workspace's backup service, enable, disable, or repoint its backups, and toggle backup verification."
     },
     {
       "permission": "minds-workspaces-update",

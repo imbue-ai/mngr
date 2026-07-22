@@ -5,19 +5,70 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr_lima.config import LimaProviderConfig
-from imbue.mngr_lima.errors import LimaHostRenameError
+from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.instance import _parse_size_to_gb
 from imbue.mngr_lima.limactl import LimaSshConfig
+from imbue.mngr_lima.testing import install_fake_limactl
+
+
+def test_discover_hosts_reports_provider_unavailable_when_limactl_crashes(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A limactl that is installed and correctly versioned but crashes on ``list`` is
+    reported as provider unavailability (like an unreachable Docker daemon), not
+    silently swallowed into an all-offline view.
+
+    ``--version`` succeeds so the availability check passes; only ``list`` crashes,
+    mirroring a mid-session limactl startup fault (e.g. the getpwuid init panic).
+    """
+    bin_dir = tmp_path / "bin"
+    install_fake_limactl(
+        bin_dir,
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\n'
+        'echo "panic: user: unknown userid 501" >&2\nexit 2\n',
+        monkeypatch,
+    )
+
+    with pytest.raises(LimaCommandUnavailableError, match="not available"):
+        lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group)
+
+
+def test_discover_hosts_degrades_to_empty_when_limactl_unavailable(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When limactl is unavailable in a recognized way (here: too old to meet the
+    minimum version), discovery degrades gracefully -- it returns hosts from local
+    records only (all offline) rather than raising, so Lima-less/underprovisioned
+    environments still work. With no host records that is an empty list.
+
+    This is the counterpart to the crash case above: a *recognized* unavailability
+    (absent/too-old limactl, both ProviderUnavailableError) is swallowed, whereas a
+    limactl that runs but fails at runtime is reported as provider-unavailable.
+    """
+    bin_dir = tmp_path / "bin"
+    install_fake_limactl(
+        bin_dir,
+        'if [ "$1" = "--version" ]; then echo "limactl version 0.9.0"; exit 0; fi\nexit 0\n',
+        monkeypatch,
+    )
+
+    assert lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group) == []
 
 
 def test_provider_capabilities(lima_provider: LimaProviderInstance) -> None:
@@ -39,12 +90,41 @@ def test_snapshot_methods_raise(lima_provider: LimaProviderInstance) -> None:
         lima_provider.delete_snapshot(host_id, SnapshotId("snap-1"))
 
 
-def test_rename_host_raises(lima_provider: LimaProviderInstance) -> None:
-    from imbue.mngr.primitives import HostName
-
+def test_rename_host_raises_when_record_missing(lima_provider: LimaProviderInstance) -> None:
     host_id = HostId.generate()
-    with pytest.raises(LimaHostRenameError):
+    with pytest.raises(HostNotFoundError):
         lima_provider.rename_host(host_id, HostName("new-name"))
+
+
+def test_rename_host_updates_persisted_host_name(lima_provider: LimaProviderInstance) -> None:
+    """Renaming a Lima host rewrites the host name on its record (the instance name is untouched)."""
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="old-name",
+            user_tags={},
+            snapshots=[],
+            created_at=now,
+            updated_at=now,
+        ),
+        config=LimaHostConfig(
+            instance_name=f"mngr-{host_id}",
+            is_host_data_volume_exposed=False,
+            host_data_disk_name="mngr-abc-data",
+        ),
+    )
+    lima_provider._host_store.write_host_record(record)
+
+    lima_provider.rename_host(host_id, HostName("new-name"))
+
+    updated = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert updated is not None
+    assert updated.certified_host_data.host_name == "new-name"
+    # The limactl instance name is unchanged (no VM rename).
+    assert updated.config is not None
+    assert updated.config.instance_name == f"mngr-{host_id}"
 
 
 def test_tags_crud(lima_provider: LimaProviderInstance) -> None:

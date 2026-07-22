@@ -17,6 +17,8 @@ from imbue.mngr_imbue_cloud.connector.client import _auth_policy_to_connector_bo
 from imbue.mngr_imbue_cloud.connector.client import _parse_auth_policy
 from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
+from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
+from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
@@ -24,6 +26,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
 
@@ -97,6 +100,47 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.agent_id == "agent-abc"
     assert result.host_name == "my-host"
     assert result.attributes == {"cpus": 2}
+
+
+def test_rename_host_success_posts_new_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = _json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"host_db_id": "00000000-0000-0000-0000-000000000009", "host_name": "new-name"},
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_post(*args, **kwargs):
+        with httpx.Client(transport=transport) as inner:
+            return inner.post(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    client.rename_host(SecretStr("tok"), "00000000-0000-0000-0000-000000000009", "new-name")
+
+    assert captured["url"] == "https://example.com/hosts/00000000-0000-0000-0000-000000000009/rename"
+    assert captured["body"] == {"host_name": "new-name"}
+
+
+def test_rename_host_error_raises_connector_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_post(*args, **kwargs):
+        with httpx.Client(transport=transport) as inner:
+            return inner.post(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    with pytest.raises(ImbueCloudConnectorError):
+        client.rename_host(SecretStr("tok"), "00000000-0000-0000-0000-000000000009", "new-name")
 
 
 def test_unauthenticated_responses_raise_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -506,3 +550,127 @@ def test_send_does_not_retry_http_status_errors(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(ImbueCloudTunnelError):
         client.list_tunnels(SecretStr("tok"))
     assert state["calls"] == 1
+
+
+# -- Workspace sync methods --
+
+
+def _sync_record_json(host_id: str = "host-1", revision: int = 1) -> dict[str, object]:
+    return {
+        "host_id": host_id,
+        "agent_id": "agent-1",
+        "display_name": "ws",
+        "color": None,
+        "provider_kind": "lima",
+        "hosting_device_id": "device-1",
+        "device_label": "laptop",
+        "state": "active",
+        "restored_from_host_id": None,
+        "encrypted_secrets": None,
+        "revision": revision,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+
+
+def test_list_sync_records_parses_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/sync/records"
+        assert request.headers["authorization"] == "Bearer tok"
+        return httpx.Response(200, json={"records": [_sync_record_json()]})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    records = client.list_sync_records(SecretStr("tok"))
+    assert len(records) == 1
+    assert records[0].host_id == "host-1"
+    assert records[0].state == "active"
+
+
+def test_put_sync_record_returns_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/sync/records/host-1"
+        body = _json.loads(request.content)
+        assert body["revision"] == 1
+        return httpx.Response(200, json=_sync_record_json())
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    stored = client.put_sync_record(SecretStr("tok"), SyncWorkspaceRecord.model_validate(_sync_record_json()))
+    assert stored.revision == 1
+
+
+def test_put_sync_record_conflict_carries_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409, json={"detail": {"message": "revision conflict", "stored": _sync_record_json(revision=4)}}
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudSyncConflictError) as exc_info:
+        client.put_sync_record(SecretStr("tok"), SyncWorkspaceRecord.model_validate(_sync_record_json()))
+    assert exc_info.value.stored_record is not None
+    assert exc_info.value.stored_record["revision"] == 4
+
+
+def test_put_sync_record_agent_conflict_has_no_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": {"message": "another ACTIVE record already exists"}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudSyncConflictError) as exc_info:
+        client.put_sync_record(SecretStr("tok"), SyncWorkspaceRecord.model_validate(_sync_record_json()))
+    assert exc_info.value.stored_record is None
+
+
+def test_scrub_sync_secrets_returns_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/sync/scrub-secrets"
+        return httpx.Response(200, json={"scrubbed": 3})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    assert client.scrub_sync_secrets(SecretStr("tok")) == 3
+
+
+def test_get_key_bundle_returns_none_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "No key bundle stored for this account"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    assert client.get_key_bundle(SecretStr("tok")) is None
+
+
+def test_key_bundle_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle_json = {
+        "kdf_salt": "c2FsdHNhbHRzYWx0c2FsdA==",
+        "kdf_time_cost": 3,
+        "kdf_memory_kib": 65536,
+        "kdf_parallelism": 4,
+        "wrapped_dek": "d3JhcHBlZA==",
+        "key_epoch": 1,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            body = _json.loads(request.content)
+            assert body["wrapped_dek"] == bundle_json["wrapped_dek"]
+            return httpx.Response(200, json={"status": "ok"})
+        if request.method == "GET":
+            return httpx.Response(200, json=bundle_json)
+        return httpx.Response(200, json={"status": "deleted"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    client.put_key_bundle(SecretStr("tok"), SyncKeyBundle.model_validate(bundle_json))
+    fetched = client.get_key_bundle(SecretStr("tok"))
+    assert fetched is not None
+    assert fetched.key_epoch == 1
+    client.delete_key_bundle(SecretStr("tok"))
+
+
+def test_sync_records_auth_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "Invalid token"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudAuthError):
+        client.list_sync_records(SecretStr("bad"))

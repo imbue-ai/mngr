@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr observe [--events-dir DIR] [--discovery-only]
+mngr observe [--events-dir DIR] [--discovery-only] [--stream-events]
 ```
 
 Observe agent state changes across all hosts [experimental].
@@ -31,6 +31,12 @@ observers to run simultaneously for different output locations.
 With --discovery-only, only the host/agent discovery stream is emitted as JSONL
 to stdout. This is useful for programmatically tracking which agents and hosts
 exist without the full observe overhead.
+
+With --stream-events, the full observer additionally echoes each agents-stream
+event (AGENT_STATE, AGENTS_FULL_STATE, AGENT_REMOVED) to stdout as compact JSONL,
+in addition to writing the usual event files. A parent process can then consume
+live agent lifecycle state -- including event-driven detection of an agent
+process dying on its own -- by reading this observer's stdout.
 
 Press Ctrl+C to stop.
 
@@ -66,7 +72,8 @@ mngr observe [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--events-dir` | path | Base directory for the full observer's event output files and lock. Defaults to MNGR_HOST_DIR (~/.mngr). Has no effect with --discovery-only (the discovery log always lives under the default host dir). | None |
-| `--discovery-only` | boolean | Stream only discovery events as JSONL (hosts and agents discovered/destroyed). Outputs a full snapshot, then tails the event file for updates. Periodically re-polls to catch any missed changes. Does not start activity streams or emit agent state events. | `False` |
+| `--discovery-only` | boolean | Stream only discovery events as JSONL (hosts and agents discovered/destroyed). Polls each provider independently on its own loop, emitting a per-provider snapshot as each finishes, then tails the event file for updates. Does not start activity streams or emit agent state events. | `False` |
+| `--stream-events` | boolean | Echo each agents-stream event (AGENT_STATE, AGENTS_FULL_STATE, AGENT_REMOVED) to stdout as compact JSONL, in addition to writing the event files. Lets a parent process consume live agent lifecycle state (including event-driven process death) by reading this observer's stdout. Cannot be combined with --discovery-only. | `False` |
 | `--daemonize`, `--no-daemonize` | boolean | When not daemonized (default), exit if the parent process dies. Use --daemonize to keep running independently. | `False` |
 
 ## See Also
@@ -98,4 +105,10 @@ $ mngr observe --quiet
 
 ```bash
 $ mngr observe --discovery-only
+```
+
+**Stream full agent state events to stdout**
+
+```bash
+$ mngr observe --stream-events
 ```

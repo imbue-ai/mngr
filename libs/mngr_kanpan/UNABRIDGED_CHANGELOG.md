@@ -4,6 +4,28 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-16
+
+Added attach, peek, and reply to the kanpan board, so you can work with an agent without leaving it:
+
+- Attach to the focused agent's session with `Enter`. The board suspends while attached and restores immediately when you detach (`Ctrl-b d`), returning you to the board instead of a bare shell. On attach the screen clears to a brief `Connecting to <agent>...` line rather than flashing the shell behind the board; a failed connect shows its exit code as a footer message instead of vanishing with the repaint.
+
+- Peek at an agent with `Space`: a live bordered panel below the board shows the agent's recent user/assistant conversation (via `mngr transcript --role user --role assistant`), refreshed every couple of seconds, with the board still visible above. Tool calls and framework-injected turns do not appear, so the peek reads like the human conversation. Each `[timestamp] role:` header is trimmed to a dim role cue. It shows the newest lines, so a long final message renders its end under a `⋯` marker rather than being cut off at the top or mirroring the agent's scrolled-up screen. The panel says `(no messages yet)` when there is no readable message, and its border title (`name · state · provider`) re-renders on every board refresh so it cannot go stale. `Esc` closes the panel.
+
+- Reply from the peek panel: type into the `›` input and press `Enter` to send a message to that agent (an empty reply does nothing). Your reply is echoed into the panel immediately as a `›` line, so it appears without waiting; the send runs in the background (`mngr message` blocks up to ~90s on the agent's submission signal, which a busy agent cannot give until its current turn ends), and once the agent accepts the reply and it shows up in the transcript the echo is replaced by the real message. Several replies typed in a row are delivered in order. A failed send drops its echo and renders a dim `(reply failed: ...)` line, so a lost message never silently looks delivered.
+
+- The reply input supports readline-style editing (via the `urwid_readline` library, with the Option/Ctrl+arrow chords added): word movement (`Option`/`Ctrl`+`←`/`→`, `Meta-B`/`F`), word delete (`Option`+`Delete`, `Ctrl-W`, `Meta-D`), jump to start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
+
+- The footer is a single continuous blue belt (no gap between its two sides): on the left a relative refresh stamp -- `Refreshed just now · 3.2s` right after a refresh, aging to `Refreshed 32s ago` / `Refreshed 5m ago` (the fetch duration only shows while fresh) -- and on the right the command keys one forgets -- `r: refresh  m: mute  d: mark delete  x: execute  q: quit  ?: more keys` -- with the keys highlighted. Everything else (`space` peek, `enter` attach, marks, configured shell commands) is listed by the `?` overlay: a bordered, padded panel anchored above the footer's `?`, keys accented in their own column; `Esc`, `q`, or `?` closes it. The peek panel's `enter: send · esc: close` hint is quiet in-panel text, tucked into the bottom right, with the same key accent.
+
+- Fixed: the row focus highlight is now one continuous band across muted and stale cells; inverting their dim gray used to punch dark holes in it.
+
+- Kanpan sets the terminal title (`kanpan`) while running: it re-takes the title after you detach from an attached agent session (which sets its own), and restores the previous title on exit in terminals that support the title stack.
+
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-19
 
 The kanpan plugin's cross-scope config merge now follows the same standard config-merge semantics as every other config field. Previously `KanpanPluginConfig` carried a custom `merge_with` that automatically *unioned* its six dict fields (`commands`, `data_sources`, `shell_commands`, `columns`, `on_before_refresh`, `on_after_refresh`) across config scopes (user < project < local), so a key set by a lower scope always survived. That method is removed and the merge now runs through the standard overlay pipeline: these fields assign-by-default, guarded by the cross-scope narrowing detector.

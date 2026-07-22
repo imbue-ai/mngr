@@ -1,27 +1,45 @@
 name: Release Tests
 
-# Comprehensive release-readiness tests (the `@pytest.mark.release` suite).
+# Comprehensive mngr release-readiness tests (the `@pytest.mark.release` suite).
 # They are too slow to run per-PR, so they run here instead:
 #   - workflow_dispatch: trigger manually against `main` BEFORE cutting a
 #     release, to validate the commit you're about to tag.
 #   - push of a `v*` tag: an automatic backstop record when a release is cut.
 # Note: this is NOT a hard publish gate -- publish.yml runs on the same `v*`
 # tag independently. Run this workflow and confirm it is green before tagging.
+#
+# These jobs cover the *mngr* release suite only. All minds release tests --
+# whether or not they carry a minds capability mark -- run from the minds jobs in
+# `ci.yml` (manual `run_minds_release_tests` dispatch), since the minds release
+# procedure is a manual dispatch, not a `v*` tag. So these jobs simply exclude
+# the entire `apps/minds` tree by path (`--ignore apps/minds`) rather than
+# enumerating minds markers.
 on:
   workflow_dispatch:
   push:
     tags: ['v*']
 
 jobs:
-  # Docker release tests - runs on a GitHub runner with a real Docker daemon,
-  # since Docker-in-Docker under gVisor (offload-modal-release) is too flaky.
-  # Filters for release-marked docker tests.
-  test-docker-release:
+  # Docker mngr release tests - runs on a GitHub runner with a real Docker
+  # daemon, since Docker-in-Docker under gVisor (offload-modal-release) is too
+  # flaky. Filters for release-marked docker tests; the whole minds tree is
+  # excluded by path (minds release tests run from their own minds jobs in ci.yml).
+  test-mngr-release-docker:
     runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    permissions:
+      contents: read
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
 
     steps:
+      # Anthropic key from Vault (migrated off the ANTHROPIC_API_KEY GitHub
+      # Actions secret).
+      - name: Fetch Anthropic key from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/ANTHROPIC_API_KEY
       - uses: actions/checkout@v6
 
       - name: Set up Python
@@ -48,18 +66,20 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.141
+        run: npm install -g @anthropic-ai/claude-code@2.1.207
 
       - name: Run Docker release tests
-        run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release'
+        run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short --ignore apps/minds -m '(docker or docker_sdk) and release'
 
-  # Release tests - the full `@pytest.mark.release` suite.
-  test-release:
+  # mngr release tests - the `@pytest.mark.release` suite, with the whole minds
+  # tree excluded by path (all minds release tests run from their own minds jobs
+  # in ci.yml).
+  test-mngr-release:
     runs-on: ${{ matrix.os }}
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    permissions:
+      contents: read
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +87,18 @@ jobs:
         group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     steps:
+      # Anthropic key + imbue Modal workspace token (id + secret) from Vault,
+      # migrated off the ANTHROPIC_API_KEY / MODAL_TOKEN_SECRET GitHub Actions
+      # secrets and the MODAL_TOKEN_ID variable. The GitHub-hosted macOS runners
+      # in this matrix have curl + jq preinstalled, which the action needs.
+      - name: Fetch Anthropic key and Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/ANTHROPIC_API_KEY
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
       - uses: actions/checkout@v6
 
       - name: Set up Python
@@ -85,7 +117,7 @@ jobs:
         run: brew install tmux unison
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.141
+        run: npm install -g @anthropic-ai/claude-code@2.1.207
 
       - name: Configure Docker Hub mirror
         if: runner.os == 'Linux'
@@ -104,11 +136,13 @@ jobs:
       - name: Run release tests
         run: |
           export IS_RELEASE=1
+          # Exclude the whole minds tree by path: all minds release tests run
+          # from their own minds jobs in ci.yml (manual dispatch).
           if [ "$RUNNER_OS" = "macOS" ]; then
             # macOS runners don't have Docker; skip Docker-marked tests
-            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration -m 'release and not docker and not docker_sdk'
+            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration --ignore apps/minds -m 'release and not docker and not docker_sdk'
           else
-            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration
+            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration --ignore apps/minds
           fi
 
       - name: Upload test timing data

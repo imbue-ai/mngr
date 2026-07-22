@@ -1,15 +1,14 @@
-import os
 import subprocess
 from pathlib import Path
 from typing import Final
 
 import pytest
-from loguru import logger
+from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import mngr_host_dir_for
-from imbue.minds.config.data_types import parse_agents_from_mngr_output
-from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",
@@ -84,87 +83,6 @@ def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "upda
         )
 
 
-# ---------------------------------------------------------------------------
-# End-to-end test helpers (for real mngr subprocess calls)
-# ---------------------------------------------------------------------------
-
-
-def clean_env() -> dict[str, str]:
-    """Build an environment dict for subprocesses.
-
-    Returns a copy of os.environ. Relies on the shared plugin test fixtures
-    (registered in apps/minds/conftest.py via register_plugin_test_fixtures)
-    having set MNGR_HOST_DIR / MNGR_PREFIX / MNGR_ROOT_NAME to per-test
-    tmp values, so the subprocess inherits proper isolation. With
-    MNGR_ROOT_NAME set to `mngr-test-<id>`, the subprocess does not load
-    the repo's .mngr/settings.toml, so the is_allowed_in_pytest=false
-    guard there does not fire and no explicit opt-in is needed.
-
-    Asserts that the expected isolation is in place so a future test that
-    forgets to register the shared fixtures gets a loud failure instead of
-    a silent orphan-env leak.
-    """
-    host_dir = os.environ.get("MNGR_HOST_DIR")
-    prefix = os.environ.get("MNGR_PREFIX", "")
-    root_name = os.environ.get("MNGR_ROOT_NAME", "")
-    assert host_dir is not None, (
-        "clean_env() requires MNGR_HOST_DIR to be set -- expected the shared plugin "
-        "test fixtures (register_plugin_test_fixtures in apps/minds/conftest.py) to "
-        "have populated it via the autouse setup_test_mngr_env fixture."
-    )
-    assert prefix.startswith(TEST_ENV_PREFIX), (
-        f"clean_env() requires MNGR_PREFIX to start with {TEST_ENV_PREFIX!r} so any "
-        f"leaked Modal env is visible to the CI cleanup script; got {prefix!r}. The "
-        f"apps/minds/conftest.py override points this at generate_test_environment_name()."
-    )
-    assert root_name.startswith("mngr-test-"), (
-        f"clean_env() requires MNGR_ROOT_NAME to start with 'mngr-test-' so the "
-        f"subprocess mngr does not load the repo's .mngr/settings.toml; got "
-        f"{root_name!r}. The autouse setup_test_mngr_env fixture sets this."
-    )
-    return dict(os.environ)
-
-
-def run_mngr(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    """Run a `uv run mngr` command and return the result."""
-    return subprocess.run(
-        ["uv", "run", "mngr", *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=clean_env(),
-        cwd=cwd,
-    )
-
-
-def parse_mngr_list_json(stdout: str) -> list[dict[str, object]]:
-    """Extract agent records from mngr list --format json stdout.
-
-    Delegates to the shared implementation in config.data_types. Kept here
-    for backward compatibility with existing test callers.
-    """
-    return parse_agents_from_mngr_output(stdout)
-
-
-def find_agent(agent_name: str) -> dict[str, object] | None:
-    """Find an agent by name, returning its full record or None."""
-    result = run_mngr(
-        "list",
-        "--include",
-        f'name == "{agent_name}"',
-        "--format=json",
-        "--provider",
-        "local",
-    )
-    if result.returncode != 0:
-        logger.debug("mngr list failed (rc={}): {}", result.returncode, result.stderr[:200])
-        return None
-    agents = parse_mngr_list_json(result.stdout)
-    if agents:
-        return agents[0]
-    return None
-
-
 def stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_name: str) -> Path:
     """Redirect ``Path.home()`` to ``tmp_path`` and seed a minimal mngr profile.
 
@@ -197,3 +115,89 @@ def extract_response(exec_result: subprocess.CompletedProcess[str]) -> str:
     if not response_lines:
         raise AssertionError(f"No response from model: {exec_result.stdout!r}")
     return response_lines[0]
+
+
+# -- Backup-service test helpers (shared by the workspace-script unit tests
+# and the snapshot-resume backup tests) --
+
+_BACKUP_TEST_GIT_IDENTITY: Final[tuple[str, ...]] = (
+    "-c",
+    "user.name=test",
+    "-c",
+    "user.email=test@example.com",
+)
+
+
+def run_git_for_backup_test(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *_BACKUP_TEST_GIT_IDENTITY, *args], cwd=repo, capture_output=True, text=True, check=True, timeout=60
+    )
+    return result.stdout
+
+
+def write_stub_supervisorctl(stub_bin: Path, *, is_restart_ok: bool = True) -> Path:
+    """Write a stub ``supervisorctl`` into ``stub_bin`` and return its path.
+
+    The healthy variant always reports ``host-backup`` RUNNING; the
+    ``is_restart_ok=False`` variant fails ``restart`` and reports the program
+    STOPPED, for exercising the update script's rollback path.
+    """
+    stub = stub_bin / "supervisorctl"
+    if is_restart_ok:
+        stub.write_text('#!/bin/bash\necho "host-backup RUNNING pid 123, uptime 0:00:01"\nexit 0\n')
+    else:
+        stub.write_text(
+            '#!/bin/bash\nif [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi\n'
+            'echo "host-backup STOPPED"\nexit 0\n'
+        )
+    stub.chmod(0o755)
+    return stub
+
+
+def tag_newer_release_content(repo: Path, *, removed_file: str | None = None) -> None:
+    """Commit newer backup code on a side branch and tag it ``minds-v2.0.0``.
+
+    HEAD (main) then reads as *outdated* relative to the tag. ``removed_file``
+    additionally deletes that path inside the release commit, for exercising
+    convergence onto a tag that removed a file.
+    """
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
+    if removed_file is not None:
+        run_git_for_backup_test(repo, "rm", "-q", removed_file)
+    (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
+    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
+
+
+# -- Workspace-sync e2e (snapshot sandbox + real connector env) ---------------
+#
+# The sync e2e release tests (apps/minds/test_sync_e2e.py) run in the
+# minds-snapshot offload sandbox against a real per-run CI connector env.
+# The env's coordinates + admin secrets are forwarded into the sandbox as
+# env vars (only on run_minds_release_tests CI runs); these helpers hold the
+# contract in one place so the conftest fixture and any future consumer agree.
+
+SYNC_E2E_CONNECTOR_URL_ENV: Final[str] = "MINDS_SYNC_E2E_CONNECTOR_URL"
+SYNC_E2E_LITELLM_URL_ENV: Final[str] = "MINDS_SYNC_E2E_LITELLM_URL"
+SYNC_E2E_SUPERTOKENS_URI_ENV: Final[str] = "MINDS_SYNC_E2E_SUPERTOKENS_CONNECTION_URI"
+SYNC_E2E_SUPERTOKENS_API_KEY_ENV: Final[str] = "MINDS_SYNC_E2E_SUPERTOKENS_API_KEY"
+
+
+class SyncE2EEnv(FrozenModel):
+    """Coordinates + admin secrets of the real connector env the sync e2e tests target."""
+
+    connector_url: str = Field(description="Base URL of the deployed remote_service_connector")
+    litellm_proxy_url: str = Field(description="Base URL of the deployed litellm proxy")
+    supertokens_connection_uri: SecretStr = Field(description="SuperTokens core URI for admin user provisioning")
+    supertokens_api_key: SecretStr = Field(description="SuperTokens core admin api-key")
+
+
+class SyncE2EAccount(FrozenModel):
+    """A per-test, pre-verified, paid account on the sync e2e connector env."""
+
+    email: str = Field(description="Unique per-test address under the env's seeded paid domain")
+    password: SecretStr = Field(description="The account's sign-in password (typed into the real UI)")
+    user_id: str = Field(description="SuperTokens user id (used for teardown and record assertions)")
+    access_token: SecretStr = Field(description="A session JWT for read-only connector polling from the test")

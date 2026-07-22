@@ -4,6 +4,40 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+`mngr forward --use-http2`: abandoned TLS connections no longer dump an "Unhandled exception in client_connected_cb / TimeoutError: SSL shutdown timed out" traceback to stderr, and are now force-closed after a bounded few-second wait instead of holding a per-connection task open for asyncio's full 30-second SSL shutdown timeout. The serve loop bounds the wait for the peer's close_notify reply (hypercorn does not expose asyncio's ssl_shutdown_timeout) and drops the benign teardown errors of already-dead connections (the SSL-shutdown TimeoutError and TLS handshake failures) instead of logging them as unhandled exceptions.
+
+## 2026-07-13
+
+Add a `--use-http2` flag to `mngr forward` that terminates TLS and negotiates HTTP/2 (via ALPN) for the workspace origin instead of serving plain HTTP/1.1.
+
+HTTP/2 multiplexes many streams over one connection, so the workspace UI is no longer capped by Chromium's ~6-connection-per-origin HTTP/1.1 limit (which hangs the UI once enough chat/app streams are open). When the flag is set, the proxy generates a fresh self-signed cert at startup (SANs `localhost`, `*.localhost`, `127.0.0.1`; loaded via a transient 0600 temp file, never persisted), serves TLS + h2 via hypercorn (replacing uvicorn), and its client-facing URLs become `https`/`wss` with the `mngr_forward_session` cookie marked `Secure`. WebSockets (terminal, log stream, `/api/ws` state socket) keep working over the TLS connection. hypercorn is the ASGI server whether or not a WebSocket rides the h2 connection (it advertises RFC 8441 Extended CONNECT), and its `websocket.receive` events always include both `text` and `bytes` keys with the unused one `None` (uvicorn omitted it), so the client->backend forwarder now selects each frame's payload by value rather than key presence.
+
+The flag is off by default, so a human running `mngr forward` still gets plain HTTP/1.1 with no cert friction; only clients that can trust the self-signed cert (the minds desktop app) should enable it. There is no runtime HTTP fallback -- if TLS setup fails the proxy exits during startup with a log line naming TLS/HTTP-2 as the cause.
+
+`mngr forward` now persists its per-agent service map to a small on-disk cache (`$MNGR_HOST_DIR/plugin/forward/service_map.json`) while running, and seeds the resolver from it at startup. A restored window onto a remote mind whose container is up becomes routable as soon as discovery supplies membership + SSH info, instead of waiting on the slow per-agent `mngr event ... services` stream (measured ~10s cold, ~50s under spawn contention). The live stream still runs and overwrites the seed as soon as it delivers, so a stale seed self-corrects within one stream connect. An empty, missing, or corrupt cache is a no-op: startup behaves exactly as before.
+
+## 2026-07-10
+
+The forward stream manager no longer logs a "Discovery error from ..." warning on every poll cycle for a provider stuck on the same failure (e.g. missing credentials): provider-level discovery errors are now logged once per process via the shared `DiscoveryErrorLogSuppressor`, with an info-level recovery line (and re-armed suppression) when the provider's discovery next succeeds. Host- and agent-attributed discovery errors keep logging on every occurrence.
+
+## 2026-07-06
+
+The "Loading workspace" proxy loader now re-attempts the workspace by polling in the background and reloading once it answers, instead of full-reloading itself every second via a `<meta http-equiv="refresh">`. The old full reload stole OS focus from any other view layered over the loader (in the minds app, the bug-report modal), which made the modal's text field impossible to type into -- the focus was cleared every second. Polling leaves the loader (and any overlay focused above it) untouched while waiting, and also keeps the spinner from visibly jumping on each tick.
+
+Changed: `mngr forward` now consumes the new per-provider discovery model. The plugin's stream manager feeds every parsed discovery event into the shared, span-aware `DiscoveryStateAggregator` and reacts to the returned membership delta (newly present agents get a tunnel + `mngr event` stream, newly absent agents are torn down). Handling of the legacy global `FullDiscoverySnapshotEvent` (`DISCOVERY_FULL`) has been removed; the plugin now routes `ProviderDiscoverySnapshotEvent` (`DISCOVERY_PROVIDER`) plus the incremental agent/host events. Retain-on-provider-error semantics are unchanged, now provided by the aggregator's per-provider scoping.
+
+Fixed a span-awareness gap: the periodic snapshot's per-agent events-stream retry no longer respawns a stream for an agent destroyed during that snapshot's discovery span (the retry is now restricted to agents the aggregator still tracks).
+
+Updated the `mngr forward` help example for filtering by label to use `has(agent.labels.is_primary)` instead of the removed `workspace` label, matching the new workspace-discovery filter.
+
+Integrates the "simple names" work: the `mngr forward` label-filter help example now uses `has(agent.labels.is_primary)` instead of the removed `workspace` label, matching the new workspace-discovery filter.
+
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-28
 
 Respawns a dead per-agent events stream instead of skipping it forever, fixing a case where the forward got permanently stuck serving the "Loading workspace" / 503 page after an agent's host restarted.

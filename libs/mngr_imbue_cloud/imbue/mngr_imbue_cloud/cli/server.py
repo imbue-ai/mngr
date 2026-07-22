@@ -1,7 +1,7 @@
 """``mngr imbue_cloud admin server ...`` -- operator-only bare-metal fleet management.
 
 Manages the OVH bare-metal servers we rent (the lima-VM "slices" we carve on them
-are baked via ``admin pool create --backend slice``, whose shared implementation
+are baked via ``admin pool create``, whose shared implementation
 lives here as :func:`allocate_slices`). Writes the connector's host_pool Neon DB
 directly (laptop-side), mirroring ``admin pool create``; the connector only reads
 these rows (plus its release-time teardown). Every step is resumable: ordering and
@@ -18,13 +18,18 @@ import shutil
 import signal
 import tempfile
 import threading
+from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
+from contextlib import nullcontext
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import TypeVar
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -37,6 +42,7 @@ from tabulate import tabulate
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
@@ -53,16 +59,22 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
+from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyOutcome
+from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyReport
+from imbue.mngr_imbue_cloud.data_types import SliceBakeOutcome
+from imbue.mngr_imbue_cloud.data_types import SliceBakeReport
 from imbue.mngr_imbue_cloud.data_types import SlicePricingRow
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceBakeTerminatedError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import OVH_US_DATACENTER_CODES
+from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_DELIVERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
@@ -77,13 +89,18 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import POOL_HOST_STATUS_LEASED
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import claim_pool_host_for_removal
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import delete_pool_host_row
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import destroy_eligible_pool_host_statuses
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_pool_host_destroy_target
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_pool_host_status
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_disk_names_for_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_instance_names_for_server
-from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_row_ids
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
@@ -261,7 +278,7 @@ def prep_box(
     Idempotent. Authorizes the pool management key (POOL_SSH_PRIVATE_KEY) for the
     service user so the admin CLI can bake slices and the connector can tear them
     down, and stages the slice guest OS image once so bakes never depend on the
-    Debian mirror. Run after the OS install, before ``admin pool create --backend slice``.
+    Debian mirror. Run after the OS install, before ``admin pool create``.
 
     The box SSH strictly pins the box's recorded sshd host key (no
     trust-on-first-use); the key is injected by ``server setup`` (OS reinstall) or
@@ -425,7 +442,7 @@ def compute_server_slice_sizing(server: BareMetalServer) -> dict[str, int]:
     """Compute the per-slice VM sizing for ``server`` from its stored inputs + specs.
 
     Returns ``{vcpus, memory_mib, disk_gib, advertised_memory_gb}`` -- identical for
-    every slice on this box (so a single ``admin pool create --backend slice`` batch is one server).
+    every slice on this box (so a single ``admin pool create`` batch is one server).
     Raises ``BareMetalProvisioningError`` if the server is missing the inputs a
     pre-sizing registration would have set (re-register it first).
     """
@@ -457,7 +474,7 @@ def slice_advertised_attributes(sizing: dict[str, int]) -> dict[str, Any]:
 # carry the box address + per-slice carve sizing into the create.
 _SLICE_PROVIDER_INSTANCE: str = "imbue_cloud_slice"
 
-# Per-slice ``mngr create`` hard timeout (carve + FCT container build + agent
+# Per-slice ``mngr create`` hard timeout (carve + DEFAULT_WORKSPACE_TEMPLATE container build + agent
 # bootstrap). 45 min gives headroom for the build under concurrency; the bake's
 # semaphore keeps concurrency low enough that any single create stays well under
 # it. Applied per create, so one slice timing out never aborts the others.
@@ -480,7 +497,7 @@ def _build_slice_create_args(
     ssh_user: str,
     port_range_start: int,
     port_range_end: int,
-    fct_cache_tag: str | None,
+    default_workspace_template_cache_tag: str | None,
 ) -> list[str]:
     """Render the ``-S`` provider-config overrides that point one slice bake at this box.
 
@@ -525,10 +542,10 @@ def _build_slice_create_args(
     # absent, so the provider falls back to legacy un-stamped names.
     if env_name is not None:
         overrides["slice_env_name"] = env_name
-    # Production (--from-tag) bakes enable the per-box FCT image cache: the first
+    # Production (--from-tag) bakes enable the per-box DEFAULT_WORKSPACE_TEMPLATE image cache: the first
     # slice builds + seeds the box tar, the rest docker-load it. Omitted for dev bakes.
-    if fct_cache_tag is not None:
-        overrides["fct_cache_tag"] = fct_cache_tag
+    if default_workspace_template_cache_tag is not None:
+        overrides["default_workspace_template_cache_tag"] = default_workspace_template_cache_tag
     args: list[str] = []
     for key, value in overrides.items():
         args.extend(["-S", f"{prefix}.{key}={value}"])
@@ -569,7 +586,7 @@ def _slice_run_in_container(
     memory, so a fresh ``mngr`` can't resolve it -- instead we SSH straight to the
     container's box-forwarded port (``baked.ssh_port``) with the container key the
     create recorded. Wrapped in ``bash -lc`` so ``uv``/``mngr`` are on PATH in the
-    FCT image. Returns ``(returncode, stdout, stderr)``.
+    DEFAULT_WORKSPACE_TEMPLATE image. Returns ``(returncode, stdout, stderr)``.
     """
     if not baked.ssh_host or baked.ssh_port is None or not baked.ssh_key_path:
         return 1, "", f"baked slice {baked.host_name} missing container SSH connection info"
@@ -625,11 +642,11 @@ def _bake_one_slice(
     port_range_start: int,
     port_range_end: int,
     is_deferred_install_wait_skipped: bool,
-    fct_cache_tag: str | None,
-) -> dict[str, Any]:
+    default_workspace_template_cache_tag: str | None,
+) -> SliceBakeOutcome:
     """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
-    Returns an outcome dict (never raises). ``bake_pool_host`` carves the VM (over
+    Returns an outcome (never raises). ``bake_pool_host`` carves the VM (over
     SSH on the box, inside the slice provider) and bakes the shared container; the
     shared :func:`finalize_baked_pool_host` then hardens the container sshd and
     tears down the bootstrap chat agent over the slice (direct-SSH) transport. Any
@@ -659,7 +676,7 @@ def _bake_one_slice(
                 ssh_user=ssh_user,
                 port_range_start=port_range_start,
                 port_range_end=port_range_end,
-                fct_cache_tag=fct_cache_tag,
+                default_workspace_template_cache_tag=default_workspace_template_cache_tag,
             ),
             mngr_create_timeout_seconds=_SLICE_MNGR_CREATE_TIMEOUT_SECONDS,
         )
@@ -672,7 +689,7 @@ def _bake_one_slice(
                     f"container={baked.ssh_port})"
                 )
             finalize_baked_pool_host(_slice_run_in_container, baked, host_name=host_name)
-            # Let the FCT deferred-install (heavy apt + browser download) finish before we stop the
+            # Let the DEFAULT_WORKSPACE_TEMPLATE deferred-install (heavy apt + browser download) finish before we stop the
             # services agent: stopping mid-apt corrupts dpkg (see wait_for_deferred_install). Dev
             # bakes may skip this wait to save the few minutes; the tradeoff is the baked container's
             # deferred-install can be left incomplete/corrupt (acceptable for slow-path dev bakes,
@@ -684,10 +701,9 @@ def _bake_one_slice(
                 )
             else:
                 wait_for_deferred_install(_slice_run_in_container, baked, host_name=host_name)
-            # Stop the services agent so it lands in the pool STOPPED, exactly like an
-            # OVH pool host (which ``_create_single_pool_host`` stops via local mngr).
+            # Stop the services agent so it lands in the pool STOPPED.
             # The fast-path lease then *starts* the adopted agent, which re-runs the
-            # FCT bootstrap -- and because finalize removed the initial-chat sentinel,
+            # DEFAULT_WORKSPACE_TEMPLATE bootstrap -- and because finalize removed the initial-chat sentinel,
             # the bootstrap re-creates the chat agent under the leasing user's
             # workspace name. Without this stop the agent stays running from bake
             # through lease, the one-shot bootstrap never re-runs, and the workspace
@@ -745,75 +761,132 @@ def _bake_one_slice(
             baked.outer_ssh_port,
             baked.ssh_port,
         )
-        return {
-            "host_name": host_name,
-            "server_id": str(server.id),
-            "host_id": baked.host_id,
-            "agent_id": baked.agent_id,
-            "vm_ssh_port": baked.outer_ssh_port,
-            "container_ssh_port": baked.ssh_port,
-            "attributes": attributes,
-            "status": "succeeded",
-        }
+        return SliceBakeOutcome(
+            host_name=host_name,
+            server_id=str(server.id),
+            status=SliceBakeOutcomeStatus.SUCCEEDED,
+            host_id=baked.host_id,
+            agent_id=baked.agent_id,
+            vm_ssh_port=baked.outer_ssh_port,
+            container_ssh_port=baked.ssh_port,
+            attributes=attributes,
+        )
     except (PoolBakeError, BareMetalProvisioningError, MngrError, psycopg2.Error, OSError) as exc:
         logger.warning("Slice bake {} failed: {}", host_name, exc)
-        return {"host_name": host_name, "server_id": str(server.id), "status": "failed", "error": str(exc)}
+        return SliceBakeOutcome(
+            host_name=host_name, server_id=str(server.id), status=SliceBakeOutcomeStatus.FAILED, error=str(exc)
+        )
 
 
-def _bake_into_outcomes(
+# The per-item result type produced by a bounded fan-out's workers (bake and
+# destroy outcomes today).
+OutcomeT = TypeVar("OutcomeT")
+
+
+def _run_worker_into_outcomes(
     *,
-    server: BareMetalServer,
-    sizing: dict[str, int],
-    lease_attributes: dict[str, Any],
-    region: str,
-    env_name: str | None,
-    workspace_dir: Path,
-    pool_public_key: str,
-    private_key_path: Path,
-    database_url: str,
-    port_range_start: int,
-    port_range_end: int,
-    is_deferred_install_wait_skipped: bool,
-    fct_cache_tag: str | None,
+    worker: Callable[..., OutcomeT],
+    worker_kwargs: Mapping[str, Any],
     semaphore: "threading.Semaphore",
     total: int,
-    outcomes: list[dict[str, Any]],
+    progress_noun: str,
+    describe_outcome: Callable[[OutcomeT], str],
+    outcomes: list[OutcomeT],
     outcomes_lock: "threading.Lock",
 ) -> None:
-    """Thread target: bake one slice under the concurrency semaphore, recording progress.
+    """Thread target: run one outcome worker under the concurrency semaphore, recording progress.
 
-    The semaphore caps how many bakes run at once (the rest block here until a slot
-    frees). Each bake has its own per-create timeout, so one slice failing or timing
-    out releases its slot and lets the queued ones proceed -- it never aborts the rest.
+    The semaphore caps how many workers run at once (the rest block here until a
+    slot frees). Workers return their outcome instead of raising, so one item
+    failing never aborts the rest.
     """
     with semaphore:
-        outcome = _bake_one_slice(
-            server=server,
-            sizing=sizing,
-            lease_attributes=lease_attributes,
-            region=region,
-            env_name=env_name,
-            workspace_dir=workspace_dir,
-            pool_public_key=pool_public_key,
-            private_key_path=private_key_path,
-            database_url=database_url,
-            port_range_start=port_range_start,
-            port_range_end=port_range_end,
-            is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
-            fct_cache_tag=fct_cache_tag,
-        )
+        outcome = worker(**worker_kwargs)
     with outcomes_lock:
         outcomes.append(outcome)
         done = len(outcomes)
-        succeeded_so_far = sum(1 for entry in outcomes if entry.get("status") == "succeeded")
-    logger.info(
-        "Slice bake progress: {}/{} done ({} succeeded) -- {} {}",
-        done,
-        total,
-        succeeded_so_far,
-        outcome.get("host_name"),
-        outcome.get("status"),
-    )
+    logger.info("{} progress: {}/{} done -- {}", progress_noun, done, total, describe_outcome(outcome))
+
+
+def run_outcome_workers_in_bounded_threads(
+    *,
+    worker: Callable[..., OutcomeT],
+    worker_kwargs_list: Sequence[Mapping[str, Any]],
+    max_concurrency: int,
+    thread_name_prefix: str,
+    progress_noun: str,
+    describe_outcome: Callable[[OutcomeT], str],
+    # The exception types that count as an interruption of the start/join loop (e.g.
+    # the bake's SIGTERM-raised SliceBakeTerminatedError). Empty: nothing is
+    # intercepted and any exception propagates immediately.
+    interruption_exception_types: tuple[type[Exception], ...],
+    # Invoked once when an interruption exception arrives, before the threads are
+    # re-joined and the exception re-raised -- the caller's chance to kill in-flight
+    # worker subprocesses so the re-join can finish.
+    on_join_interrupted: Callable[[], None] | None,
+) -> list[OutcomeT]:
+    """Run one worker call per kwargs mapping in parallel threads, at most ``max_concurrency`` at once.
+
+    The shared fan-out used by both the slice bake and the pool-host destroy.
+    Returns the outcomes in completion order. Workers must return their outcome
+    rather than raising -- an exception escaping a worker aborts the whole batch
+    at join time (``ObservableThread.join`` re-raises it).
+    """
+    outcomes: list[OutcomeT] = []
+    outcomes_lock = threading.Lock()
+    worker_semaphore = threading.Semaphore(max_concurrency)
+    threads = [
+        ObservableThread(
+            target=_run_worker_into_outcomes,
+            kwargs=dict(
+                worker=worker,
+                worker_kwargs=worker_kwargs,
+                semaphore=worker_semaphore,
+                total=len(worker_kwargs_list),
+                progress_noun=progress_noun,
+                describe_outcome=describe_outcome,
+                outcomes=outcomes,
+                outcomes_lock=outcomes_lock,
+            ),
+            name=f"{thread_name_prefix}-{idx}",
+        )
+        for idx, worker_kwargs in enumerate(worker_kwargs_list)
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    except interruption_exception_types:
+        # The exception always propagates after the hook + re-join.
+        if on_join_interrupted is not None:
+            on_join_interrupted()
+            for thread in threads:
+                # An interruption during the start loop can leave later threads
+                # never-started; joining those would raise a second error.
+                if thread.ident is not None:
+                    thread.join()
+        raise
+    return outcomes
+
+
+def _describe_bake_outcome(outcome: SliceBakeOutcome) -> str:
+    return f"{outcome.host_name} {outcome.status}"
+
+
+def _handle_bake_join_interruption(is_main_thread: bool) -> None:
+    """React to the bake fan-out's join loop being interrupted (a SIGTERM/SIGINT-raised error).
+
+    Without this, the in-flight ``mngr create`` workers would be reparented and keep
+    carving VMs after we exit. Ignore further signals, then kill the workers so no
+    new VM appears; the fan-out re-joins the worker threads afterward and the bake's
+    ``finally`` reaps the orphans.
+    """
+    if is_main_thread:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    logger.warning("Slice bake terminated by signal; killing in-flight workers before reap")
+    _kill_bake_worker_processes()
 
 
 def _raise_on_bake_termination_signal(signum: int, _frame: object) -> None:
@@ -939,80 +1012,265 @@ def _reap_orphan_slice_resources(
             logger.warning("Orphan reap: failed to delete disk {} on {}: {}", disk_name, server.public_address, exc)
 
 
-def destroy_slice_vm(*, server: BareMetalServer, lima_instance_name: str) -> None:
-    """Destroy one slice's lima VM (and its data disk) on its box, freeing the box slot.
+# Max pool hosts destroyed at once by default. Destroys are light (a few seconds of
+# limactl over SSH each, no box lock involved), so the bound mainly protects the
+# boxes' sshd connection limits and basic IO -- higher than the bake's default 4.
+DEFAULT_SLICE_DESTROY_CONCURRENCY: Final[int] = 8
 
-    The teardown counterpart of the carve: SSHes the bare-metal box with the pool
-    management key (POOL_SSH_PRIVATE_KEY) and runs ``limactl delete`` for the named
-    instance -- the same client + key path the orphan reaper uses, but targeted at a
-    single known instance so ``admin pool destroy`` can fully tear down a slice
-    before dropping its ``pool_hosts`` row (instead of stranding the VM on the box).
+
+@pure
+def _already_gone_outcome(pool_host_id: str) -> PoolHostDestroyOutcome:
+    return PoolHostDestroyOutcome(
+        pool_host_id=pool_host_id,
+        status=PoolHostDestroyOutcomeStatus.ALREADY_GONE,
+        detail="row no longer exists (already destroyed)",
+    )
+
+
+def _destroy_one_pool_host(
+    *,
+    pool_host_id: str,
+    database_url: str,
+    # None only when ``is_row_drop_only`` (no box SSH happens).
+    private_key_path: Path | None,
+    eligible_statuses: tuple[str, ...],
+    is_row_drop_only: bool,
+) -> PoolHostDestroyOutcome:
+    """Claim, tear down, and delete one pool host row; returns its outcome (never raises).
+
+    Any expected error class (DB, SSH, mngr) becomes a per-host 'failed' outcome, so one
+    bad id or a transient Neon hiccup never aborts the sibling destroys or suppresses the
+    batch report.
     """
-    if not server.public_address:
-        raise BareMetalProvisioningError(
-            f"server {server.id} has no public_address; cannot reach the box to destroy {lima_instance_name}"
+    try:
+        return _run_pool_host_destroy_steps(
+            pool_host_id=pool_host_id,
+            database_url=database_url,
+            private_key_path=private_key_path,
+            eligible_statuses=eligible_statuses,
+            is_row_drop_only=is_row_drop_only,
         )
-    ssh_user = server.lima_service_user or "limahost"
-    with _pool_private_key_path() as private_key_path:
+    except (MngrError, psycopg2.Error, OSError) as exc:
+        logger.warning("Destroy of pool host {} failed: {}", pool_host_id, exc)
+        return PoolHostDestroyOutcome(
+            pool_host_id=pool_host_id,
+            status=PoolHostDestroyOutcomeStatus.FAILED,
+            detail=f"destroy failed: {exc}",
+        )
+
+
+def _run_pool_host_destroy_steps(
+    *,
+    pool_host_id: str,
+    database_url: str,
+    private_key_path: Path | None,
+    eligible_statuses: tuple[str, ...],
+    is_row_drop_only: bool,
+) -> PoolHostDestroyOutcome:
+    """Run one host's claim -> VM teardown -> row delete and return its outcome.
+
+    The atomic claim (flip to 'removing' from an eligible status, committed before any
+    teardown) is what closes the destroy-vs-lease race: the connector's lease only
+    selects 'available' rows, so once claimed the row can never be handed to a user.
+    A teardown failure leaves the row 'removing' -- unleasable and retryable by
+    re-running the destroy with the same id.
+    """
+    # Claim the row; a miss means it no longer exists (already destroyed) or its
+    # status is not eligible (e.g. it was leased between listing and destroying).
+    conn = psycopg2.connect(database_url)
+    try:
+        is_claimed = claim_pool_host_for_removal(conn, pool_host_id, eligible_statuses)
+        if not is_claimed:
+            current_status = fetch_pool_host_status(conn, pool_host_id)
+            if current_status is None:
+                return _already_gone_outcome(pool_host_id)
+            if current_status == POOL_HOST_STATUS_LEASED:
+                logger.warning(
+                    "Skipping pool host {}: it is leased (likely grabbed between listing and destroying)",
+                    pool_host_id,
+                )
+                return PoolHostDestroyOutcome(
+                    pool_host_id=pool_host_id,
+                    status=PoolHostDestroyOutcomeStatus.SKIPPED_LEASED,
+                    detail="row is 'leased'; pass --force to destroy leased rows",
+                )
+            # A miss on an existing, non-leased row means a status outside the known
+            # vocabulary -- report it precisely rather than guessing at a cause.
+            logger.warning(
+                "Cannot claim pool host {}: status '{}' is not in {}", pool_host_id, current_status, eligible_statuses
+            )
+            return PoolHostDestroyOutcome(
+                pool_host_id=pool_host_id,
+                status=PoolHostDestroyOutcomeStatus.FAILED,
+                detail=f"row is in unexpected status '{current_status}' (claimable: {', '.join(eligible_statuses)})",
+            )
+        target = fetch_pool_host_destroy_target(conn, pool_host_id)
+    finally:
+        conn.close()
+    if target is None:
+        # Deleted between the claim and the fetch -- only a concurrent destroy of the
+        # same id can do that, and the end state (row gone) is what we wanted.
+        return _already_gone_outcome(pool_host_id)
+
+    # Tear the slice VM down before dropping the row, so a failure keeps the row
+    # ('removing') and the teardown stays retryable -- never a stranded VM.
+    if not is_row_drop_only:
+        if not target.lima_instance_name or not target.box_public_address:
+            return PoolHostDestroyOutcome(
+                pool_host_id=pool_host_id,
+                status=PoolHostDestroyOutcomeStatus.FAILED,
+                detail=(
+                    "cannot locate the VM to destroy (missing lima_instance_name or the box record is gone); "
+                    "pass --drop-row-only to drop the row without teardown"
+                ),
+            )
+        if private_key_path is None:
+            return PoolHostDestroyOutcome(
+                pool_host_id=pool_host_id,
+                status=PoolHostDestroyOutcomeStatus.FAILED,
+                detail="no pool management key available for the box SSH (POOL_SSH_PRIVATE_KEY)",
+            )
         client = LimaSliceVpsClient(
-            box_address=str(server.public_address),
-            box_ssh_user=ssh_user,
+            box_address=target.box_public_address,
+            box_ssh_user=target.lima_service_user or "limahost",
             private_key_path=str(private_key_path),
-            box_host_public_key=server.box_host_public_key,
+            box_host_public_key=target.box_host_public_key,
         )
-        client.destroy_instance(VpsInstanceId(lima_instance_name))
+        try:
+            client.destroy_instance(VpsInstanceId(target.lima_instance_name))
+        except (MngrError, OSError) as exc:
+            logger.warning("Failed to tear down slice {}: {}", target.lima_instance_name, exc)
+            return PoolHostDestroyOutcome(
+                pool_host_id=pool_host_id,
+                status=PoolHostDestroyOutcomeStatus.FAILED,
+                detail=f"VM teardown failed ({target.lima_instance_name} on {target.box_public_address}): {exc}",
+            )
+
+    # The VM is gone (or the operator asked for a row-only drop); drop the row. A fresh
+    # connection on purpose: the SSH teardown above can take minutes, and a Neon
+    # connection held idle across it may be dropped server-side by the time we delete.
+    conn_for_delete = psycopg2.connect(database_url)
+    try:
+        delete_pool_host_row(conn_for_delete, pool_host_id)
+    finally:
+        conn_for_delete.close()
+    logger.info("Destroyed pool host {} ({})", pool_host_id, target.lima_instance_name or "no VM")
+    detail = "row dropped without VM teardown (--drop-row-only)" if is_row_drop_only else None
+    return PoolHostDestroyOutcome(
+        pool_host_id=pool_host_id, status=PoolHostDestroyOutcomeStatus.DESTROYED, detail=detail
+    )
 
 
-def tear_down_unleased_slices(database_url: str) -> dict[str, Any]:
+def _describe_destroy_outcome(outcome: PoolHostDestroyOutcome) -> str:
+    return f"{outcome.pool_host_id} {outcome.status}"
+
+
+def destroy_pool_hosts_in_parallel(
+    *,
+    pool_host_ids: Sequence[str],
+    database_url: str,
+    eligible_statuses: tuple[str, ...],
+    is_row_drop_only: bool,
+    max_concurrency: int,
+) -> list[PoolHostDestroyOutcome]:
+    """Destroy pool hosts concurrently (claim -> VM teardown -> row delete), one outcome per id.
+
+    All targets run in parallel under one global semaphore regardless of which box each
+    slice is on -- deletes never take the box's carve-time reservation lock, so
+    parallelism within a single box is safe. Outcomes are returned in input order.
+    """
+    if max_concurrency <= 0:
+        raise click.UsageError("--max-concurrency must be positive")
+    unique_ids = list(dict.fromkeys(pool_host_ids))
+    logger.info("Destroying {} pool host(s) ({} at a time)", len(unique_ids), max_concurrency)
+    # A row-only drop never SSHes a box, so it must not require POOL_SSH_PRIVATE_KEY.
+    key_path_context = nullcontext(None) if is_row_drop_only else _pool_private_key_path()
+    with key_path_context as private_key_path:
+        outcomes = run_outcome_workers_in_bounded_threads(
+            worker=_destroy_one_pool_host,
+            worker_kwargs_list=[
+                dict(
+                    pool_host_id=pool_host_id,
+                    database_url=database_url,
+                    private_key_path=private_key_path,
+                    eligible_statuses=eligible_statuses,
+                    is_row_drop_only=is_row_drop_only,
+                )
+                for pool_host_id in unique_ids
+            ],
+            max_concurrency=max_concurrency,
+            thread_name_prefix="destroy",
+            progress_noun="Pool host destroy",
+            describe_outcome=_describe_destroy_outcome,
+            interruption_exception_types=(),
+            on_join_interrupted=None,
+        )
+    outcome_by_id = {outcome.pool_host_id: outcome for outcome in outcomes}
+    return [outcome_by_id[pool_host_id] for pool_host_id in unique_ids]
+
+
+@pure
+def build_pool_host_destroy_report(outcomes: Sequence[PoolHostDestroyOutcome]) -> PoolHostDestroyReport:
+    """Aggregate per-host destroy outcomes into the summary report the destroy commands emit."""
+    destroyed_count = sum(
+        1
+        for outcome in outcomes
+        if outcome.status in (PoolHostDestroyOutcomeStatus.DESTROYED, PoolHostDestroyOutcomeStatus.ALREADY_GONE)
+    )
+    skipped_count = sum(1 for outcome in outcomes if outcome.status == PoolHostDestroyOutcomeStatus.SKIPPED_LEASED)
+    failed_count = sum(1 for outcome in outcomes if outcome.status == PoolHostDestroyOutcomeStatus.FAILED)
+    return PoolHostDestroyReport(
+        requested=len(outcomes),
+        destroyed=destroyed_count,
+        skipped=skipped_count,
+        failed=failed_count,
+        hosts=tuple(outcomes),
+    )
+
+
+def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> PoolHostDestroyReport:
     """Tear down every unleased slice VM recorded in ``database_url`` and drop its row.
 
     The teardown an env destroy runs (before its per-env DB is deleted) so the env's
     baked-but-unleased pool slices don't leak their VMs on the shared boxes. Leased
-    slices are excluded: they are torn down via their agent's release path. Each VM
-    teardown is idempotent (an already-absent VM counts as success); the row is
-    dropped only after its VM is gone. Must-succeed: raises
+    slices are excluded: they are torn down via their agent's release path. Rows
+    stranded in 'removing' (a crashed release) are included so they never leak. Each
+    row is atomically claimed before its VM is touched, so a lease cannot race the
+    teardown; each VM teardown is idempotent (an already-absent VM counts as success)
+    and the row is dropped only after its VM is gone. Must-succeed: raises
     ``BareMetalProvisioningError`` listing every slice whose box could not be
     reached, so the caller can stop the destroy rather than silently leak.
     """
+    eligible_statuses = destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False)
     conn = psycopg2.connect(database_url)
     try:
-        targets = fetch_unleased_slice_teardown_targets(conn)
+        row_ids = fetch_unleased_slice_teardown_row_ids(conn, eligible_statuses)
     finally:
         conn.close()
-    if not targets:
-        return {"torn_down": 0, "failed": 0}
-    torn_down_count = 0
-    failures: list[str] = []
-    with _pool_private_key_path() as private_key_path:
-        for target in targets:
-            client = LimaSliceVpsClient(
-                box_address=target.box_public_address,
-                box_ssh_user=target.lima_service_user,
-                private_key_path=str(private_key_path),
-                box_host_public_key=target.box_host_public_key,
-            )
-            try:
-                client.destroy_instance(VpsInstanceId(target.lima_instance_name))
-            except (MngrError, OSError) as exc:
-                logger.warning("Failed to tear down slice {}: {}", target.lima_instance_name, exc)
-                failures.append(f"{target.lima_instance_name} on {target.box_public_address}: {exc}")
-                continue
-            conn = psycopg2.connect(database_url)
-            try:
-                delete_pool_host_row(conn, target.pool_host_row_id)
-            finally:
-                conn.close()
-            torn_down_count += 1
-            logger.info("Tore down unleased slice {} on {}", target.lima_instance_name, target.box_public_address)
+    if not row_ids:
+        return build_pool_host_destroy_report([])
+    outcomes = destroy_pool_hosts_in_parallel(
+        pool_host_ids=row_ids,
+        database_url=database_url,
+        eligible_statuses=eligible_statuses,
+        is_row_drop_only=False,
+        max_concurrency=max_concurrency,
+    )
+    report = build_pool_host_destroy_report(outcomes)
+    failures = [
+        f"{outcome.pool_host_id}: {outcome.detail or 'unknown failure'}"
+        for outcome in outcomes
+        if outcome.status == PoolHostDestroyOutcomeStatus.FAILED
+    ]
     if failures:
         raise BareMetalProvisioningError(
             f"failed to tear down {len(failures)} slice(s); their VMs may still be running: {'; '.join(failures)}"
         )
-    return {"torn_down": torn_down_count, "failed": 0}
+    return report
 
 
 def _resolve_vendored_mngr_source(*, mngr_source: str | None, repo_root: Path, is_from_tag: bool) -> Path | None:
-    """Return the mngr tree to vendor into the FCT clone's ``vendor/mngr``, or None to keep the clone's own.
+    """Return the mngr tree to vendor into the DEFAULT_WORKSPACE_TEMPLATE clone's ``vendor/mngr``, or None to keep the clone's own.
 
     An explicit ``--mngr-source`` always wins. Otherwise a ``--from-tag`` bake keeps
     the mngr already vendored at the pinned tag (returns None -- byte-for-byte tag
@@ -1047,7 +1305,7 @@ def allocate_slices(
     The slice backend of ``admin pool create``. Bakes onto the operator-named
     ``server_id`` (one server per invocation: a server's per-slice vCPU/RAM/disk
     are fixed by its registration, so a batch is homogeneous), vendors the resolved
-    mngr source into the FCT workspace once (see ``_resolve_vendored_mngr_source``:
+    mngr source into the DEFAULT_WORKSPACE_TEMPLATE workspace once (see ``_resolve_vendored_mngr_source``:
     a ``--from-tag`` bake keeps the tag's own vendored mngr), then bakes the slices concurrently -- at most
     ``max_concurrency`` at a time (the rest queue) so the box isn't over-contended,
     which would push each ``mngr create`` past its timeout. Each ``mngr create``
@@ -1126,7 +1384,7 @@ def allocate_slices(
             )
             return
 
-        # Resolve which mngr tree (if any) to vendor into the FCT workspace's
+        # Resolve which mngr tree (if any) to vendor into the DEFAULT_WORKSPACE_TEMPLATE workspace's
         # vendor/mngr (the baked container builds its mngr from there). For a
         # --from-tag bake we keep the mngr already vendored at the pinned tag so the
         # slice is byte-for-byte tag content; only --workspace-dir (dev) or an
@@ -1139,47 +1397,35 @@ def allocate_slices(
             sync_mngr_into_template(mngr_source_to_vendor, workspace_dir)
 
         pool_public_key = _derive_public_key(private_key_path)
-        # Enable the per-box FCT image cache only for production (--from-tag) bakes, whose
+        # Enable the per-box default-workspace-template image cache only for production (--from-tag) bakes, whose
         # content is an immutable tag: the first slice builds + seeds a box-local tar
-        # (tagged fct:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
-        # mutable content under a branch label, so they always build (fct_cache_tag=None).
+        # (tagged default-workspace-template:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
+        # mutable content under a branch label, so they always build (default_workspace_template_cache_tag=None).
         repo_branch_or_tag = lease_attributes.get("repo_branch_or_tag")
-        fct_cache_tag = f"fct:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
-        # Spawn one thread per slice but cap how many bake at once with a semaphore
-        # (``max_concurrency``): each thread blocks on it before its ``mngr create``,
-        # so the box is never contended by more than K simultaneous carves+builds
+        default_workspace_template_cache_tag = (
+            f"default-workspace-template:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
+        )
+        # One worker per slice, capped at ``max_concurrency`` at once by the shared
+        # fan-out: each bake blocks on the semaphore before its ``mngr create``, so
+        # the box is never contended by more than K simultaneous carves+builds
         # (which would push each create past its timeout). Every bake is handed the
         # FULL box port range: the on-box reservation lock makes concurrent carves
         # (this env's and other envs') pick distinct free ports from it.
-        outcomes: list[dict[str, Any]] = []
-        outcomes_lock = threading.Lock()
-        bake_semaphore = threading.Semaphore(max_concurrency)
-        threads = [
-            ObservableThread(
-                target=_bake_into_outcomes,
-                kwargs=dict(
-                    server=server,
-                    sizing=sizing,
-                    lease_attributes=lease_attributes,
-                    region=region,
-                    env_name=env_name,
-                    workspace_dir=workspace_dir,
-                    pool_public_key=pool_public_key,
-                    private_key_path=private_key_path,
-                    database_url=database_url,
-                    port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
-                    port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
-                    is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
-                    fct_cache_tag=fct_cache_tag,
-                    semaphore=bake_semaphore,
-                    total=count,
-                    outcomes=outcomes,
-                    outcomes_lock=outcomes_lock,
-                ),
-                name=f"bake-{idx}",
-            )
-            for idx in range(count)
-        ]
+        bake_worker_kwargs = dict(
+            server=server,
+            sizing=sizing,
+            lease_attributes=lease_attributes,
+            region=region,
+            env_name=env_name,
+            workspace_dir=workspace_dir,
+            pool_public_key=pool_public_key,
+            private_key_path=private_key_path,
+            database_url=database_url,
+            port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
+            port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
+            is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+            default_workspace_template_cache_tag=default_workspace_template_cache_tag,
+        )
         logger.info("Baking {} slice(s) on {} ({} at a time)", count, server.public_address, max_concurrency)
 
         # ``signal.signal`` only works on the main thread; the admin CLI always runs
@@ -1189,23 +1435,22 @@ def allocate_slices(
         previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_bake_termination_signal) if is_main_thread else None
         previous_sigint = signal.signal(signal.SIGINT, _raise_on_bake_termination_signal) if is_main_thread else None
         try:
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
+            outcomes = run_outcome_workers_in_bounded_threads(
+                worker=_bake_one_slice,
+                worker_kwargs_list=[bake_worker_kwargs for _ in range(count)],
+                max_concurrency=max_concurrency,
+                thread_name_prefix="bake",
+                progress_noun="Slice bake",
+                describe_outcome=_describe_bake_outcome,
+                interruption_exception_types=(SliceBakeTerminatedError,),
+                on_join_interrupted=lambda: _handle_bake_join_interruption(is_main_thread),
+            )
         except SliceBakeTerminatedError:
             # Top-level kill (e.g. the minds wrapper's subprocess timeout SIGTERMs us).
-            # Without this, the workers would be reparented and keep carving VMs. Ignore
-            # further signals, kill the in-flight workers so no new VM is carved, and let
-            # their threads settle; the finally reaps the orphans. Exit non-zero so the
-            # caller sees the failure.
-            if is_main_thread:
-                signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                signal.signal(signal.SIGINT, signal.SIG_IGN)
-            logger.warning("Slice bake terminated by signal; killing in-flight workers before reap")
-            _kill_bake_worker_processes()
-            for thread in threads:
-                thread.join()
+            # The fan-out's on_join_interrupted hook has already ignored further
+            # signals, killed the in-flight workers (so no new VM is carved), and let
+            # their threads settle; the finally reaps the orphans. Exit non-zero so
+            # the caller sees the failure.
             raise SystemExit(1) from None
         finally:
             # Reap VMs left orphaned by a killed/timed-out create (carved but never
@@ -1220,16 +1465,12 @@ def allocate_slices(
                 signal.signal(signal.SIGTERM, previous_sigterm)
                 signal.signal(signal.SIGINT, previous_sigint)
 
-    succeeded = [outcome for outcome in outcomes if outcome.get("status") == "succeeded"]
-    emit_json(
-        {
-            "requested": count,
-            "succeeded": len(succeeded),
-            "failed": count - len(succeeded),
-            "slices": outcomes,
-        }
+    succeeded = [outcome for outcome in outcomes if outcome.status == SliceBakeOutcomeStatus.SUCCEEDED]
+    report = SliceBakeReport(
+        requested=count, succeeded=len(succeeded), failed=count - len(succeeded), slices=tuple(outcomes)
     )
-    if len(succeeded) < count:
+    emit_json(report.model_dump(mode="json", exclude_none=True))
+    if report.failed:
         raise SystemExit(1)
 
 
@@ -1463,6 +1704,16 @@ def _wait_for_ssh_ready(
     ),
 )
 @click.option("--yes", is_flag=True, default=False, help="Skip the interactive confirmation and place the order.")
+@click.option(
+    "--dry-run",
+    "is_dry_run",
+    is_flag=True,
+    default=False,
+    help=(
+        "Build + assign a non-committal cart, print the real OVH price preview + derived specs, then delete "
+        "the cart without ordering. No charge and no prompt -- use it to confirm price/specs before ordering."
+    ),
+)
 @click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
 def order(
     plan_code: str,
@@ -1473,6 +1724,7 @@ def order(
     cpu_overcommit: float,
     option_codes: tuple[str, ...],
     yes: bool,
+    is_dry_run: bool,
     database_url: str | None,
 ) -> None:
     """Order a bare-metal server from OVH (THIS CHARGES the account) and record it at status 'ordered'.
@@ -1480,7 +1732,8 @@ def order(
     Builds + assigns the eco cart, shows the real OVH price preview for confirmation, places the order, and
     inserts a bare_metal_servers row (specs derived from the catalog). Then run ``await-delivery`` + ``setup``.
     Any mandatory option family with more than one offer (e.g. bandwidth, vrack) must be chosen explicitly
-    via ``--option``; needs OVH_* credentials and the pool DSN.
+    via ``--option``; needs OVH_* credentials and the pool DSN. Pass ``--dry-run`` to price + preview only
+    (no charge, no prompt, no DB write); ``--dry-run`` wins over ``--yes``.
     """
     config = _require_ovh_config()
     client = build_ovh_client(config)
@@ -1506,6 +1759,12 @@ def order(
         f"{disk_gb}GB usable disk ({raid_level}) -> {slot_count} slices of {memory_per_slice_gb}GB.\n"
         f"OVH price preview:\n{summarize_checkout_prices(preview)}"
     )
+    # A dry run stops here (before any prompt or charge), deleting the non-committal cart. Checked ahead of
+    # --yes so an accidental `--dry-run --yes` never charges.
+    if is_dry_run:
+        delete_cart_quietly(client, cart_id)
+        write_human_line("Dry run: cart deleted, no order placed.")
+        return
     if not yes and not click.confirm("Place this order now (this charges the account)?", default=False):
         delete_cart_quietly(client, cart_id)
         write_human_line("Aborted; cart deleted, no order placed.")
@@ -1689,5 +1948,5 @@ def setup(
     _update_server_fields(dsn, server_id, lima_service_user=lima_service_user, status=SERVER_STATUS_READY)
     write_human_line(
         f"Server {server_id} is READY: {service_name} ({address}), "
-        f"{server.slot_count} slots. Bake a slice with `admin pool create --backend slice`."
+        f"{server.slot_count} slots. Bake a slice with `admin pool create`."
     )

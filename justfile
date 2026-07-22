@@ -125,7 +125,7 @@ test-offload-release args="":
 # Usage:
 #     just test-offload-minds-snapshot im-01...    # required: snapshot image id
 #     just test-offload-minds-snapshot im-01... '--filter test_foo'
-# The snapshot image already has the entire mngr checkout, the FCT
+# The snapshot image already has the entire mngr checkout, the DEFAULT_WORKSPACE_TEMPLATE
 # workspace's Docker container (in a stopped state), and dockerd's
 # /var/lib/docker tree baked in -- so offload skips its normal image-
 # setup phase entirely and boots straight from the snapshot via
@@ -149,6 +149,15 @@ test-offload-minds-snapshot snapshot_image_id args="":
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         EXTRA_ENV_ARGS+=(--env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
     fi
+    # Forward the sync e2e connector-env coordinates when present (only the
+    # run_minds_release_tests CI path exports them; see apps/minds/test_sync_e2e.py).
+    # Secret values are masked in CI logs by the Vault use-vault-secrets action.
+    for sync_e2e_var in MINDS_SYNC_E2E_CONNECTOR_URL MINDS_SYNC_E2E_LITELLM_URL \
+        MINDS_SYNC_E2E_SUPERTOKENS_CONNECTION_URI MINDS_SYNC_E2E_SUPERTOKENS_API_KEY; do
+        if [ -n "${!sync_e2e_var:-}" ]; then
+            EXTRA_ENV_ARGS+=(--env "${sync_e2e_var}=${!sync_e2e_var}")
+        fi
+    done
     offload -c offload-modal-minds-snapshot.toml run --trace \
         --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
@@ -217,6 +226,29 @@ test target:
 test-sdk-live args="":
   RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
 
+# === TMR (test map-reduce) variants ===
+# Canonical per-suite flag sets for `mngr tmr` (one agent per test, run + fix in
+# parallel). Each variant gets its own --name prefix so its agents, branches, and
+# PRs stay separate and reviewable on their own. The CI workflow
+# (.github/workflows/tmr.yml) mirrors these via its name / mapper_prompt inputs.
+# Extra flags pass through before the `--` separator, e.g.
+#   just tmr-minds --provider modal --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+
+# mngr release suite (scoped to libs/mngr; the apps/minds tree is a separate variant).
+tmr-mngr *args:
+  uv run --project libs/mngr_tmr mngr tmr libs/mngr --name tmr-mngr {{args}} -- -m 'release and not docker and not docker_sdk'
+
+# Defaults to the plain @release tests that need no ci env / snapshot image. The
+# capability suites additionally need their own setup, appended as extra args:
+#   - minds_snapshot_resume: a pre-baked snapshot image (--snapshot <id>) on a
+#     vm_runtime host, plus ANTHROPIC_API_KEY.
+#   - minds_deployment / minds_services: Modal deploy tokens + the env secrets
+#     (litellm, etc.); each deployment test mints its own ephemeral env.
+#
+# minds release suite (the apps/minds tree), with the minds-tailored mapper prompt.
+tmr-minds *args:
+  uv run --project libs/mngr_tmr mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2 {{args}} -- -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
+
 # === minds deployment / services test orchestrator ===
 # Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
 # and apps/minds/deployment_tests/README.md for the full design + usage.
@@ -247,7 +279,7 @@ minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
 
 # End-to-end acceptance test that drives the real Electron minds app to create
-# a local Docker workspace from forever-claude-template using the manual
+# a local Docker workspace from default-workspace-template using the manual
 # `api_key` AI provider, then sends a chat message and asserts the agent replies.
 # Wraps the invocation with `xvfb-run` so it works on headless Linux. macOS users
 # with a real display can run the underlying pytest directly without xvfb-run.
@@ -258,7 +290,11 @@ minds-test-deployment-only *tests:
 # the gitignored stylesheet. The test lives in the snapshot-resume suite (it
 # runs in CI in the snapshot offload stage, reusing that image's warm Electron
 # toolchain) but creates its own fresh workspace, so it runs fine locally too.
+# The test itself only consumes the DEFAULT_WORKSPACE_TEMPLATE worktree (erroring if absent), so this
+# recipe first materializes it (paired DEFAULT_WORKSPACE_TEMPLATE branch + vendored mngr) unless an
+# operator worktree is already present, mirroring the CI snapshot bake.
 minds-test-electron *args: minds-css
+  uv run python -c 'from imbue.minds.desktop_client.default_workspace_template_worktree import materialize_paired_default_workspace_template_worktree; materialize_paired_default_workspace_template_worktree()'
   xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Drive the FULL Electron workspace lifecycle end-to-end (create local Docker
@@ -268,10 +304,10 @@ minds-test-electron *args: minds-css
 # is an operator/debug harness: it needs Docker + live AI creds, so activate an
 # env with a logged-in account first, e.g.
 #   eval "$(uv run minds env activate dev-josh-1)"
-# It also needs the FCT external worktree's vendor/mngr synced to this checkout
+# It also needs the DEFAULT_WORKSPACE_TEMPLATE external worktree's vendor/mngr synced to this checkout
 # (otherwise the initial chat agent fails to create on settings the vendored mngr
 # doesn't recognize, and the chat step hangs on "Waiting for initial chat
-# agent..."); run `just sync-vendor-mngr .external_worktrees/forever-claude-template`
+# agent..."); run `just sync-vendor-mngr .external_worktrees/default-workspace-template`
 # first (the minds-dev-workflow does this on every startup).
 # Screenshots of each step land in /tmp/minds-electron-flow/.
 minds-test-electron-flow *args: minds-css
@@ -286,58 +322,75 @@ minds-test-electron-flow *args: minds-css
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
-# Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
-# in FCT. The FCT checkout path comes from the positional arg, else FCT_DIR read
+alias dwt-worktree := default-workspace-template-worktree
+# Create an independent default-workspace-template checkout nested in the
+# current mngr checkout at .external_worktrees/default-workspace-template -- the
+# CLAUDE.md convention for developing default_workspace_template alongside mngr. Defaults the default_workspace_template branch
+# to the current mngr branch; override with a positional arg. Errors if a checkout
+# already exists or the branch is already on default_workspace_template. It is a full clone (survives
+# deletion of any other clone/cache) and needs no configuration.
+# Set DEFAULT_WORKSPACE_TEMPLATE_DIR (gitignored apps/minds/.env or your shell) to a local default_workspace_template clone to
+# make the clone fast -- purely a speed hint, no lasting dependency is created.
+default-workspace-template-worktree branch="" base="origin/main":
+    bash scripts/default_workspace_template_worktree.sh "{{branch}}" "{{base}}"
+
+# Sync vendor/mngr in default-workspace-template to this repo's HEAD and commit
+# in DEFAULT_WORKSPACE_TEMPLATE. The DEFAULT_WORKSPACE_TEMPLATE checkout path comes from the positional arg, else DEFAULT_WORKSPACE_TEMPLATE_DIR read
 # from a gitignored apps/minds/.env (minds-scoped per-user config -- see
-# apps/minds/.env.example), else $FCT_DIR in your shell. No personal path is
+# apps/minds/.env.example), else $DEFAULT_WORKSPACE_TEMPLATE_DIR in your shell. No personal path is
 # baked in, and nothing outside this recipe loads that .env. Position the mngr
 # checkout at the exact commit you want to vendor first -- your release PR branch
 # HEAD / the verified release SHA, NOT blindly `main`, which can drift past it
 # between verification and merge. The recipe archives HEAD, replaces vendor/mngr/
-# with that snapshot, and commits in FCT. Does not push. Aborts if FCT is dirty.
+# with that snapshot, and commits in DEFAULT_WORKSPACE_TEMPLATE. Does not push. Aborts if DEFAULT_WORKSPACE_TEMPLATE is dirty.
 # Full release flow: apps/minds/docs/release.md.
-sync-vendor-mngr fct="":
+sync-vendor-mngr default_workspace_template="":
     #!/bin/bash
     set -ueo pipefail
-    fct="{{fct}}"
-    # Fall back to FCT_DIR -- from a gitignored apps/minds/.env (minds-scoped), or your shell.
-    if [ -z "$fct" ] && [ -f apps/minds/.env ]; then set -a; . ./apps/minds/.env; set +a; fi
-    if [ -z "$fct" ]; then fct="${FCT_DIR:-}"; fi
-    if [ -z "$fct" ]; then
-        echo "error: no forever-claude-template path. Set FCT_DIR in apps/minds/.env, or pass it:" >&2
-        echo "  echo 'FCT_DIR=/path/to/forever-claude-template' >> apps/minds/.env   # gitignored" >&2
-        echo "  just sync-vendor-mngr /path/to/forever-claude-template" >&2
+    default_workspace_template="{{default_workspace_template}}"
+    # Fall back to DEFAULT_WORKSPACE_TEMPLATE_DIR -- from a gitignored apps/minds/.env (minds-scoped), or your shell.
+    if [ -z "$default_workspace_template" ] && [ -f apps/minds/.env ]; then set -a; . ./apps/minds/.env; set +a; fi
+    if [ -z "$default_workspace_template" ]; then default_workspace_template="${DEFAULT_WORKSPACE_TEMPLATE_DIR:-}"; fi
+    if [ -z "$default_workspace_template" ]; then
+        if [ -n "${FCT_DIR:-}" ]; then  # rename:keep -- legacy-var guard
+            echo "error: FCT_DIR is the pre-rename variable name; rename it to DEFAULT_WORKSPACE_TEMPLATE_DIR (same value)," >&2  # rename:keep
+            echo "or migrate all local state at once: scripts/migrate_state_fct_to_default_workspace_template.sh --dry-run" >&2  # rename:keep
+            exit 2
+        fi
+        echo "error: no default-workspace-template path. Set DEFAULT_WORKSPACE_TEMPLATE_DIR in apps/minds/.env, or pass it:" >&2
+        echo "  echo 'DEFAULT_WORKSPACE_TEMPLATE_DIR=/path/to/default-workspace-template' >> apps/minds/.env   # gitignored" >&2
+        echo "  just sync-vendor-mngr /path/to/default-workspace-template" >&2
         exit 2
     fi
-    if [ ! -d "$fct/vendor/mngr" ]; then
-        echo "Error: $fct/vendor/mngr not found"
+    if [ ! -d "$default_workspace_template/vendor/mngr" ]; then
+        echo "Error: $default_workspace_template/vendor/mngr not found"
         exit 1
     fi
-    # Resolve to an absolute path: the recipe `cd`s into $fct/vendor/mngr and
-    # later back to $fct, so a relative arg would break the second cd.
-    fct="$(cd "$fct" && pwd)"
-    if [ -n "$(git -C "$fct" status --porcelain)" ]; then
-        echo "Error: $fct has uncommitted changes; resolve them first:"
-        git -C "$fct" status --short
+    # Resolve to an absolute path: the recipe `cd`s into $default_workspace_template/vendor/mngr and
+    # later back to $default_workspace_template, so a relative arg would break the second cd.
+    default_workspace_template="$(cd "$default_workspace_template" && pwd)"
+    if [ -n "$(git -C "$default_workspace_template" status --porcelain)" ]; then
+        echo "Error: $default_workspace_template has uncommitted changes; resolve them first:"
+        git -C "$default_workspace_template" status --short
         exit 1
     fi
-    branch=$(git rev-parse --abbrev-ref HEAD)
+    branch=$(bash "{{justfile_directory()}}/scripts/current_branch.sh" "{{justfile_directory()}}" || echo HEAD)
     short=$(git rev-parse --short HEAD)
     full=$(git rev-parse HEAD)
     tarball=$(mktemp)
     trap "rm -f $tarball" EXIT
     git archive --format=tar HEAD > "$tarball"
-    cd "$fct/vendor/mngr"
+    cd "$default_workspace_template/vendor/mngr"
     rm -rf ./* ./.[!.]*
     tar -xf "$tarball"
-    cd "$fct"
+    cd "$default_workspace_template"
     git add -A vendor/mngr/
     if git diff --cached --quiet -- vendor/mngr/; then
         echo "vendor/mngr already in sync with mngr ${short}; nothing to commit"
         exit 0
     fi
     git commit -m "Sync vendor/mngr to ${branch} (${short})" -m "Tracks ${full} in mngr."
-    echo "Synced vendor/mngr to ${branch} (${short}). To publish: (cd $fct && git push origin ${branch})"
+    echo "Synced vendor/mngr to ${branch} (${short}). To publish: (cd $default_workspace_template && git push origin ${branch})"
 
 
 # === Modal deploy / minds iteration helpers ===
@@ -362,11 +415,10 @@ deploy *args:
 # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (see below), and sets
 # MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository" and
 # "branch":
-#   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
+#   MINDS_WORKSPACE_GIT_URL = .external_worktrees/default-workspace-template/
 #       (REQUIRED -- recipe fails if missing; create the worktree with
-#       `git -C ~/project/forever-claude-template worktree add` before
-#       running minds-start).
-#   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
+#       `just default-workspace-template-worktree` before running minds-start).
+#   MINDS_WORKSPACE_BRANCH  = the DEFAULT_WORKSPACE_TEMPLATE worktree's current branch.
 # The workspace name is never prefilled: the create form generates a `mind-N`
 # name -- matching a shipped binary -- unless you type one into the form's
 # advanced "Name" field. Type a name there if you want a predictable handle for
@@ -377,17 +429,18 @@ deploy *args:
 # the shell. The opt-in is what makes dev iteration work on ANY tier --
 # including staging / production -- instead of only on per-developer dev envs.
 #
-# Always re-syncs the live mngr working tree into the FCT worktree's
+# Always re-syncs the live mngr working tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's
 # vendor/mngr/ first, so the very first Create after starting the app
 # picks up your local mngr code rather than whatever stale snapshot the
-# FCT worktree was created from. Uses rsync (vs `just sync-vendor-mngr`'s
-# git archive) so uncommitted mngr changes flow through and the FCT
+# DEFAULT_WORKSPACE_TEMPLATE worktree was created from. Uses rsync (vs `just sync-vendor-mngr`'s
+# git archive) so uncommitted mngr changes flow through and the DEFAULT_WORKSPACE_TEMPLATE
 # worktree's git state stays as a normal diff.
 #
 # Requires that you've activated a minds env in this shell first --
-# `eval "$(uv run minds env activate <your-user>-dev)"` is the typical
-# dev case. Refuses without activation so the recipe never silently
-# writes to the wrong env's data root.
+# `eval "$(uv run minds env activate dev-<your-user>)"` is the typical
+# dev case (add `--create` on the very first activation of a fresh dev env
+# to make its data root). Refuses without activation so the recipe never
+# silently writes to the wrong env's data root.
 #
 # Install the minds desktop client's node deps (electron, etc.) using the Node
 # version apps/minds pins in apps/minds/.nvmrc -- selected via
@@ -401,49 +454,64 @@ minds-install:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm install
 
-# Override branch / fct (FCT worktree path) via positional args (just has no
+# Override branch / default_workspace_template (DEFAULT_WORKSPACE_TEMPLATE worktree path) via positional args (just has no
 # name=value form for recipe params -- pass them in order):
 #   just minds-start                     # launch against the worktree's branch
-#   just minds-start my-branch           # pin the FCT branch to `my-branch`
-#   just minds-start "" .external_worktrees/my-fct-worktree   # 2nd arg = fct
-# `fct` defaults to .external_worktrees/forever-claude-template; an absolute
+#   just minds-start my-branch           # pin the DEFAULT_WORKSPACE_TEMPLATE branch to `my-branch`
+#   just minds-start "" .external_worktrees/my-default-workspace-template-worktree   # 2nd arg = default_workspace_template
+# `default_workspace_template` defaults to .external_worktrees/default-workspace-template; an absolute
 # path is used as-is, a relative one is resolved against the mngr root. This
 # is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
-# so point it at whichever FCT worktree/branch you want to launch against.
+# so point it at whichever DEFAULT_WORKSPACE_TEMPLATE worktree/branch you want to launch against.
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
 # minds-stop` to kill the running instance first.
-minds-start branch="" fct="":
+minds-start branch="" default_workspace_template="":
     #!/bin/bash
     set -ueo pipefail
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
         echo "error: no minds env activated in this shell." >&2
         echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
-        echo "       (e.g. \`<your-user>-dev\` for your personal dev env), then" >&2
+        echo "       (e.g. \`dev-<your-user>\` for your personal dev env), then" >&2
         echo "       re-run \`just minds-start\` from the same shell." >&2
+        echo "       On the first activation of a fresh dev env, add --create to" >&2
+        echo "       make its data root:" >&2
+        echo "         eval \"\$(uv run minds env activate --create dev-<your-user>)\"" >&2
         echo "" >&2
         echo "       Without activation, an inherited MNGR_HOST_DIR from the parent" >&2
         echo "       shell would silently win and minds would read a different mngr" >&2
         echo "       settings.toml than its bootstrap writes to." >&2
         exit 2
     fi
-    if [ -n "{{fct}}" ]; then
-        case "{{fct}}" in
-            /*) fct_wt="{{fct}}" ;;
-            *)  fct_wt="$(pwd)/{{fct}}" ;;
+    if [ -n "{{default_workspace_template}}" ]; then
+        case "{{default_workspace_template}}" in
+            /*) default_workspace_template_wt="{{default_workspace_template}}" ;;
+            *)  default_workspace_template_wt="$(pwd)/{{default_workspace_template}}" ;;
         esac
     else
-        fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+        default_workspace_template_wt="$(pwd)/.external_worktrees/default-workspace-template"
     fi
-    if [ ! -e "$fct_wt/.git" ]; then
-        echo "error: no FCT worktree at $fct_wt" >&2
-        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
+    if [ ! -e "$default_workspace_template_wt/.git" ]; then
+        echo "error: no DEFAULT_WORKSPACE_TEMPLATE worktree at $default_workspace_template_wt" >&2
+        echo "       run \`just default-workspace-template-worktree\` to create it (or pass a custom default_workspace_template path)," >&2
+        echo "       then re-run minds-start." >&2
         exit 2
     fi
-    vendor_mngr="$fct_wt/vendor/mngr"
+    vendor_mngr="$default_workspace_template_wt/vendor/mngr"
     mkdir -p "$vendor_mngr"
-    echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no FCT commit)"
+    # The vendor/mngr sync below uses `rsync --filter=':- .gitignore'`, a GNU
+    # rsync feature. Recent macOS ships Apple's openrsync at /usr/bin/rsync,
+    # which doesn't support it and fails the sync with a confusing error --
+    # fail fast here with the fix. See apps/minds/README.md (Getting started).
+    if rsync --version 2>&1 | grep -qi openrsync; then
+        echo "error: your 'rsync' is Apple's openrsync, which lacks the" >&2
+        echo "       --filter=':- .gitignore' support minds-start needs." >&2
+        echo "       Install GNU rsync and put it ahead of /usr/bin on PATH:" >&2
+        echo "         brew install rsync" >&2
+        echo "         rsync --version | head -1   # must NOT say 'openrsync'" >&2
+        exit 2
+    fi
+    echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no DEFAULT_WORKSPACE_TEMPLATE commit)"
     # Exclusions must match _RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
     # in libs/mngr_imbue_cloud/.../cli/admin.py and apps/minds/.../cli/pool.py,
     # and the RSYNC_EXCLUDES array in apps/minds/scripts/propagate_changes --
@@ -485,14 +553,14 @@ minds-start branch="" fct="":
     # leak is a dev-environment artifact; unsetting here is the
     # proportionate fix. `unset` of an already-unset var is a no-op.
     unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
-    export MINDS_WORKSPACE_GIT_URL="$fct_wt"
+    export MINDS_WORKSPACE_GIT_URL="$default_workspace_template_wt"
     # Explicit opt-in so the desktop client honors the MINDS_WORKSPACE_* vars
     # on any tier (the form ignores them otherwise; see _operator_workspace_default).
     export MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
     else
-        export MINDS_WORKSPACE_BRANCH="$(git -C "$fct_wt" rev-parse --abbrev-ref HEAD)"
+        export MINDS_WORKSPACE_BRANCH="$(bash "{{justfile_directory()}}/scripts/current_branch.sh" "$default_workspace_template_wt")"
     fi
     echo "MINDS_WORKSPACE_GIT_URL=$MINDS_WORKSPACE_GIT_URL"
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
@@ -521,7 +589,7 @@ minds-start branch="" fct="":
 # slices. Unlike `just minds-start` (which targets LOCAL Lima/Docker dev),
 # this deliberately does NOT set MINDS_USE_LOCAL_WORKSPACE_DEFAULTS /
 # MINDS_WORKSPACE_*, so the create form keeps its shipped fallbacks: the
-# canonical forever-claude-template remote + FALLBACK_BRANCH (the
+# canonical default-workspace-template remote + FALLBACK_BRANCH (the
 # minds-v<version> release tag baked into production slices). Those shipped
 # defaults are exactly the identity stamped into a slice by
 # `just bake-slice-prod <region> minds-v<version>`, so an IMBUE_CLOUD create
@@ -683,7 +751,7 @@ minds-build:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm build
 
-# Sync this repo's mngr changes (and the FCT worktree's template state)
+# Sync this repo's mngr changes (and the DEFAULT_WORKSPACE_TEMPLATE worktree's template state)
 # into a running Docker agent's container, then restart the agent and the
 # desktop client. Wraps apps/minds/scripts/propagate_changes by auto-
 # discovering the agent's Docker SSH port (via `docker port`) and the
@@ -813,18 +881,17 @@ forward-system-interface agent_name:
     echo "  Tunnel: $TUNNEL_NAME (locked to $EMAIL)"
 
 # Spin up a new PRIVATE personal GitHub repo as a full-history copy of
-# imbue-ai/forever-claude-template's main. Clones into
+# imbue-ai/default-workspace-template's main. Clones into
 # <parent_dir>/<repo_name> (default parent: $HOME/project), creates the
 # repo under whichever account `gh` is authenticated as, pushes main,
 # and prints a pre-filled URL for a fine-grained PAT scoped to it. See
-# .claude/skills/new-forever-claude-clone/SKILL.md for the rationale.
-# Create a new private personal repo from forever-claude-template.
+# .claude/skills/new-default-workspace-template-clone/SKILL.md for the rationale.
+# Create a new private personal repo from default-workspace-template.
 create-new-mind-repo repo_name parent_dir="$HOME/project":
     #!/bin/bash
     set -ueo pipefail
     repo="{{repo_name}}"
     parent="{{parent_dir}}"
-    fct="$HOME/project/forever-claude-template"
 
     if ! command -v gh >/dev/null 2>&1; then
         echo "error: gh CLI not found on PATH" >&2; exit 2
@@ -835,9 +902,6 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     owner=$(gh api user --jq .login)
     if [ -z "$owner" ]; then
         echo "error: could not determine GitHub username from 'gh api user'" >&2; exit 2
-    fi
-    if [ ! -d "$fct/.git" ]; then
-        echo "error: $fct is not a git repo (skill expects forever-claude-template here)" >&2; exit 2
     fi
     if [ ! -d "$parent" ]; then
         echo "error: parent directory '$parent' does not exist" >&2; exit 2
@@ -851,7 +915,7 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     fi
 
     cd "$parent"
-    git clone git@github.com:imbue-ai/forever-claude-template.git "$repo"
+    git clone git@github.com:imbue-ai/default-workspace-template.git "$repo"
     cd "$repo"
     git checkout main
     git remote remove origin
@@ -931,18 +995,16 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # DSN from their per-env secrets.toml. Activate a minds env first:
 #   eval "$(uv run minds env activate <name>)"
 #
-# Pool hosts are baked as bare-metal SLICES (recipes below). Baking new OVH
-# classic VPS pool hosts is DEPRECATED and no longer supported; existing OVH VPS
-# rows can still be listed (`just list-pool-hosts`) and destroyed
-# (`just destroy-pool-host`).
+# Pool hosts are baked as bare-metal SLICES (recipes below). List them with
+# `just list-pool-hosts` and remove them with `just destroy-pool-hosts`.
 
 # === minds bare-metal SLICES (carved on a pre-registered bare-metal box) ===
 #
 # These bake "slices": lima/QEMU VMs carved on a bare-metal box you already
 # ordered, `mngr imbue_cloud admin server register`ed, and `... prep`ped
-# (status `ready`). They are thin wrappers over `minds pool create --backend
-# slice` (the default), which resolves the tier's pool key (+ host_pool DSN for
-# shared tiers) from Vault automatically.
+# (status `ready`). They are thin wrappers over `minds pool create`, which
+# resolves the tier's pool key (+ host_pool DSN for shared tiers) from Vault
+# automatically.
 #
 # Prereqs: activate a minds env first (`eval "$(uv run minds env activate <name>)"`)
 # AND `vault login -method=oidc` (the wrapper's Vault reads need a live token).
@@ -953,21 +1015,37 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # slots and is not region-filtered today, so the box must have a free slot.
 
 # Dev slice bake from a working tree (identity = its origin remote + current branch).
-bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+# workspace_dir resolves: explicit arg, else DEFAULT_WORKSPACE_TEMPLATE_DIR (shell or gitignored
+# apps/minds/.env), else the .external_worktrees/default-workspace-template checkout
+# that `just default-workspace-template-worktree` creates. No personal path baked in.
+bake-slice-dev region workspace_dir="" count="1" *extra_args:
+    #!/usr/bin/env bash
+    set -ueo pipefail
+    wd="{{workspace_dir}}"
+    if [ -z "$wd" ]; then
+        [ -f apps/minds/.env ] && { set -a; . apps/minds/.env; set +a; }
+        # $PWD is the repo root (just runs recipes from the justfile dir); keeps
+        # the fallback absolute, which minds pool create's --workspace-dir wants.
+        wd="${DEFAULT_WORKSPACE_TEMPLATE_DIR:-$PWD/.external_worktrees/default-workspace-template}"
+    fi
+    if [ ! -d "$wd/.git" ]; then
+        echo "error: no default_workspace_template checkout at $wd" >&2
+        echo "       run 'just default-workspace-template-worktree' to create it, or set DEFAULT_WORKSPACE_TEMPLATE_DIR (apps/minds/.env or shell)" >&2
+        echo "       to your default_workspace_template clone." >&2
+        exit 2
+    fi
     uv run minds pool create \
-        --backend slice \
         --count "{{count}}" \
         --region "{{region}}" \
-        --workspace-dir "{{workspace_dir}}" \
+        --workspace-dir "$wd" \
         --skip-deferred-install-wait \
         {{extra_args}}
 
-# Production slice bake from an exact FCT tag (strict; content provably equals the
+# Production slice bake from an exact DEFAULT_WORKSPACE_TEMPLATE tag (strict; content provably equals the
 # tag). Pass `--dry-run` through extra args first to confirm server selection +
 # per-slice sizing without baking.
 bake-slice-prod region tag count="1" *extra_args:
     uv run minds pool create \
-        --backend slice \
         --count "{{count}}" \
         --region "{{region}}" \
         --from-tag "{{tag}}" \
@@ -985,6 +1063,21 @@ add-paid-email email:
 list-pool-hosts:
     uv run minds pool list
 
+# List bare-metal servers (per-server + fleet slot accounting) for the activated
+# minds env (read-only; DSN resolved from the env, no manual exports).
+list-servers:
+    uv run minds server list
+
+# (Re-)prep a bare-metal box for slice baking: qemu/lima/tooling + image staging +
+# the per-box default-workspace-template image cache dir. Pool SSH key + DSN come from
+# the activated tier's Vault entry / env secrets, so no manual exports. Idempotent.
+# The cache-lock path also `mkdir -p`s the cache dir on demand, so boxes prepped
+# under the old dir name do not need a re-prep for production --from-tag bakes.
+#
+#   just prep-server <bare-metal-server-id>
+prep-server server_id *extra_args:
+    uv run minds server prep --server-id "{{server_id}}" {{extra_args}}
+
 # One-time host-key backfill for the activated minds env. Keyscans every
 # pre-existing pool host + bare-metal box whose recorded sshd host key columns
 # are still null and records them, so rows baked before host-key pinning become
@@ -998,21 +1091,20 @@ list-pool-hosts:
 backfill-pool-host-keys:
     uv run minds pool backfill-host-keys
 
-# Destroy a single pool host: tear down its underlying machine, then drop its
-# pool_hosts row. The teardown mirrors the row's backend -- cancel the OVH VPS for
-# an ovh_vps row, or destroy the lima VM (freeing the box slot) for a slice row.
-# Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
-# destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
-# underlying machine is already gone).
+# Destroy pool hosts in parallel: atomically claim each row (so a user cannot lease
+# it mid-destroy), destroy its slice lima VM (freeing the box slot), then drop the
+# row. Find the ids with `just list-pool-hosts`. Extra flags forward to
+# `minds pool destroy` (e.g. --force to also destroy a leased row, --drop-row-only
+# for rows whose box record is gone or whose machine is permanently dead).
 #
-#   just destroy-pool-host <pool-host-id>
+#   just destroy-pool-hosts <pool-host-id> [<pool-host-id> ...]
 #
-# Note: the steady-state teardown is automatic -- the connector releases a host
-# when its lease ends and an hourly Modal cron (`cleanup_removing_pool_hosts`)
-# sweeps any stragglers; `minds env destroy` removes every VPS for a whole tier.
-# This recipe is the manual single-host escape hatch.
-destroy-pool-host pool_host_id *extra_args:
-    uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
+# Note: the steady-state teardown is automatic -- the connector destroys a host's
+# slice VM when its lease ends. `minds env destroy` tears down a whole env's
+# unleased slices. This recipe is the manual escape hatch (e.g. retiring the old
+# `available` rows after baking a new pool generation).
+destroy-pool-hosts *args:
+    uv run minds pool destroy {{args}}
 
 # Args forward as-is, e.g. `just release patch`, `just release patch --dry-run
 # --minor mngr`, or `just release --watch`. See scripts/release.py's header for

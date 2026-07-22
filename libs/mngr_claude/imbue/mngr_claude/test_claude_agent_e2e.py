@@ -51,6 +51,8 @@ import pytest
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.agents.agent_release_testing import run_concurrent_message_delivery
+from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
@@ -89,6 +91,9 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
     # token usage, so both gated assertions apply (observing the RUNNING marker is universal).
     forces_tool_call = True
     asserts_usage = True
+    # /clear exercises the relaxed slash-command policy end to end (claude records
+    # its effect durably as a session-id change, but the send must not depend on it).
+    clear_slash_command = "/clear"
     # This is the store the adopt-from-preserved arc adopts: after destroy, a fresh agent
     # in a new worktree adopts the just-preserved session and must recall the pre-destroy
     # secret -- proving the store resumes and the cross-cwd re-filing works.
@@ -175,3 +180,35 @@ def test_claude_agent_full_lifecycle(tmp_path: Path) -> None:
     assertions rather than passing silently.
     """
     run_agent_release_lifecycle(_ClaudeReleaseProfile(), tmp_path)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_message_delivery_journey(tmp_path: Path) -> None:
+    """Drive the evidence-confirmed send pipeline through its racey delivery scenarios.
+
+    One real claude agent (haiku) walks idle delivery -> send-while-busy (queued
+    input) -> rapid sequential sends -> a long buffer-pasted message -> /clear
+    under the relaxed policy. Every ``mngr message`` exit 0 is load-bearing:
+    strict confirmation succeeds only once the message's own content appears in
+    claude's durable transcript (enqueue or user record), and the exactly-once
+    assertions prove the pane-gated Enter retries never duplicate a message.
+    """
+    run_message_delivery_journey(_ClaudeReleaseProfile(), tmp_path)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_concurrent_message_delivery(tmp_path: Path) -> None:
+    """Two claude agents on one tmux server, messaged concurrently.
+
+    Both sends must confirm and each message must land exactly once on its own
+    agent -- concurrent sends must never cross-confirm against each other's
+    submission evidence (the historical failure mode was exactly this kind of
+    cross-talk, via latched tmux wait-for signals on a shared server).
+    """
+    run_concurrent_message_delivery(_ClaudeReleaseProfile(), tmp_path)

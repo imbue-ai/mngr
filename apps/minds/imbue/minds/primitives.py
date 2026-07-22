@@ -1,3 +1,5 @@
+import os
+import platform
 from enum import auto
 from typing import Final
 
@@ -67,6 +69,60 @@ class LaunchMode(UpperCaseStrEnum):
     LIMA = auto()
     IMBUE_CLOUD = auto()
     AWS = auto()
+    # Runs the agent in a Modal sandbox using the local machine's own Modal token
+    # (``modal token new``) -- resolves the ``modal`` provider instance. Modal
+    # sandboxes are ephemeral (~1 day max), so it is surfaced as "Modal (1-day
+    # ephemeral)" and is testing-only.
+    MODAL = auto()
+
+
+class DockerRuntime(UpperCaseStrEnum):
+    """Container runtime for the local Docker compute provider (``LaunchMode.DOCKER``).
+
+    - ``RUNC`` -- Docker's default runtime. Works everywhere, including macOS.
+    - ``RUNSC`` -- gVisor, which intercepts the container's syscalls to shrink
+      the host kernel attack surface for untrusted agents. Requires ``runsc`` to
+      be installed and registered with the local Docker daemon (Linux in
+      practice); it is unavailable on macOS.
+
+    Only meaningful for the Docker compute provider; the other launch modes pin
+    their own runtime. The create form defaults this to the platform-appropriate
+    value (see :func:`default_docker_runtime`) and lets the user override it
+    under advanced settings.
+    """
+
+    RUNC = auto()
+    RUNSC = auto()
+
+
+# Env override for the create-form / create-API default runtime, consulted by
+# ``default_docker_runtime``. Set it to a ``DockerRuntime`` value
+# (case-insensitive) to force the default. CI and the e2e snapshot build set it
+# to ``RUNC`` because their Docker daemon has no gVisor (runsc) registered; a
+# real deployment leaves it unset, so Linux still defaults to the hardened
+# runsc. This is the layer that decides whether the create stacks the
+# ``docker_runsc`` template at all -- distinct from
+# ``MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME``, which only overrides the mngr
+# provider config and cannot override a template that was explicitly stacked.
+_DEFAULT_DOCKER_RUNTIME_ENV_VAR: Final[str] = "MINDS_DOCKER_RUNTIME_DEFAULT"
+
+
+def default_docker_runtime() -> DockerRuntime:
+    """Return the default Docker container runtime for the create form / API.
+
+    An explicit ``MINDS_DOCKER_RUNTIME_DEFAULT`` env override wins when set
+    (CI uses it to pin runc, having no gVisor). Otherwise the platform default:
+    macOS has no gVisor so it must use runc; Linux defaults to the
+    gVisor-hardened runsc (which the minds app assumes is installed there).
+
+    Raises ``ValueError`` if the override is set to a value that is not a
+    ``DockerRuntime`` -- a misconfigured knob should fail loud, not silently
+    fall back.
+    """
+    override = os.environ.get(_DEFAULT_DOCKER_RUNTIME_ENV_VAR)
+    if override:
+        return DockerRuntime(override.strip().upper())
+    return DockerRuntime.RUNC if platform.system() == "Darwin" else DockerRuntime.RUNSC
 
 
 class AIProvider(UpperCaseStrEnum):
@@ -112,26 +168,6 @@ class BackupProvider(UpperCaseStrEnum):
     IMBUE_CLOUD = auto()
     API_KEY = auto()
     CONFIGURE_LATER = auto()
-
-
-class BackupEncryptionMethod(UpperCaseStrEnum):
-    """Which master/recovery key the workspace's restic repo is initialized with.
-
-    Only meaningful when a real backup provider (``IMBUE_CLOUD`` or
-    ``API_KEY``) is selected. Either way the workspace gets its own random
-    repository password; this only governs the key minds uses to ``restic
-    init`` the repo (a user-controlled recovery key), which never enters the
-    workspace.
-
-    - ``MASTER_PASSWORD`` -- init the repo with a user passphrase, established
-      once and stored in a per-user file shared across all of the user's
-      workspaces.
-    - ``NO_PASSWORD`` -- init the repo with an empty password (restic
-      ``--insecure-no-password``); no recovery passphrase to remember.
-    """
-
-    MASTER_PASSWORD = auto()
-    NO_PASSWORD = auto()
 
 
 class OneTimeCode(NonEmptyStr):

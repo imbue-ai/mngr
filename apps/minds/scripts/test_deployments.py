@@ -2,8 +2,8 @@
 
 Plain-Python (click-driven) entrypoint -- NOT a pytest wrapper. Owns:
 
-* The FCT worktree at ``<monorepo>/.external_worktrees/forever-claude-template/``:
-  validation, stash + push to a ``ci-<timestamp>`` branch on the FCT
+* The DEFAULT_WORKSPACE_TEMPLATE worktree at ``<monorepo>/.external_worktrees/default-workspace-template/``:
+  validation, stash + push to a ``ci-<timestamp>`` branch on the DEFAULT_WORKSPACE_TEMPLATE
   remote, and stash-restore so the operator's worktree state is
   unchanged.
 * The per-run mail.tm account: creation via the public mail.tm HTTP
@@ -20,7 +20,7 @@ Plain-Python (click-driven) entrypoint -- NOT a pytest wrapper. Owns:
 Wired up to satisfy the spec's command surface. The env lifecycle --
 the ``minds env deploy`` / ``destroy`` shellouts, the per-run secret
 handoff, the fixed CI test-user creation, and the name+age sweep -- is
-implemented. The FCT branch push/delete steps remain explicitly stubbed
+implemented. The DEFAULT_WORKSPACE_TEMPLATE branch push/delete steps remain explicitly stubbed
 for Phase 2 and log a clear "not implemented yet" warning rather than
 silently no-op-ing.
 """
@@ -54,8 +54,8 @@ from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.config.loader import load_client_config
+from imbue.minds.deployment_tests.data_types import DefaultWorkspaceTemplateRef
 from imbue.minds.deployment_tests.data_types import DeploymentEnvsConfig
-from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvUrls
 from imbue.minds.deployment_tests.helpers import build_minds_env_subprocess_env
 from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_api
@@ -75,6 +75,12 @@ from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.paths import secrets_file
 from imbue.minds.envs.primitives import DevEnvName
+from imbue.minds.envs.r2_cleanup import CloudflareR2Credentials
+from imbue.minds.envs.r2_cleanup import R2CleanupError
+from imbue.minds.envs.r2_cleanup import SuperTokensCoreCredentials
+from imbue.minds.envs.r2_cleanup import sweep_orphaned_r2_buckets
+from imbue.minds.envs.vault_reader import VaultPath
+from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
 from imbue.minds.utils.output import write_stdout_line
 from imbue.mngr.utils.testing import get_short_random_string
@@ -84,8 +90,10 @@ from imbue.mngr.utils.testing import get_short_random_string
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
-_FCT_WORKTREE_PATH: Final[Path] = _REPO_ROOT / ".external_worktrees" / "forever-claude-template"
-_FCT_REMOTE_URL: Final[str] = "git@github.com:imbue-ai/forever-claude-template.git"
+_DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH: Final[Path] = (
+    _REPO_ROOT / ".external_worktrees" / "default-workspace-template"
+)
+_DEFAULT_WORKSPACE_TEMPLATE_REMOTE_URL: Final[str] = "git@github.com:imbue-ai/default-workspace-template.git"
 _LEDGER_PATH: Final[Path] = _REPO_ROOT / ".minds" / "ci-test-deploys.jsonl"
 _DEPLOYMENT_ENVS_JSON_PATH: Final[Path] = _REPO_ROOT / "test-results" / "deployment_envs.json"
 _ITERATE_STATE_DIR: Final[Path] = _REPO_ROOT / ".minds"
@@ -119,7 +127,7 @@ class LedgerKind(UpperCaseStrEnum):
     """What kind of resource a ledger entry tracks."""
 
     ENV = auto()
-    FCT_BRANCH = auto()
+    DEFAULT_WORKSPACE_TEMPLATE_BRANCH = auto()
     MAILTM_ACCOUNT = auto()
 
 
@@ -216,37 +224,40 @@ def _mint_run_id() -> RunId:
 
 
 # ---------------------------------------------------------------------------
-# FCT worktree
+# DEFAULT_WORKSPACE_TEMPLATE worktree
 # ---------------------------------------------------------------------------
 
 
-class FctWorktreeMissingError(MindError):
-    """Raised when ``.external_worktrees/forever-claude-template/`` is not present."""
+class DefaultWorkspaceTemplateWorktreeMissingError(MindError):
+    """Raised when ``.external_worktrees/default-workspace-template/`` is not present."""
 
 
-def _validate_fct_worktree() -> None:
-    """Warn (do not fail) if the FCT worktree is missing.
+def _validate_default_workspace_template_worktree() -> None:
+    """Warn (do not fail) if the DEFAULT_WORKSPACE_TEMPLATE worktree is missing.
 
-    No Phase 1 test creates an FCT workspace -- the deleted workspace/signup
+    No Phase 1 test creates a DEFAULT_WORKSPACE_TEMPLATE workspace -- the deleted workspace/signup
     services tests were the only consumers -- so a missing worktree is not
     fatal today (and CI runners don't have one). Phase 2 re-adds the
     workspace-creating tests and will restore the hard requirement here.
     """
-    if not _FCT_WORKTREE_PATH.is_dir() or not (_FCT_WORKTREE_PATH / ".git").exists():
+    if (
+        not _DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH.is_dir()
+        or not (_DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH / ".git").exists()
+    ):
         logger.warning(
-            "FCT worktree missing at {} -- continuing (no Phase 1 test needs it). To enable the "
+            "DEFAULT_WORKSPACE_TEMPLATE worktree missing at {} -- continuing (no Phase 1 test needs it). To enable the "
             "future workspace/signup tests, create it with `git worktree add -B <branch> {} <branch>` "
-            "from an FCT clone.",
-            _FCT_WORKTREE_PATH,
-            _FCT_WORKTREE_PATH,
+            "from a DEFAULT_WORKSPACE_TEMPLATE clone.",
+            _DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH,
+            _DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH,
         )
 
 
-def _push_fct_test_branch(*, run_id: RunId) -> str:
-    """Stash + commit + push the worktree's contents to ``ci-<run_id>`` on the FCT remote.
+def _push_default_workspace_template_test_branch(*, run_id: RunId) -> str:
+    """Stash + commit + push the worktree's contents to ``ci-<run_id>`` on the DEFAULT_WORKSPACE_TEMPLATE remote.
 
     Returns the branch name. Records the branch in the ledger. The
-    operator's primary FCT clone is never touched.
+    operator's primary DEFAULT_WORKSPACE_TEMPLATE clone is never touched.
 
     Stub for now: stamped out per the spec but not yet exercised by the
     tests (they all skip). The stash + push code lives here so iterating
@@ -254,13 +265,13 @@ def _push_fct_test_branch(*, run_id: RunId) -> str:
     """
     branch_name = f"ci-{run_id}"
     logger.warning(
-        "FCT branch push to {!r} is stubbed out -- the push flow is documented in the spec but "
-        "not yet wired up. Tests today use the local worktree path via the fct_template_ref fixture.",
+        "DEFAULT_WORKSPACE_TEMPLATE branch push to {!r} is stubbed out -- the push flow is documented in the spec but "
+        "not yet wired up. Tests today use the local worktree path via the default_workspace_template_ref fixture.",
         branch_name,
     )
     _append_ledger_entry(
         LedgerEntry(
-            kind=LedgerKind.FCT_BRANCH,
+            kind=LedgerKind.DEFAULT_WORKSPACE_TEMPLATE_BRANCH,
             name=NonEmptyStr(branch_name),
             created_at=datetime.now(timezone.utc),
             run_id=run_id,
@@ -270,14 +281,19 @@ def _push_fct_test_branch(*, run_id: RunId) -> str:
     return branch_name
 
 
-def _delete_fct_test_branch(branch_name: str, *, run_id: RunId) -> None:
-    """Delete the pushed test branch from the FCT remote. Idempotent against already-gone."""
+def _delete_default_workspace_template_test_branch(branch_name: str, *, run_id: RunId) -> None:
+    """Delete the pushed test branch from the DEFAULT_WORKSPACE_TEMPLATE remote. Idempotent against already-gone."""
     logger.warning(
-        "FCT branch deletion for {!r} is stubbed out -- pair with the push stub. The age-sweep "
+        "DEFAULT_WORKSPACE_TEMPLATE branch deletion for {!r} is stubbed out -- pair with the push stub. The age-sweep "
         "will eventually be the safety net here.",
         branch_name,
     )
-    _mark_status(NonEmptyStr(branch_name), kind=LedgerKind.FCT_BRANCH, run_id=run_id, status=LedgerStatus.DESTROYED)
+    _mark_status(
+        NonEmptyStr(branch_name),
+        kind=LedgerKind.DEFAULT_WORKSPACE_TEMPLATE_BRANCH,
+        run_id=run_id,
+        status=LedgerStatus.DESTROYED,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +524,14 @@ def _reconstruct_env_secrets_file(name: DevEnvName) -> None:
 
 
 _CI_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^ci-(\d{8}t\d{6}z)")
+# The bucket sweep reads both of its inputs from the ci tier's own Vault
+# prefix, which is all the cleanup job's Vault role (minds_ci_env_gh) is
+# scoped to. That works because the ci and dev tiers share one Cloudflare
+# account AND one SuperTokens core (the ci tier's SUPERTOKENS_CONNECTION_URI
+# is the same core the dev-* apps live on) -- so the ci secrets can see every
+# account that is able to create a bucket in that Cloudflare account, which is
+# exactly what the "no live owner" rule needs. See imbue.minds.envs.r2_cleanup.
+_CI_VAULT_PREFIX: Final[str] = "secrets/minds/ci"
 
 
 def _parse_ci_env_timestamp(stamp: str) -> datetime:
@@ -588,12 +612,14 @@ def _sweep_stale_envs(max_age_hours: int = _DEFAULT_MAX_RESOURCE_AGE_HOURS) -> N
 def _write_deployment_envs_json(
     *,
     shared_envs: dict[SharedEnvRole, SharedEnvUrls],
-    fct: FctTemplateRef,
+    default_workspace_template: DefaultWorkspaceTemplateRef,
     run_id: RunId,
     target_path: Path = _DEPLOYMENT_ENVS_JSON_PATH,
 ) -> Path:
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    config = DeploymentEnvsConfig(shared_envs=shared_envs, fct=fct, run_id=run_id)
+    config = DeploymentEnvsConfig(
+        shared_envs=shared_envs, default_workspace_template=default_workspace_template, run_id=run_id
+    )
     target_path.write_text(config.model_dump_json(indent=2))
     return target_path
 
@@ -674,14 +700,14 @@ def cli() -> None:
     "--keep-on-failure", is_flag=True, default=False, help="Leave ephemeral envs from failing tests in place."
 )
 def run(keep_on_failure: bool) -> None:
-    """Full flow: sweep, FCT push, mail.tm, shared envs, pytest x2, teardown."""
+    """Full flow: sweep, DEFAULT_WORKSPACE_TEMPLATE push, mail.tm, shared envs, pytest x2, teardown."""
     run_id = _mint_run_id()
     logger.info("Starting orchestrator run {}", run_id)
 
-    _validate_fct_worktree()
+    _validate_default_workspace_template_worktree()
     _sweep_stale_envs()
 
-    fct_branch = _push_fct_test_branch(run_id=run_id)
+    default_workspace_template_branch = _push_default_workspace_template_test_branch(run_id=run_id)
     mailtm = _create_mailtm_account(run_id=run_id)
 
     shared_env_urls: dict[SharedEnvRole, SharedEnvUrls] = {}
@@ -706,10 +732,10 @@ def run(keep_on_failure: bool) -> None:
 
     pytest_envs_path = _write_deployment_envs_json(
         shared_envs=shared_env_urls,
-        fct=FctTemplateRef(
-            worktree_path=_FCT_WORKTREE_PATH,
-            test_branch=NonEmptyStr(fct_branch),
-            test_remote=NonEmptyStr(_FCT_REMOTE_URL),
+        default_workspace_template=DefaultWorkspaceTemplateRef(
+            worktree_path=_DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH,
+            test_branch=NonEmptyStr(default_workspace_template_branch),
+            test_remote=NonEmptyStr(_DEFAULT_WORKSPACE_TEMPLATE_REMOTE_URL),
         ),
         run_id=run_id,
     )
@@ -731,7 +757,7 @@ def run(keep_on_failure: bool) -> None:
     teardown_failures = _teardown_run(
         run_id=run_id,
         mailtm_account=mailtm,
-        fct_branch=fct_branch,
+        default_workspace_template_branch=default_workspace_template_branch,
         keep_on_failure=keep_on_failure,
         tests_failed=(deployment_rc != 0 or services_rc != 0),
     )
@@ -758,8 +784,51 @@ def sweep(max_age_hours: int) -> None:
     fired because its job hard-crashed / was cancelled). Run on its own CI
     runner, so it relies on the Modal-side enumeration rather than local
     state.
+
+    Then sweep the R2 buckets imbue-cloud backups provisioned for accounts
+    that no longer exist -- env destroy never deleted them, so every CI run
+    that exercised backups leaked one (see :mod:`imbue.minds.envs.r2_cleanup`
+    for why "no live owner" is the only safe rule on an account the dev tier
+    shares).
     """
     _sweep_stale_envs(max_age_hours=max_age_hours)
+    _sweep_orphaned_buckets()
+
+
+def _sweep_orphaned_buckets(*, is_dry_run: bool = False) -> tuple[str, ...]:
+    """Delete R2 buckets whose owning account is gone; never fails the caller."""
+    try:
+        cloudflare_secrets = read_vault_kv(VaultPath(f"{_CI_VAULT_PREFIX}/cloudflare"))
+        supertokens_secrets = read_vault_kv(VaultPath(f"{_CI_VAULT_PREFIX}/supertokens"))
+    except MindError as exc:
+        logger.error("R2 sweep skipped: could not read the Cloudflare / SuperTokens secrets: {}", exc)
+        return ()
+    try:
+        return sweep_orphaned_r2_buckets(
+            CloudflareR2Credentials(
+                account_id=cloudflare_secrets["CLOUDFLARE_ACCOUNT_ID"],
+                api_token=SecretStr(cloudflare_secrets["CLOUDFLARE_API_TOKEN"]),
+            ),
+            SuperTokensCoreCredentials(
+                connection_uri=supertokens_secrets["SUPERTOKENS_CONNECTION_URI"],
+                api_key=SecretStr(supertokens_secrets["SUPERTOKENS_API_KEY"]),
+            ),
+            is_dry_run=is_dry_run,
+        )
+    except (R2CleanupError, KeyError) as exc:
+        # The bucket sweep is a backstop; a failure here must not fail the
+        # cleanup job (whose primary duty is destroying leaked envs).
+        logger.error("R2 sweep failed: {}", exc)
+        return ()
+
+
+@cli.command(name="sweep-buckets")
+@click.option("--dry-run", is_flag=True, help="List the ownerless buckets without deleting anything.")
+def sweep_buckets(dry_run: bool) -> None:
+    """Sweep R2 buckets whose owning account no longer exists (backups leak them)."""
+    swept = _sweep_orphaned_buckets(is_dry_run=dry_run)
+    verb = "Would delete" if dry_run else "Deleted"
+    write_stdout_line(f"{verb} {len(swept)} ownerless R2 bucket(s).")
 
 
 @cli.command()
@@ -782,8 +851,8 @@ def cleanup() -> None:
             match entry.kind:
                 case LedgerKind.ENV:
                     _destroy_env(DevEnvName(str(entry.name)), run_id=entry.run_id)
-                case LedgerKind.FCT_BRANCH:
-                    _delete_fct_test_branch(str(entry.name), run_id=entry.run_id)
+                case LedgerKind.DEFAULT_WORKSPACE_TEMPLATE_BRANCH:
+                    _delete_default_workspace_template_test_branch(str(entry.name), run_id=entry.run_id)
                 case LedgerKind.MAILTM_ACCOUNT:
                     logger.warning(
                         "mail.tm account {} cleanup needs the JWT, which we did not persist; "
@@ -814,19 +883,21 @@ def deployment_only(tests: tuple[str, ...]) -> None:
     For iterating on the ``minds_deployment`` tests (those that mint
     their own ephemeral env via the ``ephemeral_env`` fixture) without
     paying for the shared-env-deploy + mail.tm-account setup that the
-    main ``run`` command does. The FCT worktree is still validated up
+    main ``run`` command does. The DEFAULT_WORKSPACE_TEMPLATE worktree is still validated up
     front so tests that create real minds agents have a template ref to
     point at; pass test files / nodeids positionally.
 
     Operator must have ``vault login``-ed (the in-test ``minds env
     deploy`` subprocess reads tier secrets from Vault).
     """
-    _validate_fct_worktree()
+    _validate_default_workspace_template_worktree()
     run_id = _mint_run_id()
 
     pytest_envs_path = _write_deployment_envs_json(
         shared_envs={},
-        fct=FctTemplateRef(worktree_path=_FCT_WORKTREE_PATH),
+        default_workspace_template=DefaultWorkspaceTemplateRef(
+            worktree_path=_DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH
+        ),
         run_id=run_id,
     )
     pytest_env = _build_pytest_env(
@@ -848,7 +919,7 @@ def up(role: str) -> None:
     """Local iterate: stand up a shared env + print a ready-to-paste pytest command."""
     run_id = _mint_run_id()
     role_key = SharedEnvRole(role)
-    _validate_fct_worktree()
+    _validate_default_workspace_template_worktree()
     env_name = _mint_shared_env_name(run_id=run_id, role=role_key)
     _append_ledger_entry(
         LedgerEntry(
@@ -863,7 +934,9 @@ def up(role: str) -> None:
     state_path = _ITERATE_STATE_DIR / f"iterate-{role}.json"
     _write_deployment_envs_json(
         shared_envs={role_key: urls},
-        fct=FctTemplateRef(worktree_path=_FCT_WORKTREE_PATH),
+        default_workspace_template=DefaultWorkspaceTemplateRef(
+            worktree_path=_DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH
+        ),
         run_id=run_id,
         target_path=state_path,
     )
@@ -894,8 +967,13 @@ def down(role: str) -> None:
 @cli.command(name="services-against")
 @click.argument("env_name")
 @click.argument("tests", nargs=-1)
-@click.option("--no-fct-push", is_flag=True, default=False, help="Skip the FCT branch push (purely backend tests).")
-def services_against(env_name: str, tests: tuple[str, ...], no_fct_push: bool) -> None:
+@click.option(
+    "--no-default-workspace-template-push",
+    is_flag=True,
+    default=False,
+    help="Skip the DEFAULT_WORKSPACE_TEMPLATE branch push (purely backend tests).",
+)
+def services_against(env_name: str, tests: tuple[str, ...], no_default_workspace_template_push: bool) -> None:
     """Point minds_services tests at an already-deployed dev env (e.g. dev-josh).
 
     Loads ``~/.minds-<env>/client.toml`` for the URLs + ``~/.minds-<env>/secrets.toml``
@@ -906,14 +984,14 @@ def services_against(env_name: str, tests: tuple[str, ...], no_fct_push: bool) -
     with whichever test paths the operator passed.
 
     Does not touch the target env's cloud state -- no create, no
-    destroy, no recover. The FCT worktree push runs by default so
+    destroy, no recover. The DEFAULT_WORKSPACE_TEMPLATE worktree push runs by default so
     tests that create real minds agents can reach the prepared
-    template ref; ``--no-fct-push`` opts out for purely backend tests.
+    template ref; ``--no-default-workspace-template-push`` opts out for purely backend tests.
     """
     dev_env_name = DevEnvName(env_name)
-    _validate_fct_worktree()
+    _validate_default_workspace_template_worktree()
     run_id = _mint_run_id()
-    _push_fct_test_branch(run_id=run_id) if not no_fct_push else None
+    _push_default_workspace_template_test_branch(run_id=run_id) if not no_default_workspace_template_push else None
 
     target_env_root = Path.home() / f".minds-{dev_env_name}"
     target_client_toml = target_env_root / "client.toml"
@@ -947,7 +1025,9 @@ def services_against(env_name: str, tests: tuple[str, ...], no_fct_push: bool) -
 
     pytest_envs_path = _write_deployment_envs_json(
         shared_envs={default_role: shared_env_urls},
-        fct=FctTemplateRef(worktree_path=_FCT_WORKTREE_PATH),
+        default_workspace_template=DefaultWorkspaceTemplateRef(
+            worktree_path=_DEFAULT_WORKSPACE_TEMPLATE_WORKTREE_PATH
+        ),
         run_id=run_id,
     )
     pytest_env = _build_pytest_env(
@@ -961,12 +1041,14 @@ def services_against(env_name: str, tests: tuple[str, ...], no_fct_push: bool) -
     pytest_argv: tuple[str, ...] = tuple(test_targets)
     rc = _invoke_pytest_for_mark("minds_services", env=pytest_env, extra_args=pytest_argv)
 
-    # Teardown: only the mail.tm account + (if pushed) the FCT branch
+    # Teardown: only the mail.tm account + (if pushed) the DEFAULT_WORKSPACE_TEMPLATE branch
     # need cleanup -- we never created the target dev env.
     teardown_failures = _teardown_run(
         run_id=run_id,
         mailtm_account=mailtm,
-        fct_branch=NonEmptyStr(f"ci-{run_id}") if not no_fct_push else NonEmptyStr("noop"),
+        default_workspace_template_branch=NonEmptyStr(f"ci-{run_id}")
+        if not no_default_workspace_template_push
+        else NonEmptyStr("noop"),
         keep_on_failure=False,
         tests_failed=(rc != 0),
     )
@@ -984,7 +1066,7 @@ def _teardown_run(
     *,
     run_id: RunId,
     mailtm_account: _MailtmAccount,
-    fct_branch: str,
+    default_workspace_template_branch: str,
     keep_on_failure: bool,
     tests_failed: bool,
 ) -> int:
@@ -1003,8 +1085,8 @@ def _teardown_run(
             match entry.kind:
                 case LedgerKind.ENV:
                     _destroy_env(DevEnvName(str(entry.name)), run_id=run_id)
-                case LedgerKind.FCT_BRANCH:
-                    _delete_fct_test_branch(str(entry.name), run_id=run_id)
+                case LedgerKind.DEFAULT_WORKSPACE_TEMPLATE_BRANCH:
+                    _delete_default_workspace_template_test_branch(str(entry.name), run_id=run_id)
                 case LedgerKind.MAILTM_ACCOUNT:
                     _delete_mailtm_account(entry.name, mailtm_account.jwt, run_id=run_id)
                 case _ as unreachable:
@@ -1012,11 +1094,11 @@ def _teardown_run(
         except (MindError, httpx.HTTPError) as exc:
             logger.error("Teardown failed for {} {}: {}", entry.kind, entry.name, exc)
             failures += 1
-    # ``fct_branch`` is recorded in the ledger at push time; the teardown loop
-    # finds and deletes it via _delete_fct_test_branch. The arg is kept on
+    # ``default_workspace_template_branch`` is recorded in the ledger at push time; the teardown loop
+    # finds and deletes it via _delete_default_workspace_template_test_branch. The arg is kept on
     # the signature so future callers (e.g. a partial-teardown helper) can
     # target it explicitly.
-    _ = fct_branch
+    _ = default_workspace_template_branch
     return failures
 
 

@@ -1,24 +1,35 @@
 """Free-function helpers used by InteractiveTuiAgent and its subclasses.
 
-This module owns the actual implementation of the TUI-input pipeline:
-paste-visibility detection, TUI-ready polling, and the three send-Enter
-strategies (signal-hook, poll-cleared-indicator, best-effort). Keeping
-them as free functions lets ``InteractiveTuiAgent`` read as a contract
-that registers the shape -- each subclass picks a strategy by *calling*
-the relevant helper from its ``_send_enter_and_validate`` override.
+This module owns the TUI-input pipeline: paste-visibility detection,
+TUI-ready polling, and the submit-and-confirm engine. The engine sends
+Enter and then polls agent-supplied *durable evidence probes* (transcript
+records, marker files) until one proves the agent accepted the message.
+Confirmation never relies on ephemeral signals: tmux ``wait-for`` channels
+latch signals fired with no waiter (a signal is remembered until the next
+waiter consumes it), which historically produced instant false-positive
+confirmations that reported success for messages that were never submitted.
+
+The engine runs the whole confirmation window as ONE sequential remote
+script -- no background jobs, no EXIT trap -- so Enter is always sent
+before any confirmation check can run, and nothing can kill a pending
+keystroke.
 """
 
 from __future__ import annotations
 
 import re
 import shlex
-import time
+from enum import auto
 from typing import Any
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -28,23 +39,122 @@ _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
 # This can take a while, especially on Modal -- the process needs to actually
 # start and render the TUI before the indicator appears.
 _TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
-# Default timeout for the signal-based submission path. Needs to be fairly
-# long; can be slow when overloading a host while it is starting (esp Modal).
-DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 90.0
-# Bounds for the poll-based Enter path. Each attempt sends Enter then polls
-# the pane for the cleared indicator; worst case waits MAX_ATTEMPTS *
-# PER_ATTEMPT_TIMEOUT seconds before raising.
-_SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS: Final[int] = 3
-_SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS: Final[float] = 2.0
+# Default confirmation window: how long to poll for durable evidence that the
+# agent accepted the message. Needs to be fairly long: a message sent to a busy
+# codex/antigravity agent leaves no evidence until the prompt is dequeued at
+# the end of the running turn.
+DEFAULT_CONFIRMATION_TIMEOUT_SECONDS: Final[float] = 90.0
+# Relaxed sends (slash commands) only poll briefly: they never hard-fail, so a
+# long window would just delay the caller for commands that leave no evidence.
+RELAXED_CONFIRMATION_TIMEOUT_SECONDS: Final[float] = 15.0
+# How often the remote confirmation loop re-polls the evidence probes.
+_CONFIRMATION_POLL_INTERVAL_SECONDS: Final[float] = 0.5
+# Seconds into the confirmation window at which Enter is re-sent when no
+# evidence has appeared AND the pane still shows the pasted text (a swallowed
+# Enter). Enter is the only thing ever retried -- the text is never re-pasted,
+# so mngr's own retries can never duplicate a message.
+_ENTER_RETRY_OFFSETS_SECONDS: Final[tuple[int, ...]] = (3, 10, 30)
+# Length of the normalized message tail used to gate Enter retries on pane
+# content (and, by convention, used by content probes such as Claude's).
+NORMALIZED_PROBE_MAX_LENGTH: Final[int] = 60
+
+# Markers printed by the remote confirmation script and parsed by
+# _parse_confirmation_output. Kept obscure enough not to collide with probe
+# tokens (probes print to command substitutions, never to the script stdout).
+_CONFIRMED_MARKER: Final[str] = "MNGR_CONFIRMED"
+_TIMEOUT_MARKER: Final[str] = "MNGR_UNCONFIRMED"
+_ENTER_FAILED_MARKER: Final[str] = "MNGR_ENTER_FAILED"
+_RETRY_MARKER: Final[str] = "MNGR_ENTER_RETRY"
+_PROBE_DIAGNOSTIC_MARKER: Final[str] = "MNGR_PROBE"
 
 _NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
 
 
+class SubmissionConfirmationPolicy(UpperCaseStrEnum):
+    """How an unconfirmed submission is surfaced to the caller.
+
+    STRICT raises (normal messages must never silently vanish); RELAXED logs a
+    warning and records an agent event (slash commands often leave no
+    observable evidence, so they must not hard-fail).
+    """
+
+    STRICT = auto()
+    RELAXED = auto()
+
+
+@pure
+def is_slash_command_message(message: str) -> bool:
+    """Whether a message is a TUI slash command (confirmed under the relaxed policy)."""
+    return message.lstrip().startswith("/")
+
+
+class SubmissionEvidenceProbe(FrozenModel):
+    """A durable-evidence source polled to confirm that a message was accepted.
+
+    Both commands are shell snippets run on the agent's host. The probe
+    confirms when its poll output is non-empty AND differs from its baseline
+    output, so a probe can be either a monotonic token (poll == baseline
+    command; e.g. a marker file's mtime) or a baseline-parameterized search
+    (baseline captures a byte offset, poll prints a fixed token once the
+    evidence is found past ``$base``).
+    """
+
+    name: str = Field(description="Short identifier used in logs and diagnostics")
+    baseline_command: str = Field(
+        description="Shell snippet printing the probe's pre-Enter baseline token (may print nothing)"
+    )
+    poll_command: str = Field(
+        description="Shell snippet printing the probe's current token; may reference the baseline as $base"
+    )
+
+
+@pure
+def build_changed_token_probe(name: str, token_command: str) -> SubmissionEvidenceProbe:
+    """Build a probe that confirms when a monotonic token command's output changes."""
+    return SubmissionEvidenceProbe(name=name, baseline_command=token_command, poll_command=token_command)
+
+
+@pure
+def build_file_mtime_token_command(file_path_expression: str) -> str:
+    """Portable (GNU + BSD stat) shell snippet printing a file's full-precision mtime token.
+
+    Prints nothing when the file does not exist, so a changed-token probe built
+    on this confirms both on the marker appearing and on its mtime advancing.
+    ``file_path_expression`` is embedded verbatim (it may reference env vars
+    resolved on the host), so the caller is responsible for quoting.
+    """
+    return f"stat -c %y {file_path_expression} 2>/dev/null || stat -f %Fm {file_path_expression} 2>/dev/null || true"
+
+
+class SubmissionConfirmationOutcome(FrozenModel):
+    """Parsed result of one remote confirmation window."""
+
+    is_confirmed: bool = Field(description="Whether any evidence probe confirmed the submission")
+    confirming_probe_name: str | None = Field(description="Name of the probe that confirmed, if any")
+    enter_retry_offsets: tuple[int, ...] = Field(description="Elapsed seconds at which Enter was re-sent")
+    probe_diagnostics: tuple[str, ...] = Field(description="Per-probe baseline/final tokens on timeout")
+
+
+@pure
 def _normalize_for_match(text: str) -> str:
     """Strip non-alphanumeric characters and lowercase for fuzzy matching."""
     return _NON_ALNUM_RE.sub("", text.lower())
 
 
+@pure
+def build_normalized_message_probe(message: str) -> str:
+    """Return the normalized tail of a message used for content matching.
+
+    Used both to gate Enter retries on pane content and by content-verifying
+    evidence probes (the probe must be compared against text that went through
+    the same normalization, e.g. jq-decoded transcript content piped through
+    ``tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]'``).
+    """
+    normalized = _normalize_for_match(message)
+    return normalized[-NORMALIZED_PROBE_MAX_LENGTH:]
+
+
+@pure
 def _check_paste_content(pane_content: str, message: str) -> bool:
     """Check whether pasted message content is visible in pane text.
 
@@ -55,12 +165,9 @@ def _check_paste_content(pane_content: str, message: str) -> bool:
         return True
 
     normalized_pane = _normalize_for_match(pane_content)
-    normalized_msg = _normalize_for_match(message)
-
-    probe_length = min(60, len(normalized_msg))
-    if probe_length == 0:
+    probe = build_normalized_message_probe(message)
+    if probe == "":
         return True
-    probe = normalized_msg[-probe_length:]
     return probe in normalized_pane
 
 
@@ -145,222 +252,257 @@ def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -
 
 
 # ---------------------------------------------------------------------------
-# Send-Enter strategies. Subclasses of InteractiveTuiAgent pick one of these
-# from their _send_enter_and_validate override.
+# Submit-and-confirm engine
 # ---------------------------------------------------------------------------
 
 
-def send_enter_best_effort(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -> None:
-    """Strategy 1: send Enter, do not wait for any confirmation.
+@pure
+def _build_probe_baseline_lines(probes: tuple[SubmissionEvidenceProbe, ...]) -> list[str]:
+    """Build the script lines capturing each probe's pre-Enter baseline token."""
+    return [f'base_{idx}="$( {probe.baseline_command} )"' for idx, probe in enumerate(probes)]
 
-    Appropriate when the agent's TUI exposes no submission hook and no
-    reliable input-cleared placeholder. The earlier paste-visibility check
-    is what gave us confidence the message landed.
+
+@pure
+def _build_probe_check_lines(probes: tuple[SubmissionEvidenceProbe, ...]) -> list[str]:
+    """Build the poll-loop lines that check each probe and exit 0 on confirmation.
+
+    A probe confirms when its poll output is non-empty and differs from its
+    baseline. The poll command runs in a command substitution with ``base``
+    bound to the probe's baseline token.
     """
-    send_enter_keystroke(agent, tmux_target)
-
-
-def send_enter_and_poll_for_cleared_indicator(
-    agent: BaseAgent[Any],
-    tmux_target: TmuxWindowTarget,
-    *,
-    cleared_indicator: str,
-    max_attempts: int = _SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS,
-    per_attempt_timeout_seconds: float = _SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS,
-) -> None:
-    """Strategy 2: send Enter, poll for the cleared indicator, retry on miss.
-
-    ``cleared_indicator`` must be a substring that is hidden while the user's
-    text occupies the input row and reappears once Enter is consumed -- the
-    typical example is an input-prompt placeholder that the TUI hides while
-    the user is typing. When the poll times out we re-send Enter --
-    interactive TUIs occasionally swallow Enter on fresh sessions when it
-    arrives before the pasted text has been absorbed.
-
-    Raises ``SendMessageError`` if all ``max_attempts`` rounds time out.
-    """
-    for attempt in range(max_attempts):
-        send_enter_keystroke(agent, tmux_target)
-        if poll_until(
-            lambda: agent._check_pane_contains(tmux_target, cleared_indicator),
-            timeout=per_attempt_timeout_seconds,
-            poll_interval=0.05,
-        ):
-            logger.trace("Input prompt cleared after Enter attempt {}", attempt + 1)
-            return
-        logger.debug(
-            "Enter attempt {} did not produce TUI ready indicator {!r}; retrying",
-            attempt + 1,
-            cleared_indicator,
+    lines: list[str] = []
+    for idx, probe in enumerate(probes):
+        lines.append(f'cur_{idx}="$( base="$base_{idx}"; {probe.poll_command} )"')
+        lines.append(
+            f'if [ -n "$cur_{idx}" ] && [ "$cur_{idx}" != "$base_{idx}" ]; then '
+            f"printf '%s %s\\n' {_CONFIRMED_MARKER} {shlex.quote(probe.name)}; exit 0; fi"
         )
-
-    pane_content = agent._capture_pane_content(tmux_target)
-    if pane_content is not None:
-        logger.error("send-enter-and-poll timeout -- remote pane content:\n{}", pane_content)
-    total_wait = max_attempts * per_attempt_timeout_seconds
-    raise SendMessageError(
-        str(agent.name),
-        f"Timeout waiting for TUI input prompt to clear after Enter "
-        f"(waited {total_wait:.1f}s across {max_attempts} attempts)",
-    )
+    return lines
 
 
-def send_enter_via_tmux_wait_for_hook(
-    agent: BaseAgent[Any],
+@pure
+def _build_enter_retry_lines(
     tmux_target: TmuxWindowTarget,
-    *,
-    wait_channel: str,
-    timeout_seconds: float,
-    accept_marker_command: str | None = None,
-) -> None:
-    """Strategy 3: send Enter and wait for a tmux wait-for channel fired by a TUI hook.
+    normalized_pane_probe: str,
+    retry_offsets: tuple[int, ...],
+) -> list[str]:
+    """Build the poll-loop lines that re-send Enter on schedule.
 
-    Used by agents whose TUI exposes a UserPromptSubmit-style hook that fires
-    ``tmux wait-for -S $channel`` once the message is submitted. The waiter
-    is run in the **foreground** so it registers with the tmux server
-    synchronously, then Enter is sent from a backgrounded subshell after a
-    short delay. This avoids a race where the hook signal fires before the
-    waiter has registered (signals wake exactly one waiter; if none exists
-    the signal is lost).
-
-    ``accept_marker_command`` (when supplied) is an agent-provided shell snippet
-    that prints a lexicographically-monotonic token -- e.g. an ISO-8601
-    timestamp -- for the latest "message accepted" marker its TUI records the
-    instant a message is taken into its queue, or empty output if none has been
-    recorded yet. Supplying it lets the call also confirm submission from that
-    marker, watched *concurrently* with the hook signal. This matters because
-    the hook may only fire once the prompt reaches the model -- for a message
-    sent to a busy agent that is when it is finally dequeued, potentially much
-    later -- whereas the acceptance marker is recorded immediately. We baseline
-    the marker before Enter, poll for a newer value alongside the hook wait, and
-    succeed on whichever lands first, keeping the call fast (well under any
-    front-door HTTP/proxy timeout) for busy agents while the hook still covers
-    submissions that record no marker. ``None`` waits on the hook alone (the
-    original behavior). Keeping the marker command agent-supplied is what lets
-    this module stay agent-neutral.
-
-    Raises ``SendMessageError`` on timeout.
+    One statically generated check per offset, sequenced by ``retry_count``,
+    so each slot fires at most once. Retries are gated on the pane still
+    showing the pasted text (normalized the same way as the probe) so a retry
+    never types into a turn that already consumed the message. When the
+    message normalizes to nothing (so the gate cannot recognize it), retries
+    fire unconditionally on schedule instead -- a stray Enter on an empty
+    input row is a no-op for every TUI we drive. Each slot is consumed whether
+    or not Enter was re-sent, bounding the pane captures to one per slot.
     """
-    if _send_enter_and_wait_for_signal(
-        agent=agent,
-        tmux_target=tmux_target,
-        wait_channel=wait_channel,
-        timeout_seconds=timeout_seconds,
-        accept_marker_command=accept_marker_command,
-    ):
-        logger.debug("Message submitted successfully")
-        return
-
-    pane_content = agent._capture_pane_content(tmux_target)
-    if pane_content is not None:
-        logger.error(
-            "TUI send enter and wait timeout -- remote pane content:\n{}",
-            pane_content,
+    if normalized_pane_probe == "":
+        retry_action = (
+            f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter 2>/dev/null; "
+            f"printf '%s %s\\n' {_RETRY_MARKER} \"$elapsed\""
         )
     else:
-        logger.error("TUI send enter and wait timeout -- failed to capture remote pane content")
+        retry_action = (
+            f'pane="$( tmux capture-pane -p -t {tmux_target.as_shell_arg()} 2>/dev/null '
+            "| tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]' )\"; "
+            f'case "$pane" in *{shlex.quote(normalized_pane_probe)}*) '
+            f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter 2>/dev/null; "
+            f"printf '%s %s\\n' {_RETRY_MARKER} \"$elapsed\" ;; *) : ;; esac"
+        )
+    return [
+        f'if [ "$retry_count" -eq {slot_idx} ] && [ "$elapsed" -ge {offset} ]; then '
+        f"{retry_action}; retry_count={slot_idx + 1}; fi"
+        for slot_idx, offset in enumerate(retry_offsets)
+    ]
 
-    raise SendMessageError(
-        str(agent.name),
-        f"Timeout waiting for message submission signal (waited {timeout_seconds}s)",
-    )
+
+@pure
+def _build_timeout_diagnostic_lines(probes: tuple[SubmissionEvidenceProbe, ...]) -> list[str]:
+    """Build the lines printed when the window expires without confirmation."""
+    lines = [f"printf '%s\\n' {_TIMEOUT_MARKER}"]
+    for idx, probe in enumerate(probes):
+        lines.append(
+            f"printf '%s %s base=[%s] final=[%s]\\n' {_PROBE_DIAGNOSTIC_MARKER} "
+            f'{shlex.quote(probe.name)} "$base_{idx}" "$cur_{idx}"'
+        )
+    return lines
 
 
-def _send_enter_and_wait_for_signal(
-    *,
-    agent: BaseAgent[Any],
+@pure
+def build_confirmation_command(
     tmux_target: TmuxWindowTarget,
-    wait_channel: str,
-    timeout_seconds: float,
-    accept_marker_command: str | None,
-) -> bool:
-    """Inner helper for send_enter_via_tmux_wait_for_hook; returns True on success."""
-    start = time.time()
-    full_timeout = timeout_seconds + 1
-
-    if accept_marker_command is None:
-        cmd = _build_signal_only_command(full_timeout, wait_channel, tmux_target)
-    else:
-        cmd = _build_signal_or_marker_command(full_timeout, wait_channel, tmux_target, accept_marker_command)
-
-    # Give the remote command a beat past its own internal deadline to return
-    # cleanly before the pyinfra-level timeout fires.
-    remaining_time = full_timeout + 5.0
-    try:
-        result = agent.host.execute_stateful_command(cmd, timeout_seconds=remaining_time)
-    except TimeoutError:
-        # The execute_command timeout can race with the bash `timeout` inside
-        # the command. Treat the pyinfra-level timeout as a normal timeout.
-        logger.debug("Execute command timed out before bash timeout; treating as signal timeout")
-        return False
-    elapsed_ms = (time.time() - start) * 1000
-    if result.success:
-        logger.trace("Confirmed message submission in {:.0f}ms", elapsed_ms)
-        return True
-    return False
-
-
-def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
-    """The original behavior: send Enter, then block on the hook's wait-for channel.
-
-    Used for TUIs with no acceptance-marker command to watch. The waiter is started (in the
-    foreground here) before Enter is sent from a backgrounded subshell, so the
-    signal cannot fire before a waiter is registered (signals wake exactly one
-    waiter; a signal with none registered is lost).
-    """
-    return (
-        f"bash -c '"
-        f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
-        f'timeout {full_timeout} tmux wait-for "$0"'
-        f"' {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
-    )
-
-
-def _build_signal_or_marker_command(
-    full_timeout: float,
-    wait_channel: str,
-    tmux_target: TmuxWindowTarget,
-    accept_marker_command: str,
+    probes: tuple[SubmissionEvidenceProbe, ...],
+    normalized_pane_probe: str,
+    window_seconds: int,
+    poll_interval_seconds: float = _CONFIRMATION_POLL_INTERVAL_SECONDS,
+    retry_offsets: tuple[int, ...] = _ENTER_RETRY_OFFSETS_SECONDS,
 ) -> str:
-    """Succeed as soon as EITHER the hook signal fires OR a fresh acceptance marker appears.
+    """Build the single sequential remote command for one confirmation window.
 
-    A single remote command so the two conditions are watched concurrently with
-    no dangling process: it registers the (full-timeout) hook waiter in the
-    background -- which writes a sentinel file on success, preserving the
-    register-before-Enter ordering so the signal is never missed (which matters
-    for submissions that only ever fire the signal, never recording a marker)
-    -- sends Enter, then polls both the sentinel and the acceptance marker until
-    either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
-    timeout.
-
-    ``accept_marker_command`` is the agent-supplied shell snippet that prints the
-    agent's latest acceptance-marker token (empty if none yet). A baseline is
-    captured before Enter so only a newer token counts; the comparison is a
-    plain string ``>``, so the token must be lexicographically monotonic (an
-    ISO-8601 timestamp satisfies this, and an empty baseline sorts before any
-    real token). The module stays agent-neutral by treating this command as an
-    opaque probe -- all knowledge of the agent's marker schema lives in the
-    agent that supplies it.
+    The script is deliberately linear -- capture baselines, send Enter, then
+    poll -- with no background jobs and no traps, so the ordering invariant
+    "confirmation is only ever evaluated after Enter was sent" holds by
+    construction. Evidence is checked immediately after Enter and then every
+    ``poll_interval_seconds`` until ``window_seconds`` elapse.
     """
-    script = (
-        'sig="$(mktemp)"; '
-        # Clean up on every exit path: remove the sentinel file and reap any
-        # still-running background job (notably the hook waiter, which otherwise
-        # outlives a fast marker-win and would recreate "$sig" -- leaking the
-        # temp file -- when the hook finally fires). Runs exactly once on exit.
-        'trap \'p="$(jobs -p)"; [ -n "$p" ] && kill $p 2>/dev/null; rm -f "$sig"\' EXIT; '
-        f'base="$({accept_marker_command})"; '
-        # Register the hook waiter first (full timeout), sentinel on success.
-        f'( timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
-        # Then submit, after a beat so the waiter is registered.
-        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
-        f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
-        'while [ "$(date +%s)" -lt "$end" ]; do '
-        'if [ -s "$sig" ]; then exit 0; fi; '
-        f'cur="$({accept_marker_command})"; '
-        'if [[ -n "$cur" && "$cur" > "$base" ]]; then exit 0; fi; '
-        "sleep 0.25; "
-        "done; "
-        "exit 1"
+    target_arg = tmux_target.as_shell_arg()
+    lines: list[str] = []
+    # Capture every probe's baseline BEFORE Enter so evidence produced by this
+    # submission always reads as a change against it.
+    lines.extend(_build_probe_baseline_lines(probes))
+    lines.append(f"tmux send-keys -t {target_arg} Enter || {{ printf '%s\\n' {_ENTER_FAILED_MARKER}; exit 3; }}")
+    lines.append('start_ts="$( date +%s )"')
+    lines.append("retry_count=0")
+    lines.append("while :; do")
+    loop_lines: list[str] = []
+    loop_lines.extend(_build_probe_check_lines(probes))
+    loop_lines.append("elapsed=$(( $( date +%s ) - start_ts ))")
+    loop_lines.append(f'if [ "$elapsed" -ge {window_seconds} ]; then break; fi')
+    loop_lines.extend(_build_enter_retry_lines(tmux_target, normalized_pane_probe, retry_offsets))
+    loop_lines.append(f"sleep {poll_interval_seconds}")
+    lines.extend(f"  {line}" for line in loop_lines)
+    lines.append("done")
+    lines.extend(_build_timeout_diagnostic_lines(probes))
+    lines.append("exit 1")
+    script = "\n".join(lines)
+    return f"bash -c {shlex.quote(script)}"
+
+
+@pure
+def _parse_confirmation_output(stdout: str) -> SubmissionConfirmationOutcome:
+    """Parse the marker lines printed by the remote confirmation script."""
+    confirming_probe_name: str | None = None
+    is_confirmed = False
+    retry_offsets: list[int] = []
+    probe_diagnostics: list[str] = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_CONFIRMED_MARKER):
+            is_confirmed = True
+            probe_name_text = stripped[len(_CONFIRMED_MARKER) :].strip()
+            confirming_probe_name = probe_name_text if probe_name_text != "" else None
+        elif stripped.startswith(_RETRY_MARKER):
+            offset_text = stripped[len(_RETRY_MARKER) :].strip()
+            if offset_text.isdigit():
+                retry_offsets.append(int(offset_text))
+            else:
+                probe_diagnostics.append(stripped)
+        elif stripped.startswith(_PROBE_DIAGNOSTIC_MARKER):
+            probe_diagnostics.append(stripped[len(_PROBE_DIAGNOSTIC_MARKER) :].strip())
+        else:
+            pass
+    return SubmissionConfirmationOutcome(
+        is_confirmed=is_confirmed,
+        confirming_probe_name=confirming_probe_name,
+        enter_retry_offsets=tuple(retry_offsets),
+        probe_diagnostics=tuple(probe_diagnostics),
     )
-    return f"bash -c {shlex.quote(script)} _ {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
+
+
+@pure
+def _build_unconfirmed_diagnostics(
+    outcome: SubmissionConfirmationOutcome,
+    window_seconds: int,
+    pane_content: str | None,
+) -> str:
+    """Assemble the human-readable diagnostics for an unconfirmed submission."""
+    retry_text = ", ".join(str(offset) for offset in outcome.enter_retry_offsets)
+    parts = [
+        f"no evidence probe confirmed the submission within {window_seconds}s",
+        f"Enter re-sent at offsets: [{retry_text}]" if retry_text != "" else "Enter was never re-sent",
+    ]
+    if len(outcome.probe_diagnostics) > 0:
+        parts.append("probes: " + "; ".join(outcome.probe_diagnostics))
+    if pane_content:
+        parts.append(f"pane content:\n{pane_content}")
+    return "\n".join(parts)
+
+
+def submit_message_and_confirm(
+    agent: BaseAgent[Any],
+    tmux_target: TmuxWindowTarget,
+    message: str,
+    probes: tuple[SubmissionEvidenceProbe, ...],
+    timeout_seconds: float,
+) -> SubmissionConfirmationOutcome:
+    """Send Enter to submit the pasted message, then poll evidence probes to confirm.
+
+    Returns the parsed outcome; the caller decides how an unconfirmed outcome
+    is surfaced (raise for normal messages, warn for slash commands). Raises
+    ``SendMessageError`` only when the Enter keystroke itself could not be
+    delivered -- without Enter nothing was submitted under any policy.
+
+    With no probes at all this degrades to a plain best-effort Enter (reported
+    as unconfirmed), which is the fallback for agent types that supply no
+    durable evidence.
+    """
+    if len(probes) == 0:
+        send_enter_keystroke(agent, tmux_target)
+        return SubmissionConfirmationOutcome(
+            is_confirmed=False,
+            confirming_probe_name=None,
+            enter_retry_offsets=(),
+            probe_diagnostics=("no evidence probes supplied; Enter sent best-effort",),
+        )
+
+    window_seconds = max(1, int(timeout_seconds))
+    normalized_pane_probe = build_normalized_message_probe(message)
+    command = build_confirmation_command(
+        tmux_target=tmux_target,
+        probes=probes,
+        normalized_pane_probe=normalized_pane_probe,
+        window_seconds=window_seconds,
+    )
+    # Give the remote command a beat past its own internal deadline to return
+    # cleanly before the host-level timeout fires.
+    try:
+        result = agent.host.execute_stateful_command(command, timeout_seconds=window_seconds + 10.0)
+    except TimeoutError:
+        # The host-level timeout can race with the script's own deadline.
+        # Treat it as an ordinary unconfirmed window.
+        logger.debug("Confirmation command timed out at the host layer; treating as unconfirmed")
+        return SubmissionConfirmationOutcome(
+            is_confirmed=False,
+            confirming_probe_name=None,
+            enter_retry_offsets=(),
+            probe_diagnostics=("host-level command timeout before the script deadline",),
+        )
+
+    if _ENTER_FAILED_MARKER in result.stdout:
+        raise SendMessageError(
+            str(agent.name),
+            f"tmux send-keys Enter failed: {result.stderr or result.stdout}",
+        )
+
+    outcome = _parse_confirmation_output(result.stdout)
+    if outcome.is_confirmed:
+        logger.debug("Message submitted successfully (confirmed by {})", outcome.confirming_probe_name)
+        return outcome
+    if _TIMEOUT_MARKER not in result.stdout:
+        # The script printed neither a confirmation nor its own timeout marker,
+        # so it aborted abnormally (e.g. a broken probe command crashed bash)
+        # rather than polling out its window. Surface the crash instead of
+        # letting it masquerade as an ordinary evidence timeout.
+        abort_diagnostic = f"confirmation script aborted abnormally before its deadline; stderr: {result.stderr!r}"
+        logger.warning("Confirmation script for agent {} aborted abnormally: {}", agent.name, result.stderr)
+        outcome = SubmissionConfirmationOutcome(
+            is_confirmed=False,
+            confirming_probe_name=None,
+            enter_retry_offsets=outcome.enter_retry_offsets,
+            probe_diagnostics=(*outcome.probe_diagnostics, abort_diagnostic),
+        )
+    return outcome
+
+
+def raise_for_unconfirmed_submission(
+    agent: BaseAgent[Any],
+    tmux_target: TmuxWindowTarget,
+    outcome: SubmissionConfirmationOutcome,
+    timeout_seconds: float,
+) -> None:
+    """Raise ``SendMessageError`` with rich diagnostics for an unconfirmed strict send."""
+    pane_content = agent._capture_pane_content(tmux_target)
+    diagnostics = _build_unconfirmed_diagnostics(outcome, max(1, int(timeout_seconds)), pane_content)
+    logger.error("Message submission was not confirmed -- {}", diagnostics)
+    raise SendMessageError(str(agent.name), f"Timeout waiting for message submission evidence: {diagnostics}")

@@ -11,15 +11,11 @@ single home both import.
 
 from loguru import logger
 from pydantic import Field
-from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
-from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -39,10 +35,11 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.errors import MindsConfigError
-from imbue.minds.primitives import BackupEncryptionMethod
+from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 # -- Region resolution --
 
@@ -152,7 +149,7 @@ def _run_tunnel_setup(
     if info.token is None:
         logger.warning("Tunnel created for {} but no token returned", agent_id)
         return
-    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value())
+    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value(), imbue_cloud_cli.mngr_caller)
     logger.debug("Injected tunnel token into agent {}", agent_id)
 
 
@@ -226,14 +223,38 @@ class OnCreatedCallback(MutableModel):
             "workspace), in which case no association is recorded and no tunnel is set up."
         ),
     )
+    display_name: str = Field(
+        frozen=True, default="", description="The user-chosen workspace name, seeded into the workspace record."
+    )
+    color: str | None = Field(
+        frozen=True, default=None, description="The user-chosen accent color, seeded into the workspace record."
+    )
+    is_cloud_row: bool = Field(
+        frozen=True,
+        default=False,
+        description="True for imbue_cloud compute: the record carries no hosting device (any device may modify).",
+    )
 
-    def __call__(self, agent_id: AgentId) -> None:
+    def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
         if not self.account_id:
             return
-        # Bind the workspace to the account using the canonical agent id --
-        # this is what later ``get_account_for_workspace`` lookups (e.g. for
-        # the destruction handler) expect to find.
-        self.session_store.associate_workspace(self.account_id, str(agent_id))
+        # Bind the workspace to the account by seeding its workspace record with
+        # the canonical ids. Discovery hasn't seen the workspace yet, so the
+        # record starts with just the form metadata; the reconcile's metadata
+        # refresh enriches it (provider, secrets) once discovery catches up.
+        # Never let an association hiccup fail the creation itself.
+        try:
+            self.session_store.associate_created_workspace(
+                user_id=self.account_id,
+                agent_id=str(agent_id),
+                host_id=str(host_id),
+                display_name=self.display_name,
+                color=self.color,
+                is_cloud_row=self.is_cloud_row,
+            )
+        except WorkspaceSyncError as exc:
+            logger.warning("Could not record the account association for {}: {}", agent_id, exc)
+            return
         # Wake the chrome SSE so the workspace tile picks up its new
         # 'account' field immediately. Without this, the chrome shows
         # the workspace as unassociated until the next discovery cycle
@@ -285,9 +306,9 @@ class CreateOnCreatedCallback(MutableModel):
     launch_mode: LaunchMode = Field(frozen=True, description="Compute launch mode whose region default is updated.")
     region: str = Field(frozen=True, default="", description="Resolved region to persist on a successful create.")
 
-    def __call__(self, agent_id: AgentId) -> None:
+    def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
         if self.base_callback is not None:
-            self.base_callback(agent_id)
+            self.base_callback(agent_id, host_id)
         persist_region_for_launch_mode(self.minds_config, self.launch_mode, self.region)
 
 
@@ -296,10 +317,17 @@ def build_create_on_created_callback(
     minds_config: MindsConfig | None,
     launch_mode: LaunchMode,
     region: str,
+    display_name: str = "",
+    color: str | None = None,
 ) -> CreateOnCreatedCallback:
     """Build the composed post-creation callback (tunnel/account injection + region persistence)."""
     return CreateOnCreatedCallback(
-        base_callback=build_on_created_callback(account_id),
+        base_callback=build_on_created_callback(
+            account_id,
+            display_name=display_name,
+            color=color,
+            is_cloud_row=launch_mode is LaunchMode.IMBUE_CLOUD,
+        ),
         minds_config=minds_config,
         launch_mode=launch_mode,
         region=region,
@@ -308,6 +336,9 @@ def build_create_on_created_callback(
 
 def build_on_created_callback(
     account_id: str,
+    display_name: str = "",
+    color: str | None = None,
+    is_cloud_row: bool = False,
 ) -> OnCreatedCallback | None:
     """Build a callback that injects the tunnel token after agent creation.
 
@@ -337,6 +368,9 @@ def build_on_created_callback(
         notification_dispatcher=notification_dispatcher,
         backend_resolver=backend_resolver,
         account_id=account_id,
+        display_name=display_name,
+        color=color,
+        is_cloud_row=is_cloud_row,
     )
 
 
@@ -346,16 +380,14 @@ def build_on_created_callback(
 def build_backup_request_or_error(
     *,
     backup_provider: BackupProvider,
-    encryption_method: BackupEncryptionMethod,
-    typed_master_password: str,
-    is_save_password: bool,
     api_key_env: str,
     account_email: str,
-    paths: WorkspacePaths,
 ) -> tuple[BackupSetupRequest | None, str | None]:
     """Resolve form backup inputs into a ``BackupSetupRequest`` or an error message.
 
-    Reads / first-time-saves the shared master password as a side effect.
+    No password is involved: repositories are initialized with each
+    workspace's own random password, and the master password's only role in
+    the application is wrapping the account's sync DEK (see ``dek_store``).
     Returns ``(request, None)`` on success or ``(None, message)`` for a
     validation error the caller should re-render on the form.
     """
@@ -373,23 +405,9 @@ def build_backup_request_or_error(
             "Don't set RESTIC_PASSWORD in the backup env -- minds assigns each workspace its own random "
             "repository password. Provide RESTIC_REPOSITORY and any backend credentials only."
         )
-    # The master password (or empty, for no_password) is used only to
-    # initialize the repo from the minds machine; it never enters the workspace.
-    master_password: SecretStr | None = None
-    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD:
-        saved_password = read_saved_backup_password(paths)
-        if saved_password is not None:
-            master_password = SecretStr(saved_password)
-        elif typed_master_password:
-            master_password = SecretStr(typed_master_password)
-            if is_save_password:
-                save_backup_password_if_absent(paths, typed_master_password)
-        else:
-            return None, "Enter a backup master password, or set the encryption method to 'no password'."
     return (
         BackupSetupRequest(
             backup_provider=backup_provider,
-            master_password=master_password,
             api_key_env_text=api_key_env if backup_provider is BackupProvider.API_KEY else "",
             account_email=account_email,
         ),

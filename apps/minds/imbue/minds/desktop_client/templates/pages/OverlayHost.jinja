@@ -1,0 +1,28 @@
+{#def #}
+{#
+  Always-warm overlay host page. main.js loads this ONCE into the shared
+  modal WebContentsView at window creation and keeps it mounted for the
+  window's life (see createBundleOverlayView in electron/main.js), instead of the
+  old model of loading a fresh page into that view on every modal open.
+
+  Every overlay is hosted here as in-page DOM driven over IPC -- the
+  migrated modals (workspace menu / inbox / help / sign-in) as
+  mount-on-demand iframes (created when opened, destroyed when closed),
+  and hover tooltips -- so opening an overlay never costs a page
+  load. The overlay manager (/_static/overlay.js) owns the registry of
+  open overlays and reports the overlay view's required bounds back to
+  main, because Electron 40 has no per-view click-through: a
+  WebContentsView's bounds rectangle always captures clicks, so the only
+  lever is how large the view is. The manager reports full-window while a
+  capturing modal is open, just the tooltip's rectangle while only
+  tooltips show, and hidden when nothing is shown.
+
+  The page itself is transparent; each hosted overlay paints its own
+  backdrop.
+#}
+{% set _scripts %}
+<script src="/_static/overlay.js" defer></script>
+{% endset %}
+<OverlaySurface title="Minds" scripts={{ _scripts }}>
+  <div id="overlay-root" class="fixed inset-0"></div>
+</OverlaySurface>

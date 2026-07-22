@@ -2,9 +2,12 @@
 
 Every operation that minds previously did via direct HTTP calls into the
 ``remote_service_connector`` (auth, host pool, LiteLLM keys, Cloudflare
-tunnels) now runs as a child process invocation of ``mngr imbue_cloud …``,
-spawned through a ``ConcurrencyGroup`` so failures and lifetimes are managed
-the same way as every other subprocess minds drives.
+tunnels) now runs as an invocation of ``mngr imbue_cloud …`` handed to a
+:class:`~imbue.minds.utils.mngr_caller.MngrCaller`, which runs it in a
+pre-warmed, single-use ``mngr`` process. This avoids re-paying the
+multi-second interpreter + plugin-import startup on every call (which matters
+for the sharing flow, where a single user action fires several sequential
+``mngr imbue_cloud tunnels …`` invocations).
 
 The plugin always emits a JSON document on stdout for the success case and a
 JSON ``{"error": ...}`` document on stderr for the failure case (see
@@ -14,6 +17,7 @@ parses those into typed pydantic objects.
 
 import json as _json
 import os
+import tempfile
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -25,13 +29,13 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import MindError
+from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 
-_MNGR_BINARY = "mngr"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _LEASE_TIMEOUT_SECONDS = 300.0
 _KEY_OP_TIMEOUT_SECONDS = 90.0
@@ -66,6 +70,16 @@ class ImbueCloudCliError(MindError):
 
 class ImbueCloudUnavailableError(ImbueCloudCliError):
     """Subclass of CliError indicating the connector returned 503 (no matching pool host)."""
+
+
+class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
+    """A record push hit a 409 (revision CAS or active-agent conflict).
+
+    ``stored_record`` carries the server's current row when the conflict was a
+    revision CAS failure, so the caller can rebase and retry; None otherwise.
+    """
+
+    stored_record: dict[str, Any] | None = None
 
 
 class ImbueCloudAuthSession(FrozenModel):
@@ -145,17 +159,19 @@ class R2BucketCreateResult(FrozenModel):
 
 
 class ImbueCloudCli(MutableModel):
-    """Run ``mngr imbue_cloud …`` subcommands inside a ConcurrencyGroup.
+    """Run ``mngr imbue_cloud …`` subcommands via a :class:`MngrCaller`.
 
-    All invocations are routed through ``ConcurrencyGroup.run_process_to_completion``
-    so the calling code's resource lifetime extends to cover the subprocess.
+    All invocations are routed through the shared ``MngrCaller``, which runs each
+    one in a pre-warmed, single-use ``mngr`` process so repeated calls don't
+    re-pay the interpreter + plugin-import startup cost.
     """
 
-    parent_concurrency_group: ConcurrencyGroup = Field(
-        frozen=True,
+    mngr_caller: MngrCaller = Field(
+        default_factory=get_default_mngr_caller,
         description=(
-            "Parent CG. Each invocation creates a child group named after the subcommand "
-            "so subprocesses are tied to the desktop client's overall lifetime."
+            "Runs each `mngr imbue_cloud …` invocation in a pre-warmed process. Defaults to the "
+            "process-wide shared caller (initialized at startup) so imbue_cloud calls reuse the same "
+            "warm-process machinery as the rest of the app."
         ),
     )
     connector_url: AnyUrl = Field(
@@ -173,38 +189,33 @@ class ImbueCloudCli(MutableModel):
         *,
         cg_name: str,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-        on_output: Any = None,
-    ) -> FinishedProcess:
-        full_command = [_MNGR_BINARY, "imbue_cloud", *args]
-        # Inherit the parent env so subprocesses still see HOME / PATH /
-        # MNGR_HOST_DIR etc.; layer the connector URL on top so the
-        # `mngr imbue_cloud` plugin reaches the right backend without
-        # a baked-in default.
-        env = dict(os.environ)
-        env[_CONNECTOR_URL_SUBPROCESS_ENV] = str(self.connector_url).rstrip("/")
+    ) -> MngrCallResult:
+        argv = ["imbue_cloud", *args]
+        # Layer the connector URL onto the warm process's inherited env so the
+        # `mngr imbue_cloud` plugin reaches the right backend without a
+        # baked-in default. The warm process already inherits HOME / PATH /
+        # MNGR_HOST_DIR etc. from the minds backend, so only this override is
+        # needed.
+        env_overrides = {_CONNECTOR_URL_SUBPROCESS_ENV: str(self.connector_url).rstrip("/")}
         # Run from $HOME like every other laptop-side mngr invocation, so this
         # does not resolve project config from minds' cwd (the monorepo root in
         # a dev checkout). Otherwise `mngr imbue_cloud auth list` loads
         # `<repo>/.mngr/settings.toml`, which under the e2e test trips mngr's
         # pytest config guard and the account-discovery poll fails every cycle.
-        cg = self.parent_concurrency_group.make_concurrency_group(name=cg_name)
+        #
         # Debug timing so a slow/timed-out imbue_cloud command tells us which
-        # subcommand it was and how long it took before the timeout fired
-        # (these run as detached post-create callbacks, so a bare "exit -15" is
-        # otherwise hard to attribute). cg_name already uniquely identifies the
-        # subcommand; the raw args are deliberately not logged because some
-        # callsites (e.g. auth signin/signup) pass secrets like --password.
+        # subcommand it was and how long it took before the timeout fired.
+        # cg_name uniquely identifies the subcommand; the raw args are
+        # deliberately not logged because some callsites (e.g. auth
+        # signin/signup) pass secrets like --password.
         logger.debug("Running imbue_cloud command (cg={}, timeout={}s)", cg_name, timeout_seconds)
         start_time = time.monotonic()
-        with cg:
-            result = cg.run_process_to_completion(
-                command=full_command,
-                timeout=float(timeout_seconds),
-                is_checked_after=False,
-                on_output=on_output,
-                cwd=Path.home(),
-                env=env,
-            )
+        result = self.mngr_caller.call(
+            argv,
+            timeout=float(timeout_seconds),
+            env_overrides=env_overrides,
+            cwd=Path.home(),
+        )
         logger.debug(
             "Finished imbue_cloud command (cg={}) in {:.1f}s: returncode={} timed_out={}",
             cg_name,
@@ -216,7 +227,7 @@ class ImbueCloudCli(MutableModel):
 
     def _expect_success(
         self,
-        result: FinishedProcess,
+        result: MngrCallResult,
         command_repr: str,
         *,
         unavailable_signal: str | None = None,
@@ -631,6 +642,115 @@ class ImbueCloudCli(MutableModel):
         result = self._run(args, cg_name="imbue-cloud-bucket-keys-create", timeout_seconds=_KEY_OP_TIMEOUT_SECONDS)
         body = self._expect_success(result, "bucket keys create")
         return R2BucketKeyMaterial.model_validate(body)
+
+    # ------------------------------------------------------------------
+    # Workspace sync (records + key bundle)
+    # ------------------------------------------------------------------
+
+    def sync_records_pull(self, account: str) -> list[dict[str, Any]]:
+        result = self._run(["sync", "records", "pull", "--account", account], cg_name="imbue-cloud-sync-records-pull")
+        body = self._expect_success(result, "sync records pull")
+        records = body.get("records", []) if isinstance(body, dict) else []
+        return [entry for entry in records if isinstance(entry, dict)]
+
+    def sync_record_push(self, account: str, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Push one record; returns the stored row. Raises ImbueCloudSyncConflictCliError on a 409.
+
+        The record JSON travels via a 0600 temp file (--input-file) so secret
+        payloads never ride a command line or a log.
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(record), handle)
+            input_path = handle.name
+        try:
+            result = self._run(
+                ["sync", "records", "push", "--account", account, "--input-file", input_path],
+                cg_name="imbue-cloud-sync-record-push",
+            )
+        finally:
+            Path(input_path).unlink(missing_ok=True)
+        if result.returncode != 0 and "ImbueCloudSyncConflictError" in result.stderr:
+            conflict = ImbueCloudSyncConflictCliError("sync records push: revision/agent conflict")
+            conflict.exit_code = result.returncode if result.returncode is not None else 1
+            conflict.stdout = result.stdout
+            conflict.stderr = result.stderr
+            conflict.stored_record = _parse_conflict_stored(result.stderr)
+            raise conflict
+        body = self._expect_success(result, "sync records push")
+        return body if isinstance(body, dict) else {}
+
+    def sync_record_delete(self, account: str, host_id: str) -> None:
+        result = self._run(
+            ["sync", "records", "delete", host_id, "--account", account],
+            cg_name="imbue-cloud-sync-record-delete",
+        )
+        self._expect_success(result, "sync records delete")
+
+    def sync_scrub_secrets(self, account: str) -> int:
+        result = self._run(["sync", "scrub-secrets", "--account", account], cg_name="imbue-cloud-sync-scrub")
+        body = self._expect_success(result, "sync scrub-secrets")
+        return int(body.get("scrubbed", 0)) if isinstance(body, dict) else 0
+
+    def sync_bundle_pull(self, account: str) -> dict[str, Any] | None:
+        result = self._run(["sync", "bundle", "pull", "--account", account], cg_name="imbue-cloud-sync-bundle-pull")
+        body = self._expect_success(result, "sync bundle pull")
+        bundle = body.get("bundle") if isinstance(body, dict) else None
+        return bundle if isinstance(bundle, dict) else None
+
+    def sync_bundle_push(self, account: str, bundle: Mapping[str, Any]) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(bundle), handle)
+            input_path = handle.name
+        try:
+            result = self._run(
+                ["sync", "bundle", "push", "--account", account, "--input-file", input_path],
+                cg_name="imbue-cloud-sync-bundle-push",
+            )
+        finally:
+            Path(input_path).unlink(missing_ok=True)
+        self._expect_success(result, "sync bundle push")
+
+    def sync_bundle_delete(self, account: str) -> None:
+        result = self._run(
+            ["sync", "bundle", "delete", "--account", account], cg_name="imbue-cloud-sync-bundle-delete"
+        )
+        self._expect_success(result, "sync bundle delete")
+
+
+def _parse_conflict_stored(stderr: str) -> dict[str, Any] | None:
+    """Extract the ``stored`` row from a sync-push conflict's JSON error body, if present.
+
+    The body is indent-formatted JSON (its first line is a bare ``{``) that
+    may be surrounded by log lines, so each candidate document is raw-decoded
+    from the opening brace's actual byte offset -- that consumes exactly one
+    document regardless of what precedes or follows it on the stream.
+    """
+    decoder = _json.JSONDecoder()
+    offset = 0
+    is_any_document_parsed = False
+    for line in stderr.splitlines(keepends=True):
+        lstripped = line.lstrip()
+        if lstripped.startswith("{"):
+            try:
+                parsed, _consumed_until = decoder.raw_decode(stderr, offset + len(line) - len(lstripped))
+            except _json.JSONDecodeError as exc:
+                # Some other output line merely started with a brace; keep
+                # scanning for the real error body.
+                logger.warning(
+                    "Skipping a brace-prefixed non-JSON stderr line while locating the conflict body: {}", exc
+                )
+                parsed = None
+            if isinstance(parsed, dict):
+                is_any_document_parsed = True
+                stored = parsed.get("stored")
+                if isinstance(stored, dict):
+                    return stored
+        offset += len(line)
+    if not is_any_document_parsed:
+        logger.warning("Could not locate a JSON error body on the sync-conflict stderr")
+    return None
 
 
 def _parse_stdout_json(stdout: str, command_repr: str) -> Any:

@@ -532,6 +532,35 @@ def test_parse_output_options_verbose_2_sets_trace(mngr_test_prefix: str) -> Non
     assert logging_config.console_level == LogLevel.TRACE
 
 
+def test_parse_output_options_max_log_size_default_uses_config(mngr_test_prefix: str) -> None:
+    """parse_output_options should inherit config.logging.max_log_size_mb when no override is given."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    _output_opts, logging_config = parse_output_options(
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        config=config,
+    )
+    assert logging_config.max_log_size_mb == config.logging.max_log_size_mb
+
+
+def test_parse_output_options_max_log_size_override(mngr_test_prefix: str) -> None:
+    """parse_output_options should honor an explicit max_log_size_mb override over the config value."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    _output_opts, logging_config = parse_output_options(
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        config=config,
+        max_log_size_mb=10,
+    )
+    assert logging_config.max_log_size_mb == 10
+
+
 def test_parse_output_options_format_template(mngr_test_prefix: str) -> None:
     """parse_output_options should recognize a non-builtin format as a template string."""
     config = MngrConfig(prefix=mngr_test_prefix)
@@ -738,24 +767,24 @@ def test_apply_create_template_multiple_templates_extend_stack(mngr_test_prefix:
 
 def test_apply_create_template_post_host_create_command_extend_stacks(mngr_test_prefix: str) -> None:
     """`post_host_create_command__extend` from a template merges into the CLI tuple param
-    so users can opt into image-specific first-boot setup (e.g. FCT's /usr/local/bin/fct-seed)
+    so users can opt into image-specific first-boot setup (e.g. DEFAULT_WORKSPACE_TEMPLATE's /usr/local/bin/default-workspace-template-seed)
     without inlining shell into mngr."""
     ctx = _make_click_context(
         params={
-            "template": ("fct-docker",),
+            "template": ("default-workspace-template-docker",),
             "post_host_create_command": (),
         },
     )
     config = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
-            CreateTemplateName("fct-docker"): CreateTemplate(
-                options={"post_host_create_command__extend": ["/usr/local/bin/fct-seed"]}
+            CreateTemplateName("default-workspace-template-docker"): CreateTemplate(
+                options={"post_host_create_command__extend": ["/usr/local/bin/default-workspace-template-seed"]}
             ),
         },
     )
     result = apply_create_template(ctx, ctx.params.copy(), config)
-    assert result["post_host_create_command"] == ("/usr/local/bin/fct-seed",)
+    assert result["post_host_create_command"] == ("/usr/local/bin/default-workspace-template-seed",)
 
 
 def test_apply_create_template_second_template_narrowing_raises(mngr_test_prefix: str) -> None:

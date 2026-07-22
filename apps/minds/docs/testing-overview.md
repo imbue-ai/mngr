@@ -39,15 +39,19 @@ run. By area:
 | File / test | Marks | What it exercises |
 |---|---|---|
 | `test_aws_workspace_release.py::test_aws_workspace_runs_in_runsc_container_on_ec2` | `release`, `timeout(900)`, skip unless AWS creds + `MNGR_AWS_RELEASE_TESTS=1` | Provisions a real EC2 instance, asserts the agent runs in a runsc/gVisor container. Costs money. |
-| `test_snapshot_resume.py` (6 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Five assert against a Modal-snapshot sandbox (pre-baked, stopped FCT workspace container). The sixth, `test_create_apikey_workspace_and_chat_via_electron`, reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker FCT workspace via the manual `api_key` AI provider (needs `ANTHROPIC_API_KEY`), sends a chat message, and asserts the agent replies, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
+| `test_snapshot_resume.py` (9 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a live LLM-backed chat, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), and the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one). `test_create_apikey_workspace_and_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace via the manual `api_key` AI provider (needs `ANTHROPIC_API_KEY`), sends a chat message, and asserts the agent replies, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
 | `test_sse_redirect.py::test_sse_redirect_on_done` | `release` | Werkzeug server + Playwright; verifies the creating-page SSE stream delivers `done` and the JS redirects. No Docker/agent. |
-| `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_forever_claude_template_pin` | `release` | Checks the Claude Code CLI pin matches the FCT pin. |
+| `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_default_workspace_template_pin` | `release` | Checks the Claude Code CLI pin matches the DEFAULT_WORKSPACE_TEMPLATE pin. |
 
 ### 1.3 Deployment-test suites (`deployment_tests/`)
 
 An importable helper package, excluded from all offload runs and `test-quick`;
 driven only by `just minds-test-deployment` and siblings (orchestrator
-`apps/minds/scripts/test_deployments.py`).
+`apps/minds/scripts/test_deployments.py`). Every test here carries
+`@pytest.mark.release` (so it is part of the shared release suite, discoverable
+by tag) in addition to its capability mark; all minds release tests run from the
+minds jobs (`test-minds-release`), never from the mngr release workflow, which
+excludes the whole `apps/minds` tree by path.
 
 - `@pytest.mark.minds_deployment` (each mints its own ephemeral CI env):
   `test_deploy_new_version`, `test_deploy_auto_rollback_on_broken_healthcheck`,
@@ -91,17 +95,33 @@ driven only by `just minds-test-deployment` and siblings (orchestrator
   `test-docker-electron` job.
 - **`cleanup-modal-environments`** -- sweeps old Modal test envs + leaked
   snapshot images.
+- **`test-minds-release`** (manual only -- `workflow_dispatch` +
+  `run_minds_release_tests`) -- the home for **all** minds release tests. Runs
+  the `minds_deployment` group via the deployment orchestrator (each mints +
+  destroys its own ephemeral ci env), then the plain minds `@release` tests that
+  need no ci env, selected by tag: `-m 'release and not minds_deployment and not
+  minds_services and not minds_snapshot_resume'`. That is where
+  `test_claude_version_alignment.py`, `test_sse_redirect.py` (Chromium installed
+  in-job), and `test_aws_workspace_release.py` (skips without AWS opt-in) run.
 
-`.github/workflows/release-tests.yml` (`workflow_dispatch` + `v*` tags):
+`.github/workflows/release-tests.yml` (`workflow_dispatch` + `v*` tags) -- the
+*mngr* release suite only. Both jobs exclude the whole `apps/minds` tree by path
+(`--ignore apps/minds`); all minds release tests run from `test-minds-release`
+above (the minds release procedure is a manual dispatch, not a `v*` tag):
 
-- **`test-docker-release`** -- `(docker or docker_sdk) and release`.
-- **`test-release`** -- the full `release` suite, matrixed `[ubuntu, macos] x
-  group 1..12` (pytest-split). Where `test_aws_workspace_release.py`,
-  `test_sse_redirect.py`, and `test_claude_version_alignment.py` run.
+- **`test-mngr-release-docker`** -- `(docker or docker_sdk) and release`, with
+  `--ignore apps/minds`.
+- **`test-mngr-release`** -- the `release` suite with `--ignore apps/minds`,
+  matrixed `[ubuntu, macos] x group 1..12` (pytest-split).
 
 `.github/workflows/minds-launch-to-msg.yml`: builds the `.app` via ToDesktop,
 runs `scripts/launch_to_msg_e2e.py` (Python launch-to-first-message + Slack), and
-a parallel job runs `macos-launch.spec.js`.
+a parallel job runs `macos-launch.spec.js`. Both inputs (`commit_sha` for mngr,
+`template_ref` for default-workspace-template) accept a full 40-char SHA, branch,
+or tag; a ref is frozen to its SHA once at run start, and that frozen SHA is
+what gets built (mngr) and what the agent is created from (DEFAULT_WORKSPACE_TEMPLATE) -- the SHAs in
+the slack message and step summaries are exactly what ran, even if the ref
+moved mid-run.
 
 ### 1.6 The modal-snapshot stage (the "new" parallel-in-offload e2e stage)
 
@@ -124,10 +144,13 @@ then cheap test sandboxes fan out from the baked image.
   one `[groups.all]` with `filters="-m 'minds_snapshot_resume'"`,
   `max_parallel=10`. The image is deleted on success. Both jobs are gated by the
   `DISABLE_MINDS_SNAPSHOT_CI` repo variable and skipped on fork PRs.
-- **Currently runs:** the 5 `minds_snapshot_resume` tests in
-  `test_snapshot_resume.py` (container present + stopped; resumed workspace
-  serves `system_interface`; services-agent alive; expected services
-  registered; minds recovery restores a dead `system_interface`).
+- **Currently runs:** every `minds_snapshot_resume` test in
+  `test_snapshot_resume.py` (resume sanity checks, the Electron create+chat
+  round-trip, the backup-update chat gate, and the backup-service
+  check/update and enable/repair/destination-change flows). Run a single one
+  with `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`;
+  mint an image id manually via `uv run python
+  scripts/snapshot_minds_e2e_state.py`.
 
 The `ANTHROPIC_API_KEY` is pulled from Vault for the test job (so the agent can
 actually run), but these tests do **not** require an imbue_cloud login.
@@ -142,12 +165,12 @@ actually run), but these tests do **not** require an imbue_cloud login.
 - **Live Electron workspace** (driver, not a fixture):
   `imbue/minds/desktop_client/e2e_workspace_runner.py` --
   `create_workspace_via_electron`, `destroy_agent_best_effort`,
-  `resolve_fct_path`, `materialize_isolated_fct`, `ensure_minds_env_defaults`,
+  `resolve_default_workspace_template_path`, `materialize_isolated_default_workspace_template`, `ensure_minds_env_defaults`,
   `find_free_port`.
 - **Deployment/services** (`deployment_tests/conftest.py`): `shared_env(role)`,
   `verified_user`, `ephemeral_env`, `signup_email` (mail.tm).
 - **General minds helpers** (`imbue/minds/testing.py`): `make_git_repo`,
-  `init_and_commit_git_repo`, `run_mngr`, `parse_mngr_list_json`, `find_agent`,
+  `init_and_commit_git_repo`,
   `stub_mngr_host_dir`, `extract_response`; `desktop_client/testing.py`
   (`restic_backup_a_file`); `utils/testing.py` (`RecordingMngrCaller`);
   `latchkey/testing.py` (`FakeLatchkeyGatewayClient`, `build_fake_gateway_client`).
@@ -156,7 +179,7 @@ actually run), but these tests do **not** require an imbue_cloud login.
 
 Legend for where each test best fits:
 
-- **[snapshot]** -- fits the modal-snapshot stage (a live, stopped FCT workspace
+- **[snapshot]** -- fits the modal-snapshot stage (a live, stopped DEFAULT_WORKSPACE_TEMPLATE workspace
   already in Docker); add to `test_snapshot_resume.py`-style files with marks
   `minds_snapshot_resume` + `docker`. These fan out in parallel in offload and
   need no imbue_cloud login.
@@ -174,7 +197,7 @@ release/deployment-only and is **not** recommended for the snapshot stage.
 
 ### 2.1 Against the modal snapshot (highest leverage -- parallel, no login)
 
-The snapshot already has a running-then-stopped FCT workspace with `mngr` and a
+The snapshot already has a running-then-stopped DEFAULT_WORKSPACE_TEMPLATE workspace with `mngr` and a
 resumable container. That makes it the cheapest place to assert real
 cross-component behavior.
 
@@ -210,9 +233,10 @@ cross-component behavior.
    the contract the desktop client relies on for byte-forwarding.
 5. **Backup listing for an online workspace** [snapshot] -- if a restic repo is
    configured in the snapshot, `GET /workspaces/<id>/backups` lists snapshots and
-   `is_backing_up` is a bool; otherwise assert the 404/501 "backups not
-   configured" path. (Per-snapshot *export* is heavier; keep it [local] with a
-   seeded restic repo via `restic_backup_a_file`.)
+   `is_backing_up` is a bool; otherwise assert the unconfigured shape (200 with
+   an empty snapshot list and `is_configured` false). (Per-snapshot *export* is
+   heavier; keep it [local] with a seeded restic repo via
+   `restic_backup_a_file`.)
 6. **Cross-workspace notification route** [snapshot] -- `POST
    /api/v1/agents/<id>/notifications` for the resumed workspace returns `ok` and
    dispatches (assert via a recording dispatcher).
