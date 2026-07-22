@@ -22,6 +22,33 @@ from imbue.mngr_mapreduce.launching import REDUCER_INPUTS_DIRNAME
 TESTING_AGENT_OUTCOME_FILENAME = "testing_agent_outcome.json"
 INTEGRATOR_OUTCOME_FILENAME = "integrator_outcome.json"
 
+# Per-test timeout (seconds) passed to every pytest invocation TMR agents make.
+#
+# The projects' addopts set --timeout=10, which suits unit tests but is far
+# below what a release test needs: each drives a real `mngr` subprocess whose
+# cold start alone is 10-20s (the CLI eagerly imports every provider plugin).
+# Without an explicit override the agents see spurious timeouts, "fix" them by
+# adding a @pytest.mark.timeout to the test, and the next run's agents do it
+# again somewhere else -- the marker thrash this constant exists to stop.
+#
+# Mapper and reducer must use the SAME value: if the reducer verified at a
+# lower budget than the mapper ran at, it would reject good fixes (and vice
+# versa). Both render it from here, so they cannot drift.
+#
+# This only governs tests without their own @pytest.mark.timeout; pytest-timeout
+# gives a marker precedence over the command-line flag. That is fine for the
+# mapper/reducer agreement above (both see the same marker), but it does mean a
+# marked test runs at its marker's value, not this one.
+#
+# On the relationship to CI: the release lane runs at --timeout 90, so this
+# value being higher means a test taking 90-120s passes under TMR and is then
+# failed by CI. That is a deliberate trade -- a budget tight enough to never
+# exceed CI's would reintroduce the spurious timeouts this constant exists to
+# stop -- and a test that slow should be escalated rather than accommodated. If
+# you change this, note the direction: lowering it toward 90 tightens the
+# TMR-passes-implies-CI-passes guarantee, raising it weakens it further.
+TEST_TIMEOUT_SECONDS = 120
+
 # Prompts are plain text, not HTML, so autoescaping is off. The templates
 # never mix variable substitution with literal `{{`/`}}` -- empty-dict bash
 # and JSON examples use single `{` `}` only -- so no `{% raw %}` blocks are
@@ -102,10 +129,10 @@ def build_test_agent_prompt(
     e2e-specific multi-run artifact-naming guidance (and is None otherwise).
     ``template_path`` overrides the packaged mapper template when provided.
     """
-    flags_str = " ".join(pytest_flags)
-    run_cmd = f"pytest {test_node_id}"
-    if flags_str:
-        run_cmd += f" {flags_str}"
+    # The timeout goes first so a caller-supplied flag in ``pytest_flags`` can
+    # still override it (pytest takes the last occurrence of a repeated option).
+    parts = [f"pytest --timeout={TEST_TIMEOUT_SECONDS}", test_node_id, *pytest_flags]
+    run_cmd = " ".join(part for part in parts if part)
 
     template = _resolve_template(_MAPPER_TEMPLATE, template_path)
     return template.render(
@@ -113,10 +140,15 @@ def build_test_agent_prompt(
         outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
         publish_snippet=_PUBLISH_OUTPUTS_SNIPPET,
         e2e_run_name=e2e_run_name,
+        test_timeout_seconds=TEST_TIMEOUT_SECONDS,
     )
 
 
-def build_integrator_prompt(template_path: Path | None = None) -> str:
+def build_integrator_prompt(
+    report_url: str | None = None,
+    is_pull_request_enabled: bool = False,
+    template_path: Path | None = None,
+) -> str:
     """Build the integrator's initial message.
 
     The orchestrator has rsynced the per-test-agent output directories under
@@ -132,4 +164,7 @@ def build_integrator_prompt(template_path: Path | None = None) -> str:
         mapper_outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
         reducer_outcome_filename=INTEGRATOR_OUTCOME_FILENAME,
         publish_snippet=_PUBLISH_OUTPUTS_SNIPPET,
+        test_timeout_seconds=TEST_TIMEOUT_SECONDS,
+        report_url=report_url,
+        is_pull_request_enabled=is_pull_request_enabled,
     )
