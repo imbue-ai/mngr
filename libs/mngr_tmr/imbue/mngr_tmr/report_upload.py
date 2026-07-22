@@ -22,6 +22,19 @@ _KEY_PREFIX = "tmr-reports"
 _URL_BASE = "http://go/shared/tmr-reports"
 
 
+def report_url_for_run(run_name: str) -> str | None:
+    """Return the URL this run's report will be mirrored to, if it will be.
+
+    The key is derived from the run name alone, so the URL is known before the
+    upload happens -- which is what lets the reducer prompt carry the link even
+    though the reducer is launched before the final report is written. Returns
+    ``None`` when AWS credentials are absent, matching ``maybe_upload_report``.
+    """
+    if not (os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")):
+        return None
+    return f"{_URL_BASE}/{run_name}.html"
+
+
 def maybe_upload_report(html_path: Path, run_name: str) -> str | None:
     """Upload ``html_path`` to the shared S3 bucket and return its public URL.
 
@@ -29,7 +42,7 @@ def maybe_upload_report(html_path: Path, run_name: str) -> str | None:
     are not configured. Logs a warning and returns ``None`` on upload
     failure -- a failed upload should not break the pipeline.
     """
-    if not (os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")):
+    if report_url_for_run(run_name) is None:
         return None
 
     key = f"{_KEY_PREFIX}/{run_name}.html"
@@ -45,4 +58,4 @@ def maybe_upload_report(html_path: Path, run_name: str) -> str | None:
         logger.warning("Failed to upload report to s3://{}/{}: {}", _BUCKET, key, exc)
         return None
 
-    return f"{_URL_BASE}/{run_name}.html"
+    return report_url_for_run(run_name)
