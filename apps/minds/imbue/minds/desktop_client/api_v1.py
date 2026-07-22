@@ -142,7 +142,6 @@ from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
-from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
@@ -525,11 +524,12 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     """Create a new peer workspace; return an operation handle to poll.
 
     Accepts a JSON body with ``git_url`` (required) and optional ``host_name``,
-    ``branch``, ``color``, ``launch_mode`` (default ``DOCKER``), ``ai_provider``
-    (default ``SUBSCRIPTION``), ``account_id`` (selects the imbue_cloud account
-    for compute/AI -- required when ``launch_mode`` or ``ai_provider`` is
-    ``IMBUE_CLOUD``), ``anthropic_api_key`` (required when ``ai_provider`` is
-    ``API_KEY``), and ``region``. Returns ``202`` with an ``operation_id`` the
+    ``branch``, ``color``, ``launch_mode`` (default ``DOCKER``), ``account_id``
+    (selects the imbue_cloud account for compute/backups -- required when
+    ``launch_mode`` is ``IMBUE_CLOUD``), and ``region``. No AI-provider or
+    Anthropic-key fields exist anymore: workspaces boot unauthenticated and the
+    in-workspace sign-in modal is the sole auth surface (a stale ``ai_provider``
+    field from an old client is silently ignored). Returns ``202`` with an ``operation_id`` the
     caller polls at ``/api/v1/workspaces/operations/create/<operation_id>``; the
     canonical workspace id appears there once ``mngr create`` returns.
 
@@ -566,10 +566,6 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
         return _json_error(f"Invalid launch_mode: {body.get('launch_mode')!r}", 400)
-    try:
-        ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
-    except ValueError:
-        return _json_error(f"Invalid ai_provider: {body.get('ai_provider')!r}", 400)
     # Docker container runtime (runc vs gVisor's runsc); only consumed for
     # LaunchMode.DOCKER. Defaults to the platform-appropriate value so macOS
     # (no gVisor) gets runc and Linux gets the hardened runsc.
@@ -583,7 +579,6 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         return _json_error(f"Invalid backup_provider: {body.get('backup_provider')!r}", 400)
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
-    anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
 
     # The workspace name is chosen automatically unless one was submitted (the
@@ -600,9 +595,9 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # Mirror the UI's create-form validation so misconfiguration fails fast here
     # rather than deep in the background creation thread.
     session_store: MultiAccountSessionStore | None = get_state().session_store
-    is_imbue_cloud = launch_mode is LaunchMode.IMBUE_CLOUD or ai_provider is AIProvider.IMBUE_CLOUD
+    is_imbue_cloud = launch_mode is LaunchMode.IMBUE_CLOUD
     if is_imbue_cloud and not account_id:
-        # The remote (Imbue Cloud) presets require an account. With no account at
+        # The remote (Imbue Cloud) preset requires an account. With no account at
         # all the compute path is unusable, so carry the sign-up redirect target
         # back to the create page (its no-JS backstop is the same destination).
         # When accounts exist but none is selected, ask the user to pick one.
@@ -616,18 +611,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
                 status_code=400,
             )
         return _json_field_error(
-            "imbue_cloud requires an account. Select an account or pick a different "
-            "option for both the compute and AI providers.",
+            "imbue_cloud requires an account. Select an account or pick a different compute provider.",
             "account_id",
-        )
-    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
-        return _json_field_error(
-            "An Anthropic API key is required when AI provider is set to api_key.", "anthropic_api_key"
         )
 
     # Resolve the imbue_cloud account email (the session store maps account_id
-    # -> email) so the background creation can mint a LiteLLM key / lease a pool
-    # host against the right account.
+    # -> email) so the background creation can lease a pool host / provision
+    # backups against the right account.
     account_email = ""
     if account_id and session_store is not None:
         account_email = session_store.get_account_email(account_id) or ""
@@ -668,11 +658,9 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         display_name=host_name,
         branch=branch,
         launch_mode=launch_mode,
-        ai_provider=ai_provider,
         account_email=account_email,
         branch_or_tag=branch_or_tag,
         region=region,
-        anthropic_api_key=anthropic_api_key,
         on_created=on_created,
         backup_request=backup_request,
         color=color,

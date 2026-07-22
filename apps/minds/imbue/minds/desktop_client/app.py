@@ -36,6 +36,9 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.ai_keys import AiKeyMintError
+from imbue.minds.desktop_client.ai_keys import mint_workspace_credential_blob
+from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.api_schema import create_api_schema_blueprint
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.assist_chat import AssistSupport
@@ -108,6 +111,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
 from imbue.minds.desktop_client.templates import render_accounts_page
+from imbue.minds.desktop_client.templates import render_ai_keys_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_consent_page
@@ -2017,6 +2021,106 @@ def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | No
     return None
 
 
+def _workspace_record_store() -> WorkspaceRecordStore | None:
+    """The workspace-record store, when the sync machinery is configured."""
+    sync_scheduler = get_state().sync_scheduler
+    return None if sync_scheduler is None else sync_scheduler.record_store
+
+
+def _handle_ai_keys_page() -> Response:
+    """Render the workspace AI-key mint page (GET /settings/ai-keys?workspace=<host_id>).
+
+    Reached from a workspace's Claude sign-in modal ("Sign in with Imbue").
+    Keyed by the workspace's mngr host id; the owning account is resolved
+    from the workspace-record store (association IS record existence), and
+    the page errors -- pointing at the workspace settings page -- when no
+    account is associated.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    workspace_host_id = request.args.get("workspace", "").strip()
+    if not workspace_host_id:
+        html = render_ai_keys_page(
+            workspace_host_id="",
+            workspace_display_name="",
+            account_email="",
+            error_message=(
+                "This page needs to be opened from a workspace: use the Sign in with Imbue "
+                "option in the workspace's Claude sign-in dialog."
+            ),
+        )
+        return make_html_response(content=html)
+    resolved = resolve_workspace_account(workspace_host_id, _workspace_record_store(), get_state().session_store)
+    if resolved is None:
+        html = render_ai_keys_page(
+            workspace_host_id=workspace_host_id,
+            workspace_display_name="",
+            account_email="",
+            error_message=(
+                "This workspace has no associated Imbue account. Associate an account on the "
+                "workspace's settings page, then come back here."
+            ),
+        )
+        return make_html_response(content=html)
+    html = render_ai_keys_page(
+        workspace_host_id=workspace_host_id,
+        workspace_display_name=resolved.workspace_display_name,
+        account_email=resolved.account_email,
+        error_message="",
+    )
+    return make_html_response(content=html)
+
+
+def _handle_mint_ai_key() -> Response:
+    """Mint a LiteLLM key for a workspace (POST /settings/ai-keys/mint).
+
+    JSON body: ``{"workspace": "<host_id>"}``. Returns ``{"credentials": ...}``
+    (the env-var-style blob the workspace modal expects) on success, or
+    ``{"error": ...}`` with a matching status code.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True) or {}
+    workspace_host_id = str(body.get("workspace", "")).strip()
+    if not workspace_host_id:
+        return make_response(
+            status_code=400,
+            content=json.dumps({"error": "Missing 'workspace' (the workspace host id)"}),
+            media_type="application/json",
+        )
+    resolved = resolve_workspace_account(workspace_host_id, _workspace_record_store(), get_state().session_store)
+    if resolved is None:
+        return make_response(
+            status_code=400,
+            content=json.dumps(
+                {
+                    "error": "This workspace has no associated Imbue account. Associate one on the "
+                    "workspace's settings page first."
+                }
+            ),
+            media_type="application/json",
+        )
+    imbue_cloud_cli = get_state().imbue_cloud_cli
+    if imbue_cloud_cli is None:
+        return make_response(
+            status_code=501,
+            content=json.dumps({"error": "Imbue Cloud is not configured on this install"}),
+            media_type="application/json",
+        )
+    try:
+        credential_blob = mint_workspace_credential_blob(
+            workspace_host_id=workspace_host_id,
+            account_email=resolved.account_email,
+            imbue_cloud_cli=imbue_cloud_cli,
+        )
+    except AiKeyMintError as exc:
+        logger.warning("LiteLLM key mint failed for workspace {}: {}", workspace_host_id, exc)
+        return make_response(status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json")
+    return make_response(
+        status_code=200, content=json.dumps({"credentials": credential_blob}), media_type="application/json"
+    )
+
+
 def _handle_settings_page() -> Response:
     """Render the app-level settings page (GET /settings).
 
@@ -2874,6 +2978,8 @@ def create_desktop_client(
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
     app.add_url_rule("/settings", view_func=_handle_settings_page)
+    app.add_url_rule("/settings/ai-keys", view_func=_handle_ai_keys_page)
+    app.add_url_rule("/settings/ai-keys/mint", view_func=_handle_mint_ai_key, methods=["POST"])
     app.add_url_rule("/settings/permissions/revoke", view_func=_handle_revoke_service_for_workspace, methods=["POST"])
     app.add_url_rule(
         "/settings/permissions/revoke-all", view_func=_handle_revoke_service_for_all_workspaces, methods=["POST"]

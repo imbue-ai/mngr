@@ -32,6 +32,7 @@ import httpx
 import pytest
 import tomlkit
 from loguru import logger
+from playwright.sync_api import Page
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import mngr_prefix_for
@@ -441,13 +442,15 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
 # The snapshot image bakes a warm Electron/Playwright/Xvfb/Docker toolchain (the
 # snapshot *build* drives that same toolchain to create the first workspace).
 # This test reuses that warm toolchain to drive the real Electron app and create
-# a SECOND workspace -- this time via the manual ``api_key`` AI-provider option
-# -- then sends a chat message to its ``system_interface`` and asserts the agent
-# replies. It runs in the same offload snapshot stage (carries
-# minds_snapshot_resume), so all the "drive Electron" coverage lives in one place
-# instead of a separate cold-install CI job. It does NOT use the baked first
-# workspace (it creates its own), so it is independent of the
-# ``running_workspace`` fixture.
+# a SECOND workspace -- which boots unauthenticated (the create flow injects no
+# AI credentials anymore), signs in through the workspace's own Claude sign-in
+# modal with a raw API key (the modal auto-appears on the fresh workspace, the
+# designed first-boot step), then sends a chat message to its
+# ``system_interface`` and asserts the agent replies. It runs in the same
+# offload snapshot stage (carries minds_snapshot_resume), so all the "drive
+# Electron" coverage lives in one place instead of a separate cold-install CI
+# job. It does NOT use the baked first workspace (it creates its own), so it is
+# independent of the ``running_workspace`` fixture.
 
 
 def _opt_into_pytest_config_guard(settings_path: Path) -> None:
@@ -517,34 +520,63 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 @pytest.mark.minds_snapshot_resume
+def _sign_in_with_api_key_via_modal(page: Page, api_key: str) -> None:
+    """Drive the workspace's Claude sign-in modal through the API-key path.
+
+    A freshly created workspace has no AI credentials, so the modal opens on
+    its own (the load-time status check) -- the designed first-boot step.
+    Signing in writes the key into the shared Claude settings env block and
+    restarts the workspace's claude agents, so the success state can take a
+    couple of minutes to appear.
+    """
+    logger.info("Waiting for the Claude sign-in modal to auto-appear")
+    page.wait_for_selector(".claude-login-modal", timeout=120_000)
+    page.click(".claude-login-alts-toggle")
+    page.click('button.claude-login-alt:has-text("Use an API key")')
+    page.wait_for_selector("#claude-login-api-key-input", timeout=10_000)
+    page.fill("#claude-login-api-key-input", api_key)
+    logger.info("Submitting the API key through the modal")
+    page.click('button:has-text("Save & finish")')
+    # Applying credentials restarts the claude agents before reporting success.
+    page.wait_for_selector(".claude-login-status-icon--success", timeout=300_000)
+    page.click('button:has-text("Done")')
+    page.wait_for_selector(".claude-login-overlay", state="detached", timeout=10_000)
+    logger.info("Signed in via the modal")
+
+
+def _sign_in_and_chat(page: Page, api_key: str, token: str) -> None:
+    _sign_in_with_api_key_via_modal(page, api_key)
+    _send_message_and_await_reply(page, token)
+
+
 @pytest.mark.docker
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
-def test_create_apikey_workspace_and_chat_via_electron(
+def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     xvfb_display: str,
 ) -> None:
-    """Drive Electron to create a manual-API-key Docker workspace, then chat with it.
+    """Create an unauthenticated Docker workspace, sign in via the modal, chat.
 
-    The product-level round-trip: pick the ``api_key`` AI provider, type a raw
-    Anthropic key, create a local Docker workspace from DEFAULT_WORKSPACE_TEMPLATE, and assert the agent
-    in the workspace's ``system_interface`` answers a chat message (echoes a
-    unique token) -- end-to-end through the real Electron app and the desktop
-    client proxy.
+    The product-level first-boot round-trip: the create flow injects no AI
+    credentials, so the workspace boots unauthenticated and its Claude
+    sign-in modal auto-appears; the test fills the API-key path in the real
+    modal UI, waits for the settings write + agent restart, then asserts the
+    agent answers a chat message (echoes a unique token) -- end-to-end
+    through the real Electron app and the desktop client proxy.
 
     Runs in the snapshot offload sandbox, reusing the warm Electron toolchain
     baked into the image (the ``xvfb_display`` fixture supplies the display the
-    sandbox lacks). Needs a real Anthropic key: the ``API_KEY`` path talks to the
-    official Anthropic API directly (no LiteLLM proxy), so the agent only replies
-    if the key works. The key is read from ``ANTHROPIC_API_KEY`` (forwarded into
-    this stage from Vault) and typed into the create form -- the Electron child
-    env scrubs that var, so the key reaches the agent only via the form,
-    exercising the real manual-key UX. Skips if the key is absent.
+    sandbox lacks). Needs a real Anthropic key: the agent only replies if the
+    key works. The key is read from ``ANTHROPIC_API_KEY`` (forwarded into
+    this stage from Vault) and typed into the modal -- the Electron child
+    env scrubs that var, so the key reaches the agent only via the modal,
+    exercising the real sign-in UX. Skips if the key is absent.
     """
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not anthropic_api_key:
-        pytest.skip("ANTHROPIC_API_KEY is required for the manual-key workspace chat round-trip")
+        pytest.skip("ANTHROPIC_API_KEY is required for the modal sign-in workspace chat round-trip")
 
     default_workspace_template_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
 
@@ -565,8 +597,7 @@ def test_create_apikey_workspace_and_chat_via_electron(
             workspace_name,
             debug_port,
             host_config_dir=host_config_root,
-            anthropic_api_key=anthropic_api_key,
-            on_workspace_ready=lambda page: _send_message_and_await_reply(page, token),
+            on_workspace_ready=lambda page: _sign_in_and_chat(page, anthropic_api_key, token),
         )
     finally:
         destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")

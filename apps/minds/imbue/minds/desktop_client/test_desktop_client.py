@@ -697,16 +697,18 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     assert "imbue_cloud" in response.text
 
 
-def test_create_form_shows_ai_provider_dropdown(tmp_path: Path) -> None:
-    """GET /create form includes the AI provider dropdown with all three options."""
+def test_create_form_has_no_ai_provider_dropdown(tmp_path: Path) -> None:
+    """GET /create form no longer offers an AI-provider choice or key input.
+
+    AI credentials are configured through the workspace's own Claude sign-in
+    modal after boot, not at create time.
+    """
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert 'name="ai_provider"' in response.text
-    assert 'value="IMBUE_CLOUD"' in response.text
-    assert 'value="API_KEY"' in response.text
-    assert 'value="SUBSCRIPTION"' in response.text
+    assert 'name="ai_provider"' not in response.text
+    assert 'name="anthropic_api_key"' not in response.text
 
 
 def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:

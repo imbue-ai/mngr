@@ -1,14 +1,16 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
   Two views share one form. The simple view offers two compute presets
   -- "remote" (Imbue Cloud) and "local" (directly on this computer) --
   as large selectable cards; picking one fills the (hidden) advanced
-  selects with that preset's compute / AI / backup defaults. The advanced
-  view exposes those selects plus the repository / branch / region inputs
+  selects with that preset's compute / backup defaults. The advanced view
+  exposes those selects plus the repository / branch / region inputs
   directly. The advanced selects are always the source of truth on
   submit, so toggling between views never changes what gets POSTed.
+  There is no AI-provider choice here: the workspace boots unauthenticated
+  and its in-workspace sign-in modal is the sole Claude auth surface.
 
   The color is chosen automatically (the first unused palette entry, carried
   in a hidden input), so it is not asked for here. The workspace name defaults
@@ -48,13 +50,9 @@
 
     var accountSelect = document.getElementById('account_id');
     var launchSelect = document.getElementById('launch_mode');
-    var aiProviderSelect = document.getElementById('ai_provider');
-    var apiKeyRow = document.getElementById('api-key-row');
-    var apiKeyInput = document.getElementById('anthropic_api_key');
     var launchModeError = document.getElementById('launch-mode-account-error');
     var awsCredentialsNote = document.getElementById('aws-credentials-note');
     var modalDirectNote = document.getElementById('modal-direct-note');
-    var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
     var backupProviderError = document.getElementById('backup-provider-account-error');
@@ -86,15 +84,14 @@
     // Each preset fills the advanced selects with its compute / AI / backup
     // defaults. These mirror the per-account defaults the server applies.
     var PRESETS = {
-      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'IMBUE_CLOUD', backup_provider: 'IMBUE_CLOUD'},
-      local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER'}
+      remote: {launch_mode: 'IMBUE_CLOUD', backup_provider: 'IMBUE_CLOUD'},
+      local:  {launch_mode: 'LIMA', backup_provider: 'CONFIGURE_LATER'}
     };
 
     function applyPreset(name) {
       var preset = PRESETS[name];
       if (!preset) return;
       launchSelect.value = preset.launch_mode;
-      aiProviderSelect.value = preset.ai_provider;
       backupSelect.value = preset.backup_provider;
     }
 
@@ -113,11 +110,10 @@
     }
 
     function imbueCloudNeedsAccount() {
-      // Imbue Cloud compute / AI / backup requires an account. True when one of
+      // Imbue Cloud compute / backup requires an account. True when one of
       // those is selected but no account is picked.
       return accountSelect.value === '' && (
         launchSelect.value === 'IMBUE_CLOUD' ||
-        aiProviderSelect.value === 'IMBUE_CLOUD' ||
         backupSelect.value === 'IMBUE_CLOUD'
       );
     }
@@ -334,9 +330,7 @@
         branch: fieldValue(branchInput).trim(),
         color: fieldValue(colorInput),
         launch_mode: launchSelect.value,
-        ai_provider: aiProviderSelect.value,
         account_id: accountSelect.value,
-        anthropic_api_key: fieldValue(apiKeyInput).trim(),
         backup_provider: backupSelect.value,
         backup_api_key_env: fieldValue(backupApiKeyEnvInput),
         region: fieldValue(regionSelect),
@@ -469,26 +463,18 @@
 
       var launchImbueOption = launchSelect.querySelector('option[data-requires-account]');
       if (launchImbueOption) launchImbueOption.disabled = !hasAccount;
-      var aiImbueOption = aiProviderSelect.querySelector('option[data-requires-account]');
-      if (aiImbueOption) aiImbueOption.disabled = !hasAccount;
       var backupImbueOption = backupSelect.querySelector('option[data-requires-account]');
       if (backupImbueOption) backupImbueOption.disabled = !hasAccount;
-
-      var isApiKey = aiProviderSelect.value === 'API_KEY';
-      apiKeyRow.classList.toggle('hidden', !isApiKey);
-      apiKeyInput.required = isApiKey;
 
       var backupValue = backupSelect.value;
       var isBackupApiKey = backupValue === 'API_KEY';
       backupApiKeyRow.classList.toggle('hidden', !isBackupApiKey);
 
       var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
-      var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
       var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
       launchModeError.classList.toggle('hidden', !launchInvalid);
       if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
       if (modalDirectNote) modalDirectNote.classList.toggle('hidden', launchSelect.value !== 'MODAL');
-      aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
 
       // "Create" stays enabled; the account requirement is enforced on submit
@@ -505,7 +491,6 @@
 
     accountSelect.addEventListener('change', onAccountChange);
     launchSelect.addEventListener('change', update);
-    aiProviderSelect.addEventListener('change', update);
     backupSelect.addEventListener('change', update);
 
     hostNameInput.addEventListener('input', scheduleHostNameValidation);
@@ -644,23 +629,6 @@
           </Select>
         </div>
         <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
-      </div>
-
-      <div>
-        <div class="flex items-center justify-between gap-3">
-          <FormLabel target="ai_provider" inline>AI provider</FormLabel>
-          <Select id="ai_provider" name="ai_provider" width="w-48">
-            {% for provider in ai_providers %}
-              <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
-                      {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ provider.value | lower }}</option>
-            {% endfor %}
-          </Select>
-        </div>
-        <p id="ai-provider-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
-        <div id="api-key-row" class="mt-2 hidden">
-          <FormLabel target="anthropic_api_key">Anthropic API key</FormLabel>
-          <TextInput name="anthropic_api_key" :value="anthropic_api_key" placeholder="sk-ant-..." id="anthropic_api_key" type="password" />
-        </div>
       </div>
 
       <div>

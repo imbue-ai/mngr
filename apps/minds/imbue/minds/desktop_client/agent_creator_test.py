@@ -55,7 +55,6 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
-from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
@@ -1348,15 +1347,12 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AI provider dispatch tests
+# Create-time credential regression tests
 #
-# These exercise the new ``ai_provider`` match in ``_create_agent_background``
-# end-to-end via ``start_creation`` -- the ``mngr create`` subprocess fails
-# (we point at a nonexistent local path) but by then we've already gone
-# through the AI-provider dispatch, so the recorded calls on the fake CLI
-# tell us whether the right branch ran. The branch goal explicitly created
-# the new combination "AIProvider.IMBUE_CLOUD with launch_mode != IMBUE_CLOUD",
-# which we cover here.
+# AI-provider selection moved out of the create flow entirely: workspaces boot
+# unauthenticated and sign in through the workspace's own Claude modal. These
+# guard the removal -- creation must never mint a LiteLLM key (the mint moved
+# to the desktop app's /settings/ai-keys page; see ai_keys_test.py).
 # ---------------------------------------------------------------------------
 
 
@@ -1419,7 +1415,7 @@ def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadlin
 
     The deadline is only a ceiling -- the loop returns the instant the status is
     terminal, so a passing test never waits for it. It is set to 30s (matching the
-    ``@pytest.mark.timeout(30)`` on the litellm-key tests) so heavy setup under
+    ``@pytest.mark.timeout(30)`` on the creation tests) so heavy setup under
     offload CI contention does not trip a spurious timeout at the old 10s.
     """
     deadline = time.monotonic() + deadline_seconds
@@ -1432,10 +1428,10 @@ def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadlin
 
 
 @pytest.mark.timeout(30)
-def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_path: Path) -> None:
-    """The AIProvider.IMBUE_CLOUD branch must mint a LiteLLM key even when the compute
-    provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
-    real binary / no real repo) but the key-mint must happen first."""
+def test_start_creation_never_mints_a_litellm_key(tmp_path: Path) -> None:
+    """Creation injects no Anthropic credentials: even with an imbue_cloud
+    account supplied (for compute/backups), no LiteLLM key is minted -- the
+    workspace signs in through its own modal after boot."""
     cli = _RecordingImbueCloudCli(
         connector_url=FAKE_CONNECTOR_URL,
     )
@@ -1445,89 +1441,11 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
         launch_mode=LaunchMode.DOCKER,
-        ai_provider=AIProvider.IMBUE_CLOUD,
         account_email="alice@imbue.com",
     )
-    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
-
-    assert len(cli.create_calls) == 1
-    assert cli.create_calls[0]["account"] == "alice@imbue.com"
-    # The LiteLLM key no longer carries host_name metadata (the host name is
-    # mutable and the key is minted before the host exists).
-    assert cli.create_calls[0]["metadata"] is None
-
-
-# Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a
-# recording http-server fixture, which can exceed the default 10s pytest-timeout.
-@pytest.mark.timeout(30)
-def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
-    """The API_KEY branch uses the user-supplied key directly and must never call
-    ``create_litellm_key``."""
-    cli = _RecordingImbueCloudCli(
-        connector_url=FAKE_CONNECTOR_URL,
-    )
-    creator = _make_creator_with_cli(tmp_path, cli)
-
-    creation_id = creator.start_creation(
-        repo_source=str(_make_fake_repo(tmp_path)),
-        host_name="my-workspace",
-        launch_mode=LaunchMode.DOCKER,
-        ai_provider=AIProvider.API_KEY,
-        anthropic_api_key="sk-ant-user-supplied",
-    )
     _wait_until_finished(creator, creation_id)
 
     assert cli.create_calls == []
-
-
-# Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout (so these carry a 30s
-# timeout, matched by _wait_until_finished's poll deadline).
-@pytest.mark.timeout(30)
-def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
-    """The SUBSCRIPTION branch injects no Anthropic creds and must never call
-    ``create_litellm_key``."""
-    cli = _RecordingImbueCloudCli(
-        connector_url=FAKE_CONNECTOR_URL,
-    )
-    creator = _make_creator_with_cli(tmp_path, cli)
-
-    creation_id = creator.start_creation(
-        repo_source=str(_make_fake_repo(tmp_path)),
-        host_name="my-workspace",
-        launch_mode=LaunchMode.DOCKER,
-        ai_provider=AIProvider.SUBSCRIPTION,
-    )
-    _wait_until_finished(creator, creation_id)
-
-    assert cli.create_calls == []
-
-
-# Carries the same 30s pytest-timeout as the other creation tests: this caller
-# also uses _wait_until_finished's 30s default poll deadline, which without this
-# marker would be pre-empted by the global --timeout=10 under heavy parallel load.
-@pytest.mark.timeout(30)
-def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
-    """The API_KEY branch must reject an empty key with a specific error rather than
-    silently falling through to mngr create with no key set."""
-    cli = _RecordingImbueCloudCli(
-        connector_url=FAKE_CONNECTOR_URL,
-    )
-    creator = _make_creator_with_cli(tmp_path, cli)
-
-    creation_id = creator.start_creation(
-        repo_source=str(_make_fake_repo(tmp_path)),
-        host_name="my-workspace",
-        launch_mode=LaunchMode.DOCKER,
-        ai_provider=AIProvider.API_KEY,
-        anthropic_api_key="",
-    )
-    _wait_until_finished(creator, creation_id)
-
-    info = creator.get_creation_info(creation_id)
-    assert info is not None
-    assert info.status is AgentCreationStatus.FAILED
-    assert info.error is not None and "API_KEY" in info.error
 
 
 def test_checkout_existing_branch_is_noop_when_already_on_branch_without_fetch_head(tmp_path: Path) -> None:

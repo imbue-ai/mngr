@@ -48,7 +48,6 @@ from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -60,7 +59,6 @@ from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.lima_image.primitives import get_current_image_arch
-from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
@@ -205,15 +203,13 @@ class AgentCreationStatus(UpperCaseStrEnum):
     status and emits a SSE event each time it changes so the UI spinner
     caption stays in sync with what the backend is actually doing.
     Conditional phases (``CHECKING_OUT_BRANCH`` only if a branch was
-    given, ``PROVISIONING_AI`` only for ``IMBUE_CLOUD`` AI provider) are
-    skipped when they don't apply -- the status simply jumps to the next
-    applicable phase.
+    given) are skipped when they don't apply -- the status simply jumps to
+    the next applicable phase.
     """
 
     INITIALIZING = auto()
     CLONING_REPO = auto()
     CHECKING_OUT_BRANCH = auto()
-    PROVISIONING_AI = auto()
     CREATING_WORKSPACE = auto()
     WAITING_FOR_READY = auto()
     DONE = auto()
@@ -1151,8 +1147,6 @@ def run_mngr_create(
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
     region: str | None = None,
-    anthropic_api_key: str | None = None,
-    anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -1171,10 +1165,9 @@ def run_mngr_create(
     pool host has its own pre-baked ``.mngr/`` and the local repo is
     irrelevant.
 
-    ``anthropic_api_key`` / ``anthropic_base_url`` are placed into the
-    subprocess env (not argv) so they don't show up in ``ps`` output; the DEFAULT_WORKSPACE_TEMPLATE
-    template's own ``pass_(host_)env`` declarations cause mngr to forward them
-    onto the host as appropriate.
+    No Anthropic credentials are involved at create time: workspace Claude
+    auth lives in the env block of the shared CLAUDE_CONFIG_DIR settings.json,
+    written by the in-workspace sign-in modal after the workspace boots.
 
     Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical
     ids are parsed out of the ``"event": "created"`` JSONL line that
@@ -1202,19 +1195,6 @@ def run_mngr_create(
         prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
     )
 
-    # Build the subprocess env from the parent's env + any secrets we inject
-    # for the matching ``--pass-(host-)env`` flag to forward. Mutating
-    # ``os.environ`` directly would leak the user's secrets into the desktop
-    # client's other subprocesses, so we keep the override scoped to this
-    # invocation.
-    subprocess_env: dict[str, str] | None = None
-    if anthropic_api_key is not None or anthropic_base_url is not None:
-        subprocess_env = dict(os.environ)
-        if anthropic_api_key is not None:
-            subprocess_env["ANTHROPIC_API_KEY"] = anthropic_api_key
-        if anthropic_base_url is not None:
-            subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
-
     # The command carries the latchkey gateway password + permissions-override
     # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
     # so the persistent logs (uploaded with bug reports) never carry the raw
@@ -1231,7 +1211,7 @@ def run_mngr_create(
             cwd=workspace_dir,
             is_checked_after=False,
             on_output=capture,
-            env=subprocess_env,
+            env=None,
             # Name the reader thread with the redacted command so the gateway
             # password + JWT never reach the JSONL log's ``thread_name`` (nor any
             # ProcessError message); the real command is still what executes.
@@ -1330,8 +1310,6 @@ class _MngrCreateAttemptParams(FrozenModel):
     repo_source: str | None
     branch_or_tag: str | None
     region: str | None
-    anthropic_api_key: str | None
-    anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
     docker_runtime: DockerRuntime
@@ -1370,8 +1348,6 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # (-b --vultr-region=), and AWS (-b --aws-region=); the command builder
         # ignores it for DOCKER/LIMA.
         region=(params.region or None),
-        anthropic_api_key=params.anthropic_api_key,
-        anthropic_base_url=params.anthropic_base_url,
         color=params.color,
         docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
@@ -1563,11 +1539,9 @@ class AgentCreator(MutableModel):
         display_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.DOCKER,
-        ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
-        anthropic_api_key: str = "",
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -1576,17 +1550,12 @@ class AgentCreator(MutableModel):
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
-        ``ai_provider`` controls how the agent obtains its Anthropic
-        credentials, decoupled from the compute provider:
-
-        - ``IMBUE_CLOUD`` -- mint a LiteLLM virtual key against
-          ``account_email`` and inject ``ANTHROPIC_API_KEY`` /
-          ``ANTHROPIC_BASE_URL`` so the agent talks to LiteLLM. Requires
-          an account.
-        - ``API_KEY`` -- inject ``anthropic_api_key`` directly so the agent
-          talks to the official Anthropic API.
-        - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
-          interactively in the workspace.
+        No AI credentials are chosen or injected at create time: the
+        workspace boots unauthenticated and its in-UI sign-in modal is the
+        sole auth surface (subscription setup-token, Imbue LiteLLM key, or
+        raw API key -- all written into the shared Claude settings env).
+        ``account_email`` still selects the imbue_cloud account for compute
+        leasing and backups.
 
         ``docker_runtime`` selects the container runtime for
         ``LaunchMode.DOCKER`` (runc vs gVisor's runsc); it is ignored by every
@@ -1647,11 +1616,9 @@ class AgentCreator(MutableModel):
                 effective_branch,
                 log_queue,
                 launch_mode,
-                ai_provider,
                 account_email,
                 branch_or_tag,
                 region,
-                anthropic_api_key,
                 on_created,
                 backup_request,
                 color,
@@ -1712,11 +1679,9 @@ class AgentCreator(MutableModel):
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
-        ai_provider: AIProvider,
         account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
-        anthropic_api_key: str = "",
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -1725,12 +1690,9 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
-        For ``ai_provider == IMBUE_CLOUD``, mints a LiteLLM key (via the
-        plugin CLI) and forwards ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL``
-        onto the host via the subprocess env + matching
-        ``--pass-(host-)env`` flags. For ``API_KEY``, forwards the
-        user-supplied key as ``ANTHROPIC_API_KEY``. For ``SUBSCRIPTION``,
-        injects neither.
+        No Anthropic credentials are minted or injected here: the workspace
+        boots unauthenticated and the in-workspace sign-in modal writes the
+        credentials into the shared Claude settings env after first boot.
 
         For ``LaunchMode.IMBUE_CLOUD``, the plugin's provider backend
         handles the lease + SSH bootstrap inside ``create_host``; the
@@ -1869,45 +1831,6 @@ class AgentCreator(MutableModel):
                             parent_cg=self.root_concurrency_group,
                         )
 
-                # Resolve the Anthropic credentials according to the AI
-                # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;
-                # API_KEY uses the user-supplied key directly; SUBSCRIPTION
-                # injects nothing so the agent prompts the user to log in.
-                effective_anthropic_api_key: str | None = None
-                effective_anthropic_base_url: str | None = None
-                match ai_provider:
-                    case AIProvider.IMBUE_CLOUD:
-                        if self.imbue_cloud_cli is None:
-                            raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
-                        if not account_email:
-                            raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
-                        with self._lock:
-                            self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
-                        log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
-                        try:
-                            # No host_name metadata: the key is minted before the
-                            # host exists (so no host id is available), and the host
-                            # name is mutable, so it would only go stale on rename.
-                            key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
-                                account=account_email,
-                                alias=None,
-                                max_budget=100.0,
-                                budget_duration="1d",
-                            )
-                        except ImbueCloudCliError as exc:
-                            raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
-                        log_queue.put("[minds] LiteLLM key minted.")
-                        effective_anthropic_api_key = key_material.key.get_secret_value()
-                        effective_anthropic_base_url = str(key_material.base_url)
-                    case AIProvider.API_KEY:
-                        if not anthropic_api_key:
-                            raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
-                        effective_anthropic_api_key = anthropic_api_key
-                    case AIProvider.SUBSCRIPTION:
-                        pass
-                    case _ as unreachable:
-                        assert_never(unreachable)
-
                 with self._lock:
                     self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
 
@@ -1981,8 +1904,6 @@ class AgentCreator(MutableModel):
                     repo_source=repo_source,
                     branch_or_tag=branch_or_tag,
                     region=region,
-                    anthropic_api_key=effective_anthropic_api_key,
-                    anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                     color=color,
                     docker_runtime=docker_runtime,

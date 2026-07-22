@@ -1,0 +1,94 @@
+{#def workspace_host_id, workspace_display_name, account_email, error_message #}
+{#
+  Workspace AI-key mint page (GET /settings/ai-keys?workspace=<host_id>).
+
+  Reached from the workspace's Claude sign-in modal ("Sign in with Imbue").
+  Mint-only: one button mints a LiteLLM key for the workspace (the alias and
+  metadata carry the workspace host id, fixed server-side) and copies the
+  env-var-style credential blob to the clipboard for pasting back into the
+  modal. With no resolvable workspace/account, `error_message` is set and
+  only the explanation renders.
+#}
+{% set _scripts %}
+<script>
+  (function() {
+    var mintButton = document.getElementById('mint-key');
+    if (!mintButton) return;
+    var statusLine = document.getElementById('mint-status');
+    var blobBox = document.getElementById('credential-blob');
+
+    function setStatus(text, isError) {
+      statusLine.textContent = text;
+      statusLine.classList.toggle('text-important', !!isError);
+      statusLine.classList.remove('hidden');
+    }
+
+    mintButton.addEventListener('click', function () {
+      mintButton.disabled = true;
+      setStatus('Creating key...', false);
+      fetch('/settings/ai-keys/mint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace: {{ workspace_host_id | tojson }} })
+      }).then(function (r) {
+        return r.json().then(function (data) { return { status: r.status, data: data || {} }; });
+      }).then(function (res) {
+        if (res.status !== 200 || !res.data.credentials) {
+          setStatus(res.data.error || 'Could not create the key.', true);
+          mintButton.disabled = false;
+          return;
+        }
+        // Always reveal the blob so the user can copy manually if the
+        // clipboard write is rejected (insecure context, permissions).
+        blobBox.value = res.data.credentials;
+        blobBox.parentElement.classList.remove('hidden');
+        navigator.clipboard.writeText(res.data.credentials).then(function () {
+          setStatus('Credentials copied to your clipboard. Paste them into the workspace sign-in dialog.', false);
+        }).catch(function () {
+          setStatus('Key created. Copy the credentials below and paste them into the workspace sign-in dialog.', false);
+        });
+        mintButton.disabled = false;
+        mintButton.textContent = 'Create another key';
+      }).catch(function () {
+        setStatus('Could not reach the server. Please try again.', true);
+        mintButton.disabled = false;
+      });
+    });
+  })();
+</script>
+{% endset %}
+<PageNarrowContainer title="Workspace AI key" padding="form" max_width="max-w-[560px]" scripts={{ _scripts }}>
+  <div class="text-center mb-8">
+    <p class="type-label uppercase tracking-wide text-secondary">Sign in with Imbue</p>
+    <h1 class="type-heading-lg text-primary mt-1">Get AI credentials for your workspace</h1>
+  </div>
+
+  {% if error_message %}
+    <Notice variant="error">{{ error_message }}</Notice>
+  {% else %}
+    <p class="type-body text-secondary text-center mb-2">
+      This creates an AI key for
+      <span class="text-primary font-semibold">{{ workspace_display_name }}</span>,
+      billed to <span class="text-primary font-semibold">{{ account_email }}</span>.
+    </p>
+    <p class="type-helper text-tertiary text-center mb-8">
+      The key has a daily spending budget. Your usage appears on your Imbue account.
+    </p>
+
+    <div class="flex justify-center">
+      <Button variant="primary" id="mint-key" extra="w-80">Create key &amp; copy credentials</Button>
+    </div>
+
+    <p id="mint-status" role="status" class="hidden mt-4 type-helper text-secondary text-center"></p>
+
+    <div class="hidden mt-4">
+      <FormLabel target="credential-blob">Credentials</FormLabel>
+      <Textarea id="credential-blob" name="credential_blob" rows="3" extra="font-mono" readonly
+                onclick="this.select()" :value="''" />
+    </div>
+
+    <p class="type-helper text-tertiary text-center mt-8">
+      Then return to your workspace and paste the credentials into the Sign in with Imbue dialog.
+    </p>
+  {% endif %}
+</PageNarrowContainer>

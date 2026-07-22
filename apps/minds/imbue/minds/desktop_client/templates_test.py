@@ -34,7 +34,6 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_N
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
-from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -326,10 +325,12 @@ def test_render_create_form_selects_specified_launch_mode() -> None:
     assert 'value="LIMA" selected' not in html
 
 
-def test_render_create_form_contains_ai_provider_options() -> None:
+def test_render_create_form_has_no_ai_provider_field() -> None:
+    # AI provider selection moved into the workspace's own sign-in modal;
+    # the create form must not offer it (or an API-key input) anymore.
     html = render_create_form()
-    for provider in AIProvider:
-        assert f'value="{provider.value}"' in html
+    assert "ai_provider" not in html
+    assert "anthropic_api_key" not in html
 
 
 def test_render_create_form_contains_docker_runtime_options() -> None:
@@ -353,19 +354,11 @@ def test_render_create_form_selects_specified_docker_runtime() -> None:
     assert f'value="{non_default.value}" selected' in html
 
 
-def test_render_create_form_defaults_ai_provider_to_imbue_cloud() -> None:
-    # The remote preset is the default, so the AI provider starts on IMBUE_CLOUD
-    # rather than the local SUBSCRIPTION default.
-    html = render_create_form()
-    assert 'value="SUBSCRIPTION" selected' not in html
-
-
-def test_render_create_form_local_preset_selects_lima_and_subscription() -> None:
+def test_render_create_form_local_preset_selects_lima() -> None:
     # Selecting the local preset (e.g. a re-render of a LIMA submission) keeps
-    # the compute / AI providers on the local LIMA / SUBSCRIPTION defaults.
+    # the compute provider on the local LIMA default.
     html = render_create_form(selected_preset="local")
     assert 'value="LIMA" selected' in html
-    assert 'value="SUBSCRIPTION" selected' in html
     assert 'aria-checked="true"' in _preset_card_tag(html, "local")
 
 
