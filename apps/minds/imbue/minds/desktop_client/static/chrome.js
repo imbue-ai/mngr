@@ -163,11 +163,16 @@
         applyModeSetup();
         window.scrollTo(0, 0);
         var u = new URL(url, window.location.href);
-        window.MindsUI.setContentUrl(u.pathname + u.search);
-        // Local pages derive their accent from their own path; the wrapper's
-        // accent is owned by the Electron main pushes (and was seeded
-        // server-side via the ?accent= param).
+        // The /_chrome wrapper is the agent-content loading surface, not a page
+        // of its own: both its content URL and its accent are owned by main's
+        // IPC pushes (the displayed workspace's URL + accent, the latter seeded
+        // server-side via ?accent=). A swap to it must stamp NEITHER. Stamping
+        // the content URL is the bug this guards: setContentUrl('/_chrome')
+        // classifies as Home, so revealing a workspace after visiting its
+        // settings (which swaps the chrome view back to /_chrome) dropped the
+        // workspace breadcrumb the reveal had just restored.
         if (u.pathname !== '/_chrome') {
+          window.MindsUI.setContentUrl(u.pathname + u.search);
           window.MindsUI.setAccentScopeAgent(accentSourceFromPath(u.pathname));
         }
       });
