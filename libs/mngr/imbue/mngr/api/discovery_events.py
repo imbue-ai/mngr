@@ -766,9 +766,10 @@ def find_discovery_snapshot_replay_offset(events_path: Path) -> int:
     providers.
 
     Returns the offset of the first event line at or after the earliest
-    ``discovery_started_at`` among every provider's latest ``DISCOVERY_PROVIDER`` snapshot
-    (falling back to the latest legacy ``DISCOVERY_FULL`` timestamp only when no
-    per-provider snapshot exists). Returns 0 when the file is absent or holds no snapshot
+    ``discovery_started_at`` among every provider's latest non-errored
+    ``DISCOVERY_PROVIDER`` snapshot -- its latest snapshot when the file holds only
+    errored ones for it (falling back to the latest legacy ``DISCOVERY_FULL``
+    timestamp only when no per-provider snapshot exists). Returns 0 when the file is absent or holds no snapshot
     (read the whole file). Starting a little early is harmless: per-provider snapshots
     reset only their own provider, and the per-item span rule keeps a stale snapshot from
     clobbering newer in-span events.
