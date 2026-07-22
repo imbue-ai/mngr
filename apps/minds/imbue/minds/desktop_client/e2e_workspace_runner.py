@@ -8,9 +8,9 @@ renders through the desktop client's subdomain proxy.
 Two callers consume this module:
 
 - ``apps/minds/test_snapshot_resume.py`` -- the pytest test
-  (``test_create_apikey_workspace_and_chat_via_electron``) wraps
-  :func:`create_workspace_via_electron` and always cleans up the resulting
-  mngr agent in its ``finally``.
+  (``test_create_workspace_and_sign_in_via_modal_then_chat_via_electron``)
+  wraps :func:`create_workspace_via_electron` and always cleans up the
+  resulting mngr agent in its ``finally``.
 - ``scripts/snapshot_minds_e2e_state.py`` -- the Modal-snapshot script
   calls the same function but deliberately *does not* destroy the agent,
   because the whole point of the snapshot is to capture a sandbox in
