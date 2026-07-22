@@ -5704,7 +5704,7 @@ def _summarize_owner_bucket_usage(ops: CloudflareOps, username_prefix: str) -> t
     bucket_names = [str(bucket.get("name", "")) for bucket in _list_owned_buckets(ops, username_prefix)]
     total_bucket_bytes = 0
     for bucket_name, result in zip(
-        bucket_names, _read_bucket_usage_bytes_concurrently(ops, bucket_names), strict=False
+        bucket_names, _read_bucket_usage_bytes_concurrently(ops, bucket_names), strict=True
     ):
         if isinstance(result, (CloudflareApiError, httpx.HTTPError)):
             logger.warning("Failed to read usage for bucket %s: %s", bucket_name, result)
