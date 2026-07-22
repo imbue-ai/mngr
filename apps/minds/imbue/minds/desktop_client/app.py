@@ -1517,14 +1517,14 @@ def _handle_chrome_events() -> Response:
             if discovery_watchdog is not None and discovery_watchdog.get_health() is DiscoveryHealth.BLOCKED:
                 yield "data: {}\n\n".format(json.dumps(_discovery_health_payload(DiscoveryHealth.BLOCKED)))
                 discovery_blocked_emitted = True
-            # Replay any queued agent bug report so a freshly (re)loaded chrome reopens the report
-            # modal for it -- the store outlives SSE reconnects, so a report queued while no
-            # connection was subscribed still surfaces here. The chrome pulls the head's content via
-            # /help/pending-report; this is just the nudge to check.
-            initial_pending_head = pending_report_store.head()
-            last_pending_head_id = initial_pending_head.report_id if initial_pending_head is not None else None
-            if initial_pending_head is not None:
-                yield "data: {}\n\n".format(json.dumps({"type": "pending_report"}))
+            # Replay the queued agent bug report head so a freshly (re)loaded chrome reopens the
+            # report modal for it -- the store outlives SSE reconnects, so a report queued while no
+            # connection was subscribed still surfaces here. The event carries the head ``report_id``
+            # (or null when the queue is empty) so the chrome caches it and only fetches the head's
+            # content via /help/pending-report when something is actually pending; null re-syncs a
+            # chrome whose queue emptied while it was disconnected.
+            last_pending_head_id = pending_report_store.head_id()
+            yield "data: {}\n\n".format(json.dumps({"type": "pending_report", "report_id": last_pending_head_id}))
             # Anchor the periodic re-assert clock to the connect-time snapshot
             # just sent, so the first backstop re-assert is a full interval out.
             last_status_reassert = time.monotonic()
@@ -1575,22 +1575,24 @@ def _handle_chrome_events() -> Response:
                 if shutdown_event.is_set():
                     break
 
-                # Nudge the chrome to (re)open the report modal for a queued agent bug report. Emit on
-                # any change to the head id, plus a periodic re-assert while one stays pending, so a
-                # chrome that missed the one-shot (its target modal was busy, or the webview reloaded)
-                # still reopens it. The chrome pulls the head's content via /help/pending-report.
-                current_pending_head = pending_report_store.head()
-                current_pending_head_id = current_pending_head.report_id if current_pending_head is not None else None
+                # Nudge the chrome about the queued agent bug report head. Emit its ``report_id`` on
+                # any change (including to null when the queue empties, so the chrome clears its
+                # cache), plus a periodic re-assert while one stays pending so a chrome that missed the
+                # one-shot (its target modal was busy, or the webview reloaded) still reopens it. The
+                # chrome caches this id and only fetches the head's content via /help/pending-report
+                # when it is non-null, keeping the common empty-queue case free of extra requests.
+                current_pending_head_id = pending_report_store.head_id()
                 pending_reassert_due = (
-                    current_pending_head is not None
+                    current_pending_head_id is not None
                     and time.monotonic() - last_pending_reassert >= _SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
                 )
                 if current_pending_head_id != last_pending_head_id or pending_reassert_due:
                     last_pending_head_id = current_pending_head_id
                     if pending_reassert_due:
                         last_pending_reassert = time.monotonic()
-                    if current_pending_head is not None:
-                        yield "data: {}\n\n".format(json.dumps({"type": "pending_report"}))
+                    yield "data: {}\n\n".format(
+                        json.dumps({"type": "pending_report", "report_id": current_pending_head_id})
+                    )
 
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()

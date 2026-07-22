@@ -1370,6 +1370,13 @@ function toggleHelp(bundle, agentId, assistAvailable) {
 // so the queue head is opened at most once at a time.
 let pendingReportFetchInFlight = false;
 
+// The queued agent bug report head id, cached from the ``pending_report`` SSE event (its ``report_id``,
+// or null when the queue is empty). It lets maybeOpenPendingReport skip the /help/pending-report fetch
+// when nothing is queued -- the common case -- so a plain inbox/sidebar/help close costs no round-trip.
+// The fetch is still issued (for the head's content, and as the authoritative check that resolves a
+// report already submitted/discarded between nudge and open) whenever this is non-null.
+let pendingReportHeadId = null;
+
 // Surface the next queued agent bug report, if the app is free to show it. The backend store is the
 // single source of truth: this pulls the current head via /help/pending-report and opens the report
 // modal for it in the window showing that workspace (else the most-recent window). It is the sole
@@ -1378,6 +1385,9 @@ let pendingReportFetchInFlight = false;
 // queued and is retried on the next trigger. A submit/discard removes it server-side, advancing the
 // head so the next trigger opens the following report.
 function maybeOpenPendingReport() {
+  // Nothing queued (per the last SSE nudge) -> skip the fetch entirely. This is what keeps the
+  // per-modal-close trigger cheap when no agent report is pending.
+  if (!pendingReportHeadId) return;
   if (isShuttingDown || !backendBaseUrl || pendingReportFetchInFlight) return;
   // Never pop a report over an error/quitting takeover in any window (a global takeover flips every
   // window to isErrorState). The steady-state per-target checks below then handle a single busy window.
@@ -2064,10 +2074,12 @@ function handleChromeSSEEvent(evt) {
       }
     }
   } else if (evt.type === 'pending_report') {
-    // A queued agent bug report is waiting for review (the backend pending-report store, fed by the
-    // /api/v1 report route). This is only a nudge -- maybeOpenPendingReport pulls the current head
-    // and opens it if a window is free. If every window is busy, it stays queued and reopens on the
-    // next nudge or when a modal closes, so it is never dropped.
+    // The queued agent-report head changed (or is being re-asserted / replayed on (re)connect). Cache
+    // its id (null when the queue emptied) so modal-close triggers can skip the fetch when nothing is
+    // pending, then try to open it: maybeOpenPendingReport pulls the head's content and opens it if a
+    // window is free. If every window is busy it stays queued and reopens on the next nudge or modal
+    // close, so it is never dropped.
+    pendingReportHeadId = evt.report_id ? String(evt.report_id) : null;
     maybeOpenPendingReport();
   } else if (evt.type === 'discovery_health') {
     // App-global discovery-pipeline health. Only the terminal `blocked` state is

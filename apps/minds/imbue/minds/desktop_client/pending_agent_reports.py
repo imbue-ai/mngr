@@ -101,6 +101,11 @@ class PendingAgentReportStore(MutableModel):
         with self._lock:
             return self._reports[0] if self._reports else None
 
+    def head_id(self) -> str | None:
+        """Return just the oldest pending report's id (the SSE nudge's payload), or None when empty."""
+        with self._lock:
+            return self._reports[0].report_id if self._reports else None
+
     def list_pending(self) -> list[PendingAgentReport]:
         """Return a snapshot of all pending reports, oldest first."""
         with self._lock:

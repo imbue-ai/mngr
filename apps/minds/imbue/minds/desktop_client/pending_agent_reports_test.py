@@ -19,6 +19,22 @@ def test_add_returns_id_and_preserves_order() -> None:
     assert head.workspace_agent_id == "agent-1"
 
 
+def test_head_id_tracks_the_oldest_report() -> None:
+    store = PendingAgentReportStore()
+    # ``head_id`` is the lightweight id the SSE nudge carries; it must agree with ``head`` and be None
+    # when empty, so the chrome's "is anything queued" cache stays in sync with the queue.
+    assert store.head_id() is None
+    first_id = store.add(description="first", workspace_agent_id=None)
+    store.add(description="second", workspace_agent_id=None)
+    assert store.head_id() == first_id
+    store.remove(first_id)
+    second_head_id = store.head_id()
+    assert second_head_id is not None
+    assert second_head_id == store.list_pending()[0].report_id
+    store.remove(second_head_id)
+    assert store.head_id() is None
+
+
 def test_remove_drops_one_report_and_advances_head() -> None:
     store = PendingAgentReportStore()
     first_id = store.add(description="first", workspace_agent_id=None)
