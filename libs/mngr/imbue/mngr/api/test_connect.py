@@ -1,8 +1,12 @@
 """Integration tests for connect-related functionality."""
 
+import fcntl
 import importlib.resources
 import os
+import pty
+import struct
 import subprocess
+import termios
 from pathlib import Path
 
 import pytest
@@ -255,4 +259,116 @@ def test_sigwinch_panes_script_fit_mode_resizes_pinned_window_to_client(
         )
 
     finally:
+        cleanup_tmux_session(session_name)
+
+
+@pytest.mark.flaky
+@pytest.mark.tmux
+def test_sigwinch_panes_script_fit_mode_converges_on_live_client_size(mngr_test_prefix: str, tmp_path) -> None:
+    """Fit mode resizes to the session's LIVE client size, not the hook-fire arguments.
+
+    A resize burst (e.g. a sash drag in the web terminal) fires many overlapping hook
+    instances, each carrying the client geometry captured when its hook fired. If the
+    script trusted those arguments, whichever backgrounded instance's resize-window
+    landed last could pin the manual window at a stale intermediate size. The script
+    must instead read the current client size at act time, so any instance -- here one
+    invoked with deliberately stale arguments -- converges the window on the real size.
+    """
+    session_name = f"{mngr_test_prefix}sigwinch-live"
+    client_width, client_height = 143, 37
+
+    master_fd = None
+    attach_proc = None
+    try:
+        # Resilient catcher pane (re-enters `wait` after each trapped WINCH) so the
+        # script's repaint signal cannot kill the pane -- and with it the session --
+        # before the window size is read back.
+        ready_file = tmp_path / "catcher_ready"
+        catcher = f"trap : WINCH; echo ready > {ready_file}; while :; do sleep 3600 & wait; done"
+        subprocess.run(
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "-n",
+                "agent",
+                "bash",
+                "-c",
+                catcher,
+            ],
+            check=True,
+        )
+        wait_for(
+            lambda: ready_file.exists(),
+            timeout=5.0,
+            error_message="catcher pane did not install its SIGWINCH trap",
+        )
+        subprocess.run(
+            ["tmux", "set-option", "-t", f"={session_name}:agent", "window-size", "manual"],
+            check=True,
+        )
+
+        # Attach a real client through a pty pre-sized to the target geometry. The
+        # attach must not run inside any ambient tmux (nested-session guard).
+        master_fd, slave_fd = pty.openpty()
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", client_height, client_width, 0, 0))
+        attach_env = {**os.environ}
+        attach_env.pop("TMUX", None)
+        # A capable TERM is required or the client exits with "open terminal failed"
+        # (the test shell's TERM may be dumb/unset).
+        attach_env["TERM"] = "xterm-256color"
+        attach_proc = subprocess.Popen(
+            ["tmux", "attach", "-t", f"={session_name}"],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            start_new_session=True,
+            env=attach_env,
+        )
+        os.close(slave_fd)
+        os.set_blocking(master_fd, False)
+
+        def _client_attached() -> bool:
+            # Drain the pty so the tmux client never blocks on a full buffer.
+            try:
+                while os.read(master_fd, 65536):
+                    pass
+            except BlockingIOError:
+                pass
+            except OSError:
+                pass
+            result = subprocess.run(
+                ["tmux", "list-clients", "-t", f"={session_name}", "-F", "#{client_width}x#{client_height}"],
+                capture_output=True,
+                text=True,
+            )
+            return f"{client_width}x{client_height}" in result.stdout
+
+        wait_for(
+            lambda: _client_attached(),
+            timeout=5.0,
+            error_message="tmux client did not attach at the pty's size",
+        )
+
+        # Invoke the script with stale hook-fire geometry; it must ignore it in favor
+        # of the live client.
+        subprocess.run(
+            ["bash", _SIGWINCH_PANES_SCRIPT_PATH, session_name, "agent", "fit", "90", "30"],
+            check=True,
+            env=_no_delay_env(),
+        )
+        assert _window_size(session_name) == (client_width, client_height)
+
+    finally:
+        if attach_proc is not None:
+            attach_proc.terminate()
+            attach_proc.wait(timeout=5)
+        if master_fd is not None:
+            os.close(master_fd)
         cleanup_tmux_session(session_name)

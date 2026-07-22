@@ -56,11 +56,32 @@ _floored() {
     fi
 }
 
-# Re-fit the manual-pinned agent window to the attaching client, floored at the usable minimum.
+# Current size ("<width> <height>") of the session's most-recently-active attached client, or
+# empty when none is attached. Read fresh from tmux rather than trusting the hook-fire arguments:
+# a resize burst (e.g. a sash drag in the web terminal, or a hidden tab growing to full size)
+# fires many overlapping hook instances, and with captured-at-fire geometry the last resize-window
+# to land can be a stale intermediate size -- which a manual-pinned window then keeps until the
+# next client event. Reading at act time makes every instance converge on the real current size.
+_current_client_size() {
+    tmux list-clients -t "=${SESSION}" -F '#{client_activity} #{client_width} #{client_height}' 2>/dev/null \
+        | sort -rn | awk 'NR==1 {print $2, $3}'
+}
+
+# Re-fit the manual-pinned agent window to the client, floored at the usable minimum. Prefers the
+# live client size (see _current_client_size); falls back to the hook-fire arguments when no
+# client is listed (defensive -- client-attached fires with the client already attached).
 _fit_window() {
-    local width height
-    width="$(_floored "${CLIENT_WIDTH}" "${_MIN_WIDTH}")"
-    height="$(_floored "${CLIENT_HEIGHT}" "${_MIN_HEIGHT}")"
+    local width height current
+    current="$(_current_client_size)"
+    if [ -n "${current}" ]; then
+        width="${current% *}"
+        height="${current#* }"
+    else
+        width="${CLIENT_WIDTH}"
+        height="${CLIENT_HEIGHT}"
+    fi
+    width="$(_floored "${width}" "${_MIN_WIDTH}")"
+    height="$(_floored "${height}" "${_MIN_HEIGHT}")"
     tmux resize-window -t "=${SESSION}:${PRIMARY_WINDOW}" -x "${width}" -y "${height}" 2>/dev/null || true
 }
 
@@ -77,9 +98,13 @@ _main() {
     if [ "${MODE}" = fit ]; then
         # We own the (manual-pinned) window: fit it to the client immediately so a live attach or
         # terminal resize is tracked promptly (matching tmux's native continuous "latest"), then
-        # settle before repainting unconditionally.
+        # settle and fit AGAIN before repainting -- the post-settle fit re-reads the client size,
+        # so whichever overlapping hook instance acts last still leaves the window matching the
+        # client as it is by then (a resize burst otherwise ends on whichever instance's
+        # resize-window happened to land last).
         _fit_window
         sleep "${SIGWINCH_DELAY_SECONDS}"
+        _fit_window
         _signal_panes
         return 0
     fi

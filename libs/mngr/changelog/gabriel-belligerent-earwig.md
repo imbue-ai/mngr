@@ -1,0 +1,5 @@
+Fix the agent tmux window sticking at a stale size after a resize burst (visible as a dot-filled unused region, or a partial-width TUI, in the minds terminal tabs).
+
+The agent window is pinned to `window-size manual` (so a degenerate client can never collapse it) and refit by the `client-attached`/`client-resized` hooks running `sigwinch_panes.sh fit` with the geometry captured when each hook fired. A resize burst (a sash drag in the web terminal, or a hidden tab growing to full size) fires many overlapping backgrounded hook instances, and whichever instance's `resize-window` landed last could pin the window at a stale intermediate size -- with nothing left to correct it until the next client event.
+
+`sigwinch_panes.sh` fit mode now reads the session's current attached-client size at act time (and re-fits again after its settle delay) instead of trusting the captured hook arguments, so any instance acting last converges the window on the real client size. The hook-fire arguments remain only as a fallback when no client is listed.
