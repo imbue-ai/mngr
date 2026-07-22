@@ -124,15 +124,29 @@ body:not(.term-body) .transcript { padding-bottom: 16px; }
   border: 1px solid var(--border); border-radius: 4px;
 }
 .backburner-btn:hover { color: var(--fg); border-color: var(--border-strong); }
+.backburner-btn:disabled { opacity: 0.4; cursor: default; } /* a toggle is in flight */
 /* Parked cards: dimmed + no left accent so the live list reads first. */
 .agent-card.backburner { opacity: 0.55; border-left-color: transparent; }
 .agent-card.backburner:hover { opacity: 0.85; }
-/* Divider heading the parked-agents section. */
+/* Home sections: live agents + Backburner each scroll past ~5 rows; Backburner is
+   collapsible; Shortcuts sits below. */
+.scroll-section { display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow-y: auto; }
 .section-head {
-  margin: 16px 2px 2px; padding-top: 12px; border-top: 1px solid var(--border);
+  margin: 16px 2px 4px; padding-top: 12px; border-top: 1px solid var(--border);
   color: var(--fg-faint); font-size: 11px; font-weight: 600;
   letter-spacing: 0.08em; text-transform: uppercase;
 }
+/* The Backburner header is a <button>; strip button chrome, keep the top rule. */
+button.section-head {
+  width: 100%; text-align: left; font-family: inherit; cursor: pointer;
+  background: transparent; border: none; border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
+}
+.section-head .chevron { font-size: 9px; transition: transform 0.12s; }
+.section-head .count { margin-left: 4px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--fg-faint); }
+.bb-block.collapsed .chevron { transform: rotate(-90deg); }
+.bb-block.collapsed .scroll-section { display: none; }
+.shortcuts-body { min-height: 8px; }
 .chip {
   font-size: 11px;
   padding: 1px 7px;

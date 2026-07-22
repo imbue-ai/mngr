@@ -279,22 +279,43 @@
     // mngr label (persisted server-side); the home page files them under their own
     // section instead of the live list.
     let lastAgents = [];
-    function isBackburner(a) { return !!(a.labels && a.labels["foreman.backburner"] === "true"); }
-    function withBackburner(labels, on) {
-      const out = {};
-      for (const k in (labels || {})) if (k !== "foreman.backburner") out[k] = labels[k];
-      if (on) out["foreman.backburner"] = "true";
-      return out;
+    // Per-agent in-flight guard. A toggle flips a persisted mngr label, then a
+    // discovery poll (~10s) re-reads it. During that window we (1) hold the optimistic
+    // value so a stale snapshot can't flip the card back, and (2) refuse a second
+    // toggle of the SAME agent. A 15s timeout is the backstop: if the change never
+    // reconciles (POST lost, agent vanished), the guard releases so the button can't
+    // wedge forever.
+    const bbPending = new Map(); // name -> { want: bool, timer }
+    function rawBackburner(a) { return !!(a.labels && a.labels["foreman.backburner"] === "true"); }
+    function isBackburner(a) {
+      const p = bbPending.get(a.name);
+      return p ? p.want : rawBackburner(a); // optimistic value wins until reconciled
     }
-    // Move the card now (snappy), persist the label, let the next snapshot reconcile.
-    function setBackburner(name, on) {
-      lastAgents = lastAgents.map((a) => a.name === name
-        ? Object.assign({}, a, { labels: withBackburner(a.labels, on) }) : a);
+    function clearBbPending(name) {
+      const p = bbPending.get(name);
+      if (!p) return;
+      clearTimeout(p.timer);
+      bbPending.delete(name);
       renderAll(lastAgents);
+    }
+    // On a fresh snapshot, release any guard whose persisted label now matches the ask.
+    function reconcileBackburner(agents) {
+      bbPending.forEach((p, name) => {
+        const a = agents.find((x) => x.name === name);
+        if (a && rawBackburner(a) === p.want) { clearTimeout(p.timer); bbPending.delete(name); }
+      });
+    }
+    function setBackburner(name, on) {
+      if (bbPending.has(name)) return; // a toggle for this agent is already in flight
+      const timer = setTimeout(() => clearBbPending(name), 15000);
+      bbPending.set(name, { want: on, timer });
+      renderAll(lastAgents); // optimistic: isBackburner now reflects `want`
       fetch("/api/agents/" + encodeURIComponent(name) + "/backburner", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ on: on }),
-      }).catch(() => {}); // a failed POST self-heals on the next discovery snapshot
+      })
+        .then((r) => { if (!r.ok) clearBbPending(name); }) // rejected -> revert to persisted
+        .catch(() => clearBbPending(name)); // never sent -> revert; snapshot is truth
     }
     function cardEl(a) {
       const card = el("a", "agent-card");
@@ -326,6 +347,7 @@
       // margin-left:auto). The card is an <a>, so stop it navigating.
       const demote = el("button", "backburner-btn", bb ? "⬆" : "⬇");
       demote.type = "button";
+      demote.disabled = bbPending.has(a.name); // one toggle at a time per agent
       demote.title = bb ? "Restore from backburner" : "Send to backburner";
       demote.addEventListener("click", function (e) {
         e.preventDefault();
@@ -336,20 +358,50 @@
       card.appendChild(row2);
       return card;
     }
+    // Backburner collapse persists in localStorage: renderAll rebuilds the DOM on
+    // every discovery snapshot (~every poll), so without persistence a collapse would
+    // pop back open on the next tick.
+    const BB_COLLAPSE_KEY = "foreman.backburnerCollapsed";
+    function scrollSection() { return el("div", "scroll-section"); }
     function renderAll(agents) {
       lastAgents = agents;
+      reconcileBackburner(agents); // release guards whose label has now propagated
       listEl.innerHTML = "";
-      if (!agents.length) {
-        listEl.appendChild(el("div", "empty", "no agents"));
-        return;
-      }
-      // Live agents up top; parked ones under a Backburner divider.
-      agents.filter((a) => !isBackburner(a)).forEach((a) => listEl.appendChild(cardEl(a)));
+      const active = agents.filter((a) => !isBackburner(a));
       const back = agents.filter(isBackburner);
+
+      // 1. Live agents: no title, not collapsible, scrolls past ~5 rows.
+      const live = scrollSection();
+      if (!agents.length) live.appendChild(el("div", "empty", "no agents"));
+      active.forEach((a) => live.appendChild(cardEl(a)));
+      listEl.appendChild(live);
+
+      // 2. Backburner: collapsible header + its own ~5-row scroll body.
       if (back.length) {
-        listEl.appendChild(el("div", "section-head", "Backburner"));
-        back.forEach((a) => listEl.appendChild(cardEl(a)));
+        const block = el("div", "bb-block");
+        if (localStorage.getItem(BB_COLLAPSE_KEY) === "1") block.classList.add("collapsed");
+        const head = el("button", "section-head");
+        head.type = "button";
+        head.appendChild(el("span", "chevron", "▾"));
+        head.appendChild(document.createTextNode("Backburner"));
+        head.appendChild(el("span", "count", "(" + back.length + ")"));
+        head.addEventListener("click", function () {
+          block.classList.toggle("collapsed");
+          localStorage.setItem(BB_COLLAPSE_KEY, block.classList.contains("collapsed") ? "1" : "0");
+        });
+        block.appendChild(head);
+        const body = scrollSection();
+        back.forEach((a) => body.appendChild(cardEl(a)));
+        block.appendChild(body);
+        listEl.appendChild(block);
       }
+
+      // 3. Shortcuts: always present, below the agents. (Contents TBD.)
+      const sc = el("div", "shortcuts-block");
+      sc.appendChild(el("div", "section-head", "Shortcuts"));
+      sc.appendChild(el("div", "shortcuts-body"));
+      listEl.appendChild(sc);
+
       pollStatuses(); // populate the new cards' dots right away, don't wait a tick
     }
 
