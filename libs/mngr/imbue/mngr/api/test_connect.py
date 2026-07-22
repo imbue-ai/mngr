@@ -349,7 +349,13 @@ def test_sigwinch_panes_script_fit_mode_converges_on_live_client_size(mngr_test_
     finally:
         if attach_proc is not None:
             attach_proc.terminate()
-            attach_proc.wait(timeout=5)
+            try:
+                attach_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # A client wedged (e.g. blocked writing to the no-longer-drained pty)
+                # must not leak the fd/session below or mask the original failure.
+                attach_proc.kill()
+                attach_proc.wait(timeout=5)
         if master_fd is not None:
             os.close(master_fd)
         cleanup_tmux_session(session_name)
