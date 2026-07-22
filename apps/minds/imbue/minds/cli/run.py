@@ -201,11 +201,11 @@ def run(
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
     #
-    # Sentry always initializes, but what it actually sends is gated live by per-machine user
-    # settings (stored in MindsConfig, surfaced via the first-launch consent screen and account
-    # settings): ``report_unexpected_errors`` gates automatic error sends, and ``include_error_logs``
-    # gates log/traceback attachments. Both are read live, so toggling a setting takes effect without
-    # restarting. Manual bug reports are always sent regardless of ``report_unexpected_errors``.
+    # Sentry always initializes, but what it actually sends is gated live by a single per-machine user
+    # setting (stored in MindsConfig, surfaced via the first-launch consent screen):
+    # ``report_unexpected_errors`` gates automatic error sends and their log/traceback attachments
+    # together. It is read live, so a change takes effect without restarting. Manual bug reports are
+    # always sent (with full diagnostics) regardless of ``report_unexpected_errors``.
     #
     # The activated minds env (from `minds env activate`) selects the Sentry DSN and, for
     # production/staging, which S3 attachment bucket: production and staging each get their own, while
@@ -232,7 +232,6 @@ def run(
         log_folder=paths.log_dir,
         anonymous_user_id=anonymous_user_id,
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
-        is_log_inclusion_enabled=minds_config.get_include_error_logs,
         latchkey_plugin_data_dir=latchkey.plugin_data_dir,
         discovery_events_dir=get_discovery_events_dir(MngrConfig(default_host_dir=mngr_host_dir)),
     )
@@ -341,7 +340,6 @@ def run(
     write_latchkey_forward_sentry_consent(
         latchkey_forward_sentry_consent_path(data_directory),
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
-        is_log_inclusion_enabled=minds_config.get_include_error_logs(),
     )
 
     # Background thread: supervisor restart must complete before the

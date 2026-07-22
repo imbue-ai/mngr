@@ -128,15 +128,15 @@ Sentry initializes whenever `DSN`, `ENVIRONMENT`, `RELEASE`, and `GIT_SHA` are a
 present (run standalone without them, it simply does nothing). They are required
 together: the supervisor has no fallback of its own.
 
-The **consent** -- whether to actually send reports, and whether to attach logs
--- is read live, not snapshotted, so the embedder can toggle it on a running
-daemon without respawning it:
+The **consent** -- whether to send reports at all (log/traceback attachments ride
+along with reports) -- is read live, not snapshotted, so the embedder can toggle
+it on a running daemon without respawning it:
 
 - `MNGR_LATCHKEY_SENTRY_CONSENT_FILE` -- path to a JSON file
-  (`{"report_unexpected_errors": bool, "include_error_logs": bool}`) that the
-  embedder writes and rewrites whenever the user changes their consent. The
-  daemon reads it on every event, so a grant/revoke takes effect immediately. An
-  absent/unreadable file means both are off.
+  (`{"report_unexpected_errors": bool}`) that the embedder writes and rewrites
+  whenever the user changes their consent. The daemon reads it on every event, so
+  a grant/revoke takes effect immediately. An absent/unreadable file means
+  reporting is off.
 
 Events are tagged with the `mngr-latchkey-forward` service name so they are
 distinguishable from other Imbue Python processes that report to the same

@@ -802,7 +802,7 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     assert opted_out in render_chrome_page()
     assert opted_out in render_overlay_host_page()
     assert opted_out in render_sidebar_page()
-    assert opted_out in render_help_page(include_logs_setting=False, workspace_agent_id="")
+    assert opted_out in render_help_page(workspace_agent_id="")
     assert opted_out in render_inbox_page(cards=())
     # Normal scrolling content pages keep the reserved gutter so their layout
     # doesn't shift sideways when a classic scrollbar appears.

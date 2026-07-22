@@ -661,22 +661,17 @@ def render_creating_page(
 
 
 @pure
-def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> str:
-    """Render the first-launch error-reporting consent screen.
+def render_consent_page() -> str:
+    """Render the first-launch error-reporting notice screen.
 
-    The two checkbox states seed the form; "Include logs" is only revealed once "Report unexpected
-    errors" is enabled (handled client-side).
+    Informational only: during the alpha, unexpected errors (with logs) are always reported to Imbue
+    and there is no opt-out, so the screen just informs the user and offers an acknowledge button.
     """
-    return CATALOG.render(
-        "pages.Consent",
-        report_unexpected_errors=report_unexpected_errors,
-        include_logs=include_logs,
-    )
+    return CATALOG.render("pages.Consent")
 
 
 @pure
 def render_help_page(
-    include_logs_setting: bool,
     workspace_agent_id: str,
     assist_available: bool = False,
     description: str = "",
@@ -685,21 +680,20 @@ def render_help_page(
 ) -> str:
     """Render the get-help modal page (report a bug + optional agent help).
 
-    ``include_logs_setting`` is the persistent include-logs preference: when on, logs are always
-    attached and the form hides its one-off "include logs" checkbox. ``workspace_agent_id`` is the
-    workspace the help flow was opened from ("" on a general screen), enabling workspace-scoped options.
-    ``assist_available`` enables the "have an agent help" option; it is set only when the workspace is
-    reachable/healthy enough to host an ``/assist`` chat (an unreachable workspace's chat couldn't be
-    seen or used), so it is distinct from ``workspace_agent_id``, which still scopes a bug report to a
-    stuck workspace. ``description`` pre-fills the report textarea -- non-empty when an in-workspace
-    ``/assist`` agent asked the app to open the modal with its diagnosis already written in.
-    ``is_agent_report`` is set for that agent-escalation flow: the modal then frames the pre-filled
-    report as the agent's submission (titled with ``workspace_name``, when known) and hides the mode
-    choice, since a report is already underway.
+    Recent logs are always attached to a submitted report (the form has no one-off logs checkbox).
+    ``workspace_agent_id`` is the workspace the help flow was opened from ("" on a general screen),
+    enabling workspace-scoped options. ``assist_available`` enables the "have an agent help" option; it
+    is set only when the workspace is reachable/healthy enough to host an ``/assist`` chat (an
+    unreachable workspace's chat couldn't be seen or used), so it is distinct from
+    ``workspace_agent_id``, which still scopes a bug report to a stuck workspace. ``description``
+    pre-fills the report textarea -- non-empty when an in-workspace ``/assist`` agent asked the app to
+    open the modal with its diagnosis already written in. ``is_agent_report`` is set for that
+    agent-escalation flow: the modal then frames the pre-filled report as the agent's submission
+    (titled with ``workspace_name``, when known) and hides the mode choice, since a report is already
+    underway.
     """
     return CATALOG.render(
         "pages.Help",
-        include_logs_setting=include_logs_setting,
         workspace_agent_id=workspace_agent_id,
         assist_available=assist_available,
         description=description,
@@ -1794,8 +1788,6 @@ def render_accounts_page(
 
 @pure
 def render_settings_page(
-    report_unexpected_errors: bool = False,
-    include_error_logs: bool = False,
     services_overview: Sequence[object] | None = None,
     file_sharing_grants: Sequence[object] | None = None,
     workspace_delegation_grants: Sequence[object] | None = None,
@@ -1805,13 +1797,11 @@ def render_settings_page(
     """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
 
     The page has a left nav (Permissions / Error reporting) and a right content
-    pane.
+    pane. The error-reporting section is an informational notice (during the alpha
+    unexpected errors are always reported to Imbue, with no opt-out).
 
-    ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
-    error-reporting toggles hosted on this page (the same settings the
-    first-launch consent screen records); ``is_master_password_set`` feeds the
-    master-password section's helper copy (whether any signed-in account
-    already has a non-empty sync master password).
+    ``is_master_password_set`` feeds the master-password section's helper copy
+    (whether any signed-in account already has a non-empty sync master password).
 
     ``services_overview`` is a sequence of
     :class:`~imbue.minds.desktop_client.latchkey.permission_overview.ServicePermissionOverview`
@@ -1830,8 +1820,6 @@ def render_settings_page(
     """
     return CATALOG.render(
         "pages.Settings",
-        report_unexpected_errors=report_unexpected_errors,
-        include_error_logs=include_error_logs,
         services_overview=list(services_overview or []),
         file_sharing_grants=list(file_sharing_grants or []),
         workspace_delegation_grants=list(workspace_delegation_grants or []),

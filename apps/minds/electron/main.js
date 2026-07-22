@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const paths = require('./paths');
 const { initElectronLogging } = require('./logger');
-const { initSentry, captureManualReport, isLogInclusionEnabled } = require('./sentry');
+const { initSentry, captureManualReport } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
@@ -3417,34 +3417,20 @@ ipcMain.on('toggle-help', (event, agentId, assistAvailable) => {
 
 // One-shot bug report from the full-app error takeover (shell.html), used when the
 // Python backend is down and its /help flow is unreachable. Reports the on-screen
-// error via the always-initialized main-process Sentry -- with host basics, plus
-// recent log files when the user opted in (the persistent include-logs setting, or
-// the takeover's per-report ``includeLogs`` checkbox) -- since the backend's richer
-// collector is gone. Returns the event id so the shell can show it. ``invoke`` (not
-// ``send``) so the renderer gets the id back.
-ipcMain.handle('report-error', (_event, opts) => {
+// error via the always-initialized main-process Sentry -- with host basics and recent
+// log files (always attached) -- since the backend's richer collector is gone. Returns
+// the event id so the shell can show it. ``invoke`` (not ``send``) so the renderer gets
+// the id back.
+ipcMain.handle('report-error', () => {
   try {
     const eventId = captureManualReport({
       message: lastErrorTakeover ? lastErrorTakeover.message : null,
       details: lastErrorTakeover ? lastErrorTakeover.details : null,
-      includeLogs: Boolean(opts && opts.includeLogs),
     });
     return { ok: Boolean(eventId), eventId: eventId || null };
   } catch (err) {
     console.error('[report-error] failed to capture manual report:', err && err.message);
     return { ok: false, eventId: null };
-  }
-});
-
-// Lets the error takeover (shell.html) learn the persistent ``include_error_logs``
-// setting so it only offers its per-report "Include recent logs" checkbox when the
-// setting is off (when on, logs are always attached and the checkbox is redundant).
-ipcMain.handle('get-log-inclusion-setting', () => {
-  try {
-    return isLogInclusionEnabled();
-  } catch (err) {
-    console.error('[get-log-inclusion-setting] failed to read setting:', err && err.message);
-    return false;
   }
 });
 

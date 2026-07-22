@@ -1333,19 +1333,17 @@ def test_settings_page_requires_auth(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_settings_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
-    """The Settings page hosts the per-machine error-reporting toggles, seeded from config."""
-    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+def test_settings_page_shows_error_reporting_notice_without_opt_out(tmp_path: Path) -> None:
+    """The Settings error-reporting section is informational during the alpha -- no off-switch."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get("/settings")
     assert response.status_code == 200
-    assert "Report unexpected errors" in response.text
-    report_input = response.text.split('id="report-errors-toggle"')[1].split(">")[0]
-    assert "checked" in report_input
-    # With reporting on, the include-logs row is revealed (not ``hidden``).
-    logs_row = response.text.split('id="include-logs-row"')[1].split(">")[0]
-    assert "hidden" not in logs_row
+    assert "Error reporting" in response.text
+    assert "alpha" in response.text
+    # No toggle to turn reporting (or logs) off.
+    assert "report-errors-toggle" not in response.text
+    assert "include-logs-toggle" not in response.text
 
 
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
@@ -1730,7 +1728,9 @@ def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path
     response = client.get("/")
     assert response.status_code == 200
     assert "Help improve Minds" in response.text
-    assert "Report unexpected errors" in response.text
+    # The notice is informational (alpha): it explains reporting, with no opt-out toggles.
+    assert "alpha" in response.text
+    assert "consent-report" not in response.text
 
 
 def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:
@@ -1763,9 +1763,9 @@ def test_consent_page_requires_auth(tmp_path: Path) -> None:
 
 
 def test_consent_submit_requires_auth(tmp_path: Path) -> None:
-    """POST /consent rejects an unauthenticated request and persists nothing."""
+    """POST /consent rejects an unauthenticated request and records nothing."""
     client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
+    response = client.post("/consent", json={})
     assert response.status_code == 403
     assert MindsConfig(data_dir=tmp_path).get_error_reporting_consent_given() is False
 
@@ -1781,60 +1781,21 @@ def test_post_login_routes_to_landing_while_consent_unanswered(tmp_path: Path) -
     assert response.headers["location"] == "/"
 
 
-def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> None:
+def test_consent_submit_acknowledges_and_unblocks_landing(tmp_path: Path) -> None:
+    """The notice is informational: acknowledging it marks consent given and leaves reporting on."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
-    response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
+    response = client.post("/consent", json={})
     assert response.status_code == 200
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_error_reporting_consent_given() is True
+    # Reporting stays on (the alpha default); the notice offers no opt-out.
     assert config.get_report_unexpected_errors() is True
-    assert config.get_include_error_logs() is True
 
-    # With consent answered, the authenticated "/" no longer shows the consent screen.
+    # With the notice acknowledged, the authenticated "/" no longer shows it.
     landing = client.get("/")
     assert "Help improve Minds" not in landing.text
-
-
-def test_consent_submit_does_not_persist_logs_without_reporting(tmp_path: Path) -> None:
-    """ "Include logs" is only meaningful with reporting on, so it is not persisted otherwise."""
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-    response = client.post("/consent", json={"report_unexpected_errors": False, "include_logs": True})
-    assert response.status_code == 200
-
-    config = MindsConfig(data_dir=tmp_path)
-    assert config.get_error_reporting_consent_given() is True
-    assert config.get_report_unexpected_errors() is False
-    assert config.get_include_error_logs() is False
-
-
-def test_error_reporting_settings_requires_auth(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True})
-    assert response.status_code == 403
-    # Nothing was persisted.
-    config = MindsConfig(data_dir=tmp_path)
-    assert config.get_report_unexpected_errors() is False
-
-
-def test_error_reporting_settings_persist_each_toggle(tmp_path: Path) -> None:
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-
-    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True}).status_code == 200
-    assert client.post("/_chrome/error-reporting", json={"include_logs": True}).status_code == 200
-
-    config = MindsConfig(data_dir=tmp_path)
-    assert config.get_report_unexpected_errors() is True
-    assert config.get_include_error_logs() is True
-
-    # A partial update touches only the named key.
-    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": False}).status_code == 200
-    config = MindsConfig(data_dir=tmp_path)
-    assert config.get_report_unexpected_errors() is False
-    assert config.get_include_error_logs() is True
 
 
 # -- backup master-password change tests --
@@ -2091,18 +2052,12 @@ def test_help_page_agent_report_frames_as_agent_submission_and_hides_mode_choice
     assert "it broke" in response.text
 
 
-def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
-    """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
-    MindsConfig(data_dir=tmp_path).set_include_error_logs(True)
+def test_help_page_has_no_logs_checkbox(tmp_path: Path) -> None:
+    """Logs are always attached to a submitted report now, so the form offers no logs checkbox."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
     assert 'id="help-include-logs"' not in response.text
-
-
-def test_help_page_shows_include_logs_checkbox_when_setting_off(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.get("/help")
-    assert 'id="help-include-logs"' in response.text
+    assert "Recent logs are always included" in response.text
 
 
 def test_help_page_shows_checkboxes_inline_and_report_id_affordance(tmp_path: Path) -> None:
@@ -2141,9 +2096,10 @@ def test_help_report_accepts_a_description(tmp_path: Path) -> None:
 
 
 def test_served_page_omits_frontend_sentry_when_reporting_off(tmp_path: Path) -> None:
-    # Default shipped state: report_unexpected_errors is off, so a page served by the backend must
-    # not boot the frontend Sentry SDK. This is the unified gate -- the browser honors the same user
-    # setting as the backend rather than the old MINDS_SENTRY_ENABLED env var.
+    # When report_unexpected_errors is explicitly off, a page served by the backend must not boot the
+    # frontend Sentry SDK. This is the unified gate -- the browser honors the same user setting as the
+    # backend rather than the old MINDS_SENTRY_ENABLED env var.
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(False)
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
     assert response.status_code == 200
@@ -2151,11 +2107,10 @@ def test_served_page_omits_frontend_sentry_when_reporting_off(tmp_path: Path) ->
     assert "sentry.browser.min.js" not in response.text
 
 
-def test_served_page_emits_frontend_sentry_when_reporting_on(tmp_path: Path) -> None:
-    # With the user's report_unexpected_errors setting on, a served page boots the frontend Sentry
-    # SDK. The setting is read live per render, so flipping it (as the consent screen / settings do)
-    # takes effect on the next page load without restarting the backend.
-    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+def test_served_page_emits_frontend_sentry_by_default(tmp_path: Path) -> None:
+    # report_unexpected_errors defaults on (the alpha), so a served page boots the frontend Sentry SDK
+    # without any explicit opt-in. The setting is read live per render, so flipping it takes effect on
+    # the next page load without restarting the backend.
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
     assert response.status_code == 200

@@ -152,28 +152,21 @@ class MindsConfig(MutableModel):
         self._set_bool("error_reporting_consent_given", given)
 
     def get_report_unexpected_errors(self) -> bool:
-        """Return whether unexpected errors are reported to Sentry automatically. Default: False.
+        """Return whether unexpected errors (with their log/traceback attachments) are reported to
+        Sentry automatically. Default: True.
 
-        Read live at Sentry send time (so toggling it takes effect without an app restart).
-        Manual bug reports are an explicit user action and are sent regardless of this setting.
+        A single flag gating both automatic error sends and whether their log/traceback attachments
+        are uploaded. During the alpha this defaults on and the UI offers no way to turn it off (the
+        first-launch screen is informational); the flag is retained so reporting can be made
+        opt-out-able again later without a schema change. Read live at Sentry send time (so a change
+        takes effect without an app restart). Manual bug reports are an explicit user action and are
+        sent (with full diagnostics) regardless of this setting.
         """
-        return self._get_bool("report_unexpected_errors", default=False)
+        return self._get_bool("report_unexpected_errors", default=True)
 
     def set_report_unexpected_errors(self, enabled: bool) -> None:
         """Set whether unexpected errors are reported to Sentry automatically."""
         self._set_bool("report_unexpected_errors", enabled)
-
-    def get_include_error_logs(self) -> bool:
-        """Return whether log/traceback attachments are included with error reports. Default: False.
-
-        Read live when attachments are collected. Only meaningful in production/staging, where the
-        S3 attachment bucket exists; development never uploads attachments regardless.
-        """
-        return self._get_bool("include_error_logs", default=False)
-
-    def set_include_error_logs(self, enabled: bool) -> None:
-        """Set whether log/traceback attachments are included with error reports."""
-        self._set_bool("include_error_logs", enabled)
 
     def get_auto_open_requests_panel(self) -> bool:
         """Return whether the inbox should auto-open on new pending requests. Default: True.

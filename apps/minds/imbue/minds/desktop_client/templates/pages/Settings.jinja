@@ -1,4 +1,4 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
+{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
 {#
   App-level settings page, reachable from the floating sidebar's "Settings" entry.
 
@@ -72,43 +72,6 @@
     if (sectionNames.indexOf(initialSection) !== -1) {
       selectSection(initialSection);
     }
-
-    // -- Error reporting toggles -----------------------------------------
-    var reportToggle = document.getElementById('report-errors-toggle');
-    var logsRow = document.getElementById('include-logs-row');
-    var logsToggle = document.getElementById('include-logs-toggle');
-
-    function syncLogsVisibility() {
-      if (reportToggle.checked) {
-        logsRow.classList.remove('hidden');
-      } else {
-        logsRow.classList.add('hidden');
-      }
-    }
-    syncLogsVisibility();
-
-    function saveErrorReporting(payload) {
-      return fetch('/_chrome/error-reporting', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-    }
-
-    reportToggle.addEventListener('change', function () {
-      var enabled = reportToggle.checked;
-      var payload = { report_unexpected_errors: enabled };
-      if (!enabled) {
-        logsToggle.checked = false;
-        payload.include_logs = false;
-      }
-      syncLogsVisibility();
-      saveErrorReporting(payload);
-    });
-
-    logsToggle.addEventListener('change', function () {
-      saveErrorReporting({ include_logs: logsToggle.checked });
-    });
 
     // -- Permission revocation -------------------------------------------
     var revokeDialog = document.getElementById('revoke-dialog');
@@ -527,27 +490,18 @@
           {% endif %}
         </section>
 
-        {# -- Error reporting panel -- #}
+        {# -- Error reporting panel (informational: no opt-out during the alpha) -- #}
         <section data-settings-panel="error-reporting" class="hidden">
           <h2 class="type-heading-lg text-primary mb-2">Error reporting</h2>
           <p class="type-body text-secondary mb-3">Applies to this device, regardless of which account is signed in.</p>
-          <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
-            <span>
-              <span class="type-body text-primary font-semibold">Report unexpected errors</span>
-              <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
-            </span>
-            <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
-                   {% if report_unexpected_errors %}checked{% endif %}>
-          </label>
-          <label id="include-logs-row"
-                 class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
-            <span>
-              <span class="type-body text-primary font-semibold">Include logs</span>
-              <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
-            </span>
-            <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
-                   {% if include_error_logs %}checked{% endif %}>
-          </label>
+          <p class="type-body text-secondary mb-2">
+            Minds is in its alpha phase. Unexpected errors are automatically reported to Imbue, along
+            with recent logs, so we can find and fix problems quickly.
+          </p>
+          <p class="type-helper text-tertiary">
+            Reports include diagnostic details about the error and your setup, which may identify you
+            (for example, your signed-in account email).
+          </p>
         </section>
 
         {# -- Master password panel: wraps each signed-in account's sync key

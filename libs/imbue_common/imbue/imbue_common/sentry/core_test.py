@@ -273,23 +273,23 @@ def test_drop_interrupt_events_keeps_ordinary_exception_and_eventless_hints() ->
     assert _drop_interrupt_events(event, cast(Hint, {"exc_info": (None, None, None)})) is event
 
 
-def test_add_extra_info_hook_skips_attachments_when_log_inclusion_disabled() -> None:
-    # With log inclusion off, no upload callbacks are prepared and no uploaded-files extras are added,
-    # but the lightweight ``platform`` extra is still attached.
+def test_add_extra_info_hook_skips_attachments_when_reporting_disabled() -> None:
+    # With reporting off (the event will be dropped anyway), no upload callbacks are prepared and no
+    # uploaded-files extras are added, but the lightweight ``platform`` extra is still attached.
     register_attachments_uploader(ErrorAttachmentsS3Uploader())
     event: Event = {"extra": {}}
-    result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: False)
+    result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_error_reporting_enabled=lambda: False)
     assert callbacks == ()
     assert "platform" in result_event["extra"]
     assert not any(key.startswith("uploaded_files") for key in result_event["extra"])
 
 
-def test_add_extra_info_hook_collects_traceback_when_log_inclusion_enabled() -> None:
-    # With log inclusion on and no scope-configured log folder, the only attachment prepared is the
+def test_add_extra_info_hook_collects_traceback_when_reporting_enabled() -> None:
+    # With reporting on and no scope-configured log folder, the only attachment prepared is the
     # synthesized-traceback upload (one callback). Callbacks are partials, so nothing is uploaded here.
     register_attachments_uploader(ErrorAttachmentsS3Uploader())
     event: Event = {"extra": {}}
-    _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: True)
+    _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_error_reporting_enabled=lambda: True)
     assert len(callbacks) == 1
 
 
@@ -351,7 +351,6 @@ def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disable
         event_id = submit_manual_bug_report(
             title="[bug report] boom",
             report={"description": "boom", "remote_access_requested": False},
-            include_logs=False,
             logs_folder=None,
         )
         client.flush()
@@ -395,6 +394,4 @@ def test_register_ignored_loggers_makes_matching_loggers_ignored(_cleanup_ignore
 def test_submit_manual_bug_report_returns_none_when_sentry_inactive() -> None:
     # With no active Sentry client (the default in tests), the submit is a no-op that returns None
     # (no event id) rather than raising.
-    assert (
-        submit_manual_bug_report(title="t", report={"description": "d"}, include_logs=False, logs_folder=None) is None
-    )
+    assert submit_manual_bug_report(title="t", report={"description": "d"}, logs_folder=None) is None

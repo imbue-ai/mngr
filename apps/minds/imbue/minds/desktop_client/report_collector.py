@@ -22,7 +22,6 @@ from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.utils.sentry.core import submit_manual_bug_report
 from imbue.mngr.primitives import AgentId
@@ -136,7 +135,6 @@ def build_bug_report(
 def submit_bug_report(
     *,
     description: str,
-    include_logs: bool,
     include_app_diagnostics: bool,
     include_workspace_details: bool,
     remote_access_requested: bool,
@@ -164,7 +162,6 @@ def submit_bug_report(
     return submit_manual_bug_report(
         title=_report_title(description),
         report=report,
-        include_logs=include_logs,
         logs_folder=logs_folder,
     )
 
@@ -174,24 +171,19 @@ def submit_bug_report_from_body(
     body: Mapping[str, Any],
     session_store: MultiAccountSessionStore | None,
     backend_resolver: BackendResolverInterface | None,
-    minds_config: MindsConfig | None,
     paths: WorkspacePaths | None,
 ) -> str | None:
     """Parse a help-form / API request body and submit the resulting bug report.
 
     Shared by the local ``POST /help/report`` handler and the ``/api/v1`` bug-report route so both
-    interpret the same fields identically. Logs are included when the persistent ``include_error_logs``
-    setting is on OR the request opted in for this one report (the form surfaces that checkbox only when
-    the setting is off). The caller is responsible for validating that a description is present.
+    interpret the same fields identically. Recent logs are always attached (a no-op in environments
+    without an S3 bucket). The caller is responsible for validating that a description is present.
 
     Returns the Sentry event id (or None when Sentry is inactive / the event was dropped).
     """
-    include_logs_setting = minds_config.get_include_error_logs() if minds_config is not None else False
-    include_logs = include_logs_setting or bool(body.get("include_logs", False))
     workspace_agent_id = body.get("workspace_agent_id") or None
     return submit_bug_report(
         description=str(body.get("description", "")).strip(),
-        include_logs=include_logs,
         include_app_diagnostics=bool(body.get("include_app_diagnostics", False)),
         include_workspace_details=bool(body.get("include_workspace_details", False)),
         remote_access_requested=bool(body.get("remote_access", False)),
