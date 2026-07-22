@@ -290,13 +290,15 @@
   }
 
   // ``isFreshlyEnabled`` distinguishes the two callers: right after an
-  // enable, the hostname was just (re)created so the URL is hidden behind
-  // the warning until a probe confirms it. On plain page load of an
-  // existing share the link is probably long-live, so it shows immediately
-  // and only the warning line rides along until the first probe passes.
+  // enable, the hostname was just (re)created, so the warning box shows
+  // immediately and the URL stays hidden behind it until a probe confirms
+  // the link. On plain page load of an existing share the link is almost
+  // always long-live, so the URL shows immediately and NOTHING else is
+  // rendered until the first probe answers -- only if that probe reports
+  // not-ready does the warning appear (no flash for healthy links).
   function startReadinessPolling(url, isFreshlyEnabled) {
     document.getElementById('url-section').classList.remove('hidden');
-    document.getElementById('url-provisioning').classList.remove('hidden');
+    document.getElementById('url-provisioning').classList.toggle('hidden', !isFreshlyEnabled);
     document.getElementById('url-fallback-note').classList.add('hidden');
     var isUrlHidden = isFreshlyEnabled && !isUrlRevealedEarly;
     var showAnywayBtn = document.getElementById('show-url-anyway-btn');
@@ -315,6 +317,7 @@
           } else if (elapsedMs >= READINESS_DEADLINE_MS) {
             markShareUrlStillNotLive();
           } else {
+            document.getElementById('url-provisioning').classList.remove('hidden');
             var interval = elapsedMs < READINESS_FAST_PHASE_MS ? READINESS_FAST_INTERVAL_MS : READINESS_SLOW_INTERVAL_MS;
             setTimeout(poll, interval);
           }

@@ -92,6 +92,10 @@ from supertokens_python.syncio import get_user
 from supertokens_python.syncio import list_users_by_account_info
 from supertokens_python.types import RecipeUserId
 from supertokens_python.types.base import AccountInfoInput
+from tenacity import retry
+from tenacity import retry_if_exception
+from tenacity import stop_after_attempt
+from tenacity import wait_exponential
 
 logger = logging.getLogger(__name__)
 
@@ -899,6 +903,28 @@ def cf_delete_dns_record(client: httpx.Client, zone_id: str, record_id: str) -> 
 # --- Access operations ---
 
 
+def _is_transient_cloudflare_access_error(exc: BaseException) -> bool:
+    """Whether a Cloudflare Access failure is worth retrying after a short wait.
+
+    Cloudflare's Access control plane is eventually consistent around
+    application deletion: recreating (or mutating) an app for a hostname whose
+    previous app was deleted seconds earlier intermittently makes the API
+    itself fail with its generic ``access.api.error.internal_server_error``
+    (code 10001). Those 5xx responses are transient -- the same call succeeds
+    once the teardown settles -- so the Access operations retry them.
+    """
+    return isinstance(exc, CloudflareApiError) and exc.status_code >= 500
+
+
+_retry_transient_access_errors = retry(
+    retry=retry_if_exception(_is_transient_cloudflare_access_error),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    reraise=True,
+)
+
+
+@_retry_transient_access_errors
 def cf_create_access_app(
     client: httpx.Client,
     account_id: str,
@@ -921,10 +947,12 @@ def cf_create_access_app(
     return cf_check(response)["result"]
 
 
+@_retry_transient_access_errors
 def cf_delete_access_app(client: httpx.Client, account_id: str, app_id: str) -> None:
     cf_check(client.delete(f"/accounts/{account_id}/access/apps/{app_id}"))
 
 
+@_retry_transient_access_errors
 def cf_get_access_app_by_domain(client: httpx.Client, account_id: str, hostname: str) -> dict[str, Any] | None:
     response = client.get(f"/accounts/{account_id}/access/apps")
     data = cf_check(response)
@@ -934,11 +962,13 @@ def cf_get_access_app_by_domain(client: httpx.Client, account_id: str, hostname:
     return None
 
 
+@_retry_transient_access_errors
 def cf_list_access_policies(client: httpx.Client, account_id: str, app_id: str) -> list[dict[str, Any]]:
     response = client.get(f"/accounts/{account_id}/access/apps/{app_id}/policies")
     return cf_check(response)["result"]
 
 
+@_retry_transient_access_errors
 def cf_create_access_policy(
     client: httpx.Client, account_id: str, app_id: str, policy: dict[str, Any]
 ) -> dict[str, Any]:
@@ -946,6 +976,7 @@ def cf_create_access_policy(
     return cf_check(response)["result"]
 
 
+@_retry_transient_access_errors
 def cf_update_access_policy(
     client: httpx.Client, account_id: str, app_id: str, policy_id: str, policy: dict[str, Any]
 ) -> dict[str, Any]:
@@ -953,6 +984,7 @@ def cf_update_access_policy(
     return cf_check(response)["result"]
 
 
+@_retry_transient_access_errors
 def cf_delete_access_policy(client: httpx.Client, account_id: str, app_id: str, policy_id: str) -> None:
     cf_check(client.delete(f"/accounts/{account_id}/access/apps/{app_id}/policies/{policy_id}"))
 
@@ -6436,7 +6468,7 @@ _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 _SCALEDOWN_WINDOW = int(os.environ.get("MINDS_CONNECTOR_SCALEDOWN_WINDOW", "0"))
 
 image = modal.Image.debian_slim().pip_install(
-    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
+    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko", "tenacity"
 )
 app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 

@@ -35,6 +35,13 @@ from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
 _CLOUDFLARE_ACCESS_LOGIN_HOST_SUFFIX: Final[str] = "cloudflareaccess.com"
+
+# Substring marker (in the plugin's JSON stderr) of Cloudflare's transient
+# Access-API internal error -- e.g. code 10001, seen when re-enabling sharing
+# seconds after a disable while the deleted Access app is still tearing down.
+# The connector already retries these briefly; if one still escapes, the user
+# should be told to try again rather than shown a raw exit-code error.
+_CLOUDFLARE_ACCESS_TRANSIENT_ERROR_SIGNAL: Final[str] = "access.api.error"
 _EDGE_REDIRECT_STATUS_CODES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
 
 # How long the readiness probe waits on a single edge fetch before treating the
@@ -178,6 +185,11 @@ def enable_sharing_via_cloudflare(
             policy={"emails": list(emails)},
         )
     except ImbueCloudCliError as exc:
+        if _CLOUDFLARE_ACCESS_TRANSIENT_ERROR_SIGNAL in exc.stderr:
+            raise SharingError(
+                "Cloudflare had a temporary problem publishing this share (its Access API "
+                "sometimes hiccups right after a share is disabled). Wait a few seconds and try again."
+            ) from exc
         raise SharingError(f"Failed to enable sharing for '{service_name}': {exc}") from exc
     if tunnel.token is None:
         raise SharingError("Sharing enabled but the connector did not return a Cloudflare token.")

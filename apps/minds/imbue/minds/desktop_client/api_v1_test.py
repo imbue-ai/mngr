@@ -40,6 +40,7 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -920,6 +921,9 @@ class FakeSharingCli(FakeImbueCloudCli):
     removed_services: list[str] = Field(default_factory=list)
     added_services: list[str] = Field(default_factory=list)
     enabled_policies: list[dict[str, Any]] = Field(default_factory=list)
+    enable_sharing_error_stderr: str | None = Field(
+        default=None, description="When set, enable_sharing raises an ImbueCloudCliError carrying this stderr"
+    )
 
     def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
         return self.tunnel
@@ -937,6 +941,10 @@ class FakeSharingCli(FakeImbueCloudCli):
         service_url: str,
         policy: Any,
     ) -> tuple[TunnelInfo, dict[str, Any]]:
+        if self.enable_sharing_error_stderr is not None:
+            error = ImbueCloudCliError("tunnels enable-sharing failed (exit 1); see the desktop client logs")
+            error.stderr = self.enable_sharing_error_stderr
+            raise error
         assert self.tunnel is not None
         self.added_services.append(service_name)
         self.enabled_policies.append(dict(policy))
@@ -1398,6 +1406,37 @@ def test_sharing_enable_returns_json(tmp_path: Path) -> None:
     assert body["url"] == "https://share.example.com"
     assert "web" in cli.added_services
     assert cli.enabled_policies == [{"emails": ["viewer@example.com"]}]
+
+
+def test_sharing_enable_translates_transient_cloudflare_access_error(tmp_path: Path) -> None:
+    # A Cloudflare Access-API 5xx that escapes the connector's retries should
+    # read as "temporary problem, try again", not a raw exit-code error.
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=()),
+    )
+    cli.enable_sharing_error_stderr = (
+        '{"error": "Connector error 500: {\\"detail\\":{\\"errors\\":[{\\"code\\":10001,'
+        '\\"message\\":\\"access.api.error.internal_server_error\\"}]}}"}'
+    )
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        service_logs={str(agent_id): make_service_log("web", "http://127.0.0.1:9000")},
+    )
+
+    response = client.put(
+        f"/api/v1/workspaces/{agent_id}/sharing/web",
+        headers=_auth_header(),
+        json={"emails": ["viewer@example.com"]},
+    )
+
+    assert response.status_code == 502
+    body = json.loads(response.data)
+    assert "temporary problem" in body["error"]
+    assert "try again" in body["error"]
+    assert "exit 1" not in body["error"]
 
 
 def test_sharing_enable_rejects_empty_emails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

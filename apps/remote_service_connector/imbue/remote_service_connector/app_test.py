@@ -3486,6 +3486,42 @@ def test_route_add_service_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPa
     assert re_add.status_code == 200
 
 
+def test_cf_access_calls_retry_transient_500s() -> None:
+    """A Cloudflare Access 5xx (e.g. its internal error while a just-deleted app
+    for the same hostname is still tearing down) is retried and succeeds."""
+    call_counter = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_counter["count"] += 1
+        if call_counter["count"] == 1:
+            return httpx.Response(
+                500,
+                json={
+                    "success": False,
+                    "errors": [{"code": 10001, "message": "access.api.error.internal_server_error"}],
+                },
+            )
+        return httpx.Response(200, json={"success": True, "result": {"id": "app-1"}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.cloudflare.example")
+    result = app_mod.cf_create_access_app(client, "acct", "web.example.com", "cf-fwd-test")
+    assert result == {"id": "app-1"}
+    assert call_counter["count"] == 2
+
+
+def test_cf_access_calls_do_not_retry_client_errors() -> None:
+    call_counter = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_counter["count"] += 1
+        return httpx.Response(400, json={"success": False, "errors": [{"code": 1001, "message": "bad request"}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.cloudflare.example")
+    with pytest.raises(CloudflareApiError):
+        app_mod.cf_create_access_app(client, "acct", "web.example.com", "cf-fwd-test")
+    assert call_counter["count"] == 1
+
+
 def _enable_sharing_body(service_name: str = "web", email: str = "guest@y.com") -> dict[str, Any]:
     return {
         "agent_id": "agent1",
