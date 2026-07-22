@@ -76,7 +76,13 @@ test-offload-acceptance args="":
     # between create and the next line still cleans up; '|| true' on delete
     # absorbs the not-found case if the env is already gone.
     trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
-    uv run modal environment create "$SHARED_ENV"
+    # `modal environment create` is not idempotent and its client retries: a
+    # transient API error after a server-side success surfaces as "Can not
+    # create an environment with the same name ... as an existing one" for the
+    # env our own first attempt just created (the uuid suffix makes any other
+    # collision impossible). Tolerate exactly that self-race by accepting a
+    # failed create iff the env verifiably exists.
+    uv run modal environment create "$SHARED_ENV" || uv run modal environment list 2>/dev/null | grep -qF "$SHARED_ENV"
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
@@ -101,7 +107,8 @@ test-offload-release args="":
     # See `test-offload-acceptance` for the full rationale.
     SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
     trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
-    uv run modal environment create "$SHARED_ENV"
+    # Tolerate the create self-race; see `test-offload-acceptance` for why.
+    uv run modal environment create "$SHARED_ENV" || uv run modal environment list 2>/dev/null | grep -qF "$SHARED_ENV"
 
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml run --trace \
