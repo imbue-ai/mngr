@@ -1147,19 +1147,23 @@ function registerShortcutsFor(bundle, wc) {
       }
       return;
     }
-    // Cmd+W closes the active dockview tab INSIDE the displayed workspace, not
-    // the window (the app menu deliberately carries no Cmd+W accelerator; Cmd+Q
-    // quits). Intercept it here -- before-input-event sees the keystroke even
-    // when focus is inside one of the workspace's embedded service iframes
-    // (terminal / browser panels), where a top-document keydown listener in the
-    // page would not -- and forward it into the page via the content relay's
-    // outbound channel; the system interface closes its active panel on the
-    // resulting ``minds:close-active-tab`` message. preventDefault so the
-    // page's own fallback keydown binding can't double-fire. macOS-only:
-    // Ctrl+W on other platforms stays untouched below because terminals use it
-    // as delete-word.
+    // Cmd+W (macOS) / Ctrl+W (Windows, Linux) closes the active dockview tab
+    // INSIDE the displayed workspace, not the window (the app menu deliberately
+    // carries no close-window accelerator; Cmd/Ctrl+Q quits). Intercept it
+    // here -- before-input-event sees the keystroke even when focus is inside
+    // one of the workspace's embedded service iframes (terminal / browser
+    // panels), where a top-document keydown listener in the page would not --
+    // and forward it into the page via the content relay's outbound channel;
+    // the system interface closes its active panel on the resulting
+    // ``minds:close-active-tab`` message. preventDefault so the page's own
+    // fallback keydown binding can't double-fire. This eats Ctrl+W from
+    // terminals (where it natively means delete-word) -- the same trade every
+    // major browser makes, so it matches user expectations.
+    const closeTabCombo = isMac
+      ? input.meta && !input.shift && !input.alt && !input.control
+      : input.control && !input.shift && !input.alt && !input.meta;
     if (
-      isMac && input.meta && !input.shift && !input.alt && !input.control && key === 'w'
+      closeTabCombo && key === 'w'
       && bundle.contentView && !bundle.contentView.webContents.isDestroyed()
       && wc === bundle.contentView.webContents
       && bundle.currentWorkspaceId
@@ -1171,9 +1175,9 @@ function registerShortcutsFor(bundle, wc) {
     // When the app menu is installed, it owns cmd+Q / cmd+N; handling them here
     // too would double-fire (e.g. two new windows per cmd+N).
     if (appMenuInstalled) return;
-    // Ctrl+W on non-macOS: do NOT close the window. The keystroke should
-    // reach the web content (terminal, editor) where it means "delete word"
-    // or "close tab" depending on the app.
+    // Ctrl/Cmd+W never closes the WINDOW on any platform: on a workspace it
+    // closes the active tab (handled above); elsewhere it falls through to the
+    // page. Close Window remains a menu item with no accelerator.
     if (modifier && !input.shift && !input.alt && key === 'q') {
       event.preventDefault();
       initiateFullQuit();
