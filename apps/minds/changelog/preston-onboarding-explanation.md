@@ -14,4 +14,4 @@ The walkthrough is now fully integrated with the create flow:
 
 - The walkthrough's theme-color pick now actually changes the workspace's color: a new create-operation color endpoint records the pick, which is applied as the workspace's color label during creation (or immediately if creation already finished).
 
-- The create form now shows a visible theme-color swatch picker (previously the color was auto-chosen with no UI), pre-selected with the first unused palette entry.
+- The create form shows a visible theme-color swatch picker (pre-selected with the first unused palette entry) once onboarding has been seen; on the very first creation the picker is hidden there, since the walkthrough owns the color pick.

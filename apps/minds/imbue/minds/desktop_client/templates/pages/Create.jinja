@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b", palette={} #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b", palette={}, show_color_picker=True #}
 {#
   Workspace creation form.
 
@@ -746,7 +746,7 @@
     {# Theme-color picker: swatches mirror the workspace-settings picker;
        clicking one updates the hidden color input (wired in the scripts
        block above). #}
-    {% if palette %}
+    {% if palette and show_color_picker %}
     <div class="flex flex-col items-center gap-2 mt-12">
       <span class="type-helper text-tertiary">Theme color</span>
       <div id="create-color-picker" role="radiogroup" aria-label="Theme color" class="flex items-center gap-2 flex-wrap justify-center">

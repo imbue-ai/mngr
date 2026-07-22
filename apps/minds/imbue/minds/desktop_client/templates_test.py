@@ -387,6 +387,20 @@ def test_render_create_form_carries_color_in_hidden_input_with_visible_picker() 
         assert f'data-color="{hex_value}"' in html
 
 
+def test_render_create_form_hides_picker_before_first_onboarding() -> None:
+    # On the user's first-ever creation the onboarding walkthrough owns the
+    # color pick, so the form shows no swatches -- but the hidden input still
+    # carries the auto-chosen color.
+    html = render_create_form(show_color_picker=False)
+    assert 'name="color"' in html
+    assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
+    assert 'id="create-color-picker"' not in html
+    # No swatch buttons render (the class string still appears in the page's
+    # picker-wiring JS, which is inert without the picker element).
+    for hex_value in WORKSPACE_PALETTE.values():
+        assert f'data-color="{hex_value}"' not in html
+
+
 def test_render_create_form_carries_provided_color_in_hidden_input() -> None:
     html = render_create_form(color="#cecd0c")
     assert 'value="#cecd0c"' in html

@@ -455,6 +455,7 @@ def render_create_form(
     selected_preset: str | None = None,
     start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
+    show_color_picker: bool = True,
 ) -> str:
     """Render the agent creation form page.
 
@@ -547,6 +548,10 @@ def render_create_form(
         start_advanced=start_advanced,
         color=color,
         palette=WORKSPACE_PALETTE,
+        # Hidden on the user's first-ever creation: the onboarding
+        # walkthrough owns the color pick there; the auto-chosen hidden
+        # input still carries a color either way.
+        show_color_picker=show_color_picker,
     )
 
 
