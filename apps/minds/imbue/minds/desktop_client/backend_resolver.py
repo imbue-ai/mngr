@@ -604,7 +604,7 @@ class _WorkspaceNameOverride(FrozenModel):
 
 
 # Sized for the slowest legitimate stop/start round-trip (a cloud VM's first stop
-# can run ~20 min; see workspace_lifecycle._HOST_STOP_START_TIMEOUT_SECONDS) plus
+# can run ~20 min; see workspace_lifecycle._HOST_STOP_TIMEOUT_SECONDS) plus
 # discovery reconcile headroom. Purely a backstop: a retention is normally dropped
 # the moment discovery re-lists the host, long before this.
 _HOST_TRANSITION_RETENTION_CAP_SECONDS: Final[float] = 1500.0

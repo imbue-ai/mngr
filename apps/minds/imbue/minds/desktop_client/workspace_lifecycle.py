@@ -24,14 +24,17 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 # A host stop/start shells out to ``mngr`` and blocks until the host transition
-# resolves before returning the outcome. Sized for the slowest legitimate case:
-# a cloud VM's FIRST stop mirrors the entire host_dir to the provider's state
-# store before deallocating (observed ~10 minutes on Azure after a fresh
-# workspace build; later stops sync deltas and take ~1-2 min). A timeout here
-# is reported to the UI as a stop *failure* even though the underlying stop
-# keeps running -- so a too-small cap manufactures false failures for exactly
-# the flows that are working.
-_HOST_STOP_START_TIMEOUT_SECONDS: Final[float] = 1200.0
+# resolves before returning the outcome. A timeout here is reported to the UI as
+# a *failure* even though the underlying mngr keeps running -- so a too-small cap
+# manufactures false failures for flows that are actually working.
+#
+# Only STOP is slow: a cloud VM's FIRST stop mirrors the entire host_dir to the
+# provider's state store before deallocating (observed ~10 minutes on Azure after
+# a fresh workspace build; later stops sync deltas and take ~1-2 min). START just
+# resumes a disk-intact VM (no mirror), so it keeps the original short cap -- a
+# genuinely hung start should surface quickly, not hold the UI for 20 minutes.
+_HOST_STOP_TIMEOUT_SECONDS: Final[float] = 1200.0
+_HOST_START_TIMEOUT_SECONDS: Final[float] = 300.0
 
 
 class MindHostAction(UpperCaseStrEnum):
@@ -71,9 +74,11 @@ def perform_mind_host_action(
         case MindHostAction.STOP:
             argv = [mngr_binary, "stop", str(services_agent_id), "--quiet", "--stop-host"]
             transitional_state = HostState.STOPPING
+            timeout_seconds = _HOST_STOP_TIMEOUT_SECONDS
         case MindHostAction.START:
             argv = [mngr_binary, "start", str(services_agent_id), "--quiet"]
             transitional_state = HostState.STARTING
+            timeout_seconds = _HOST_START_TIMEOUT_SECONDS
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -91,7 +96,7 @@ def perform_mind_host_action(
     try:
         with cg:
             finished = cg.run_process_to_completion(
-                argv, timeout=_HOST_STOP_START_TIMEOUT_SECONDS, is_checked_after=False, env=env
+                argv, timeout=timeout_seconds, is_checked_after=False, env=env
             )
     except (OSError, ConcurrencyGroupError) as exc:
         logger.warning("Could not run mngr to {} host for {}: {!r}", action.value, workspace_agent_id, exc)

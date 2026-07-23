@@ -4,6 +4,8 @@
 
 - The bring-your-own-key cloud-accounts UI and routes are gated behind the `FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS` env flag (off by default), so the feature ships dark until a build opts in.
 
+- The Stop / Start blocking-call timeout is now per-action: Stop keeps the long 20-minute cap (sized for a cloud VM's slow first-stop host_dir mirror), while Start uses a 5-minute cap, so a genuinely hung start surfaces as a failure quickly instead of holding the UI for 20 minutes.
+
 - Azure accounts are pinned to one region per entry (Azure's network scaffolding is region-locked); each entry gets its own resource group so multiple regions coexist as multiple entries. Region and machine-size offerings widened beyond US-only, with capacity-alternate machine families (t3a/m6i, n2, Dsv5/Dasv5) for fresh-subscription SkuNotAvailable restrictions.
 
 - Review-driven UI rework: the compute dropdown lists every provider flat (imbue_cloud / docker / lima / vultr / modal + each configured cloud account) with trailing "add AWS/GCP/Azure account…" entries that open the add-account dialog directly and return with the new account selected. The machine-credential (ambient) AWS path was removed from Minds entirely -- bring-your-own accounts are the only AWS path -- and legacy ambient `aws-<region>` blocks are cleaned up at boot. Account renaming was dropped; account deletion moved to the providers panel on the home screen, with the button disabled while the account still has active workspaces (the API's 409 guard remains the authority).

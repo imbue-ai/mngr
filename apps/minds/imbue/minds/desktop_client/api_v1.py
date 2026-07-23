@@ -171,7 +171,7 @@ from imbue.mngr.primitives import InvalidName
 # Cap for a short blocking ``mngr`` command run via ``_run_mngr_blocking``
 # (restart-services, git label read/write) -- quick operations, unlike the host
 # stop/start transition (that path uses ``perform_mind_host_action``'s much
-# larger ``_HOST_STOP_START_TIMEOUT_SECONDS``, sized for the slow first cloud stop).
+# larger ``_HOST_STOP_TIMEOUT_SECONDS``, sized for the slow first cloud stop).
 _MNGR_BLOCKING_COMMAND_TIMEOUT_SECONDS: float = 300.0
 
 # SSE event-stream headers (disable proxy/browser buffering so events flush live).
