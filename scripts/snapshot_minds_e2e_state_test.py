@@ -107,7 +107,9 @@ def test_offload_discovery_filters_pin_repo_root_pytest_config() -> None:
     from the repo root, so every test would error at execution. The
     ``-c pyproject.toml`` discovery arg in the group filters keeps the ids
     repo-root-relative; this test fails if that pinning is dropped from any
-    group. (A nested-pytest replay of discovery is not possible here: it
+    group. Remove both the flag and this test once OFFLOAD-9 gives offload a
+    first-class discovery-args/rootdir knob. (A nested-pytest replay of
+    discovery is not possible here: it
     would run with PYTEST_CURRENT_TEST set and trip the mngr config loader's
     is_allowed_in_pytest guard on the repo's .mngr/settings.toml.)
     """

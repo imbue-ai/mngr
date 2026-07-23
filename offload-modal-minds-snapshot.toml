@@ -82,7 +82,9 @@ type = "pytest"
 # (/code/mngr) -- so an unprefixed id would not resolve and every test
 # would error. The `-c pyproject.toml` in the group filters below
 # (discovery-only args) pins the root config so discovery emits
-# repo-root-relative ids, exactly as unscoped discovery did.
+# repo-root-relative ids, exactly as unscoped discovery did. Tracked
+# upstream as OFFLOAD-9 (a first-class discovery-args/rootdir knob in
+# offload); drop the flag from the filters once that lands.
 paths = ["apps/minds/test_snapshot_resume.py", "apps/minds/test_sync_e2e.py"]
 # Bash-wrapped command with a conditional cd so the same string works in
 # both offload contexts:
@@ -134,7 +136,8 @@ run_args = "--no-cov -p no:xdist"
 # here). `-c pyproject.toml` is a discovery-only arg (offload passes group
 # filters only to `pytest --collect-only`, not to execution) that pins the
 # repo-root pytest config so the scoped `paths` above still yield
-# repo-root-relative test ids -- see the [framework] comment.
+# repo-root-relative test ids -- see the [framework] comment. Remove
+# once OFFLOAD-9 provides a proper discovery-args knob.
 retry_count = 0
 filters = "-m 'minds_snapshot_resume' -c pyproject.toml"
 
