@@ -758,6 +758,12 @@ def e2e(
         "\n"
         "[commands.connect]\n"
         'connect_command = "mngr-e2e-connect"\n'
+        "\n"
+        # No e2e host has a codex binary or npm, so provisioning a codex agent
+        # must skip the `npm i -g @openai/codex` install check. Seed it here so
+        # tutorial tests that create a codex agent don't each re-disable it.
+        "[agent_types.codex]\n"
+        "check_installation = false\n"
     )
 
     # NOTE: the project-scope ``settings.toml`` is deliberately NOT seeded here.
