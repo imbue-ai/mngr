@@ -1,6 +1,7 @@
 """Unit tests for the kanpan TUI."""
 
 import io
+import queue
 import subprocess
 import threading
 from concurrent.futures import Future
@@ -44,9 +45,9 @@ from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
 from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
+from imbue.mngr_kanpan.fetcher import FetchUpdate
 from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
-from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
 from imbue.mngr_kanpan.tui import PEEK_BODY_HEIGHT
 from imbue.mngr_kanpan.tui import _BUILTIN_COLUMN_DEFS
@@ -63,6 +64,7 @@ from imbue.mngr_kanpan.tui import _FieldCellMarkupFn
 from imbue.mngr_kanpan.tui import _FieldCellTextFn
 from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
+from imbue.mngr_kanpan.tui import _apply_stream_updates
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
 from imbue.mngr_kanpan.tui import _build_agent_row
@@ -74,18 +76,19 @@ from imbue.mngr_kanpan.tui import _build_legend_bindings
 from imbue.mngr_kanpan.tui import _build_mark_palette
 from imbue.mngr_kanpan.tui import _build_peek_panel
 from imbue.mngr_kanpan.tui import _cancel_peek_alarm
-from imbue.mngr_kanpan.tui import _carry_forward_fields
 from imbue.mngr_kanpan.tui import _clear_focus
 from imbue.mngr_kanpan.tui import _close_peek
 from imbue.mngr_kanpan.tui import _compute_board_column_widths
 from imbue.mngr_kanpan.tui import _compute_footer_display
 from imbue.mngr_kanpan.tui import _dispatch_command
+from imbue.mngr_kanpan.tui import _drain_refresh_updates
 from imbue.mngr_kanpan.tui import _ensure_peek_executor
 from imbue.mngr_kanpan.tui import _ensure_peek_reply_executor
 from imbue.mngr_kanpan.tui import _execute_marks
 from imbue.mngr_kanpan.tui import _execute_next_in_batch
 from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
+from imbue.mngr_kanpan.tui import _finalize_refresh
 from imbue.mngr_kanpan.tui import _find_entry_by_name
 from imbue.mngr_kanpan.tui import _finish_batch_execution
 from imbue.mngr_kanpan.tui import _flatten_markup_to_attr
@@ -514,6 +517,115 @@ def test_render_footer_is_single_writer_no_flicker() -> None:
     assert second.startswith("  Running deploy on agent-a")
 
 
+# =============================================================================
+# Streaming refresh: draining and applying incremental updates
+# =============================================================================
+
+
+def test_drain_refresh_updates_drains_all_in_order() -> None:
+    update_queue: queue.Queue[FetchUpdate] = queue.Queue()
+    first = FetchUpdate(snapshot=make_board_snapshot(entries=()), is_final=False)
+    second = FetchUpdate(snapshot=make_board_snapshot(entries=()), is_final=True)
+    update_queue.put(first)
+    update_queue.put(second)
+    drained = _drain_refresh_updates(update_queue)
+    assert drained == [first, second]
+    # The queue is now empty; a second drain yields nothing.
+    assert _drain_refresh_updates(update_queue) == []
+
+
+def test_apply_stream_updates_nonfinal_keeps_refresh_in_flight() -> None:
+    state = _make_state()
+    loop = _make_mock_loop()
+    state.loop = loop
+    state.refresh_future = cast(Any, object())
+    state.refresh_queue = cast(Any, object())
+    snapshot = make_board_snapshot(entries=(_make_entry(name="a"),))
+    _apply_stream_updates(loop, state, [FetchUpdate(snapshot=snapshot, is_final=False)])
+    # The base snapshot is rendered, but the refresh stays in flight and another
+    # poll is scheduled.
+    assert state.snapshot is snapshot
+    assert state.refresh_future is not None
+    assert state.refresh_queue is not None
+    assert loop._alarm_tracker.call_count == 1
+
+
+def test_apply_stream_updates_coalesces_to_last_snapshot(tmp_path: Path) -> None:
+    state = _make_state()
+    state.mngr_ctx = cast(Any, SimpleNamespace(profile_dir=tmp_path))
+    loop = _make_mock_loop()
+    state.loop = loop
+    state.refresh_future = cast(Any, object())
+    state.refresh_queue = cast(Any, object())
+    partial = make_board_snapshot(entries=(_make_entry(name="a"),))
+    complete = make_board_snapshot(entries=(_make_entry(name="a"), _make_entry(name="b")))
+    _apply_stream_updates(
+        loop,
+        state,
+        [FetchUpdate(snapshot=partial, is_final=False), FetchUpdate(snapshot=complete, is_final=True)],
+    )
+    # Only the last (most complete) update is rendered.
+    assert state.snapshot is complete
+
+
+def test_apply_stream_updates_final_finalizes_and_clears_in_flight(tmp_path: Path) -> None:
+    state = _make_state()
+    state.mngr_ctx = cast(Any, SimpleNamespace(profile_dir=tmp_path))
+    loop = _make_mock_loop()
+    state.loop = loop
+    state.refresh_future = cast(Any, object())
+    state.refresh_queue = cast(Any, object())
+    snapshot = make_board_snapshot(entries=(_make_entry(name="a"),))
+    _apply_stream_updates(loop, state, [FetchUpdate(snapshot=snapshot, cached_fields={}, is_final=True)])
+    assert state.snapshot is snapshot
+    assert state.refresh_future is None
+    assert state.refresh_queue is None
+
+
+def test_apply_stream_updates_error_preserves_board_and_appends_error() -> None:
+    old_snapshot = make_board_snapshot(entries=(_make_entry(name="a"),))
+    state = _make_state(snapshot=old_snapshot)
+    loop = _make_mock_loop()
+    state.loop = loop
+    state.refresh_future = cast(Any, object())
+    state.refresh_queue = cast(Any, object())
+    _apply_stream_updates(loop, state, [FetchUpdate(error="boom", is_final=True)])
+    # The prior board is preserved (its single entry survives) and the error is
+    # surfaced at the bottom of the board.
+    assert state.snapshot is not None
+    assert len(state.snapshot.entries) == 1
+    assert any("boom" in err for err in state.snapshot.errors)
+    # The failed refresh is finalized (no longer in flight).
+    assert state.refresh_future is None
+    assert state.refresh_queue is None
+
+
+def test_finalize_refresh_full_clears_state() -> None:
+    state = _make_state(snapshot=make_board_snapshot(entries=()))
+    loop = _make_mock_loop()
+    state.loop = loop
+    state.refresh_future = cast(Any, object())
+    state.refresh_queue = cast(Any, object())
+    state.refresh_is_local_only = False
+    _finalize_refresh(loop, state, failed=False)
+    assert state.refresh_future is None
+    assert state.refresh_queue is None
+    assert state.last_refresh_time > 0.0
+
+
+def test_finalize_refresh_local_only_does_not_stamp_refresh_time() -> None:
+    state = _make_state(snapshot=make_board_snapshot(entries=()))
+    loop = _make_mock_loop()
+    state.loop = loop
+    state.refresh_future = cast(Any, object())
+    state.refresh_queue = cast(Any, object())
+    state.refresh_is_local_only = True
+    _finalize_refresh(loop, state, failed=False)
+    # A local-only refresh must not advance the full-refresh cooldown clock.
+    assert state.last_refresh_time == 0.0
+    assert state.refresh_future is None
+
+
 def test_update_snapshot_mute() -> None:
     entry = _make_entry(is_muted=False)
     state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
@@ -837,60 +949,6 @@ def test_build_agent_row_muted_section_overrides_stale() -> None:
     widths = _compute_board_column_widths((entry,), column_defs)
     row = _build_agent_row(entry, widths, column_defs, now=now, staleness_threshold_seconds=1800.0)
     assert _ci_widget_attr(row) == "muted"
-
-
-# =============================================================================
-# Carry forward fields
-# =============================================================================
-
-
-def test_carry_forward_fields_merges() -> None:
-    old_entry = _make_entry(
-        name="a",
-        fields={
-            "pr": make_pr_field(created=datetime(2027, 1, 1, 0, 0, 7, tzinfo=timezone.utc)),
-            "commits_ahead": CommitsAheadField(
-                count=3, has_work_dir=True, created=datetime(2027, 1, 1, 0, 0, 8, tzinfo=timezone.utc)
-            ),
-        },
-        cells={
-            "pr": make_pr_field(created=datetime(2027, 1, 1, 0, 0, 9, tzinfo=timezone.utc)).display(),
-            "commits_ahead": CommitsAheadField(
-                count=3, has_work_dir=True, created=datetime(2027, 1, 1, 0, 0, 10, tzinfo=timezone.utc)
-            ).display(),
-        },
-    )
-    new_entry = _make_entry(
-        name="a",
-        fields={
-            "commits_ahead": CommitsAheadField(
-                count=5, has_work_dir=True, created=datetime(2027, 1, 1, 0, 0, 11, tzinfo=timezone.utc)
-            )
-        },
-        cells={
-            "commits_ahead": CommitsAheadField(
-                count=5, has_work_dir=True, created=datetime(2027, 1, 1, 0, 0, 12, tzinfo=timezone.utc)
-            ).display()
-        },
-    )
-    old_snapshot = make_board_snapshot(entries=(old_entry,))
-    new_snapshot = make_board_snapshot(entries=(new_entry,))
-    result = _carry_forward_fields(old_snapshot, new_snapshot)
-    merged = result.entries[0]
-    assert "pr" in merged.fields
-    assert "commits_ahead" in merged.fields
-    ca_field = merged.fields["commits_ahead"]
-    assert isinstance(ca_field, CommitsAheadField)
-    assert ca_field.count == 5
-
-
-def test_carry_forward_fields_new_agent() -> None:
-    new_entry = _make_entry(name="new-agent")
-    old_snapshot = make_board_snapshot(entries=())
-    new_snapshot = make_board_snapshot(entries=(new_entry,))
-    result = _carry_forward_fields(old_snapshot, new_snapshot)
-    assert len(result.entries) == 1
-    assert result.entries[0].name == AgentName("new-agent")
 
 
 # =============================================================================

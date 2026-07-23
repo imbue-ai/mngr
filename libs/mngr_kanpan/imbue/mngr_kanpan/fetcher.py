@@ -1,9 +1,11 @@
 import json
 import tempfile
 import time
+from collections.abc import Callable
 from collections.abc import Sequence
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,71 @@ class FetchResult(FrozenModel):
     )
 
 
+class FetchUpdate(FrozenModel):
+    """One incremental update posted by a streaming refresh.
+
+    ``stream_board_snapshot`` posts a sequence of these as its data sources
+    return. Each non-error update carries a full board ``snapshot`` that is
+    strictly more complete than the previous one (fresh source output layered
+    over the last-known cached values), so a consumer can simply render the
+    latest one it has drained.
+
+    ``cached_fields`` holds only the freshly computed fields -- never the seeded
+    cache values -- so the final update's ``cached_fields`` matches what a batch
+    ``fetch_board_snapshot`` would produce and is what gets persisted.
+    """
+
+    snapshot: BoardSnapshot | None = Field(
+        default=None, description="Full board snapshot to render; None only on a hard failure."
+    )
+    cached_fields: dict[AgentName, dict[str, FieldValue]] = Field(
+        default_factory=dict,
+        description="Freshly computed (unseeded) fields so far; authoritative on the final update.",
+    )
+    is_final: bool = Field(default=False, description="True on the last update of the stream.")
+    error: str | None = Field(
+        default=None, description="Hard-failure detail; set only on a final update whose fetch crashed."
+    )
+
+
+def _assemble_entries(
+    agents: tuple[AgentDetails, ...],
+    all_fields: dict[AgentName, dict[str, FieldValue]],
+) -> tuple[AgentBoardEntry, ...]:
+    """Build board entries from agents and their computed fields.
+
+    The muted bit rides on each AgentDetails (populated by kanpan's
+    agent_field_generators / offline_agent_field_generators during the
+    list_agents call), so it is sourced as resiliently as the agent list itself
+    and its ``created`` is now.
+    """
+    now = now_utc()
+    entries: list[AgentBoardEntry] = []
+    for agent in agents:
+        agent_fields = dict(all_fields.get(agent.name, {}))
+        is_agent_muted = is_muted(agent.plugin.get(PLUGIN_NAME, {}))
+        agent_fields[FIELD_MUTED] = BoolField(value=is_agent_muted, created=now)
+
+        cells = {key: field.display() for key, field in agent_fields.items()}
+        section = compute_section(agent_fields)
+        work_dir = _get_local_work_dir(agent)
+
+        entries.append(
+            AgentBoardEntry(
+                name=agent.name,
+                state=agent.state,
+                provider_name=agent.host.provider_name,
+                branch=agent.initial_branch,
+                work_dir=work_dir,
+                is_muted=is_agent_muted,
+                fields=agent_fields,
+                cells=cells,
+                section=section,
+            )
+        )
+    return tuple(entries)
+
+
 def fetch_board_snapshot(
     mngr_ctx: MngrContext,
     data_sources: Sequence[KanpanDataSource],
@@ -89,42 +156,128 @@ def fetch_board_snapshot(
                 all_fields[agent_name] = {}
             all_fields[agent_name].update(agent_fields)
 
-    # Build board entries. The muted bit rides on each AgentDetails (populated by
-    # kanpan's agent_field_generators / offline_agent_field_generators during the
-    # list_agents call above), so it is sourced as resiliently as the agent list
-    # itself and its `created` is now.
-    now = now_utc()
-    entries: list[AgentBoardEntry] = []
-    for agent in agents:
-        agent_fields = dict(all_fields.get(agent.name, {}))
-        is_agent_muted = is_muted(agent.plugin.get(PLUGIN_NAME, {}))
-        agent_fields[FIELD_MUTED] = BoolField(value=is_agent_muted, created=now)
-
-        cells = {key: field.display() for key, field in agent_fields.items()}
-        section = compute_section(agent_fields)
-        work_dir = _get_local_work_dir(agent)
-
-        entries.append(
-            AgentBoardEntry(
-                name=agent.name,
-                state=agent.state,
-                provider_name=agent.host.provider_name,
-                branch=agent.initial_branch,
-                work_dir=work_dir,
-                is_muted=is_agent_muted,
-                fields=agent_fields,
-                cells=cells,
-                section=section,
-            )
-        )
+    entries = _assemble_entries(agents, all_fields)
 
     elapsed = time.monotonic() - start_time
     snapshot = BoardSnapshot(
-        entries=tuple(entries),
+        entries=entries,
         errors=tuple(errors),
         fetch_time_seconds=elapsed,
     )
     return FetchResult(snapshot=snapshot, cached_fields=all_fields)
+
+
+def stream_board_snapshot(
+    mngr_ctx: MngrContext,
+    data_sources: Sequence[KanpanDataSource],
+    cached_fields: dict[AgentName, dict[str, FieldValue]],
+    post: Callable[[FetchUpdate], None],
+    include_filters: tuple[str, ...] = (),
+    exclude_filters: tuple[str, ...] = (),
+) -> None:
+    """Streaming full fetch: list agents, then fan out data sources, posting a
+    progressively more complete snapshot as each source returns.
+
+    Meant to run in a background thread. ``post`` is called once with a base
+    snapshot (agents in their last-known sections, seeded from ``cached_fields``
+    and rendered stale by their age), then once per data source as it returns,
+    and a final time with ``is_final=True``. On an unexpected failure a single
+    final update carrying ``error`` is posted instead, leaving the current board
+    for the consumer to preserve and retry.
+
+    The seeded cache values are display-only: ``cached_fields`` on each posted
+    update carries just the freshly computed fields, and once a source returns
+    its field keys are governed entirely by that fresh output (a stale seeded
+    value for one of its keys is dropped, even if the source failed and produced
+    nothing), so the final snapshot is identical to what ``fetch_board_snapshot``
+    would produce.
+    """
+    start_time = time.monotonic()
+    try:
+        errors: list[str] = []
+
+        result = list_agents(
+            mngr_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+        )
+        for error in result.errors:
+            errors.append(f"{error.exception_type}: {error.message}")
+        agents = tuple(result.agents)
+
+        # `display_fields` starts seeded from the previous cycle's cache so agents
+        # appear in their last-known sections immediately; the old `created` on
+        # those values renders them stale until fresh data lands. `fresh_fields`
+        # accumulates only freshly computed values and becomes the persisted cache.
+        display_fields: dict[AgentName, dict[str, FieldValue]] = {
+            agent.name: dict(cached_fields.get(agent.name, {})) for agent in agents
+        }
+        fresh_fields: dict[AgentName, dict[str, FieldValue]] = {}
+
+        if not data_sources:
+            _post_stream_update(post, agents, display_fields, fresh_fields, errors, start_time, is_final=True)
+            return
+
+        # Base snapshot: every agent visible at once, before any source returns.
+        _post_stream_update(post, agents, display_fields, fresh_fields, errors, start_time, is_final=False)
+
+        with ThreadPoolExecutor(max_workers=min(len(data_sources), 8)) as executor:
+            future_to_source: dict[
+                Future[tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]], KanpanDataSource
+            ] = {
+                executor.submit(_compute_source_safely, source, agents, cached_fields, mngr_ctx): source
+                for source in data_sources
+            }
+            remaining = len(future_to_source)
+            for future in as_completed(future_to_source):
+                source = future_to_source[future]
+                source_fields, source_errors = future.result()
+                errors.extend(source_errors)
+                # This source's keys are now authoritative: drop any seeded value
+                # for them (even where the source produced nothing for an agent),
+                # then layer in the fresh output.
+                owned_keys = set(source.field_types.keys())
+                for agent_fields in display_fields.values():
+                    for key in owned_keys:
+                        agent_fields.pop(key, None)
+                for agent_name, agent_fields in source_fields.items():
+                    display_fields.setdefault(agent_name, {}).update(agent_fields)
+                    fresh_fields.setdefault(agent_name, {}).update(agent_fields)
+                remaining -= 1
+                _post_stream_update(
+                    post, agents, display_fields, fresh_fields, errors, start_time, is_final=(remaining == 0)
+                )
+    except Exception as e:
+        logger.debug("Streaming refresh failed: {}", e)
+        post(FetchUpdate(error=f"Refresh failed: {e}", is_final=True))
+
+
+def stream_local_snapshot(
+    mngr_ctx: MngrContext,
+    data_sources: Sequence[KanpanDataSource],
+    cached_fields: dict[AgentName, dict[str, FieldValue]],
+    post: Callable[[FetchUpdate], None],
+    include_filters: tuple[str, ...] = (),
+    exclude_filters: tuple[str, ...] = (),
+) -> None:
+    """Streaming local-only fetch: like ``stream_board_snapshot`` but runs only
+    non-remote sources.
+
+    Remote fields (PR, CI, ...) are carried forward implicitly through the
+    seeded cache: no remote source runs to claim their keys, so their last-known
+    values stay on the board (rendered stale by age) instead of being dropped.
+    """
+    local_sources = [s for s in data_sources if not s.is_remote]
+    stream_board_snapshot(
+        mngr_ctx,
+        local_sources,
+        cached_fields,
+        post,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
+    )
 
 
 def fetch_local_snapshot(
@@ -155,6 +308,49 @@ def _get_local_work_dir(agent: AgentDetails) -> Path | None:
     return None
 
 
+def _compute_source_safely(
+    source: KanpanDataSource,
+    agents: tuple[AgentDetails, ...],
+    cached_fields: dict[AgentName, dict[str, FieldValue]],
+    mngr_ctx: MngrContext,
+) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
+    """Run one data source's ``compute``, turning any failure into an error string.
+
+    Data sources are pluggable, so a single misbehaving source must never crash
+    the refresh (batch or streaming). A failure is surfaced as an error message
+    and the source contributes no fields, exactly as if it had returned empty.
+    The broad catch is intentional: a source can raise anything, and none of it
+    should take down the board.
+    """
+    try:
+        return source.compute(agents, cached_fields, mngr_ctx)
+    except Exception as e:
+        logger.debug("Data source '{}' failed: {}", source.name, e)
+        return {}, [f"Data source '{source.name}' failed: {e}"]
+
+
+def _post_stream_update(
+    post: Callable[[FetchUpdate], None],
+    agents: tuple[AgentDetails, ...],
+    display_fields: dict[AgentName, dict[str, FieldValue]],
+    fresh_fields: dict[AgentName, dict[str, FieldValue]],
+    errors: Sequence[str],
+    start_time: float,
+    is_final: bool,
+) -> None:
+    """Assemble a board snapshot from the current display fields and post it.
+
+    ``display_fields`` drives what the board shows (seed layered under fresh
+    output); ``fresh_fields`` -- only the freshly computed values -- rides along
+    as ``cached_fields`` so the final update carries the authoritative cache.
+    """
+    entries = _assemble_entries(agents, display_fields)
+    elapsed = time.monotonic() - start_time
+    snapshot = BoardSnapshot(entries=entries, errors=tuple(errors), fetch_time_seconds=elapsed)
+    cached_copy = {name: dict(fields) for name, fields in fresh_fields.items()}
+    post(FetchUpdate(snapshot=snapshot, cached_fields=cached_copy, is_final=is_final))
+
+
 def _run_data_sources_parallel(
     data_sources: Sequence[KanpanDataSource],
     agents: tuple[AgentDetails, ...],
@@ -171,16 +367,12 @@ def _run_data_sources_parallel(
     with ThreadPoolExecutor(max_workers=min(len(data_sources), 8)) as executor:
         futures: dict[str, Future[tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]]] = {}
         for source in data_sources:
-            futures[source.name] = executor.submit(source.compute, agents, cached_fields, mngr_ctx)
+            futures[source.name] = executor.submit(_compute_source_safely, source, agents, cached_fields, mngr_ctx)
 
         for source_name, future in futures.items():
-            try:
-                source_fields, source_errors = future.result()
-                results[source_name] = source_fields
-                all_errors.extend(source_errors)
-            except Exception as e:
-                all_errors.append(f"Data source '{source_name}' failed: {e}")
-                logger.debug("Data source '{}' failed: {}", source_name, e)
+            source_fields, source_errors = future.result()
+            results[source_name] = source_fields
+            all_errors.extend(source_errors)
 
     return results, all_errors
 

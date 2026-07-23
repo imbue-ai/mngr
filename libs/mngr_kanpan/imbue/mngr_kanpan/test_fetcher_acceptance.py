@@ -1,13 +1,16 @@
-"""Acceptance tests for fetch_board_snapshot and fetch_local_snapshot.
+"""Acceptance tests for the batch and streaming board fetchers.
 
-These tests exercise the full fetch pipeline with real agents created via the
-local provider, rather than mocking list_agents.
+These tests exercise the full fetch pipeline (fetch_board_snapshot,
+fetch_local_snapshot, stream_board_snapshot, stream_local_snapshot) with real
+agents created via the local provider, rather than mocking list_agents.
 
 To run these tests locally:
 
     just test libs/mngr_kanpan/imbue/mngr_kanpan/test_fetcher_acceptance.py
 """
 
+from collections.abc import Callable
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -32,6 +35,7 @@ from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
@@ -40,8 +44,11 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.fetcher import FetchResult
+from imbue.mngr_kanpan.fetcher import FetchUpdate
 from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
 from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
+from imbue.mngr_kanpan.fetcher import stream_board_snapshot
+from imbue.mngr_kanpan.fetcher import stream_local_snapshot
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 
 
@@ -81,6 +88,51 @@ class _FakeRemoteDataSource:
             },
             [],
         )
+
+
+class _FakeEmptyRepoPathSource:
+    """A local source that owns the repo_path key but produces nothing.
+
+    Used to verify that once a source returns successfully, a stale seeded value
+    for one of its keys is dropped even when the source emitted nothing for the
+    agent.
+    """
+
+    @property
+    def name(self) -> str:
+        return "fake_empty_repo_path"
+
+    @property
+    def is_remote(self) -> bool:
+        return False
+
+    @property
+    def columns(self) -> dict[str, str]:
+        return {FIELD_REPO_PATH: "FAKE"}
+
+    @property
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {FIELD_REPO_PATH: TypeAdapter(RepoPathField)}
+
+    def compute(
+        self,
+        agents: tuple[AgentDetails, ...],
+        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        mngr_ctx: MngrContext,
+    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
+        return {}, []
+
+
+def _collect_stream_updates(
+    stream_fn: Callable[..., None],
+    mngr_ctx: MngrContext,
+    sources: Sequence[KanpanDataSource],
+    cached_fields: dict[AgentName, dict[str, FieldValue]] | None = None,
+) -> list[FetchUpdate]:
+    """Run a streaming fetch synchronously, collecting every posted update in order."""
+    updates: list[FetchUpdate] = []
+    stream_fn(mngr_ctx, sources, cached_fields or {}, updates.append)
+    return updates
 
 
 @pytest.fixture
@@ -261,6 +313,165 @@ def test_fetch_local_snapshot_skips_remote_sources(
     assert FIELD_COMMITS_AHEAD in entry.fields
     # repo_path would only come from the remote source, so it should be absent
     assert FIELD_REPO_PATH not in entry.fields
+
+
+# =============================================================================
+# stream_board_snapshot / stream_local_snapshot
+# =============================================================================
+
+
+@pytest.mark.acceptance
+def test_stream_board_snapshot_no_sources_posts_single_final(temp_mngr_ctx: MngrContext) -> None:
+    """With no data sources, a single final update is posted."""
+    updates = _collect_stream_updates(stream_board_snapshot, temp_mngr_ctx, [])
+    assert len(updates) == 1
+    assert updates[0].is_final is True
+    assert updates[0].snapshot is not None
+    assert updates[0].snapshot.entries == ()
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_stream_board_snapshot_posts_base_before_source_result(
+    local_host: Host,
+    work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The agent is visible in the first (base) update, before the source returns."""
+    agent = create_test_agent_state(local_host, work_dir, "stream-base-agent")
+    agent.set_labels({"remote": "git@github.com:org/myrepo.git"})
+    updates = _collect_stream_updates(stream_board_snapshot, temp_mngr_ctx, [RepoPathsDataSource()])
+
+    # base (not final) + one per source (final).
+    assert len(updates) == 2
+    base, final = updates
+    assert base.is_final is False
+    assert final.is_final is True
+
+    base_entry = {e.name: e for e in base.snapshot.entries}[AgentName("stream-base-agent")]
+    final_entry = {e.name: e for e in final.snapshot.entries}[AgentName("stream-base-agent")]
+    # The base snapshot shows the agent but not yet the source's repo_path.
+    assert FIELD_REPO_PATH not in base_entry.fields
+    # The final snapshot carries the freshly computed repo_path.
+    final_repo = final_entry.fields[FIELD_REPO_PATH]
+    assert isinstance(final_repo, RepoPathField)
+    assert final_repo.path == "org/myrepo"
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_stream_board_snapshot_seeds_base_from_cache_then_replaces(
+    local_host: Host,
+    work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Option A: the base render seeds cached values, which fresh output replaces.
+
+    The seeded value never leaks into the persisted cache -- the final update's
+    cached_fields carries only freshly computed data.
+    """
+    agent = create_test_agent_state(local_host, work_dir, "stream-seed-agent")
+    agent.set_labels({"remote": "git@github.com:org/myrepo.git"})
+    seeded = {
+        AgentName("stream-seed-agent"): {
+            FIELD_REPO_PATH: RepoPathField(path="old/seeded", created=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        }
+    }
+    updates = _collect_stream_updates(stream_board_snapshot, temp_mngr_ctx, [RepoPathsDataSource()], seeded)
+
+    base, final = updates[0], updates[-1]
+    base_entry = {e.name: e for e in base.snapshot.entries}[AgentName("stream-seed-agent")]
+    final_entry = {e.name: e for e in final.snapshot.entries}[AgentName("stream-seed-agent")]
+
+    base_repo = base_entry.fields[FIELD_REPO_PATH]
+    assert isinstance(base_repo, RepoPathField)
+    assert base_repo.path == "old/seeded"
+
+    final_repo = final_entry.fields[FIELD_REPO_PATH]
+    assert isinstance(final_repo, RepoPathField)
+    assert final_repo.path == "org/myrepo"
+
+    # No seed leakage into the persisted cache.
+    persisted = final.cached_fields[AgentName("stream-seed-agent")][FIELD_REPO_PATH]
+    assert isinstance(persisted, RepoPathField)
+    assert persisted.path == "org/myrepo"
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_stream_board_snapshot_drops_seeded_key_when_source_returns_nothing(
+    local_host: Host,
+    work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A successful source governs its key entirely: a stale seed is dropped."""
+    create_test_agent_state(local_host, work_dir, "stream-drop-agent")
+    seeded = {
+        AgentName("stream-drop-agent"): {
+            FIELD_REPO_PATH: RepoPathField(path="old/seeded", created=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        }
+    }
+    updates = _collect_stream_updates(stream_board_snapshot, temp_mngr_ctx, [_FakeEmptyRepoPathSource()], seeded)
+
+    base, final = updates[0], updates[-1]
+    base_entry = {e.name: e for e in base.snapshot.entries}[AgentName("stream-drop-agent")]
+    final_entry = {e.name: e for e in final.snapshot.entries}[AgentName("stream-drop-agent")]
+    # Seeded in the base render, dropped once the owning source returned empty.
+    assert FIELD_REPO_PATH in base_entry.fields
+    assert FIELD_REPO_PATH not in final_entry.fields
+    assert AgentName("stream-drop-agent") not in final.cached_fields
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_stream_board_snapshot_final_matches_batch(
+    local_host: Host,
+    temp_git_repo: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The final streamed snapshot matches what the batch fetch produces."""
+    agent = create_test_agent_state(local_host, temp_git_repo, "stream-parity-agent")
+    agent.set_labels({"remote": "git@github.com:org/myrepo.git"})
+    sources: list[KanpanDataSource] = [RepoPathsDataSource(), GitInfoDataSource()]
+
+    batch = fetch_board_snapshot(temp_mngr_ctx, sources, {})
+    final = _collect_stream_updates(stream_board_snapshot, temp_mngr_ctx, sources)[-1]
+
+    batch_entry = {e.name: e for e in batch.snapshot.entries}[AgentName("stream-parity-agent")]
+    final_entry = {e.name: e for e in final.snapshot.entries}[AgentName("stream-parity-agent")]
+    assert set(final_entry.fields.keys()) == set(batch_entry.fields.keys())
+    assert final_entry.section == batch_entry.section
+    assert set(final.cached_fields.keys()) == set(batch.cached_fields.keys())
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_stream_local_snapshot_carries_forward_remote_fields_via_seed(
+    local_host: Host,
+    temp_git_repo: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A local streaming refresh keeps remote fields (skipped sources) via the seed."""
+    create_test_agent_state(local_host, temp_git_repo, "stream-local-agent")
+    seeded = {
+        AgentName("stream-local-agent"): {
+            FIELD_REPO_PATH: RepoPathField(path="seed/repo", created=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        }
+    }
+    updates = _collect_stream_updates(
+        stream_local_snapshot,
+        temp_mngr_ctx,
+        [GitInfoDataSource(), _FakeRemoteDataSource()],
+        seeded,
+    )
+
+    final_entry = {e.name: e for e in updates[-1].snapshot.entries}[AgentName("stream-local-agent")]
+    # The remote (repo_path) source is skipped, so its seeded value is carried forward.
+    carried = final_entry.fields[FIELD_REPO_PATH]
+    assert isinstance(carried, RepoPathField)
+    assert carried.path == "seed/repo"
+    # The local git source still ran and produced a fresh commits_ahead field.
+    assert FIELD_COMMITS_AHEAD in final_entry.fields
 
 
 # =============================================================================
