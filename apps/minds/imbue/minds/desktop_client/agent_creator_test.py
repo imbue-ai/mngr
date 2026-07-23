@@ -316,11 +316,11 @@ def test_build_mngr_create_command_points_lima_at_prebaked_image_when_provided()
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.LIMA,
         host_name=HostName("hello"),
-        prebaked_lima_image_qcow2_path=Path("/data/lima-images/image.qcow2"),
+        prebaked_lima_image_raw_path=Path("/data/lima-images/image.raw"),
     )
     joined = " ".join(command)
     assert "-S providers.lima.default_image_url_" in joined
-    assert "/data/lima-images/image.qcow2" in joined
+    assert "/data/lima-images/image.raw" in joined
 
 
 def test_build_mngr_create_command_omits_prebaked_image_override_when_unset() -> None:

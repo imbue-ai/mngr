@@ -1,3 +1,4 @@
+import time
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -5,16 +6,21 @@ from pathlib import Path
 
 import pytest
 from pydantic import AnyUrl
+from pydantic import Field
 
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.config.data_types import ClientEnvConfig
+from imbue.minds.desktop_client.lima_image_prefetch import DOWNLOAD_STALL_MIN_PROGRESS_BYTES
+from imbue.minds.desktop_client.lima_image_prefetch import DOWNLOAD_STALL_WINDOW_SECONDS
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImagePrefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_disabled
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.lima_image_prefetch import resolve_ready_prebaked_lima_image
 from imbue.minds.desktop_client.lima_image_prefetch import should_use_prebaked_lima_image
-from imbue.minds.errors import LimaImageDownloadError
+from imbue.minds.errors import LimaImageVerificationError
+from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
 from imbue.minds.lima_image.cache_layout import manifest_signature_url
 from imbue.minds.lima_image.cache_layout import manifest_url
 from imbue.minds.lima_image.data_types import LimaImageEntry
@@ -24,16 +30,17 @@ from imbue.minds.lima_image.data_types import LimaImageSource
 from imbue.minds.lima_image.data_types import ROOT_MANIFEST_SCHEMA_VERSION
 from imbue.minds.lima_image.data_types import RootManifest
 from imbue.minds.lima_image.mock_lima_image_test import AcceptingSignatureVerifier
-from imbue.minds.lima_image.mock_lima_image_test import CopyingImageFormatConverter
 from imbue.minds.lima_image.mock_lima_image_test import FixedRawChunkStore
 from imbue.minds.lima_image.mock_lima_image_test import InMemoryManifestFetcher
 from imbue.minds.lima_image.mock_lima_image_test import RecordingProgressSink
+from imbue.minds.lima_image.mock_lima_image_test import RejectingSignatureVerifier
 from imbue.minds.lima_image.primitives import ImageArch
 from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import Sha256Hex
 
 _DEFAULT_REPO = "https://github.com/imbue-ai/default-workspace-template.git"
 _TAG = "minds-v0.3.4"
+_COMMIT = "a" * 40
 _SOURCE = LimaImageSource(base_url="https://cdn.example/lima", public_key="RWkey")
 
 
@@ -45,12 +52,14 @@ def _gate(
     source: LimaImageSource | None = _SOURCE,
     is_dev_loop: bool = False,
     environ: Mapping[str, str] | None = None,
+    current_release_commit: str | None = None,
 ) -> bool:
     return should_use_prebaked_lima_image(
         is_lima_launch_mode=is_lima_launch_mode,
         repo_url=repo_url,
         branch_or_tag=branch_or_tag,
         current_release_tag=_TAG,
+        current_release_commit=current_release_commit,
         default_repo_url=_DEFAULT_REPO,
         source=source,
         is_dev_loop=is_dev_loop,
@@ -83,6 +92,24 @@ def test_gate_false_for_non_release_branch() -> None:
     assert _gate(branch_or_tag=None) is False
 
 
+def test_gate_true_for_the_release_tags_own_commit() -> None:
+    # CI pins the workspace to a SHA for reproducibility. The image is baked from a
+    # commit, so the tag's commit is the same content as the tag: requiring the tag's
+    # *name* would send every SHA-pinned create down the slow path, leaving the fast
+    # path untested by the very run that is supposed to exercise it.
+    assert _gate(branch_or_tag=_COMMIT, current_release_commit=_COMMIT) is True
+
+
+def test_gate_false_for_a_commit_that_is_not_the_release_tags() -> None:
+    assert _gate(branch_or_tag="b" * 40, current_release_commit=_COMMIT) is False
+
+
+def test_gate_false_for_a_sha_when_the_tag_could_not_be_resolved() -> None:
+    # An unresolvable tag must not open the gate to arbitrary SHAs; it just means
+    # SHA-pinned creates build in-VM, which is the safe direction.
+    assert _gate(branch_or_tag=_COMMIT, current_release_commit=None) is False
+
+
 def test_gate_false_when_kill_switch_set() -> None:
     assert _gate(environ={"MINDS_DISABLE_LIMA_IMAGE_CACHE": "1"}) is False
 
@@ -112,9 +139,9 @@ def test_make_source_requires_both_fields() -> None:
     assert source is not None and source.base_url == "https://cdn.example/lima"
 
 
-def test_setting_args_point_lima_at_local_qcow2() -> None:
-    args = prebaked_image_mngr_setting_args(ImageArch.X86_64, Path("/data/lima-images/img.qcow2"))
-    assert args == ["-S", "providers.lima.default_image_url_x86_64=/data/lima-images/img.qcow2"]
+def test_setting_args_point_lima_at_local_raw_image() -> None:
+    args = prebaked_image_mngr_setting_args(ImageArch.X86_64, Path("/data/lima-images/img.raw"))
+    assert args == ["-S", "providers.lima.default_image_url_x86_64=/data/lima-images/img.raw"]
 
 
 def _prefetcher(
@@ -122,6 +149,8 @@ def _prefetcher(
     chunk_store: FixedRawChunkStore,
     sink: RecordingProgressSink,
     cache_dir: Path,
+    stall_window_seconds: float = DOWNLOAD_STALL_WINDOW_SECONDS,
+    stall_min_progress_bytes: int = DOWNLOAD_STALL_MIN_PROGRESS_BYTES,
 ) -> LimaImagePrefetcher:
     return LimaImagePrefetcher(
         source=_SOURCE,
@@ -131,9 +160,40 @@ def _prefetcher(
         fetcher=fetcher,
         verifier=AcceptingSignatureVerifier(),
         chunk_store=chunk_store,
-        converter=CopyingImageFormatConverter(),
         progress_sink=sink,
+        stall_window_seconds=stall_window_seconds,
+        stall_min_progress_bytes=stall_min_progress_bytes,
     )
+
+
+class _GrowingImage(MutableModel):
+    """Grows the in-flight image on every progress poll, then flips the state to READY.
+
+    Stands in for a healthy desync extract: the bytes keep landing, so the waiter must
+    keep waiting rather than declaring the download stalled.
+    """
+
+    path: Path = Field(frozen=True, description="The in-flight image the waiter measures")
+    sink: RecordingProgressSink = Field(frozen=True, description="Where the terminal state is written")
+    ready_after_calls: int = Field(frozen=True, description="Polls to grow for before reporting READY")
+    raw_path: Path = Field(frozen=True, description="Path reported once READY")
+    calls: int = Field(default=0, description="Progress polls seen so far")
+
+    def __call__(self, fetched_bytes: int) -> None:
+        self.calls += 1
+        if self.calls >= self.ready_after_calls:
+            self.sink.write_state(
+                LimaImagePrefetchState(
+                    status=LimaImagePrefetchStatus.READY,
+                    minds_version=MindsImageVersion(_TAG),
+                    arch=ImageArch.X86_64,
+                    updated_at=datetime.now(timezone.utc),
+                    raw_path=self.raw_path,
+                )
+            )
+            return
+        with self.path.open("ab") as handle:
+            handle.write(b"y" * 4096)
 
 
 def test_ensure_once_records_failed_on_missing_published_objects(tmp_path: Path) -> None:
@@ -164,6 +224,30 @@ def test_ensure_once_records_failed_on_missing_published_objects(tmp_path: Path)
     assert state.error is not None
 
 
+def test_ensure_once_records_untrusted_when_the_signature_does_not_verify(tmp_path: Path) -> None:
+    # A fetch failure is worth retrying; bytes that do not verify are not. They must be a
+    # distinct status, because a create builds in-VM for the first and refuses for the second.
+    fetcher = InMemoryManifestFetcher()
+    fetcher.objects_by_url[manifest_url(_SOURCE.base_url, MindsImageVersion(_TAG))] = b"{}"
+    fetcher.objects_by_url[manifest_signature_url(_SOURCE.base_url, MindsImageVersion(_TAG))] = b"forged"
+
+    sink = RecordingProgressSink()
+    prefetcher = LimaImagePrefetcher(
+        source=_SOURCE,
+        minds_version=MindsImageVersion(_TAG),
+        arch=ImageArch.X86_64,
+        cache_dir=tmp_path,
+        fetcher=fetcher,
+        verifier=RejectingSignatureVerifier(),
+        chunk_store=FixedRawChunkStore(),
+        progress_sink=sink,
+    )
+    state = prefetcher.ensure_once()
+
+    assert state.status is LimaImagePrefetchStatus.UNTRUSTED
+    assert state.error is not None
+
+
 def test_wait_until_terminal_returns_ready(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
@@ -173,7 +257,7 @@ def test_wait_until_terminal_returns_ready(tmp_path: Path) -> None:
             minds_version=MindsImageVersion(_TAG),
             arch=ImageArch.X86_64,
             updated_at=datetime.now(timezone.utc),
-            qcow2_path=tmp_path / "image.qcow2",
+            raw_path=tmp_path / "image.raw",
         )
     )
     state = prefetcher.wait_until_terminal(timeout_seconds=1.0, poll_interval_seconds=0.01)
@@ -201,7 +285,7 @@ def _resolve(
 
 
 def _seed(
-    sink: RecordingProgressSink, status: LimaImagePrefetchStatus, *, qcow2_path: Path | None, error: str | None
+    sink: RecordingProgressSink, status: LimaImagePrefetchStatus, *, raw_path: Path | None, error: str | None
 ) -> None:
     sink.write_state(
         LimaImagePrefetchState(
@@ -209,7 +293,7 @@ def _seed(
             minds_version=MindsImageVersion(_TAG),
             arch=ImageArch.X86_64,
             updated_at=datetime.now(timezone.utc),
-            qcow2_path=qcow2_path,
+            raw_path=raw_path,
             error=error,
         )
     )
@@ -222,36 +306,206 @@ def test_resolve_returns_none_without_prefetcher() -> None:
 def test_resolve_returns_none_when_gate_false(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    _seed(sink, LimaImagePrefetchStatus.READY, qcow2_path=tmp_path / "i.qcow2", error=None)
+    _seed(sink, LimaImagePrefetchStatus.READY, raw_path=tmp_path / "i.raw", error=None)
     assert _resolve(prefetcher, branch_or_tag="main") is None
 
 
 def test_resolve_returns_path_when_ready(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    qcow2 = tmp_path / "image.qcow2"
-    _seed(sink, LimaImagePrefetchStatus.READY, qcow2_path=qcow2, error=None)
-    assert _resolve(prefetcher) == qcow2
+    raw = tmp_path / "image.raw"
+    raw.write_bytes(b"image")
+    _seed(sink, LimaImagePrefetchStatus.READY, raw_path=raw, error=None)
+    assert _resolve(prefetcher) == raw
+
+
+def test_resolve_builds_in_vm_when_the_ready_image_is_gone(tmp_path: Path) -> None:
+    # READY is a claim about the past: the file can be deleted afterwards (a cleaned cache, a
+    # pruned disk). Handing Lima a path to nothing fails the create with an obscure error.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    _seed(sink, LimaImagePrefetchStatus.READY, raw_path=tmp_path / "deleted.raw", error=None)
+    assert _resolve(prefetcher) is None
 
 
 def test_resolve_returns_none_when_version_unavailable(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    _seed(sink, LimaImagePrefetchStatus.VERSION_UNAVAILABLE, qcow2_path=None, error=None)
+    _seed(sink, LimaImagePrefetchStatus.VERSION_UNAVAILABLE, raw_path=None, error=None)
     assert _resolve(prefetcher) is None
 
 
-def test_resolve_raises_when_failed(tmp_path: Path) -> None:
+def test_resolve_builds_in_vm_when_the_image_could_not_be_downloaded(tmp_path: Path) -> None:
+    # A network drop is not a broken image, and the create has a working slow path. Failing it
+    # would leave the user worse off than if the pre-baked image had never existed -- and the
+    # prefetch retries with backoff, so a create landing in that window must not inherit it.
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    _seed(sink, LimaImagePrefetchStatus.FAILED, qcow2_path=None, error="network down")
-    with pytest.raises(LimaImageDownloadError):
+    _seed(sink, LimaImagePrefetchStatus.FAILED, raw_path=None, error="network down")
+    assert _resolve(prefetcher) is None
+
+
+def test_resolve_raises_when_the_image_does_not_verify(tmp_path: Path) -> None:
+    # The one case that must be loud: the published bytes do not match the signed manifest.
+    # Booting them is out of the question, and silently building in-VM would hide it.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    _seed(sink, LimaImagePrefetchStatus.UNTRUSTED, raw_path=None, error="signature does not verify")
+    with pytest.raises(LimaImageVerificationError):
         _resolve(prefetcher)
 
 
-def test_resolve_raises_on_timeout_without_terminal_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "in_progress_status",
+    (
+        LimaImagePrefetchStatus.FETCHING_MANIFEST,
+        LimaImagePrefetchStatus.DOWNLOADING,
+        LimaImagePrefetchStatus.VERIFYING,
+    ),
+)
+def test_resolve_builds_in_vm_when_the_image_is_still_being_fetched(
+    tmp_path: Path, in_progress_status: LimaImagePrefetchStatus
+) -> None:
+    # A download that is merely slow (a big image on a thin connection) must not fail the
+    # create: without the pre-baked image the user would simply have built in-VM, so that
+    # is what a create falls back to. The prefetch keeps running for the next one.
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    # No terminal state ever written -> wait times out -> retryable raise.
-    with pytest.raises(LimaImageDownloadError):
-        _resolve(prefetcher, wait_timeout_seconds=0.05)
+    _seed(sink, in_progress_status, raw_path=None, error=None)
+    assert _resolve(prefetcher, wait_timeout_seconds=0.05) is None
+
+
+def test_resolve_builds_in_vm_when_no_progress_was_ever_recorded(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    assert _resolve(prefetcher, wait_timeout_seconds=0.05) is None
+
+
+def test_a_waiting_create_is_told_how_much_of_the_image_has_landed(tmp_path: Path) -> None:
+    # desync only draws a progress bar on a tty, so a packaged app gets no output from the
+    # download: without this the create blocks for minutes showing nothing at all.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assembling = layout.assembling_raw_path(MindsImageVersion(_TAG), ImageArch.X86_64)
+    assembling.parent.mkdir(parents=True, exist_ok=True)
+    assembling.write_bytes(b"x" * 8192)
+    _seed(sink, LimaImagePrefetchStatus.DOWNLOADING, raw_path=None, error=None)
+
+    reported: list[int] = []
+    resolve_ready_prebaked_lima_image(
+        prefetcher=prefetcher,
+        is_lima_launch_mode=True,
+        repo_url=_DEFAULT_REPO,
+        branch_or_tag=_TAG,
+        current_release_tag=_TAG,
+        default_repo_url=_DEFAULT_REPO,
+        is_dev_loop=False,
+        environ={},
+        wait_timeout_seconds=0.05,
+        poll_interval_seconds=0.01,
+        on_download_progress=reported.append,
+    )
+
+    assert reported, "a create blocked on a downloading image must be told it is progressing"
+    # Allocated blocks, not the apparent size: the image is sparse.
+    assert all(fetched > 0 for fetched in reported)
+
+
+def test_no_download_progress_is_reported_when_nothing_is_being_assembled(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    assert prefetcher.downloaded_bytes() is None
+
+
+def test_a_stalled_download_stops_the_wait_instead_of_sitting_out_the_timeout(tmp_path: Path) -> None:
+    # A download that is not advancing is not going to arrive, and every second spent waiting
+    # on it is one the user could have spent building the workspace in-VM. The create must give
+    # up as soon as it stops moving -- not at the far end of the overall timeout.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(
+        InMemoryManifestFetcher(),
+        FixedRawChunkStore(),
+        sink,
+        tmp_path,
+        stall_window_seconds=0.05,
+        stall_min_progress_bytes=1024,
+    )
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assembling = layout.assembling_raw_path(MindsImageVersion(_TAG), ImageArch.X86_64)
+    assembling.parent.mkdir(parents=True, exist_ok=True)
+    # Written once and never again: the download is wedged.
+    assembling.write_bytes(b"x" * 4096)
+    _seed(sink, LimaImagePrefetchStatus.DOWNLOADING, raw_path=None, error=None)
+
+    started_at = time.monotonic()
+    state = prefetcher.wait_until_terminal(timeout_seconds=30.0, poll_interval_seconds=0.01)
+    elapsed = time.monotonic() - started_at
+
+    assert state is not None and state.status is LimaImagePrefetchStatus.DOWNLOADING
+    assert elapsed < 5.0, "it must bail on the stall, not wait out the 30s timeout"
+
+
+def test_a_create_that_falls_back_says_why(tmp_path: Path) -> None:
+    # The user watched the download report bytes and then stop. Falling back silently would
+    # leave them staring at a create that got slow for no stated reason.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(
+        InMemoryManifestFetcher(),
+        FixedRawChunkStore(),
+        sink,
+        tmp_path,
+        stall_window_seconds=0.05,
+        stall_min_progress_bytes=1024,
+    )
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assembling = layout.assembling_raw_path(MindsImageVersion(_TAG), ImageArch.X86_64)
+    assembling.parent.mkdir(parents=True, exist_ok=True)
+    assembling.write_bytes(b"x" * 4096)
+    _seed(sink, LimaImagePrefetchStatus.DOWNLOADING, raw_path=None, error=None)
+
+    reasons: list[str] = []
+    resolved = resolve_ready_prebaked_lima_image(
+        prefetcher=prefetcher,
+        is_lima_launch_mode=True,
+        repo_url=_DEFAULT_REPO,
+        branch_or_tag=_TAG,
+        current_release_tag=_TAG,
+        default_repo_url=_DEFAULT_REPO,
+        is_dev_loop=False,
+        environ={},
+        wait_timeout_seconds=30.0,
+        poll_interval_seconds=0.01,
+        on_fallback_to_in_vm=reasons.append,
+    )
+
+    assert resolved is None
+    assert reasons and "downloading" in reasons[0]
+
+
+def test_a_download_that_keeps_advancing_is_not_treated_as_stalled(tmp_path: Path) -> None:
+    # The flip side: a working download must never be cut off. It keeps growing past the
+    # per-window floor, so the wait stays alive until the image is READY.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(
+        InMemoryManifestFetcher(),
+        FixedRawChunkStore(),
+        sink,
+        tmp_path,
+        stall_window_seconds=0.02,
+        stall_min_progress_bytes=8,
+    )
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assembling = layout.assembling_raw_path(MindsImageVersion(_TAG), ImageArch.X86_64)
+    assembling.parent.mkdir(parents=True, exist_ok=True)
+    assembling.write_bytes(b"x" * 4096)
+    _seed(sink, LimaImagePrefetchStatus.DOWNLOADING, raw_path=None, error=None)
+
+    grower = _GrowingImage(path=assembling, sink=sink, ready_after_calls=25, raw_path=tmp_path / "image.raw")
+    state = prefetcher.wait_until_terminal(
+        timeout_seconds=30.0, poll_interval_seconds=0.01, on_download_progress=grower
+    )
+
+    assert state is not None and state.status is LimaImagePrefetchStatus.READY, (
+        "a download that is still advancing must be waited for, not abandoned"
+    )

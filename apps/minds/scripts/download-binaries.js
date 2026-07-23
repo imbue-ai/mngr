@@ -30,8 +30,8 @@ const RESTIC_VERSION = '0.18.1';
 // Pinned dugite-native git payload (macOS/Linux). Single source of truth for
 // the tag, version, per-target asset names, and SHA256 hashes.
 const GIT_MANIFEST_PATH = path.join(__dirname, 'git-manifest.json');
-// desync: content-defined-chunking client used to fetch the pre-baked Lima image
-// (issue #2306). Only bundled on macOS/Linux (the Lima launch mode's platforms).
+// desync: content-defined-chunking client used to fetch the pre-baked Lima image.
+// Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
 
 /**
@@ -41,10 +41,11 @@ const DESYNC_VERSION = '1.0.3';
  * - uv: https://github.com/astral-sh/uv/releases/download/<version>/<file>.sha256
  * - MinGit: https://github.com/git-for-windows/git/releases/tag/<tag> release notes
  * - restic: https://github.com/restic/restic/releases/download/v<version>/SHA256SUMS
+ * - desync: https://github.com/folbricht/desync/releases/tag/v<version>
  *
- * Update this map whenever UV_VERSION, GIT_FOR_WINDOWS_VERSION, or
- * RESTIC_VERSION changes. If a download hash doesn't match an entry
- * here, the script aborts before extracting or executing any
+ * Update this map whenever UV_VERSION, GIT_FOR_WINDOWS_VERSION,
+ * RESTIC_VERSION, or DESYNC_VERSION changes. If a download hash doesn't
+ * match an entry here, the script aborts before extracting or executing any
  * downloaded bytes.
  */
 const EXPECTED_SHA256 = {
@@ -703,8 +704,8 @@ function assertUploadFitsToDesktopLimit(appRoot, todesktopConfig) {
  * pnpm and Node are NOT provisioned here -- ToDesktop's `pnpmVersion`
  * and `nodeVersion` fields in `todesktop.js` cover that. This hook only
  * handles binaries ToDesktop has no first-class knob for: `uv`, `git`,
- * and `restic` (used by the desktop client to manage per-workspace
- * backups).
+ * `restic` (per-workspace backups), and, for the Lima launch mode on
+ * macOS/Linux, `desync` (fetches the pre-baked Lima image).
  */
 async function downloadBinaries(resourcesDir) {
   const { platform, arch } = getPlatformArch();

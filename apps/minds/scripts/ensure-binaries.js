@@ -27,6 +27,14 @@ const REQUIRED = [
   path.join(RESOURCES, 'desync', 'desync'),
 ];
 
+// Requiring a path the downloader deliberately skips would leave it missing forever
+// and re-trigger the full download on every start, so mirror the skip exactly:
+// downloadDesync bails on win32 (no Lima launch mode).
+const IS_WIN32 = process.platform === 'win32';
+if (!IS_WIN32) {
+  REQUIRED.push(path.join(RESOURCES, 'desync', 'desync'));
+}
+
 const missing = REQUIRED.filter((p) => !fs.existsSync(p));
 
 // The bundled git payload is pinned by scripts/git-manifest.json. A dev machine

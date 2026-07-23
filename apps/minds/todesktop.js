@@ -16,8 +16,8 @@ module.exports = {
   // because `mac.additionalBinariesToSign` paths must exist in the uploaded
   // app-files tree (the builder's signing preflight rejects missing entries,
   // and nothing recreates lima cloud-side), so subtrees holding a signed
-  // binary stay in. scripts/build.js estimates the resulting upload and
-  // fails the build when it approaches uploadSizeLimit.
+  // binary (lima/bin, restic, desync) stay in. scripts/build.js estimates the
+  // resulting upload and fails the build when it approaches uploadSizeLimit.
   appFiles: [
     '**',
     '!resources/git/**',
@@ -25,11 +25,10 @@ module.exports = {
     '!resources/lima/libexec/**',
     '!resources/lima/share/**',
     '!resources/uv/**',
-    '!resources/desync/**',
     '!resources/wheels/**',
     '!resources/pyproject/**',
   ],
-  uploadSizeLimit: 600,
+  uploadSizeLimit: 650,
   nodeVersion: pkg.engines.node,
   pnpmVersion: pkg.engines.pnpm,
   extraResources: [{ from: 'resources/', to: '.' }],
@@ -38,6 +37,7 @@ module.exports = {
     additionalBinariesToSign: [
       'resources/lima/bin/limactl',
       'resources/restic/restic',
+      'resources/desync/desync',
     ],
   },
 };

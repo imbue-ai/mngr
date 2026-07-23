@@ -59,18 +59,6 @@ class ImageChunkStoreInterface(MutableModel, ABC):
         """
 
 
-class ImageFormatConverterInterface(MutableModel, ABC):
-    """Converts a raw disk image into the qcow2 format Lima consumes."""
-
-    @abstractmethod
-    def convert_raw_to_qcow2(self, *, raw_file: Path, qcow2_file: Path) -> None:
-        """Convert ``raw_file`` to qcow2 at ``qcow2_file``. Raises ``LimaImageToolError`` on failure."""
-
-    @abstractmethod
-    def convert_qcow2_to_raw(self, *, qcow2_file: Path, raw_file: Path) -> None:
-        """Convert ``qcow2_file`` back to a raw image at ``raw_file`` (used to seed the next upgrade)."""
-
-
 class LimaImageProgressSinkInterface(MutableModel, ABC):
     """Persists the ensure-image operation's progress for the create gate to read."""
 
