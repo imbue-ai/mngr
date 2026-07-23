@@ -104,7 +104,7 @@ _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 # ``LATCHKEY_VERSION``). 2.18.0 was the first release with the ``auth prepare``
 # subcommand, which the Minds Google OAuth flow (:meth:`Latchkey.auth_prepare`)
 # depends on.
-LATCHKEY_MIN_VERSION: Final[str] = "3.0.0"
+LATCHKEY_MIN_VERSION: Final[str] = "3.0.1"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
