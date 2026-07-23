@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
@@ -109,6 +110,21 @@ class WorkspaceFileSharingGrant(FrozenModel):
     paths: tuple[SharedPath, ...] = Field(description="Shared paths with their access level, sorted by path.")
 
 
+# Label shown for a service's single unnamed "default" account (latchkey keys it
+# by the empty string). Users never typed a name for it, so we show a neutral
+# placeholder rather than an empty row.
+_DEFAULT_ACCOUNT_LABEL = "Default account"
+
+
+class ServiceAccount(FrozenModel):
+    """One signed-in account for a service, shown under the service's Connectors header."""
+
+    account: str = Field(
+        description='Latchkey account key (an e-mail / handle; ``""`` for the unnamed default); the disconnect key.',
+    )
+    label: str = Field(description="User-facing account label (the default account reads as ``Default account``).")
+
+
 class WorkspaceServiceGrant(FrozenModel):
     """The permissions a single workspace's host has been granted for one service."""
 
@@ -126,6 +142,13 @@ class ServicePermissionOverview(FrozenModel):
 
     service_name: str = Field(description="Raw service name (e.g. ``slack``); used as the revoke action key.")
     display_name: str = Field(description="Human-readable service label shown as the section header.")
+    accounts: tuple[ServiceAccount, ...] = Field(
+        default=(),
+        description=(
+            "Signed-in accounts for this service, read from ``latchkey services info --offline``. "
+            "Empty when the service has a grant but no stored credentials."
+        ),
+    )
     workspace_grants: tuple[WorkspaceServiceGrant, ...] = Field(
         description="One entry per active workspace that has at least one permission for this service.",
     )
@@ -259,10 +282,47 @@ def build_permission_overview(
                 ServicePermissionOverview(
                     service_name=service_name,
                     display_name=service_infos[0].display_name,
+                    accounts=_service_accounts(latchkey, service_name),
                     workspace_grants=tuple(grants),
                 )
             )
     return tuple(sorted(overviews, key=lambda overview: overview.display_name.lower()))
+
+
+def _account_label(account: str) -> str:
+    """Render a latchkey account key as a user-facing label (default account is unnamed)."""
+    return _DEFAULT_ACCOUNT_LABEL if account == DEFAULT_ACCOUNT else account
+
+
+def _service_accounts(latchkey: Latchkey, service_name: str) -> tuple[ServiceAccount, ...]:
+    """List the signed-in accounts for one service via ``latchkey services info --offline``.
+
+    ``--offline`` reports the *stored* accounts without a per-account network
+    round-trip, which is all the settings page needs (it lists accounts, it does
+    not validate them). Accounts are sorted for a stable UI, with the unnamed
+    default account (if any) shown last.
+    """
+    accounts = latchkey.services_info(service_name, is_offline=True).accounts
+    return tuple(
+        ServiceAccount(account=account.account, label=_account_label(account.account))
+        for account in sorted(accounts, key=lambda entry: (entry.account == DEFAULT_ACCOUNT, entry.account.lower()))
+    )
+
+
+def disconnect_account(latchkey: Latchkey, service_name: str, account: str) -> bool:
+    """Clear one account's stored credentials for ``service_name``.
+
+    Runs ``latchkey auth clear <service> --account <account>`` (the default
+    account is addressed with the empty string). Returns ``True`` when the
+    service has no stored accounts left afterwards, so the caller can trigger the
+    "revoke all" cleanup. Raises :class:`PermissionOverviewError` if the clear
+    command fails.
+    """
+    is_success, detail = latchkey.auth_clear(service_name, account=account)
+    if not is_success:
+        raise PermissionOverviewError(f"Could not disconnect account '{account or 'default'}': {detail}")
+    remaining = latchkey.services_info(service_name, is_offline=True).accounts
+    return len(remaining) == 0
 
 
 def _parse_file_sharing_permission(permission_name: str) -> tuple[str, str] | None:

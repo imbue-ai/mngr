@@ -1816,7 +1816,10 @@ def render_settings_page(
     ``services_overview`` is a sequence of
     :class:`~imbue.minds.desktop_client.latchkey.permission_overview.ServicePermissionOverview`
     describing the predefined-service grants held across all active workspaces
-    (empty when nothing is granted). ``file_sharing_grants`` is a sequence of
+    (empty when nothing is granted); each entry also carries the service's
+    signed-in ``accounts``, which the Connectors panel lists above the
+    per-workspace grants (with "+ Add account" and per-account "Disconnect"
+    actions). ``file_sharing_grants`` is a sequence of
     :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceFileSharingGrant`
     describing the file-sharing access granted per workspace, rendered as a
     separate section below the services. ``workspace_delegation_grants`` is a

@@ -26,10 +26,12 @@ import threading
 import time
 from collections.abc import Collection
 from collections.abc import Mapping
+from collections.abc import Sequence
 from enum import auto
 from importlib import resources
 from pathlib import Path
 from typing import Final
+from typing import cast
 
 from loguru import logger
 from packaging.version import InvalidVersion
@@ -184,6 +186,20 @@ _CREDENTIAL_STATUS_BY_LATCHKEY_VALUE: Final[dict[str, CredentialStatus]] = {
 LATCHKEY_AUTH_OPTION_BROWSER: Final[str] = "browser"
 LATCHKEY_AUTH_OPTION_SET: Final[str] = "set"
 
+# Env var the upstream ``latchkey`` CLI (>= 3.0.0) reads to run browser auth
+# flows without persisting or reusing any saved browser session state. We set
+# it for the "Add account" flow so the user always lands on a fresh sign-in
+# screen and can log in to a brand-new account instead of being silently
+# re-authenticated as the account whose session the browser happens to hold.
+LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR: Final[str] = "LATCHKEY_EPHEMERAL_BROWSER"
+
+# Key latchkey uses for a service's single unnamed "default" account in the
+# ``credentials`` object of ``services info`` output (and everywhere else an
+# account is addressed). Distinct from "no account at all": a service with the
+# empty-string account has one stored credential set that was saved without an
+# explicit account name.
+DEFAULT_ACCOUNT: Final[str] = ""
+
 # Google services that authenticate via the Minds-provided OAuth client (the
 # browser / consent-screen flow). ``google-directions`` is deliberately
 # excluded: it authenticates with an API key (latchkey ``set`` auth), not
@@ -213,11 +229,33 @@ MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "991889009876-ms5ln5jnvqmsrgpmi2nipkv
 MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
 
 
+class ServiceAccountCredential(FrozenModel):
+    """One stored account's credential state for a service.
+
+    latchkey (>= 3.0.0) stores credentials per account: ``services info`` now
+    returns a ``credentials`` object keyed by account name, with the single
+    unnamed "default" account keyed by the empty string (:data:`DEFAULT_ACCOUNT`).
+    """
+
+    account: str = Field(description='Account name (an e-mail, workspace handle, ...); ``""`` for the default.')
+    credential_status: CredentialStatus = Field(description="Credential state latchkey reports for this account.")
+
+
 class LatchkeyServiceInfo(FrozenModel):
     """Parsed output of ``latchkey services info <service>``."""
 
     credential_status: CredentialStatus = Field(
-        description="Credential state reported by latchkey.",
+        description=(
+            "Aggregate credential state across every stored account (see "
+            ":func:`_aggregate_credential_status`). ``MISSING`` when no account is stored at all."
+        ),
+    )
+    accounts: tuple[ServiceAccountCredential, ...] = Field(
+        default=(),
+        description=(
+            "Every stored account for the service, in latchkey's iteration order. Empty when the "
+            "service has no stored credentials (``credentials == {}``)."
+        ),
     )
     auth_options: frozenset[str] = Field(
         description=(
@@ -236,6 +274,7 @@ class LatchkeyServiceInfo(FrozenModel):
 
 _UNKNOWN_LATCHKEY_SERVICE_INFO: Final[LatchkeyServiceInfo] = LatchkeyServiceInfo(
     credential_status=CredentialStatus.UNKNOWN,
+    accounts=(),
     auth_options=frozenset(),
     set_credentials_example=None,
 )
@@ -286,12 +325,11 @@ def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
     return _is_port_listening(host, port, timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
 
 
-def _parse_credential_status(payload: Mapping[str, object], service_name: str) -> CredentialStatus:
-    """Pull ``credentialStatus`` out of ``payload``, defaulting to UNKNOWN on any oddity."""
-    raw_status = payload.get("credentialStatus")
+def _parse_one_credential_status(raw_status: object, service_name: str) -> CredentialStatus:
+    """Map a single account's ``credentialStatus`` string to the enum, UNKNOWN on any oddity."""
     if not isinstance(raw_status, str):
         logger.warning(
-            "'latchkey services info {}' did not include a credentialStatus string",
+            "'latchkey services info {}' account entry did not include a credentialStatus string",
             service_name,
         )
         return CredentialStatus.UNKNOWN
@@ -304,6 +342,64 @@ def _parse_credential_status(payload: Mapping[str, object], service_name: str) -
         )
         return CredentialStatus.UNKNOWN
     return status
+
+
+def _parse_accounts(payload: Mapping[str, object], service_name: str) -> tuple[ServiceAccountCredential, ...]:
+    """Pull the per-account ``credentials`` object out of ``payload``.
+
+    latchkey 3.0.0 replaced the single top-level ``credentialStatus`` field with
+    a ``credentials`` object keyed by account name (the default account keyed by
+    the empty string). A service with no stored credentials reports ``{}``. Any
+    missing/malformed ``credentials`` value yields an empty tuple so callers see
+    "no accounts" (which :func:`_aggregate_credential_status` maps to MISSING).
+    """
+    raw_credentials = payload.get("credentials")
+    if raw_credentials is None:
+        return ()
+    if not isinstance(raw_credentials, Mapping):
+        logger.warning(
+            "'latchkey services info {}' credentials was not an object: {!r}",
+            service_name,
+            raw_credentials,
+        )
+        return ()
+    credentials = cast(Mapping[str, object], raw_credentials)
+    accounts: list[ServiceAccountCredential] = []
+    for account, entry in credentials.items():
+        raw_status: object = None
+        if isinstance(entry, Mapping):
+            raw_status = cast(Mapping[str, object], entry).get("credentialStatus")
+        accounts.append(
+            ServiceAccountCredential(
+                account=str(account),
+                credential_status=_parse_one_credential_status(raw_status, service_name),
+            )
+        )
+    return tuple(accounts)
+
+
+def _aggregate_credential_status(accounts: Sequence[ServiceAccountCredential]) -> CredentialStatus:
+    """Reduce the per-account statuses to a single service-level status.
+
+    The grant flow only asks one yes/no question of this value -- "must I set up
+    credentials before granting?" (:func:`predefined._needs_credential_setup`
+    treats MISSING / INVALID as "yes"). So the aggregate is optimistic about a
+    usable credential existing:
+
+    * no accounts at all -> ``MISSING`` (nothing stored; sign-in required);
+    * any account ``VALID`` -> ``VALID``;
+    * otherwise any ``UNKNOWN`` -> ``UNKNOWN`` (present but unverifiable, e.g. a
+      ``rawCurl`` token -- do not force a re-sign-in);
+    * otherwise ``INVALID`` (every stored account is known-broken).
+    """
+    if not accounts:
+        return CredentialStatus.MISSING
+    statuses = {account.credential_status for account in accounts}
+    if CredentialStatus.VALID in statuses:
+        return CredentialStatus.VALID
+    if CredentialStatus.UNKNOWN in statuses:
+        return CredentialStatus.UNKNOWN
+    return CredentialStatus.INVALID
 
 
 def _parse_auth_options(payload: Mapping[str, object], service_name: str) -> frozenset[str]:
@@ -854,11 +950,14 @@ class Latchkey(MutableModel):
         """Run ``latchkey services info <service>`` and return the parsed output.
 
         Latchkey emits pretty-printed JSON to stdout; we parse it and pull
-        out ``credentialStatus``, ``authOptions``, and ``setCredentialsExample``.
-        Any failure (process error, malformed output, unrecognized status
-        string) yields a service info with ``CredentialStatus.UNKNOWN`` and
-        empty ``auth_options``, so the caller can fall back to its legacy
-        behaviour rather than wrongly assuming credentials are valid.
+        out the per-account ``credentials`` object, ``authOptions``, and
+        ``setCredentialsExample``. The per-account statuses are reduced to an
+        aggregate ``credential_status`` (see :func:`_aggregate_credential_status`)
+        and the individual accounts are exposed on ``accounts``. Any failure
+        (process error, malformed output, unrecognized status string) yields a
+        service info with ``CredentialStatus.UNKNOWN``, no accounts, and empty
+        ``auth_options``, so the caller can fall back to its legacy behaviour
+        rather than wrongly assuming credentials are valid.
 
         When ``is_offline`` is set, ``--offline`` is passed so latchkey
         reports the *stored* credential state without any network
@@ -911,15 +1010,52 @@ class Latchkey(MutableModel):
             logger.warning("'latchkey services info {}' returned non-object JSON", service_name)
             return _UNKNOWN_LATCHKEY_SERVICE_INFO
 
+        accounts = _parse_accounts(payload, service_name)
         return LatchkeyServiceInfo(
-            credential_status=_parse_credential_status(payload, service_name),
+            credential_status=_aggregate_credential_status(accounts),
+            accounts=accounts,
             auth_options=_parse_auth_options(payload, service_name),
             set_credentials_example=_parse_set_credentials_example(payload, service_name),
         )
 
     # -- Interactive auth ----------------------------------------------------
 
-    def auth_browser(self, service_name: str) -> tuple[bool, str]:
+    def add_account(self, service_name: str) -> tuple[bool, str]:
+        """Sign in to a *new* account for ``service_name`` from the settings page.
+
+        Runs the same sign-in flow as an Approve (:meth:`auth_browser`) but with
+        the ephemeral-browser mode enabled (:data:`LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR`),
+        so the browser starts with no saved session and the user lands on a
+        fresh sign-in screen -- letting them add a genuinely new account rather
+        than being silently re-authenticated as an already-signed-in one.
+
+        For a Minds Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
+        if signing in with the official (Minds-provided) client does not
+        succeed, always fall back to a fresh self-setup ``auth browser-prepare``
+        step and retry the ephemeral sign-in, so the user can register their own
+        OAuth client. Returns ``(is_success, detail)``.
+        """
+        is_success, detail = self.auth_browser(service_name, is_ephemeral=True)
+        if is_success:
+            return True, ""
+        if service_name not in MINDS_GOOGLE_OAUTH_SERVICES:
+            return False, detail
+        logger.info(
+            "Adding a Google account for {} via the Minds client did not succeed; "
+            "running a fresh 'auth browser-prepare' and retrying",
+            service_name,
+        )
+        is_prepared, prepare_detail = self._run_latchkey_auth_command(
+            log_label="auth browser-prepare",
+            argv=["auth", "browser-prepare", service_name],
+            service_name=service_name,
+            is_ephemeral=True,
+        )
+        if not is_prepared:
+            return False, prepare_detail
+        return self.auth_browser_login(service_name, is_ephemeral=True)
+
+    def auth_browser(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
         """Run ``latchkey auth browser <service>`` and report success or failure.
 
         Returns ``(True, "")`` on a clean exit. Any non-zero exit -- whether
@@ -946,7 +1082,7 @@ class Latchkey(MutableModel):
         registered up front, keeps the two common cases (already registered and
         no registration neeeded) to a single latchkey call.
         """
-        is_success, detail = self.auth_browser_login(service_name)
+        is_success, detail = self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
         if is_success:
             return True, ""
         if "latchkey auth browser-prepare" not in detail.lower():
@@ -955,7 +1091,9 @@ class Latchkey(MutableModel):
         # hint means). For a Minds Google OAuth service, prefer the Minds client
         # before offering the user the self-setup flow.
         if service_name in MINDS_GOOGLE_OAUTH_SERVICES:
-            is_minds_success, minds_detail = self._authenticate_with_minds_google_client(service_name)
+            is_minds_success, minds_detail = self._authenticate_with_minds_google_client(
+                service_name, is_ephemeral=is_ephemeral
+            )
             if is_minds_success:
                 return True, minds_detail
         logger.info(
@@ -966,12 +1104,15 @@ class Latchkey(MutableModel):
             log_label="auth browser-prepare",
             argv=["auth", "browser-prepare", service_name],
             service_name=service_name,
+            is_ephemeral=is_ephemeral,
         )
         if not is_prepared:
             return False, prepare_detail
-        return self.auth_browser_login(service_name)
+        return self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
 
-    def _authenticate_with_minds_google_client(self, service_name: str) -> tuple[bool, str]:
+    def _authenticate_with_minds_google_client(
+        self, service_name: str, *, is_ephemeral: bool = False
+    ) -> tuple[bool, str]:
         """Register the Minds Google OAuth client and retry the bare sign-in.
 
         Reached from :meth:`auth_browser` for a service in
@@ -994,15 +1135,16 @@ class Latchkey(MutableModel):
         )
         if not is_prepared:
             return False, prepare_detail
-        is_success, login_detail = self.auth_browser_login(service_name)
+        is_success, login_detail = self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
         if is_success:
             return True, login_detail
         # The Minds client we just registered did not yield a working sign-in;
-        # clear it so the self-setup fallback's browser-prepare can run.
-        self.auth_clear(service_name)
+        # clear it (credentials *and* the prepared client, via ``--all``) so the
+        # self-setup fallback's browser-prepare can run from a clean slate.
+        self.auth_clear(service_name, is_all=True)
         return False, login_detail
 
-    def auth_browser_login(self, service_name: str) -> tuple[bool, str]:
+    def auth_browser_login(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
         """Run a single ``latchkey auth browser <service>`` with no preparation fallback.
 
         Unlike :meth:`auth_browser`, this never auto-runs ``auth
@@ -1016,6 +1158,7 @@ class Latchkey(MutableModel):
             log_label="auth browser",
             argv=["auth", "browser", service_name],
             service_name=service_name,
+            is_ephemeral=is_ephemeral,
         )
 
     def auth_prepare(self, service_name: str, client_id: str, client_secret: str) -> tuple[bool, str]:
@@ -1035,20 +1178,48 @@ class Latchkey(MutableModel):
             service_name=service_name,
         )
 
-    def auth_clear(self, service_name: str) -> tuple[bool, str]:
-        """Clear the stored credentials (and registered client) for a service.
+    def auth_clear(
+        self,
+        service_name: str,
+        *,
+        account: str | None = None,
+        is_all: bool = False,
+    ) -> tuple[bool, str]:
+        """Clear stored credentials for a service, one account or all of them.
 
-        Runs ``latchkey auth clear -y <service>``. Used to discard a failed
-        OAuth client registration (e.g. the Minds client left behind by
-        :meth:`auth_prepare`) so the self-setup fallback can start clean:
-        :meth:`auth_browser` only runs ``auth browser-prepare`` when *no*
-        client is registered, so a stuck client would otherwise block it.
-        Clearing an already-empty service is a harmless no-op (exit 0).
-        Returns ``(is_success, detail)``.
+        latchkey 3.0.0 made ``auth clear`` account-aware:
+
+        * ``is_all=True`` runs ``latchkey auth clear -y <service> --all``, wiping
+          every account's credentials *and* the service's prepared OAuth client.
+          This is what discards a failed Minds client registration (left behind
+          by :meth:`auth_prepare`) so the self-setup fallback can start clean --
+          plain ``auth clear`` no longer touches the preparation.
+        * ``account`` (with ``is_all=False``) runs
+          ``latchkey auth clear -y <service> --account <account>``, clearing just
+          that one account. The default (unnamed) account is addressed with
+          :data:`DEFAULT_ACCOUNT` (the empty string). Required when the service
+          has more than one stored account, since latchkey refuses an ambiguous
+          clear.
+        * neither: runs the bare ``latchkey auth clear -y <service>``, which
+          clears the single stored account (erroring if the service is
+          ambiguous).
+
+        ``is_all`` and ``account`` are mutually exclusive; ``is_all`` wins if
+        both are somehow passed. Clearing an already-empty service is a harmless
+        no-op (exit 0). Returns ``(is_success, detail)``.
         """
+        argv = ["auth", "clear", "-y", service_name]
+        if is_all:
+            argv.append("--all")
+        elif account is not None:
+            argv.extend(["--account", account])
+        else:
+            # Bare clear: latchkey resolves the single stored account itself
+            # (and errors if the service has more than one).
+            pass
         return self._run_latchkey_auth_command(
             log_label="auth clear",
-            argv=["auth", "clear", "-y", service_name],
+            argv=argv,
             service_name=service_name,
         )
 
@@ -1057,14 +1228,24 @@ class Latchkey(MutableModel):
         log_label: str,
         argv: list[str],
         service_name: str,
+        is_ephemeral: bool = False,
     ) -> tuple[bool, str]:
         """Run a single ``latchkey auth ...`` subcommand and translate its exit into ``(is_success, detail)``.
 
         ``log_label`` is the human-readable name of the subcommand
         (e.g. ``"auth browser"``, ``"auth browser-prepare"``) used in
         log lines and the generic failure-message fallback.
+
+        When ``is_ephemeral`` is set, :data:`LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR`
+        is exported to the child so any browser flow starts from a clean session
+        (used by :meth:`add_account`).
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        if is_ephemeral and env is not None:
+            # ``_build_env_with_latchkey_directory`` only returns ``None`` when
+            # neither a directory nor an encryption key is set; here we always
+            # pass an encryption key, so ``env`` is a real dict we can extend.
+            env[LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR] = "1"
         cg = ConcurrencyGroup(name=f"latchkey-{log_label.replace(' ', '-')}")
         with cg:
             # No timeout: ``auth browser`` waits on a real human

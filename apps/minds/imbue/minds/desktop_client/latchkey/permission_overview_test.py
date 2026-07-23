@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOv
 from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
@@ -19,7 +20,10 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_works
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -479,3 +483,114 @@ def test_workspace_parser_round_trips_canonical_gateway_names(tmp_path: Path) ->
     assert verbs["read"].is_all_workspaces and verbs["destroy"].is_all_workspaces
     assert verbs["recover"].target_names == (target,)
     assert verbs["backups-export"].target_names == (target,)
+
+
+# -- Connector accounts (services info --offline) --
+
+
+class _AccountsLatchkey(Latchkey):
+    """``Latchkey`` double whose ``services_info`` / ``auth_clear`` operate on an in-memory account map.
+
+    ``services_info(--offline)`` reports the configured accounts for a service;
+    ``auth_clear`` records each call and removes the named account so
+    :func:`disconnect_account` sees the updated state on its follow-up read.
+    """
+
+    accounts_by_service: dict[str, list[str]] = Field(default_factory=dict)
+    cleared_calls: list[tuple[str, str | None]] = Field(default_factory=list)
+
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
+        del is_offline
+        accounts = tuple(
+            ServiceAccountCredential(account=account, credential_status=CredentialStatus.VALID)
+            for account in self.accounts_by_service.get(service_name, [])
+        )
+        return LatchkeyServiceInfo(
+            credential_status=CredentialStatus.VALID if accounts else CredentialStatus.MISSING,
+            accounts=accounts,
+            auth_options=frozenset({"browser", "set"}),
+            set_credentials_example=None,
+        )
+
+    def auth_clear(
+        self,
+        service_name: str,
+        *,
+        account: str | None = None,
+        is_all: bool = False,
+    ) -> tuple[bool, str]:
+        del is_all
+        self.cleared_calls.append((service_name, account))
+        if account is not None and service_name in self.accounts_by_service:
+            self.accounts_by_service[service_name] = [
+                stored for stored in self.accounts_by_service[service_name] if stored != account
+            ]
+        return (True, "")
+
+
+def test_build_overview_lists_service_accounts(tmp_path: Path) -> None:
+    latchkey = _AccountsLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": ["hynek@imbue-ai", ""]},
+    )
+    agent, host = str(AgentId()), HostId()
+    _seed_host(latchkey, host, ({"slack-api": ["slack-read-all"]},))
+    resolver = _resolver({agent: host}, {agent: "Alpha"})
+
+    overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
+
+    slack = {o.service_name: o for o in overview}["slack"]
+    # Named account first, the unnamed default account last and relabelled.
+    assert [(a.account, a.label) for a in slack.accounts] == [
+        ("hynek@imbue-ai", "hynek@imbue-ai"),
+        ("", "Default account"),
+    ]
+
+
+def test_disconnect_account_reports_not_last_when_accounts_remain(tmp_path: Path) -> None:
+    latchkey = _AccountsLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": ["a@x", "b@x"]},
+    )
+
+    is_last = disconnect_account(latchkey, "slack", "a@x")
+
+    assert is_last is False
+    assert latchkey.cleared_calls == [("slack", "a@x")]
+
+
+def test_disconnect_account_reports_last_when_none_remain(tmp_path: Path) -> None:
+    latchkey = _AccountsLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": ["only@x"]},
+    )
+
+    is_last = disconnect_account(latchkey, "slack", "only@x")
+
+    assert is_last is True
+    assert latchkey.cleared_calls == [("slack", "only@x")]
+
+
+def test_disconnect_account_raises_when_clear_fails(tmp_path: Path) -> None:
+    class _FailingClearLatchkey(_AccountsLatchkey):
+        def auth_clear(
+            self,
+            service_name: str,
+            *,
+            account: str | None = None,
+            is_all: bool = False,
+        ) -> tuple[bool, str]:
+            del service_name, account, is_all
+            return (False, "keychain locked")
+
+    latchkey = _FailingClearLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": ["a@x"]},
+    )
+
+    with pytest.raises(PermissionOverviewError, match="keychain locked"):
+        disconnect_account(latchkey, "slack", "a@x")

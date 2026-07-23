@@ -1508,7 +1508,17 @@ def _make_services_info_binary(
     credential_status: str = "valid",
     exit_code: int = 0,
 ) -> Path:
-    """Build a fake latchkey CLI that emits a services-info JSON payload."""
+    """Build a fake latchkey CLI that emits a services-info JSON payload.
+
+    Emits the latchkey 3.0.0 shape: a ``credentials`` object keyed by account
+    (the default account keyed by the empty string) carrying the requested
+    ``credentialStatus``. An empty ``credential_status`` string models a service
+    with no stored credentials (``credentials == {}``).
+    """
+    if credential_status == "":
+        credentials_literal = "{}"
+    else:
+        credentials_literal = json.dumps({"": {"credentialType": "rawCurl", "credentialStatus": credential_status}})
     script = tmp_path / "latchkey"
     script.write_text(
         "#!/usr/bin/env python3\n"
@@ -1520,7 +1530,7 @@ def _make_services_info_binary(
         f'    "type": "built-in",\n'
         f'    "baseApiUrls": ["https://api.example.com"],\n'
         f'    "authOptions": ["browser", "set"],\n'
-        f'    "credentialStatus": {credential_status!r},\n'
+        f'    "credentials": {credentials_literal},\n'
         f'    "setCredentialsExample": "...",\n'
         f'    "developerNotes": "...",\n'
         f"}}\n"
@@ -1557,10 +1567,35 @@ def test_services_info_returns_valid_when_status_is_valid(tmp_path: Path) -> Non
     assert info.set_credentials_example == "..."
 
 
-def test_services_info_returns_missing_when_status_is_missing(tmp_path: Path) -> None:
-    binary = _make_services_info_binary(tmp_path, credential_status="missing")
+def test_services_info_returns_missing_when_no_accounts_are_stored(tmp_path: Path) -> None:
+    # latchkey 3.0.0 represents "no stored credentials" as an empty ``credentials``
+    # object; there is no per-account ``missing`` status anymore.
+    binary = _make_services_info_binary(tmp_path, credential_status="")
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-    assert latchkey.services_info("slack").credential_status == CredentialStatus.MISSING
+    info = latchkey.services_info("slack")
+    assert info.credential_status == CredentialStatus.MISSING
+    assert info.accounts == ()
+
+
+def test_services_info_parses_multiple_accounts_and_aggregates_status(tmp_path: Path) -> None:
+    script = tmp_path / "latchkey"
+    payload = {
+        "authOptions": ["browser", "set"],
+        "credentials": {
+            "hynek@imbue-ai": {"credentialType": "oauth", "credentialStatus": "valid"},
+            "hynek@glebs-corner": {"credentialType": "oauth", "credentialStatus": "invalid"},
+        },
+    }
+    script.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps(" + json.dumps(payload) + "))\n")
+    script.chmod(0o755)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    info = latchkey.services_info("slack")
+    # One VALID account makes the aggregate VALID even though another is INVALID.
+    assert info.credential_status == CredentialStatus.VALID
+    assert {account.account for account in info.accounts} == {"hynek@imbue-ai", "hynek@glebs-corner"}
+    by_account = {account.account: account.credential_status for account in info.accounts}
+    assert by_account["hynek@imbue-ai"] == CredentialStatus.VALID
+    assert by_account["hynek@glebs-corner"] == CredentialStatus.INVALID
 
 
 def test_services_info_returns_invalid_when_status_is_invalid(tmp_path: Path) -> None:
@@ -1897,6 +1932,92 @@ def test_auth_clear_invokes_clear_with_yes_flag(tmp_path: Path) -> None:
     assert argv_calls == [["auth", "clear", "-y", "google-sheets"]]
 
 
+def test_auth_clear_all_passes_all_flag(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    latchkey.auth_clear("google-sheets", is_all=True)
+
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "clear", "-y", "google-sheets", "--all"]]
+
+
+def test_auth_clear_account_passes_account_flag(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    latchkey.auth_clear("slack", account="hynek@imbue-ai")
+
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "clear", "-y", "slack", "--account", "hynek@imbue-ai"]]
+
+
+# -- add_account --
+
+
+def _make_env_recording_binary(tmp_path: Path, *, exit_code: int = 0, stderr: str = "") -> Path:
+    """Fake latchkey CLI that records argv and the LATCHKEY_EPHEMERAL_BROWSER env var per call."""
+    script = tmp_path / "latchkey"
+    report_path = tmp_path / "latchkey_report.jsonl"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"with open({str(report_path)!r}, 'a') as f:\n"
+        "    f.write(json.dumps({'argv': sys.argv[1:], "
+        "'env_ephemeral': os.environ.get('LATCHKEY_EPHEMERAL_BROWSER', '')}) + '\\n')\n"
+        f"if {stderr!r}:\n"
+        f"    sys.stderr.write({stderr!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_add_account_runs_ephemeral_auth_browser(tmp_path: Path) -> None:
+    binary = _make_env_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.add_account("slack")
+
+    assert is_success is True
+    assert detail == ""
+    records = _read_recording_report(tmp_path)
+    assert [record["argv"] for record in records] == [["auth", "browser", "slack"]]
+    # The ephemeral-browser env var is set so the sign-in starts from a fresh session.
+    assert records[0]["env_ephemeral"] == "1"
+
+
+def test_add_account_non_google_failure_does_not_run_browser_prepare(tmp_path: Path) -> None:
+    binary = _make_env_recording_binary(tmp_path, exit_code=1, stderr="user cancelled")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.add_account("slack")
+
+    assert is_success is False
+    assert detail == "user cancelled"
+    assert [record["argv"] for record in _read_recording_report(tmp_path)] == [["auth", "browser", "slack"]]
+
+
+def test_add_account_google_falls_back_to_browser_prepare_when_official_client_fails(tmp_path: Path) -> None:
+    # A pre-existing (official) client whose sign-in fails: add_account must run a
+    # fresh self-setup browser-prepare and retry rather than giving up.
+    binary = _make_google_oauth_binary(
+        tmp_path,
+        is_client_preregistered=True,
+        does_preregistered_login_succeed=False,
+    )
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, _detail = latchkey.add_account("google-gmail")
+
+    assert is_success is True
+    assert _read_argv_calls(tmp_path) == [
+        ["auth", "browser", "google-gmail"],
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
+    ]
+
+
 # -- auth_browser Minds Google OAuth client preference --
 
 
@@ -2013,7 +2134,7 @@ def test_auth_browser_google_minds_sign_in_failure_clears_then_self_setup(tmp_pa
         ["auth", "browser", "google-gmail"],
         _MINDS_PREPARE_ARGV,
         ["auth", "browser", "google-gmail"],
-        ["auth", "clear", "-y", "google-gmail"],
+        ["auth", "clear", "-y", "google-gmail", "--all"],
         ["auth", "browser-prepare", "google-gmail"],
         ["auth", "browser", "google-gmail"],
     ]
@@ -2035,7 +2156,7 @@ def test_auth_browser_google_minds_prepare_failure_falls_through_without_clearin
         ["auth", "browser", "google-gmail"],
     ]
     # We never registered our client, so nothing of ours is cleared.
-    assert ["auth", "clear", "-y", "google-gmail"] not in argv_calls
+    assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
 def test_auth_browser_google_already_registered_signs_in_with_one_call(tmp_path: Path) -> None:
@@ -2067,4 +2188,4 @@ def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: 
     # The pre-existing client is preserved: no prepare and no clear, because we
     # only ever touch a client we registered ourselves.
     assert argv_calls == [["auth", "browser", "google-gmail"]]
-    assert ["auth", "clear", "-y", "google-gmail"] not in argv_calls
+    assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
