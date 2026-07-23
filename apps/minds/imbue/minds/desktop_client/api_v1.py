@@ -775,7 +775,9 @@ def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[in
     """Run an ``mngr`` command to completion; return ``(returncode, stdout, stderr)``."""
     cg = parent_cg.make_concurrency_group(name="workspace-lifecycle")
     with cg:
-        finished = cg.run_process_to_completion(argv, timeout=_MNGR_BLOCKING_COMMAND_TIMEOUT_SECONDS, is_checked_after=False)
+        finished = cg.run_process_to_completion(
+            argv, timeout=_MNGR_BLOCKING_COMMAND_TIMEOUT_SECONDS, is_checked_after=False
+        )
     returncode = finished.returncode if finished.returncode is not None else 1
     return returncode, finished.stdout, finished.stderr
 

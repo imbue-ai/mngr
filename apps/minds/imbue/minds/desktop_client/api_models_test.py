@@ -29,7 +29,13 @@ def test_cloud_account_create_discriminates_on_backend() -> None:
     # and another backend's fields (sent by mistake) are ignored, not rejected
     # (semantic per-backend requiredness stays in the handler).
     aws = CloudAccountCreateRequest.model_validate(
-        {"backend": "aws", "alias": "mine", "region": "us-east-1", "aws_access_key_id": "AKIA", "aws_secret_access_key": "s"}
+        {
+            "backend": "aws",
+            "alias": "mine",
+            "region": "us-east-1",
+            "aws_access_key_id": "AKIA",
+            "aws_secret_access_key": "s",
+        }
     )
     assert isinstance(aws.root, AwsCloudAccountCreateRequest)
     assert aws.root.aws_access_key_id == "AKIA"

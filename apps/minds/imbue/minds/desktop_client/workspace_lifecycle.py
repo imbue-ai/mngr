@@ -95,9 +95,7 @@ def perform_mind_host_action(
     cg = concurrency_group.make_concurrency_group(name="workspace-lifecycle")
     try:
         with cg:
-            finished = cg.run_process_to_completion(
-                argv, timeout=timeout_seconds, is_checked_after=False, env=env
-            )
+            finished = cg.run_process_to_completion(argv, timeout=timeout_seconds, is_checked_after=False, env=env)
     except (OSError, ConcurrencyGroupError) as exc:
         logger.warning("Could not run mngr to {} host for {}: {!r}", action.value, workspace_agent_id, exc)
         if host_id is not None:
