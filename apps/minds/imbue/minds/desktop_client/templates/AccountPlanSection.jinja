@@ -1,0 +1,61 @@
+{#def acct_user_id, plan_view=None, trim_status=None #}
+{#
+  Per-account plan/usage fragment, rendered by GET /accounts/<user_id>/plan-view
+  and injected into the accounts page's placeholder by accounts.js. The page
+  itself renders instantly; this section is the slow part (the connector
+  computes live usage per request), so it loads asynchronously.
+
+  plan_view is the view model from build_account_plan_view, or None when the
+  connector could not be reached. trim_status carries the account's
+  backup-trim progress (BackupTrimStatus), if any. data-trim-running tells
+  accounts.js to keep re-fetching this fragment while a trim runs.
+#}
+{% set is_trim_running = trim_status and trim_status.is_running %}
+<div data-trim-running="{{ '1' if is_trim_running else '0' }}">
+  {% if plan_view %}
+    <div class="flex items-center justify-between mb-2">
+      <div class="type-label text-secondary">
+        Plan: <span class="font-semibold text-primary">{{ plan_view.plan_display_name }}</span>
+      </div>
+      {% if plan_view.available_plans | length > 1 %}
+        <form method="POST" action={{ "/accounts/" ~ acct_user_id ~ "/plan" }} class="flex items-center gap-2">
+          <select name="plan" class="rounded-md border border-default bg-surface px-2 py-1 type-label">
+            {% for plan in plan_view.available_plans %}
+              <option value="{{ plan }}"{% if plan == plan_view.plan_name %} selected{% endif %}>{{ plan | capitalize }}</option>
+            {% endfor %}
+          </select>
+          <ButtonSubmit variant="secondary">Switch plan</ButtonSubmit>
+        </form>
+      {% endif %}
+    </div>
+    <table class="w-full type-helper">
+      <tbody>
+        {% for row in plan_view.usage_rows %}
+          <tr>
+            <td class="py-0.5 pr-4 text-secondary">{{ row.label }}</td>
+            <td class="py-0.5 pr-4 text-primary whitespace-nowrap">{{ row.used }} of {{ row.limit }}</td>
+            <td class="py-0.5 text-tertiary">{{ row.note }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if plan_view.is_over_storage_quota or trim_status %}
+      <div class="mt-2 flex items-center gap-3">
+        {% if plan_view.is_over_storage_quota and not is_trim_running %}
+          <form method="POST" action={{ "/accounts/" ~ acct_user_id ~ "/trim-backups" }}>
+            <ButtonSubmit variant="secondary">Free up backup space</ButtonSubmit>
+          </form>
+        {% endif %}
+        {% if trim_status %}
+          <span class="type-helper text-tertiary">{{ trim_status.detail }}</span>
+        {% elif plan_view.is_over_storage_quota %}
+          <span class="type-helper text-tertiary">Removes the oldest backups (each workspace keeps its latest) until you are back under the limit.</span>
+        {% endif %}
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="type-helper text-tertiary">
+      Plan and usage are unavailable right now (could not reach Imbue Cloud).
+    </div>
+  {% endif %}
+</div>

@@ -1,0 +1,3 @@
+Add the `blueprint/cloud-quotas/` plan: per-user resource quotas and account plans ("explorer" / "ally") for imbue_cloud, enforced in the remote_service_connector, replacing the paid-account gate. Covers quota schema, LiteLLM monthly user budgets, R2 storage sweep with in-place key downgrades, single-key-per-bucket, tunnel/service caps, public-exposure hardening, and user/operator visibility surfaces. Planning only -- no behavior changes yet.
+
+The minds e2e snapshot image build (`scripts/snapshot_minds_e2e_state.py`) now runs `scripts/ensure-binaries.js` (like `pnpm start`'s prestart hook) so the bundled binaries -- restic in particular -- are present in the sandbox. Without this, the release-dispatch sync-e2e backup tests failed with "restic binary not found".

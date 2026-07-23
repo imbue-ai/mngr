@@ -19,13 +19,16 @@ from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
@@ -346,10 +349,10 @@ def test_list_buckets_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [b.bucket_name for b in items] == ["u--a"]
 
 
-def test_create_bucket_key_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_roll_bucket_key_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/buckets/data/keys"
-        assert _json.loads(request.content) == {"access": "read", "alias": "ro"}
+        assert request.url.path == "/buckets/data/roll-key"
+        assert request.method == "POST"
         return httpx.Response(
             200,
             json={
@@ -357,13 +360,13 @@ def test_create_bucket_key_parses(monkeypatch: pytest.MonkeyPatch) -> None:
                 "secret_access_key": "s2",
                 "s3_endpoint": "https://acct.r2.cloudflarestorage.com",
                 "bucket_name": "u--data",
-                "access": "read",
+                "access": "readwrite",
             },
         )
 
     client = _install_mock_httpx(monkeypatch, handler)
-    material = client.create_bucket_key(SecretStr("tok"), "data", "ro", "read")
-    assert material.access == "read"
+    material = client.roll_bucket_key(SecretStr("tok"), "data")
+    assert material.access_key_id == "akid2"
     assert material.secret_access_key.get_secret_value() == "s2"
 
 
@@ -403,13 +406,275 @@ def test_list_bucket_keys_per_bucket_uses_scoped_path(monkeypatch: pytest.Monkey
     assert items[0].access_key_id == "akid"
 
 
-def test_destroy_bucket_key_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_quota_exceeded_403_raises_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connector's structured quota rejection surfaces as ImbueCloudQuotaExceededError."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/bucket-keys/akid1"
-        return httpx.Response(200, json={"status": "deleted"})
+        return httpx.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "quota_exceeded",
+                    "entitlement": "max_buckets",
+                    "limit": 5,
+                    "current": 5,
+                    "message": "Quota exceeded: this account allows 5 buckets and 5 are already in use.",
+                }
+            },
+        )
 
     client = _install_mock_httpx(monkeypatch, handler)
-    client.destroy_bucket_key(SecretStr("tok"), "akid1")
+    with pytest.raises(ImbueCloudQuotaExceededError) as exc_info:
+        client.create_bucket(SecretStr("tok"), "one-more", "readwrite")
+    assert exc_info.value.entitlement == "max_buckets"
+    assert exc_info.value.limit == 5
+    assert exc_info.value.current == 5
+
+
+def test_get_account_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account"
+        return httpx.Response(
+            200,
+            json={
+                "user_id": "user-1",
+                "email": "alice@imbue.com",
+                "plan_name": "ally",
+                "entitlements": {
+                    "max_remote_workspaces": 10,
+                    "max_tunnels": 50,
+                    "max_services_per_tunnel": 10,
+                    "max_buckets": 20,
+                    "max_total_bucket_bytes": 536870912000,
+                    "monthly_llm_spend_usd": 1000.0,
+                    "max_active_synced_workspaces": 200,
+                },
+                "usage": {
+                    "remote_workspaces": 2,
+                    "tunnels": 3,
+                    "buckets": 1,
+                    "total_bucket_bytes": 12345,
+                    "llm_spend_usd_this_period": 42.5,
+                    "llm_budget_resets_at": "2026-08-01T00:00:00Z",
+                    "active_synced_workspaces": 4,
+                },
+                "available_plans": ["ally", "explorer"],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    info = client.get_account(SecretStr("tok"))
+    assert info.plan_name == "ally"
+    assert info.entitlements.max_remote_workspaces == 10
+    assert info.usage.llm_spend_usd_this_period == 42.5
+    assert info.available_plans == ("ally", "explorer")
+
+
+def test_create_storage_cleanup_grant_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account/storage-cleanup-grant"
+        return httpx.Response(
+            200,
+            json={
+                "status": "granted",
+                "expires_at": "2026-07-21T13:00:00+00:00",
+                "baseline_bytes": 1000,
+                "keys": [
+                    {
+                        "access_key_id": "akid",
+                        "bucket_name": "u--data",
+                        "access": "readwrite",
+                        "alias": "default",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "enforced_access": None,
+                    }
+                ],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    grant = client.create_storage_cleanup_grant(SecretStr("tok"))
+    assert grant.status == "granted"
+    assert grant.baseline_bytes == 1000
+    assert grant.keys[0].enforced_access is None
+
+
+def test_create_storage_cleanup_grant_budget_exhausted_raises_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "cleanup_grant_budget_exhausted",
+                    "limit": 5,
+                    "current": 5,
+                    "window_hours": 24,
+                    "message": "Cleanup-grant budget exhausted",
+                }
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudCleanupGrantBudgetError) as exc_info:
+        client.create_storage_cleanup_grant(SecretStr("tok"))
+    assert exc_info.value.limit == 5
+    assert exc_info.value.current == 5
+    assert exc_info.value.window_hours == 24
+
+
+def test_recheck_storage_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account/storage-recheck"
+        return httpx.Response(
+            200,
+            json={
+                "usage_bytes": 40,
+                "limit_bytes": 100,
+                "is_over_quota": False,
+                "is_grant_settled": True,
+                "keys": [],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    result = client.recheck_storage(SecretStr("tok"))
+    assert result.usage_bytes == 40
+    assert result.is_over_quota is False
+    assert result.is_grant_settled is True
+
+
+def test_admin_run_r2_sweep_scopes_by_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["email"] = request.url.params.get("email", "")
+        return httpx.Response(200, json={"status": "completed", "counters": {"keys_downgraded": 1}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    body = client.admin_run_r2_sweep(SecretStr("admin-key"), "somebody@example.com")
+    assert seen["path"] == "/admin/sweep/r2"
+    assert seen["email"] == "somebody@example.com"
+    assert body["counters"]["keys_downgraded"] == 1
+
+
+def test_list_bucket_keys_parses_enforced_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep's enforcement marker round-trips into the client's key metadata."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "access_key_id": "akid",
+                    "bucket_name": "u--data",
+                    "access": "readwrite",
+                    "alias": "default",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "enforced_access": "read",
+                }
+            ],
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    items = client.list_bucket_keys(SecretStr("tok"), None)
+    assert items[0].enforced_access == "read"
+
+
+def test_set_account_plan_posts_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account/plan"
+        assert _json.loads(request.content) == {"plan": "ally"}
+        return httpx.Response(200, json={"plan_name": "ally", "entitlements": {}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    body = client.set_account_plan(SecretStr("tok"), "ally")
+    assert body["plan_name"] == "ally"
+
+
+def test_set_account_plan_ineligible_403_surfaces_server_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An eligibility refusal raises ImbueCloudAccountError with the server's reason, not an auth error."""
+    reason = "The 'ally' plan requires partner access (a paid-listed email)"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": reason})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudAccountError, match="partner access"):
+        client.set_account_plan(SecretStr("tok"), "ally")
+
+
+def test_admin_account_endpoints_use_admin_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/quota"):
+            assert _json.loads(request.content) == {"entitlement": "max_tunnels", "value": 60.0}
+            return httpx.Response(200, json={"status": "updated", "entitlement": "max_tunnels", "value": 60})
+        if request.url.path.endswith("/plan"):
+            return httpx.Response(200, json={"plan_name": "ally", "entitlements": {}})
+        return httpx.Response(
+            200,
+            json={
+                "user_id": "user-1",
+                "email": "alice@imbue.com",
+                "plan_name": "explorer",
+                "entitlements": {
+                    "max_remote_workspaces": 2,
+                    "max_tunnels": 50,
+                    "max_services_per_tunnel": 10,
+                    "max_buckets": 5,
+                    "max_total_bucket_bytes": 53687091200,
+                    "monthly_llm_spend_usd": 0.0,
+                    "max_active_synced_workspaces": 200,
+                },
+                "usage": {
+                    "remote_workspaces": 0,
+                    "tunnels": 0,
+                    "buckets": 0,
+                    "total_bucket_bytes": 0,
+                    "llm_spend_usd_this_period": 0.0,
+                    "llm_budget_resets_at": None,
+                    "active_synced_workspaces": 0,
+                },
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    info = client.admin_get_account(SecretStr("adm"), "alice@imbue.com")
+    assert info.plan_name == "explorer"
+    client.admin_set_account_plan(SecretStr("adm"), "alice@imbue.com", "ally")
+    client.admin_set_account_quota(SecretStr("adm"), "alice@imbue.com", "max_tunnels", 60)
+    assert seen == [
+        "/admin/accounts/alice@imbue.com",
+        "/admin/accounts/alice@imbue.com/plan",
+        "/admin/accounts/alice@imbue.com/quota",
+    ]
+
+
+def test_admin_account_path_percent_encodes_reserved_email_characters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An email with URL-reserved characters ('#', '?') stays one intact path segment.
+
+    Without percent-encoding, '?' would start a query string and '#' a
+    fragment, silently addressing the wrong path.
+    """
+    email = "al#i?ce@imbue.com"
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(200, json={"plan_name": "ally", "entitlements": {}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    client.admin_set_account_plan(SecretStr("adm"), email, "ally")
+    assert len(seen) == 1
+    # httpx exposes the percent-decoded path: the full email survives intact.
+    assert seen[0].path == f"/admin/accounts/{email}/plan"
+    assert seen[0].query == b""
+    assert seen[0].fragment == ""
 
 
 # -- Paid lists (admin-key authenticated) --
@@ -674,3 +939,118 @@ def test_sync_records_auth_error_raises(monkeypatch: pytest.MonkeyPatch) -> None
     client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAuthError):
         client.list_sync_records(SecretStr("bad"))
+
+
+def test_find_tunnel_for_agent_parses_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/tunnels/by-agent/agent-abc123"
+        return httpx.Response(200, json={"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "services": ["web"]})
+
+    client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    tunnel = client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123")
+    assert tunnel is not None
+    assert tunnel.tunnel_name == "owner--abc123"
+    assert tunnel.services == ("web",)
+
+
+def test_find_tunnel_for_agent_returns_none_on_200_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The up-to-date connector answers "no tunnel" with 200 + null; no O(n)
+    # enumeration fallback is triggered.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/tunnels/by-agent/agent-abc123"
+        return httpx.Response(200, json=None)
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    assert client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123") is None
+    assert state["calls"] == 1
+
+
+def test_find_tunnel_for_agent_falls_back_to_list_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A connector that predates the by-agent endpoint 404s the unknown route;
+    # the client transparently falls back to enumerating GET /tunnels and
+    # matches on the trailing --<agent-prefix> slug.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/tunnels/by-agent/agent-abc123":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        assert request.url.path == "/tunnels"
+        return httpx.Response(
+            200,
+            json=[
+                {"tunnel_name": "owner--deadbeef", "tunnel_id": "t-0", "services": []},
+                {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "services": ["web"]},
+            ],
+        )
+
+    client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    tunnel = client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123")
+    assert tunnel is not None
+    assert tunnel.tunnel_name == "owner--abc123"
+    assert tunnel.services == ("web",)
+
+
+def test_find_tunnel_for_agent_fallback_returns_none_when_no_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/tunnels/by-agent/agent-abc123":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        return httpx.Response(200, json=[])
+
+    client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    assert client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123") is None
+
+
+def test_enable_sharing_posts_combined_body_and_parses_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/sharing/enable"
+        body = _json.loads(request.content)
+        assert body["agent_id"] == "agent-abc123"
+        assert body["service_name"] == "web"
+        assert body["service_url"] == "http://localhost:8080"
+        assert body["auth_policy"]["rules"][0]["include"] == [{"email": {"email": "guest@y.com"}}]
+        return httpx.Response(
+            200,
+            json={
+                "tunnel": {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "token": "tok-1", "services": ["web"]},
+                "service": {
+                    "service_name": "web",
+                    "hostname": "web--abc123--owner.example.com",
+                    "service_url": "http://localhost:8080",
+                },
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    tunnel, service = client.enable_sharing(
+        SecretStr("tok"),
+        "agent-abc123",
+        "web",
+        "http://localhost:8080",
+        AuthPolicy(emails=("guest@y.com",)),
+    )
+    assert tunnel.tunnel_name == "owner--abc123"
+    assert tunnel.token is not None
+    assert tunnel.token.get_secret_value() == "tok-1"
+    assert service.hostname == "web--abc123--owner.example.com"
+
+
+def test_enable_sharing_raises_on_malformed_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The well-formed "tunnel" half carries the cloudflared token, so the
+    # malformed-response error must describe the body's shape without leaking
+    # its contents (the message ends up in CLI stderr and client logs).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "tunnel": {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "token": "SECRET-TUNNEL-TOKEN"},
+                "service": "nope",
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudTunnelError) as exc_info:
+        client.enable_sharing(
+            SecretStr("tok"), "agent-abc123", "web", "http://localhost:8080", AuthPolicy(emails=("a@b.com",))
+        )
+    message = str(exc_info.value)
+    assert "SECRET-TUNNEL-TOKEN" not in message
+    assert "tunnel" in message
+    assert "service" in message

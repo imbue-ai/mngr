@@ -44,3 +44,28 @@ litellm_proxy = 1
 # migrations, so the imbue team can exercise paid features on production.
 [paid]
 domains = ["imbue.com"]
+
+# Plan definitions written (overwriting) into the connector's plans table on
+# every deploy -- git is the source of truth for plan defaults. Existing
+# per-user entitlement rows (copied from a plan at assignment) are never
+# touched by this; adjust individual users via
+# `mngr imbue_cloud admin account set-plan / set-quota`. The same values are
+# committed for every tier; tests that need small limits override per-user
+# via the admin API.
+[plans.explorer]
+max_remote_workspaces = 2
+max_tunnels = 50
+max_services_per_tunnel = 10
+max_buckets = 5
+max_total_bucket_gb = 50
+monthly_llm_spend_usd = 0
+max_active_synced_workspaces = 200
+
+[plans.ally]
+max_remote_workspaces = 10
+max_tunnels = 50
+max_services_per_tunnel = 10
+max_buckets = 20
+max_total_bucket_gb = 500
+monthly_llm_spend_usd = 1000
+max_active_synced_workspaces = 200

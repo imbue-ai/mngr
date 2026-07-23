@@ -3,6 +3,7 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
+from typing import Any
 
 import httpx
 from flask import Request
@@ -27,6 +28,8 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
+from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
@@ -1175,6 +1178,10 @@ def _create_test_client_with_stores(
     tmp_path: Path,
     cli: ImbueCloudCli | None = None,
     mngr_caller: MngrCaller | None = None,
+    # When set, also wired into the app state as ``imbue_cloud_cli`` so routes
+    # that reach the connector through ``get_state().imbue_cloud_cli`` (e.g.
+    # the accounts plan-view fragment) hit the fake instead of degrading.
+    imbue_cloud_cli: ImbueCloudCli | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with session store and config for testing new routes.
 
@@ -1200,6 +1207,7 @@ def _create_test_client_with_stores(
         request_inbox=request_inbox,
         paths=WorkspacePaths(data_dir=tmp_path),
         mngr_caller=mngr_caller,
+        imbue_cloud_cli=imbue_cloud_cli,
     )
     client = app.test_client()
     return client, auth_store
@@ -1355,6 +1363,74 @@ def test_accounts_page_no_longer_hosts_error_reporting_toggles(tmp_path: Path) -
     response = client.get("/accounts")
     assert response.status_code == 200
     assert "report-errors-toggle" not in response.text
+
+
+class _PlanInfoImbueCloudCli(FakeImbueCloudCli):
+    """FakeImbueCloudCli whose ``get_account_info`` returns a canned plan/usage dict.
+
+    Backs the ``GET /accounts/<user_id>/plan-view`` route tests without
+    spawning a real ``mngr imbue_cloud account show`` subprocess.
+    """
+
+    def get_account_info(self, account: str) -> dict[str, Any]:
+        return {
+            "plan_name": "explorer",
+            "available_plans": ["ally", "explorer"],
+            "entitlements": {
+                "max_remote_workspaces": 2,
+                "max_tunnels": 50,
+                "max_services_per_tunnel": 10,
+                "max_buckets": 5,
+                "max_total_bucket_bytes": 50 * 1024**3,
+                "monthly_llm_spend_usd": 0.0,
+                "max_active_synced_workspaces": 200,
+            },
+            "usage": {
+                "remote_workspaces": 1,
+                "tunnels": 3,
+                "buckets": 2,
+                "total_bucket_bytes": int(1.5 * 1024**3),
+                "llm_spend_usd_this_period": 12.345,
+                "llm_budget_resets_at": "2026-08-01T00:00:00Z",
+                "active_synced_workspaces": 4,
+            },
+        }
+
+
+def test_account_plan_view_requires_auth(tmp_path: Path) -> None:
+    """The plan-view fragment endpoint requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/accounts/user-test-123/plan-view")
+    assert response.status_code == 403
+
+
+def test_account_plan_view_renders_plan_for_known_account(tmp_path: Path) -> None:
+    """A signed-in account's fragment carries its plan and usage from the CLI."""
+    cli = _PlanInfoImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli, imbue_cloud_cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/accounts/user-test-123/plan-view")
+
+    assert response.status_code == 200
+    assert "Explorer" in response.text
+    assert "1 of 2" in response.text
+    assert 'data-trim-running="0"' in response.text
+    assert "unavailable" not in response.text
+
+
+def test_account_plan_view_degrades_to_unavailable_without_cli(tmp_path: Path) -> None:
+    """With no imbue_cloud CLI wired the fragment renders its unavailable message, not an error."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/accounts/user-test-123/plan-view")
+
+    assert response.status_code == 200
+    assert "Plan and usage are unavailable right now" in response.text
 
 
 def test_settings_page_requires_auth(tmp_path: Path) -> None:

@@ -88,8 +88,13 @@
 
     // Each preset fills the advanced selects with its compute / AI / backup
     // defaults. These mirror the per-account defaults the server applies.
+    // The remote preset defaults the AI provider to the user's own Claude
+    // subscription: imbue-cloud inference keys are quota-gated per plan (the
+    // explorer plan has a $0 LLM budget), so subscription is the default
+    // that works for everyone; users with an LLM budget can still pick
+    // IMBUE_CLOUD under advanced options.
     var PRESETS = {
-      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'IMBUE_CLOUD', backup_provider: 'IMBUE_CLOUD'},
+      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'SUBSCRIPTION', backup_provider: 'IMBUE_CLOUD'},
       local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER'}
     };
 

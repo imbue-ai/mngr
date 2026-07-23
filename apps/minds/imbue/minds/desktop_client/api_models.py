@@ -389,6 +389,10 @@ class SharingToggleResponse(FrozenModel):
     agent_id: str = Field(description="The workspace agent id")
     service_name: str = Field(description="The service whose sharing was changed")
     enabled: bool = Field(description="Whether sharing is now enabled")
+    url: str | None = Field(
+        default=None,
+        description="The service's public share URL (enable only); lets the editor skip a follow-up status read",
+    )
 
 
 class ProviderToggleResponse(FrozenModel):
