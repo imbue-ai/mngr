@@ -2,22 +2,34 @@
 {#
   Create from Inspiration page (GET /create/inspiration?git_url=...).
 
-  Landing page for an Inspiration deeplink (minds://create?git_url=...). Three
-  views toggled via .hidden, sharing one render:
+  Landing page for an Inspiration deeplink (minds://create?git_url=...), laid
+  out as a numbered vertical timeline with progressive disclosure: a step is
+  revealed only once the previous one is completed, walking the user through
+  (1) -> (2) -> (3) in order.
 
-  - Chooser: shows the inspiration repo and asks whether to create a new
-    workspace from it or add it to an existing one.
-  - Add flow (two steps): a copyable "/use-inspiration <git-url>" message (the
-    skill accepts only a URL -- a deeplink branch is deliberately dropped
-    here), then the user's workspaces to open so they can paste the message
-    into the target workspace's chat. Clicking a row mirrors the landing
-    page's gating: STOPPED minds detour through recovery with intent=restart,
-    everything else goes straight to the workspace.
-  - New flow: only the cloud/local preset cards plus the compact account
-    picker; the repo rides along read-only, and a required "I trust this
-    Inspiration" acknowledgment gates the submit. The POST body carries the
-    preset's provider values directly (there are no advanced selects here);
-    host name, region, and runtime are omitted so the server defaults apply.
+  - Step 1 (always visible): create a new workspace from the Inspiration, or
+    add it to an existing one.
+  - Create branch: (2) local vs. remote via the shared preset cards -- no
+    default selection, an explicit click completes the step -- then (3) the
+    remaining settings: account, the Inspiration shown as plain read-only
+    text, a required "I trust this Inspiration" acknowledgment, and the
+    "Create from Inspiration" submit. The POST carries the preset's provider
+    values directly; host name, region, and runtime are omitted so the
+    server defaults apply.
+  - Add branch: (2) copy the "/use-inspiration <git-url>" message (the skill
+    accepts only a URL -- a deeplink branch is deliberately dropped); the
+    Copy click is what completes the step, forcing the copy before (3) the
+    workspace picker appears. Rows mirror the landing page's gating: STOPPED
+    minds detour through recovery with intent=restart.
+
+  Interactability is kept explicit: the repo is rendered as plain text (never
+  an input-looking box); the only boxed value is the copyable skill message,
+  whose CopyField pairs it with the Copy button that acts on it.
+
+  Note the ``.hidden`` toggle lives on the step wrapper (a plain block div),
+  never combined with ``flex`` -- Tailwind's ``flex`` would beat ``hidden``
+  (see the landing rows' same gotcha), so the row's ``flex`` sits on an inner
+  element.
 #}
 {% set _scripts %}
 <script src="/_static/api_errors.js"></script>
@@ -33,13 +45,16 @@
       local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER'}
     };
 
-    var views = {
-      chooser: document.getElementById('inspiration-chooser'),
-      add: document.getElementById('inspiration-add'),
-      create: document.getElementById('inspiration-new')
+    var steps = {
+      create2: document.getElementById('inspiration-step-create-2'),
+      create3: document.getElementById('inspiration-step-create-3'),
+      add2: document.getElementById('inspiration-step-add-2'),
+      add3: document.getElementById('inspiration-step-add-3')
     };
-    var addStep1 = document.getElementById('inspiration-add-step1');
-    var addStep2 = document.getElementById('inspiration-add-step2');
+    var choiceButtons = {
+      create: document.getElementById('choose-new-workspace'),
+      add: document.getElementById('choose-add-existing')
+    };
     var accountSelect = document.getElementById('account_id');
     var accountError = document.getElementById('inspiration-account-error');
     var trustCheckbox = document.getElementById('inspiration-trust');
@@ -48,24 +63,47 @@
     var submitBtn = document.getElementById('inspiration-submit');
     var presetCards = document.querySelectorAll('[data-preset]');
 
-    function showView(name) {
-      for (var key in views) views[key].classList.toggle('hidden', key !== name);
-      if (name === 'add') {
-        addStep1.classList.remove('hidden');
-        addStep2.classList.add('hidden');
+    // Progressive-disclosure state: which branch step 1 picked, and whether
+    // each branch's step 2 is complete (preset clicked / message copied). A
+    // branch's step 3 shows only once its flag is set.
+    var isPresetChosen = false;
+    var isMessageCopied = false;
+
+    function markCircleDone(stepEl) {
+      var circle = stepEl.querySelector('[data-step-circle]');
+      circle.classList.add('border-accent', 'text-accent', 'bg-accent/15');
+    }
+
+    function updateConnectors() {
+      // Show the vertical connector under every visible step except the last.
+      var allSteps = document.querySelectorAll('.inspiration-step');
+      var visible = [];
+      for (var i = 0; i < allSteps.length; i++) {
+        if (!allSteps[i].classList.contains('hidden')) visible.push(allSteps[i]);
+      }
+      for (var j = 0; j < visible.length; j++) {
+        var connector = visible[j].querySelector('[data-step-connector]');
+        if (connector) connector.classList.toggle('hidden', j === visible.length - 1);
       }
     }
 
-    document.getElementById('choose-new-workspace').addEventListener('click', function () { showView('create'); });
-    document.getElementById('choose-add-existing').addEventListener('click', function () { showView('add'); });
-    document.getElementById('inspiration-add-back').addEventListener('click', function () { showView('chooser'); });
-    document.getElementById('inspiration-new-back').addEventListener('click', function () { showView('chooser'); });
-    document.getElementById('inspiration-choose-workspace').addEventListener('click', function () {
-      addStep1.classList.add('hidden');
-      addStep2.classList.remove('hidden');
-    });
+    function selectBranch(name) {
+      for (var key in choiceButtons) {
+        choiceButtons[key].classList.toggle('ring-2', key === name);
+        choiceButtons[key].classList.toggle('ring-accent', key === name);
+      }
+      steps.create2.classList.toggle('hidden', name !== 'create');
+      steps.create3.classList.toggle('hidden', name !== 'create' || !isPresetChosen);
+      steps.add2.classList.toggle('hidden', name !== 'add');
+      steps.add3.classList.toggle('hidden', name !== 'add' || !isMessageCopied);
+      markCircleDone(document.getElementById('inspiration-step-1'));
+      updateConnectors();
+    }
+
+    choiceButtons.create.addEventListener('click', function () { selectBranch('create'); });
+    choiceButtons.add.addEventListener('click', function () { selectBranch('add'); });
     var emptyToNew = document.getElementById('inspiration-empty-to-new');
-    if (emptyToNew) emptyToNew.addEventListener('click', function () { showView('create'); });
+    if (emptyToNew) emptyToNew.addEventListener('click', function (e) { e.preventDefault(); selectBranch('create'); });
 
     var copyBtn = document.getElementById('inspiration-copy-btn');
     copyBtn.addEventListener('click', function () {
@@ -77,6 +115,12 @@
       } catch (e) {
         /* ignore */
       }
+      // Copying completes step 2: only now does the workspace picker appear,
+      // so the user cannot enter a workspace without the message in hand.
+      isMessageCopied = true;
+      steps.add3.classList.remove('hidden');
+      markCircleDone(steps.add2);
+      updateConnectors();
     });
 
     window.inspirationRowClick = function (row) {
@@ -99,7 +143,7 @@
 
     function selectedPreset() {
       var card = document.querySelector('[data-preset][aria-checked="true"]');
-      return card ? card.getAttribute('data-preset') : 'remote';
+      return card ? card.getAttribute('data-preset') : null;
     }
 
     function markPresetSelected(name) {
@@ -130,6 +174,11 @@
           if (firstAccount) accountSelect.value = firstAccount.value;
         }
         hideAccountError();
+        // An explicit choice completes step 2 and reveals the final step.
+        isPresetChosen = true;
+        steps.create3.classList.remove('hidden');
+        markCircleDone(steps.create2);
+        updateConnectors();
       });
     }
 
@@ -160,7 +209,7 @@
         trustError.classList.remove('hidden');
         return;
       }
-      var preset = PRESETS[selectedPreset()];
+      var preset = PRESETS[selectedPreset() || 'remote'];
       // Imbue Cloud needs an account: signed out opens the sign-in modal,
       // signed in surfaces the picker error (create-form parity).
       if (preset.launch_mode === 'IMBUE_CLOUD' && accountSelect.value === '') {
@@ -200,164 +249,181 @@
         showCreateError('Could not reach the server. Please try again.');
       });
     });
+
+    updateConnectors();
   })();
 </script>
 {% endset %}
 <PageNarrowContainer title="Create from Inspiration" page_label="New workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
 
-  {# ---- Chooser: new workspace vs add to existing ---- #}
-  <div id="inspiration-chooser">
-    <div class="text-center mb-8">
-      <p class="type-label uppercase tracking-wide text-secondary">Inspiration</p>
-      <h1 class="type-heading-lg text-primary mt-1">You've opened an Inspiration</h1>
-    </div>
-    <CopyField :value="git_url" aria-label="Inspiration repository" extra="mb-8" />
-    <div class="flex flex-col gap-3">
-      <Button variant="primary" block id="choose-new-workspace">Create a new workspace</Button>
-      <Button variant="secondary" block id="choose-add-existing">Add to an existing workspace</Button>
-    </div>
+  <div class="text-center mb-8">
+    <p class="type-label uppercase tracking-wide text-secondary">Inspiration</p>
+    <h1 class="type-heading-lg text-primary mt-1">You've opened an Inspiration</h1>
+    {# Plain read-only text, deliberately not styled like an input. #}
+    <p class="type-body text-secondary font-mono mt-2 break-all">{{ git_url }}</p>
   </div>
 
-  {# ---- Add flow: copy the skill message, then pick a workspace ---- #}
-  <div id="inspiration-add" class="hidden">
-    <span>
-      <Button variant="ghost" id="inspiration-add-back"
-              extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
-        &larr; Back
-      </Button>
-    </span>
-    <div id="inspiration-add-step1" class="mt-4">
-      <h2 class="type-heading text-primary mb-2">Add to an existing workspace</h2>
-      <p class="type-body text-secondary mb-4">
-        Copy this message, then paste it into the chat of the workspace you want
-        to add this Inspiration to.
-      </p>
-      {% set skill_message = "/use-inspiration " ~ git_url %}
-      <CopyField id="inspiration-skill-message" :value="skill_message" extra="mb-4">
-        <Button variant="secondary" id="inspiration-copy-btn">Copy</Button>
-      </CopyField>
-      {% if branch %}
-        <p class="type-helper text-tertiary mb-4">
-          The link's branch ({{ branch }}) applies only when creating a new workspace;
-          the message above always uses the Inspiration's published version.
-        </p>
-      {% endif %}
-      <Button variant="primary" block id="inspiration-choose-workspace">Choose workspace</Button>
+  {# Numbered vertical timeline. Each step wrapper carries ``.hidden`` alone
+     (never with ``flex``); the row layout sits on the inner ``.flex`` div. #}
+  <div>
+
+    {# ---- Step 1: choose the pathway (always visible) ---- #}
+    <div id="inspiration-step-1" class="inspiration-step">
+      <div class="flex gap-4">
+        <div class="flex flex-col items-center self-stretch">
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">1</span>
+          <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
+        </div>
+        <div class="flex-1 pb-8">
+          <h2 class="type-heading text-primary mb-4">What would you like to do with it?</h2>
+          <div class="flex flex-col gap-3">
+            <Button variant="secondary" block id="choose-new-workspace">Create a new workspace</Button>
+            <Button variant="secondary" block id="choose-add-existing">Add to an existing workspace</Button>
+          </div>
+        </div>
+      </div>
     </div>
-    <div id="inspiration-add-step2" class="hidden mt-4">
-      <h2 class="type-heading text-primary mb-2">Open the workspace</h2>
-      <p class="type-body text-secondary mb-4">
-        Pick the workspace to open, then paste the copied message into its chat.
-      </p>
-      {% if workspace_rows %}
-        <div class="flex flex-col gap-1.5">
-          {% for row in workspace_rows %}
-            {% set accent_style = "--workspace-accent: " ~ row.accent ~ ";" %}
-            {% set goto_href = mngr_forward_origin ~ "/goto/" ~ row.agent_id ~ "/" %}
-            <Card layout="row" interactive
-                  extra="accent-spine relative overflow-hidden"
-                  :style="accent_style"
-                  :data-agent-id="row.agent_id"
-                  :data-liveness="row.liveness"
-                  :data-default-href="goto_href"
-                  onclick="window.inspirationRowClick(this)">
-              <span class="flex-1 font-semibold text-primary pl-1">{{ row.name }}</span>
-              {% if row.liveness == "STOPPED" %}
-                <StatusBadge>Stopped</StatusBadge>
+
+    {# ---- Create branch, step 2: local vs. remote ---- #}
+    <div id="inspiration-step-create-2" class="inspiration-step hidden">
+      <div class="flex gap-4">
+        <div class="flex flex-col items-center self-stretch">
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">2</span>
+          <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
+        </div>
+        <div class="flex-1 pb-8">
+          <h2 class="type-heading text-primary mb-4">Where should it run?</h2>
+          <div role="radiogroup" aria-label="Where to run your workspace">
+            <CreatePresetCards selected_preset="" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {# ---- Create branch, step 3: remaining settings + create ---- #}
+    <div id="inspiration-step-create-3" class="inspiration-step hidden">
+      <div class="flex gap-4">
+        <div class="flex flex-col items-center self-stretch">
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">3</span>
+          <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
+        </div>
+        <div class="flex-1 pb-8">
+          <h2 class="type-heading text-primary mb-4">Confirm and create</h2>
+          <form id="inspiration-form">
+            <input type="hidden" id="inspiration-git-url" value="{{ git_url }}">
+            <input type="hidden" id="inspiration-branch" value="{{ branch }}">
+            <input type="hidden" id="inspiration-color" value="{{ color }}">
+
+            <p id="inspiration-create-error" role="alert" class="hidden mb-4 type-helper text-important"></p>
+
+            <div class="mb-4">
+              <p class="type-label uppercase tracking-wide text-secondary">Creating from</p>
+              {# Plain read-only text, deliberately not styled like an input. #}
+              <p class="type-body text-primary font-mono mt-1 break-all">{{ git_url }}</p>
+              {% if branch %}
+                <p class="type-helper text-tertiary mt-1">Version: {{ branch }}</p>
               {% endif %}
-            </Card>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="type-body text-secondary">
-          You don't have any workspaces yet.
-          <a href="#" id="inspiration-empty-to-new" class="text-accent hover:underline">Create a new one from this Inspiration</a> instead.
-        </p>
-      {% endif %}
-    </div>
-  </div>
-
-  {# ---- New flow: presets + trust acknowledgment + create ---- #}
-  <div id="inspiration-new" class="hidden">
-    <span>
-      <Button variant="ghost" id="inspiration-new-back"
-              extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
-        &larr; Back
-      </Button>
-    </span>
-    <form id="inspiration-form" class="mt-4">
-      <input type="hidden" id="inspiration-git-url" value="{{ git_url }}">
-      <input type="hidden" id="inspiration-branch" value="{{ branch }}">
-      <input type="hidden" id="inspiration-color" value="{{ color }}">
-
-      <div class="text-center mb-8">
-        <p class="type-label uppercase tracking-wide text-secondary">Create from Inspiration</p>
-        <h1 class="type-heading-lg text-primary mt-1">Where should it run?</h1>
-      </div>
-
-      <p id="inspiration-create-error" role="alert" class="hidden mb-6 type-helper text-important text-center"></p>
-
-      <div role="radiogroup" aria-label="Where to run your workspace">
-        <div class="flex gap-6 items-stretch">
-          <PresetCard preset="remote" :selected="True" extra="flex-1">
-            <div class="flex items-center gap-2">
-              <span class="type-heading text-primary">Imbue Cloud</span>
-              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper uppercase font-bold bg-accent/15 text-accent">Recommended</span>
             </div>
-            <ul class="flex flex-col gap-1.5 mt-1">
-              <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>30 second setup</li>
-              <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Runs even if your computer is off</li>
-              <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Accessible from mobile</li>
-            </ul>
-          </PresetCard>
-          <PresetCard preset="local" :selected="False" extra="flex-1">
-            <span class="type-heading text-primary">Directly on your computer</span>
-            <ul class="flex flex-col gap-1.5 mt-1">
-              <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>5-10 minute setup</li>
-              <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>Runs only when your computer is on</li>
-              <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>Uses your computer's memory</li>
-            </ul>
-          </PresetCard>
+
+            <div class="flex items-center type-helper">
+              <select id="account_id" name="account_id"
+                      class="max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
+                {% for acct in accounts %}
+                  <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
+                {% endfor %}
+                <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
+              </select>
+            </div>
+            <p id="inspiration-account-error" class="hidden mt-2 type-helper text-important">
+              Pick an account to use Imbue Cloud, or choose the local preset.
+            </p>
+
+            <div class="mt-6">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" id="inspiration-trust" class="shrink-0">
+                <span>
+                  <span class="type-body text-primary font-semibold">I trust this Inspiration</span>
+                  <span class="block type-helper text-tertiary">Inspirations are community content. This one has not been approved or verified by Imbue.</span>
+                </span>
+              </label>
+              <p id="inspiration-trust-error" class="hidden mt-2 type-helper text-important">
+                Check "I trust this Inspiration" to continue.
+              </p>
+            </div>
+
+            <div class="mt-6">
+              <ButtonSubmit id="inspiration-submit" variant="primary" block>Create from Inspiration</ButtonSubmit>
+            </div>
+          </form>
         </div>
       </div>
+    </div>
 
-      <div class="flex items-center justify-between mt-8 type-helper">
-        <select id="account_id" name="account_id"
-                class="max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
-          {% for acct in accounts %}
-            <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
-          {% endfor %}
-          <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
-        </select>
+    {# ---- Add branch, step 2: copy the skill message ---- #}
+    <div id="inspiration-step-add-2" class="inspiration-step hidden">
+      <div class="flex gap-4">
+        <div class="flex flex-col items-center self-stretch">
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">2</span>
+          <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
+        </div>
+        <div class="flex-1 pb-8">
+          <h2 class="type-heading text-primary mb-1">Copy the message</h2>
+          <p class="type-body text-secondary mb-4">
+            You'll paste this into the chat of the workspace you want to add
+            this Inspiration to.
+          </p>
+          <CopyField :value="'/use-inspiration ' ~ git_url" id="inspiration-skill-message" aria-label="Inspiration chat message">
+            <Button variant="secondary" id="inspiration-copy-btn">Copy</Button>
+          </CopyField>
+          {% if branch %}
+            <p class="type-helper text-tertiary mt-2">
+              The link's branch ({{ branch }}) applies only when creating a new workspace;
+              the message above always uses the Inspiration's published version.
+            </p>
+          {% endif %}
+        </div>
       </div>
-      <p id="inspiration-account-error" class="hidden mt-2 type-helper text-important text-center">
-        Pick an account to use Imbue Cloud, or choose the local preset.
-      </p>
+    </div>
 
-      <div class="mt-8">
-        <FormLabel target="inspiration-repo-display">Inspiration</FormLabel>
-        <CopyField id="inspiration-repo-display" :value="git_url" extra="mt-1" />
-        {% if branch %}
-          <p class="type-helper text-tertiary mt-1">Version: {{ branch }}</p>
-        {% endif %}
+    {# ---- Add branch, step 3: pick the workspace (revealed by Copy) ---- #}
+    <div id="inspiration-step-add-3" class="inspiration-step hidden">
+      <div class="flex gap-4">
+        <div class="flex flex-col items-center self-stretch">
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">3</span>
+          <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
+        </div>
+        <div class="flex-1 pb-8">
+          <h2 class="type-heading text-primary mb-1">Select a workspace</h2>
+          <p class="type-body text-secondary mb-4">
+            It will open so you can paste the copied message into its chat.
+          </p>
+          {% if workspace_rows %}
+            <div class="flex flex-col gap-1.5">
+              {% for row in workspace_rows %}
+                {% set accent_style = "--workspace-accent: " ~ row.accent ~ ";" %}
+                {% set goto_href = mngr_forward_origin ~ "/goto/" ~ row.agent_id ~ "/" %}
+                <Card layout="row" interactive
+                      extra="accent-spine relative overflow-hidden"
+                      :style="accent_style"
+                      :data-agent-id="row.agent_id"
+                      :data-liveness="row.liveness"
+                      :data-default-href="goto_href"
+                      onclick="window.inspirationRowClick(this)">
+                  <span class="flex-1 font-semibold text-primary pl-1">{{ row.name }}</span>
+                  {% if row.liveness == "STOPPED" %}
+                    <StatusBadge>Stopped</StatusBadge>
+                  {% endif %}
+                </Card>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="type-body text-secondary">
+              You don't have any workspaces yet.
+              <a href="#" id="inspiration-empty-to-new" class="text-accent hover:underline">Create a new one from this Inspiration</a> instead.
+            </p>
+          {% endif %}
+        </div>
       </div>
-
-      <div class="mt-6">
-        <label class="flex items-center gap-3 cursor-pointer">
-          <input type="checkbox" id="inspiration-trust" class="shrink-0">
-          <span>
-            <span class="type-body text-primary font-semibold">I trust this Inspiration</span>
-            <span class="block type-helper text-tertiary">Inspirations are community content. This one has not been approved or verified by Imbue.</span>
-          </span>
-        </label>
-        <p id="inspiration-trust-error" class="hidden mt-2 type-helper text-important">
-          Check "I trust this Inspiration" to continue.
-        </p>
-      </div>
-
-      <div class="mt-8">
-        <ButtonSubmit id="inspiration-submit" variant="primary" block>Create from Inspiration</ButtonSubmit>
-      </div>
-    </form>
+    </div>
   </div>
 </PageNarrowContainer>

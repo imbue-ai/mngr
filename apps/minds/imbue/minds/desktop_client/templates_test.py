@@ -707,13 +707,46 @@ def test_render_inspiration_page_submit_labeled_create_from_inspiration() -> Non
     assert 'id="inspiration-submit"' in html
 
 
-def test_render_inspiration_page_repo_is_readonly_confirmation() -> None:
-    # The repo is display-only: no editable git_url TextInput anywhere; the
-    # POSTed value rides in a hidden input instead.
+def test_render_inspiration_page_repo_shown_as_plain_text() -> None:
+    # The repo is display-only and deliberately not rendered as an input-looking
+    # box: it appears as plain paragraph text, and the POSTed value rides in a
+    # hidden input. There is no editable git_url form field.
     html = _render_inspiration()
     assert 'name="git_url"' not in html
     assert 'id="inspiration-git-url"' in html
-    assert "readonly" in html
+    assert f">{_INSPIRATION_URL}</p>" in html
+
+
+def test_render_inspiration_page_downstream_steps_start_hidden() -> None:
+    # Progressive disclosure: only step 1 is visible on load; every downstream
+    # step wrapper starts hidden and is revealed by the timeline's JS. The
+    # ``hidden`` toggle must not sit on a ``flex`` element (flex would win), so
+    # it lives on the plain step wrapper.
+    html = _render_inspiration()
+    assert re.search(r'id="inspiration-step-1" class="inspiration-step"', html)
+    for step_id in (
+        "inspiration-step-create-2",
+        "inspiration-step-create-3",
+        "inspiration-step-add-2",
+        "inspiration-step-add-3",
+    ):
+        assert re.search(rf'id="{step_id}" class="inspiration-step hidden"', html), step_id
+
+
+def test_render_inspiration_page_gates_each_step_on_the_previous() -> None:
+    # Copying the message is what reveals the workspace picker; choosing a
+    # preset is what reveals the final create step.
+    html = _render_inspiration()
+    assert "isMessageCopied = true" in html
+    assert "steps.add3.classList.remove('hidden')" in html
+    assert "isPresetChosen = true" in html
+    assert "steps.create3.classList.remove('hidden')" in html
+
+
+def test_render_inspiration_page_skill_message_has_stable_id() -> None:
+    # The copy handler reads the message by id, so the CopyField must carry it.
+    html = _render_inspiration()
+    assert 'id="inspiration-skill-message"' in html
 
 
 def test_render_inspiration_page_carries_branch_hidden_input() -> None:
