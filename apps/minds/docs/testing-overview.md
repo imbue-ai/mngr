@@ -39,7 +39,7 @@ run. By area:
 | File / test | Marks | What it exercises |
 |---|---|---|
 | `test_aws_workspace_release.py::test_aws_workspace_runs_in_runsc_container_on_ec2` | `release`, `timeout(900)`, skip unless AWS creds + `MNGR_AWS_RELEASE_TESTS=1` | Provisions a real EC2 instance, asserts the agent runs in a runsc/gVisor container. Costs money. |
-| `test_snapshot_resume.py` (9 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a live LLM-backed chat, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), and the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one). `test_create_apikey_workspace_and_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace via the manual `api_key` AI provider (needs `ANTHROPIC_API_KEY`), sends a chat message, and asserts the agent replies, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
+| `test_snapshot_resume.py` (10 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a live LLM-backed chat, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one), and the in-place backup restore (the real restore worker + workspace script: pinned-restic install, safety snapshot, sync restore, services back). `test_create_apikey_workspace_and_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace via the manual `api_key` AI provider (needs `ANTHROPIC_API_KEY`), sends a chat message, and asserts the agent replies, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
 | `test_sse_redirect.py::test_sse_redirect_on_done` | `release` | Werkzeug server + Playwright; verifies the creating-page SSE stream delivers `done` and the JS redirects. No Docker/agent. |
 | `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_default_workspace_template_pin` | `release` | Checks the Claude Code CLI pin matches the DEFAULT_WORKSPACE_TEMPLATE pin. |
 
@@ -142,13 +142,15 @@ then cheap test sandboxes fan out from the baked image.
   The config boots straight from the override image (no Dockerfile/post-patch),
   `cpu_cores=4.0`, `memory_gb=8`, `vm_runtime=true` (must match the producer),
   one `[groups.all]` with `filters="-m 'minds_snapshot_resume'"`,
-  `max_parallel=10`. The image is deleted on success. Both jobs are gated by the
+  `max_parallel=20`. The image is deleted on success. Both jobs are gated by the
   `DISABLE_MINDS_SNAPSHOT_CI` repo variable and skipped on fork PRs.
 - **Currently runs:** every `minds_snapshot_resume` test in
   `test_snapshot_resume.py` (resume sanity checks, the Electron create+chat
-  round-trip, the backup-update chat gate, and the backup-service
-  check/update and enable/repair/destination-change flows). Run a single one
-  with `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`;
+  round-trip, the backup-update chat gate, the backup-service
+  check/update and enable/repair/destination-change flows, and the in-place
+  backup restore). Run a single one locally with
+  `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`, or in
+  CI via the `minds_snapshot_test_filter` workflow_dispatch input on ci.yml;
   mint an image id manually via `uv run python
   scripts/snapshot_minds_e2e_state.py`.
 
