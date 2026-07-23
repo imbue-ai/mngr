@@ -30,7 +30,7 @@ const RESTIC_VERSION = '0.18.1';
 const DESYNC_VERSION = '1.0.3';
 
 // datalib "curl" distribution: the dispatch curl + the Chrome-impersonating
-// shim it fronts (see the `frankweiler-curl-<triple>.tar.gz` release asset).
+// curl it fronts (see the `frankweiler-curl-<triple>.tar.gz` release asset).
 // The latchkey gateway runs the dispatch curl as its LATCHKEY_CURL so marked
 // requests get Chrome TLS impersonation. Only macOS arm64 and Linux x86_64
 // (glibc) are bundled -- datalib publishes no x86_64-apple-darwin, and there
@@ -344,7 +344,7 @@ async function downloadDesync(resourcesDir, { platform, arch }) {
 }
 
 /**
- * Bundle the datalib dispatch curl + Chrome-impersonating shim into
+ * Bundle the datalib dispatch curl + Chrome-impersonating curl into
  * `<resourcesDir>/curl/`. The latchkey gateway runs the dispatch curl as
  * its LATCHKEY_CURL (wired in electron/backend.js).
  *
@@ -384,14 +384,14 @@ async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
   execSync(`tar xzf "${tarPath}" -C "${curlDir}" --strip-components=1`, { stdio: 'inherit' });
   fs.unlinkSync(tarPath);
 
-  for (const name of ['frankweiler-latchkey-curl-dispatch', 'frankweiler-latchkey-curl-shim']) {
+  for (const name of ['frankweiler-latchkey-curl-dispatch', 'frankweiler-latchkey-curl-impersonate']) {
     const binPath = path.join(curlDir, name);
     if (!fs.existsSync(binPath)) {
       throw new Error(`${name} not found at ${binPath} after extraction`);
     }
     fs.chmodSync(binPath, 0o755);
   }
-  console.log(`[download-binaries] latchkey curl (dispatch + shim) installed in ${curlDir}`);
+  console.log(`[download-binaries] latchkey curl (dispatch + impersonator) installed in ${curlDir}`);
 }
 
 /**

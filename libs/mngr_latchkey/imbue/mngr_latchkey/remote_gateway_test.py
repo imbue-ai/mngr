@@ -20,7 +20,7 @@ from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import _CURL_DISPATCH_PATH
-from imbue.mngr_latchkey.remote_gateway import _CURL_SHIM_PATH
+from imbue.mngr_latchkey.remote_gateway import _CURL_IMPERSONATE_PATH
 from imbue.mngr_latchkey.remote_gateway import _GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote_gateway import _MINIMUM_NODE_MAJOR_VERSION
 from imbue.mngr_latchkey.remote_gateway import _TUNNEL_PROGRAM_NAME
@@ -170,15 +170,15 @@ def test_ensure_latchkey_installed_best_effort_installs_impersonating_curl() -> 
     # Fetches the datalib curl tarball for the VPS arch from the pinned release.
     assert f"releases/download/{DATALIB_CURL_VERSION}/" in command
     assert "frankweiler-curl-${_ci_triple}.tar.gz" in command
-    # Installs both the dispatch curl and the shim it fronts.
+    # Installs both the dispatch curl and the impersonator it fronts.
     assert _CURL_DISPATCH_PATH.rsplit("/", 1)[1] in command
-    assert _CURL_SHIM_PATH.rsplit("/", 1)[1] in command
+    assert _CURL_IMPERSONATE_PATH.rsplit("/", 1)[1] in command
     # Verifies the download against the release's published .sha256.
     assert "sha256sum -c" in command
     # Best-effort: a fetch failure warns and continues (never aborts
     # provisioning), and the whole block is skipped when already installed.
     assert "latchkey will use system curl" in command
-    assert f"if [ ! -x {_CURL_DISPATCH_PATH} ] || [ ! -x {_CURL_SHIM_PATH} ]; then" in command
+    assert f"if [ ! -x {_CURL_DISPATCH_PATH} ] || [ ! -x {_CURL_IMPERSONATE_PATH} ]; then" in command
 
 
 def test_ensure_latchkey_installed_uses_generous_install_timeout() -> None:
@@ -460,9 +460,11 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_
     # Routes latchkey through the bundled dispatch curl -- but only when both
     # binaries are present, so a host without the impersonating curl installed
     # (fetch failed / older release) falls back to system curl unchanged.
-    assert f"if [ -x {_CURL_DISPATCH_PATH} ] && [ -x {_CURL_SHIM_PATH} ]; then" in run_script
+    assert f"if [ -x {_CURL_DISPATCH_PATH} ] && [ -x {_CURL_IMPERSONATE_PATH} ]; then" in run_script
     assert f"export LATCHKEY_CURL={_CURL_DISPATCH_PATH}" in run_script
-    assert f"export FRANKWEILER_IMPERSONATE_CURL={_CURL_SHIM_PATH}" in run_script
+    # The dispatch curl finds the impersonator as a sibling, so no second
+    # env var is exported.
+    assert "FRANKWEILER_IMPERSONATE_CURL" not in run_script
     # The wrapper refuses to launch a keyless gateway when its tmpfs secrets are
     # gone (e.g. wiped by a reboot).
     assert "exit 1" in run_script
