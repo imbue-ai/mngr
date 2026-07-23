@@ -1756,6 +1756,7 @@ function overlayIdForUrl(url) {
   if (pathname === '/help') return 'help';
   if (pathname === '/auth/signin-modal') return 'signin';
   if (pathname === '/settings/modal') return 'settings';
+  if (pathname === '/settings/ai-keys') return 'ai-keys';
   if (pathname === '/accounts/modal') return 'accounts';
   if (/^\/sharing\/agent-[a-f0-9]+\/[^/]+\/modal$/i.test(pathname)) return 'sharing';
   return null;
@@ -4243,6 +4244,23 @@ ipcMain.on('open-help', (event, agentId) => {
 // URL is the shell's own record of the pre-crash workspace, never the renderer's.
 ipcMain.on('reload-crashed-view', (event) => {
   reloadCrashedContentView(getBundleFromEvent(event));
+});
+
+// Open the workspace AI-key mint page (/settings/ai-keys) on behalf of the
+// (otherwise unprivileged) content view -- used by the workspace's Claude
+// sign-in modal ("Sign in with Imbue"). Only content-relay-preload.js can emit
+// this channel, and only for an allowlisted `minds:open-ai-keys-page`
+// postMessage. The mint page lives on the minds backend, whose origin (a
+// random per-run port) the workspace page cannot know, so it opens in the
+// sender's own window as an overlay modal. The host id is re-validated here
+// (never trust the renderer) before being packed into the URL; an empty id
+// still opens the page, which renders its own explanation.
+ipcMain.on('open-ai-keys', (event, hostId) => {
+  const workspaceHostId = typeof hostId === 'string' && /^host-[a-f0-9]{1,64}$/i.test(hostId) ? hostId : '';
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !backendBaseUrl) return;
+  const query = workspaceHostId ? '?workspace=' + encodeURIComponent(workspaceHostId) : '';
+  openModal(bundle, backendBaseUrl + '/settings/ai-keys' + query);
 });
 
 // Reload the crashed chrome (titlebar) view on behalf of chrome-crashed.html's
