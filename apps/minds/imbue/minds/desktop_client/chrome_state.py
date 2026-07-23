@@ -301,6 +301,30 @@ class DestroyingBootExtras(FrozenModel):
         return self.model_dump(mode="json")
 
 
+class ConsentBootExtras(FrozenModel):
+    """Error-reporting consent page boot island data (the ``consent`` key).
+
+    The two checkbox states seed the form; no ``chrome`` sibling (the page
+    only POSTs /consent and reloads)."""
+
+    report_unexpected_errors: bool = Field(description="Initial state of the report-unexpected-errors toggle")
+    include_logs: bool = Field(description="Initial state of the include-logs toggle")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class AuthErrorBootExtras(FrozenModel):
+    """Authentication-failure page boot island data (the ``auth_error`` key)."""
+
+    message: str = Field(description="The failure explanation shown under the heading")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class ChromeBootState(FrozenModel):
     """A connect-time snapshot of the chrome data, for page boot-state islands.
 

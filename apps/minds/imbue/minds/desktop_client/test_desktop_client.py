@@ -1736,7 +1736,7 @@ def test_landing_shows_login_not_consent_when_unauthenticated(tmp_path: Path) ->
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/")
     assert response.status_code == 200
-    assert "Help improve Minds" not in response.text
+    assert "MindsUI.mountConsent" not in response.text
     assert "Login" in response.text
 
 
@@ -1763,7 +1763,7 @@ def test_landing_does_not_bounce_to_welcome_when_signed_in(tmp_path: Path) -> No
     response = client.get("/")
     assert response.status_code == 200
     # Consent still unanswered, so the consent screen shows (not the splash).
-    assert "Help improve Minds" in response.text
+    assert "MindsUI.mountConsent" in response.text
 
 
 def test_landing_shows_consent_screen_after_account_choice_when_unanswered(tmp_path: Path) -> None:
@@ -1774,8 +1774,8 @@ def test_landing_shows_consent_screen_after_account_choice_when_unanswered(tmp_p
     assert skip.status_code == 303
     response = client.get("/")
     assert response.status_code == 200
-    assert "Help improve Minds" in response.text
-    assert "Report unexpected errors" in response.text
+    assert "MindsUI.mountConsent" in response.text
+    assert parse_boot_island(response.text)["consent"] == {"report_unexpected_errors": False, "include_logs": False}
 
 
 def test_welcome_signup_login_open_signin_modal_with_page_fallbacks(tmp_path: Path) -> None:
@@ -1790,11 +1790,11 @@ def test_welcome_signup_login_open_signin_modal_with_page_fallbacks(tmp_path: Pa
     _authenticate_client(client, auth_store)
     welcome = client.get("/welcome")
     assert welcome.status_code == 200
-    assert "window.minds.openSigninModal('/', mode)" in welcome.text
-    assert 'id="welcome-signup-btn"' in welcome.text
-    assert 'id="welcome-login-btn"' in welcome.text
-    assert 'href="/auth/signup"' in welcome.text
-    assert 'href="/auth/login"' in welcome.text
+    # The buttons and their modal-vs-fallback wiring render client-side (the
+    # mithril WelcomePage component; covered by WelcomePage.test.ts) -- the
+    # server shell's contract is the island + mount call.
+    assert "MindsUI.mountWelcome" in welcome.text
+    assert parse_boot_island(welcome.text)["welcome"] == {}
 
 
 def test_welcome_self_advances_when_an_account_appears(tmp_path: Path) -> None:
@@ -1809,8 +1809,10 @@ def test_welcome_self_advances_when_an_account_appears(tmp_path: Path) -> None:
     _authenticate_client(client, auth_store)
     welcome = client.get("/welcome")
     assert welcome.status_code == 200
-    assert "/_chrome/events" in welcome.text
-    assert "has_accounts" in welcome.text
+    # The SSE watch lives in the WelcomePage component (it subscribes to the
+    # shared chrome event stream through the host adapter; covered by
+    # WelcomePage.test.ts) -- the server shell just mounts it.
+    assert "MindsUI.mountWelcome" in welcome.text
 
 
 def test_landing_does_not_bounce_to_welcome_when_account_listing_fails(tmp_path: Path) -> None:
@@ -1840,18 +1842,15 @@ def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path)
     _authenticate_client(client, auth_store)
     welcome = client.get("/welcome")
     assert welcome.status_code == 200
-    # Isolate the full opening <a> tag that carries the skip-account id, regardless of
-    # attribute order, and assert it links to the skip route (which redirects to the
-    # consent-bearing landing route) rather than straight to "/create".
-    before, after = welcome.text.split('id="skip-account-btn"', 1)
-    skip_tag = before.rsplit("<a", 1)[1] + after.split(">", 1)[0]
-    assert 'href="/welcome/skip"' in skip_tag
+    # The skip link renders client-side (WelcomePage.test.ts asserts it
+    # points at /welcome/skip rather than straight at /create).
+    assert "MindsUI.mountWelcome" in welcome.text
     # Following that link redirects to "/", which shows the consent screen while unanswered.
     skip = client.get("/welcome/skip")
     assert skip.status_code == 303
     assert skip.headers["location"] == "/"
     landing = client.get("/")
-    assert "Help improve Minds" in landing.text
+    assert "MindsUI.mountConsent" in landing.text
 
 
 def test_consent_page_requires_auth(tmp_path: Path) -> None:
@@ -1898,7 +1897,7 @@ def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> 
     client.get("/welcome/skip")
     landing = client.get("/")
     assert landing.status_code == 200
-    assert "Help improve Minds" not in landing.text
+    assert "MindsUI.mountConsent" not in landing.text
 
 
 def test_consent_submit_does_not_persist_logs_without_reporting(tmp_path: Path) -> None:

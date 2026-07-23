@@ -7,6 +7,8 @@
 // section (never from #local-page-scripts, which would re-run it per swap);
 // the per-page mount calls live in #local-page-scripts.
 import { setAccentScopeAgentId, setContentUrl, setDisplayedWorkspaceAgentId } from "./store";
+import { mountAuthError, mountLoginPrompt } from "./views/AuthTextPages";
+import { mountConsent } from "./views/ConsentPage";
 import { mountCreating } from "./views/CreatingPage";
 import { mountDestroying } from "./views/DestroyingPage";
 import { mountInboxList } from "./views/InboxList";
@@ -16,9 +18,12 @@ import { mountSharingEditor } from "./views/SharingEditor";
 import { mountStyleguidePrimitives, mountStyleguideWorkspaceRows } from "./views/StyleguideRows";
 import { mountStyleguideSmoke } from "./views/StyleguideSmoke";
 import { mountTitleBar } from "./views/TitleBar";
+import { mountWelcome } from "./views/WelcomePage";
 import { mountWorkspaceMenu } from "./views/WorkspaceMenu";
 
 export interface MindsUINamespace {
+  mountAuthError: typeof mountAuthError;
+  mountConsent: typeof mountConsent;
   mountCreating: typeof mountCreating;
   mountDestroying: typeof mountDestroying;
   mountInboxList: typeof mountInboxList;
@@ -28,7 +33,9 @@ export interface MindsUINamespace {
   mountStyleguideSmoke: typeof mountStyleguideSmoke;
   mountStyleguidePrimitives: typeof mountStyleguidePrimitives;
   mountStyleguideWorkspaceRows: typeof mountStyleguideWorkspaceRows;
+  mountLoginPrompt: typeof mountLoginPrompt;
   mountTitleBar: typeof mountTitleBar;
+  mountWelcome: typeof mountWelcome;
   mountWorkspaceMenu: typeof mountWorkspaceMenu;
   // chrome.js's browser-mode pushes: the content URL (crumb derivation), the
   // accent-scope workspace (accent + menu highlight), and the displayed
@@ -50,6 +57,8 @@ declare global {
 adoptParentModalBridge();
 
 window.MindsUI = {
+  mountAuthError,
+  mountConsent,
   mountCreating,
   mountDestroying,
   mountInboxList,
@@ -59,7 +68,9 @@ window.MindsUI = {
   mountStyleguideSmoke,
   mountStyleguidePrimitives,
   mountStyleguideWorkspaceRows,
+  mountLoginPrompt,
   mountTitleBar,
+  mountWelcome,
   mountWorkspaceMenu,
   setContentUrl,
   setAccentScopeAgent: setAccentScopeAgentId,

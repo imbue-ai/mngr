@@ -219,3 +219,24 @@ export interface DestroyingBootExtras {
 export interface DestroyingBootIsland {
   destroying: DestroyingBootExtras;
 }
+
+// Error-reporting consent page boot island data (mirror of
+// ConsentBootExtras in chrome_state.py).
+export interface ConsentBootExtras {
+  report_unexpected_errors: boolean;
+  include_logs: boolean;
+}
+
+export interface ConsentBootIsland {
+  consent: ConsentBootExtras;
+}
+
+// Authentication-failure page boot island data (mirror of
+// AuthErrorBootExtras in chrome_state.py).
+export interface AuthErrorBootExtras {
+  message: string;
+}
+
+export interface AuthErrorBootIsland {
+  auth_error: AuthErrorBootExtras;
+}

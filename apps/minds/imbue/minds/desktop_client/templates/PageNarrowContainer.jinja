@@ -1,4 +1,4 @@
-{#def title, padding="default", max_width="max-w-[420px]", scripts="", page_label="", show_back=False #}
+{#def title, padding="default", max_width="max-w-[420px]", scripts="", page_label="", show_back=False, boot_state=None #}
 {#
   Narrow, vertically-centered page layout. Renders the Base scaffold with
   a body that flex-centers a single max-width column; the page's entire
@@ -27,6 +27,7 @@
 <ChromeShell title={{ title }}
       :page_label="page_label"
       :show_back="show_back"
+      :boot_state="boot_state"
       body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-4"
       scripts={{ scripts }}>
   <div class="{{ _padding_cls }} {{ max_width }} w-full">

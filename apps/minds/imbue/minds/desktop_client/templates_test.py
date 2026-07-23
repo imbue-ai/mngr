@@ -313,11 +313,14 @@ def test_render_login_redirect_page_contains_redirect_script() -> None:
     assert "encodeURIComponent" in html
 
 
-def test_render_auth_error_page_shows_error_message() -> None:
+def test_render_auth_error_page_island_carries_message() -> None:
+    """The failure body renders client-side (AuthErrorPage); the shell seeds
+    the message in the ``auth_error`` island slice."""
     html = render_auth_error_page(message="This code has already been used.")
-    assert "This code has already been used." in html
-    assert "Authentication Failed" in html
-    assert "restart the server" in html
+    island = parse_boot_island(html)
+    assert island["auth_error"] == {"message": "This code has already been used."}
+    assert "MindsUI.mountAuthError" in html
+    assert 'id="auth-error-root"' in html
 
 
 def test_agent_id_rejects_invalid_format() -> None:
@@ -721,9 +724,12 @@ def test_make_unique_host_name_bare_then_numbered_from_two() -> None:
     assert str(make_unique_host_name("mindtest", {"mindtest", "mindtest-2"})) == "mindtest-3"
 
 
-def test_render_login_page_shows_prompt() -> None:
+def test_render_login_page_mounts_the_prompt() -> None:
     html = render_login_page()
-    assert "login URL" in html.lower() or "Login" in html
+    island = parse_boot_island(html)
+    assert island["login"] == {}
+    assert "MindsUI.mountLoginPrompt" in html
+    assert 'id="login-root"' in html
 
 
 def test_render_chrome_page_contains_titlebar() -> None:
@@ -2561,7 +2567,7 @@ def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
     # which excludes an arbitrary ``() -> dict`` test stub; the assignment is
     # fine at runtime (Jinja globals are untyped string-keyed values).
     catalog.jinja_env.globals["frontend_sentry_browser_payload"] = lambda: payload  # ty: ignore[invalid-assignment]
-    html = catalog.render("pages.Login")
+    html = catalog.render("pages.Login", boot_state={"login": {}})
     # Bundle + init load before the page's own scripts; config is passed as JSON.
     assert '<script src="/_static/sentry.browser.min.js"></script>' in html
     assert '<script src="/_static/sentry_init.js"></script>' in html

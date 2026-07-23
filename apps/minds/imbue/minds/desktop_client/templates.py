@@ -34,10 +34,12 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.chrome_state import AuthErrorBootExtras
 from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import ConsentBootExtras
 from imbue.minds.desktop_client.chrome_state import CreatingBootExtras
 from imbue.minds.desktop_client.chrome_state import DestroyingBootExtras
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
@@ -672,11 +674,11 @@ def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> s
     The two checkbox states seed the form; "Include logs" is only revealed once "Report unexpected
     errors" is enabled (handled client-side).
     """
-    return CATALOG.render(
-        "pages.Consent",
+    extras = ConsentBootExtras(
         report_unexpected_errors=report_unexpected_errors,
         include_logs=include_logs,
     )
+    return CATALOG.render("pages.Consent", boot_state={"consent": extras.to_payload_dict()})
 
 
 @pure
@@ -715,14 +717,22 @@ def render_help_page(
 
 @pure
 def render_welcome_page() -> str:
-    """Render the welcome/splash page for first-time users."""
-    return CATALOG.render("pages.Welcome")
+    """Render the welcome/splash page for first-time users.
+
+    The ``welcome`` island slice is empty: the page needs no data, but every
+    converted page carries an island so harnesses can wait on the mount
+    marker uniformly.
+    """
+    return CATALOG.render("pages.Welcome", boot_state={"welcome": {}})
 
 
 @pure
 def render_login_page() -> str:
-    """Render the login prompt page for unauthenticated users."""
-    return CATALOG.render("pages.Login")
+    """Render the login prompt page for unauthenticated users.
+
+    The ``login`` island slice is empty (no data; see render_welcome_page).
+    """
+    return CATALOG.render("pages.Login", boot_state={"login": {}})
 
 
 @pure
@@ -734,7 +744,8 @@ def render_login_redirect_page(one_time_code: OneTimeCode) -> str:
 @pure
 def render_auth_error_page(message: str) -> str:
     """Render an error page for failed authentication."""
-    return CATALOG.render("pages.AuthError", message=message)
+    extras = AuthErrorBootExtras(message=message)
+    return CATALOG.render("pages.AuthError", boot_state={"auth_error": extras.to_payload_dict()})
 
 
 @pure
