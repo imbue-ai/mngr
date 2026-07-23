@@ -13,6 +13,8 @@ from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
+from imbue.minds.desktop_client.templates import render_account_plan_section
+from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -200,6 +202,30 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "/goto/" not in html
 
 
+def test_render_landing_page_signed_out_launcher_signs_in_back_to_home() -> None:
+    # Signed out (no account email): the bottom-left account launcher reads
+    # "Log in", and (the Landing page being a trusted local page on the chrome
+    # surface) it opens the sign-in modal via the shell bridge with
+    # ``returnTo: '/'`` so a successful sign-in lands back on the home screen
+    # (the server's return_to default is the create screen), leading with the
+    # sign-in tab to match the launcher's label.
+    html = render_landing_page(accessible_agent_ids=())
+    assert 'id="landing-minds-settings"' in html
+    assert 'id="landing-account"' in html
+    assert "Log in" in html
+    assert "window.minds.openSigninModal('/', 'signin')" in html
+
+
+def test_render_landing_page_signed_in_launcher_shows_email_and_extra_count() -> None:
+    html = render_landing_page(
+        accessible_agent_ids=(),
+        account_email="alice@example.com",
+        extra_account_count=2,
+    )
+    assert "alice@example.com" in html
+    assert "(+2)" in html
+
+
 def test_render_login_redirect_page_contains_redirect_script() -> None:
     html = render_login_redirect_page(
         one_time_code=OneTimeCode("abc123-secret-82341"),
@@ -281,15 +307,16 @@ def test_render_create_form_explicit_page_omits_self_heal_sse() -> None:
     assert "workspaceNowExists" not in html
 
 
-def test_render_create_form_opens_signin_modal_via_overlay_relay() -> None:
+def test_render_create_form_opens_signin_modal_via_overlay_bridge() -> None:
     # Choosing Imbue Cloud while signed out opens the sign-in modal in the
     # desktop client's shared overlay layer (so it covers the title bar), not an
     # in-page dialog. The create page therefore no longer embeds the auth form
-    # or loads auth.js itself; it asks the Electron main process to open the
-    # /auth/signin-modal page via an allowlisted postMessage relay (falling back
-    # to navigating there directly in the browser).
+    # or loads auth.js itself; being a trusted local page on the chrome surface,
+    # it asks the Electron main process to open the /auth/signin-modal page via
+    # the window.minds shell bridge (falling back to navigating there directly in
+    # the browser).
     html = render_create_form(accounts=[])
-    assert "minds:open-signin-modal" in html
+    assert "window.minds.openSigninModal()" in html
     assert "/auth/signin-modal" in html
     # The auth form + its script now live in the overlay page, not here.
     assert 'id="signin-modal"' not in html
@@ -651,25 +678,69 @@ def test_render_login_page_shows_prompt() -> None:
 def test_render_chrome_page_contains_titlebar() -> None:
     html = render_chrome_page()
     assert "minds-titlebar" in html
-    assert "sidebar-toggle" in html
     assert "home-btn" in html
     assert "back-btn" in html
     assert "content-frame" in html
+    # The home button reads "(icon) Minds"; there is no hamburger menu, no
+    # forward arrow, and no centered page title.
+    assert ">Minds</span>" in html
+    assert "sidebar-toggle" not in html
+    assert "forward-btn" not in html
+    assert 'id="page-title"' not in html
 
 
-def test_render_chrome_page_titlebar_centers_title_with_1_2_1_sections() -> None:
-    # The titlebar is three flex sections sized 1 / 2 / 1 (left controls |
-    # title | right controls) so the workspace title sits in the window's exact
-    # horizontal center regardless of how wide each side's controls are. The
-    # title's section grows at flex-[2] and centers its content; it is flanked
-    # by exactly two flex-1 sections (left + right). The center must NOT be a
-    # lone flex-1 -- that centered the title within the *leftover* space, so it
-    # drifted off-center whenever the two sides differed in width.
+def test_render_chrome_page_contains_workspace_crumb_and_icon_tabs() -> None:
+    # The breadcrumb block ("/ workspace-name (chevron)") and the two
+    # workspace icon-tabs render hidden; chrome.js shows them on
+    # workspace-scoped screens. The switcher button anchors the workspace
+    # menu beneath itself.
+    html = render_chrome_page()
+    assert 'id="ws-crumb"' in html
+    assert 'id="workspace-switcher-btn"' in html
+    assert 'id="ws-tab-workspace"' in html
+    assert 'id="ws-tab-settings"' in html
+    # The Connections icon-tab was removed; pending permission requests are
+    # served by the titlebar's inbox popup instead.
+    assert 'id="ws-tab-connections"' not in html
+    assert 'id="page-crumb"' in html
+    # Visibility is driven through the native ``hidden`` attribute (the blocks
+    # carry flex display classes that would beat a ``hidden`` class).
+    assert 'id="ws-crumb" class="flex items-center min-w-0" hidden' in html
+
+
+def test_render_chrome_page_seeds_workspace_crumb_server_side() -> None:
+    # The desktop shell passes the workspace being loaded (?agent=... resolved
+    # to a name by the route) so the wrapper's first paint already shows the
+    # workspace breadcrumb with the Workspace tab active -- no bare "Minds" bar
+    # while the content view loads. Without a crumb the block renders hidden
+    # exactly as before.
+    html = render_chrome_page(crumb_workspace_name="my-mind", crumb_agent_id="agent-abc123")
+    assert 'id="ws-crumb" class="flex items-center min-w-0">' in html
+    assert 'data-agent-id="agent-abc123"' in html
+    assert ">my-mind</span>" in html
+    assert 'id="ws-tab-workspace"' in html and "bg-fill-active" in html
+    bare = render_chrome_page()
+    assert 'id="ws-crumb" class="flex items-center min-w-0" hidden' in bare
+
+
+def test_render_chrome_page_contextual_back_button_starts_hidden() -> None:
+    # The back arrow is contextual: hidden at rest, shown by chrome.js only on
+    # pages that opt in (e.g. the create form). There is no forward arrow.
+    html = render_chrome_page()
+    back_open = html.index('id="back-btn"')
+    back_tag = html[html.rindex("<button", 0, back_open) : html.index(">", back_open)]
+    assert " hidden" in back_tag
+
+
+def test_render_chrome_page_titlebar_is_left_cluster_plus_right_cluster() -> None:
+    # The titlebar is a growing left cluster (breadcrumb + icon-tabs) and a
+    # shrink-0 right cluster (bug report + non-mac window controls); there is
+    # no centered title section.
     html = render_chrome_page()
     titlebar = html[html.index('id="minds-titlebar"') : html.index('id="sidebar-backdrop"')]
-    assert "flex-[2] flex items-center justify-center" in titlebar
-    assert "flex-[2]" in titlebar[: titlebar.index('id="page-title"')]
-    assert titlebar.count("flex-1") == 2
+    assert titlebar.count("flex-1") == 1
+    assert "flex-[2]" not in titlebar
+    assert "justify-end shrink-0" in titlebar
 
 
 def test_render_chrome_page_titlebar_reserves_mac_traffic_lights_with_spacer() -> None:
@@ -686,19 +757,21 @@ def test_render_chrome_page_titlebar_reserves_mac_traffic_lights_with_spacer() -
     # The padding approach is the bug being fixed: it must not come back.
     assert "pl-[72px]" not in html_mac
     assert "pl-[72px]" not in html_other
-    # The spacer sits at the very start of the left section, ahead of the menu
-    # button (#sidebar-toggle), only on macOS.
-    left_section_mac = html_mac[: html_mac.index('id="sidebar-toggle"')]
+    # The spacer sits at the very start of the left section, ahead of the back
+    # button (#back-btn), only on macOS.
+    left_section_mac = html_mac[: html_mac.index('id="back-btn"')]
     assert 'class="w-[72px] shrink-0" aria-hidden="true"' in left_section_mac
     assert "w-[72px]" not in html_other
 
 
 def test_render_chrome_page_requests_badge_is_inline_count() -> None:
-    # The requests badge is the Badge count pill sat inline beside the messages
-    # icon (gap-[3px] row), not a dot overlapping the icon's corner: it carries
-    # the type-badge pill role and no absolute positioning (chrome.js fills the
-    # count text + toggles the native `hidden` attribute).
+    # The titlebar's inbox button (right cluster) carries the pending-request
+    # badge: the Badge count pill sat inline beside the inbox icon (gap-[3px]
+    # row), not a dot overlapping the icon's corner. It carries the type-badge
+    # pill role and no absolute positioning (chrome.js fills the count text +
+    # toggles the native `hidden` attribute from the global SSE requests count).
     html = render_chrome_page()
+    assert 'id="requests-toggle"' in html
     assert 'id="requests-badge"' in html
     assert "type-badge" in html
     assert "gap-[3px]" in html
@@ -736,24 +809,26 @@ def test_render_chrome_page_titlebar_background_follows_titlebar_bg_var() -> Non
     assert "var(--titlebar-bg" in html
 
 
-def test_render_chrome_page_page_title_uses_text_primary_token() -> None:
-    # The page title is a plain ``text-primary`` token; the ``.titlebar-surface``
-    # scope re-bases that token off --titlebar-bg, so the title flips
-    # black/white with the accent's lightness (in pure CSS).
+def test_render_chrome_page_crumbs_use_type_label_tokens() -> None:
+    # The breadcrumb text (workspace name / page name) uses plain type-label +
+    # text tokens; the ``.titlebar-surface`` scope re-bases those tokens off
+    # --titlebar-bg, so the crumbs flip black/white with the accent's
+    # lightness (in pure CSS).
     html = render_chrome_page()
-    assert 'id="page-title" class="text-primary' in html
+    assert 'id="workspace-switcher-name" class="type-label' in html
+    assert 'id="page-crumb-name" class="type-label text-primary' in html
 
 
-def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
-    # The titlebar no longer carries an account button (``id="user-btn"``); the
-    # "Manage account(s)" / "Log in" entry now lives in the floating sidebar
-    # alongside the workspace list and the "New workspace" CTA. The titlebar
-    # accent color therefore doesn't have to repaint the account button -- the
-    # sidebar's own dark background is constant.
+def test_render_chrome_page_switcher_menu_has_only_new_workspace() -> None:
+    # The titlebar carries no account button (``id="user-btn"``). The floating
+    # switcher menu's bottom section was trimmed to just the "New workspace"
+    # CTA: the "Minds Settings" and "Manage account(s)" / "Log in" entries were
+    # removed (Minds Settings is still reachable from the home screen).
     html = render_chrome_page()
     assert 'id="user-btn"' not in html
-    assert 'id="sidebar-account"' in html
-    assert 'id="sidebar-account-label"' in html
+    assert 'id="sidebar-new-workspace"' in html
+    assert 'id="sidebar-settings"' not in html
+    assert 'id="sidebar-account"' not in html
 
 
 def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
@@ -799,7 +874,10 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     css = _TOKENS_CSS_PATH.read_text()
     assert "html.no-scrollbar-gutter" in css
     opted_out = '<html lang="en" class="no-scrollbar-gutter">'
-    assert opted_out in render_chrome_page()
+    # The agent-content wrapper additionally carries the ``agent-surface`` mode
+    # class (its viewport-lock CSS is keyed off the html class so the swap
+    # engine's html-class adoption toggles it correctly across in-place swaps).
+    assert '<html lang="en" class="no-scrollbar-gutter agent-surface">' in render_chrome_page()
     assert opted_out in render_overlay_host_page()
     assert opted_out in render_sidebar_page()
     assert opted_out in render_help_page(include_logs_setting=False, workspace_agent_id="")
@@ -824,15 +902,13 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # breaks the click-outside-to-close behavior.
     assert 'id="sidebar-menu"' in html
     # SidebarBottom.jinja is rendered inside the floating menu in both
-    # Chrome.jinja (browser mode) and Sidebar.jinja (the sidebar page loaded
-    # into the shared modal WebContentsView in Electron). It carries the
-    # "New workspace" CTA, the "Settings" entry, and the "Manage account(s)" /
-    # "Log in" entry; the label is updated dynamically by sidebar.js from
-    # /auth/api/status.
+    # Chrome.jinja (browser mode) and Sidebar.jinja (the switcher page loaded
+    # into the shared modal WebContentsView in Electron). It now carries only
+    # the "New workspace" CTA; the "Minds Settings" and "Manage account(s)" /
+    # "Log in" entries were removed.
     assert 'id="sidebar-new-workspace"' in html
-    assert 'id="sidebar-settings"' in html
-    assert 'id="sidebar-account"' in html
-    assert 'id="sidebar-account-label"' in html
+    assert 'id="sidebar-settings"' not in html
+    assert 'id="sidebar-account"' not in html
 
 
 def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
@@ -860,11 +936,12 @@ def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
     assert "top:36px" in html
 
     # Defaults (no caller args) anchor a 38px-tall element at the top-left,
-    # nudged 2px left (offset_x=-2 -> 0 + -2) and 2px below it
+    # nudged 24px left (offset_x=-24 -> 0 + -24) and 2px below it
     # (offset_y=2 -> 0 + 38 + 2) -- right shape for "open the sidebar from
-    # the first titlebar button" without any caller customization.
+    # the first titlebar button" without any caller customization. The -24
+    # lines a row's workspace-name label up under the breadcrumb's name text.
     html_default = render_sidebar_page()
-    assert "left:-2px" in html_default
+    assert "left:-24px" in html_default
     assert "top:40px" in html_default
 
 
@@ -1835,16 +1912,16 @@ def test_oauth_button_github_uses_github_label_and_glyph() -> None:
 
 def test_page_narrow_container_default_padding_and_max_width() -> None:
     html = CATALOG.render("PageNarrowContainer", title="x", _content="<p>body</p>")
-    # Width/padding only: p-8 + max-w-[420px] + w-full, no surface chrome.
+    # The narrow column itself is width/padding only: p-8 + max-w-[420px] +
+    # w-full, no surface chrome (it is a plain width container, not a card).
     assert "p-8" in html
     assert "max-w-[420px]" in html
     assert "w-full" in html
     assert "<p>body</p>" in html
-    # No border/rounding/shadow -- this is a plain width container, not a card.
-    assert "rounded-lg" not in html
-    assert "shadow-raised" not in html
-    assert "border border-default" not in html
-    # The body is flex-centered around the column.
+    # PageNarrowContainer now renders via the shared ChromeShell layout, so a
+    # trusted local page reached through it (auth flow, create form) carries the
+    # app titlebar; the body is flex-centered around the column below it.
+    assert 'id="minds-titlebar"' in html
     assert "flex items-center justify-center min-h-screen" in html
 
 
@@ -2252,3 +2329,59 @@ def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
     assert '<script type="application/json" id="minds-sentry-config">' in html
     assert '"environment": "staging"' in html
     assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html
+
+
+def _plan_view_fixture(is_over_storage_quota: bool = False) -> dict[str, object]:
+    return {
+        "plan_name": "ally",
+        "plan_display_name": "Ally",
+        "available_plans": ["ally", "explorer"],
+        "usage_rows": [
+            {"label": "Remote workspaces", "used": "1", "limit": "10", "note": ""},
+            {"label": "Backup storage", "used": "2.4 GB", "limit": "500.0 GB", "note": "n"},
+        ],
+        "is_over_storage_quota": is_over_storage_quota,
+    }
+
+
+def test_render_accounts_page_renders_async_plan_placeholder() -> None:
+    # The page must never block on the connector: each account gets a loading
+    # placeholder that accounts.js fills in from GET /accounts/<uid>/plan-view.
+    acct = SimpleNamespace(user_id="u-1", email="a@b.com", workspace_ids=[])
+    html = render_accounts_page(accounts=[acct], default_account_id="u-1")
+    assert "data-plan-section" in html
+    assert 'data-user-id="u-1"' in html
+    assert "Loading plan and usage" in html
+    assert '<script src="/_static/accounts.js" defer></script>' in html
+
+
+def test_render_account_plan_section_renders_usage_and_plan_selector() -> None:
+    html = render_account_plan_section(acct_user_id="u-1", plan_view=_plan_view_fixture())
+    assert 'data-trim-running="0"' in html
+    assert "Ally" in html
+    assert "1 of 10" in html
+    assert "2.4 GB of 500.0 GB" in html
+    assert "/accounts/u-1/plan" in html
+    assert "Switch plan" in html
+
+
+def test_render_account_plan_section_shows_trim_action_only_when_over_quota_and_idle() -> None:
+    over_html = render_account_plan_section(acct_user_id="u-1", plan_view=_plan_view_fixture(True))
+    assert "/accounts/u-1/trim-backups" in over_html
+    under_html = render_account_plan_section(acct_user_id="u-1", plan_view=_plan_view_fixture(False))
+    assert "/accounts/u-1/trim-backups" not in under_html
+
+
+def test_render_account_plan_section_marks_running_trim_for_polling() -> None:
+    trim = SimpleNamespace(is_running=True, detail="Trimming backups (round 1)")
+    html = render_account_plan_section(acct_user_id="u-1", plan_view=_plan_view_fixture(True), trim_status=trim)
+    assert 'data-trim-running="1"' in html
+    assert "Trimming backups (round 1)" in html
+    # The trim form is hidden while a trim is already running.
+    assert "/accounts/u-1/trim-backups" not in html
+
+
+def test_render_account_plan_section_degrades_to_unavailable_without_plan_view() -> None:
+    html = render_account_plan_section(acct_user_id="u-1")
+    assert "Plan and usage are unavailable right now" in html
+    assert 'data-trim-running="0"' in html

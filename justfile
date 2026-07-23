@@ -179,11 +179,15 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # (which runs the opposite filter). A later -m on CLI overrides this.
 _skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
+# Coverage report flags are passed explicitly here (not via root addopts) so
+# offload CI batches can suppress them -- see the NOTE in root addopts.
+# --coverage-to-file keeps the term-missing report out of the terminal and
+# writes it to .test_output/ instead.
 test-unit:
-  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=term-missing --cov-report=xml --cov-report=html --coverage-to-file --ignore-glob="**/test_*.py" --cov-fail-under=36
 
 test-integration:
-  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --cov-fail-under=80
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=term-missing --cov-report=xml --cov-report=html --coverage-to-file --cov-fail-under=80
 
 # Examples:
 #   just test-quick
@@ -694,18 +698,31 @@ minds-stop:
         rm -f "$pid_file"
         exit 0
     fi
-    # Snapshot the full descendant tree. pstree -p -T walks PPID links and
-    # gives PIDs in flat form. We'll use this both to identify electron's
-    # main process and to verify the whole tree exits.
-    descendants=$(pstree -p -T "$pid" 2>/dev/null | grep -oE '\([0-9]+\)' | tr -d '()' | sort -u)
-    # Locate Electron's main process: the descendant whose cmd contains the
-    # electron binary path and is NOT a `--type=zygote` / `--type=utility`
-    # / `--type=...` subprocess. There's exactly one such process per
-    # session (the rest are renderer / GPU / network helpers it spawned).
+    # Snapshot the full descendant tree by walking PPID links with plain ps
+    # (portable: pstree is not preinstalled on macOS, and macOS ps has no
+    # `cmd=` keyword). We'll use this both to identify electron's main
+    # process and to verify the whole tree exits.
+    descendants=$(ps -eo pid=,ppid= | awk -v root="$pid" '
+        { ppid_of[$1] = $2 }
+        END {
+            n = 1; queue[0] = root; seen[root] = 1
+            for (i = 0; i < n; i++)
+                for (p in ppid_of)
+                    if (ppid_of[p] == queue[i] && !(p in seen)) { seen[p] = 1; queue[n++] = p }
+            for (i = 0; i < n; i++) print queue[i]
+        }' | sort -u)
+    # Locate Electron's main process: the descendant whose command contains
+    # the electron binary path (Linux: node_modules/electron/dist/electron;
+    # macOS: Electron.app/Contents/MacOS/Electron) and is NOT a
+    # `--type=zygote` / `--type=utility` / `--type=...` subprocess. There's
+    # exactly one such process per session (the rest are renderer / GPU /
+    # network helpers it spawned).
     electron_main_pid=""
     for d in $descendants; do
-        cmd=$(ps -o cmd= -p "$d" 2>/dev/null || true)
-        if [[ "$cmd" == *"node_modules/electron/dist/electron "* && "$cmd" != *"--type="* ]]; then
+        cmd=$(ps -o command= -p "$d" 2>/dev/null || true)
+        if [[ "$cmd" != *"--type="* ]] \
+            && { [[ "$cmd" == *"node_modules/electron/dist/electron "* ]] \
+                 || [[ "$cmd" == *"Electron.app/Contents/MacOS/Electron"* ]]; }; then
             electron_main_pid="$d"
             break
         fi

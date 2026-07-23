@@ -49,6 +49,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.region_preference import start_geo_detection
 from imbue.minds.desktop_client.state import DesktopClientState
+from imbue.minds.desktop_client.templates import warm_template_caches
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import flush_sentry_on_shutdown
 
@@ -88,11 +89,29 @@ def desktop_client_runtime(state: DesktopClientState, is_externally_managed_clie
     which case the runtime neither creates nor closes it.
     """
     if not is_externally_managed_client:
-        state.http_client = httpx.Client(follow_redirects=False, timeout=_PROXY_TIMEOUT_SECONDS)
+        # TLS verification is deliberately OFF: this client's only consumer is
+        # the share-URL readiness probe, and Python's ssl refuses to match a
+        # wildcard certificate against a hostname label containing an
+        # underscore (e.g. ``system_interface--...``), which browsers accept.
+        # A verifying probe therefore reports "certificate verify failed"
+        # forever on share links that work fine in every browser. The probe
+        # reads only the redirect status/location (the Access-app "live"
+        # signal) and transfers nothing sensitive; the user's browser still
+        # fully verifies the real link.
+        state.http_client = httpx.Client(follow_redirects=False, timeout=_PROXY_TIMEOUT_SECONDS, verify=False)
     # Kick off the one-shot IP-geolocation lookup in the background so the create
     # form can default each provider's region to the user's nearest datacenter.
     if state.root_concurrency_group is not None:
         start_geo_detection(state.root_concurrency_group, state.geo_location_cache)
+        # Pay the lazy JinjaX template compiles up front so the first open of the
+        # workspace switcher / inbox / help modal is as fast as every later one
+        # (the first render otherwise showed up as a ~2s stall).
+        state.root_concurrency_group.start_new_thread(
+            target=warm_template_caches,
+            name="template-cache-warmup",
+            # Warmup failures must not poison the root group; the target swallows its own.
+            is_checked=False,
+        )
     try:
         yield
     finally:

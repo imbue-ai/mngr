@@ -87,6 +87,13 @@
       // Tell main the iframe is ready so it can replay the cached chrome state
       // (workspace list / request count) into it.
       window.minds.overlayModalLoaded(id);
+      if (frame === modalFrame) {
+        // The hosted page reloaded itself in place (e.g. the accounts modal
+        // after a log-out). Keep it:
+        // destroying here would blank the modal while main still holds the
+        // overlay view visible, leaving an invisible layer eating every click.
+        return;
+      }
       if (frame !== incomingFrame) {
         // Superseded by a newer show before it finished loading; discard it.
         destroyFrame(frame);
@@ -248,4 +255,25 @@
     else if (cmd.type === 'show-tooltip') showTooltip(cmd);
     else if (cmd.type === 'hide-tooltip') hideTooltip();
   });
+
+  // The dark-mode setting changed (persisted from some window's settings UI).
+  // Freshly-mounted modal iframes pick the theme up server-side (Base.jinja),
+  // so this only needs to flip the documents already on screen: the host page
+  // itself plus any mounted modal iframe. Hosted pages come from the same
+  // backend origin as this host, so their contentDocument is reachable; a
+  // still-loading iframe may not expose one yet, which is fine -- its
+  // server-rendered theme is already current.
+  if (window.minds.onChromeEvent) {
+    window.minds.onChromeEvent(function (data) {
+      if (!data || data.type !== 'appearance') return;
+      var isDark = !!data.is_dark;
+      document.documentElement.classList.toggle('dark', isDark);
+      [modalFrame, incomingFrame].forEach(function (frame) {
+        if (!frame) return;
+        try {
+          frame.contentDocument.documentElement.classList.toggle('dark', isDark);
+        } catch (e) { /* iframe not loaded yet */ }
+      });
+    });
+  }
 })();

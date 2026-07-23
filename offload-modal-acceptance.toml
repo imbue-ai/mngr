@@ -24,26 +24,15 @@ enable_docker = true
 
 [checkpoint]
 # pyproject.toml + uv.lock are here because Python deps are installed
-# at image build time via `uv sync --all-packages` in the mngr Dockerfile.
-# Per-package pyproject.toml files are also included: changes to per-package
-# metadata (entry points, optional deps, build-system requires) make `uv run`
-# in the sandbox consider editable installs stale and try to rebuild them,
-# which fails because the sandbox runs with network disabled. Rebuilding the
-# checkpoint image regenerates editable-install dist-info to match the new
-# source so `uv run` finds nothing to rebuild.
-# If dep churn starts invalidating the checkpoint too often, the
-# alternative is to drop these from build_inputs and add a second
-# `uv sync` call at sandbox startup (e.g. via offload's sandbox_init_cmd
-# or the CMD) on top of the existing build-time one -- the Dockerfile
-# RUN still provides the baseline install, and the startup sync picks
-# up whatever drifted since the checkpoint. Trade-off is slower
-# per-sandbox startup vs faster warm-cache hit rate.
+# at image build time via `uv sync --all-packages` in the mngr Dockerfile
+# (any per-package dependency change necessarily also changes uv.lock).
+# Per-package pyproject.toml files are deliberately NOT build inputs --
+# see offload-modal.toml for the full rationale (post_patch_cmd reruns
+# `uv sync --all-packages` after every thin diff, refreshing dist-info).
 build_inputs = [
     "libs/mngr/imbue/mngr/resources/Dockerfile",
     "pyproject.toml",
     "uv.lock",
-    "libs/*/pyproject.toml",
-    "apps/*/pyproject.toml",
 ]
 
 [framework]
