@@ -76,6 +76,22 @@ def test_start_connect_with_multiple_agents(
     assert "--connect can only be used with a single agent" in result.output
 
 
+def test_start_resume_message_with_no_resume_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --resume-message combined with --no-resume fails."""
+    result = cli_runner.invoke(
+        start,
+        ["agent1", "--resume-message", "continue please", "--no-resume"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    assert "--resume-message cannot be combined with --no-resume" in result.output
+
+
 # =============================================================================
 # Output helper tests
 # =============================================================================
