@@ -16,6 +16,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.core import ServiceAccountCredential
 
 
 class FakeLatchkey(Latchkey):
@@ -67,19 +68,33 @@ class FakeLatchkey(Latchkey):
         del service_name, is_offline
         return self._service_info
 
+    def auth_list(self, *, is_offline: bool = False) -> dict[str, tuple[ServiceAccountCredential, ...]]:
+        del is_offline
+        return {}
+
     def auth_prepare(self, service_name: str, client_id: str, client_secret: str) -> tuple[bool, str]:
         del service_name, client_id, client_secret
         return (True, "")
 
-    def auth_clear(self, service_name: str) -> tuple[bool, str]:
-        del service_name
+    def auth_clear(
+        self,
+        service_name: str,
+        *,
+        account: str | None = None,
+        is_all: bool = False,
+    ) -> tuple[bool, str]:
+        del service_name, account, is_all
         return (True, "")
 
-    def auth_browser_login(self, service_name: str) -> tuple[bool, str]:
-        del service_name
+    def auth_browser_login(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
+        del service_name, is_ephemeral
         return (True, "")
 
-    def auth_browser(self, service_name: str) -> tuple[bool, str]:
+    def auth_browser(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
+        del service_name, is_ephemeral
+        return (True, "")
+
+    def add_account(self, service_name: str) -> tuple[bool, str]:
         del service_name
         return (True, "")
 
