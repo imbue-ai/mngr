@@ -145,7 +145,7 @@ def test_initialize_accepts_exactly_minimum_version(tmp_path: Path) -> None:
 
 
 def test_initialize_accepts_newer_version(tmp_path: Path) -> None:
-    binary = _make_version_binary(tmp_path, version_output="3.0.0")
+    binary = _make_version_binary(tmp_path, version_output="33.0.0")
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     manager.initialize()
 
