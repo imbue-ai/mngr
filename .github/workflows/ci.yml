@@ -891,10 +891,14 @@ jobs:
       # e.g. to exercise just the sync e2e against a branch.
       - name: Run minds snapshot-resume tests via offload
         id: tests
+        # The input reaches the script through env (never ${{ }} inside run:)
+        # so a crafted dispatch value stays data instead of becoming shell.
+        env:
+          MINDS_SNAPSHOT_TEST_FILTER: ${{ inputs.minds_snapshot_test_filter }}
         run: |
           FILTER_ARGS=""
-          if [ -n "${{ inputs.minds_snapshot_test_filter }}" ]; then
-            FILTER_ARGS="--filter ${{ inputs.minds_snapshot_test_filter }}"
+          if [ -n "$MINDS_SNAPSHOT_TEST_FILTER" ]; then
+            FILTER_ARGS="--filter $MINDS_SNAPSHOT_TEST_FILTER"
           fi
           just test-offload-minds-snapshot "${{ needs.build-minds-snapshot.outputs.image_id }}" "$FILTER_ARGS"
 
