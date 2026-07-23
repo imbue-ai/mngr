@@ -203,6 +203,16 @@ class SendMessageError(AgentError):
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
 
 
+class MessageDeliveredButBlockedError(SendMessageError):
+    """The message was delivered/accepted, but a blocking dialog remained afterward and could not be resolved.
+
+    Distinct from a plain SendMessageError (which means the message was NOT delivered): here the input
+    landed (e.g. a slash command was accepted), but the agent is now stuck on an interactive TUI dialog
+    that mngr could not clear. Callers map this to a dedicated exit code so "delivered but now blocked"
+    is distinguishable from "message failed to send".
+    """
+
+
 class DuplicateAgentNameError(AgentError):
     """An agent with this name already exists on the host."""
 

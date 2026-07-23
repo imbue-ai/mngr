@@ -1,8 +1,13 @@
 import json
+import tomllib
 from pathlib import Path
+from typing import Final
 
 import pytest
 
+from imbue.imbue_common.primitives import NonNegativeFloat
+from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.config.data_types import PlanQuotasConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
 from imbue.minds.errors import MalformedMngrOutputError
@@ -87,3 +92,57 @@ def test_parse_agents_from_mngr_output_raises_on_missing_agents_key() -> None:
     output = json.dumps({"not_agents": []})
     with pytest.raises(MalformedMngrOutputError, match="missing 'agents' key"):
         parse_agents_from_mngr_output(output)
+
+
+def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
+    config = PlanQuotasConfig(
+        max_remote_workspaces=NonNegativeInt(2),
+        max_tunnels=NonNegativeInt(50),
+        max_services_per_tunnel=NonNegativeInt(10),
+        max_buckets=NonNegativeInt(5),
+        max_total_bucket_gb=NonNegativeInt(50),
+        monthly_llm_spend_usd=NonNegativeFloat(0),
+        max_active_synced_workspaces=NonNegativeInt(200),
+    )
+    row = config.to_plan_row()
+    assert row["max_total_bucket_bytes"] == 50 * 1024**3
+    assert row["monthly_llm_spend_usd"] == 0.0
+    assert row["max_remote_workspaces"] == 2
+    # Every quota column the connector's plans table carries is present.
+    assert sorted(row) == [
+        "max_active_synced_workspaces",
+        "max_buckets",
+        "max_remote_workspaces",
+        "max_services_per_tunnel",
+        "max_total_bucket_bytes",
+        "max_tunnels",
+        "monthly_llm_spend_usd",
+    ]
+
+
+_EXPECTED_DEPLOY_TIERS: Final[frozenset[str]] = frozenset({"ci", "dev", "staging", "production"})
+
+
+def test_committed_deploy_tomls_all_define_the_launch_plans() -> None:
+    """Every tier ships the exact same plan definitions (per-user bumps handle exceptions).
+
+    Tiers are discovered from disk (every ``envs/*/deploy.toml``) rather than
+    hardcoded, so a newly-added tier cannot silently diverge; the known four
+    are asserted present so a renamed tier cannot drop out of coverage.
+    """
+    envs_dir = Path(__file__).parent / "envs"
+    deploy_paths = sorted(envs_dir.glob("*/deploy.toml"))
+    discovered_tiers = {path.parent.name for path in deploy_paths}
+    assert _EXPECTED_DEPLOY_TIERS <= discovered_tiers, (
+        f"missing deploy.toml for tiers: {sorted(_EXPECTED_DEPLOY_TIERS - discovered_tiers)}"
+    )
+    plan_blocks_by_tier: dict[str, dict[str, PlanQuotasConfig]] = {}
+    for path in deploy_paths:
+        raw = tomllib.loads(path.read_text())
+        plans = {name: PlanQuotasConfig.model_validate(values) for name, values in raw.get("plans", {}).items()}
+        plan_blocks_by_tier[path.parent.name] = plans
+    for tier, plans in plan_blocks_by_tier.items():
+        assert sorted(plans) == ["ally", "explorer"], f"tier {tier} is missing a launch plan"
+        assert plans == plan_blocks_by_tier["dev"], f"tier {tier} diverges from the shared [plans] values"
+    assert plan_blocks_by_tier["dev"]["explorer"].monthly_llm_spend_usd == 0.0
+    assert plan_blocks_by_tier["dev"]["ally"].monthly_llm_spend_usd == 1000.0

@@ -116,12 +116,18 @@
     banner.style.display = 'flex';
   }
 
+  // Set when the chrome shell swaps this page out in place (no document
+  // teardown): ends the poll chain so a departed page stops fetching.
+  var pageTornDown = false;
+  window.addEventListener('minds:page-teardown', function () { pageTornDown = true; }, { once: true });
+
   function poll() {
+    if (pageTornDown) return;
     fetch('/_chrome/sync-initial-status')
       .then(function (resp) { return resp.ok ? resp.json() : null; })
       .then(function (data) {
         // Unauthenticated (or error) responses end polling: signin reloads the page.
-        if (!data || !Array.isArray(data.accounts)) return;
+        if (pageTornDown || !data || !Array.isArray(data.accounts)) return;
         render(data.accounts);
         var hasPending = data.accounts.some(function (entry) { return entry.state === 'PENDING'; });
         var hasFailed = data.accounts.some(function (entry) { return entry.state === 'FAILED'; });

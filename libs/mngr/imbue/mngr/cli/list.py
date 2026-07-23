@@ -1003,20 +1003,35 @@ def _format_value_as_string(value: Any) -> str:
 _BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
 
 
+def _typed_cel_sort_key(value: Any) -> tuple[int, Any]:
+    """Return a ``(type_rank, comparable)`` key that orders ``value`` within its type.
+
+    The leading rank groups values by type so values of different types are never
+    compared to one another (which would raise). celpy's ``IntType`` / ``DoubleType``
+    / ``StringType`` are ``int`` / ``float`` / ``str`` subclasses, so CEL values
+    match the ``isinstance`` checks here.
+    """
+    if isinstance(value, (int, float)):
+        return (0, value)
+    if isinstance(value, str):
+        return (1, value)
+    return (2, str(value))
+
+
 class _CelSortKeyExtractor:
     """Extracts a sort key from an (agent, cel_context) pair for a single CEL expression."""
 
     program: Any
     is_descending: bool
 
-    def __call__(self, pair: tuple[AgentDetails, dict[str, Any]]) -> tuple[int, str]:
+    def __call__(self, pair: tuple[AgentDetails, dict[str, Any]]) -> tuple[int, tuple[int, Any]]:
         _, ctx = pair
         value = evaluate_cel_sort_key(self.program, ctx)
         if value is None:
-            # For ascending: (1, "") puts None at end
-            # For descending (reverse=True): (0, "") puts None at end
-            return (1, "") if not self.is_descending else (0, "")
-        return (0, str(value)) if not self.is_descending else (1, str(value))
+            # reverse=is_descending flips the whole key, so the leading none-rank
+            # is inverted to keep missing values at the end in both directions.
+            return (1, (2, "")) if not self.is_descending else (0, (2, ""))
+        return (0, _typed_cel_sort_key(value)) if not self.is_descending else (1, _typed_cel_sort_key(value))
 
 
 def _sort_agents_by_cel(

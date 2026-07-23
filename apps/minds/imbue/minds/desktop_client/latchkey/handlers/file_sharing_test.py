@@ -14,6 +14,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -100,14 +101,29 @@ def _make_file_sharing_handler(
     )
 
 
+class _NamedWorkspaceResolver(StaticBackendResolver):
+    """Static resolver that reports every configured agent as a named workspace."""
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
+
+    def get_workspace_name(self, agent_id: AgentId) -> str | None:
+        return f"ws-{agent_id}"
+
+
 def _build_authenticated_client(
     tmp_path: Path,
     handler: FileSharingGrantHandler,
     inbox: RequestInbox,
+    known_agent: AgentId | None = None,
 ) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
-    backend_resolver: BackendResolverInterface = StaticBackendResolver(url_by_agent_and_service={})
+    backend_resolver: BackendResolverInterface
+    if known_agent is not None:
+        backend_resolver = _NamedWorkspaceResolver(url_by_agent_and_service={str(known_agent): {}})
+    else:
+        backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     paths = WorkspacePaths(data_dir=tmp_path)
     app = create_desktop_client(
         auth_store=auth_store,
@@ -165,8 +181,8 @@ def test_render_request_detail_fragment_shows_path_and_rationale(tmp_path: Path)
     # The fragment must show the human-readable access label so the user
     # knows what's being granted.
     assert "read-only" in body
-    # The fragment is right-pane-only and has no chrome of its own; the
-    # inbox shell owns the backdrop, close button, and submission JS.
+    # The fragment carries no page chrome of its own; the Connections
+    # shell owns the card chrome and submission JS.
     assert "<html" not in body
     assert "permissions-backdrop" not in body
     assert "<script>" not in body

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import Field
 
@@ -10,6 +11,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.sharing_handler import disable_sharing
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
+from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -132,3 +134,44 @@ def test_disable_sharing_is_idempotent_when_service_already_absent(tmp_path: Pat
     disable_sharing(agent_id, ServiceName("web"), cli, store)
 
     assert cli.remove_service_calls == []
+
+
+_SHARE_URL = "https://web--abc--owner.example.com"
+_LOGIN_URL = "https://team.cloudflareaccess.com/cdn-cgi/access/login/web--abc--owner.example.com"
+
+
+def _probe_client(login_response: httpx.Response) -> httpx.Client:
+    """Client whose edge answers with the Access redirect and whose login URL answers ``login_response``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "team.cloudflareaccess.com":
+            return login_response
+        return httpx.Response(302, headers={"location": _LOGIN_URL})
+
+    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+
+def test_probe_ready_when_edge_redirects_and_login_page_resolves() -> None:
+    client = _probe_client(httpx.Response(200, text="<title>Sign in - Cloudflare Access</title>"))
+    assert probe_share_url_readiness(client, _SHARE_URL) is True
+
+
+def test_probe_not_ready_while_access_app_missing_page_shows() -> None:
+    # The edge redirect can go live before the Access login service knows the
+    # application; its transient error page is a 200, so the probe must read
+    # the body to tell it apart from the real login page.
+    client = _probe_client(httpx.Response(200, text="<h1>Unable to find your Access application!</h1>"))
+    assert probe_share_url_readiness(client, _SHARE_URL) is False
+
+
+def test_probe_not_ready_when_login_url_errors() -> None:
+    client = _probe_client(httpx.Response(500, text="boom"))
+    assert probe_share_url_readiness(client, _SHARE_URL) is False
+
+
+def test_probe_not_ready_without_edge_redirect() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    assert probe_share_url_readiness(client, _SHARE_URL) is False

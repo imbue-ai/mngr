@@ -8,6 +8,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr_claude.plugin import DialogDetectedError
+from imbue.mngr_claude.plugin import _INPUT_PROMPT_GLYPH
 from imbue.mngr_claude.plugin_test import make_claude_agent
 
 # The fake tmux sessions these tests drive just need to stay alive long enough
@@ -64,15 +65,15 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
     window_name = agent.mngr_ctx.config.tmux.primary_window_name
 
     try:
-        # The pane must contain the TUI-ready indicator (Claude's input-prompt
-        # glyph), because send_message now waits for readiness before pasting.
-        # A bare pane without it would (correctly) block on that wait; here we
-        # are exercising the no-dialog path, so the pane stands in for a ready
-        # Claude TUI.
-        ready_glyph = agent.get_tui_ready_indicator()
+        # The pane must contain the TUI-ready indicator, because send_message now waits for
+        # readiness before pasting. Claude's readiness is the input-prompt glyph at the START of a
+        # line (column 0); a bare pane without it would (correctly) block on that wait. Here we are
+        # exercising the no-dialog path, so we echo a literal column-0 prompt line to stand in for a
+        # ready Claude TUI. (The indicator itself is a compiled regex, not a literal, so it must not
+        # be embedded into the pane text directly.)
         # Name the primary window so it matches agent.tmux_target (which targets by name).
         agent.host.execute_idempotent_command(
-            f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'echo \"{ready_glyph} Normal output here\"; sleep {_KEEP_ALIVE_SLEEP_SECONDS}'",
+            f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'echo \"{_INPUT_PROMPT_GLYPH} Normal output here\"; sleep {_KEEP_ALIVE_SLEEP_SECONDS}'",
             timeout_seconds=5.0,
         )
 
