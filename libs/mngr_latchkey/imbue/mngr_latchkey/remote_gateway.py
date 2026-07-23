@@ -55,15 +55,13 @@ from imbue.mngr_latchkey.store import plugin_data_dir
 LATCHKEY_VERSION: Final[str] = "2.21.0"
 
 # datalib release the VPS fetches the "dispatch curl" + Chrome-impersonating
-# curl from. The gateway runs the dispatch curl as its ``LATCHKEY_CURL`` so a
-# caller that sends the ``X-Imbue-Impersonate`` marker header gets Chrome TLS
-# impersonation, while every other request passes through to the system curl.
-#
-# FOLLOWUP: point this at the first datalib release that ships the
-# ``curl-<triple>.tar.gz`` tarballs (the dispatch curl was added
-# after v0.21.0). Until such a release exists the VPS fetch 404s and is
-# skipped (best-effort -- it must not break provisioning); the gateway then
-# uses system curl, unchanged.
+# curl from (``curl-<triple>.tar.gz``). The gateway runs the dispatch curl as
+# its ``LATCHKEY_CURL`` so a caller that sends the ``X-Imbue-Impersonate``
+# marker header gets Chrome TLS impersonation, while every other request
+# passes through to the system curl. The fetch is best-effort: a failure
+# (network, or a host arch datalib doesn't build) must not break
+# provisioning -- the gateway run script guards on the binaries' presence and
+# falls back to system curl when they're absent.
 _DATALIB_REPO: Final[str] = "imbue-ai/datalib"
 DATALIB_CURL_VERSION: Final[str] = "v0.22.0"
 # Where the two binaries land on the VPS. ``/usr/local/bin`` is already on the

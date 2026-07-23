@@ -36,17 +36,11 @@ const DESYNC_VERSION = '1.0.3';
 // (glibc) are bundled -- datalib publishes no x86_64-apple-darwin, and there
 // is no impersonation on Windows.
 //
-// FOLLOWUP: point DATALIB_CURL_VERSION at the first datalib release that
-// contains the `curl-*` tarballs (the dispatch curl was added
-// after v0.21.0), and replace the PENDING_DATALIB_RELEASE sentinels in
-// EXPECTED_SHA256 with the real hashes. Until then the curl download is a
-// loud no-op (see downloadLatchkeyCurl) so builds stay green and latchkey
-// falls back to the system curl.
+// When bumping DATALIB_CURL_VERSION, update the `curl-*` hashes in
+// EXPECTED_SHA256 to match (the tarball filename is version-less, so the
+// old hash would otherwise be checked against the new bytes and fail).
 const DATALIB_REPO = 'imbue-ai/datalib';
 const DATALIB_CURL_VERSION = 'v0.22.0';
-// Sentinel meaning "not yet pinned"; downloadLatchkeyCurl skips instead of
-// failing while any supported-platform hash is still this value.
-const PENDING_DATALIB_RELEASE = 'PENDING_DATALIB_RELEASE';
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -75,10 +69,10 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_darwin_amd64.tar.gz':   'ab029448074428dc757d2235109dd557e9f34e4865052432a6ea7c431f0a5a19',
   'desync_1.0.3_linux_amd64.tar.gz':    'ad4dd9e91b57eef8627d2038df09281d7f38dca02eeca0e66592b54087619953',
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
-  // FOLLOWUP: replace these sentinels with the real hashes from the datalib
-  // release named by DATALIB_CURL_VERSION (`curl-<triple>.tar.gz.sha256`).
-  'curl-aarch64-apple-darwin.tar.gz':      PENDING_DATALIB_RELEASE,
-  'curl-x86_64-unknown-linux-gnu.tar.gz':  PENDING_DATALIB_RELEASE,
+  // From the datalib release named by DATALIB_CURL_VERSION
+  // (`curl-<triple>.tar.gz.sha256`).
+  'curl-aarch64-apple-darwin.tar.gz':      '6d03bed2b15005766df8af3362dc6489690552718b4f4f77644dc80e09a6d0b9',
+  'curl-x86_64-unknown-linux-gnu.tar.gz':  '6f881600d3d56d7033c7e12906bc3146e233bcdd14b458061e52f7111cf7a9eb',
 };
 
 const MAX_REDIRECTS = 5;
@@ -349,23 +343,14 @@ async function downloadDesync(resourcesDir, { platform, arch }) {
  * its LATCHKEY_CURL (wired in electron/backend.js).
  *
  * No-op with a warning -- rather than a hard failure -- when the platform
- * has no datalib build, or while the pinned SHA is still the
- * PENDING_DATALIB_RELEASE sentinel (the datalib release with the curl
- * tarball isn't cut yet). In those cases latchkey keeps using the system
- * curl, exactly as before. Once pinned this behaves like the other
- * binaries: hard-fail on a download error or SHA mismatch.
+ * has no datalib build (macOS x86_64, Windows); in that case latchkey keeps
+ * using the system curl. On a supported platform this behaves like the
+ * other bundled binaries: hard-fail on a download error or SHA mismatch.
  */
 async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
   const info = getLatchkeyCurlDownloadInfo({ platform, arch });
   if (info === null) {
     console.log(`[download-binaries] No datalib curl build for ${platform}/${arch}; skipping (latchkey uses system curl).`);
-    return;
-  }
-  if (EXPECTED_SHA256[info.filename] === PENDING_DATALIB_RELEASE) {
-    console.log(
-      `[download-binaries] ${info.filename} not yet pinned (see the DATALIB_CURL_VERSION / ` +
-      `EXPECTED_SHA256 FOLLOWUP); skipping curl impersonation bundle for now.`,
-    );
     return;
   }
 

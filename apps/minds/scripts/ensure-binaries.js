@@ -25,12 +25,14 @@ const REQUIRED = [
   path.join(RESOURCES, 'git', 'bin', 'git'),
   path.join(RESOURCES, 'lima', 'bin', 'limactl'),
   path.join(RESOURCES, 'desync', 'desync'),
-  // FOLLOWUP: once the datalib curl download is pinned (see
-  // download-binaries.js DATALIB_CURL_VERSION / EXPECTED_SHA256), add
-  //   path.join(RESOURCES, 'curl', 'latchkey-curl-dispatch'),
-  // here so dev `pnpm start` fetches it too. Left out until then: while the
-  // download is a sentinel no-op, listing it would make every start re-run
-  // the (always-full) downloader for a file that never appears.
+  // The dispatch curl the latchkey gateway runs as LATCHKEY_CURL. Only
+  // fetched on platforms datalib builds it for (macOS arm64, Linux x86_64);
+  // on others downloadLatchkeyCurl no-ops and this path stays absent, so
+  // guard membership on the platform to avoid a perpetual re-download loop.
+  ...((process.platform === 'darwin' && process.arch === 'arm64') ||
+  (process.platform === 'linux' && process.arch === 'x64')
+    ? [path.join(RESOURCES, 'curl', 'latchkey-curl-dispatch')]
+    : []),
 ];
 
 const missing = REQUIRED.filter((p) => !fs.existsSync(p));
