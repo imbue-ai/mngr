@@ -91,7 +91,8 @@
         if (wasHidden && opts.active) animateReveal(body);
       }
       if (summary) {
-        summary.textContent = opts.summary || '';
+        var summaryText = summary.querySelector('[data-step-summary-text]');
+        if (summaryText) summaryText.textContent = opts.summary || '';
         summary.classList.toggle('hidden', !(opts.done && opts.summary));
       }
       // Active or completed steps get the accent circle; only completed steps
@@ -230,12 +231,6 @@
       presetCards[i].addEventListener('click', function () {
         var name = this.getAttribute('data-preset');
         markPresetSelected(name);
-        // Create-form parity: picking the remote card while signed in but on
-        // "No account" auto-selects the first account instead of erroring.
-        if (name === 'remote' && HAS_ANY_ACCOUNT && accountSelect.value === '') {
-          var firstAccount = accountSelect.querySelector('option[value]:not([value=""])');
-          if (firstAccount) accountSelect.value = firstAccount.value;
-        }
         hideAccountError();
         // A choice advances to the confirmation step.
         activeStep = 3;
@@ -344,7 +339,16 @@
         </div>
         <div class="flex-1 pb-8">
           <h2 data-step-title class="type-heading text-primary">What would you like to do with it?</h2>
-          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          {# Collapsed answer: a check + the chosen option, tucked close under
+             its question with extra room below so it clearly groups with the
+             question it answers (hidden toggle on this block; flex on inner to
+             avoid the flex-beats-hidden gotcha). #}
+          <div data-step-summary class="hidden mt-0.5 mb-4">
+            <span class="flex items-center gap-2 type-body text-secondary">
+              <span class="text-success shrink-0"><Icon16 name="badge-check-filled" /></span>
+              <span data-step-summary-text></span>
+            </span>
+          </div>
           <div data-step-body class="flex flex-col gap-3 mt-4">
             <Button variant="secondary" block id="choose-new-workspace">Create a new workspace</Button>
             <Button variant="secondary" block id="choose-add-existing">Add to an existing workspace</Button>
@@ -362,7 +366,16 @@
         </div>
         <div class="flex-1 pb-8">
           <h2 data-step-title class="type-heading text-primary">Where should it run?</h2>
-          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          {# Collapsed answer: a check + the chosen option, tucked close under
+             its question with extra room below so it clearly groups with the
+             question it answers (hidden toggle on this block; flex on inner to
+             avoid the flex-beats-hidden gotcha). #}
+          <div data-step-summary class="hidden mt-0.5 mb-4">
+            <span class="flex items-center gap-2 type-body text-secondary">
+              <span class="text-success shrink-0"><Icon16 name="badge-check-filled" /></span>
+              <span data-step-summary-text></span>
+            </span>
+          </div>
           <div data-step-body class="mt-4" role="radiogroup" aria-label="Where to run your workspace">
             <CreatePresetCards selected_preset="" />
           </div>
@@ -379,7 +392,16 @@
         </div>
         <div class="flex-1 pb-8">
           <h2 data-step-title class="type-heading text-primary">Confirm and create</h2>
-          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          {# Collapsed answer: a check + the chosen option, tucked close under
+             its question with extra room below so it clearly groups with the
+             question it answers (hidden toggle on this block; flex on inner to
+             avoid the flex-beats-hidden gotcha). #}
+          <div data-step-summary class="hidden mt-0.5 mb-4">
+            <span class="flex items-center gap-2 type-body text-secondary">
+              <span class="text-success shrink-0"><Icon16 name="badge-check-filled" /></span>
+              <span data-step-summary-text></span>
+            </span>
+          </div>
           <div data-step-body class="mt-4">
             <form id="inspiration-form">
               <input type="hidden" id="inspiration-git-url" value="{{ git_url }}">
@@ -440,7 +462,16 @@
         </div>
         <div class="flex-1 pb-8">
           <h2 data-step-title class="type-heading text-primary">Copy the message</h2>
-          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          {# Collapsed answer: a check + the chosen option, tucked close under
+             its question with extra room below so it clearly groups with the
+             question it answers (hidden toggle on this block; flex on inner to
+             avoid the flex-beats-hidden gotcha). #}
+          <div data-step-summary class="hidden mt-0.5 mb-4">
+            <span class="flex items-center gap-2 type-body text-secondary">
+              <span class="text-success shrink-0"><Icon16 name="badge-check-filled" /></span>
+              <span data-step-summary-text></span>
+            </span>
+          </div>
           <div data-step-body class="mt-4">
             <p class="type-body text-secondary mb-4">
               You'll paste this into the chat of the workspace you want to add
@@ -469,7 +500,16 @@
         </div>
         <div class="flex-1 pb-8">
           <h2 data-step-title class="type-heading text-primary">Select a workspace</h2>
-          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          {# Collapsed answer: a check + the chosen option, tucked close under
+             its question with extra room below so it clearly groups with the
+             question it answers (hidden toggle on this block; flex on inner to
+             avoid the flex-beats-hidden gotcha). #}
+          <div data-step-summary class="hidden mt-0.5 mb-4">
+            <span class="flex items-center gap-2 type-body text-secondary">
+              <span class="text-success shrink-0"><Icon16 name="badge-check-filled" /></span>
+              <span data-step-summary-text></span>
+            </span>
+          </div>
           <div data-step-body class="mt-4">
             <p class="type-body text-secondary mb-4">
               It will open so you can paste the copied message into its chat.
