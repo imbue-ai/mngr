@@ -4,6 +4,12 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-22
+
+### Changed
+
+- Changed: The TMR workflow no longer opens the run's pull request itself — the reducer agent does, so the PR description can carry the run's actual findings (mapper status breakdown, escalations table). The workflow now passes the reducer (and only the reducer) `GH_TOKEN` plus the context to write that description (repository, base branch, run URL, periodic-run label/assignees) via the new `--reducer-env` option; mappers do not receive the token. The only PR-related step left in the workflow is the breadcrumb comment linking a superseded periodic PR to its replacement, which reads the new PR's URL from a `pull_request_url` event the orchestrator emits.
+
 ## 2026-07-21
 
 ### Added

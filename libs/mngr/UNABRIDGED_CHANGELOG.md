@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-22
+
+`mngr tmr` gained a `--reducer-env` option, documented in the generated CLI reference. It passes environment variables to the reducer agent only, never to the mappers, for credentials the reducer needs but mappers must not receive (such as a token that can push and open pull requests).
+
+The `mngr tmr` help text now describes the reducer's full role (collapsing repeated changes, writing the run's changelog, opening the pull request), the explicit per-test `--timeout` its agents run with, and the `escalations` field in the outcome schema.
+
 ## 2026-07-21
 
 Fixed: agent tmux windows are no longer born collapsed (e.g. to `2x1`) when a degenerate, unsized client is attached to the host's shared tmux server. Previously mngr created agent sessions with tmux's default `window-size latest` policy, so a brand-new detached session was born at the geometry of whatever client was already attached to the shared server -- even a stray `2x1` ttyd/web-shell client -- regardless of the `new-session -x 200 -y 50` sizing. A `2x1` pane breaks Claude Code's TUI, so the initial `mngr message` delivery (which waits for the TUI to be ready) would time out and the message would be silently dropped. This is the root cause of "the agent was created but never got its first message" symptoms (e.g. the desktop `/assist` "have an agent help" flow, and launch-task workers).

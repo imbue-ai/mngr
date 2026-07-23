@@ -365,6 +365,44 @@ def _outcome_path_for_integrator(output_dir: Path, agent_name: AgentName) -> Pat
     return output_dir / str(agent_name) / EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
 
 
+def synthesize_missing_mapper_outcomes(output_dir: Path, agents: Sequence[AgentMetadata]) -> list[AgentName]:
+    """Write a synthetic errored outcome for every failed mapper that produced none.
+
+    A mapper that failed to launch, timed out, or crashed never writes an outcome
+    file. Anything that reads the output dir as *files* rather than as
+    orchestrator metadata -- the reducer, whose PR summary and should-pull
+    predicate both count outcomes on disk -- is therefore blind to it, so a run
+    with failures reports as if those tests did not exist. Give each failed
+    mapper a minimal ``errored`` outcome so it is seen and counted as failed.
+
+    Only fills gaps: a mapper that already wrote an outcome is left untouched.
+    Returns the agent names a synthetic outcome was written for.
+    """
+    written: list[AgentName] = []
+    for meta in agents:
+        if meta.kind is not AgentKind.MAPPER or meta.error_summary is None:
+            continue
+        path = _outcome_path_for_testing_agent(output_dir, meta.agent_name)
+        if path.exists():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "changes": {},
+                    "errored": True,
+                    "tests_passing_before": None,
+                    "tests_passing_after": None,
+                    "summary_markdown": meta.error_summary,
+                    "test_runs": [],
+                    "escalations": [],
+                }
+            )
+        )
+        written.append(meta.agent_name)
+    return written
+
+
 def load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> TestResult | None:
     """Read and cache a testing agent's outcome from the extracted output dir.
 

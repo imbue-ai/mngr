@@ -93,6 +93,7 @@ class MapReduceCliOptions(CommonCliOptions):
     source: str | None
     reintegrate: bool
     run_name: str | None
+    reducer_branch_suffix: str
     additional_authorized_keys: tuple[str, ...]
 
 
@@ -200,6 +201,13 @@ def add_mapreduce_options(command: TDecorated) -> TDecorated:
         "--env",
         multiple=True,
         help="Environment variable KEY=VALUE to pass to agents [repeatable]",
+    )(command)
+    command = click.option(
+        "--reducer-branch-suffix",
+        default="",
+        help="Suffix appended to the reducer's branch/agent/host names. Set this on a reintegration so its "
+        "pull request is opened from a branch that does not collide with the original run's reducer branch "
+        "(the two share a run name). Blank for a normal run.",
     )(command)
     command = click.option(
         "--reducer-env",
@@ -367,6 +375,11 @@ def _run_reducer_phase(
     if not has_any_successful_mapper:
         return None
 
+    # Give the recipe the full mapper set (successes and failures alike) before
+    # the reducer reads the output dir, so failed mappers that produced no file
+    # can be represented rather than silently missing.
+    recipe.on_all_mappers_finalized(ctx, mapper_metadata)
+
     prompt = recipe.build_reducer_prompt(ctx)
     try:
         info, host = launch_reducer_agent(
@@ -376,6 +389,7 @@ def _run_reducer_phase(
             mngr_ctx=mngr_ctx,
             run_name=ctx.run_name,
             output_dir=ctx.output_dir,
+            branch_suffix=opts.reducer_branch_suffix,
         )
     except (MngrError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch reducer agent: {}", exc)

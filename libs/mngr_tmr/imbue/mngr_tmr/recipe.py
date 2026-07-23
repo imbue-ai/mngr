@@ -36,6 +36,7 @@ from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.report import EXTRACTED_TEST_OUTPUT_DIR
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.report import load_integrator_outcome_file
+from imbue.mngr_tmr.report import synthesize_missing_mapper_outcomes
 from imbue.mngr_tmr.report_upload import maybe_upload_report
 from imbue.mngr_tmr.report_upload import report_url_for_run
 
@@ -239,6 +240,15 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         bundle = agent_dir / _BRANCH_BUNDLE_NAME
         if bundle.is_file():
             _apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg)
+
+    def on_all_mappers_finalized(self, ctx: MapReduceContext, mapper_metadata: Sequence[AgentMetadata]) -> None:
+        # Failed mappers write no outcome file, so the reducer -- which reads the
+        # rsynced output dir as files -- would not see them and its PR summary
+        # would under-count failures. Synthesize an errored outcome for each so
+        # the failed tests are represented in the reducer's inputs and the PR.
+        written = synthesize_missing_mapper_outcomes(ctx.output_dir, mapper_metadata)
+        if written:
+            logger.info("Synthesized errored outcomes for {} failed mapper(s)", len(written))
 
     def on_reducer_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: ReducerInfo) -> None:
         # The reducer opens the run's PR itself, so surface the URL it reported

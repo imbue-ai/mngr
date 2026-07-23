@@ -1,8 +1,9 @@
-{#def accounts, default_account_id, enabled_by_user_id #}
+{#def accounts, default_account_id, enabled_by_user_id, plan_error="" #}
 {#
   Manage accounts page. Lists each signed-in account with its
-  workspace count, default-account marker, and per-account
-  set-default / log-out controls.
+  workspace count, default-account marker, per-account
+  set-default / log-out controls, and the account's plan + usage/limits
+  section with a plan selector.
 
   enabled_by_user_id maps each account's user_id to whether its
   [providers.imbue_cloud_<slug>] block is enabled in settings.toml.
@@ -10,49 +11,69 @@
   in sessions.json) but the user disabled the block via the providers
   panel.
 
+  The plan/usage section renders as a loading placeholder and is filled
+  in asynchronously by accounts.js from GET /accounts/<user_id>/plan-view
+  (see AccountPlanSection.jinja) -- computing live usage takes a connector
+  round trip per account, so it must not block the page render. plan_error
+  carries the reason a plan switch was refused (e.g. ally requires partner
+  access); switching to an ineligible plan simply errors with that reason.
+
   The per-machine error-reporting toggles live on the dedicated Settings
   page (reachable from the sidebar), not here -- they are global to the
   machine and independent of which accounts are signed in.
 #}
 {% set _scripts %}
 <script src="/_static/sync_status_banner.js" defer></script>
+<script src="/_static/accounts.js" defer></script>
 {% endset %}
-<Base title="Manage Accounts" scripts={{ _scripts }}>
+<ChromeShell title="Manage Accounts" page_label="Accounts" :show_back="True" scripts={{ _scripts }}>
   <PageContainer>
     <h1 class="type-heading text-primary mb-4">Manage Accounts</h1>
+
+    {% if plan_error %}
+      <div class="mb-4"><Notice variant="error">{{ plan_error }}</Notice></div>
+    {% endif %}
 
     {% if accounts %}
       <div class="flex flex-col gap-2">
       {% for acct in accounts %}
         {% set acct_enabled = enabled_by_user_id.get(acct.user_id | string, True) %}
-        <Card layout="row-spread">
-          <div>
-            <div class="font-semibold">
-              {{ acct.email }}
-              {% if not acct_enabled %}
-                <StatusBadge variant="warn" size="xs" extra="ml-2" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</StatusBadge>
-              {% endif %}
+        <Card>
+          <div class="flex items-center justify-between">
+            <div>
+              <div class="font-semibold">
+                {{ acct.email }}
+                {% if not acct_enabled %}
+                  <StatusBadge variant="warn" size="xs" extra="ml-2" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</StatusBadge>
+                {% endif %}
+              </div>
+              <div class="type-helper text-tertiary">
+                {{ acct.workspace_ids | length }} workspace(s)
+                {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
+              </div>
             </div>
-            <div class="type-helper text-tertiary">
-              {{ acct.workspace_ids | length }} workspace(s)
-              {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
+            <div class="flex gap-2">
+              {% if not acct_enabled %}
+                <ButtonLink href="/auth/login" variant="primary">Sign in again</ButtonLink>
+              {% endif %}
+              {% if acct.user_id | string != default_account_id %}
+                <form method="POST" action="/accounts/set-default">
+                  <input type="hidden" name="user_id" value="{{ acct.user_id }}">
+                  <ButtonSubmit variant="secondary">Set default</ButtonSubmit>
+                </form>
+              {% else %}
+                <span class="inline-flex items-center justify-center px-3 py-2 rounded-md type-label bg-fill-subtle text-primary border border-default opacity-60 cursor-default">Default</span>
+              {% endif %}
+              <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/logout" }}>
+                <ButtonSubmit variant="danger">Log out</ButtonSubmit>
+              </form>
             </div>
           </div>
-          <div class="flex gap-2">
-            {% if not acct_enabled %}
-              <ButtonLink href="/auth/login" variant="primary">Sign in again</ButtonLink>
-            {% endif %}
-            {% if acct.user_id | string != default_account_id %}
-              <form method="POST" action="/accounts/set-default">
-                <input type="hidden" name="user_id" value="{{ acct.user_id }}">
-                <ButtonSubmit variant="secondary">Set default</ButtonSubmit>
-              </form>
-            {% else %}
-              <span class="inline-flex items-center justify-center px-3 py-2 rounded-md type-label bg-fill-subtle text-primary border border-default opacity-60 cursor-default">Default</span>
-            {% endif %}
-            <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/logout" }}>
-              <ButtonSubmit variant="danger">Log out</ButtonSubmit>
-            </form>
+
+          <div class="mt-3 pt-3 border-t border-default" data-plan-section data-user-id="{{ acct.user_id }}">
+            <div class="flex items-center gap-2 type-helper text-tertiary">
+              <Spinner size="sm" /> Loading plan and usage&hellip;
+            </div>
           </div>
         </Card>
       {% endfor %}
@@ -65,6 +86,5 @@
       <ButtonLink href="/auth/login" variant="primary">Add account</ButtonLink>
     </div>
 
-    <div class="mt-4"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
   </PageContainer>
-</Base>
+</ChromeShell>

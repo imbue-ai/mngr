@@ -1,6 +1,6 @@
 # mngr_imbue_cloud
 
-Provider backend plugin and CLI for Imbue Cloud, the imbue-team-hosted leasing service for pre-provisioned pool hosts. All functionality is reachable through `mngr` commands: auth, host leasing, LiteLLM virtual keys, R2 buckets, and Cloudflare tunnels.
+Provider backend plugin and CLI for Imbue Cloud, the imbue-team-hosted leasing service for pre-provisioned pool hosts. All functionality is reachable through `mngr` commands: auth, account plans/quotas, host leasing, LiteLLM virtual keys, R2 buckets, and Cloudflare tunnels.
 
 ## Configuration
 
@@ -22,6 +22,21 @@ mngr imbue_cloud auth signin --account alice@imbue.com
 # or browser-based OAuth:
 mngr imbue_cloud auth oauth google --account alice@imbue.com
 ```
+
+## Account plans and quotas
+
+Every account has a plan ("explorer" by default; "ally" grants higher limits and requires a paid-listed email) whose quotas cap resource use: remote workspaces, tunnels, services per tunnel, buckets, total bucket storage, monthly LLM spend, and synced workspaces. The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit.
+
+```bash
+# Show the plan, entitlement values, and live usage.
+mngr imbue_cloud account show
+
+# Switch plans (re-selecting the current plan is a no-op; switching to
+# "ally" errors with the reason unless the email is paid-listed).
+mngr imbue_cloud account set-plan ally
+```
+
+Operators manage individual accounts by email with `mngr imbue_cloud admin account show|set-plan|set-quota` (authenticated by `$MINDS_PAID_ADMIN_KEY`, like `admin paid`). `set-plan` resets the account to the plan's defaults; `set-quota` bumps one entitlement value. `mngr imbue_cloud admin sweep r2 [--email <email>]` runs one R2 storage-quota sweep pass on demand (enforcement, grant settlement, key invariants) instead of waiting for the hourly cron.
 
 ## Create an agent on a leased host
 
@@ -56,7 +71,7 @@ minds drives this automatically: it tries `fast_mode=require` first and, on `Fas
 
 ## Buckets
 
-Create an R2 bucket (for storing files remotely) and mint scoped S3 keys for it. Requires a paid account. Each bucket is isolated (think one per host).
+Create an R2 bucket (for storing files remotely). Each bucket is isolated (think one per host) and has exactly **one** S3 key.
 
 ```bash
 # Create a bucket; emits {bucket, key} where key includes the one-time secret.
@@ -67,11 +82,30 @@ mngr imbue_cloud bucket list
 mngr imbue_cloud bucket info my-backups
 mngr imbue_cloud bucket destroy my-backups
 
-# Mint additional keys, scoped read-only or read-write, to hand to agents.
-mngr imbue_cloud bucket keys create my-backups --alias agent-ro --access read
+# Get working credentials again: rolls the key's secret in place (same
+# Access Key ID, fresh secret; the old secret stops working immediately).
+mngr imbue_cloud bucket roll-key my-backups
+
+# Inspect key metadata (never includes secrets).
 mngr imbue_cloud bucket keys list                # all keys across buckets
-mngr imbue_cloud bucket keys list my-backups     # just this bucket's keys
-mngr imbue_cloud bucket keys destroy <access-key-id>
+mngr imbue_cloud bucket keys list my-backups     # just this bucket's key
 ```
 
-The emitted credentials (`access_key_id`, `secret_access_key`, `s3_endpoint`, `bucket_name`) are standard S3-compatible credentials -- point any S3 client at the endpoint. The secret is shown only once at creation and is never stored by the service.
+The emitted credentials (`access_key_id`, `secret_access_key`, `s3_endpoint`, `bucket_name`) are standard S3-compatible credentials -- point any S3 client at the endpoint. The secret is shown only once (at creation or roll) and is never stored by the service.
+
+**Note:** total storage across all your buckets is capped by your plan's quota. While over the cap, an hourly server-side sweep turns your bucket keys read-only (the same credentials keep working for reads); they are restored automatically once you are back under quota, and an account over its storage quota cannot create new buckets.
+
+A read-only key cannot delete data (restic's `forget`/`prune` need full write access), so getting back under quota goes through a **cleanup grant**:
+
+```bash
+# Temporarily restore your downgraded keys to readwrite so cleanup can run.
+mngr imbue_cloud account cleanup-grant
+
+# ... run restic forget/prune (or delete objects) against your buckets ...
+
+# Re-measure and settle: restores your keys immediately if you are now under
+# quota, or re-downgrades if not.
+mngr imbue_cloud account recheck-storage
+```
+
+Grants that actually reduce usage are unlimited; only grants that free nothing count against a small rolling budget (so a grant cannot be farmed for extra write time). `recheck-storage` also works standalone -- if you dropped under quota some other way, it restores your keys without waiting for the hourly sweep.

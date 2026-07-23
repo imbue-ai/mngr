@@ -29,8 +29,9 @@ jobs:
       id-token: write
     env:
       MNGR_USER_ID: ${{ inputs.mngr_user_id != '' && inputs.mngr_user_id || 'tmr-ci' }}
-      # The automatic per-run token, used for `git push` + `gh pr create` on this
-      # same repo. Intentionally NOT migrated to Vault.
+      # The automatic per-run token, handed to the reducer agent (via
+      # --reducer-env below) which pushes the integrated branch and opens the
+      # PR. Intentionally NOT migrated to Vault.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
@@ -72,15 +73,29 @@ jobs:
           # already-launched ones by the tmr_run_name label), so --provider
           # is unused. The integrator runs locally on the runner and uses
           # ANTHROPIC_API_KEY directly.
+          #
+          # Like tmr.yml, the reducer opens the run's PR itself (via
+          # --reducer-env GH_TOKEN). --reducer-branch-suffix gives its branch a
+          # unique name (this workflow run's id) so the reintegration always
+          # opens a NEW PR rather than colliding with the original run's reducer
+          # branch, which shares this run name.
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           uv run --project libs/mngr_tmr mngr tmr -vv \
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
             --agent-type yolo \
             --reintegrate \
             --run-name "${{ inputs.run_name }}" \
+            --reducer-branch-suffix "r${{ github.run_id }}" \
             --env "MODAL_TOKEN_ID=${MODAL_TOKEN_ID}" \
             --env "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}" \
             --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
+            --reducer-env "GH_TOKEN=${GH_TOKEN}" \
+            --reducer-env "TMR_GITHUB_REPOSITORY=${{ github.repository }}" \
+            --reducer-env "TMR_BASE_BRANCH=${{ github.ref_name }}" \
+            --reducer-env "TMR_RUN_URL=${run_url}" \
+            --reducer-env "TMR_PR_LABEL=" \
+            --reducer-env "TMR_PR_ASSIGNEES=" \
             --output-dir tmr-report \
             --format jsonl \
             | tee tmr-report/events.jsonl
@@ -97,32 +112,7 @@ jobs:
           path: tmr-report/
           retention-days: 30
 
-      # Unlike tmr.yml, this workflow opens the PR itself. It passes no
-      # --reducer-env, so the reducer is not given a GH_TOKEN and its prompt
-      # omits the open-a-PR section entirely -- there is no double-open here.
-      - name: Push integrator branch and open PR
-        if: success()
-        run: |
-          set -euo pipefail
-          branch=$(jq -r 'select(.event == "integrator_branch") | .branch_name' < tmr-report/events.jsonl | tail -n 1)
-          if [ -z "$branch" ]; then
-            echo "Reintegration produced no integrator branch (no fixes to integrate); skipping PR."
-            exit 0
-          fi
-          echo "Integrator branch: $branch"
-          git push --set-upstream origin "$branch"
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          report_url=$(jq -r 'select(.event == "report_url") | .url' < tmr-report/events.jsonl | tail -n 1)
-          if [ -n "$report_url" ]; then
-            report_line="HTML report: $report_url (also attached as the \`tmr-report\` artifact on the workflow run)."
-          else
-            report_line="HTML report: attached as the \`tmr-report\` artifact on the workflow run; download and open \`index.html\`. (AWS credentials missing, so no s3 mirror was published.)"
-          fi
-          gh pr create \
-            --base "${{ github.ref_name }}" \
-            --head "$branch" \
-            --title "TMR re-integration of ${{ inputs.run_name }}: $branch" \
-            --body "Reintegration of TMR run \`${{ inputs.run_name }}\` from workflow run [#${{ github.run_id }}]($run_url).
-
-          $report_line" \
-            --draft
+      # The reducer opens the PR itself (see the "Open the pull request" section
+      # of reducer.j2), the same as the main tmr.yml workflow. --reducer-branch-suffix
+      # above keeps its branch distinct from the original run's, so this is always
+      # a fresh PR.

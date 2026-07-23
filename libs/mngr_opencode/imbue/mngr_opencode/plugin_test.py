@@ -546,13 +546,13 @@ def test_wait_for_ready_signal_returns_when_sentinel_present(
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / READY_SENTINEL_FILENAME).write_text("")
     # Returns without raising once the sentinel the launch script writes is present.
-    agent.wait_for_ready_signal(is_creating=True, start_action=_noop_start, timeout=2.0)
+    agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=_noop_start, timeout=2.0)
 
 
 def test_wait_for_ready_signal_skips_when_not_creating(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
-    # On a restart (is_creating=False) we do not block on the sentinel.
-    agent.wait_for_ready_signal(is_creating=False, start_action=_noop_start, timeout=0.2)
+    # On a restart (is_readiness_awaited=False) we do not block on the sentinel.
+    agent.wait_for_ready_signal(is_readiness_awaited=False, start_action=_noop_start, timeout=0.2)
 
 
 @pytest.mark.tmux
@@ -561,7 +561,7 @@ def test_wait_for_ready_signal_raises_when_sentinel_never_appears(
 ) -> None:
     agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     with pytest.raises(AgentStartError):
-        agent.wait_for_ready_signal(is_creating=True, start_action=_noop_start, timeout=0.2)
+        agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=_noop_start, timeout=0.2)
 
 
 # =============================================================================

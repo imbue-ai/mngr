@@ -83,6 +83,25 @@ def _make_mapper_identity(
     return AgentName(f"{recipe_name}-{run_name}-{suffix}"), f"{recipe_name}/{run_name}/{suffix}"
 
 
+def _make_reducer_identity(
+    recipe_name: str, run_name: str, branch_suffix: str = ""
+) -> tuple[AgentName, str, HostName]:
+    """Generate (agent_name, branch_name, host_name) for the reducer agent.
+
+    ``branch_suffix`` distinguishes reducers that share a ``run_name`` -- namely
+    a reintegration, which reuses the original run's name (to rediscover its
+    mappers by label) but must open its own pull request from a branch that does
+    not collide with the original run's reducer branch. A normal run passes no
+    suffix and keeps the historical ``<recipe>/<run>/reducer`` names.
+    """
+    stem = f"{recipe_name}-{run_name}-reducer"
+    branch = f"{recipe_name}/{run_name}/reducer"
+    if branch_suffix:
+        stem = f"{stem}-{branch_suffix}"
+        branch = f"{branch}-{branch_suffix}"
+    return AgentName(stem), branch, HostName(stem)
+
+
 def _make_launch_failure_metadata(
     task_id: str, agent_name: AgentName, branch_name: str, error: object
 ) -> AgentMetadata:
@@ -560,6 +579,7 @@ def launch_reducer_agent(
     mngr_ctx: MngrContext,
     run_name: str,
     output_dir: Path,
+    branch_suffix: str = "",
 ) -> tuple[ReducerInfo, OnlineHostInterface]:
     """Launch a reducer agent that consumes the per-mapper output directories.
 
@@ -572,9 +592,7 @@ def launch_reducer_agent(
     ``output_dir`` into ``<work_dir>/REDUCER_INPUTS_DIRNAME/`` and deliver
     the reducer prompt via ``send_message``.
     """
-    agent_name = AgentName(f"{recipe_name}-{run_name}-reducer")
-    branch_name = f"{recipe_name}/{run_name}/reducer"
-    host_name = HostName(f"{recipe_name}-{run_name}-reducer")
+    agent_name, branch_name, host_name = _make_reducer_identity(recipe_name, run_name, branch_suffix)
 
     logger.info("Launching reducer agent '{}'", agent_name)
     create_result = _create_agent(
