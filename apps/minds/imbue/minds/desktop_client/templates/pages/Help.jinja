@@ -47,7 +47,7 @@
     }
     STICKY_IDS.forEach(function (id) {
       var box = document.getElementById(id);
-      if (!box) return;  // not rendered (e.g. include-logs hidden, or no workspace)
+      if (!box) return;  // defensively skip any sticky id that isn't in the DOM
       try { restoreSticky(box); } catch (e) { /* ignore unreadable localStorage */ }
       box.addEventListener("change", function () { persistSticky(box); });
     });
