@@ -399,6 +399,25 @@ def _handle_consent_submit() -> Response:
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
+def _handle_error_reporting_settings() -> Response:
+    """Persist the error-reporting opt-out from the Settings page (POST /_chrome/error-reporting).
+
+    A single ``report_unexpected_errors`` boolean gates both automatic error sends and their
+    log/traceback attachments. Saved live and mirrored to the latchkey daemon's consent file so the
+    change takes effect without an app restart.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict) or "report_unexpected_errors" not in body:
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None:
+        minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
+        _sync_latchkey_forward_sentry_consent(minds_config)
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
 def _push_new_password_state(
     record_store: WorkspaceRecordStore,
     resolver: BackendResolverInterface,
@@ -2166,10 +2185,11 @@ def _build_app_settings_context() -> dict[str, Any]:
     Used by both the full settings page (browser-mode fallback) and the
     centered settings modal, which render the same shared sections: the
     permission overview (connectors / file sharing / workspace delegation
-    held across all active workspaces), the informational error-reporting
-    notice, and the backup master-password section.
+    held across all active workspaces), the error-reporting opt-out, and the
+    backup master-password section.
     """
     paths: WorkspacePaths | None = get_state().api_v1_paths
+    minds_config: MindsConfig | None = get_state().minds_config
 
     services_overview: list[object] = []
     file_sharing_grants: list[object] = []
@@ -2210,6 +2230,7 @@ def _build_app_settings_context() -> dict[str, Any]:
         "workspace_delegation_grants": workspace_delegation_grants,
         "permissions_unavailable": permissions_unavailable,
         "is_master_password_set": _is_any_account_password_set(paths),
+        "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else True,
     }
 
 
@@ -3054,6 +3075,7 @@ def create_desktop_client(
     # Core routes
     app.add_url_rule("/consent", view_func=_handle_consent_page)
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
+    app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
     app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
     app.add_url_rule("/_chrome/sync-unlock", view_func=_handle_sync_unlock, methods=["POST"])
     app.add_url_rule("/_chrome/sync-initial-status", view_func=_handle_sync_initial_status, methods=["GET"])

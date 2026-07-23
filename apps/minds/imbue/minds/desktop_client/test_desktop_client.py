@@ -1,5 +1,6 @@
 import os
 import queue
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -1440,17 +1441,51 @@ def test_settings_page_requires_auth(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_settings_page_shows_error_reporting_notice_without_opt_out(tmp_path: Path) -> None:
-    """The Settings error-reporting section is informational during the alpha -- no off-switch."""
+def test_settings_page_shows_error_reporting_opt_out(tmp_path: Path) -> None:
+    """The Settings error-reporting section offers a per-machine opt-out, checked on by default."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get("/settings")
     assert response.status_code == 200
     assert "Error reporting" in response.text
-    assert "alpha" in response.text
-    # No toggle to turn reporting (or logs) off.
-    assert "report-errors-toggle" not in response.text
+    toggle = re.search(r'<input[^>]*id="report-errors-toggle"[^>]*>', response.text)
+    assert toggle is not None
+    # Reporting defaults on for new installs, so the checkbox is checked.
+    assert "checked" in toggle.group(0)
+    # The separate "include logs" sub-toggle stays collapsed into the single flag.
     assert "include-logs-toggle" not in response.text
+
+
+def test_settings_page_reflects_stored_opt_out(tmp_path: Path) -> None:
+    """A prior explicit opt-out renders the error-reporting checkbox unchecked (no migration flips it)."""
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(False)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/settings")
+    assert response.status_code == 200
+    toggle = re.search(r'<input[^>]*id="report-errors-toggle"[^>]*>', response.text)
+    assert toggle is not None
+    assert "checked" not in toggle.group(0)
+
+
+def test_error_reporting_settings_endpoint_persists_toggle(tmp_path: Path) -> None:
+    """POST /_chrome/error-reporting persists the single report_unexpected_errors flag live."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": False}).status_code == 200
+    assert MindsConfig(data_dir=tmp_path).get_report_unexpected_errors() is False
+
+    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True}).status_code == 200
+    assert MindsConfig(data_dir=tmp_path).get_report_unexpected_errors() is True
+
+
+def test_error_reporting_settings_endpoint_requires_auth(tmp_path: Path) -> None:
+    """POST /_chrome/error-reporting rejects an unauthenticated request and records nothing."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/_chrome/error-reporting", json={"report_unexpected_errors": False})
+    assert response.status_code == 403
+    assert MindsConfig(data_dir=tmp_path).get_report_unexpected_errors() is True
 
 
 def test_settings_modal_requires_auth(tmp_path: Path) -> None:
@@ -1473,10 +1508,9 @@ def test_settings_modal_renders_app_settings_in_overlay(tmp_path: Path) -> None:
     # The shared sections (AppSettingsSections.jinja) and their external shell JS.
     assert "Connectors" in body
     assert "Master password" in body
-    # Error reporting is an informational notice during the alpha -- no opt-out toggle.
+    # Error reporting carries its per-machine opt-out toggle.
     assert "Error reporting" in body
-    assert "alpha" in body
-    assert 'id="report-errors-toggle"' not in body
+    assert 'id="report-errors-toggle"' in body
     assert "/_static/app_settings.js" in body
     # The modal drops the back link (X + backdrop click dismiss instead).
     assert "Back to workspaces" not in body

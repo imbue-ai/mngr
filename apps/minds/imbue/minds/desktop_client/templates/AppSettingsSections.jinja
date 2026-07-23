@@ -1,4 +1,4 @@
-{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
+{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false, report_unexpected_errors=true #}
 {#
   The app-level ("Minds") settings, shared verbatim between the centered
   settings modal (pages.SettingsModal, the Electron overlay surface) and the
@@ -14,8 +14,8 @@
     - Connectors: predefined-service grants held across all active workspaces.
     - Local files: file-sharing (WebDAV) grants per workspace.
     - Workspaces: cross-workspace-management (delegation) grants.
-    - Error reporting: the informational error-reporting notice (no opt-out
-      during the alpha).
+    - Error reporting: the per-machine opt-out toggle for automatic error
+      reporting (seeded from ``report_unexpected_errors``).
     - Master password: the sync master-password change flow (rewraps each
       signed-in account's sync key).
 
@@ -207,15 +207,22 @@
       {% endif %}
     </section>
 
-    {# -- Error reporting (informational: no opt-out during the alpha) -- #}
+    {# -- Error reporting (per-machine opt-out; single flag gating auto-sends
+       and their log attachments). Wired by app_settings.js, which POSTs the
+       toggle to /_chrome/error-reporting. -- #}
     <section data-settings-panel="error-reporting" class="hidden">
       <h2 class="type-heading-lg text-primary mb-2">Error reporting</h2>
       <p class="type-body text-secondary mb-3">Applies to this device, regardless of which account is signed in.</p>
-      <p class="type-body text-secondary mb-2">
-        Minds is in its alpha phase. Unexpected errors are automatically reported to Imbue, along
-        with recent logs, so we can find and fix problems quickly.
-      </p>
-      <p class="type-helper text-tertiary mb-2">
+      <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
+        <span>
+          <span class="type-body text-primary font-semibold">Report unexpected errors</span>
+          <span class="block type-helper text-tertiary">Automatically send a report to Imbue, along with
+            recent logs, when something goes wrong -- so we can find and fix problems quickly.</span>
+        </span>
+        <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
+               {% if report_unexpected_errors %}checked{% endif %}>
+      </label>
+      <p class="type-helper text-tertiary mt-3 mb-2">
         Reports include diagnostic details about the error and your setup, which may identify you
         (for example, your signed-in account email).
       </p>

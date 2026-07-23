@@ -196,19 +196,17 @@ def run(
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
-    # Force error reporting back on for any install that opted out before it became always-on for the
-    # alpha (a no-op otherwise). Runs before Sentry setup so the flipped value is what gets reported.
-    minds_config.migrate_alpha_error_reporting()
     paths = WorkspacePaths(data_dir=data_directory)
 
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
     #
     # Sentry always initializes, but what it actually sends is gated live by a single per-machine user
-    # setting (stored in MindsConfig, surfaced via the first-launch consent screen):
-    # ``report_unexpected_errors`` gates automatic error sends and their log/traceback attachments
-    # together. It is read live, so a change takes effect without restarting. Manual bug reports are
-    # always sent (with full diagnostics) regardless of ``report_unexpected_errors``.
+    # setting (stored in MindsConfig): ``report_unexpected_errors`` gates automatic error sends and
+    # their log/traceback attachments together. It defaults on for new installs (the first-launch
+    # consent screen is informational) and can be turned off from Settings -> Error reporting. It is
+    # read live, so a change takes effect without restarting. Manual bug reports are always sent (with
+    # full diagnostics) regardless of ``report_unexpected_errors``.
     #
     # The activated minds env (from `minds env activate`) selects the Sentry DSN and, for
     # production/staging, which S3 attachment bucket: production and staging each get their own, while

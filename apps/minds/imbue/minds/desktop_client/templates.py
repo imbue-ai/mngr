@@ -2001,6 +2001,7 @@ def render_settings_page(
     workspace_delegation_grants: Sequence[object] | None = None,
     permissions_unavailable: bool = False,
     is_master_password_set: bool = False,
+    report_unexpected_errors: bool = True,
 ) -> str:
     """Render the app-level settings page (the browser-mode fallback for the settings modal).
 
@@ -2009,8 +2010,8 @@ def render_settings_page(
     Electron shows the same sections in the centered settings modal instead
     (:func:`render_settings_modal_page`). All are per-machine / app-level
     settings -- the app, not any single workspace, owns permissions. The
-    error-reporting section is an informational notice (during the alpha
-    unexpected errors are always reported to Imbue, with no opt-out).
+    error-reporting section offers a per-machine opt-out toggle (seeded from
+    ``report_unexpected_errors``).
 
     ``services_overview`` / ``file_sharing_grants`` /
     ``workspace_delegation_grants`` are the permission-overview models (see
@@ -2027,6 +2028,7 @@ def render_settings_page(
         workspace_delegation_grants=list(workspace_delegation_grants or []),
         permissions_unavailable=permissions_unavailable,
         is_master_password_set=is_master_password_set,
+        report_unexpected_errors=report_unexpected_errors,
     )
 
 
@@ -2037,6 +2039,7 @@ def render_settings_modal_page(
     workspace_delegation_grants: Sequence[object] | None = None,
     permissions_unavailable: bool = False,
     is_master_password_set: bool = False,
+    report_unexpected_errors: bool = True,
 ) -> str:
     """Render the centered "Minds Settings" modal page (``GET /settings/modal``).
 
@@ -2051,6 +2054,7 @@ def render_settings_modal_page(
         workspace_delegation_grants=list(workspace_delegation_grants or []),
         permissions_unavailable=permissions_unavailable,
         is_master_password_set=is_master_password_set,
+        report_unexpected_errors=report_unexpected_errors,
     )
 
 

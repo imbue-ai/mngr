@@ -1,4 +1,4 @@
-{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
+{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false, report_unexpected_errors=true #}
 {#
   App-level ("Minds") settings as a full page: the browser-mode fallback for
   the centered settings modal (pages.SettingsModal) the Electron shell shows.
@@ -19,7 +19,8 @@
       :file_sharing_grants="file_sharing_grants"
       :workspace_delegation_grants="workspace_delegation_grants"
       :permissions_unavailable="permissions_unavailable"
-      :is_master_password_set="is_master_password_set" />
+      :is_master_password_set="is_master_password_set"
+      :report_unexpected_errors="report_unexpected_errors" />
     <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
   </PageContainer>
 </ChromeShell>

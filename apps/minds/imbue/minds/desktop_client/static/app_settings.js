@@ -177,6 +177,25 @@
     });
   });
 
+  // -- Error reporting opt-out -------------------------------------------
+  // A single per-machine flag gating both automatic error sends and their log
+  // attachments. Saved live (the backend reads it per Sentry event), so the
+  // change takes effect without a restart; no reload needed.
+  var reportToggle = document.getElementById('report-errors-toggle');
+  if (reportToggle) {
+    reportToggle.addEventListener('change', function () {
+      fetch('/_chrome/error-reporting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ report_unexpected_errors: reportToggle.checked }),
+      }).catch(function () {
+        // A failed save leaves the persisted flag unchanged; reflect that by
+        // reverting the checkbox so it matches what is actually stored.
+        reportToggle.checked = !reportToggle.checked;
+      });
+    });
+  }
+
   // -- Sync master password change ---------------------------------------
   // Synchronous POST: the server rewraps each signed-in account's sync key
   // (and pushes/clears the synced secrets), then answers with per-account

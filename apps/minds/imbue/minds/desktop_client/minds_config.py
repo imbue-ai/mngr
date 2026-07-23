@@ -156,35 +156,17 @@ class MindsConfig(MutableModel):
         Sentry automatically. Default: True.
 
         A single flag gating both automatic error sends and whether their log/traceback attachments
-        are uploaded. During the alpha this defaults on and the UI offers no way to turn it off (the
-        first-launch screen is informational); the flag is retained so reporting can be made
-        opt-out-able again later without a schema change. Read live at Sentry send time (so a change
-        takes effect without an app restart). Manual bug reports are an explicit user action and are
-        sent (with full diagnostics) regardless of this setting.
+        are uploaded. It defaults on for new installs (the first-launch consent screen is
+        informational, with no opt-out there) but can be turned off from Settings -> Error reporting.
+        Read live at Sentry send time (so a change takes effect without an app restart). Manual bug
+        reports are an explicit user action and are sent (with full diagnostics) regardless of this
+        setting.
         """
         return self._get_bool("report_unexpected_errors", default=True)
 
     def set_report_unexpected_errors(self, enabled: bool) -> None:
         """Set whether unexpected errors are reported to Sentry automatically."""
         self._set_bool("report_unexpected_errors", enabled)
-
-    def migrate_alpha_error_reporting(self) -> None:
-        """One-time alpha migration: force error reporting back on for installs that opted out.
-
-        An install that explicitly opted out on the old consent screen still has
-        ``report_unexpected_errors`` persisted as False. During the alpha there is no opt-out, so flip
-        it back on and re-show the informational notice (by clearing the consent-given flag).
-
-        Guarded by a one-shot marker so the migration runs at most once per install. This keeps it
-        forward-compatible with reintroducing an opt-out after the alpha: a later explicit opt-out must
-        not be flipped back on at the next startup, which a bare ``if not reporting`` guard would do.
-        """
-        if self._get_bool("alpha_error_reporting_migrated", default=False):
-            return
-        if not self.get_report_unexpected_errors():
-            self.set_report_unexpected_errors(True)
-            self.set_error_reporting_consent_given(False)
-        self._set_bool("alpha_error_reporting_migrated", True)
 
     def get_auto_open_requests_panel(self) -> bool:
         """Return whether the inbox should auto-open on new pending requests. Default: True.
