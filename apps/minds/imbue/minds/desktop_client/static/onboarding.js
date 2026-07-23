@@ -55,7 +55,6 @@
   var nextBtn = document.getElementById('onboarding-next');
   var beginBtn = document.getElementById('onboarding-begin');
   var serverCaption = document.getElementById('server-caption');
-  var topStrip = document.getElementById('top-strip');
   var demoWrap = document.getElementById('demo-wrap');
   var colorPickerWrap = document.getElementById('color-picker-wrap');
   var carouselWrap = document.getElementById('carousel-wrap');
@@ -93,13 +92,10 @@
     setDemoTab(DEMO_TAB_BY_STEP[step]);
 
     var onLastStep = step === LAST_STEP;
-    // In walkthrough-first mode, the loading bar, stage caption, and logs
-    // only surface on the last step -- so do errors: creating.js holds any
-    // failure back until the 'minds:surface-errors' signal below. On the
-    // plain loading screen the strip is visible (and errors unlocked) from
-    // the start, and stays visible if the walkthrough is opened.
-    var walkthroughFirst = root.getAttribute('data-show-walkthrough') === 'true';
-    if (topStrip && walkthroughFirst) topStrip.classList.toggle('hidden', !onLastStep);
+    // The progress strip is always visible; only errors are deferred in
+    // walkthrough-first mode -- creating.js holds any failure back until
+    // the 'minds:surface-errors' signal below fires on the last step. On
+    // the plain loading screen errors are unlocked from the start.
     if (onLastStep && !errorsSurfaced) {
       errorsSurfaced = true;
       root.setAttribute('data-surface-errors', 'true');

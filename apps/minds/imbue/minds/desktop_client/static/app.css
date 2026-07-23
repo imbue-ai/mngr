@@ -775,3 +775,11 @@ html.no-scrollbar-gutter {
 #onboarding-begin {
   animation: onboarding-begin-pulse 1.6s ease-in-out infinite;
 }
+
+/*
+ * Progress bar done state: creating.js adds is-done to the fill when
+ * creation finishes, turning the (full) bar green.
+ */
+#bar-fill.is-done {
+  background: var(--c-success);
+}

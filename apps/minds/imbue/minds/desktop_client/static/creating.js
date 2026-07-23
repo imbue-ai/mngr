@@ -99,6 +99,9 @@
     }
     if (creationDone && redirectUrl) {
       setProgress(100);
+      // Full and green: the bar itself signals done.
+      var doneFill = document.getElementById('bar-fill');
+      if (doneFill) doneFill.classList.add('is-done');
       root.setAttribute('data-redirect-url', redirectUrl);
       root.setAttribute('data-ready', 'true');
       root.dispatchEvent(new Event('minds:create-ready'));

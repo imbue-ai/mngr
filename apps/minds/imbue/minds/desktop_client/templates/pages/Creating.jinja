@@ -11,14 +11,16 @@
   screen is a nine-micro-step onboarding walkthrough (see onboarding.js),
   one short sentence per step, over a shared scene graphic that zooms out
   as the steps advance. Later creations show the plain loading screen
-  (progress strip visible, errors immediate, auto-redirect on ready) with
-  a "Learn more about Minds" button that opens the walkthrough on demand. The progress strip (bar + stage
-  caption + collapsible logs) and any creation failure stay hidden until
-  the user reaches the LAST step -- only there do the bar, the rotating
-  tips, and the setting-up/Ready state surface. When creation finishes AND
-  the user is on the last step, a Begin button replaces Next and enters
-  the workspace (there is no automatic redirect). Clicking any scene icon
-  jumps to the first step that explains it.
+  (errors immediate, auto-redirect on ready) asking whether the user wants
+  to learn more while they wait; the button opens the walkthrough on
+  demand. The progress strip (bar + stage caption + collapsible
+  logs) is always visible at the top in every mode, and its bar turns
+  green when creation finishes. In walkthrough-first mode any creation
+  failure stays hidden until the user reaches the LAST step, where the
+  rotating tips and the setting-up/Ready state also live; when creation
+  finishes AND the user is on the last step, a Begin button replaces Next
+  and enters the workspace. Clicking any scene icon jumps to the first
+  step that explains it.
 
   palette is the server-side workspace color mapping (name -> #rrggbb) for
   the theme-demo step; the pick only restyles the in-page demo, it is not
@@ -34,9 +36,9 @@
       body_class="bg-surface-primary text-primary font-sans antialiased min-h-screen"
       scripts={{ _scripts }}>
   {# show_walkthrough: walkthrough-first (first-ever creation). Otherwise #}
-  {# the plain loading screen shows immediately (bar visible, errors #}
-  {# surface right away -- data-surface-errors preset) with a "Learn more #}
-  {# about Minds" button that opens the walkthrough on demand. #}
+  {# the plain loading screen shows immediately (errors surface right #}
+  {# away -- data-surface-errors preset) and asks whether the user wants #}
+  {# to learn more while they wait. #}
   <main id="creating"
         class="w-full min-h-screen flex flex-col"
         data-agent-id="{{ agent_id }}"
@@ -52,9 +54,9 @@
     <section class="screen w-full flex-1 flex flex-col" data-screen="loading">
 
       {# Top strip: progress bar + stage caption + collapsible logs. #}
-      {# Hidden until the user reaches the last walkthrough step -- #}
-      {# onboarding.js reveals it there (see the page docstring). #}
-      <div id="top-strip" class="w-full px-6 pt-4{{ ' hidden' if show_walkthrough else '' }}">
+      {# Always visible; creating.js turns the bar green when creation #}
+      {# finishes (the is-done class on the fill). #}
+      <div id="top-strip" class="w-full px-6 pt-4">
         <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
           <div id="bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>
         </div>
@@ -76,9 +78,10 @@
       <div id="progress-view" class="flex-1 flex flex-col min-h-0">
         {# Plain loading view (repeat creations): shown instead of the #}
         {# walkthrough until the user asks to learn more. #}
-        <div id="plain-loading" class="{{ 'hidden ' if show_walkthrough else '' }}flex-1 flex flex-col items-center justify-center gap-4 px-6">
+        <div id="plain-loading" class="{{ 'hidden ' if show_walkthrough else '' }}flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center">
           <div class="type-heading">Setting up your workspace</div>
-          <Button variant="ghost" id="learn-more">Learn more about Minds</Button>
+          <p class="type-body text-secondary">Want to learn more about how Minds works while you wait?</p>
+          <Button variant="secondary" id="learn-more">Learn more about Minds</Button>
         </div>
 
         <div id="onboarding" class="{{ 'hidden ' if not show_walkthrough else '' }}onboarding step-1 flex-1 flex flex-col items-center justify-center w-full max-w-3xl mx-auto px-6 py-4 gap-6">

@@ -520,12 +520,11 @@ def test_render_creating_page_renders_onboarding_walkthrough() -> None:
     html = render_creating_page(creation_id=creation_id, info=info, onboarding_services=services)
     for step_number in range(1, 10):
         assert f'data-step="{step_number}"' in html
-    # The progress strip ships hidden; onboarding.js reveals it only on the
-    # last walkthrough step.
+    # The progress strip is always visible, in the walkthrough too.
     strip_index = html.index('id="top-strip"')
     strip_tag_start = html.rindex("<div", 0, strip_index)
     strip_tag_end = html.index(">", strip_index)
-    assert "hidden" in html[strip_tag_start:strip_tag_end]
+    assert "hidden" not in html[strip_tag_start:strip_tag_end]
     assert 'id="onboarding-color-picker"' in html
     assert html.count("color-swatch") >= len(WORKSPACE_PALETTE)
     assert "service-marquee" in html

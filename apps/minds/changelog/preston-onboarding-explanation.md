@@ -6,11 +6,11 @@ The workspace-creation loading page now shows an onboarding walkthrough while th
 
 - full picture: your computer connecting over an encrypted tunnel to the workspace machine, with copy adapting to local vs cloud workspaces.
 
-The progress bar, stage caption, logs, rotating tips, and any creation failure stay hidden until the user reaches the last step. There, the workspace tile fills in lockstep with the progress bar, its caption reads "setting up..." and flips to a glowing green "Ready" when creation finishes, and a pulsing Begin button (replacing the old auto-redirect) plays a zoom-in animation and enters the workspace. Clicking any scene icon jumps back to the step that explains it.
+The progress bar (with stage caption and collapsible logs) is always visible at the top and turns green when creation finishes; the rotating tips and any creation failure wait until the user reaches the last step. There, the workspace tile fills in lockstep with the progress bar, its caption reads "setting up..." and flips to a glowing green "Ready" when creation finishes, and a pulsing Begin button (replacing the old auto-redirect) plays a zoom-in animation and enters the workspace. Clicking any scene icon jumps back to the step that explains it.
 
 The walkthrough is now fully integrated with the create flow:
 
-- It auto-shows only on the user's first-ever workspace creation (persisted flag). Later creations show the plain loading screen (progress bar visible immediately, auto-redirect on ready) with a "Learn more about Minds" button that reopens the walkthrough on demand.
+- It auto-shows only on the user's first-ever workspace creation (persisted flag). Later creations show the plain loading screen (auto-redirect on ready) asking whether the user wants to learn more about Minds while they wait; the button reopens the walkthrough on demand.
 
 - The walkthrough's theme-color pick now actually changes the workspace's color: a new create-operation color endpoint records the pick, which is applied as the workspace's color label during creation (or immediately if creation already finished).
 
