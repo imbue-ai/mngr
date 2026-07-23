@@ -3,33 +3,32 @@
   Create from Inspiration page (GET /create/inspiration?git_url=...).
 
   Landing page for an Inspiration deeplink (minds://create?git_url=...), laid
-  out as a numbered vertical timeline with progressive disclosure: a step is
-  revealed only once the previous one is completed, walking the user through
-  (1) -> (2) -> (3) in order.
+  out as a numbered vertical stepper that shows ONE step's content at a time.
+  The active step's body is expanded; completed steps collapse to their number
+  plus a one-line summary of the choice (click to reopen and change it); steps
+  not yet reached stay hidden. The user is walked (1) -> (2) -> (3) in order.
 
-  - Step 1 (always visible): create a new workspace from the Inspiration, or
-    add it to an existing one.
+  - Step 1: create a new workspace from the Inspiration, or add it to an
+    existing one.
   - Create branch: (2) local vs. remote via the shared preset cards -- no
-    default selection, an explicit click completes the step -- then (3) the
-    remaining settings: account, the Inspiration shown as plain read-only
-    text, a required "I trust this Inspiration" acknowledgment, and the
-    "Create from Inspiration" submit. The POST carries the preset's provider
-    values directly; host name, region, and runtime are omitted so the
-    server defaults apply.
+    default selection, an explicit click advances -- then (3) the remaining
+    confirmation: account, the Inspiration shown as plain read-only text, a
+    required "I trust this Inspiration" acknowledgment, and the "Create from
+    Inspiration" submit. The POST carries the preset's provider values
+    directly; host name, region, and runtime are omitted so the server
+    defaults apply.
   - Add branch: (2) copy the "/use-inspiration <git-url>" message (the skill
-    accepts only a URL -- a deeplink branch is deliberately dropped); the
-    Copy click is what completes the step, forcing the copy before (3) the
-    workspace picker appears. Rows mirror the landing page's gating: STOPPED
-    minds detour through recovery with intent=restart.
+    accepts only a URL -- a deeplink branch is deliberately dropped); the Copy
+    click advances, forcing the copy before (3) the workspace picker. Rows
+    mirror the landing page's gating: STOPPED minds detour through recovery
+    with intent=restart.
 
-  Interactability is kept explicit: the repo is rendered as plain text (never
-  an input-looking box); the only boxed value is the copyable skill message,
+  Interactability is kept explicit: the repo is plain text (never an
+  input-looking box); the only boxed value is the copyable skill message,
   whose CopyField pairs it with the Copy button that acts on it.
 
-  Note the ``.hidden`` toggle lives on the step wrapper (a plain block div),
-  never combined with ``flex`` -- Tailwind's ``flex`` would beat ``hidden``
-  (see the landing rows' same gotcha), so the row's ``flex`` sits on an inner
-  element.
+  The ``.hidden`` toggle sits on plain block wrappers (never combined with
+  ``flex``, which would beat ``hidden`` -- see the landing rows' same gotcha).
 #}
 {% set _scripts %}
 <script src="/_static/api_errors.js"></script>
@@ -45,37 +44,54 @@
       local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER'}
     };
 
-    var steps = {
-      create2: document.getElementById('inspiration-step-create-2'),
-      create3: document.getElementById('inspiration-step-create-3'),
-      add2: document.getElementById('inspiration-step-add-2'),
-      add3: document.getElementById('inspiration-step-add-3')
+    function byId(id) { return document.getElementById(id); }
+    var el = {
+      s1: byId('inspiration-step-1'),
+      c2: byId('inspiration-step-create-2'),
+      c3: byId('inspiration-step-create-3'),
+      a2: byId('inspiration-step-add-2'),
+      a3: byId('inspiration-step-add-3')
     };
-    var choiceButtons = {
-      create: document.getElementById('choose-new-workspace'),
-      add: document.getElementById('choose-add-existing')
-    };
-    var accountSelect = document.getElementById('account_id');
-    var accountError = document.getElementById('inspiration-account-error');
-    var trustCheckbox = document.getElementById('inspiration-trust');
-    var trustError = document.getElementById('inspiration-trust-error');
-    var createError = document.getElementById('inspiration-create-error');
-    var submitBtn = document.getElementById('inspiration-submit');
+    var accountSelect = byId('account_id');
+    var accountError = byId('inspiration-account-error');
+    var trustCheckbox = byId('inspiration-trust');
+    var trustTitle = byId('inspiration-trust-title');
+    var createError = byId('inspiration-create-error');
+    var submitBtn = byId('inspiration-submit');
     var presetCards = document.querySelectorAll('[data-preset]');
 
-    // Progressive-disclosure state: which branch step 1 picked, and whether
-    // each branch's step 2 is complete (preset clicked / message copied). A
-    // branch's step 3 shows only once its flag is set.
-    var isPresetChosen = false;
-    var isMessageCopied = false;
+    // The whole flow is a two-variable state machine: which branch step 1
+    // picked, and which step is currently expanded. One body shows at a time.
+    var branch = null;      // 'create' | 'add'
+    var activeStep = 1;     // 1 | 2 | 3
 
-    function markCircleDone(stepEl) {
-      var circle = stepEl.querySelector('[data-step-circle]');
-      circle.classList.add('border-accent', 'text-accent', 'bg-accent/15');
+    function selectedPreset() {
+      var card = document.querySelector('[data-preset][aria-checked="true"]');
+      return card ? card.getAttribute('data-preset') : null;
+    }
+
+    function setStep(node, opts) {
+      node.classList.toggle('hidden', !opts.present);
+      var body = node.querySelector('[data-step-body]');
+      var summary = node.querySelector('[data-step-summary]');
+      var circle = node.querySelector('[data-step-circle]');
+      var title = node.querySelector('[data-step-title]');
+      if (body) body.classList.toggle('hidden', !opts.active);
+      if (summary) {
+        summary.textContent = opts.summary || '';
+        summary.classList.toggle('hidden', !(opts.done && opts.summary));
+      }
+      // Active or completed steps get the accent circle; only completed steps
+      // fill it (and their header becomes a "click to change" affordance).
+      circle.classList.toggle('border-accent', opts.active || opts.done);
+      circle.classList.toggle('text-accent', opts.active || opts.done);
+      circle.classList.toggle('bg-accent/15', opts.done);
+      title.classList.toggle('cursor-pointer', opts.done);
+      title.classList.toggle('hover:underline', opts.done);
     }
 
     function updateConnectors() {
-      // Show the vertical connector under every visible step except the last.
+      // Draw the vertical connector under every visible step except the last.
       var allSteps = document.querySelectorAll('.inspiration-step');
       var visible = [];
       for (var i = 0; i < allSteps.length; i++) {
@@ -87,27 +103,61 @@
       }
     }
 
-    function selectBranch(name) {
-      for (var key in choiceButtons) {
-        choiceButtons[key].classList.toggle('ring-2', key === name);
-        choiceButtons[key].classList.toggle('ring-accent', key === name);
-      }
-      steps.create2.classList.toggle('hidden', name !== 'create');
-      steps.create3.classList.toggle('hidden', name !== 'create' || !isPresetChosen);
-      steps.add2.classList.toggle('hidden', name !== 'add');
-      steps.add3.classList.toggle('hidden', name !== 'add' || !isMessageCopied);
-      markCircleDone(document.getElementById('inspiration-step-1'));
+    function presetSummary() {
+      var p = selectedPreset();
+      if (p === 'remote') return 'Imbue Cloud';
+      if (p === 'local') return 'Directly on your computer';
+      return '';
+    }
+
+    function render() {
+      var branchSummary =
+        branch === 'create' ? 'Create a new workspace'
+        : branch === 'add' ? 'Add to an existing workspace'
+        : '';
+      setStep(el.s1, {present: true, active: activeStep === 1, done: activeStep > 1, summary: branchSummary});
+
+      var isCreate = branch === 'create';
+      var isAdd = branch === 'add';
+      setStep(el.c2, {present: isCreate && activeStep >= 2, active: isCreate && activeStep === 2, done: isCreate && activeStep > 2, summary: presetSummary()});
+      setStep(el.c3, {present: isCreate && activeStep >= 3, active: isCreate && activeStep === 3, done: false, summary: ''});
+      setStep(el.a2, {present: isAdd && activeStep >= 2, active: isAdd && activeStep === 2, done: isAdd && activeStep > 2, summary: 'Message copied'});
+      setStep(el.a3, {present: isAdd && activeStep >= 3, active: isAdd && activeStep === 3, done: false, summary: ''});
+
       updateConnectors();
     }
 
-    choiceButtons.create.addEventListener('click', function () { selectBranch('create'); });
-    choiceButtons.add.addEventListener('click', function () { selectBranch('add'); });
-    var emptyToNew = document.getElementById('inspiration-empty-to-new');
-    if (emptyToNew) emptyToNew.addEventListener('click', function (e) { e.preventDefault(); selectBranch('create'); });
+    function chooseBranch(name) {
+      if (branch !== name) {
+        // Switching pathways resets the downstream progress of the old one.
+        branch = name;
+        isMessageCopied = false;
+        markPresetSelected(null);
+      }
+      activeStep = 2;
+      render();
+    }
 
-    var copyBtn = document.getElementById('inspiration-copy-btn');
+    // Header click on a completed step reopens it (activeStep steps back).
+    el.s1.querySelector('[data-step-title]').addEventListener('click', function () {
+      if (activeStep > 1) { activeStep = 1; render(); }
+    });
+    el.c2.querySelector('[data-step-title]').addEventListener('click', function () {
+      if (activeStep > 2) { activeStep = 2; render(); }
+    });
+    el.a2.querySelector('[data-step-title]').addEventListener('click', function () {
+      if (activeStep > 2) { activeStep = 2; render(); }
+    });
+
+    byId('choose-new-workspace').addEventListener('click', function () { chooseBranch('create'); });
+    byId('choose-add-existing').addEventListener('click', function () { chooseBranch('add'); });
+    var emptyToNew = byId('inspiration-empty-to-new');
+    if (emptyToNew) emptyToNew.addEventListener('click', function (e) { e.preventDefault(); chooseBranch('create'); });
+
+    var isMessageCopied = false;
+    var copyBtn = byId('inspiration-copy-btn');
     copyBtn.addEventListener('click', function () {
-      var message = document.getElementById('inspiration-skill-message').value;
+      var message = byId('inspiration-skill-message').value;
       try {
         if (navigator.clipboard) navigator.clipboard.writeText(message);
         copyBtn.textContent = 'Copied';
@@ -115,12 +165,11 @@
       } catch (e) {
         /* ignore */
       }
-      // Copying completes step 2: only now does the workspace picker appear,
-      // so the user cannot enter a workspace without the message in hand.
+      // Copying is what advances to the picker, so the user cannot enter a
+      // workspace without the message in hand.
       isMessageCopied = true;
-      steps.add3.classList.remove('hidden');
-      markCircleDone(steps.add2);
-      updateConnectors();
+      activeStep = 3;
+      render();
     });
 
     window.inspirationRowClick = function (row) {
@@ -140,11 +189,6 @@
       if (window.minds && window.minds.navigateContent) window.minds.navigateContent(target);
       else window.location = target;
     };
-
-    function selectedPreset() {
-      var card = document.querySelector('[data-preset][aria-checked="true"]');
-      return card ? card.getAttribute('data-preset') : null;
-    }
 
     function markPresetSelected(name) {
       for (var i = 0; i < presetCards.length; i++) {
@@ -174,18 +218,23 @@
           if (firstAccount) accountSelect.value = firstAccount.value;
         }
         hideAccountError();
-        // An explicit choice completes step 2 and reveals the final step.
-        isPresetChosen = true;
-        steps.create3.classList.remove('hidden');
-        markCircleDone(steps.create2);
-        updateConnectors();
+        // A choice advances to the confirmation step.
+        activeStep = 3;
+        render();
       });
     }
 
     accountSelect.addEventListener('change', hideAccountError);
-    trustCheckbox.addEventListener('change', function () {
-      if (trustCheckbox.checked) trustError.classList.add('hidden');
-    });
+
+    function syncTrustGate() {
+      // Gray out + disable Create until the Inspiration is acknowledged, and
+      // keep the acknowledgment red until it is (it is not verified by Imbue).
+      var ok = trustCheckbox.checked;
+      submitBtn.disabled = !ok;
+      trustTitle.classList.toggle('text-important', !ok);
+      trustTitle.classList.toggle('text-primary', ok);
+    }
+    trustCheckbox.addEventListener('change', syncTrustGate);
 
     function openSigninModal() {
       if (window.minds && window.minds.openSigninModal) {
@@ -202,13 +251,12 @@
       submitBtn.textContent = 'Create from Inspiration';
     }
 
-    document.getElementById('inspiration-form').addEventListener('submit', function (e) {
+    byId('inspiration-form').addEventListener('submit', function (e) {
       e.preventDefault();
       createError.classList.add('hidden');
-      if (!trustCheckbox.checked) {
-        trustError.classList.remove('hidden');
-        return;
-      }
+      // The Create button is disabled until the box is checked; this guards
+      // the Enter-key path too.
+      if (!trustCheckbox.checked) return;
       var preset = PRESETS[selectedPreset() || 'remote'];
       // Imbue Cloud needs an account: signed out opens the sign-in modal,
       // signed in surfaces the picker error (create-form parity).
@@ -220,9 +268,9 @@
       submitBtn.disabled = true;
       submitBtn.textContent = 'Creating...';
       var body = {
-        git_url: document.getElementById('inspiration-git-url').value,
-        branch: document.getElementById('inspiration-branch').value,
-        color: document.getElementById('inspiration-color').value,
+        git_url: byId('inspiration-git-url').value,
+        branch: byId('inspiration-branch').value,
+        color: byId('inspiration-color').value,
         launch_mode: preset.launch_mode,
         ai_provider: preset.ai_provider,
         backup_provider: preset.backup_provider,
@@ -250,7 +298,7 @@
       });
     });
 
-    updateConnectors();
+    render();
   })();
 </script>
 {% endset %}
@@ -263,11 +311,12 @@
     <p class="type-body text-secondary font-mono mt-2 break-all">{{ git_url }}</p>
   </div>
 
-  {# Numbered vertical timeline. Each step wrapper carries ``.hidden`` alone
-     (never with ``flex``); the row layout sits on the inner ``.flex`` div. #}
+  {# Numbered vertical stepper. Each step's ``.hidden`` toggle is on this plain
+     wrapper; the row layout sits on the inner ``.flex``. Only the active step's
+     [data-step-body] is shown; completed steps show [data-step-summary]. #}
   <div>
 
-    {# ---- Step 1: choose the pathway (always visible) ---- #}
+    {# ---- Step 1: choose the pathway (always present) ---- #}
     <div id="inspiration-step-1" class="inspiration-step">
       <div class="flex gap-4">
         <div class="flex flex-col items-center self-stretch">
@@ -275,8 +324,9 @@
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
-          <h2 class="type-heading text-primary mb-4">What would you like to do with it?</h2>
-          <div class="flex flex-col gap-3">
+          <h2 data-step-title class="type-heading text-primary">What would you like to do with it?</h2>
+          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          <div data-step-body class="flex flex-col gap-3 mt-4">
             <Button variant="secondary" block id="choose-new-workspace">Create a new workspace</Button>
             <Button variant="secondary" block id="choose-add-existing">Add to an existing workspace</Button>
           </div>
@@ -292,8 +342,9 @@
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
-          <h2 class="type-heading text-primary mb-4">Where should it run?</h2>
-          <div role="radiogroup" aria-label="Where to run your workspace">
+          <h2 data-step-title class="type-heading text-primary">Where should it run?</h2>
+          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          <div data-step-body class="mt-4" role="radiogroup" aria-label="Where to run your workspace">
             <CreatePresetCards selected_preset="" />
           </div>
         </div>
@@ -308,53 +359,55 @@
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
-          <h2 class="type-heading text-primary mb-4">Confirm and create</h2>
-          <form id="inspiration-form">
-            <input type="hidden" id="inspiration-git-url" value="{{ git_url }}">
-            <input type="hidden" id="inspiration-branch" value="{{ branch }}">
-            <input type="hidden" id="inspiration-color" value="{{ color }}">
+          <h2 data-step-title class="type-heading text-primary">Confirm and create</h2>
+          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          <div data-step-body class="mt-4">
+            <form id="inspiration-form">
+              <input type="hidden" id="inspiration-git-url" value="{{ git_url }}">
+              <input type="hidden" id="inspiration-branch" value="{{ branch }}">
+              <input type="hidden" id="inspiration-color" value="{{ color }}">
 
-            <p id="inspiration-create-error" role="alert" class="hidden mb-4 type-helper text-important"></p>
+              <p id="inspiration-create-error" role="alert" class="hidden mb-4 type-helper text-important"></p>
 
-            <div class="mb-4">
-              <p class="type-label uppercase tracking-wide text-secondary">Creating from</p>
-              {# Plain read-only text, deliberately not styled like an input. #}
-              <p class="type-body text-primary font-mono mt-1 break-all">{{ git_url }}</p>
-              {% if branch %}
-                <p class="type-helper text-tertiary mt-1">Version: {{ branch }}</p>
-              {% endif %}
-            </div>
+              <div class="mb-4">
+                <p class="type-label uppercase tracking-wide text-secondary">Creating from</p>
+                {# Plain read-only text, deliberately not styled like an input. #}
+                <p class="type-body text-primary font-mono mt-1 break-all">{{ git_url }}</p>
+                {% if branch %}
+                  <p class="type-helper text-tertiary mt-1">Version: {{ branch }}</p>
+                {% endif %}
+              </div>
 
-            <div class="flex items-center type-helper">
-              <select id="account_id" name="account_id"
-                      class="max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
-                {% for acct in accounts %}
-                  <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
-                {% endfor %}
-                <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
-              </select>
-            </div>
-            <p id="inspiration-account-error" class="hidden mt-2 type-helper text-important">
-              Pick an account to use Imbue Cloud, or choose the local preset.
-            </p>
-
-            <div class="mt-6">
-              <label class="flex items-center gap-3 cursor-pointer">
-                <input type="checkbox" id="inspiration-trust" class="shrink-0">
-                <span>
-                  <span class="type-body text-primary font-semibold">I trust this Inspiration</span>
-                  <span class="block type-helper text-tertiary">Inspirations are community content. This one has not been approved or verified by Imbue.</span>
-                </span>
-              </label>
-              <p id="inspiration-trust-error" class="hidden mt-2 type-helper text-important">
-                Check "I trust this Inspiration" to continue.
+              <div class="flex items-center type-helper">
+                <select id="account_id" name="account_id"
+                        class="max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
+                  {% for acct in accounts %}
+                    <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
+                  {% endfor %}
+                  <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
+                </select>
+              </div>
+              <p id="inspiration-account-error" class="hidden mt-2 type-helper text-important">
+                Pick an account to use Imbue Cloud, or choose the local preset.
               </p>
-            </div>
 
-            <div class="mt-6">
-              <ButtonSubmit id="inspiration-submit" variant="primary" block>Create from Inspiration</ButtonSubmit>
-            </div>
-          </form>
+              <div class="mt-6">
+                {# Required acknowledgment: shown red until checked, and the
+                   Create button below stays disabled/grayed until it is. #}
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <input type="checkbox" id="inspiration-trust" class="shrink-0">
+                  <span>
+                    <span id="inspiration-trust-title" class="type-body font-semibold text-important">I trust this Inspiration</span>
+                    <span class="block type-helper text-tertiary">Inspirations are community content. This one has not been approved or verified by Imbue.</span>
+                  </span>
+                </label>
+              </div>
+
+              <div class="mt-6">
+                <ButtonSubmit id="inspiration-submit" variant="primary" block disabled>Create from Inspiration</ButtonSubmit>
+              </div>
+            </form>
+          </div>
         </div>
       </div>
     </div>
@@ -367,25 +420,28 @@
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
-          <h2 class="type-heading text-primary mb-1">Copy the message</h2>
-          <p class="type-body text-secondary mb-4">
-            You'll paste this into the chat of the workspace you want to add
-            this Inspiration to.
-          </p>
-          <CopyField :value="'/use-inspiration ' ~ git_url" id="inspiration-skill-message" aria-label="Inspiration chat message">
-            <Button variant="secondary" id="inspiration-copy-btn">Copy</Button>
-          </CopyField>
-          {% if branch %}
-            <p class="type-helper text-tertiary mt-2">
-              The link's branch ({{ branch }}) applies only when creating a new workspace;
-              the message above always uses the Inspiration's published version.
+          <h2 data-step-title class="type-heading text-primary">Copy the message</h2>
+          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          <div data-step-body class="mt-4">
+            <p class="type-body text-secondary mb-4">
+              You'll paste this into the chat of the workspace you want to add
+              this Inspiration to.
             </p>
-          {% endif %}
+            <CopyField :value="'/use-inspiration ' ~ git_url" id="inspiration-skill-message" aria-label="Inspiration chat message">
+              <Button variant="secondary" id="inspiration-copy-btn">Copy</Button>
+            </CopyField>
+            {% if branch %}
+              <p class="type-helper text-tertiary mt-2">
+                The link's branch ({{ branch }}) applies only when creating a new workspace;
+                the message above always uses the Inspiration's published version.
+              </p>
+            {% endif %}
+          </div>
         </div>
       </div>
     </div>
 
-    {# ---- Add branch, step 3: pick the workspace (revealed by Copy) ---- #}
+    {# ---- Add branch, step 3: pick the workspace ---- #}
     <div id="inspiration-step-add-3" class="inspiration-step hidden">
       <div class="flex gap-4">
         <div class="flex flex-col items-center self-stretch">
@@ -393,35 +449,38 @@
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
-          <h2 class="type-heading text-primary mb-1">Select a workspace</h2>
-          <p class="type-body text-secondary mb-4">
-            It will open so you can paste the copied message into its chat.
-          </p>
-          {% if workspace_rows %}
-            <div class="flex flex-col gap-1.5">
-              {% for row in workspace_rows %}
-                {% set accent_style = "--workspace-accent: " ~ row.accent ~ ";" %}
-                {% set goto_href = mngr_forward_origin ~ "/goto/" ~ row.agent_id ~ "/" %}
-                <Card layout="row" interactive
-                      extra="accent-spine relative overflow-hidden"
-                      :style="accent_style"
-                      :data-agent-id="row.agent_id"
-                      :data-liveness="row.liveness"
-                      :data-default-href="goto_href"
-                      onclick="window.inspirationRowClick(this)">
-                  <span class="flex-1 font-semibold text-primary pl-1">{{ row.name }}</span>
-                  {% if row.liveness == "STOPPED" %}
-                    <StatusBadge>Stopped</StatusBadge>
-                  {% endif %}
-                </Card>
-              {% endfor %}
-            </div>
-          {% else %}
-            <p class="type-body text-secondary">
-              You don't have any workspaces yet.
-              <a href="#" id="inspiration-empty-to-new" class="text-accent hover:underline">Create a new one from this Inspiration</a> instead.
+          <h2 data-step-title class="type-heading text-primary">Select a workspace</h2>
+          <p data-step-summary class="hidden type-body text-secondary mt-1"></p>
+          <div data-step-body class="mt-4">
+            <p class="type-body text-secondary mb-4">
+              It will open so you can paste the copied message into its chat.
             </p>
-          {% endif %}
+            {% if workspace_rows %}
+              <div class="flex flex-col gap-1.5">
+                {% for row in workspace_rows %}
+                  {% set accent_style = "--workspace-accent: " ~ row.accent ~ ";" %}
+                  {% set goto_href = mngr_forward_origin ~ "/goto/" ~ row.agent_id ~ "/" %}
+                  <Card layout="row" interactive
+                        extra="accent-spine relative overflow-hidden"
+                        :style="accent_style"
+                        :data-agent-id="row.agent_id"
+                        :data-liveness="row.liveness"
+                        :data-default-href="goto_href"
+                        onclick="window.inspirationRowClick(this)">
+                    <span class="flex-1 font-semibold text-primary pl-1">{{ row.name }}</span>
+                    {% if row.liveness == "STOPPED" %}
+                      <StatusBadge>Stopped</StatusBadge>
+                    {% endif %}
+                  </Card>
+                {% endfor %}
+              </div>
+            {% else %}
+              <p class="type-body text-secondary">
+                You don't have any workspaces yet.
+                <a href="#" id="inspiration-empty-to-new" class="text-accent hover:underline">Create a new one from this Inspiration</a> instead.
+              </p>
+            {% endif %}
+          </div>
         </div>
       </div>
     </div>

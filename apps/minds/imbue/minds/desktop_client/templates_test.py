@@ -701,6 +701,17 @@ def test_render_inspiration_page_new_flow_requires_trust_checkbox() -> None:
     assert "trustCheckbox.checked" in html
 
 
+def test_render_inspiration_page_create_button_gated_on_trust() -> None:
+    # Create starts disabled/grayed and the acknowledgment starts red; both
+    # flip when the box is checked (syncTrustGate).
+    html = _render_inspiration()
+    assert re.search(r'id="inspiration-submit"[^>]*\sdisabled', html) or re.search(
+        r'\sdisabled[^>]*id="inspiration-submit"', html
+    )
+    assert re.search(r'id="inspiration-trust-title"[^>]*text-important', html)
+    assert "submitBtn.disabled = !ok" in html
+
+
 def test_render_inspiration_page_submit_labeled_create_from_inspiration() -> None:
     html = _render_inspiration()
     assert "Create from Inspiration" in html
@@ -734,13 +745,18 @@ def test_render_inspiration_page_downstream_steps_start_hidden() -> None:
 
 
 def test_render_inspiration_page_gates_each_step_on_the_previous() -> None:
-    # Copying the message is what reveals the workspace picker; choosing a
-    # preset is what reveals the final create step.
+    # The stepper shows one step's body at a time: picking a pathway advances
+    # to step 2, and copying the message / choosing a preset advances to step
+    # 3. render() hides every non-active step's body.
     html = _render_inspiration()
+    assert "function render()" in html
     assert "isMessageCopied = true" in html
-    assert "steps.add3.classList.remove('hidden')" in html
-    assert "isPresetChosen = true" in html
-    assert "steps.create3.classList.remove('hidden')" in html
+    assert "activeStep = 3" in html
+    assert "chooseBranch('create')" in html
+    assert "chooseBranch('add')" in html
+    # Completed steps collapse to a summary of the choice instead of the options.
+    assert "data-step-summary" in html
+    assert "'Create a new workspace'" in html
 
 
 def test_render_inspiration_page_skill_message_has_stable_id() -> None:
