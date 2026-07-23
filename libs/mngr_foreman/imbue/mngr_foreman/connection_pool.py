@@ -389,15 +389,11 @@ def send_via_pool(pool: ConnectionPool, agent_name: str, message: str) -> list[t
 
     Imported lazily by the messaging module to avoid a circular import.
 
-    The send runs under the per-host lock (via ``run_on_host``) so it serializes with
-    the pool's other work on that host (transcript reads, pane probes, interrupts)
-    rather than driving one connection from two threads at once. Caveat by provider:
-    the docker provider caches its host object by id, so ``send_message_to_agents``
-    reuses the very connection this lock guards; the ssh/local providers mint a fresh
-    host per ``get_host``, so there the send opens its own connection -- the lock still
-    serializes foreman's threads but that send doesn't reuse the warm connection.
-    Threading the pool's resolved host into ``send_message_to_agents`` (to always reuse
-    the warm one) is a cross-package change, deferred until send-path cost shows up.
+    Does NOT take the per-host lock: doing so made a send wait (up to the lock timeout)
+    behind the 1s input-state probes / transcript reads on that host, so the composer
+    sat greyed for seconds before the paste even started. ``send_message_to_agents``
+    manages its own paste; the brief overlap with a probe is not worth blocking every
+    send. (Reverted an over-eager serialization change.)
     """
     from imbue.mngr.api.message import send_message_to_agents
 
@@ -405,17 +401,13 @@ def send_via_pool(pool: ConnectionPool, agent_name: str, message: str) -> list[t
     if not matches:
         pool.invalidate(agent_name)
         raise LookupError(f"No agent found matching {agent_name!r}")
-
-    def _send(_agent: AgentInterface, _host: OnlineHostInterface) -> list[tuple[str, str]]:
-        result = send_message_to_agents(
-            mngr_ctx=pool.mngr_ctx,
-            message_content=message,
-            agents_to_message=matches,
-            error_behavior=ErrorBehavior.CONTINUE,
-            # Foreman never resurrects a stopped agent: it only ever shows and targets
-            # running agents, so a send must not auto-start anything.
-            is_start_desired=False,
-        )
-        return list(result.failed_agents)
-
-    return pool.run_on_host(agent_name, _send)
+    result = send_message_to_agents(
+        mngr_ctx=pool.mngr_ctx,
+        message_content=message,
+        agents_to_message=matches,
+        error_behavior=ErrorBehavior.CONTINUE,
+        # Foreman never resurrects a stopped agent: it only ever shows and targets
+        # running agents, so a send must not auto-start anything.
+        is_start_desired=False,
+    )
+    return list(result.failed_agents)
