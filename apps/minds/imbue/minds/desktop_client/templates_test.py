@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from typing import Final
 
 import pytest
@@ -651,8 +652,8 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tie
 _INSPIRATION_URL = "https://github.com/acme/inspiration"
 
 
-def _render_inspiration(**kwargs: object) -> str:
-    return render_inspiration_create_page(git_url=_INSPIRATION_URL, **kwargs)  # type: ignore[arg-type]
+def _render_inspiration(**kwargs: Any) -> str:
+    return render_inspiration_create_page(git_url=_INSPIRATION_URL, **kwargs)
 
 
 def test_render_inspiration_page_shows_chooser_options() -> None:
