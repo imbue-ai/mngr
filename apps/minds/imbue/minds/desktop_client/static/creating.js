@@ -43,6 +43,8 @@
     if (!tipEl) return;
     var idx = 0;
     tipEl.innerHTML = TIPS[0];
+    // 8s per tip: long enough to comfortably read a full sentence before it
+    // swaps (workspace setup takes minutes, so there is no rush).
     tipsInterval = setInterval(function () {
       idx = (idx + 1) % TIPS.length;
       tipEl.style.opacity = '0';
@@ -50,7 +52,7 @@
         tipEl.innerHTML = TIPS[idx];
         tipEl.style.opacity = '1';
       }, 250);
-    }, 3000);
+    }, 8000);
   }
 
   // ---- Failure view ----
@@ -104,7 +106,16 @@
     }
     if (creationDone && redirectUrl) {
       if (fill) fill.style.width = '100%';
-      window.location.href = redirectUrl;
+      // redirectUrl is the /goto/<agent>/ workspace (agent) URL. On a trusted
+      // local page on the chrome surface, hand it to the shell bridge so the new
+      // workspace opens in the caged content view instead of navigating this
+      // (chrome) frame into untrusted agent content. Plain browser (no shell)
+      // full-page navigates as before.
+      if (window.minds && window.minds.navigateContent) {
+        window.minds.navigateContent(redirectUrl);
+      } else {
+        window.location.href = redirectUrl;
+      }
       return;
     }
     var elapsed = ((window.performance && performance.now) ? performance.now() : Date.now()) - startTime;

@@ -89,7 +89,7 @@ def test_prevent_silent_decode_error_catches() -> None:
     # The added catch is ``build_info.py`` parsing the desktop app's package.json
     # for the Sentry release id: a malformed file degrades to a fallback version
     # (logged at debug) rather than crashing startup.
-    rc.check_silent_decode_error_catches(_DIR, snapshot(5))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(4))
 
 
 # --- Import style ---
@@ -171,7 +171,7 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(12))
+    rc.check_async_await(_DIR, snapshot(11))
 
 
 # --- Hardcoded paths ---
