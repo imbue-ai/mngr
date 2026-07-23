@@ -4,6 +4,62 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-22
+
+### Changed
+
+- Changed: The TMR workflow no longer opens the run's pull request itself — the reducer agent does, so the PR description can carry the run's actual findings (mapper status breakdown, escalations table). The workflow now passes the reducer (and only the reducer) `GH_TOKEN` plus the context to write that description (repository, base branch, run URL, periodic-run label/assignees) via the new `--reducer-env` option; mappers do not receive the token. The only PR-related step left in the workflow is the breadcrumb comment linking a superseded periodic PR to its replacement, which reads the new PR's URL from a `pull_request_url` event the orchestrator emits.
+
+## 2026-07-21
+
+### Added
+
+- Added: Three dev skills under `.claude/skills/` — `post-pr-to-slack` (announce this repo's PRs in `#project-minds-internal-product` with a one-line message and mark the announcement `:merged:` when the PR merges), `crispy-comments` (prune code comments on the current branch down to what helps future maintainers), and `address-pr-comments` (apply `CLAUDE:`/`SCULPTOR:`-prefixed PR comments, and critically evaluate feedback from automated reviewers against the repo's conventions and the PR's goals rather than following it blindly).
+- Added: Concise implementation plan under `blueprint/login-auth-flow-polish/` describing the Minds OAuth login-flow UX improvements (button spinner/fade, staged status messaging, raise-window-on-success, in-page error handling).
+
+### Removed
+
+- Removed: The root `.minds/policies/` directory (and its `.gitignore` un-ignore block). The minds-tier Vault ACL policy text now lives in the imbue-ai/vault repo's terraform (`terraform/employee.tf` and `terraform/minds_operators.tf`), the single source of truth — keeping a second copy here is what let the live policies drift from the vault repo's config in the first place.
+
+### Fixed
+
+- Fixed: `test_no_gitignored_files_are_tracked` now skips files that are deleted in the working tree. Offload sandboxes reconstruct branch state as a base commit plus an unstaged diff, which made the test misfire on commits that delete files and gitignore their path at the same time.
+
+## 2026-07-18
+
+### Added
+
+- Added: `scripts/current_branch.sh` — shared jj-robust current-branch helper reused by `just default-workspace-template-worktree`, `just sync-vendor-mngr`, `just minds-start`, and the Claude Code status line, replacing open-coded `git rev-parse --abbrev-ref HEAD` (which yields `HEAD` under jj colocated checkouts).
+
+### Changed
+
+- Changed: `minds-dev-workflow` skill's first-time bootstrap now activates with `--create --deploy` (was `--create`, which failed the documented `minds env deploy` one-liner), spells out the `vault login` + `~/.modal.toml` prerequisites, and Quick start points to the new `apps/minds/docs/dev-setup.md`.
+
+### Fixed
+
+- Fixed: `just default-workspace-template-worktree` no longer fails with `fatal: 'HEAD' is not a valid branch name` under jj colocated checkouts (falls back to jj's nearest bookmark to `@` when git HEAD is detached).
+- Fixed: `just minds-start` now fails fast with an actionable message when `rsync` is Apple's openrsync (recent macOS `/usr/bin/rsync`, which lacks the `--filter=':- .gitignore'` GNU feature the vendor/mngr sync needs), and its "no minds env activated" error suggests the correct env name form `dev-<user>` (was `<user>-dev`, which the env-name regex rejects).
+
+## 2026-07-16
+
+### Added
+
+- Added: `uv.lock` pins `urwid-readline`, a new dependency the kanpan board uses for readline-style editing in its agent-reply input.
+
+### Changed
+
+- Changed: `ci.yml`'s `test-minds-release` job installs `openssh-server` and sets `MNGR_LATCHKEY_E2E_TESTS=1` before the plain-minds-release step, opting in the new `apps/minds/test_latchkey_e2e.py` release test (which runs a throwaway root sshd on the runner to fake a VPS outer host; gated behind an explicit opt-in that only this throwaway-runner job sets).
+
+## 2026-07-15
+
+### Added
+
+- Added: `specs/workspace-sync/spec.md` — design record for end-to-end-encrypted cross-device sync of workspace metadata and secrets (workspace records on the connector, per-account DEKs wrapped by the master password, metadata-only tier for empty passwords, and the one-shot migration off the legacy local files). Plus `specs/workspace-sync/remote-access.md` (how synced SSH material is materialized so cloud workspaces are fully accessible from any unlocked installation) and the planning blueprint at `blueprint/remote-workspace-ssh-access/`.
+
+### Changed
+
+- Changed: `test-minds-snapshot` CI job (on `run_minds_release_tests` runs) now resolves the per-run CI env's coordinates and SuperTokens admin secrets and forwards them into the offload sandbox as `MINDS_SYNC_E2E_*` env vars so the new workspace-sync e2e tests can target the real connector.
+
 ## 2026-07-14
 
 ### Added

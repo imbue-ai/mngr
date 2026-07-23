@@ -374,6 +374,14 @@ class R2KeyInfo(FrozenModel):
     access: R2BucketAccess = Field(description="Access scope: 'read' or 'readwrite'")
     alias: str | None = Field(default=None, description="Human-readable alias")
     created_at: str = Field(description="ISO 8601 timestamp when the key was created")
+    enforced_access: str | None = Field(
+        default=None,
+        description=(
+            "Storage-quota enforcement state from the connector: 'read' when the sweep downgraded this "
+            "key because the account is over its storage quota; None when the live token policy matches "
+            "the intended access."
+        ),
+    )
 
 
 class R2BucketCreateResult(FrozenModel):
@@ -381,6 +389,62 @@ class R2BucketCreateResult(FrozenModel):
 
     bucket: R2BucketInfo = Field(description="The created bucket")
     key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
+
+
+class StorageCleanupGrant(FrozenModel):
+    """Result of requesting a storage-cleanup grant (POST /account/storage-cleanup-grant)."""
+
+    status: str = Field(description="'granted' when a grant is active (new or pre-existing), 'not_needed' otherwise")
+    expires_at: str | None = Field(default=None, description="When the active grant expires")
+    baseline_bytes: int | None = Field(default=None, description="Live usage recorded at grant time")
+    keys: tuple[R2KeyInfo, ...] = Field(default=(), description="The account's bucket keys after the grant")
+
+
+class StorageRecheckResult(FrozenModel):
+    """Result of an on-demand storage recheck (POST /account/storage-recheck)."""
+
+    usage_bytes: int = Field(description="Live total bucket bytes (real-time)")
+    limit_bytes: int = Field(description="The account's max_total_bucket_bytes entitlement")
+    is_over_quota: bool = Field(description="Whether live usage exceeds the limit")
+    is_grant_settled: bool = Field(description="Whether this recheck settled an outstanding cleanup grant")
+    keys: tuple[R2KeyInfo, ...] = Field(default=(), description="The account's bucket keys after enforcement")
+
+
+class AccountEntitlementValues(FrozenModel):
+    """The quota values an account currently holds (mirrors the connector's PlanEntitlements)."""
+
+    max_remote_workspaces: int = Field(description="Max concurrent pool-host leases (running or stopped)")
+    max_tunnels: int = Field(description="Max Cloudflare tunnels")
+    max_services_per_tunnel: int = Field(description="Max forwarded services per tunnel")
+    max_buckets: int = Field(description="Max R2 buckets")
+    max_total_bucket_bytes: int = Field(description="Max total bytes across all the account's buckets")
+    monthly_llm_spend_usd: float = Field(description="Monthly LLM spend cap in USD (rolling)")
+    max_active_synced_workspaces: int = Field(description="Max ACTIVE synced workspace records")
+
+
+class AccountUsageInfo(FrozenModel):
+    """Live usage numbers for an account (mirrors the connector's AccountUsage)."""
+
+    remote_workspaces: int = Field(description="Current pool-host leases")
+    tunnels: int = Field(description="Current Cloudflare tunnels")
+    buckets: int = Field(description="Current R2 buckets")
+    total_bucket_bytes: int = Field(description="Total bytes across the account's buckets")
+    llm_spend_usd_this_period: float = Field(description="LiteLLM aggregate spend in the current budget period")
+    llm_budget_resets_at: str | None = Field(default=None, description="When the rolling LLM budget period resets")
+    active_synced_workspaces: int = Field(description="Current ACTIVE synced workspace records")
+
+
+class AccountInfo(FrozenModel):
+    """An account's plan, entitlement values, and live usage, from GET /account."""
+
+    user_id: SuperTokensUserId = Field(description="SuperTokens user id")
+    email: str = Field(description="The account's verified email")
+    plan_name: str = Field(description="Current plan name (e.g. 'explorer' or 'ally')")
+    entitlements: AccountEntitlementValues = Field(description="The account's current entitlement values")
+    usage: AccountUsageInfo = Field(description="Live usage, computed by the connector at request time")
+    available_plans: tuple[str, ...] = Field(
+        default=(), description="Every plan name currently seeded (for plan-selector UIs)"
+    )
 
 
 class SyncWorkspaceRecord(FrozenModel):

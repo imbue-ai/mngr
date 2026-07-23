@@ -1,6 +1,7 @@
 """`mngr imbue_cloud auth ...` subcommands."""
 
 import getpass
+import html
 import http.server
 import socket
 import threading
@@ -337,12 +338,72 @@ class _OAuthCaptureBox:
             return None if self._params is None else dict(self._params)
 
 
-def _make_callback_handler_class(box: _OAuthCaptureBox) -> type[http.server.BaseHTTPRequestHandler]:
+# Inline styles for the OAuth success page: it is served from a localhost
+# listener with no other assets, so everything must be self-contained.
+_OAUTH_SUCCESS_PAGE_STYLE = (
+    "html,body{height:100%;margin:0}"
+    "body{display:flex;align-items:center;justify-content:center;text-align:center;"
+    'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;'
+    "background:#faf8f2;color:#000}"
+    "main{padding:2rem;max-width:26rem}"
+    "h1{font-size:1.6rem;font-weight:600;margin:0 0 0.6rem}"
+    "p{margin:0;font-size:1rem;line-height:1.25}"
+    ".message{margin:1.75rem 0 1.25rem}"
+    "a{color:inherit}"
+    "@media (prefers-color-scheme:dark){body{background:#1a170a;color:#fff}}"
+)
+
+# The minds wordmark, inlined because the page ships no assets. Paths fill
+# with currentColor so the mark follows the page's text color in both themes.
+_MINDS_WORDMARK_SVG = (
+    '<svg width="159" height="43" viewBox="0 0 159 43" fill="none" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M0 42V13.08H4.68V16.98C5.7 13.86 8.04 12.12 10.86 12.12C13.5 12.12 15.78 13.74 16.68 17.4C17.94 14.22 20.16 12.12 23.7 12.12C28.02 12.12 30.36 15.6 30.36 22.14V42H25.68V22.74C25.68 18.66 24.84 16.2 22.02 16.2C18.66 16.2 17.52 19.86 17.52 23.7V42H12.84V23.1C12.84 18.84 11.88 16.2 9 16.2C5.76 16.2 4.68 19.92 4.68 23.94V42H0Z" fill="currentColor"/>'
+    '<path d="M34.8366 42V37.74H48.6366V17.34H37.2966V13.08H53.7366V37.74H65.6166V42H34.8366ZM47.3766 7.98V1.08H53.9166V7.98H47.3766Z" fill="currentColor"/>'
+    '<path d="M70.3331 42V13.08H75.4931V16.98C76.9931 14.46 80.4731 12.12 84.7931 12.12C91.7531 12.12 95.7731 16.62 95.7731 24.06V42H90.6131V24.72C90.6131 19.26 88.8131 16.2 83.8931 16.2C78.4931 16.2 75.4931 20.22 75.4931 24.84V42H70.3331Z" fill="currentColor"/>'
+    '<path d="M114.59 42.9C107.03 42.9 101.21 37.38 101.21 27.54C101.21 18.78 106.49 12.12 114.65 12.12C119.51 12.12 122.69 14.76 123.95 16.98V0H129.11V42H123.95V37.98C122.39 40.68 118.91 42.9 114.59 42.9ZM115.43 38.88C120.65 38.88 124.31 34.44 124.31 27.48C124.31 20.58 120.71 16.2 115.43 16.2C110.27 16.2 106.61 20.76 106.61 27.54C106.61 34.32 110.21 38.88 115.43 38.88Z" fill="currentColor"/>'
+    '<path d="M146.846 42.9C139.046 42.9 134.546 38.64 134.426 32.46H139.466C139.646 36.36 142.286 38.88 146.906 38.88C150.866 38.88 153.566 37.08 153.566 34.14C153.566 31.86 152.006 30.36 148.526 29.7L144.146 28.86C138.746 27.84 135.326 25.08 135.326 20.64C135.326 15.72 140.006 12.12 146.546 12.12C153.506 12.12 157.706 15.54 158.066 21.42H152.966C152.546 17.94 150.086 16.2 146.186 16.2C142.706 16.2 140.486 17.88 140.486 20.34C140.486 22.68 142.166 23.82 145.406 24.42L149.906 25.26C155.126 26.22 158.666 28.8 158.666 33.6C158.666 38.76 154.226 42.9 146.846 42.9Z" fill="currentColor"/>'
+    "</svg>"
+)
+
+
+def _oauth_success_page(success_redirect_url: str | None) -> bytes:
+    """Build the HTML the callback listener serves to the browser.
+
+    With a redirect URL, the page offers a link to it -- the minds desktop
+    app passes its minds:// deeplink so a click hands focus back to the app;
+    since that flow is minds-driven (nothing else passes the option today),
+    the page carries the minds wordmark. Deliberately a link rather than an
+    automatic navigation: the click is a user gesture, so browsers show
+    their open-external-app prompt at a moment the user chose instead of
+    unprompted on page load.
+    """
+    if success_redirect_url is None:
+        body_html = "<h1>You are signed in</h1><p>You can close this tab and return to your terminal.</p>"
+    else:
+        href = html.escape(success_redirect_url, quote=True)
+        body_html = (
+            _MINDS_WORDMARK_SVG
+            + '<p class="message">You\'re in! Feel free to close this tab.</p>'
+            + f'<p><a href="{href}">Open app</a></p>'
+        )
+    page = (
+        "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<style>{_OAUTH_SUCCESS_PAGE_STYLE}</style></head>"
+        f"<body><main>{body_html}</main></body></html>"
+    )
+    return page.encode("utf-8")
+
+
+def _make_callback_handler_class(
+    box: _OAuthCaptureBox, success_redirect_url: str | None
+) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a handler class closed over a specific capture box.
 
     Closing over the box lets the handler push state without us touching the
     HTTPServer instance's attributes (which would trip the no-getattr ratchet).
     """
+    body = _oauth_success_page(success_redirect_url)
 
     class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -357,11 +418,6 @@ def _make_callback_handler_class(box: _OAuthCaptureBox) -> type[http.server.Base
             # at the same listener; those must not overwrite the captured params.
             if parsed.path == _OAUTH_CALLBACK_PATH and params:
                 box.set(params)
-            body = (
-                b"<html><head><title>Imbue Cloud sign-in</title></head>"
-                b"<body><h1>You are signed in</h1>"
-                b"<p>You can close this tab and return to your terminal.</p></body></html>"
-            )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -403,6 +459,15 @@ def _free_localhost_port() -> int:
     default=False,
     help="Print the authorize URL instead of launching the browser; useful when running headless.",
 )
+@click.option(
+    "--success-redirect-url",
+    default=None,
+    help=(
+        "URL the success page links to once the OAuth callback lands (e.g. a minds:// "
+        "deeplink so a click returns the user to the desktop app). Default: no link; "
+        "the page just says to close the tab."
+    ),
+)
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def oauth(
@@ -410,6 +475,7 @@ def oauth(
     account: str | None,
     callback_port: int | None,
     no_browser: bool,
+    success_redirect_url: str | None,
     connector_url: str | None,
 ) -> None:
     """OAuth-based sign-in. Spins up a localhost callback listener.
@@ -432,7 +498,7 @@ def oauth(
         fail_with_json("Connector did not return an authorize URL", error_class="OAuthFailed")
 
     capture_box = _OAuthCaptureBox()
-    handler_class = _make_callback_handler_class(capture_box)
+    handler_class = _make_callback_handler_class(capture_box, success_redirect_url)
     server = http.server.HTTPServer(("127.0.0.1", port), handler_class)
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="imbue-cloud-oauth-cb")

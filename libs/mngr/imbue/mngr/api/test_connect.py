@@ -143,3 +143,116 @@ def test_sigwinch_panes_script_skips_pinned_window(mngr_test_prefix: str, tmp_pa
 
     finally:
         cleanup_tmux_session(session_name)
+
+
+def _window_size(session_name: str) -> tuple[int, int]:
+    """Return the (width, height) of the session's ``agent`` window."""
+    result = subprocess.run(
+        ["tmux", "list-windows", "-t", f"={session_name}", "-F", "#{window_name} #{window_width}x#{window_height}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        name, _, size = line.partition(" ")
+        if name == "agent":
+            width, _, height = size.partition("x")
+            return int(width), int(height)
+    raise AssertionError(f"no 'agent' window found in session {session_name!r}: {result.stdout!r}")
+
+
+@pytest.mark.flaky
+@pytest.mark.tmux
+@pytest.mark.parametrize(
+    "client_width, client_height, expected_width, expected_height",
+    [
+        pytest.param(140, 40, 140, 40, id="real-client-fits-exactly"),
+        pytest.param(2, 1, 80, 24, id="degenerate-client-floored-to-minimum"),
+    ],
+)
+def test_sigwinch_panes_script_fit_mode_resizes_pinned_window_to_client(
+    mngr_test_prefix: str,
+    tmp_path,
+    client_width: int,
+    client_height: int,
+    expected_width: int,
+    expected_height: int,
+) -> None:
+    """In "fit" mode the script re-fits the manual-pinned window to the attaching client.
+
+    The default sizing policy pins the agent window to window-size=manual (so a degenerate
+    client on the shared server can never collapse it) and relies on this hook to re-fit the
+    pane to real attaching clients. A real client's geometry is honored exactly; a degenerate
+    (e.g. 2x1) client is floored to a usable minimum (80x24) so Claude Code's TUI still renders.
+    Fit mode also repaints unconditionally (unlike nudge's manual-pin guard).
+    """
+    session_name = f"{mngr_test_prefix}sigwinch-fit"
+
+    try:
+        # A resilient catcher: it re-enters `wait` after each trapped WINCH (unlike the shared
+        # single-`wait` catcher, which exits on the signal and would destroy the session before
+        # we read its window size). This lets us assert both the resize and the repaint.
+        marker_file = tmp_path / "sigwinch_received"
+        ready_file = tmp_path / "catcher_ready"
+        catcher = (
+            f"trap 'echo received > {marker_file}' WINCH; "
+            f"echo ready > {ready_file}; "
+            "while :; do sleep 3600 & wait; done"
+        )
+        subprocess.run(
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "-n",
+                "agent",
+                "bash",
+                "-c",
+                catcher,
+            ],
+            check=True,
+        )
+        wait_for(
+            lambda: ready_file.exists(),
+            timeout=5.0,
+            error_message="catcher pane did not install its SIGWINCH trap",
+        )
+        # Reproduce the default policy's pinned state so resize-window sticks.
+        subprocess.run(
+            ["tmux", "set-option", "-t", f"={session_name}:agent", "window-size", "manual"],
+            check=True,
+        )
+        subprocess.run(
+            ["tmux", "resize-window", "-t", f"={session_name}:agent", "-x", "200", "-y", "50"],
+            check=True,
+        )
+
+        subprocess.run(
+            [
+                "bash",
+                _SIGWINCH_PANES_SCRIPT_PATH,
+                session_name,
+                "agent",
+                "fit",
+                str(client_width),
+                str(client_height),
+            ],
+            check=True,
+            env=_no_delay_env(),
+        )
+
+        assert _window_size(session_name) == (expected_width, expected_height)
+        wait_for(
+            lambda: marker_file.exists(),
+            timeout=5.0,
+            error_message="fit mode should still deliver SIGWINCH to pane processes after resizing.",
+        )
+
+    finally:
+        cleanup_tmux_session(session_name)

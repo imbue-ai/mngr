@@ -13,7 +13,7 @@ from imbue.mngr_imbue_cloud.cli.auth import _make_callback_handler_class
 @pytest.fixture
 def running_callback_server() -> Iterator[tuple[_OAuthCaptureBox, int]]:
     box = _OAuthCaptureBox()
-    handler_class = _make_callback_handler_class(box)
+    handler_class = _make_callback_handler_class(box, None)
     # Bind to port 0 and read back the kernel-assigned port from the live
     # server. Picking a port via a separate socket and rebinding leaves a
     # TOCTOU window where a parallel xdist worker can steal the port.

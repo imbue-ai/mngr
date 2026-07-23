@@ -59,17 +59,20 @@ from imbue.minds.envs.health_check import await_apps_healthy as real_await_apps_
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.migrations import apply_pool_hosts_migrations as real_apply_pool_hosts_migrations
 from imbue.minds.envs.migrations import seed_paid_list_defaults as real_seed_paid_list_defaults
+from imbue.minds.envs.migrations import write_plan_defaults as real_write_plan_defaults
 from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
 from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agents
 from imbue.minds.envs.paths import active_env_name_or_none
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
+from imbue.minds.envs.per_env_deploy import active_modal_token_workspace
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
 from imbue.minds.envs.per_env_deploy import delete_modal_secret as real_delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env as real_ensure_modal_env
 from imbue.minds.envs.per_env_deploy import get_modal_app_latest_version as real_get_modal_app_latest_version
+from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import rollback_modal_app as real_rollback_modal_app
 from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
@@ -263,6 +266,14 @@ def _seed_paid_list_defaults_for_provider(
     real_seed_paid_list_defaults(host_pool_dsn, domains=domains, emails=emails, parent_cg=cg)
 
 
+def _write_plan_defaults_for_provider(
+    host_pool_dsn: SecretStr,
+    plan_rows_by_name: dict[str, dict[str, float]],
+    cg: ConcurrencyGroup,
+) -> None:
+    real_write_plan_defaults(host_pool_dsn, plan_rows_by_name=plan_rows_by_name, parent_cg=cg)
+
+
 def _get_modal_app_latest_version_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> str | None:
     return real_get_modal_app_latest_version(app_name=app_name, modal_env=modal_env, parent_cg=cg)
 
@@ -348,6 +359,7 @@ def _build_real_providers() -> Providers:
         list_modal_secrets=_list_modal_secrets_for_provider,
         apply_pool_hosts_migrations=_apply_pool_hosts_migrations_for_provider,
         seed_paid_list_defaults=_seed_paid_list_defaults_for_provider,
+        write_plan_defaults=_write_plan_defaults_for_provider,
         get_modal_app_latest_version=_get_modal_app_latest_version_for_provider,
         rollback_modal_app=_rollback_modal_app_for_provider,
         create_neon_snapshot_branch=_create_neon_snapshot_branch_for_provider,
@@ -1067,6 +1079,28 @@ def env_list(ctx: click.Context) -> None:
         write_stdout_line(json.dumps(payload, indent=2, default=str))
 
 
+def _preflight_modal_token_workspace(tier: str) -> None:
+    """Refuse a deploy whose pinned Modal profile holds a wrong-workspace token.
+
+    ``minds env activate --deploy`` only checks the ``[<workspace>]`` profile
+    section exists; the token inside is workspace-bound and could belong to a
+    different workspace, silently misrouting every ``modal`` call. Read the
+    actual binding via ``modal profile list`` and fail here -- before any cloud
+    state is created -- rather than after the first (mis-scoped) ``modal
+    deploy``. Best-effort: an undeterminable binding (modal unreachable /
+    non-JSON) falls through to the deploy-time URL assertion in ``provisioning``.
+    Skipped for tiers with no committed ``modal_workspace``.
+    """
+    modal_workspace = modal_profile_for_tier_or_none(tier)
+    if modal_workspace is None:
+        return
+    with ConcurrencyGroup(name=f"minds-modal-profile-preflight-{tier}") as cg:
+        token_workspace = active_modal_token_workspace(modal_workspace, parent_cg=cg)
+    message = modal_token_workspace_mismatch_message(modal_workspace, token_workspace)
+    if message is not None:
+        raise click.ClickException(message)
+
+
 @env.command("deploy")
 @click.option(
     "--yes-i-mean-production",
@@ -1151,6 +1185,7 @@ def env_deploy(
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
     require_deploy_mode_activation(env_name=env_name, tier=tier)
+    _preflight_modal_token_workspace(tier)
     _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:

@@ -179,11 +179,15 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # (which runs the opposite filter). A later -m on CLI overrides this.
 _skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
+# Coverage report flags are passed explicitly here (not via root addopts) so
+# offload CI batches can suppress them -- see the NOTE in root addopts.
+# --coverage-to-file keeps the term-missing report out of the terminal and
+# writes it to .test_output/ instead.
 test-unit:
-  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=term-missing --cov-report=xml --cov-report=html --coverage-to-file --ignore-glob="**/test_*.py" --cov-fail-under=36
 
 test-integration:
-  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --cov-fail-under=80
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=term-missing --cov-report=xml --cov-report=html --coverage-to-file --cov-fail-under=80
 
 # Examples:
 #   just test-quick
@@ -374,7 +378,7 @@ sync-vendor-mngr default_workspace_template="":
         git -C "$default_workspace_template" status --short
         exit 1
     fi
-    branch=$(git rev-parse --abbrev-ref HEAD)
+    branch=$(bash "{{justfile_directory()}}/scripts/current_branch.sh" "{{justfile_directory()}}" || echo HEAD)
     short=$(git rev-parse --short HEAD)
     full=$(git rev-parse HEAD)
     tarball=$(mktemp)
@@ -437,9 +441,10 @@ deploy *args:
 # worktree's git state stays as a normal diff.
 #
 # Requires that you've activated a minds env in this shell first --
-# `eval "$(uv run minds env activate <your-user>-dev)"` is the typical
-# dev case. Refuses without activation so the recipe never silently
-# writes to the wrong env's data root.
+# `eval "$(uv run minds env activate dev-<your-user>)"` is the typical
+# dev case (add `--create` on the very first activation of a fresh dev env
+# to make its data root). Refuses without activation so the recipe never
+# silently writes to the wrong env's data root.
 #
 # Install the minds desktop client's node deps (electron, etc.) using the Node
 # version apps/minds pins in apps/minds/.nvmrc -- selected via
@@ -471,8 +476,11 @@ minds-start branch="" default_workspace_template="":
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
         echo "error: no minds env activated in this shell." >&2
         echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
-        echo "       (e.g. \`<your-user>-dev\` for your personal dev env), then" >&2
+        echo "       (e.g. \`dev-<your-user>\` for your personal dev env), then" >&2
         echo "       re-run \`just minds-start\` from the same shell." >&2
+        echo "       On the first activation of a fresh dev env, add --create to" >&2
+        echo "       make its data root:" >&2
+        echo "         eval \"\$(uv run minds env activate --create dev-<your-user>)\"" >&2
         echo "" >&2
         echo "       Without activation, an inherited MNGR_HOST_DIR from the parent" >&2
         echo "       shell would silently win and minds would read a different mngr" >&2
@@ -495,6 +503,18 @@ minds-start branch="" default_workspace_template="":
     fi
     vendor_mngr="$default_workspace_template_wt/vendor/mngr"
     mkdir -p "$vendor_mngr"
+    # The vendor/mngr sync below uses `rsync --filter=':- .gitignore'`, a GNU
+    # rsync feature. Recent macOS ships Apple's openrsync at /usr/bin/rsync,
+    # which doesn't support it and fails the sync with a confusing error --
+    # fail fast here with the fix. See apps/minds/README.md (Getting started).
+    if rsync --version 2>&1 | grep -qi openrsync; then
+        echo "error: your 'rsync' is Apple's openrsync, which lacks the" >&2
+        echo "       --filter=':- .gitignore' support minds-start needs." >&2
+        echo "       Install GNU rsync and put it ahead of /usr/bin on PATH:" >&2
+        echo "         brew install rsync" >&2
+        echo "         rsync --version | head -1   # must NOT say 'openrsync'" >&2
+        exit 2
+    fi
     echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no DEFAULT_WORKSPACE_TEMPLATE commit)"
     # Exclusions must match _RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
     # in libs/mngr_imbue_cloud/.../cli/admin.py and apps/minds/.../cli/pool.py,
@@ -544,7 +564,7 @@ minds-start branch="" default_workspace_template="":
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
     else
-        export MINDS_WORKSPACE_BRANCH="$(git -C "$default_workspace_template_wt" rev-parse --abbrev-ref HEAD)"
+        export MINDS_WORKSPACE_BRANCH="$(bash "{{justfile_directory()}}/scripts/current_branch.sh" "$default_workspace_template_wt")"
     fi
     echo "MINDS_WORKSPACE_GIT_URL=$MINDS_WORKSPACE_GIT_URL"
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
@@ -678,18 +698,31 @@ minds-stop:
         rm -f "$pid_file"
         exit 0
     fi
-    # Snapshot the full descendant tree. pstree -p -T walks PPID links and
-    # gives PIDs in flat form. We'll use this both to identify electron's
-    # main process and to verify the whole tree exits.
-    descendants=$(pstree -p -T "$pid" 2>/dev/null | grep -oE '\([0-9]+\)' | tr -d '()' | sort -u)
-    # Locate Electron's main process: the descendant whose cmd contains the
-    # electron binary path and is NOT a `--type=zygote` / `--type=utility`
-    # / `--type=...` subprocess. There's exactly one such process per
-    # session (the rest are renderer / GPU / network helpers it spawned).
+    # Snapshot the full descendant tree by walking PPID links with plain ps
+    # (portable: pstree is not preinstalled on macOS, and macOS ps has no
+    # `cmd=` keyword). We'll use this both to identify electron's main
+    # process and to verify the whole tree exits.
+    descendants=$(ps -eo pid=,ppid= | awk -v root="$pid" '
+        { ppid_of[$1] = $2 }
+        END {
+            n = 1; queue[0] = root; seen[root] = 1
+            for (i = 0; i < n; i++)
+                for (p in ppid_of)
+                    if (ppid_of[p] == queue[i] && !(p in seen)) { seen[p] = 1; queue[n++] = p }
+            for (i = 0; i < n; i++) print queue[i]
+        }' | sort -u)
+    # Locate Electron's main process: the descendant whose command contains
+    # the electron binary path (Linux: node_modules/electron/dist/electron;
+    # macOS: Electron.app/Contents/MacOS/Electron) and is NOT a
+    # `--type=zygote` / `--type=utility` / `--type=...` subprocess. There's
+    # exactly one such process per session (the rest are renderer / GPU /
+    # network helpers it spawned).
     electron_main_pid=""
     for d in $descendants; do
-        cmd=$(ps -o cmd= -p "$d" 2>/dev/null || true)
-        if [[ "$cmd" == *"node_modules/electron/dist/electron "* && "$cmd" != *"--type="* ]]; then
+        cmd=$(ps -o command= -p "$d" 2>/dev/null || true)
+        if [[ "$cmd" != *"--type="* ]] \
+            && { [[ "$cmd" == *"node_modules/electron/dist/electron "* ]] \
+                 || [[ "$cmd" == *"Electron.app/Contents/MacOS/Electron"* ]]; }; then
             electron_main_pid="$d"
             break
         fi

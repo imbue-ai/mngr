@@ -242,6 +242,48 @@ def resolve_latchkey_forward_sentry_env(consent_file_path: Path, anonymous_user_
     }
 
 
+def _external_log_attachment_groups(
+    latchkey_plugin_data_dir: Path, discovery_events_dir: Path
+) -> tuple[LogAttachmentGroup, ...]:
+    """Attachment groups for logs that live outside ``~/.minds/logs``.
+
+    The detached ``mngr latchkey forward`` daemon (which runs discovery and the
+    reverse tunnels) logs into the latchkey plugin data dir, and the shared
+    discovery event stream persists under the mngr host dir -- both essential
+    for diagnosing discovery/replay problems, and both outside the flat minds
+    log folder that the default sweep covers.
+    """
+    return (
+        # The daemon's structured loguru log (mutable -- re-upload on every report).
+        LogAttachmentGroup(
+            group_name="latchkey_live_logs",
+            glob="*.jsonl",
+            max_file_count=MAX_SENTRY_LIST_SIZE,
+            is_compressed=True,
+            is_immutable=False,
+            base_dir=latchkey_plugin_data_dir,
+        ),
+        # The daemon's raw stdout/stderr capture (latchkey_forward.log).
+        LogAttachmentGroup(
+            group_name="latchkey_raw_logs",
+            glob="*.log",
+            max_file_count=MAX_SENTRY_LIST_SIZE,
+            is_compressed=True,
+            is_immutable=False,
+            base_dir=latchkey_plugin_data_dir,
+        ),
+        # The shared discovery event stream that startup replay reads from.
+        LogAttachmentGroup(
+            group_name="discovery_events",
+            glob="events.jsonl",
+            max_file_count=1,
+            is_compressed=True,
+            is_immutable=False,
+            base_dir=discovery_events_dir,
+        ),
+    )
+
+
 def setup_sentry(
     environment: SentryDeployEnvironment,
     release_id: str,
@@ -250,6 +292,8 @@ def setup_sentry(
     anonymous_user_id: str,
     is_error_reporting_enabled: Callable[[], bool],
     is_log_inclusion_enabled: Callable[[], bool],
+    latchkey_plugin_data_dir: Path,
+    discovery_events_dir: Path,
 ) -> None:
     """Set up Sentry for the minds backend process (Flask integration + flat-log layout)."""
     _setup_sentry(
@@ -260,7 +304,8 @@ def setup_sentry(
         log_folder=log_folder,
         service_name=_MINDS_SENTRY_SERVICE_NAME,
         user_id=anonymous_user_id,
-        log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS,
+        log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS
+        + _external_log_attachment_groups(latchkey_plugin_data_dir, discovery_events_dir),
         integrations=[FlaskIntegration()],
         is_error_reporting_enabled=is_error_reporting_enabled,
         is_log_inclusion_enabled=is_log_inclusion_enabled,

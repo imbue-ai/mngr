@@ -1,1 +1,0 @@
-Added `secret_wrapping`: pure envelope-encryption helpers (argon2id key derivation, AES-256-GCM DEK wrap/unwrap and secrets encrypt/decrypt) used by the minds workspace-sync feature. New dependencies: `argon2-cffi`, `cryptography`.

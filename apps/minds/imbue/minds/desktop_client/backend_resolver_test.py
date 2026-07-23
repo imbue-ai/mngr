@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.backend_resolver import ServiceLogParseError
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
+from imbue.minds.desktop_client.backend_resolver import _read_last_good_agent_topology
 from imbue.minds.desktop_client.backend_resolver import parse_agent_ids_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
@@ -774,6 +775,154 @@ def test_lifecycle_transition_cleared_on_failure_does_not_retain() -> None:
     resolver.clear_host_lifecycle_transition(host)
     resolver.update_agents(ParsedAgentsResult())
     assert resolver.list_active_workspace_ids() == ()
+
+
+def test_last_good_topology_prunes_host_on_observed_destroyed(tmp_path: Path) -> None:
+    """A host observed DESTROYED is pruned from last-good, and the prune is persisted to disk.
+
+    Reproduces the user destroying their workspace: a complete enumeration lands
+    the host in last-good, then a later snapshot reports it DESTROYED (its agents
+    linger in discovery for the provider's persistence window). The host must be
+    dropped from both the in-memory fallback and the on-disk topology so it stops
+    counting as restorable.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
+        )
+    )
+    assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
+    assert str(host) in _read_last_good_agent_topology(topology_path).agents_by_host
+
+    # The host is later observed DESTROYED (its agents still linger in discovery).
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
+            host_state_by_host_id={str(host): HostState.DESTROYED},
+        )
+    )
+    # The host is dropped from the persisted topology (the on-disk write path).
+    assert str(host) not in _read_last_good_agent_topology(topology_path).agents_by_host
+
+    # Once discovery finally drops the lingering agents, the fallback has nothing
+    # to resolve -- proving the prune, not the (now-empty) live snapshot, is what
+    # removed it. A merely-absent host would still resolve here; a DESTROYED one
+    # does not.
+    resolver.update_agents(ParsedAgentsResult())
+    assert resolver.get_system_services_agent_id(workspace_agent) is None
+    # A fresh resolver reloading from disk agrees: the prune survived the restart.
+    reloaded = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    assert reloaded.get_system_services_agent_id(workspace_agent) is None
+
+
+def test_last_good_topology_keeps_absent_host_but_prunes_destroyed_one() -> None:
+    """A host merely absent from a later snapshot is retained; only a DESTROYED one is pruned.
+
+    Guards the core last-good behavior against C1's prune: dropping on absence
+    would defeat the slow-cold-start fallback. Here one host vanishes from the
+    snapshot entirely while a sibling is observed DESTROYED in the same tick --
+    the absent host must survive (absence is not destruction) and only the
+    DESTROYED host is pruned.
+    """
+    resolver = MngrCliBackendResolver()
+    absent_host, absent_ws, absent_svc = HostId.generate(), AgentId.generate(), AgentId.generate()
+    dead_host, dead_ws, dead_svc = HostId.generate(), AgentId.generate(), AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(absent_ws, absent_svc, dead_ws, dead_svc),
+            discovered_agents=(
+                *_pair_snapshot(absent_host, absent_ws, absent_svc),
+                *_pair_snapshot(dead_host, dead_ws, dead_svc),
+            ),
+        )
+    )
+    # A later snapshot omits the first host entirely and reports the second
+    # DESTROYED (its agents still linger in discovery for the persistence window).
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(dead_ws, dead_svc),
+            discovered_agents=_pair_snapshot(dead_host, dead_ws, dead_svc),
+            host_state_by_host_id={str(dead_host): HostState.DESTROYED},
+        )
+    )
+    # A final snapshot drops the lingering DESTROYED agents too, leaving the
+    # fallback as the only source for both hosts -- so what survives is exactly
+    # what the prune kept.
+    resolver.update_agents(ParsedAgentsResult())
+
+    # Absent host is retained (fallback still resolves); DESTROYED host is pruned.
+    assert resolver.get_system_services_agent_id(absent_ws) == absent_svc
+    assert resolver.get_system_services_agent_id(dead_ws) is None
+
+
+def test_list_restorable_workspace_ids_excludes_destroyed_host_in_live_snapshot(tmp_path: Path) -> None:
+    """A live workspace whose host is DESTROYED is excluded from the restorable set.
+
+    The destroyed host lingers in discovery for the provider's persistence
+    window, but its window must not be restored: "restorable" means genuinely
+    not-destroyed, mirroring ``list_active_workspace_ids``.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    live_host, live_agent = HostId.generate(), AgentId.generate()
+    dead_host, dead_agent = HostId.generate(), AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(live_agent, dead_agent),
+            discovered_agents=(
+                _primary_system_services_agent(live_host, live_agent),
+                _primary_system_services_agent(dead_host, dead_agent),
+            ),
+            host_state_by_host_id={
+                str(live_host): HostState.RUNNING,
+                str(dead_host): HostState.DESTROYED,
+            },
+        )
+    )
+
+    assert resolver.list_restorable_workspace_ids() == (live_agent,)
+
+
+def test_list_restorable_workspace_ids_empties_after_sole_workspace_destroyed(tmp_path: Path) -> None:
+    """Destroying the only workspace empties the restorable set (the spinner-vs-create-form bug).
+
+    Covers the union's last-good half: after a complete enumeration lands the
+    workspace in last-good, observing its host DESTROYED must both prune last-good
+    (C1) and exclude the still-lingering live entry (C2), so restorable is empty --
+    and stays empty once discovery finally drops the lingering agent. Otherwise the
+    landing handler keeps the "Discovering..." spinner up instead of the create form.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host, agent = HostId.generate(), AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_primary_system_services_agent(host, agent),),
+        )
+    )
+    assert resolver.list_restorable_workspace_ids() == (agent,)
+
+    # The host is observed DESTROYED while its agent still lingers in discovery.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_primary_system_services_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.DESTROYED},
+        )
+    )
+    assert resolver.list_restorable_workspace_ids() == ()
+
+    # Discovery finally drops the lingering agent; last-good stays pruned (not resurrected).
+    resolver.update_agents(ParsedAgentsResult())
+    assert resolver.list_restorable_workspace_ids() == ()
 
 
 def test_last_good_topology_preserves_other_host_on_partial_discovery_loss() -> None:

@@ -4,6 +4,44 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-22
+
+`mngr tmr` gained a `--reducer-env` option, documented in the generated CLI reference. It passes environment variables to the reducer agent only, never to the mappers, for credentials the reducer needs but mappers must not receive (such as a token that can push and open pull requests).
+
+The `mngr tmr` help text now describes the reducer's full role (collapsing repeated changes, writing the run's changelog, opening the pull request), the explicit per-test `--timeout` its agents run with, and the `escalations` field in the outcome schema.
+
+## 2026-07-21
+
+Fixed: agent tmux windows are no longer born collapsed (e.g. to `2x1`) when a degenerate, unsized client is attached to the host's shared tmux server. Previously mngr created agent sessions with tmux's default `window-size latest` policy, so a brand-new detached session was born at the geometry of whatever client was already attached to the shared server -- even a stray `2x1` ttyd/web-shell client -- regardless of the `new-session -x 200 -y 50` sizing. A `2x1` pane breaks Claude Code's TUI, so the initial `mngr message` delivery (which waits for the TUI to be ready) would time out and the message would be silently dropped. This is the root cause of "the agent was created but never got its first message" symptoms (e.g. the desktop `/assist` "have an agent help" flow, and launch-task workers).
+
+By default, agents are now pinned to a stable, usable geometry: the primary window is set to `window-size manual` and resized to the intended dimensions (historical `200x50`), making creation deterministic and immune to stray clients. Interactive attach still fits your terminal: per-session `client-attached` and `client-resized` hooks re-fit the pane to the current client's size (so a live terminal resize is tracked continuously, matching tmux's native `latest`), floored at a usable minimum (`80x24`) so a degenerate client can never collapse the pane below what Claude Code needs to render.
+
+An explicit `--tmux-window-size` is still honored verbatim: a client-following mode (`latest`/`largest`/`smallest`) behaves as before, and an explicit `manual` stays truly fixed (the re-fit hook leaves it untouched).
+
+Note: only newly created agents get the new pinning. Agents already running when you upgrade keep their current window-size policy until recreated.
+
+Fixed `mngr list --sort` on numeric fields (e.g. `idle`, `age`, `runtime`, `idle_seconds`), which previously ordered values as strings -- so an idle spread like 2.4, 14040.2, 111044 came out interleaved rather than sorted. Numeric sort keys now compare numerically; string fields are unchanged, and missing values still sort to the end in both directions.
+
+## 2026-07-15
+
+Fixed the discovery-events replay window being permanently pinned at the last legacy `DISCOVERY_FULL` snapshot. Installs that upgraded across the per-provider discovery migration kept that line in `events.jsonl` forever (nothing writes the type anymore), so every observe-stream attach replayed days of stale history -- destroyed workspaces reappearing with their old names at app startup, then visibly disappearing again as the destroy events re-folded. The legacy timestamp now participates only when the file contains no per-provider snapshots at all.
+
+- Added: `setup_command_context` (and `parse_output_options`) accept an optional `max_log_size_mb` override so a command can pin its own rotated-log size cap instead of inheriting `logging.max_log_size_mb` from config. Long-running daemons that write to a dedicated `--log-file` use this to keep a smaller cap than the general mngr default. The default behavior (inherit the config value) is unchanged.
+
+Regenerated the `mngr imbue_cloud` CLI reference docs for the new `sync` subcommand group (workspace-record and key-bundle transport used by the minds app).
+
+Marked `test_worker_hubs_do_not_accumulate_across_polls` as flaky: its live-gevent-hub count races against concurrently-running tests under xdist (it passes reliably in isolation).
+
+Made the remote cooperative host lock safe across SSH reconnects. Previously a dropped connection mid-critical-section silently released the `flock`, and the transient-retry machinery reconnected and kept running unlocked -- a silent mutual-exclusion violation that let another actor enter its critical section in the gap.
+
+- A monotonic acquisition counter (`host_lock.generation`) is now incremented under the lock on every acquire. A holder that reconnects while holding the lock re-acquires and verifies no other actor acquired in the gap: if the counter advanced by only its own re-acquire it transparently continues, otherwise it raises the new `LockLostError` (a `MngrError`, already isolated per-host by callers such as the `mngr_mapreduce` launch loop).
+
+- Loss is detected at every boundary: the paramiko reconnect chokepoint, an independently-dead lock channel, before each rsync (which uses a separate connection), and a single-exit release backstop that guarantees no critical section is reported successful while the lock was silently lost.
+
+- While a lock is held, a still-live SSH transport is no longer torn down on a channel-level or read-timeout error (which would needlessly drop the lock); only a confirmed-dead transport triggers reconnect-and-re-verify.
+
+- All in-host lock acquirers now participate in the counter so an in-host acquisition is visible to a reconnecting remote holder: the idle-shutdown watcher increments the counter (and holds the lock) when it takes the host down, and the local-filesystem lock path increments on acquire.
+
 ## 2026-07-14
 
 The full `mngr observe` observer now detects a local agent's main process dying on its own (OOM, crash, or normal exit) within seconds instead of waiting up to 5 minutes for the next full snapshot.

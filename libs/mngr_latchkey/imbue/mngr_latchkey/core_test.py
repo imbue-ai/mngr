@@ -17,6 +17,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
@@ -144,7 +145,7 @@ def test_initialize_accepts_exactly_minimum_version(tmp_path: Path) -> None:
 
 
 def test_initialize_accepts_newer_version(tmp_path: Path) -> None:
-    binary = _make_version_binary(tmp_path, version_output="3.0.0")
+    binary = _make_version_binary(tmp_path, version_output="33.0.0")
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     manager.initialize()
 
@@ -904,7 +905,7 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(
             )
             for provider_name in ("local", "docker", "lima", "vultr", "modal"):
                 # ssh_info=None is fine here -- it keeps the test off the SSH path.
-                handler(AgentId(), HostId(), None, provider_name)
+                handler(AgentId(), HostId(), None, provider_name, HostState.RUNNING)
             assert manager.is_gateway_running
             # Same shared gateway across all five callbacks; ensure it actually came up.
             # ``start_gateway`` is idempotent and returns the bound port even
@@ -976,7 +977,7 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, HostId(), ssh_info, "local")
+        handler(agent_id, HostId(), ssh_info, "local", HostState.RUNNING)
 
         assert manager.is_gateway_running
         # ``start_gateway`` is idempotent and returns the bound port even
@@ -1021,7 +1022,7 @@ def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), HostId(), None, "local")
+        handler(AgentId(), HostId(), None, "local", HostState.RUNNING)
 
         assert manager.is_gateway_running
         assert tunnel_manager._calls == []
@@ -1045,7 +1046,7 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path, temp_mngr_ctx
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), HostId(), None, "local")
+        handler(AgentId(), HostId(), None, "local", HostState.RUNNING)
     assert not manager.is_gateway_running
     assert tunnel_manager._calls == []
 
@@ -1094,7 +1095,7 @@ def test_discovery_handler_dispatches_vps_provisioning_in_addition_to_desktop_tu
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+        handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.RUNNING)
         host_side_port = manager.start_gateway(cg)
 
         # Provisioning runs on its own fire-and-forget CG thread; poll for it.
@@ -1133,7 +1134,7 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+        handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.RUNNING)
 
         # Provisioning runs on its own fire-and-forget CG thread; poll for it.
         poll_event = threading.Event()
@@ -1143,6 +1144,72 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails
 
         # The desktop tunnel raised, yet the VPS provisioning was still dispatched.
         assert handler._provisioned == [(agent_id, host_id)]
+        manager.stop_gateway()
+
+
+def test_discovery_handler_tears_down_tunnel_for_stopped_host(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A host discovered as STOPPED has its reverse tunnel torn down and no new one set up.
+
+    A stopped container has no live sshd, so keeping the reverse tunnel would
+    leave the tunnel manager's health-check loop re-dialing a dead endpoint
+    forever. The shared desktop gateway still stays up (it outlives any single
+    agent).
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler(agent_id, HostId(), ssh_info, "local", HostState.STOPPED)
+
+        assert manager.is_gateway_running
+        assert tunnel_manager._calls == []
+        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        manager.stop_gateway()
+
+
+def test_stopped_host_skips_provisioning_and_clears_provisioned_marker(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A STOPPED VPS host skips provisioning and is dropped from the provisioned set.
+
+    Dispatching provisioning against a stopped container is exactly what raised
+    the ``container ... is not running`` error; gating on the host state prevents
+    it. Clearing the provisioned marker means a later restart re-runs the
+    idempotent provisioning (the container may be recreated while stopped).
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # The host was provisioned earlier this session, while it was running.
+        with handler._remote_hosts_lock:
+            handler._provisioned_hosts.add(str(host_id))
+
+        handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.STOPPED)
+
+        assert handler._provisioned == []
+        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        with handler._remote_hosts_lock:
+            assert str(host_id) not in handler._provisioned_hosts
         manager.stop_gateway()
 
 
@@ -1441,7 +1508,17 @@ def _make_services_info_binary(
     credential_status: str = "valid",
     exit_code: int = 0,
 ) -> Path:
-    """Build a fake latchkey CLI that emits a services-info JSON payload."""
+    """Build a fake latchkey CLI that emits a services-info JSON payload.
+
+    Emits the latchkey 3.0.0 shape: a ``credentials`` object keyed by account
+    (the default account keyed by the empty string) carrying the requested
+    ``credentialStatus``. An empty ``credential_status`` string models a service
+    with no stored credentials (``credentials == {}``).
+    """
+    if credential_status == "":
+        credentials_literal = "{}"
+    else:
+        credentials_literal = json.dumps({"": {"credentialType": "rawCurl", "credentialStatus": credential_status}})
     script = tmp_path / "latchkey"
     script.write_text(
         "#!/usr/bin/env python3\n"
@@ -1453,7 +1530,7 @@ def _make_services_info_binary(
         f'    "type": "built-in",\n'
         f'    "baseApiUrls": ["https://api.example.com"],\n'
         f'    "authOptions": ["browser", "set"],\n'
-        f'    "credentialStatus": {credential_status!r},\n'
+        f'    "credentials": {credentials_literal},\n'
         f'    "setCredentialsExample": "...",\n'
         f'    "developerNotes": "...",\n'
         f"}}\n"
@@ -1490,10 +1567,35 @@ def test_services_info_returns_valid_when_status_is_valid(tmp_path: Path) -> Non
     assert info.set_credentials_example == "..."
 
 
-def test_services_info_returns_missing_when_status_is_missing(tmp_path: Path) -> None:
-    binary = _make_services_info_binary(tmp_path, credential_status="missing")
+def test_services_info_returns_missing_when_no_accounts_are_stored(tmp_path: Path) -> None:
+    # latchkey 3.0.0 represents "no stored credentials" as an empty ``credentials``
+    # object; there is no per-account ``missing`` status anymore.
+    binary = _make_services_info_binary(tmp_path, credential_status="")
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-    assert latchkey.services_info("slack").credential_status == CredentialStatus.MISSING
+    info = latchkey.services_info("slack")
+    assert info.credential_status == CredentialStatus.MISSING
+    assert info.accounts == ()
+
+
+def test_services_info_parses_multiple_accounts_and_aggregates_status(tmp_path: Path) -> None:
+    script = tmp_path / "latchkey"
+    payload = {
+        "authOptions": ["browser", "set"],
+        "credentials": {
+            "hynek@imbue-ai": {"credentialType": "oauth", "credentialStatus": "valid"},
+            "hynek@glebs-corner": {"credentialType": "oauth", "credentialStatus": "invalid"},
+        },
+    }
+    script.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps(" + json.dumps(payload) + "))\n")
+    script.chmod(0o755)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    info = latchkey.services_info("slack")
+    # One VALID account makes the aggregate VALID even though another is INVALID.
+    assert info.credential_status == CredentialStatus.VALID
+    assert {account.account for account in info.accounts} == {"hynek@imbue-ai", "hynek@glebs-corner"}
+    by_account = {account.account: account.credential_status for account in info.accounts}
+    assert by_account["hynek@imbue-ai"] == CredentialStatus.VALID
+    assert by_account["hynek@glebs-corner"] == CredentialStatus.INVALID
 
 
 def test_services_info_returns_invalid_when_status_is_invalid(tmp_path: Path) -> None:
@@ -1619,6 +1721,65 @@ def test_services_info_offline_passes_offline_flag(tmp_path: Path) -> None:
     # Without the flag, ``--offline`` is absent.
     latchkey.services_info("slack")
     assert json.loads(report_path.read_text()) == ["services", "info", "slack"]
+
+
+def _make_auth_list_binary(tmp_path: Path, *, payload_json: str, exit_code: int = 0) -> Path:
+    """Build a fake latchkey CLI that emits an ``auth list`` JSON payload and records argv."""
+    report_path = tmp_path / "argv_report"
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        f"open({str(report_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        f"print({payload_json!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_auth_list_parses_accounts_keyed_by_service(tmp_path: Path) -> None:
+    payload = json.dumps(
+        {
+            "slack": {
+                "hynek@imbue-ai": {"credentialType": "rawCurl", "credentialStatus": "unknown"},
+                "hynek@glebs-corner": {"credentialType": "rawCurl", "credentialStatus": "valid"},
+            },
+            "github": {"": {"credentialType": "rawCurl", "credentialStatus": "unknown"}},
+        }
+    )
+    binary = _make_auth_list_binary(tmp_path, payload_json=payload)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    result = latchkey.auth_list(is_offline=True)
+
+    assert set(result) == {"slack", "github"}
+    assert {a.account: a.credential_status for a in result["slack"]} == {
+        "hynek@imbue-ai": CredentialStatus.UNKNOWN,
+        "hynek@glebs-corner": CredentialStatus.VALID,
+    }
+    assert [a.account for a in result["github"]] == [""]
+    # ``--offline`` is forwarded (and omitted when not requested).
+    assert json.loads((tmp_path / "argv_report").read_text()) == ["auth", "list", "--offline"]
+
+
+def test_auth_list_without_offline_omits_flag(tmp_path: Path) -> None:
+    binary = _make_auth_list_binary(tmp_path, payload_json="{}")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    assert latchkey.auth_list() == {}
+    assert json.loads((tmp_path / "argv_report").read_text()) == ["auth", "list"]
+
+
+def test_auth_list_degrades_to_empty_mapping_on_failure(tmp_path: Path) -> None:
+    binary = _make_auth_list_binary(tmp_path, payload_json="{}", exit_code=1)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    assert latchkey.auth_list(is_offline=True) == {}
+
+
+def test_auth_list_degrades_to_empty_mapping_when_binary_missing(tmp_path: Path) -> None:
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "does-not-exist"))
+    assert latchkey.auth_list(is_offline=True) == {}
 
 
 def test_auth_browser_reports_success_on_zero_exit(tmp_path: Path) -> None:
@@ -1830,6 +1991,103 @@ def test_auth_clear_invokes_clear_with_yes_flag(tmp_path: Path) -> None:
     assert argv_calls == [["auth", "clear", "-y", "google-sheets"]]
 
 
+def test_auth_clear_all_passes_all_flag(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    latchkey.auth_clear("google-sheets", is_all=True)
+
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "clear", "-y", "google-sheets", "--all"]]
+
+
+def test_auth_clear_account_passes_account_flag(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    latchkey.auth_clear("slack", account="hynek@imbue-ai")
+
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "clear", "-y", "slack", "--account", "hynek@imbue-ai"]]
+
+
+# -- add_account --
+
+
+def _make_env_recording_binary(tmp_path: Path, *, exit_code: int = 0, stderr: str = "") -> Path:
+    """Fake latchkey CLI that records argv and the LATCHKEY_EPHEMERAL_BROWSER env var per call."""
+    script = tmp_path / "latchkey"
+    report_path = tmp_path / "latchkey_report.jsonl"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"with open({str(report_path)!r}, 'a') as f:\n"
+        "    f.write(json.dumps({'argv': sys.argv[1:], "
+        "'env_ephemeral': os.environ.get('LATCHKEY_EPHEMERAL_BROWSER', '')}) + '\\n')\n"
+        f"if {stderr!r}:\n"
+        f"    sys.stderr.write({stderr!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_add_account_runs_ephemeral_auth_browser(tmp_path: Path) -> None:
+    binary = _make_env_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.add_account("slack")
+
+    assert is_success is True
+    assert detail == ""
+    records = _read_recording_report(tmp_path)
+    # In ephemeral mode add_account (re-)prepares before signing in, so a new
+    # account is never bound to a client/session left by an earlier one.
+    assert [record["argv"] for record in records] == [
+        ["auth", "browser-prepare", "slack"],
+        ["auth", "browser", "slack"],
+    ]
+    # The ephemeral-browser env var is set on every call so the sign-in starts
+    # from a fresh session.
+    assert all(record["env_ephemeral"] == "1" for record in records)
+
+
+def test_add_account_non_google_failure_surfaces_error(tmp_path: Path) -> None:
+    # Every call fails; the browser-prepare step fails first, so its error is
+    # surfaced as-is and no Google-only ``auth prepare`` fallback is attempted.
+    binary = _make_env_recording_binary(tmp_path, exit_code=1, stderr="user cancelled")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.add_account("slack")
+
+    assert is_success is False
+    assert detail == "user cancelled"
+    # The prepare step fails, so the sign-in is never attempted and there is no
+    # Minds Google OAuth client registration for a non-Google service.
+    assert [record["argv"] for record in _read_recording_report(tmp_path)] == [["auth", "browser-prepare", "slack"]]
+
+
+def test_add_account_google_falls_back_to_browser_prepare_when_official_client_fails(tmp_path: Path) -> None:
+    # Ephemeral add-account re-prepares the Minds client first; when that sign-in
+    # fails it falls back to a fresh self-setup browser-prepare and retries.
+    binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, _detail = latchkey.add_account("google-gmail")
+
+    assert is_success is True
+    argv_calls = _read_argv_calls(tmp_path)
+    assert argv_calls == [
+        _MINDS_PREPARE_ARGV,
+        ["auth", "browser", "google-gmail"],
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
+    ]
+    # The failed Minds preparation is left for browser-prepare to overwrite; it
+    # is not cleared (which would wipe other accounts' credentials).
+    assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
+
+
 # -- auth_browser Minds Google OAuth client preference --
 
 
@@ -1932,24 +2190,25 @@ def test_auth_browser_google_registers_minds_client_then_signs_in(tmp_path: Path
     ]
 
 
-def test_auth_browser_google_minds_sign_in_failure_clears_then_self_setup(tmp_path: Path) -> None:
-    """Minds client registers but its sign-in fails: clear it, then the self-setup flow succeeds."""
+def test_auth_browser_google_minds_sign_in_failure_falls_back_to_self_setup(tmp_path: Path) -> None:
+    """Minds client registers but its sign-in fails: fall back to the self-setup flow (no clear)."""
     binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
     is_success, _detail = latchkey.auth_browser("google-gmail")
 
     assert is_success is True
-    # The clear sits between the failed Minds sign-in and the self-setup
-    # browser-prepare, so the self-setup flow starts from a clean slate.
-    assert _read_argv_calls(tmp_path) == [
+    argv_calls = _read_argv_calls(tmp_path)
+    # browser-prepare overwrites the stale Minds preparation, so no clear is
+    # needed between the failed Minds sign-in and the self-setup browser-prepare.
+    assert argv_calls == [
         ["auth", "browser", "google-gmail"],
         _MINDS_PREPARE_ARGV,
         ["auth", "browser", "google-gmail"],
-        ["auth", "clear", "-y", "google-gmail"],
         ["auth", "browser-prepare", "google-gmail"],
         ["auth", "browser", "google-gmail"],
     ]
+    assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
 def test_auth_browser_google_minds_prepare_failure_falls_through_without_clearing(tmp_path: Path) -> None:
@@ -1968,7 +2227,7 @@ def test_auth_browser_google_minds_prepare_failure_falls_through_without_clearin
         ["auth", "browser", "google-gmail"],
     ]
     # We never registered our client, so nothing of ours is cleared.
-    assert ["auth", "clear", "-y", "google-gmail"] not in argv_calls
+    assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
 def test_auth_browser_google_already_registered_signs_in_with_one_call(tmp_path: Path) -> None:
@@ -2000,4 +2259,4 @@ def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: 
     # The pre-existing client is preserved: no prepare and no clear, because we
     # only ever touch a client we registered ourselves.
     assert argv_calls == [["auth", "browser", "google-gmail"]]
-    assert ["auth", "clear", "-y", "google-gmail"] not in argv_calls
+    assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls

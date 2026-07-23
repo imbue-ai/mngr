@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-17
+
+Bump Latchkey to v2.21.0.
+
+## 2026-07-16
+
+Fixed: `mngr latchkey forward` no longer treats a stopped (but not destroyed) workspace as if it were still running. Previously, when a workspace's container was stopped -- via an app restart, an idle-shutdown, or a VPS reboot -- discovery kept reporting the agent, so the supervisor would repeatedly try to provision the VPS-resident gateway against the stopped container (raising `container ... is not running`) and would keep the agent's reverse tunnel alive, leaving the tunnel health-check loop re-dialing a dead endpoint indefinitely.
+
+The discovery stream now carries each host's lifecycle state through to the discovery handler. When a host is reported as not-running, the handler tears down that agent's reverse tunnel and skips VPS gateway provisioning (the shared desktop gateway still stays up, since it is shared across all agents). When the host returns to running, discovery re-fires and both the tunnel and the VPS gateway are re-established.
+
+VPS latchkey provisioning now gates the NodeSource Node.js install behind a version check instead of a presence check. Previously, a VPS with a preinstalled but too-old node (e.g. Debian bookworm's distro nodejs 18.x) skipped the install and then crashed cryptically in `npm install -g latchkey` (modern npm refuses node < 20.17). Any node older than major 20 is now replaced with the pinned NodeSource install, and if a stale node still shadows the fresh one on PATH afterwards (e.g. a manual /usr/local/bin/node), provisioning fails with an actionable message naming the shadowing binary instead of the cryptic npm crash.
+
+Found by the new opt-in latchkey remote-workspace e2e release test (`apps/minds/test_latchkey_e2e.py`) running against a Debian host with node 18 preinstalled.
+
+## 2026-07-15
+
+The `mngr latchkey forward` daemon now attaches the install's anonymous user id (no PII) to its Sentry events, so its reports count as the same install as the minds backend's in Sentry's per-issue user counts. The id is inherited from the embedder via the new `MNGR_LATCHKEY_SENTRY_USER_ID` environment variable (required alongside the other `MNGR_LATCHKEY_SENTRY_*` infrastructure vars).
+
+- Changed: the `mngr latchkey forward` supervisor now caps its dedicated rotated `events.jsonl` log at 10MB (down from the general mngr default of 100MB), matching the 10MB cap the minds desktop client uses for its own rotated logs. Older rotated copies are still pruned to the newest 10.
+
 ## 2026-07-14
 
 Update Latchkey to include support for GitHub's GraphQL API.

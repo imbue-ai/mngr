@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-21
+
+Fixed a false positive in the `trailing comments` ratchet (`PREVENT_TRAILING_COMMENTS`): `#{...}` interpolation/format tokens (e.g. tmux format strings like `"#{client_width} #{client_height}"`) are no longer counted as trailing comments. The `#` in these tokens is interpolation syntax inside a string, not a comment. Real trailing comments, hex colors, and `PR #NNNN` references are unaffected.
+
+## 2026-07-15
+
+`LogAttachmentGroup` gained an optional `base_dir` field: a group with `base_dir` set sweeps that directory instead of the process's log folder, so error reports can attach log files that live outside it (e.g. minds attaching the detached `mngr latchkey forward` daemon's logs). A missing directory simply matches nothing.
+
+Sentry error reports now carry a stable, randomly-generated anonymous user id (no PII) so Sentry can report the number of distinct installs affected by each issue. Added `get_or_create_anonymous_user_id` (persists a random id to a file, race-safe across processes) and a required `user_id` argument to `setup_sentry`, which is attached to every event via `sentry_sdk.set_user`. `send_default_pii` stays disabled; only this opaque id is sent.
+
+Added `secret_wrapping`: pure envelope-encryption helpers (argon2id key derivation, AES-256-GCM DEK wrap/unwrap and secrets encrypt/decrypt) used by the minds workspace-sync feature. New dependencies: `argon2-cffi`, `cryptography`.
+
 ## 2026-07-14
 
 Fixed the inline-function ratchet (`find_inline_functions`) double-counting a function nested two or more levels deep. It walked every `FunctionDef` in a file, including nested ones, and descended into all of each one's descendants, so a function with two enclosing functions was emitted once per ancestor. The recorded count therefore overstated the real number of inline functions. Nested defs are now collected keyed by source position and counted once. Only projects that actually nest functions two deep are affected; across the whole monorepo the sole recorded count that changes is `apps/minds` (from 9 to 7 before any code change).

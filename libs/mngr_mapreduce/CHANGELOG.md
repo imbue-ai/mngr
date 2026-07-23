@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: New `mngr_mapreduce` framework, generalizing the test-fanout pattern previously baked into `mngr_tmr`. Recipes subclass `MapReduceRecipe` to plug in discovery, per-task prompts, the reducer prompt, and post-extraction hooks (`on_mapper_finalized`, `on_reducer_finalized`). The framework handles agent launching (with snapshot/host-pool support), polling, outputs-archive extraction, and report rendering/upload; it treats each agent's `outputs.tar.gz` as opaque.
+- Added: `--reducer-env KEY=VALUE` passes environment variables to the reducer agent only, never to mappers — for credentials the reducer needs but mappers must not receive (e.g. a push token). Values merge over `--env`, with reducer-only values winning on key collision.
 
 ### Changed
 

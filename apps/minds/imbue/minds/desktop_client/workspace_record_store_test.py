@@ -368,6 +368,38 @@ def test_reconcile_keeps_legacy_file_until_every_entry_converts(paths: Workspace
     assert legacy_path.with_name(legacy_path.name + ".pre-sync").exists()
 
 
+def test_reconcile_drops_legacy_association_when_only_unauthorized_providers_error(paths: WorkspacePaths) -> None:
+    """Providers without credentials error on every poll, so treating them as
+    failed polls would keep a gone workspace's legacy association in limbo
+    forever; only a genuinely failed poll may block the drop."""
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    gone_agent_id = AgentId.generate()
+    legacy_path = paths.data_dir / "workspace_associations.json"
+    legacy_path.write_text(json.dumps({user_id: [str(gone_agent_id)]}))
+    # Discovery completed and knows about a different workspace only; the sole
+    # errored provider is unconfigured (not-authorized), not a failed poll.
+    resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate(), host_name="other-ws"))
+    unauthorized_name = ProviderInstanceName("aws-us-east-1")
+    seed_provider_snapshots(
+        resolver,
+        error_by_provider_name={
+            unauthorized_name: DiscoveryError(
+                type_name="ProviderNotAuthorizedError",
+                message="AWS credentials not configured",
+                provider_name=unauthorized_name,
+            )
+        },
+    )
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    assert store.associations_view() == {}
+    assert not legacy_path.exists()
+    assert legacy_path.with_name(legacy_path.name + ".pre-sync").exists()
+
+
 def test_reconcile_keeps_legacy_file_for_signed_out_accounts(paths: WorkspacePaths) -> None:
     cli = make_fake_imbue_cloud_cli()
     store = _make_store(paths, cli)
