@@ -10,6 +10,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: `--name <slug>` flag gives a run its own variant prefix on agent, branch, and host names (e.g. `tmr-mngr/<run>/*` vs `tmr-minds/<run>/*`), so two suites' branches and PRs stay separate. Distinct from `--run-name` (which identifies a single run within a variant); validated as a slug since it becomes a branch/agent/host name segment. The reintegrate hint in the HTML report carries `--name` for non-default variants so the suggested command resolves the same run.
 - Added: `--mapper-prompt` / `--reducer-prompt` flags to point a variant at its own Jinja prompt templates. An override template may `{% extends %}` or `{% include %}` the packaged `mapper.j2` / `reducer.j2` by name to reuse the shared body.
+- Added: `escalations` list on outcomes as an orthogonal field, so a test that passes cleanly can still raise one. Escalations come in two kinds: `BLOCKER` (the agent could not proceed without a shared change) and `SHARED_PATTERN` (the local fix worked but sibling tests already carry it, meaning one suite-wide change should replace N local ones).
 
 ### Changed
 
@@ -22,16 +23,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Restructured as a thin recipe on top of the new `mngr_mapreduce` framework — all agent launching / polling / extraction code moves out, and TMR is expressed as a `TestMapReduceRecipe` in `imbue.mngr_tmr.recipe`. The `mngr tmr` CLI surface is unchanged for users, but server-side labels are renamed to `mapreduce_role` / `mapreduce_run_name` (the `mapreduce_role` label, valued by `AgentKind`, replaces the previous name-prefix matching used by `--reintegrate`, and `AgentKind` gained a `SNAPSHOTTER` variant) and the outputs-archive path is simplified to `plugin/mapreduce/outputs.tar.gz` — agents from prior TMR runs are not discoverable by this version (drain them with the prior `mngr` build first).
 - Changed: Integrator now runs on the same `--provider` as the testing agents and reuses any snapshot they built, so on Modal (or any remote provider) it spins up as quickly as the test agents do instead of running locally; it publishes its results the same way testing agents do (packing `test_output/` + `branch.bundle` into `outputs.tar.gz`) so the orchestrator pulls and applies the integrated branch through the same volume-based path.
 - Changed: Unified integrator code path across providers (including local) — the orchestrator rsyncs every testing agent's extracted outputs into `<work_dir>/.mapreduce_inputs/` on the integrator host, and the integrator prompt walks each subdirectory and cherry-picks the qualifying bundles. To make that work, local testing agents now use `GIT_MIRROR` transfer mode instead of `GIT_WORKTREE`, so branches surface in the source repo only via the published bundle (slightly slower locally, but the unified code path makes the local provider a meaningful proxy for the remote one).
+- Changed: Every pytest invocation TMR makes now passes an explicit `--timeout` (120s), shared by the mapper and reducer verification runs. Agents are told not to add or raise `@pytest.mark.timeout` markers; a test genuinely needing longer is a finding to escalate.
+- Changed: Test agents no longer write per-test changelog entries; the reducer writes one unified entry per affected project drawing on the mapper summaries.
+- Changed: The reducer now opens the run's pull request itself (rather than the workflow doing so from a branch name), with a mechanical title (`TMR tmr-mngr <date>: N fixed, M escalated`), a mapper-status breakdown, and an escalations table. A run with nothing to integrate still opens a PR on an empty commit so its escalations are not silently dropped. The reducer is only told to open a PR when actually given a token to do it with.
+- Changed: HTML report's "Blocked" section is renamed "Unresolved"; the escalations block aggregates escalations from every test agent as well as the integrator, labelled by kind and source.
 
 ### Removed
 
 - Removed: BREAKING — CLI flags `--integrator-provider`, `--integrator-type`, `--integrator-template`, `--integrator-timeout`, and `--use-snapshot` are gone; pass `--provider` once for both testing agents and the integrator, snapshot building is now automatic whenever the provider supports it, and the integrator timeout is now controlled by `--reducer-timeout` (inherited from the `mngr_mapreduce` framework). `--snapshot <ID>` still works for reusing an existing snapshot.
+- Removed: `BLOCKED` change status. Agents used to degrade a change's status to `BLOCKED` to signal "this needs wider attention", forcing a choice between reporting a successful fix and reporting a systemic problem; the new `escalations` field lets both coexist.
 
 ### Fixed
 
 - Fixed: `mngr tmr --provider modal --use-snapshot` now bootstraps the Modal per-user environment on first run instead of aborting with `ProviderEmptyError`; the pre-snapshot provider lookup passes `is_for_host_creation=True` to match the create path.
 - Fixed: Several silent-success failure modes now exit non-zero — `--reintegrate` when `mngr list` fails or no agents match the run name, and any tmr run where every test agent failed to launch.
 - Fixed: `mngr tmr` See-Also reference now links to `mngr rsync` instead of the removed `pull` command, so the generated docs no longer contain a broken `[mngr help pull](mngr help pull)` markdown link.
+- Fixed: Report generation cached parsed outcomes by agent name alone, so the same agent name under two different output directories returned the first directory's outcome.
 
 ## [v0.2.8] - 2026-05-13
 
