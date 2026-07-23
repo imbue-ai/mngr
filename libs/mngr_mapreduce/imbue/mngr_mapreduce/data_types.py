@@ -125,6 +125,12 @@ class LaunchConfig(FrozenModel):
         default_factory=AgentEnvironmentOptions,
         description="Environment variables to pass to agents",
     )
+    reducer_env_options: AgentEnvironmentOptions | None = Field(
+        default=None,
+        description="Extra environment for the reducer only, merged over env_options. For credentials the "
+        "reducer needs but mappers must not receive (e.g. a token that can push and open pull requests): "
+        "mappers are the untrusted bulk of a run, so a write-capable token should not be handed to all of them.",
+    )
     label_options: AgentLabelOptions = Field(
         default_factory=AgentLabelOptions,
         description="Labels to attach to agents",
@@ -227,6 +233,17 @@ class MapReduceRecipe(ABC):
         """Called after the reducer's outputs archive has been extracted.
 
         Same contract as ``on_mapper_finalized``. Default impl is a no-op.
+        """
+        return None
+
+    def on_all_mappers_finalized(self, ctx: MapReduceContext, mapper_metadata: Sequence[AgentMetadata]) -> None:
+        """Called once every mapper has finished, just before the reducer launches.
+
+        Unlike ``on_mapper_finalized`` (per mapper that published outputs), this
+        sees the whole set, including mappers that failed and produced no output.
+        A recipe whose reducer reads the output dir as files can use this to
+        reconcile the two views -- e.g. write a placeholder for a failed mapper
+        so it is not silently absent. Default impl is a no-op.
         """
         return None
 

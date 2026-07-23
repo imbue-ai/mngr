@@ -13,6 +13,8 @@ from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
+from imbue.minds.desktop_client.templates import render_account_plan_section
+from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -2327,6 +2329,62 @@ def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
     assert '<script type="application/json" id="minds-sentry-config">' in html
     assert '"environment": "staging"' in html
     assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html
+
+
+def _plan_view_fixture(is_over_storage_quota: bool = False) -> dict[str, object]:
+    return {
+        "plan_name": "ally",
+        "plan_display_name": "Ally",
+        "available_plans": ["ally", "explorer"],
+        "usage_rows": [
+            {"label": "Remote workspaces", "used": "1", "limit": "10", "note": ""},
+            {"label": "Backup storage", "used": "2.4 GB", "limit": "500.0 GB", "note": "n"},
+        ],
+        "is_over_storage_quota": is_over_storage_quota,
+    }
+
+
+def test_render_accounts_page_renders_async_plan_placeholder() -> None:
+    # The page must never block on the connector: each account gets a loading
+    # placeholder that accounts.js fills in from GET /accounts/<uid>/plan-view.
+    acct = SimpleNamespace(user_id="u-1", email="a@b.com", workspace_ids=[])
+    html = render_accounts_page(accounts=[acct], default_account_id="u-1")
+    assert "data-plan-section" in html
+    assert 'data-user-id="u-1"' in html
+    assert "Loading plan and usage" in html
+    assert '<script src="/_static/accounts.js" defer></script>' in html
+
+
+def test_render_account_plan_section_renders_usage_and_plan_selector() -> None:
+    html = render_account_plan_section(acct_user_id="u-1", plan_view=_plan_view_fixture())
+    assert 'data-trim-running="0"' in html
+    assert "Ally" in html
+    assert "1 of 10" in html
+    assert "2.4 GB of 500.0 GB" in html
+    assert "/accounts/u-1/plan" in html
+    assert "Switch plan" in html
+
+
+def test_render_account_plan_section_shows_trim_action_only_when_over_quota_and_idle() -> None:
+    over_html = render_account_plan_section(acct_user_id="u-1", plan_view=_plan_view_fixture(True))
+    assert "/accounts/u-1/trim-backups" in over_html
+    under_html = render_account_plan_section(acct_user_id="u-1", plan_view=_plan_view_fixture(False))
+    assert "/accounts/u-1/trim-backups" not in under_html
+
+
+def test_render_account_plan_section_marks_running_trim_for_polling() -> None:
+    trim = SimpleNamespace(is_running=True, detail="Trimming backups (round 1)")
+    html = render_account_plan_section(acct_user_id="u-1", plan_view=_plan_view_fixture(True), trim_status=trim)
+    assert 'data-trim-running="1"' in html
+    assert "Trimming backups (round 1)" in html
+    # The trim form is hidden while a trim is already running.
+    assert "/accounts/u-1/trim-backups" not in html
+
+
+def test_render_account_plan_section_degrades_to_unavailable_without_plan_view() -> None:
+    html = render_account_plan_section(acct_user_id="u-1")
+    assert "Plan and usage are unavailable right now" in html
+    assert 'data-trim-running="0"' in html
 
 
 def test_render_chrome_page_shows_workspace_switching_loading_bar() -> None:

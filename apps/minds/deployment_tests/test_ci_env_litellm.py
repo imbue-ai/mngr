@@ -36,7 +36,9 @@ def test_login_mint_litellm_key_and_call_llm(
     connector_url = str(env.urls.connector_url).rstrip("/")
 
     # Log in as the fixed CI user (created against this env's SuperTokens app at
-    # env-build time) and mint a LiteLLM key through the connector.
+    # env-build time), move it onto the ally plan (its paid-listed email makes
+    # it eligible; key minting needs a nonzero monthly LLM budget), and mint a
+    # LiteLLM key through the connector.
     with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
         signin = client.post(
             f"{connector_url}/auth/signin",
@@ -47,13 +49,26 @@ def test_login_mint_litellm_key_and_call_llm(
         assert signin_json.get("status") == "OK", f"connector /auth/signin returned non-OK: {signin_json!r}"
         access_token = signin_json["tokens"]["access_token"]
 
+        account = client.get(f"{connector_url}/account", headers={"Authorization": f"Bearer {access_token}"})
+        assert account.status_code == 200, f"GET /account failed: {account.text[:400]!r}"
+        if account.json()["plan_name"] != "ally":
+            switch = client.post(
+                f"{connector_url}/account/plan",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"plan": "ally"},
+            )
+            assert switch.status_code == 200, (
+                f"the paid-listed CI user could not switch to ally ({switch.status_code}); "
+                f"plan seeding or ally eligibility is broken: {switch.text[:400]!r}"
+            )
+
         key_response = client.post(
             f"{connector_url}/keys/create",
             headers={"Authorization": f"Bearer {access_token}"},
             json={"key_alias": f"ci-smoke-{get_short_random_string()}", "max_budget": 1.0, "budget_duration": "30d"},
         )
         assert key_response.status_code == 200, (
-            f"connector /keys/create failed ({key_response.status_code}); the paid-account gate or "
+            f"connector /keys/create failed ({key_response.status_code}); the plan quota or "
             f"litellm wiring is broken: {key_response.text[:400]!r}"
         )
         key_material = key_response.json()

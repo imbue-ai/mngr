@@ -1,8 +1,8 @@
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr_imbue_cloud.cli.paid import _resolve_admin_api_key
 from imbue.mngr_imbue_cloud.cli.paid import paid
+from imbue.mngr_imbue_cloud.cli.paid import resolve_admin_api_key
 
 
 def test_paid_group_lists_domain_and_email_subgroups() -> None:
@@ -22,18 +22,18 @@ def test_paid_subgroups_expose_add_remove_list(subgroup: str) -> None:
 
 def test_resolve_admin_api_key_prefers_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", "from-env")
-    assert _resolve_admin_api_key("from-flag").get_secret_value() == "from-flag"
+    assert resolve_admin_api_key("from-flag").get_secret_value() == "from-flag"
 
 
 def test_resolve_admin_api_key_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", "from-env")
-    assert _resolve_admin_api_key(None).get_secret_value() == "from-env"
+    assert resolve_admin_api_key(None).get_secret_value() == "from-env"
 
 
 def test_resolve_admin_api_key_errors_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDS_PAID_ADMIN_KEY", raising=False)
     with pytest.raises(SystemExit):
-        _resolve_admin_api_key(None)
+        resolve_admin_api_key(None)
 
 
 def test_domain_add_requires_connector_url(monkeypatch: pytest.MonkeyPatch) -> None:

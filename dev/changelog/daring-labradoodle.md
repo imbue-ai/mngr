@@ -1,1 +1,0 @@
-Added a concise implementation plan under `blueprint/login-auth-flow-polish/` describing the Minds OAuth login-flow UX improvements (button spinner/fade, staged status messaging, raise-window-on-success, and in-page error handling).

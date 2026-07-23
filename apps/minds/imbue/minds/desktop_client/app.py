@@ -34,6 +34,7 @@ from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -97,7 +98,6 @@ from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
@@ -108,6 +108,7 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
+from imbue.minds.desktop_client.templates import render_account_plan_section
 from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
@@ -2080,8 +2081,14 @@ def _handle_recovery_page(
 # -- Account management routes --
 
 
-def _handle_accounts_page() -> Response:
-    """Render the manage accounts page."""
+def _handle_accounts_page(plan_error: str | None = None) -> Response:
+    """Render the manage accounts page.
+
+    The per-account plan/usage sections are NOT fetched here -- computing
+    live usage takes a connector round trip per account, so the page renders
+    loading placeholders that accounts.js fills in from
+    ``GET /accounts/<user_id>/plan-view``.
+    """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = get_state().session_store
@@ -2095,8 +2102,84 @@ def _handle_accounts_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
+        plan_error=plan_error,
     )
     return make_html_response(content=html)
+
+
+def _handle_account_plan_view(user_id: str) -> Response:
+    """Render one account's plan/usage fragment (fetched asynchronously by the accounts page).
+
+    A connector failure degrades to the fragment's "usage unavailable"
+    message rather than an error status, mirroring the old page-level
+    behavior.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    plan_view: dict[str, Any] | None = None
+    if account is not None and cli is not None:
+        try:
+            info = cli.get_account_info(str(account.email))
+        except ImbueCloudCliError as exc:
+            logger.debug("Could not fetch account info for {}: {}", account.email, exc)
+        else:
+            plan_view = build_account_plan_view(info)
+    trim_status = get_state().backup_trim_manager.get_status(user_id)
+    html = render_account_plan_section(acct_user_id=user_id, plan_view=plan_view, trim_status=trim_status)
+    return make_html_response(content=html)
+
+
+def _handle_account_trim_backups(user_id: str) -> Response:
+    """Start the over-quota backup trim flow for one account (idempotent while running)."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None or cli is None or paths is None:
+        return _handle_accounts_page(plan_error="Account not found or imbue_cloud CLI unavailable.")
+    get_state().backup_trim_manager.start_trim(
+        user_id=user_id,
+        account_email=str(account.email),
+        cli=cli,
+        paths=paths,
+        notification_dispatcher=get_state().notification_dispatcher,
+    )
+    return make_response(status_code=303, headers={"Location": "/accounts"})
+
+
+def _handle_account_set_plan(user_id: str) -> Response:
+    """Switch an account's plan; on failure re-render the page with the server's reason."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    plan = str(request.form.get("plan", "")).strip()
+    if not plan:
+        return _handle_accounts_page(plan_error="No plan selected.")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None or cli is None:
+        return _handle_accounts_page(plan_error="Account not found or imbue_cloud CLI unavailable.")
+    try:
+        cli.set_account_plan(str(account.email), plan)
+    except ImbueCloudCliError as exc:
+        # The connector's reason (e.g. "requires partner access") is the
+        # user-facing explanation -- surface it plainly.
+        return _handle_accounts_page(plan_error=f"Could not switch {account.email} to '{plan}': {exc}")
+    return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
 def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | None:
@@ -2768,24 +2851,6 @@ def _handle_sharing_modal(
     return make_html_response(content=html)
 
 
-_SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
-
-
-def _probe_share_url_readiness(http_client: httpx.Client, url: str) -> bool:
-    """Fetch ``url`` once and report whether the Cloudflare Access app is live.
-
-    Uses the app's shared (``follow_redirects=False``) client so the Access
-    login redirect is observed rather than followed. Any transport error or
-    timeout is treated as "not ready yet".
-    """
-    try:
-        response = http_client.get(url, timeout=_SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
-    except httpx.HTTPError as exc:
-        logger.debug("Probed share URL {} but it is not ready yet: {}", url, exc)
-        return False
-    return is_share_ready_from_edge_response(response.status_code, response.headers.get("location"))
-
-
 def _handle_request_grant(
     request_id: str,
 ) -> Response:
@@ -3068,6 +3133,9 @@ def create_desktop_client(
         methods=["POST"],
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
+    app.add_url_rule("/accounts/<user_id>/plan-view", view_func=_handle_account_plan_view)
+    app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
+    app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 
     # Workspace settings page (the account-association and color writes it drives

@@ -14,9 +14,15 @@ from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import LaunchConfig
 from imbue.mngr_mapreduce.launching import ROLE_LABEL_KEY
 from imbue.mngr_mapreduce.launching import _build_agent_options
+from imbue.mngr_mapreduce.launching import _make_reducer_identity
 
 
-def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) -> LaunchConfig:
+def _make_config(
+    provider: str = "local",
+    snapshot: SnapshotName | None = None,
+    env_options: AgentEnvironmentOptions | None = None,
+    reducer_env_options: AgentEnvironmentOptions | None = None,
+) -> LaunchConfig:
     """Build a LaunchConfig for unit testing.
 
     Uses model_construct to skip validation of the source_host field,
@@ -28,7 +34,8 @@ def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) 
         base_commit="0" * 40,
         agent_type=AgentTypeName("claude"),
         provider_name=ProviderInstanceName(provider),
-        env_options=AgentEnvironmentOptions(),
+        env_options=env_options if env_options is not None else AgentEnvironmentOptions(),
+        reducer_env_options=reducer_env_options,
         label_options=AgentLabelOptions(),
         snapshot=snapshot,
     )
@@ -112,3 +119,63 @@ def test_build_agent_options_transfer_mode_override_wins() -> None:
         transfer_mode=TransferMode.GIT_WORKTREE,
     )
     assert opts.transfer_mode == TransferMode.GIT_WORKTREE
+
+
+# --- reducer-only environment ---
+
+SHARED_ENV = AgentEnvironmentOptions(env_vars=(EnvVar(key="ANTHROPIC_API_KEY", value="shared"),))
+REDUCER_ENV = AgentEnvironmentOptions(env_vars=(EnvVar(key="GH_TOKEN", value="secret"),))
+
+
+def _env_for(
+    kind: AgentKind,
+    env_options: AgentEnvironmentOptions | None = None,
+    reducer_env_options: AgentEnvironmentOptions | None = None,
+) -> dict[str, str]:
+    """Return the resolved environment of an agent of ``kind`` as a plain dict."""
+    config = _make_config(env_options=env_options, reducer_env_options=reducer_env_options)
+    opts = _build_agent_options(AgentName("test"), "branch", config, kind)
+    return {var.key: var.value for var in opts.environment.env_vars}
+
+
+def test_mappers_never_receive_reducer_only_env() -> None:
+    """The point of the split: a push-capable token must not reach the mappers."""
+    env = _env_for(AgentKind.MAPPER, env_options=SHARED_ENV, reducer_env_options=REDUCER_ENV)
+    assert "GH_TOKEN" not in env
+    assert env["ANTHROPIC_API_KEY"] == "shared"
+
+
+def test_reducer_receives_shared_and_reducer_only_env() -> None:
+    env = _env_for(AgentKind.REDUCER, env_options=SHARED_ENV, reducer_env_options=REDUCER_ENV)
+    assert env["GH_TOKEN"] == "secret"
+    assert env["ANTHROPIC_API_KEY"] == "shared"
+
+
+def test_reducer_only_env_wins_on_key_collision() -> None:
+    shared = AgentEnvironmentOptions(env_vars=(EnvVar(key="TOKEN", value="shared"),))
+    reducer_only = AgentEnvironmentOptions(env_vars=(EnvVar(key="TOKEN", value="reducer"),))
+    env = _env_for(AgentKind.REDUCER, env_options=shared, reducer_env_options=reducer_only)
+    assert env["TOKEN"] == "reducer"
+
+
+def test_reducer_env_unchanged_when_no_reducer_only_env_is_set() -> None:
+    env = _env_for(AgentKind.REDUCER, env_options=SHARED_ENV)
+    assert env == {"ANTHROPIC_API_KEY": "shared"}
+
+
+# --- reducer identity ---
+
+
+def test_reducer_identity_without_a_suffix() -> None:
+    agent, branch, host = _make_reducer_identity("tmr-mngr", "20260721085455")
+    assert agent == "tmr-mngr-20260721085455-reducer"
+    assert branch == "tmr-mngr/20260721085455/reducer"
+    assert host == "tmr-mngr-20260721085455-reducer"
+
+
+def test_reducer_suffix_distinguishes_a_reintegration() -> None:
+    """A reintegration reuses the run name but must not collide with the original branch."""
+    _, original, _ = _make_reducer_identity("tmr-mngr", "20260721085455")
+    _, reintegrated, _ = _make_reducer_identity("tmr-mngr", "20260721085455", "r12345")
+    assert reintegrated == "tmr-mngr/20260721085455/reducer-r12345"
+    assert reintegrated != original
