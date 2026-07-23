@@ -13,6 +13,7 @@ The ``running_callback_server`` fixture lives in ``cli/conftest.py``.
 import urllib.request
 
 from imbue.mngr_imbue_cloud.cli.auth import _OAuthCaptureBox
+from imbue.mngr_imbue_cloud.cli.auth import _oauth_success_page
 
 
 def _get(port: int, path: str) -> int:
@@ -60,3 +61,28 @@ def test_callback_handler_ignores_query_params_on_wrong_path(
     box, port = running_callback_server
     assert _get(port, "/some-other-path?code=should_be_ignored") == 200
     assert box.get() is None
+
+
+def test_success_page_without_redirect_says_return_to_terminal() -> None:
+    page = _oauth_success_page(None).decode("utf-8")
+    assert "return to your terminal" in page
+    assert "<script>" not in page
+
+
+def test_success_page_with_redirect_links_to_url_without_auto_navigation() -> None:
+    # Deliberately a plain link, not an automatic navigation: the click is the
+    # user gesture that triggers the browser's open-external-app prompt. The
+    # app-driven variant carries the minds wordmark and copy.
+    page = _oauth_success_page("minds://").decode("utf-8")
+    assert '<a href="minds://">Open app</a>' in page
+    assert "<svg" in page and 'fill="currentColor"' in page
+    assert "Feel free to close this tab." in page
+    assert "<script>" not in page
+
+
+def test_success_page_escapes_redirect_url_markup() -> None:
+    """A crafted URL must not be able to inject markup into the page: the
+    href is attribute-escaped."""
+    page = _oauth_success_page('minds://x?a=<b>&q="hi"').decode("utf-8")
+    assert "<b>" not in page
+    assert 'href="minds://x?a=&lt;b&gt;&amp;q=&quot;hi&quot;"' in page
