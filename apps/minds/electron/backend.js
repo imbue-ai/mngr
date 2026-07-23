@@ -23,6 +23,32 @@ for (const stream of [process.stdout, process.stderr]) {
 
 let backendProcess = null;
 
+/**
+ * Env vars that point the latchkey gateway at the bundled "dispatch curl"
+ * (and the Chrome-impersonating shim it fronts). Set on the minds backend
+ * process so they flow -- via ``dict(os.environ)`` inheritance -- to the
+ * minds process's own latchkey calls, the detached ``mngr latchkey
+ * forward`` supervisor, and the gateway subprocess it spawns.
+ *
+ * ``LATCHKEY_CURL`` is read by the upstream latchkey CLI; the dispatch
+ * curl reads ``FRANKWEILER_IMPERSONATE_CURL`` to locate the shim. Returns
+ * ``{}`` when the binaries aren't bundled (e.g. a platform datalib
+ * doesn't build, or before the download is pinned) so latchkey falls back
+ * to the system curl exactly as before -- never point ``LATCHKEY_CURL`` at
+ * a nonexistent file, which would break every credential check.
+ */
+function latchkeyCurlEnv() {
+  const dispatch = paths.getLatchkeyCurlDispatchPath();
+  const shim = paths.getLatchkeyCurlShimPath();
+  if (!fs.existsSync(dispatch) || !fs.existsSync(shim)) {
+    return {};
+  }
+  return {
+    LATCHKEY_CURL: dispatch,
+    FRANKWEILER_IMPERSONATE_CURL: shim,
+  };
+}
+
 // Backend stdout JSONL event fields that carry secrets and must be masked
 // before the raw line is written to minds.log (which is uploaded with bug
 // reports). Keyed by event type; each value lists the fields to redact.
@@ -254,6 +280,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_RESTIC_BINARY: paths.getResticPath(),
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
+          ...latchkeyCurlEnv(),
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -320,6 +347,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           VIRTUAL_ENV: paths.getVenvDir(),
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
+          ...latchkeyCurlEnv(),
         };
       }
 

@@ -29,6 +29,25 @@ const RESTIC_VERSION = '0.18.1';
 // (issue #2306). Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
 
+// datalib "curl" distribution: the dispatch curl + the Chrome-impersonating
+// shim it fronts (see the `frankweiler-curl-<triple>.tar.gz` release asset).
+// The latchkey gateway runs the dispatch curl as its LATCHKEY_CURL so marked
+// requests get Chrome TLS impersonation. Only macOS arm64 and Linux x86_64
+// (glibc) are bundled -- datalib publishes no x86_64-apple-darwin, and there
+// is no impersonation on Windows.
+//
+// FOLLOWUP: point DATALIB_CURL_VERSION at the first datalib release that
+// contains the `frankweiler-curl-*` tarballs (the dispatch curl was added
+// after v0.21.0), and replace the PENDING_DATALIB_RELEASE sentinels in
+// EXPECTED_SHA256 with the real hashes. Until then the curl download is a
+// loud no-op (see downloadLatchkeyCurl) so builds stay green and latchkey
+// falls back to the system curl.
+const DATALIB_REPO = 'imbue-ai/datalib';
+const DATALIB_CURL_VERSION = 'v0.22.0';
+// Sentinel meaning "not yet pinned"; downloadLatchkeyCurl skips instead of
+// failing while any supported-platform hash is still this value.
+const PENDING_DATALIB_RELEASE = 'PENDING_DATALIB_RELEASE';
+
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
  *
@@ -56,6 +75,10 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_darwin_amd64.tar.gz':   'ab029448074428dc757d2235109dd557e9f34e4865052432a6ea7c431f0a5a19',
   'desync_1.0.3_linux_amd64.tar.gz':    'ad4dd9e91b57eef8627d2038df09281d7f38dca02eeca0e66592b54087619953',
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
+  // FOLLOWUP: replace these sentinels with the real hashes from the datalib
+  // release named by DATALIB_CURL_VERSION (`frankweiler-curl-<triple>.tar.gz.sha256`).
+  'frankweiler-curl-aarch64-apple-darwin.tar.gz':      PENDING_DATALIB_RELEASE,
+  'frankweiler-curl-x86_64-unknown-linux-gnu.tar.gz':  PENDING_DATALIB_RELEASE,
 };
 
 const MAX_REDIRECTS = 5;
@@ -102,6 +125,29 @@ function getDesyncDownloadUrl({ platform, arch }) {
     throw new Error(`Unsupported desync arch: ${arch}`);
   }
   return `https://github.com/folbricht/desync/releases/download/v${DESYNC_VERSION}/desync_${DESYNC_VERSION}_${platform}_${goArch}.tar.gz`;
+}
+
+/**
+ * Map the current platform/arch to the datalib "curl" release tarball, or
+ * null when datalib publishes no build for it (macOS x86_64, Windows). The
+ * tarball filename is version-less (stable `releases/download/<tag>/<file>`
+ * URLs); the inner dir carries the version.
+ */
+function getLatchkeyCurlDownloadInfo({ platform, arch }) {
+  let triple = null;
+  if (platform === 'darwin' && arch === 'aarch64') {
+    triple = 'aarch64-apple-darwin';
+  } else if (platform === 'linux' && arch === 'x86_64') {
+    triple = 'x86_64-unknown-linux-gnu';
+  }
+  if (triple === null) {
+    return null;
+  }
+  const filename = `frankweiler-curl-${triple}.tar.gz`;
+  return {
+    filename,
+    url: `https://github.com/${DATALIB_REPO}/releases/download/${DATALIB_CURL_VERSION}/${filename}`,
+  };
 }
 
 /**
@@ -298,6 +344,57 @@ async function downloadDesync(resourcesDir, { platform, arch }) {
 }
 
 /**
+ * Bundle the datalib dispatch curl + Chrome-impersonating shim into
+ * `<resourcesDir>/curl/`. The latchkey gateway runs the dispatch curl as
+ * its LATCHKEY_CURL (wired in electron/backend.js).
+ *
+ * No-op with a warning -- rather than a hard failure -- when the platform
+ * has no datalib build, or while the pinned SHA is still the
+ * PENDING_DATALIB_RELEASE sentinel (the datalib release with the curl
+ * tarball isn't cut yet). In those cases latchkey keeps using the system
+ * curl, exactly as before. Once pinned this behaves like the other
+ * binaries: hard-fail on a download error or SHA mismatch.
+ */
+async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
+  const info = getLatchkeyCurlDownloadInfo({ platform, arch });
+  if (info === null) {
+    console.log(`[download-binaries] No datalib curl build for ${platform}/${arch}; skipping (latchkey uses system curl).`);
+    return;
+  }
+  if (EXPECTED_SHA256[info.filename] === PENDING_DATALIB_RELEASE) {
+    console.log(
+      `[download-binaries] ${info.filename} not yet pinned (see the DATALIB_CURL_VERSION / ` +
+      `EXPECTED_SHA256 FOLLOWUP); skipping curl impersonation bundle for now.`,
+    );
+    return;
+  }
+
+  const curlDir = path.join(resourcesDir, 'curl');
+  if (fs.existsSync(curlDir)) fs.rmSync(curlDir, { recursive: true });
+  fs.mkdirSync(curlDir, { recursive: true });
+
+  console.log(`[download-binaries] Downloading latchkey curl from ${info.url}...`);
+  const archive = await download(info.url);
+  verifyChecksum(archive, info.filename);
+
+  const tarPath = path.join(curlDir, 'curl.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  // The tarball is `frankweiler-curl-<version>-<triple>/<two binaries>`;
+  // strip the single inner dir so the binaries land directly in curlDir.
+  execSync(`tar xzf "${tarPath}" -C "${curlDir}" --strip-components=1`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  for (const name of ['frankweiler-latchkey-curl-dispatch', 'frankweiler-latchkey-curl-shim']) {
+    const binPath = path.join(curlDir, name);
+    if (!fs.existsSync(binPath)) {
+      throw new Error(`${name} not found at ${binPath} after extraction`);
+    }
+    fs.chmodSync(binPath, 0o755);
+  }
+  console.log(`[download-binaries] latchkey curl (dispatch + shim) installed in ${curlDir}`);
+}
+
+/**
  * Recursively copy Apple's git libexec tree into destDir, dereferencing
  * symlinks into real file copies.
  *
@@ -439,6 +536,7 @@ async function downloadBinaries(resourcesDir) {
     downloadGit(resourcesDir, { platform }),
     downloadRestic(resourcesDir, { platform, arch }),
     downloadDesync(resourcesDir, { platform, arch }),
+    downloadLatchkeyCurl(resourcesDir, { platform, arch }),
   ]);
 
   console.log('[download-binaries] Done.');
@@ -458,6 +556,7 @@ beforeInstall.downloadGit = downloadGit;
 beforeInstall.downloadUv = downloadUv;
 beforeInstall.downloadRestic = downloadRestic;
 beforeInstall.downloadDesync = downloadDesync;
+beforeInstall.downloadLatchkeyCurl = downloadLatchkeyCurl;
 beforeInstall.download = download;
 module.exports = beforeInstall;
 
