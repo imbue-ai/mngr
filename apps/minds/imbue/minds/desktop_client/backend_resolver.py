@@ -463,6 +463,13 @@ class _AgentRecord(FrozenModel):
     agent_id: AgentId = Field(description="The agent's id")
     host_id: HostId = Field(description="The id of the host the agent runs on")
     agent_name: AgentName = Field(description="The agent's name (the system-services agent is constant-named)")
+    # Optional so records persisted before provider attribution (which carry no
+    # provider) still load. It scopes the "provider-confirmed absence" prune in
+    # ``_merge_last_good_topology_locked`` to the host's own provider; a record
+    # lacking it falls back to the legacy any-clean-provider gate there.
+    provider_name: ProviderInstanceName | None = Field(
+        default=None, description="The provider instance that owns the agent's host, when known"
+    )
 
 
 class _LastGoodAgentTopology(FrozenModel):
@@ -483,7 +490,12 @@ class _LastGoodAgentTopology(FrozenModel):
 
 def _to_agent_record(agent: DiscoveredAgent) -> _AgentRecord:
     """Trim a ``DiscoveredAgent`` down to the topology fields the fallback needs."""
-    return _AgentRecord(agent_id=agent.agent_id, host_id=agent.host_id, agent_name=agent.agent_name)
+    return _AgentRecord(
+        agent_id=agent.agent_id,
+        host_id=agent.host_id,
+        agent_name=agent.agent_name,
+        provider_name=agent.provider_name,
+    )
 
 
 def _find_system_services_agent(records: Iterable[_AgentRecord], workspace_agent_id: AgentId) -> AgentId | None:
@@ -773,14 +785,17 @@ class MngrCliBackendResolver(BackendResolverInterface):
         hosts with an incomplete view (or absent from the snapshot) keep their
         last complete record. Must be called with ``self._lock`` held.
 
-        A host observed in a terminal ``HostState.DESTROYED`` state is instead
-        dropped from the topology (and skipped by the add path, so a lingering
-        destroyed host that is still enumerated during the provider's
-        destroyed-host persistence window does not thrash it back in). This is
-        the ONLY removal path: a host that is merely absent from the snapshot is
-        deliberately retained, because declining to drop on absence -- and
-        removing only on a positive DESTROYED observation -- is the entire point
-        of the last-good fallback (a transient discovery loss must not erase it).
+        There are two removal paths. A host observed in a terminal
+        ``HostState.DESTROYED`` state is dropped from the topology (and skipped
+        by the add path, so a lingering destroyed host that is still enumerated
+        during the provider's destroyed-host persistence window does not thrash
+        it back in). A host *absent* from the snapshot is dropped only when its
+        owning provider produced a clean, non-errored snapshot this session --
+        proof the workspace is genuinely gone rather than the provider being
+        slow (see ``_is_absent_host_confirmed_gone_locked``). Absence with no
+        authoritative provider signal never removes a host: declining to drop on
+        mere absence is the point of the last-good fallback, so a transient
+        discovery loss cannot erase it.
 
         Returns True if any host record changed (so the caller persists).
         """
@@ -798,13 +813,44 @@ class MngrCliBackendResolver(BackendResolverInterface):
             if self._last_good_agents_by_host.get(host_id_str) != new_records:
                 self._last_good_agents_by_host[host_id_str] = new_records
                 changed = True
-        # Prune any remembered host now observed DESTROYED -- and ONLY DESTROYED,
-        # never a host merely missing from this snapshot (see the docstring).
+        # Prune a remembered host observed DESTROYED, or one absent from this
+        # snapshot whose owning provider has confirmed it gone. A host merely
+        # missing with no authoritative provider signal is retained.
+        live_host_ids = set(agents_by_host)
         for host_id_str in tuple(self._last_good_agents_by_host):
-            if host_state_by_host_id.get(host_id_str) is HostState.DESTROYED:
+            is_destroyed = host_state_by_host_id.get(host_id_str) is HostState.DESTROYED
+            is_confirmed_gone = host_id_str not in live_host_ids and self._is_absent_host_confirmed_gone_locked(
+                host_id_str
+            )
+            if is_destroyed or is_confirmed_gone:
                 del self._last_good_agents_by_host[host_id_str]
                 changed = True
         return changed
+
+    def _is_absent_host_confirmed_gone_locked(self, host_id_str: str) -> bool:
+        """Whether a remembered host absent from the live snapshot is provably gone. Hold ``self._lock``.
+
+        A clean, non-errored provider snapshot is authoritative: a host its
+        owning provider did not list is genuinely gone, not merely slow to
+        reappear. This mirrors ``WorkspaceRecordStore._tombstone_definitively_absent``,
+        scoped to the host's own provider so an unrelated provider's outage
+        cannot force the removal. A record persisted before provider attribution
+        carries no owning provider; it clears instead once discovery is
+        demonstrably functioning (some provider produced a clean snapshot),
+        self-correcting because a still-live workspace is re-recorded -- now
+        attributed -- the moment its provider re-enumerates it.
+        """
+        records = self._last_good_agents_by_host.get(host_id_str, ())
+        provider_name = next((record.provider_name for record in records if record.provider_name is not None), None)
+        if provider_name is not None:
+            return self._has_clean_provider_snapshot_locked(provider_name)
+        return any(self._has_clean_provider_snapshot_locked(name) for name in self._last_snapshot_at_by_provider)
+
+    def _has_clean_provider_snapshot_locked(self, provider_name: ProviderInstanceName) -> bool:
+        """Whether ``provider_name`` produced a snapshot this session that did not error. Hold ``self._lock``."""
+        return (
+            provider_name in self._last_snapshot_at_by_provider and provider_name not in self._error_by_provider_name
+        )
 
     def update_providers(
         self,
