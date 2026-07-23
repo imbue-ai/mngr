@@ -246,9 +246,8 @@ def _build_ensure_installed_script(
 ) -> str:
     """Build an idempotent POSIX-sh script that installs curl, Node.js, supervisor, and latchkey.
 
-    It also best-effort installs the datalib "dispatch" curl + Chrome-
-    impersonating curl (see :data:`DATALIB_CURL_VERSION`); that step is
-    deliberately non-fatal so a missing release can never break provisioning.
+    It also installs the datalib "dispatch" curl + the Chrome-impersonating
+    curl it fronts (see :data:`DATALIB_CURL_VERSION`).
 
     Each component is gated behind a presence check -- except Node.js, which is
     gated behind a *version* check: a preinstalled distro node (e.g. Debian
@@ -278,38 +277,28 @@ def _build_ensure_installed_script(
             "  apt-get update",
             "  apt-get install -y curl",
             "fi",
-            # Best-effort: install the Chrome-impersonating "dispatch" curl +
-            # impersonator from the datalib release. Marked latchkey requests
-            # (X-Imbue-Impersonate header) then clear Cloudflare via the impersonator;
-            # everything else passes through to system curl. A fetch failure
-            # (e.g. the pinned release predates the curl tarball) MUST NOT
-            # break provisioning -- the gateway run script guards on the
-            # binaries' presence and falls back to system curl when absent, so
-            # this whole block is non-fatal by construction.
-            f"if [ ! -x {_CURL_DISPATCH_PATH} ] || [ ! -x {_CURL_IMPERSONATE_PATH} ]; then",
+            # Install the Chrome-impersonating "dispatch" curl + the
+            # impersonator it fronts from the datalib release, so marked
+            # latchkey requests (X-Imbue-Impersonate header) clear Cloudflare.
+            # Installed only when missing (idempotent), fail-loud under
+            # ``set -e`` like every other component here.
+            f"if [ ! -x {_CURL_DISPATCH_PATH} ]; then",
             '  _ci_arch="$(uname -m)"',
             '  case "$_ci_arch" in',
             "    x86_64) _ci_triple=x86_64-unknown-linux-gnu ;;",
             "    aarch64|arm64) _ci_triple=aarch64-unknown-linux-gnu ;;",
-            "    *) _ci_triple= ;;",
+            '    *) echo "no impersonating curl build for arch $_ci_arch" >&2; exit 1 ;;',
             "  esac",
-            '  if [ -n "$_ci_triple" ]; then',
-            '    _ci_tb="curl-${_ci_triple}.tar.gz"',
-            f'    _ci_url="https://github.com/{_DATALIB_REPO}/releases/download/{DATALIB_CURL_VERSION}/${{_ci_tb}}"',
-            '    _ci_tmp="$(mktemp -d)"',
-            '    if curl -fsSL --retry 3 --retry-delay 2 -o "${_ci_tmp}/${_ci_tb}" "$_ci_url" \\',
-            '        && curl -fsSL --retry 2 -o "${_ci_tmp}/${_ci_tb}.sha256" "${_ci_url}.sha256" \\',
-            '        && (cd "${_ci_tmp}" && sha256sum -c "${_ci_tb}.sha256" >/dev/null 2>&1); then',
-            '      tar -xzf "${_ci_tmp}/${_ci_tb}" -C "${_ci_tmp}"',
-            f"      for _ci_bin in {_CURL_DISPATCH_BIN} {_CURL_IMPERSONATE_BIN}; do",
-            '        _ci_src="$(find "${_ci_tmp}" -type f -name "$_ci_bin" | head -n1)"',
-            f'        if [ -n "$_ci_src" ]; then install -m 0755 "$_ci_src" "{_CURL_IMPERSONATE_INSTALL_DIR}/$_ci_bin"; fi',
-            "      done",
-            "    else",
-            '      echo "warning: could not fetch impersonating curl (${_ci_url}); latchkey will use system curl" >&2',
-            "    fi",
-            '    rm -rf "${_ci_tmp}"',
-            "  fi",
+            '  _ci_tb="curl-${_ci_triple}.tar.gz"',
+            f'  _ci_url="https://github.com/{_DATALIB_REPO}/releases/download/{DATALIB_CURL_VERSION}/${{_ci_tb}}"',
+            '  _ci_tmp="$(mktemp -d)"',
+            '  curl -fsSL --retry 3 --retry-delay 2 -o "${_ci_tmp}/${_ci_tb}" "$_ci_url"',
+            '  curl -fsSL --retry 2 -o "${_ci_tmp}/${_ci_tb}.sha256" "${_ci_url}.sha256"',
+            '  (cd "${_ci_tmp}" && sha256sum -c "${_ci_tb}.sha256" >/dev/null)',
+            '  tar -xzf "${_ci_tmp}/${_ci_tb}" -C "${_ci_tmp}" --strip-components=1',
+            f'  install -m 0755 "${{_ci_tmp}}/{_CURL_DISPATCH_BIN}" "{_CURL_DISPATCH_PATH}"',
+            f'  install -m 0755 "${{_ci_tmp}}/{_CURL_IMPERSONATE_BIN}" "{_CURL_IMPERSONATE_PATH}"',
+            '  rm -rf "${_ci_tmp}"',
             "fi",
             # Node.js + npm via NodeSource. Version-gated (not presence-gated):
             # a too-old preinstalled node must be replaced, or the npm install
@@ -728,17 +717,11 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
             "export LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1",
             "export LATCHKEY_DISABLE_COUNTING=1",
             "export LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1",
-            # Route latchkey through the bundled dispatch curl when it was
-            # installed (see _build_ensure_installed_script): requests carrying
-            # the X-Imbue-Impersonate marker header then get Chrome TLS
-            # impersonation via the impersonator, everything else passes
-            # through to system curl. The dispatch curl finds the impersonator
-            # as a sibling in the same dir, so we only export LATCHKEY_CURL --
-            # but guard on both being present. Absent (fetch failed / older
-            # release) => latchkey uses system curl, unchanged.
-            f"if [ -x {_CURL_DISPATCH_PATH} ] && [ -x {_CURL_IMPERSONATE_PATH} ]; then",
-            f"  export LATCHKEY_CURL={_CURL_DISPATCH_PATH}",
-            "fi",
+            # Route latchkey through the bundled dispatch curl (installed by
+            # _build_ensure_installed_script): requests carrying the
+            # X-Imbue-Impersonate marker header get Chrome TLS impersonation
+            # via the sibling impersonator, everything else uses system curl.
+            f"export LATCHKEY_CURL={_CURL_DISPATCH_PATH}",
             f"exec latchkey gateway --max-body-size {GATEWAY_MAX_BODY_SIZE_BYTES}",
             "",
         )

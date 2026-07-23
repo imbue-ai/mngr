@@ -32,22 +32,18 @@ let backendProcess = null;
  *
  * ``LATCHKEY_CURL`` is read by the upstream latchkey CLI. The dispatch
  * curl finds the impersonator binary as a sibling in the same
- * ``resources/curl/`` dir, so no extra env var is needed -- we just
- * require both to be present. Returns ``{}`` when they aren't bundled
- * (e.g. a platform datalib doesn't build, or before the download is
- * pinned) so latchkey falls back to the system curl exactly as before --
- * never point ``LATCHKEY_CURL`` at a nonexistent file, which would break
- * every credential check.
+ * ``resources/curl/`` dir (download-binaries.js installs both or neither),
+ * so no extra env var is needed. Returns ``{}`` when the dispatch curl
+ * isn't bundled (a platform datalib doesn't build) so latchkey falls back
+ * to the system curl -- never point ``LATCHKEY_CURL`` at a nonexistent
+ * file, which would break every credential check.
  */
 function latchkeyCurlEnv() {
   const dispatch = paths.getLatchkeyCurlDispatchPath();
-  const impersonate = paths.getLatchkeyCurlImpersonatePath();
-  if (!fs.existsSync(dispatch) || !fs.existsSync(impersonate)) {
+  if (!fs.existsSync(dispatch)) {
     return {};
   }
-  return {
-    LATCHKEY_CURL: dispatch,
-  };
+  return { LATCHKEY_CURL: dispatch };
 }
 
 // Backend stdout JSONL event fields that carry secrets and must be masked

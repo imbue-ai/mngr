@@ -163,22 +163,26 @@ def test_ensure_latchkey_installed_gates_each_component_behind_a_presence_check(
     assert command.startswith("set -e")
 
 
-def test_ensure_latchkey_installed_best_effort_installs_impersonating_curl() -> None:
+def test_ensure_latchkey_installed_installs_impersonating_curl() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_installed(outer)
     command = _stub(outer).recorded[0].command
-    # Fetches the datalib curl tarball for the VPS arch from the pinned release.
+    # Fetches the datalib curl tarball for the VPS arch from the pinned
+    # release, verifies it against the published .sha256, and installs both
+    # the dispatch curl and the impersonator it fronts.
     assert f"releases/download/{DATALIB_CURL_VERSION}/" in command
     assert "curl-${_ci_triple}.tar.gz" in command
-    # Installs both the dispatch curl and the impersonator it fronts.
-    assert _CURL_DISPATCH_PATH.rsplit("/", 1)[1] in command
-    assert _CURL_IMPERSONATE_PATH.rsplit("/", 1)[1] in command
-    # Verifies the download against the release's published .sha256.
     assert "sha256sum -c" in command
-    # Best-effort: a fetch failure warns and continues (never aborts
-    # provisioning), and the whole block is skipped when already installed.
-    assert "latchkey will use system curl" in command
-    assert f"if [ ! -x {_CURL_DISPATCH_PATH} ] || [ ! -x {_CURL_IMPERSONATE_PATH} ]; then" in command
+    assert "tar -xzf" in command and "--strip-components=1" in command
+    assert f'install -m 0755 "${{_ci_tmp}}/{_CURL_DISPATCH_PATH.rsplit("/", 1)[1]}" "{_CURL_DISPATCH_PATH}"' in command
+    assert (
+        f'install -m 0755 "${{_ci_tmp}}/{_CURL_IMPERSONATE_PATH.rsplit("/", 1)[1]}" "{_CURL_IMPERSONATE_PATH}"'
+        in command
+    )
+    # Installed only when missing (idempotent) and fail-loud like the other
+    # components -- no best-effort warning fallback that swallows failures.
+    assert f"if [ ! -x {_CURL_DISPATCH_PATH} ]; then" in command
+    assert "latchkey will use system curl" not in command
 
 
 def test_ensure_latchkey_installed_uses_generous_install_timeout() -> None:
@@ -460,10 +464,10 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_
     # Routes latchkey through the bundled dispatch curl -- but only when both
     # binaries are present, so a host without the impersonating curl installed
     # (fetch failed / older release) falls back to system curl unchanged.
-    assert f"if [ -x {_CURL_DISPATCH_PATH} ] && [ -x {_CURL_IMPERSONATE_PATH} ]; then" in run_script
+    # Unconditional export -- provisioning guarantees the dispatch curl is
+    # installed. The dispatch curl finds the impersonator as a sibling, so no
+    # second env var is exported.
     assert f"export LATCHKEY_CURL={_CURL_DISPATCH_PATH}" in run_script
-    # The dispatch curl finds the impersonator as a sibling, so no second
-    # env var is exported.
     assert "FRANKWEILER_IMPERSONATE_CURL" not in run_script
     # The wrapper refuses to launch a keyless gateway when its tmpfs secrets are
     # gone (e.g. wiped by a reboot).

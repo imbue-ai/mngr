@@ -68,24 +68,18 @@ function getResticPath() {
 }
 
 /**
- * Paths to the bundled "dispatch curl" and the Chrome-impersonating
- * curl it fronts, both shipped from the datalib release into
- * ``resources/curl/`` by scripts/download-binaries.js.
+ * Path to the bundled "dispatch curl" that the latchkey gateway runs as
+ * its ``LATCHKEY_CURL``, shipped from the datalib release into
+ * ``resources/curl/`` by scripts/download-binaries.js (alongside the
+ * Chrome-impersonating ``latchkey-curl-impersonate`` it fronts).
  *
- * The dispatch curl is a drop-in ``curl`` that the latchkey gateway runs
- * as its ``LATCHKEY_CURL``: requests carrying the marker header
- * ``X-Imbue-Impersonate:`` are routed to the impersonator (Chrome TLS
- * impersonation), everything else passes through to the system curl, so
- * one binary serves both impersonating and non-impersonating callers.
- * The dispatch curl finds the impersonator as a sibling in this same dir,
- * so both must be present (see ``latchkeyCurlEnv`` in electron/backend.js).
+ * Requests carrying the marker header ``X-Imbue-Impersonate:`` are routed
+ * to the impersonator (found as a sibling in this same dir), everything
+ * else passes through to the system curl -- so one binary serves both
+ * impersonating and non-impersonating callers.
  */
 function getLatchkeyCurlDispatchPath() {
   return path.join(getResourcesDir(), 'curl', 'latchkey-curl-dispatch');
-}
-
-function getLatchkeyCurlImpersonatePath() {
-  return path.join(getResourcesDir(), 'curl', 'latchkey-curl-impersonate');
 }
 
 /**
@@ -263,7 +257,6 @@ module.exports = {
   getLatchkeyDirectory,
   getResticPath,
   getLatchkeyCurlDispatchPath,
-  getLatchkeyCurlImpersonatePath,
   getMindsRootName,
   getDataDir,
   getMngrHostDir,
