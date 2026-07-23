@@ -1,1 +1,0 @@
-Removed the superfluous `@pytest.mark.rsync` from the `test_connect_no_start` e2e tutorial test. Connecting to a local agent is a pure `tmux attach` and never invokes rsync, so the resource guard rejected the carried-but-unused mark.

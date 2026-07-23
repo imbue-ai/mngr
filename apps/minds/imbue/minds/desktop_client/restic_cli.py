@@ -18,7 +18,6 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Final
 from typing import NoReturn
 from typing import TypeVar
@@ -68,6 +67,13 @@ _RESTORE_TIMEOUT_SECONDS: Final[float] = 600.0
 _AUTH_PROPAGATION_RETRY_SECONDS: Final[float] = 60.0
 _AUTH_PROPAGATION_WAIT_SECONDS: Final[float] = 3.0
 _TRANSIENT_AUTH_SIGNALS: Final[tuple[str, ...]] = ("unauthorized", "invalidaccesskeyid", "signaturedoesnotmatch")
+# restic's message when it cannot write its lock file to the repository --
+# the failure mode of a read-only (storage-quota-downgraded) key. Read-only
+# operations retry once with --no-lock when they see it.
+_LOCK_WRITE_FAILURE_SIGNAL: Final[str] = "unable to create lock"
+# Space reclaim (forget --prune) repacks data and can take a while on a
+# large repository.
+_PRUNE_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 
 class ResticNotInstalledError(BackupProvisioningError):
@@ -223,130 +229,9 @@ def init_repo(
     )
 
 
-def _add_password_key_once(
-    *,
-    repository: str,
-    backend_env: Mapping[str, str],
-    existing_password: str | None,
-    new_password: str,
-    parent_cg: ConcurrencyGroup | None,
-) -> None:
-    """Run a single ``restic key add`` attempt, authenticating with ``existing_password``.
-
-    An empty ``new_password`` adds the empty-password key via
-    ``--new-insecure-no-password`` (restic rejects an empty password file).
-    """
-    env, flags = _env_and_flags(repository, backend_env, existing_password)
-    if not new_password:
-        result = _run_restic(
-            [*flags, "key", "add", "--new-insecure-no-password"],
-            env_overrides=env,
-            parent_cg=parent_cg,
-            timeout_seconds=_DEFAULT_TIMEOUT_SECONDS,
-        )
-        if result.returncode != 0:
-            _raise_restic_failure("restic key add", result.returncode, result.stderr)
-        return
-    with TemporaryDirectory() as temp_dir:
-        new_password_file = Path(temp_dir) / "new_password"
-        # 0600 temp file so the random key isn't briefly world-readable on disk.
-        fd = os.open(new_password_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            os.write(fd, new_password.encode("utf-8"))
-        finally:
-            os.close(fd)
-        result = _run_restic(
-            [*flags, "key", "add", "--new-password-file", str(new_password_file)],
-            env_overrides=env,
-            parent_cg=parent_cg,
-            timeout_seconds=_DEFAULT_TIMEOUT_SECONDS,
-        )
-    if result.returncode != 0:
-        _raise_restic_failure("restic key add", result.returncode, result.stderr)
-
-
-def add_password_key(
-    *,
-    repository: str,
-    backend_env: Mapping[str, str],
-    existing_password: str | None,
-    new_password: str,
-    parent_cg: ConcurrencyGroup | None = None,
-) -> None:
-    """Add ``new_password`` as an additional key, authenticating with ``existing_password``.
-
-    Retries a transient auth failure for a bounded window (see ``init_repo``).
-    """
-    _retry_on_transient_auth(
-        lambda: _add_password_key_once(
-            repository=repository,
-            backend_env=backend_env,
-            existing_password=existing_password,
-            new_password=new_password,
-            parent_cg=parent_cg,
-        )
-    )
-
-
-class ResticKey(FrozenModel):
-    """One repository key as reported by ``restic key list --json``."""
-
-    key_id: str = Field(description="The key's id (hex prefix restic accepts for key remove)")
-    is_current: bool = Field(description="Whether this is the key the listing authenticated with")
-
-
-def list_keys(
-    *,
-    repository: str,
-    backend_env: Mapping[str, str],
-    password: str | None,
-    parent_cg: ConcurrencyGroup | None = None,
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[ResticKey, ...]:
-    """List the repository's keys, marking the one used to authenticate."""
-    env, flags = _env_and_flags(repository, backend_env, password)
-    result = _run_restic(
-        [*flags, "--no-lock", "key", "list", "--json"],
-        env_overrides=env,
-        parent_cg=parent_cg,
-        timeout_seconds=timeout_seconds,
-    )
-    if result.returncode != 0:
-        raise BackupProvisioningError(f"restic key list failed (exit {result.returncode}): {result.stderr.strip()}")
-    try:
-        raw = json.loads(result.stdout or "[]")
-    except ValueError as e:
-        raise BackupProvisioningError(f"restic key list returned non-JSON output: {e}") from e
-    if not isinstance(raw, list):
-        raise BackupProvisioningError(f"restic key list returned a non-list JSON payload: {type(raw).__name__}")
-    keys: list[ResticKey] = []
-    for entry in raw:
-        if not isinstance(entry, dict) or not entry.get("id"):
-            logger.warning("Skipping malformed restic key entry: {!r}", entry)
-            continue
-        keys.append(ResticKey(key_id=str(entry["id"]), is_current=bool(entry.get("current"))))
-    return tuple(keys)
-
-
-def remove_key(
-    *,
-    repository: str,
-    backend_env: Mapping[str, str],
-    password: str | None,
-    key_id: str,
-    parent_cg: ConcurrencyGroup | None = None,
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> None:
-    """Remove one key from the repository (restic refuses to remove the current key)."""
-    env, flags = _env_and_flags(repository, backend_env, password)
-    result = _run_restic(
-        [*flags, "key", "remove", key_id],
-        env_overrides=env,
-        parent_cg=parent_cg,
-        timeout_seconds=timeout_seconds,
-    )
-    if result.returncode != 0:
-        raise BackupProvisioningError(f"restic key remove failed (exit {result.returncode}): {result.stderr.strip()}")
+def _looks_like_lock_write_failure(stderr: str) -> bool:
+    """Return whether a restic failure means the repository lock could not be written."""
+    return _LOCK_WRITE_FAILURE_SIGNAL in stderr.lower()
 
 
 def restore_snapshot(
@@ -363,6 +248,12 @@ def restore_snapshot(
 
     ``restic restore`` downloads blobs in parallel, so it is dramatically faster
     than ``restic dump`` (which fetches sequentially) for a many-file snapshot.
+
+    Restore normally takes a (non-exclusive) repository lock, which is a
+    *write* -- so it fails against a read-only key even though the restore
+    itself only reads. When the failure is specifically the lock write, the
+    restore is retried once with ``--no-lock`` so storage-quota-downgraded
+    accounts can still restore their data.
     """
     env, flags = _env_and_flags(repository, backend_env, password)
     result = _run_restic(
@@ -371,8 +262,48 @@ def restore_snapshot(
         parent_cg=parent_cg,
         timeout_seconds=timeout_seconds,
     )
-    if result.returncode != 0:
+    if result.returncode == 0:
+        return
+    if not _looks_like_lock_write_failure(result.stderr):
         raise BackupProvisioningError(f"restic restore failed (exit {result.returncode}): {result.stderr.strip()}")
+    logger.debug("restic restore could not write its repository lock (read-only key?); retrying with --no-lock")
+    retried = _run_restic(
+        [*flags, "--no-lock", "restore", snapshot, "--target", str(target_dir)],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+    if retried.returncode != 0:
+        raise BackupProvisioningError(f"restic restore failed (exit {retried.returncode}): {retried.stderr.strip()}")
+
+
+def forget_snapshots(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    snapshot_ids: Sequence[str],
+    # When set, restic reclaims the space in the same invocation (forget
+    # alone only unreferences data; prune is what actually deletes it).
+    is_pruning: bool,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _PRUNE_TIMEOUT_SECONDS,
+) -> None:
+    """Forget the given snapshots (optionally pruning) via ``restic forget``.
+
+    Requires a writable key: forget deletes snapshot files and prune repacks
+    data, so this cannot run against a storage-quota-downgraded (read-only)
+    credential -- request a cleanup grant first.
+    """
+    if not snapshot_ids:
+        return
+    env, flags = _env_and_flags(repository, backend_env, password)
+    args = [*flags, "forget", *snapshot_ids]
+    if is_pruning:
+        args.append("--prune")
+    result = _run_restic(args, env_overrides=env, parent_cg=parent_cg, timeout_seconds=timeout_seconds)
+    if result.returncode != 0:
+        raise BackupProvisioningError(f"restic forget failed (exit {result.returncode}): {result.stderr.strip()}")
 
 
 def parse_restic_timestamp(raw: str) -> datetime | None:

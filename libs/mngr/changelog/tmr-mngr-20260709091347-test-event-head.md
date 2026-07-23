@@ -1,1 +1,0 @@
-Removed the spurious `@pytest.mark.rsync` mark from the `mngr event --head` e2e tutorial test. A local agent created in a git repo transfers its work dir via a git worktree, not rsync, so the resource guard correctly reported that rsync was never invoked. Corrected the accompanying comments to describe the git-worktree transfer.

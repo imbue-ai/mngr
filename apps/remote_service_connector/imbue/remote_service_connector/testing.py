@@ -1,20 +1,32 @@
 """Test utilities for remote_service_connector."""
 
 import base64
+import contextlib
 import json
 import secrets
 import uuid
+from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 from typing import Final
 from uuid import UUID
 
+# Note: psycopg2.errors is reachable through the base import, matching app.py;
+# an explicit ``import psycopg2.errors`` makes ty resolve the module and then
+# reject its dynamically-generated members (UniqueViolation) as unknown.
+import psycopg2
 import pytest
+from fastapi import HTTPException
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
 from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as EPSignInOkResult
 from supertokens_python.recipe.emailpassword.interfaces import SignUpOkResult as EPSignUpOkResult
 from supertokens_python.recipe.emailpassword.interfaces import UpdateEmailOrPasswordOkResult
 from supertokens_python.recipe.emailpassword.interfaces import WrongCredentialsError
+from supertokens_python.recipe.emailverification.interfaces import (
+    CreateEmailVerificationTokenEmailAlreadyVerifiedError,
+)
+from supertokens_python.recipe.emailverification.interfaces import CreateEmailVerificationTokenOkResult
 from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
 from supertokens_python.recipe.emailverification.types import EmailVerificationUser
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
@@ -34,6 +46,10 @@ from imbue.remote_service_connector.app import ForwardingCtx
 from imbue.remote_service_connector.app import PoolHostCleanupError
 from imbue.remote_service_connector.app import R2BucketNotEmptyError
 from imbue.remote_service_connector.app import R2BucketNotFoundError
+from imbue.remote_service_connector.app import SyncActiveAgentConflictError
+from imbue.remote_service_connector.app import SyncRevisionConflictError
+from imbue.remote_service_connector.app import _ONE_ACTIVE_PER_AGENT_INDEX_NAME
+from imbue.remote_service_connector.app import _WORKSPACE_RECORD_COLUMNS
 
 
 class FakeCloudflareOps:
@@ -57,6 +73,23 @@ class FakeCloudflareOps:
         self.bucket_objects: dict[str, list[str]] = {}
         self.account_tokens: dict[str, dict[str, Any]] = {}
         self._next_r2_token_id = 1
+        # Stored bytes per bucket, served by the per-bucket REST usage fake
+        # (and by the GraphQL sweep fake unless the knob below diverges them);
+        # tests set entries directly.
+        self.usage_bytes_by_bucket: dict[str, int] = {}
+        # When set, the GraphQL sweep fake serves THIS map instead of
+        # usage_bytes_by_bucket, so tests can model the analytics window peak
+        # diverging from live REST usage (the confirm-before-downgrade path).
+        self.graphql_usage_bytes_by_bucket: dict[str, int] | None = None
+        # Failure-injection knobs: the next create_access_app /
+        # create_access_policy / delete_bucket_token call raises, exercising
+        # the add-service rollback and sweep revoke-retry paths. While
+        # fail_bucket_usage_reads is set, every per-bucket REST usage read
+        # raises (the sweep/gate fail-open paths).
+        self.fail_next_create_access_app = False
+        self.fail_next_create_access_policy = False
+        self.fail_next_delete_bucket_token = False
+        self.fail_bucket_usage_reads = False
 
     def create_tunnel(self, name: str) -> dict[str, Any]:
         tunnel_id = f"tunnel-{self._next_tunnel_id}"
@@ -115,6 +148,9 @@ class FakeCloudflareOps:
         self.dns_records = [r for r in self.dns_records if r["id"] != record_id]
 
     def create_access_app(self, hostname: str, app_name: str, allowed_idps: list[str] | None = None) -> dict[str, Any]:
+        if self.fail_next_create_access_app:
+            self.fail_next_create_access_app = False
+            raise CloudflareApiError(status_code=500, errors=[{"message": "simulated Access API failure"}])
         app_id = f"access-app-{self._next_access_app_id}"
         self._next_access_app_id += 1
         access_app: dict[str, Any] = {"id": app_id, "domain": hostname, "name": app_name}
@@ -138,6 +174,9 @@ class FakeCloudflareOps:
         return list(self.access_policies.get(app_id, []))
 
     def create_access_policy(self, app_id: str, policy: dict[str, Any]) -> dict[str, Any]:
+        if self.fail_next_create_access_policy:
+            self.fail_next_create_access_policy = False
+            raise CloudflareApiError(status_code=500, errors=[{"message": "simulated Access policy failure"}])
         policy_id = f"policy-{self._next_policy_id}"
         self._next_policy_id += 1
         stored = {**policy, "id": policy_id}
@@ -216,7 +255,36 @@ class FakeCloudflareOps:
         return {"id": token_id, "value": f"token-value-{token_id}"}
 
     def delete_bucket_token(self, token_id: str) -> None:
+        if self.fail_next_delete_bucket_token:
+            self.fail_next_delete_bucket_token = False
+            raise CloudflareApiError(status_code=500, errors=[{"message": "simulated token revoke failure"}])
         self.account_tokens.pop(token_id, None)
+
+    def update_bucket_token_access(self, token_id: str, bucket_name: str, access: str, token_name: str) -> None:
+        token = self.account_tokens.get(token_id)
+        if token is None:
+            raise CloudflareApiError(status_code=404, errors=[{"message": f"token not found: {token_id}"}])
+        token["access"] = access
+        token["bucket_name"] = bucket_name
+        token["name"] = token_name
+
+    def roll_bucket_token_value(self, token_id: str) -> dict[str, Any]:
+        token = self.account_tokens.get(token_id)
+        if token is None:
+            raise CloudflareApiError(status_code=404, errors=[{"message": f"token not found: {token_id}"}])
+        roll_count = int(token.get("roll_count", 0)) + 1
+        token["roll_count"] = roll_count
+        return {"value": f"token-value-{token_id}-roll{roll_count}"}
+
+    def get_bucket_usage_bytes(self, bucket_name: str) -> int:
+        if self.fail_bucket_usage_reads:
+            raise CloudflareApiError(status_code=500, errors=[{"message": "simulated usage read failure"}])
+        return int(self.usage_bytes_by_bucket.get(bucket_name, 0))
+
+    def query_r2_storage_by_bucket(self) -> dict[str, int]:
+        if self.graphql_usage_bytes_by_bucket is not None:
+            return dict(self.graphql_usage_bytes_by_bucket)
+        return dict(self.usage_bytes_by_bucket)
 
 
 class InMemoryKeyStore:
@@ -238,6 +306,7 @@ class InMemoryKeyStore:
             "access": access,
             "alias": alias,
             "created_at": f"2026-01-01T00:00:{self._created_counter:02d}+00:00",
+            "enforced_access": None,
         }
 
     def list_keys(self, owner_user_id: str, bucket_name: str | None = None) -> list[dict[str, Any]]:
@@ -246,12 +315,23 @@ class InMemoryKeyStore:
             rows = [r for r in rows if r["bucket_name"] == bucket_name]
         return sorted(rows, key=lambda r: r["created_at"])
 
+    def list_all_keys(self) -> list[dict[str, Any]]:
+        return sorted(
+            self.keys_by_access_key_id.values(),
+            key=lambda r: (r["owner_user_id"], r["bucket_name"], r["created_at"]),
+        )
+
     def get_key(self, access_key_id: str) -> dict[str, Any] | None:
         row = self.keys_by_access_key_id.get(access_key_id)
         return dict(row) if row is not None else None
 
     def delete_key(self, access_key_id: str) -> None:
         self.keys_by_access_key_id.pop(access_key_id, None)
+
+    def set_enforced_access(self, access_key_id: str, enforced_access: str | None) -> None:
+        row = self.keys_by_access_key_id.get(access_key_id)
+        if row is not None:
+            row["enforced_access"] = enforced_access
 
     def delete_keys_for_bucket(self, owner_user_id: str, bucket_name: str) -> list[dict[str, Any]]:
         removed = [
@@ -501,6 +581,7 @@ class FakeSuperTokensBackend:
             "send_reset_password_email": self.send_reset_password_email,
             "consume_password_reset_token": self.consume_password_reset_token,
             "update_email_or_password": self.update_email_or_password,
+            "create_email_verification_token": self.create_email_verification_token,
             "verify_email_using_token": self.verify_email_using_token,
             "get_provider": self.get_provider,
             "manually_create_or_update_user": self.manually_create_or_update_user,
@@ -755,6 +836,24 @@ class FakeSuperTokensBackend:
             account.password = password
         return UpdateEmailOrPasswordOkResult()
 
+    def create_email_verification_token(
+        self,
+        *,
+        tenant_id: str,
+        recipe_user_id: RecipeUserId,
+        email: str,
+        user_context: dict[str, Any] | None = None,
+    ) -> CreateEmailVerificationTokenOkResult | CreateEmailVerificationTokenEmailAlreadyVerifiedError:
+        del tenant_id, user_context
+        self._raise_if_configured("create_email_verification_token")
+        user_id = recipe_user_id.get_as_string()
+        account = self.accounts_by_id.get(user_id)
+        if account is not None and account.is_verified:
+            return CreateEmailVerificationTokenEmailAlreadyVerifiedError()
+        token = f"verify-{secrets.token_hex(8)}"
+        self.verification_tokens[token] = (user_id, email)
+        return CreateEmailVerificationTokenOkResult(token=token)
+
     def verify_email_using_token(
         self,
         *,
@@ -951,19 +1050,60 @@ def _make_pool_row(
     return row
 
 
+# Fixed timestamps for fake workspace-sync rows; list order stands in for
+# ORDER BY created_at (rows are only ever appended).
+_SYNC_ROW_CREATED_AT: Final[str] = "2026-01-01T00:00:00+00:00"
+_SYNC_ROW_UPDATED_AT: Final[str] = "2026-01-02T00:00:00+00:00"
+
+# Derived from the production column list so the fake's tuple order can never
+# drift from what PostgresSyncStore SELECTs.
+_WORKSPACE_RECORD_COLUMN_NAMES: Final[tuple[str, ...]] = tuple(
+    name.strip() for name in _WORKSPACE_RECORD_COLUMNS.split(",")
+)
+
+
+def _adapted_bytes(value: Any) -> bytes | None:
+    """Unwrap a psycopg2.Binary bind parameter back to the raw bytes (None passes through)."""
+    if value is None:
+        return None
+    return bytes(value.adapted)
+
+
+class _OneActivePerAgentViolation(psycopg2.errors.UniqueViolation):
+    """UniqueViolation whose diagnostics carry the partial-index name, as postgres reports it."""
+
+    @property
+    def diag(self) -> Any:
+        return SimpleNamespace(constraint_name=_ONE_ACTIVE_PER_AGENT_INDEX_NAME)
+
+
 class FakeCursor:
     """In-memory cursor that simulates psycopg2 cursor behavior against FakePoolBackend."""
 
     _backend: "FakePoolBackend"
     _results: list[tuple[Any, ...]]
+    rowcount: int
 
     def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         """Route SQL queries to the in-memory store."""
         self._results = []
         self._result_idx = 0
+        self.rowcount = 0
         query_lower = query.strip().lower()
 
-        if "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
+        if "pg_advisory_xact_lock" in query_lower:
+            # The per-user lease serialization lock; the in-memory fake is
+            # single-threaded so the lock itself is a no-op.
+            self._results = [(True,)]
+
+        elif "select count(*) from pool_hosts" in query_lower:
+            username = params[0]
+            count = sum(
+                1 for row in self._backend.pool_rows if row.status == "leased" and row.leased_to_user == username
+            )
+            self._results = [(count,)]
+
+        elif "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
             # The connector serialises the request attributes via json.dumps
             # before passing them to the SQL bind parameter, so we always get
             # a JSON string here. A hard ``region`` (WHERE clause), if present,
@@ -1129,6 +1269,66 @@ class FakeCursor:
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             self._backend.pool_rows = [r for r in self._backend.pool_rows if r.host_id != host_id]
 
+        elif "from workspace_records" in query_lower and "for update" in query_lower:
+            record_row = self._backend.find_sync_record(params[0], params[1])
+            if record_row is not None:
+                self._results = [self._backend.sync_record_tuple(record_row)]
+
+        elif "from workspace_records" in query_lower and "order by created_at" in query_lower:
+            self._results = [
+                self._backend.sync_record_tuple(row)
+                for row in self._backend.sync_record_rows
+                if row["user_id"] == params[0]
+            ]
+
+        elif query_lower.startswith("insert into workspace_records"):
+            self._results = [self._backend.sync_record_tuple(self._backend.insert_sync_record(params))]
+
+        elif query_lower.startswith("update workspace_records set encrypted_secrets = null"):
+            self.rowcount = self._backend.scrub_sync_secrets(params[0])
+
+        elif query_lower.startswith("update workspace_records"):
+            updated_row = self._backend.update_sync_record(params)
+            if updated_row is not None:
+                self._results = [self._backend.sync_record_tuple(updated_row)]
+
+        elif query_lower.startswith("delete from workspace_records"):
+            user_id, record_host_id = params
+            self._backend.sync_record_rows = [
+                row
+                for row in self._backend.sync_record_rows
+                if not (row["user_id"] == user_id and row["host_id"] == record_host_id)
+            ]
+
+        elif query_lower.startswith("select") and "from account_key_bundles" in query_lower:
+            bundle = self._backend.sync_bundle_by_user.get(params[0])
+            if bundle is not None:
+                self._results = [
+                    (
+                        bundle["kdf_salt"],
+                        bundle["kdf_time_cost"],
+                        bundle["kdf_memory_kib"],
+                        bundle["kdf_parallelism"],
+                        bundle["wrapped_dek"],
+                        bundle["key_epoch"],
+                        _SYNC_ROW_UPDATED_AT,
+                    )
+                ]
+
+        elif query_lower.startswith("insert into account_key_bundles"):
+            user_id, kdf_salt, kdf_time_cost, kdf_memory_kib, kdf_parallelism, wrapped_dek, key_epoch = params
+            self._backend.sync_bundle_by_user[user_id] = {
+                "kdf_salt": _adapted_bytes(kdf_salt),
+                "kdf_time_cost": kdf_time_cost,
+                "kdf_memory_kib": kdf_memory_kib,
+                "kdf_parallelism": kdf_parallelism,
+                "wrapped_dek": _adapted_bytes(wrapped_dek),
+                "key_epoch": key_epoch,
+            }
+
+        elif query_lower.startswith("delete from account_key_bundles"):
+            self._backend.sync_bundle_by_user.pop(params[0], None)
+
         else:
             pass
 
@@ -1197,6 +1397,17 @@ class FakePoolBackend:
     # Paid-list stores: value -> {"is_paid", "created_at", "updated_at"}.
     paid_domains: dict[str, dict[str, Any]]
     paid_emails: dict[str, dict[str, Any]]
+    # Workspace-sync stores: rows keyed by (user_id, host_id) held as dicts in
+    # insertion order; bundles keyed by user_id. Secrets/salts are raw bytes.
+    sync_record_rows: list[dict[str, Any]]
+    sync_bundle_by_user: dict[str, dict[str, Any]]
+    # Failure-injection knobs for PostgresSyncStore tests. When set, the next
+    # workspace_records INSERT commits this "winner" row and then raises the
+    # primary-key UniqueViolation, simulating a concurrent first push.
+    sync_insert_race_winner: dict[str, Any] | None
+    # When true, workspace_records UPDATEs return no row, simulating the
+    # RETURNING invariant breaking.
+    sync_update_returns_no_row: bool
 
     def add_paid_domain(self, domain: str, is_paid: bool = True) -> None:
         """Seed a paid-domains row (lowercased), defaulting to active."""
@@ -1254,6 +1465,122 @@ class FakePoolBackend:
 
     def get_connection(self) -> FakeConnection:
         return _make_fake_connection(self)
+
+    def find_sync_record(self, user_id: str, host_id: str) -> dict[str, Any] | None:
+        """Return the workspace-record row for (user_id, host_id), or None."""
+        for row in self.sync_record_rows:
+            if row["user_id"] == user_id and row["host_id"] == host_id:
+                return row
+        return None
+
+    def sync_record_tuple(self, row: dict[str, Any]) -> tuple[Any, ...]:
+        """Project a stored row into the SELECT column order PostgresSyncStore uses."""
+        return tuple(row[name] for name in _WORKSPACE_RECORD_COLUMN_NAMES)
+
+    def check_one_active_sync_record_per_agent(self, user_id: str, host_id: str, agent_id: str, state: str) -> None:
+        """Enforce the partial unique index on (user_id, agent_id) WHERE state = 'active'."""
+        if state != "active":
+            return
+        for row in self.sync_record_rows:
+            if (
+                row["user_id"] == user_id
+                and row["host_id"] != host_id
+                and row["agent_id"] == agent_id
+                and row["state"] == "active"
+            ):
+                raise _OneActivePerAgentViolation(f"duplicate active workspace record for agent {agent_id}")
+
+    def insert_sync_record(self, params: tuple[Any, ...]) -> dict[str, Any]:
+        """Simulate the workspace_records INSERT, including its unique-violation modes."""
+        (
+            user_id,
+            host_id,
+            agent_id,
+            display_name,
+            color,
+            provider_kind,
+            hosting_device_id,
+            device_label,
+            state,
+            restored_from_host_id,
+            encrypted_secrets,
+            revision,
+        ) = params
+        if self.sync_insert_race_winner is not None:
+            winner = dict(self.sync_insert_race_winner)
+            self.sync_insert_race_winner = None
+            winner.setdefault("created_at", _SYNC_ROW_CREATED_AT)
+            winner.setdefault("updated_at", _SYNC_ROW_CREATED_AT)
+            self.sync_record_rows.append(winner)
+            raise psycopg2.errors.UniqueViolation("concurrent insert won the primary key")
+        if self.find_sync_record(user_id, host_id) is not None:
+            raise psycopg2.errors.UniqueViolation(f"duplicate primary key ({user_id}, {host_id})")
+        self.check_one_active_sync_record_per_agent(user_id, host_id, agent_id, state)
+        row = {
+            "user_id": user_id,
+            "host_id": host_id,
+            "agent_id": agent_id,
+            "display_name": display_name,
+            "color": color,
+            "provider_kind": provider_kind,
+            "hosting_device_id": hosting_device_id,
+            "device_label": device_label,
+            "state": state,
+            "restored_from_host_id": restored_from_host_id,
+            "encrypted_secrets": _adapted_bytes(encrypted_secrets),
+            "revision": revision,
+            "created_at": _SYNC_ROW_CREATED_AT,
+            "updated_at": _SYNC_ROW_CREATED_AT,
+        }
+        self.sync_record_rows.append(row)
+        return row
+
+    def update_sync_record(self, params: tuple[Any, ...]) -> dict[str, Any] | None:
+        """Simulate the workspace_records CAS UPDATE; returns the updated row or None."""
+        (
+            agent_id,
+            display_name,
+            color,
+            provider_kind,
+            hosting_device_id,
+            device_label,
+            state,
+            restored_from_host_id,
+            encrypted_secrets,
+            revision,
+            user_id,
+            host_id,
+        ) = params
+        if self.sync_update_returns_no_row:
+            return None
+        row = self.find_sync_record(user_id, host_id)
+        if row is None:
+            return None
+        self.check_one_active_sync_record_per_agent(user_id, host_id, agent_id, state)
+        row.update(
+            agent_id=agent_id,
+            display_name=display_name,
+            color=color,
+            provider_kind=provider_kind,
+            hosting_device_id=hosting_device_id,
+            device_label=device_label,
+            state=state,
+            restored_from_host_id=restored_from_host_id,
+            encrypted_secrets=_adapted_bytes(encrypted_secrets),
+            revision=revision,
+            updated_at=_SYNC_ROW_UPDATED_AT,
+        )
+        return row
+
+    def scrub_sync_secrets(self, user_id: str) -> int:
+        """Null out every non-null encrypted_secrets for the user; returns the row count."""
+        scrubbed = 0
+        for row in self.sync_record_rows:
+            if row["user_id"] == user_id and row["encrypted_secrets"] is not None:
+                row["encrypted_secrets"] = None
+                row["updated_at"] = _SYNC_ROW_UPDATED_AT
+                scrubbed += 1
+        return scrubbed
 
     def clean_up_slice_on_box(
         self,
@@ -1382,4 +1709,346 @@ def make_fake_pool_backend() -> FakePoolBackend:
     backend.slice_teardown_should_fail = False
     backend.paid_domains = {}
     backend.paid_emails = {}
+    backend.sync_record_rows = []
+    backend.sync_bundle_by_user = {}
+    backend.sync_insert_race_winner = None
+    backend.sync_update_returns_no_row = False
     return backend
+
+
+class InMemorySyncStore:
+    """In-memory SyncStore implementation for testing the workspace-sync endpoints.
+
+    Mirrors PostgresSyncStore's semantics: CAS on revision for updates, at
+    most one ACTIVE record per (user_id, agent_id), scrub, and the per-user
+    key bundle. Records are keyed (user_id, host_id); secrets are raw bytes.
+    """
+
+    def __init__(self) -> None:
+        self.records_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        self.bundle_by_user_id: dict[str, dict[str, Any]] = {}
+        self._created_counter = 0
+
+    def _next_timestamp(self) -> str:
+        self._created_counter += 1
+        return f"2026-01-01T00:00:{self._created_counter:02d}+00:00"
+
+    def _encode_secrets(self, record: dict[str, Any]) -> dict[str, Any]:
+        encoded = dict(record)
+        secrets_bytes = record.get("encrypted_secrets")
+        encoded["encrypted_secrets"] = (
+            base64.b64encode(secrets_bytes).decode("ascii") if secrets_bytes is not None else None
+        )
+        return encoded
+
+    def list_records(self, user_id: str) -> list[dict[str, Any]]:
+        rows = [self._encode_secrets(record) for (uid, _), record in self.records_by_key.items() if uid == user_id]
+        return sorted(rows, key=lambda record: record["created_at"])
+
+    def put_record(self, user_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        key = (user_id, record["host_id"])
+        existing = self.records_by_key.get(key)
+        if existing is not None and record["revision"] != existing["revision"] + 1:
+            raise SyncRevisionConflictError(self._encode_secrets(existing))
+        if record["state"] == "active":
+            for (uid, host_id), other in self.records_by_key.items():
+                is_other_row = uid == user_id and host_id != record["host_id"]
+                if is_other_row and other["agent_id"] == record["agent_id"] and other["state"] == "active":
+                    raise SyncActiveAgentConflictError(
+                        f"another ACTIVE record already exists for agent {record['agent_id']}"
+                    )
+        stored = dict(record)
+        stored["created_at"] = existing["created_at"] if existing is not None else self._next_timestamp()
+        stored["updated_at"] = self._next_timestamp()
+        self.records_by_key[key] = stored
+        return self._encode_secrets(stored)
+
+    def delete_record(self, user_id: str, host_id: str) -> None:
+        self.records_by_key.pop((user_id, host_id), None)
+
+    def scrub_secrets(self, user_id: str) -> int:
+        scrubbed = 0
+        for (uid, _), record in self.records_by_key.items():
+            if uid == user_id and record.get("encrypted_secrets") is not None:
+                record["encrypted_secrets"] = None
+                record["updated_at"] = self._next_timestamp()
+                scrubbed += 1
+        return scrubbed
+
+    def get_bundle(self, user_id: str) -> dict[str, Any] | None:
+        bundle = self.bundle_by_user_id.get(user_id)
+        if bundle is None:
+            return None
+        encoded = dict(bundle)
+        encoded["kdf_salt"] = base64.b64encode(bundle["kdf_salt"]).decode("ascii")
+        encoded["wrapped_dek"] = base64.b64encode(bundle["wrapped_dek"]).decode("ascii")
+        return encoded
+
+    def put_bundle(self, user_id: str, bundle: dict[str, Any]) -> None:
+        stored = dict(bundle)
+        stored["updated_at"] = self._next_timestamp()
+        self.bundle_by_user_id[user_id] = stored
+
+    def delete_bundle(self, user_id: str) -> None:
+        self.bundle_by_user_id.pop(user_id, None)
+
+
+def make_fake_sync_store() -> InMemorySyncStore:
+    """Construct an empty in-memory SyncStore for tests."""
+    return InMemorySyncStore()
+
+
+# ---------------------------------------------------------------------------
+# Plans + entitlements fakes
+# ---------------------------------------------------------------------------
+
+
+# Canonical plan values matching the committed deploy.toml [plans] blocks.
+EXPLORER_PLAN_VALUES: Final[dict[str, float]] = {
+    "max_remote_workspaces": 2,
+    "max_tunnels": 50,
+    "max_services_per_tunnel": 10,
+    "max_buckets": 5,
+    "max_total_bucket_bytes": 50 * 1024**3,
+    "monthly_llm_spend_usd": 0.0,
+    "max_active_synced_workspaces": 200,
+}
+ALLY_PLAN_VALUES: Final[dict[str, float]] = {
+    "max_remote_workspaces": 10,
+    "max_tunnels": 50,
+    "max_services_per_tunnel": 10,
+    "max_buckets": 20,
+    "max_total_bucket_bytes": 500 * 1024**3,
+    "monthly_llm_spend_usd": 1000.0,
+    "max_active_synced_workspaces": 200,
+}
+
+
+class InMemoryEntitlementsStore:
+    """In-memory EntitlementsStore for testing plans + per-account quota rows."""
+
+    def __init__(self) -> None:
+        # plan_name -> {plan_name, <quota columns>}
+        self.plans_by_name: dict[str, dict[str, Any]] = {}
+        # user_id -> {user_id, username_prefix, plan_name, <quota columns>}
+        self.rows_by_user_id: dict[str, dict[str, Any]] = {}
+
+    def seed_plan(self, plan_name: str, values: dict[str, float]) -> None:
+        self.plans_by_name[plan_name] = {"plan_name": plan_name, **values}
+
+    def get_plan(self, plan_name: str) -> dict[str, Any] | None:
+        row = self.plans_by_name.get(plan_name)
+        return dict(row) if row is not None else None
+
+    def list_plans(self) -> list[dict[str, Any]]:
+        return [dict(row) for _, row in sorted(self.plans_by_name.items())]
+
+    def get_entitlements(self, user_id: str) -> dict[str, Any] | None:
+        row = self.rows_by_user_id.get(user_id)
+        return dict(row) if row is not None else None
+
+    def get_entitlements_by_prefix(self, username_prefix: str) -> dict[str, Any] | None:
+        for row in self.rows_by_user_id.values():
+            if row["username_prefix"] == username_prefix:
+                return dict(row)
+        return None
+
+    def insert_entitlements_if_absent(self, row: dict[str, Any]) -> None:
+        self.rows_by_user_id.setdefault(row["user_id"], dict(row))
+
+    def update_entitlements(self, user_id: str, values: dict[str, Any]) -> None:
+        row = self.rows_by_user_id.get(user_id)
+        if row is not None:
+            row.update(values)
+
+
+def make_fake_entitlements_store() -> InMemoryEntitlementsStore:
+    """Construct an in-memory entitlements store pre-seeded with the two launch plans."""
+    store = InMemoryEntitlementsStore()
+    store.seed_plan("explorer", EXPLORER_PLAN_VALUES)
+    store.seed_plan("ally", ALLY_PLAN_VALUES)
+    return store
+
+
+# ---------------------------------------------------------------------------
+# R2 cleanup-grant fakes
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def noop_enforcement_lock(owner_user_id: str) -> Iterator[None]:
+    """Lock stand-in for direct run_r2_quota_sweep calls (no DB in unit tests)."""
+    del owner_user_id
+    yield
+
+
+class InMemoryGrantStore:
+    """In-memory GrantStore for testing cleanup grants.
+
+    Time is a bare minute counter (``now_minutes``): tests advance it to
+    expire grants, and timestamps in stored rows are plain integers rendered
+    to strings by the endpoints.
+    """
+
+    def __init__(self) -> None:
+        self.grants_by_id: dict[int, dict[str, Any]] = {}
+        self.now_minutes = 0
+        self._next_grant_id = 1
+
+    def create_grant(
+        self, user_id: str, username_prefix: str, baseline_bytes: int, expiry_minutes: int
+    ) -> dict[str, Any]:
+        grant = {
+            "grant_id": self._next_grant_id,
+            "user_id": user_id,
+            "username_prefix": username_prefix,
+            "baseline_bytes": baseline_bytes,
+            "granted_at": self.now_minutes,
+            "expires_at": self.now_minutes + expiry_minutes,
+            "settled_at": None,
+            "settled_bytes": None,
+            "is_decreased": None,
+        }
+        self.grants_by_id[self._next_grant_id] = grant
+        self._next_grant_id += 1
+        return dict(grant)
+
+    def get_active_grant(self, user_id: str) -> dict[str, Any] | None:
+        for grant in sorted(self.grants_by_id.values(), key=lambda g: -int(g["granted_at"])):
+            if grant["user_id"] == user_id and grant["settled_at"] is None and grant["expires_at"] > self.now_minutes:
+                return dict(grant)
+        return None
+
+    def list_unsettled_grants(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(grant)
+            for grant in sorted(self.grants_by_id.values(), key=lambda g: int(g["granted_at"]))
+            if grant["user_id"] == user_id and grant["settled_at"] is None
+        ]
+
+    def list_expired_unsettled_grants(self) -> list[dict[str, Any]]:
+        return [
+            dict(grant)
+            for grant in sorted(self.grants_by_id.values(), key=lambda g: int(g["granted_at"]))
+            if grant["settled_at"] is None and grant["expires_at"] <= self.now_minutes
+        ]
+
+    def settle_grant(self, grant_id: int, settled_bytes: int, is_decreased: bool) -> None:
+        grant = self.grants_by_id.get(grant_id)
+        if grant is not None and grant["settled_at"] is None:
+            grant["settled_at"] = self.now_minutes
+            grant["settled_bytes"] = settled_bytes
+            grant["is_decreased"] = is_decreased
+
+    def count_failed_grants_in_window(self, user_id: str, window_hours: int) -> int:
+        window_start = self.now_minutes - window_hours * 60
+        return sum(
+            1
+            for grant in self.grants_by_id.values()
+            if grant["user_id"] == user_id
+            and grant["settled_at"] is not None
+            and grant["is_decreased"] is False
+            and grant["granted_at"] > window_start
+        )
+
+
+def make_fake_grant_store() -> InMemoryGrantStore:
+    """Construct an empty in-memory GrantStore for tests."""
+    return InMemoryGrantStore()
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM admin-API fake
+# ---------------------------------------------------------------------------
+
+
+class _FakeLiteLLMResponse:
+    """Minimal httpx.Response stand-in exposing .json()."""
+
+    def __init__(self, payload: Any) -> None:
+        self._payload = payload
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class FakeLiteLLMBackend:
+    """In-memory replacement for the connector's ``_litellm_request`` helper.
+
+    Tracks internal users (for the user-level budget upserts) and key
+    operations; ``fail_user_writes`` lets tests simulate a LiteLLM outage
+    during a budget push (both /user/new and /user/update fail while set). Install by monkeypatching
+    ``app_mod._litellm_request`` to :meth:`request`.
+    """
+
+    def __init__(self) -> None:
+        self.users_by_id: dict[str, dict[str, Any]] = {}
+        self.calls: list[tuple[str, str]] = []
+        self.generated_keys: list[dict[str, Any]] = []
+        self.keys_by_id: dict[str, dict[str, Any]] = {}
+        self.fail_user_writes: bool = False
+        self._next_key_idx = 1
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> _FakeLiteLLMResponse:
+        self.calls.append((method, path))
+        body = json_body or {}
+        query = params or {}
+        if path == "/user/new":
+            if self.fail_user_writes:
+                raise HTTPException(status_code=500, detail="LiteLLM error: simulated outage")
+            user_id = str(body["user_id"])
+            if user_id in self.users_by_id:
+                raise HTTPException(status_code=400, detail="LiteLLM error: user already exists")
+            self.users_by_id[user_id] = {"user_id": user_id, "spend": 0.0, **body}
+            return _FakeLiteLLMResponse({"user_id": user_id})
+        if path == "/user/update":
+            if self.fail_user_writes:
+                raise HTTPException(status_code=500, detail="LiteLLM error: simulated outage")
+            user_id = str(body["user_id"])
+            self.users_by_id.setdefault(user_id, {"user_id": user_id, "spend": 0.0}).update(body)
+            return _FakeLiteLLMResponse({"user_id": user_id})
+        if path == "/user/info":
+            user = self.users_by_id.get(str(query.get("user_id", "")))
+            return _FakeLiteLLMResponse({"user_info": dict(user) if user else None})
+        if path == "/key/generate":
+            key = {"key": f"sk-fake-{self._next_key_idx}", "spend": 0.0, **body}
+            self._next_key_idx += 1
+            self.generated_keys.append(key)
+            self.keys_by_id[key["key"]] = key
+            return _FakeLiteLLMResponse({"key": key["key"]})
+        if path == "/key/list":
+            wanted_user = str(query.get("user_id", ""))
+            return _FakeLiteLLMResponse(
+                [
+                    {"token": k["key"], **{f: k.get(f) for f in ("key_alias", "user_id", "spend", "max_budget")}}
+                    for k in self.keys_by_id.values()
+                    if not wanted_user or k.get("user_id") == wanted_user
+                ]
+            )
+        if path == "/key/info":
+            key = self.keys_by_id.get(str(query.get("key", "")))
+            if key is None:
+                raise HTTPException(status_code=404, detail="LiteLLM error: key not found")
+            return _FakeLiteLLMResponse({"info": {"token": key["key"], **key}})
+        if path == "/key/update":
+            key = self.keys_by_id.get(str(body.get("key", "")))
+            if key is None:
+                raise HTTPException(status_code=404, detail="LiteLLM error: key not found")
+            key.update({name: value for name, value in body.items() if name != "key"})
+            return _FakeLiteLLMResponse({"status": "updated"})
+        if path == "/key/delete":
+            for key_id in body.get("keys", []):
+                self.keys_by_id.pop(str(key_id), None)
+            return _FakeLiteLLMResponse({"status": "deleted"})
+        raise HTTPException(status_code=404, detail=f"LiteLLM error: unhandled fake path {path}")
+
+
+def make_fake_litellm_backend() -> FakeLiteLLMBackend:
+    """Construct an empty in-memory LiteLLM admin-API fake."""
+    return FakeLiteLLMBackend()

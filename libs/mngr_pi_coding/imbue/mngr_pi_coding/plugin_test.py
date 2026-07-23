@@ -627,7 +627,7 @@ def test_provision_lifecycle_extension_writes_resource(pi_agent: PiCodingAgent, 
 
 def test_wait_for_ready_signal_non_creating_just_runs_start_action(pi_agent: PiCodingAgent) -> None:
     calls: list[int] = []
-    pi_agent.wait_for_ready_signal(is_creating=False, start_action=lambda: calls.append(1))
+    pi_agent.wait_for_ready_signal(is_readiness_awaited=False, start_action=lambda: calls.append(1))
     assert calls == [1]
 
 
@@ -638,7 +638,7 @@ def test_wait_for_ready_signal_returns_once_sentinel_present(pi_agent: PiCodingA
     sentinel.parent.mkdir(parents=True, exist_ok=True)
     sentinel.write_text("1")
     calls: list[int] = []
-    pi_agent.wait_for_ready_signal(is_creating=True, start_action=lambda: calls.append(1))
+    pi_agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=lambda: calls.append(1))
     assert calls == [1]
 
 

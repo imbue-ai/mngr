@@ -1,1 +1,0 @@
-Fixed the `test_start_multiple_agents` e2e tutorial test so it reliably passes: bumped its pytest timeout to 180s (creating three command agents plus a single multi-agent `mngr start` exceeds the default 10s), and removed the superfluous `@pytest.mark.rsync` mark (creating and starting clean-worktree command agents uses a git worktree and never invokes rsync).

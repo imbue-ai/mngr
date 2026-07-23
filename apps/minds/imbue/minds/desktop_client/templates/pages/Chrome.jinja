@@ -1,108 +1,33 @@
-{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces #}
+{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces, accent="", crumb_workspace_name="", crumb_agent_id="" #}
 {#
   Persistent chrome page (titlebar + sidebar + content iframe).
 
+  The titlebar + browser-mode switcher + accent / chrome.js wiring live in the
+  shared ChromeShell layout; this page fills ChromeShell's content slot with the
+  browser-mode content surface (the #content-frame iframe, backed by the white
+  mirror). In Electron mode the iframe and embedded browser-mode switcher are
+  hidden via JS; the content is a separate WebContentsView, and the switcher page
+  is loaded into the shared modal WebContentsView when opened.
+
   is_mac controls macOS-specific styling (traffic-light padding, hidden window
-  controls). In Electron mode, the iframe and embedded browser-mode sidebar are
-  hidden via JS; the content is a separate WebContentsView, and the sidebar
-  page is loaded into the shared modal WebContentsView when opened.
-
-  mngr_forward_origin is exposed to page-level JS via a data attribute on the
-  body so chrome.js can build workspace links that target the plugin's port
-  directly.
+  controls). mngr_forward_origin is exposed to page-level JS via a data attribute
+  on the body so chrome.js can build workspace links that target the plugin's
+  port directly.
 #}
-{% set _head %}
-<style>
-  /* Things that can't easily be expressed as Tailwind utilities. */
-  html, body { height: 100%; overflow: hidden; }
-  #minds-titlebar { -webkit-app-region: drag; }
-  #minds-titlebar button { -webkit-app-region: no-drag; }
-  /* When the inbox modal (or any modal hosted in the main process's
-     modalView) is open, drop the titlebar's app-region: drag. macOS
-     unions drag regions across all views in a window, so without this
-     the titlebar's drag swallows clicks intended for the modal's
-     interior in the y=0..TITLEBAR strip. The main process sends
-     `modal-state-changed` over IPC and chrome.js toggles the
-     ``modal-open`` body class accordingly. */
-  body.modal-open #minds-titlebar { -webkit-app-region: no-drag; }
-</style>
-{% endset %}
-{% set _body_attrs %}data-is-mac="{{ 'true' if is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
-{% set _scripts %}
-<script src="/_static/workspace_accent.js" defer></script>
-<script src="/_static/backup_health.js" defer></script>
-<script src="/_static/sidebar_workspace_row.js" defer></script>
-<script src="/_static/chrome.js" defer></script>
-{% endset %}
-{# Body background tracks --titlebar-bg so the iframe's rounded top corners
-   (browser mode) and the chromeView's extension strip (Electron mode) both
-   reveal accent color through the curve. Falls back to the neutral app
-   surface (surface-primary -- white in light, black in dark) when no
-   workspace is active. #}
-<Base title="Minds"
-      body_class="font-sans antialiased"
-      body_style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
-      head={{ _head }}
-      body_attrs={{ _body_attrs }}
-      scripts={{ _scripts }}>
-  {# Three flex sections sized 1 / 2 / 1 so the page title always sits in the
-     screen's exact center, regardless of how wide each side's controls are.
-     Centering holds only while the left and right ``flex-1`` sections stay
-     equal width, so macOS reserves the traffic-light strip with a fixed
-     spacer div -- NOT a left padding. With ``box-sizing: border-box`` a left
-     padding clamps the section's flex base size up to that padding, making the
-     left section 72px wider than the right and shoving the title ~36px
-     off-center to the right. A ``shrink-0`` spacer instead lives inside the
-     section, which ``min-w-0`` lets shrink to its 1/4 flex share, so both
-     sides keep equal width and the center stays truly centered. Non-mac draws
-     its own min/max/close at the right. #}
-  <div id="minds-titlebar"
-       style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
-       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1">
-    <div class="flex-1 flex items-center gap-0.5 min-w-0">
-      {% if is_mac %}<div class="w-[72px] shrink-0" aria-hidden="true"></div>{% endif %}
-      <TitlebarButton id="sidebar-toggle" aria-label="Main Menu" data-tooltip="Main Menu"><Icon16 name="menu" /></TitlebarButton>
-      <TitlebarButton id="home-btn" aria-label="Home" data-tooltip="Home"><Icon16 name="home" /></TitlebarButton>
-      <TitlebarButton id="back-btn" aria-label="Back" data-tooltip="Back"><Icon16 name="chevron-left" /></TitlebarButton>
-      <TitlebarButton id="forward-btn" aria-label="Forward" data-tooltip="Forward"><Icon16 name="chevron-right" /></TitlebarButton>
-    </div>
-    <div class="flex-[2] flex items-center justify-center px-2 min-w-0">
-      <span id="page-title" class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
-    </div>
-    <div class="flex-1 flex items-center justify-end min-w-0">
-      <TitlebarButton id="help-toggle" aria-label="Ran into a bug?" data-tooltip="Ran into a bug?"><Icon16 name="bug" /></TitlebarButton>
-      <TitlebarButton id="requests-toggle" aria-label="Requests" data-tooltip="Requests" extra="gap-[3px]">
-        <Icon16 name="inbox" />
-        <Badge :count="0" id="requests-badge" hidden />
-      </TitlebarButton>
-      <div class="flex {% if is_mac %}hidden{% endif %}">
-        <TitlebarButton variant="control" id="min-btn" aria-label="Minimize" data-tooltip="Minimize"><Icon12 name="minimize" /></TitlebarButton>
-        <TitlebarButton variant="control" id="max-btn" aria-label="Maximize" data-tooltip="Maximize"><Icon12 name="maximize" /></TitlebarButton>
-        <TitlebarButton variant="control" tone="danger" id="close-btn" aria-label="Close" data-tooltip="Close"><Icon12 name="close" /></TitlebarButton>
-      </div>
-    </div>
-  </div>
-
-  {# Browser-mode floating sidebar: full-screen transparent backdrop
-     (#sidebar-backdrop) with a floating dark menu (#sidebar-menu)
-     positioned at toggle time by chrome.js using the sidebar-toggle
-     button's getBoundingClientRect + a caller-chosen offset. Clicks on
-     the backdrop and Escape close the menu (handled by chrome.js). In
-     Electron this whole block is hidden via JS; the sidebar page
-     (Sidebar.jinja) is loaded into the shared modal WebContentsView and
-     uses the same #sidebar-backdrop / #sidebar-menu shape with the
-     /_static/sidebar.js renderer. Both modes share the position model:
-     menu.top-left = trigger.bottom-left + offset, with a uniform 4px panel
-     pad (p-1) and 2px between entries (gap-0.5); each row adds its own
-     px-2 for the hover highlight's inset. #}
-  <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
-    <div id="sidebar-menu"
-         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden">
-      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
-      <SidebarBottom />
-    </div>
-  </div>
-
+{# Body background tracks --titlebar-bg (ChromeShell's agent-surface default) so
+   the iframe's rounded top corners (browser mode) and the chromeView's extension
+   strip (Electron mode) both reveal accent color through the curve. Falls back to
+   the neutral app surface (surface-primary -- white in light, black in dark) when
+   no workspace is active. #}
+<ChromeShell title="Minds"
+             :is_mac="is_mac"
+             :is_authenticated="is_authenticated"
+             :mngr_forward_origin="mngr_forward_origin"
+             :is_agent_content_surface="True"
+             :accent="accent"
+             :crumb_workspace_name="crumb_workspace_name"
+             :crumb_agent_id="crumb_agent_id"
+             :active_tab="'workspace' if crumb_agent_id else ''">
   {# White "mirror" sized exactly like the Electron contentView (left:4
      / top:38 / right:4 / bottom:4 / radius:12 -- matches CONTENT_INSET
      and CONTENT_CORNER_RADIUS in electron/main.js). Sits behind the
@@ -118,8 +43,14 @@
        class="fixed left-[4px] top-[38px] rounded-[12px] bg-surface-primary pointer-events-none"
        style="width: calc(100% - 8px); height: calc(100% - 42px);"></div>
 
+  {# No eager src: chrome.js arms it (data-content-src) in BROWSER mode only.
+     In Electron the iframe is hidden and must never load -- an eager src="/"
+     kicked off a hidden Landing load on every wrapper mount, whose subframe
+     load activity flipped the chrome webContents into a "loading" state that
+     demoted subsequent hub navigations from in-place swaps to full loads
+     (the titlebar flash), and wasted a Landing render + SSE stream. #}
   <iframe id="content-frame"
-          src="/"
+          data-content-src="/"
           class="fixed left-[4px] top-[38px] border-0 rounded-[12px] bg-surface-primary"
           style="width: calc(100% - 8px); height: calc(100% - 42px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;"></iframe>
-</Base>
+</ChromeShell>

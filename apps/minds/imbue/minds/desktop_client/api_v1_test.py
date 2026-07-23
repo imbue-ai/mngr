@@ -21,6 +21,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import CreationErrorKind
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -39,6 +40,7 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -55,6 +57,7 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TEST_KEY = "test-minds-api-key"
@@ -109,7 +112,7 @@ class _RecordingAgentCreator(AgentCreator):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -515,6 +518,44 @@ def test_create_operation_status_includes_status_text(
     assert body["kind"] == "create"
     assert body["status_text"] == status_text_for(str(AgentCreationStatus.INITIALIZING), launch_mode=LaunchMode.DOCKER)
     assert body["status_text"]
+    # An in-flight (non-failed) creation carries no failure classification.
+    assert body["error_kind"] is None
+
+
+def test_create_operation_status_carries_error_kind_for_classified_failures(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # A failed creation whose error was classified (e.g. a private GitHub repo
+    # the local git credentials cannot see) reports the machine-readable kind
+    # alongside the error message; the creating page gates its static sign-in
+    # guidance on it.
+    creation_id = CreationId()
+    creator = _StatusReportingAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        fixed_info=AgentCreationInfo(
+            creation_id=creation_id,
+            status=AgentCreationStatus.FAILED,
+            launch_mode=LaunchMode.DOCKER,
+            error="git clone failed:\nfatal: could not read Username for 'https://github.com'",
+            error_kind=CreationErrorKind.GITHUB_AUTH_REQUIRED,
+        ),
+    )
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["status"] == "FAILED"
+    assert body["error"]
+    assert body["error_kind"] == "GITHUB_AUTH_REQUIRED"
 
 
 def test_create_workspace_full_surface_returns_202_and_threads_fields(
@@ -879,6 +920,10 @@ class FakeSharingCli(FakeImbueCloudCli):
     service_auth: dict[str, Any] = Field(default_factory=dict)
     removed_services: list[str] = Field(default_factory=list)
     added_services: list[str] = Field(default_factory=list)
+    enabled_policies: list[dict[str, Any]] = Field(default_factory=list)
+    enable_sharing_error_stderr: str | None = Field(
+        default=None, description="When set, enable_sharing raises an ImbueCloudCliError carrying this stderr"
+    )
 
     def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
         return self.tunnel
@@ -887,12 +932,27 @@ class FakeSharingCli(FakeImbueCloudCli):
         assert self.tunnel is not None
         return self.tunnel
 
-    def add_service(self, *, account: str, tunnel_name: str, service_name: str, service_url: str) -> dict[str, Any]:
+    def enable_sharing(
+        self,
+        *,
+        account: str,
+        agent_id: str,
+        service_name: str,
+        service_url: str,
+        policy: Any,
+    ) -> tuple[TunnelInfo, dict[str, Any]]:
+        if self.enable_sharing_error_stderr is not None:
+            error = ImbueCloudCliError("tunnels enable-sharing failed (exit 1); see the desktop client logs")
+            error.stderr = self.enable_sharing_error_stderr
+            raise error
+        assert self.tunnel is not None
         self.added_services.append(service_name)
-        return {}
-
-    def set_service_auth(self, account: str, tunnel_name: str, service_name: str, policy: Any) -> None:
-        return None
+        self.enabled_policies.append(dict(policy))
+        hostname = next(
+            (e.get("hostname") for e in self.service_entries if e.get("service_name") == service_name),
+            "share.example.com",
+        )
+        return self.tunnel, {"service_name": service_name, "service_url": service_url, "hostname": hostname}
 
     def list_services(self, account: str, tunnel_name: str) -> list[dict[str, Any]]:
         return list(self.service_entries)
@@ -913,7 +973,14 @@ def _associated_session_store(
     """Build a session store with one signed-in account that owns ``agent_id``."""
     cli.add_account(user_id=user_id, email=email)
     store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
-    store.associate_workspace(user_id, str(agent_id))
+    store.associate_created_workspace(
+        user_id=user_id,
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
     return store
 
 
@@ -1334,7 +1401,42 @@ def test_sharing_enable_returns_json(tmp_path: Path) -> None:
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["enabled"] is True
+    # The enable response carries the share URL so the editor can start the
+    # readiness poll without a follow-up status fetch.
+    assert body["url"] == "https://share.example.com"
     assert "web" in cli.added_services
+    assert cli.enabled_policies == [{"emails": ["viewer@example.com"]}]
+
+
+def test_sharing_enable_translates_transient_cloudflare_access_error(tmp_path: Path) -> None:
+    # A Cloudflare Access-API 5xx that escapes the connector's retries should
+    # read as "temporary problem, try again", not a raw exit-code error.
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=()),
+    )
+    cli.enable_sharing_error_stderr = (
+        '{"error": "Connector error 500: {\\"detail\\":{\\"errors\\":[{\\"code\\":10001,'
+        '\\"message\\":\\"access.api.error.internal_server_error\\"}]}}"}'
+    )
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        service_logs={str(agent_id): make_service_log("web", "http://127.0.0.1:9000")},
+    )
+
+    response = client.put(
+        f"/api/v1/workspaces/{agent_id}/sharing/web",
+        headers=_auth_header(),
+        json={"emails": ["viewer@example.com"]},
+    )
+
+    assert response.status_code == 502
+    body = json.loads(response.data)
+    assert "temporary problem" in body["error"]
+    assert "try again" in body["error"]
+    assert "exit 1" not in body["error"]
 
 
 def test_sharing_enable_rejects_empty_emails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -1,11 +1,17 @@
-// Electron sidebar page: loaded into the shared modal WebContentsView when
-// the user opens the sidebar. Renders the floating menu (workspace list +
-// "New workspace" + "Settings" + "Manage account(s)"). Clicks + context menus
-// go through window.minds IPC. In browser mode the chrome.js embedded sidebar
-// handles the same job inline instead.
+// Electron workspace-switcher page: loaded into the shared modal
+// WebContentsView when the user opens the switcher from the titlebar
+// breadcrumb. Renders the floating menu (workspace list + "New workspace").
+// Clicks + context menus go through window.minds IPC. In browser mode the
+// chrome.js embedded menu handles the same job inline.
 (function () {
   var isElectron = !!window.minds;
+  // The workspace whose CONTENT is displayed (narrow: null on its settings /
+  // sharing screens). ``currentScopeAgentId`` is the wider accent-source
+  // workspace -- the one whose scope is active, including those screens -- and
+  // is what the current-row highlight keys off so opening a mind's settings
+  // still marks that mind as current.
   var currentWorkspaceId = null;
+  var currentScopeAgentId = null;
   var lastWorkspaces = [];
 
   // ``mngr forward`` plugin's bare origin (e.g. ``http://localhost:8421``).
@@ -13,8 +19,8 @@
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
   // The floating sidebar auto-closes after the user makes a selection
-  // (workspace row, settings gear, "New workspace", "Manage account(s)" /
-  // "Log in", and "Open in new window"). The close happens entirely on the
+  // (workspace row, "New workspace", "Manage account(s)" / "Log in", and
+  // "Open in new window"). The close happens entirely on the
   // main process side: `navigate-content` and `open-workspace-in-new-window`
   // in apps/minds/electron/main.js both call closeModal(bundle) before
   // returning, so the renderer must NOT also send a `toggle-sidebar` IPC
@@ -33,10 +39,6 @@
     if (isElectron && window.minds.openWorkspaceInNewWindow) {
       window.minds.openWorkspaceInNewWindow(agentId);
     }
-  }
-
-  function openWorkspaceSettings(agentId) {
-    navigate('/workspace/' + agentId + '/settings');
   }
 
   function renderWorkspaces(workspaces) {
@@ -68,7 +70,7 @@
         // context-menu are handled by the delegated document listeners below.
         container.appendChild(
           window.mindsSidebarRow.buildRow(w, {
-            isCurrent: w.id === currentWorkspaceId,
+            isCurrent: w.id === (currentScopeAgentId || currentWorkspaceId),
             withOpenNew: true,
           }),
         );
@@ -82,20 +84,11 @@
     var agentId = row.getAttribute('data-agent-id');
     if (!agentId) return;
     if (target.closest('[data-open-new]')) { openInNewWindow(agentId); return; }
-    if (target.closest('[data-open-settings]')) { openWorkspaceSettings(agentId); return; }
     selectWorkspace(agentId);
   }
   document.addEventListener('click', function (e) {
     if (e.target.closest('#sidebar-new-workspace')) {
       navigate('/create');
-      return;
-    }
-    if (e.target.closest('#sidebar-settings')) {
-      navigate('/settings');
-      return;
-    }
-    if (e.target.closest('#sidebar-account')) {
-      navigate(signedIn ? '/accounts' : '/auth/login');
       return;
     }
     handleRowClick(e.target);
@@ -141,36 +134,13 @@
     });
   }
 
-  // -- Auth status ----------------------------------------------------------
-  //
-  // The /_chrome/events SSE stream pushes workspace updates but not auth
-  // transitions, so we poll /auth/api/status on load (and whenever the
-  // workspace content URL changes, since a sign-in / sign-out happens in
-  // that view). Mirrors chrome.js's behavior for the browser-mode chrome.
-  var signedIn = false;
-  function updateAccountUI(data) {
-    var label = document.getElementById('sidebar-account-label');
-    var btn = document.getElementById('sidebar-account');
-    if (!label || !btn) return;
-    if (data && data.signedIn) {
-      signedIn = true;
-      label.textContent = 'Manage account(s)';
-      btn.title = data.email || 'Manage accounts';
-    } else {
-      signedIn = false;
-      label.textContent = 'Log in';
-      btn.title = 'Sign in to your account';
-    }
-  }
-  function refreshAuthStatus() {
-    fetch('/auth/api/status')
-      .then(function (r) { return r.json(); })
-      .then(updateAccountUI)
-      .catch(function () {});
-  }
-  refreshAuthStatus();
-  if (isElectron && window.minds.onContentURLChange) {
-    window.minds.onContentURLChange(refreshAuthStatus);
+  // The accent-source workspace (the active scope, including a workspace's
+  // settings / sharing screens) drives which row is marked current.
+  if (isElectron && window.minds.onAccentChanged) {
+    window.minds.onAccentChanged(function (agentId) {
+      currentScopeAgentId = agentId || null;
+      renderWorkspaces(lastWorkspaces);
+    });
   }
 
   function handleChromeEvent(data) {

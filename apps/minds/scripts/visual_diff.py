@@ -64,6 +64,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
+from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -76,6 +77,8 @@ from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragme
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_settings_modal_page
+from imbue.minds.desktop_client.templates import render_settings_page as render_app_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
@@ -249,10 +252,9 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_create_form(launch_mode=LaunchMode.LIMA, ai_provider=AIProvider.SUBSCRIPTION),
         ),
         Scenario(
-            name="create_with_master_password",
+            name="create_with_imbue_cloud_backups",
             builder=lambda: render_create_form(
                 backup_provider=BackupProvider.IMBUE_CLOUD,
-                has_saved_backup_password=False,
                 accounts=(account_a,),
                 default_account_id="user-aaaaaa",
             ),
@@ -372,6 +374,34 @@ def _build_scenarios() -> list[Scenario]:
             name="auth_error",
             builder=lambda: render_auth_error_page(message="This code has already been used."),
         ),
+        # -- App-level settings (page + centered modal) -------------------
+        Scenario(
+            name="settings_page",
+            builder=lambda: render_app_settings_page(
+                report_unexpected_errors=True,
+                include_error_logs=False,
+                permissions_unavailable=False,
+                has_saved_backup_password=True,
+            ),
+        ),
+        Scenario(
+            name="settings_modal",
+            builder=lambda: render_settings_modal_page(
+                report_unexpected_errors=False,
+                include_error_logs=False,
+                permissions_unavailable=False,
+                has_saved_backup_password=False,
+            ),
+        ),
+        Scenario(
+            name="accounts_modal",
+            builder=lambda: render_accounts_modal_page(
+                accounts=(account_a, account_b),
+                default_account_id=str(account_a.user_id),
+                enabled_by_user_id={str(account_a.user_id): True, str(account_b.user_id): False},
+            ),
+        ),
+        # -- Inbox --------------------------------------------------------
         Scenario(
             name="inbox_unavailable_fragment",
             builder=lambda: render_inbox_unavailable_fragment(message="This request was already granted."),

@@ -89,6 +89,14 @@ def test_looks_like_transient_auth_failure_matches_known_signals() -> None:
     assert restic_cli._looks_like_transient_auth_failure("repository master key already initialized") is False
 
 
+def test_looks_like_lock_write_failure_matches_signal() -> None:
+    assert restic_cli._looks_like_lock_write_failure("unable to create lock in backend: permission denied") is True
+    # Matching is case-insensitive.
+    assert restic_cli._looks_like_lock_write_failure("Unable to create LOCK in backend") is True
+    assert restic_cli._looks_like_lock_write_failure("Fatal: open repository failed: Unauthorized") is False
+    assert restic_cli._looks_like_lock_write_failure("") is False
+
+
 def test_raise_restic_failure_raises_transient_for_auth_errors() -> None:
     with pytest.raises(restic_cli.ResticTransientAuthError):
         restic_cli._raise_restic_failure("restic init", 1, "Fatal: create repository failed: Unauthorized")
@@ -148,16 +156,12 @@ def test_ensure_restic_available_does_not_raise() -> None:
 
 
 @pytest.mark.timeout(60)
-def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
+def test_init_and_status_against_local_repo(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
-    master = "master-passphrase"
     workspace_password = "workspace-random-key"
 
-    # Init with the master password, then add the random workspace key.
-    restic_cli.init_repo(repository=repo, backend_env={}, password=master)
-    restic_cli.add_password_key(
-        repository=repo, backend_env={}, existing_password=master, new_password=workspace_password
-    )
+    # Init with the workspace's own random password -- the repo's single key.
+    restic_cli.init_repo(repository=repo, backend_env={}, password=workspace_password)
 
     now = datetime.now(timezone.utc)
     # Fresh repo: no snapshots, no in-progress lock -- queried with the
@@ -290,3 +294,55 @@ def test_restore_snapshot_restores_files(tmp_path: Path) -> None:
     restored = list(restore_dir.rglob("data.txt"))
     assert restored, list(restore_dir.rglob("*"))
     assert restored[0].read_text() == "hello export"
+
+
+@pytest.mark.timeout(60)
+def test_restore_snapshot_retries_with_no_lock_when_lock_write_fails(tmp_path: Path) -> None:
+    """A restore that cannot write the repository lock (read-only key) succeeds via the --no-lock retry."""
+    repo_dir = tmp_path / "repo"
+    repo = str(repo_dir)
+    password = "no-lock-test-pw"
+    restic_cli.init_repo(repository=repo, backend_env={}, password=password)
+    source = tmp_path / "data.txt"
+    source.write_text("hello no-lock")
+    restic_backup_a_file(repo, password, source)
+
+    # A read-only locks directory reproduces the downgraded-key failure mode:
+    # the first restore fails with "unable to create lock" and only the
+    # --no-lock retry can complete.
+    locks_dir = repo_dir / "locks"
+    locks_dir.chmod(0o555)
+    restore_dir = tmp_path / "restore"
+    try:
+        restic_cli.restore_snapshot(repository=repo, backend_env={}, password=password, target_dir=restore_dir)
+    finally:
+        locks_dir.chmod(0o755)
+
+    restored = list(restore_dir.rglob("data.txt"))
+    assert restored, list(restore_dir.rglob("*"))
+    assert restored[0].read_text() == "hello no-lock"
+
+
+@pytest.mark.timeout(120)
+def test_forget_snapshots_prunes_old_snapshot_against_local_repo(tmp_path: Path) -> None:
+    repo = str(tmp_path / "repo")
+    password = "forget-test-pw"
+    restic_cli.init_repo(repository=repo, backend_env={}, password=password)
+    source = tmp_path / "data.txt"
+    source.write_text("first version")
+    restic_backup_a_file(repo, password, source)
+    source.write_text("second version")
+    restic_backup_a_file(repo, password, source)
+    snapshots = restic_cli.list_snapshots(repository=repo, backend_env={}, password=password)
+    assert len(snapshots) == 2
+
+    # An empty id list is a no-op (no restic invocation at all).
+    restic_cli.forget_snapshots(repository=repo, backend_env={}, password=password, snapshot_ids=[], is_pruning=True)
+    assert len(restic_cli.list_snapshots(repository=repo, backend_env={}, password=password)) == 2
+
+    forgotten_id, surviving_id = snapshots[0].snapshot_id, snapshots[1].snapshot_id
+    restic_cli.forget_snapshots(
+        repository=repo, backend_env={}, password=password, snapshot_ids=[forgotten_id], is_pruning=True
+    )
+    remaining = restic_cli.list_snapshots(repository=repo, backend_env={}, password=password)
+    assert [snapshot.snapshot_id for snapshot in remaining] == [surviving_id]

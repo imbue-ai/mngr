@@ -2124,9 +2124,11 @@ name = "imbue-common"
 version = "0.1.20"
 source = { editable = "libs/imbue_common" }
 dependencies = [
+    { name = "argon2-cffi" },
     { name = "boto3" },
     { name = "click" },
     { name = "cowsay-python" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "pydantic" },
@@ -2142,9 +2144,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "boto3", specifier = ">=1.34" },
     { name = "click", specifier = ">=8.0" },
     { name = "cowsay-python", specifier = ">=1.0.2" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
     { name = "loguru", specifier = ">=0.7" },
@@ -2509,6 +2513,7 @@ dependencies = [
     { name = "click-option-group" },
     { name = "imbue-mngr" },
     { name = "tenacity" },
+    { name = "urwid-readline" },
 ]
 
 [package.metadata]
@@ -2517,6 +2522,7 @@ requires-dist = [
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "tenacity", specifier = ">=8.0" },
+    { name = "urwid-readline", specifier = ">=0.14" },
 ]
 
 [[package]]
@@ -4898,6 +4904,7 @@ dependencies = [
     { name = "psycopg2-binary" },
     { name = "pydantic" },
     { name = "supertokens-python" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
@@ -4912,6 +4919,7 @@ requires-dist = [
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "supertokens-python", specifier = ">=0.31.3" },
+    { name = "tenacity", specifier = ">=8.0" },
 ]
 
 [[package]]
@@ -5820,6 +5828,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/1c/09/afbd44c7c57b1124d
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e4/f8/5fcf2602662dbd6fab8f60f24efb363fb9ec0e9fa37d7a6ae6c8785d6e14/urwid-4.0.0-py3-none-any.whl", hash = "sha256:f6f0381d5656b8b24ee960969927021d858c1f7320771cf8f3ec5b94a139b9b7", size = 293823, upload-time = "2026-03-30T12:39:00.293Z" },
 ]
+
+[[package]]
+name = "urwid-readline"
+version = "0.15.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "urwid" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ad/70/be318554495555eba7d8ff6e489f6f74ddb225b24086ba4af62a82e723fd/urwid_readline-0.15.1.tar.gz", hash = "sha256:9301444b86d58f7d26388506b704f142cefd193888488b4070d3a0fdfcfc0f84", size = 9007, upload-time = "2024-09-22T17:51:55.144Z" }
 
 [[package]]
 name = "uvicorn"

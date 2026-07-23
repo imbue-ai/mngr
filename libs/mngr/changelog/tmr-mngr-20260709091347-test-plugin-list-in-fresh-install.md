@@ -1,1 +1,0 @@
-Fixed the fresh-install test fixture (`isolated_mngr_venv`) to install the `overlay` workspace package. mngr declares `overlay` as a dependency, but the fixture installs workspace packages editable (they are filtered out of the exported pinned deps), and the list omitted it, so the isolated venv failed to import `imbue.overlay` and every `mngr` invocation crashed.

@@ -28,6 +28,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.help_modal_requests import HelpModalRequestBroker
@@ -39,6 +40,7 @@ from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
@@ -63,7 +65,13 @@ class DesktopClientState(MutableModel):
     auth_store: AuthStoreInterface = Field(frozen=True, description="Cookie/session auth store")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Agent/host discovery resolver")
     http_client: httpx.Client | None = Field(
-        default=None, description="Shared sync HTTP client (created by the runtime; injected in tests)"
+        default=None,
+        description=(
+            "HTTP client for the share-URL readiness probe (its only consumer), created by the "
+            "runtime with TLS verification disabled -- Python's ssl cannot wildcard-match "
+            "underscore hostnames like system_interface--..., so a verifying probe never goes "
+            "ready on links browsers accept. Injected in tests."
+        ),
     )
     agent_creator: AgentCreator | None = Field(
         default=None, frozen=True, description="In-flight agent creation manager"
@@ -94,8 +102,21 @@ class DesktopClientState(MutableModel):
     session_store: MultiAccountSessionStore | None = Field(
         default=None, frozen=True, description="Multi-account session store"
     )
+    sync_scheduler: WorkspaceSyncScheduler | None = Field(
+        default=None, frozen=True, description="Background workspace-record sync loop (kicked on auth changes)"
+    )
     request_inbox: RequestInbox | None = Field(
         default=None, description="Immutable pending-request inbox (reassigned)"
+    )
+    is_account_setup_skipped: bool = Field(
+        default=False,
+        description=(
+            "True once the user chose 'Continue without an account' on the welcome "
+            "splash this run; until then (while signed out with no workspaces) the "
+            "home route bounces back to the welcome splash. Reset per app run, "
+            "mirroring the cold-start routing that lands a functionally-empty app "
+            "on the welcome screen."
+        ),
     )
     request_event_handlers: tuple[RequestEventHandler, ...] = Field(
         default=(), frozen=True, description="Registered request-event grant/deny handlers"
@@ -141,6 +162,11 @@ class DesktopClientState(MutableModel):
     workspace_operation_registry: WorkspaceOperationRegistryInterface = Field(
         default_factory=InMemoryWorkspaceOperationRegistry,
         description="In-memory registry tracking in-process workspace operations (restart) + their logs",
+    )
+    backup_trim_manager: BackupTrimManager = Field(
+        default_factory=BackupTrimManager,
+        frozen=True,
+        description="Runs the over-quota backup trim flow on detached threads and tracks per-account progress",
     )
     ssh_tunnel_manager: SSHTunnelManager = Field(
         default_factory=SSHTunnelManager,

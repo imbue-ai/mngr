@@ -221,9 +221,7 @@
   })();
 </script>
 {% endset %}
-<Base title="Ran into a bug?"
-      body_class="bg-transparent text-primary font-sans antialiased"
-      scripts={{ _scripts }}>
+<OverlaySurface title="Ran into a bug?" scripts={{ _scripts }}>
   <div id="help-backdrop"
        class="fixed inset-0 bg-surface-overlay flex items-center justify-center p-4"
        onclick="onHelpBackdropClick(event)">
@@ -352,4 +350,4 @@
       </div>
     </div>
   </div>
-</Base>
+</OverlaySurface>

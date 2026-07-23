@@ -1,1 +1,0 @@
-Bump the release-sandbox Dockerfile's pinned Claude Code version from 2.1.160 to 2.1.207, which supports the Claude Fable 5 model. Must land together with the matching `[agent_types.claude].version` bump in default-workspace-template.

@@ -142,6 +142,19 @@ class LockNotHeldError(HostError):
     """Raised when attempting to use a lock that is not held."""
 
 
+class LockLostError(HostError):
+    """Raised when a held cooperative host lock was lost and could not be safely recovered.
+
+    A remote cooperative lock is bound to SSH connection liveness. If the
+    connection drops mid-critical-section the flock silently releases; on
+    reconnect we re-acquire and verify that no other actor acquired the lock in
+    the interval. When another actor did intervene (or the lock cannot be
+    re-established), we raise this instead of silently continuing unlocked.
+    As a MngrError subclass it is already isolated per-host by callers that
+    catch MngrError (e.g. the mngr_mapreduce launch loop).
+    """
+
+
 class AgentError(MngrError):
     """Base class for agent-related errors.
 
@@ -188,6 +201,16 @@ class SendMessageError(AgentError):
         self.agent_name = agent_name
         self.reason = reason
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
+
+
+class MessageDeliveredButBlockedError(SendMessageError):
+    """The message was delivered/accepted, but a blocking dialog remained afterward and could not be resolved.
+
+    Distinct from a plain SendMessageError (which means the message was NOT delivered): here the input
+    landed (e.g. a slash command was accepted), but the agent is now stuck on an interactive TUI dialog
+    that mngr could not clear. Callers map this to a dedicated exit code so "delivered but now blocked"
+    is distinguishable from "message failed to send".
+    """
 
 
 class DuplicateAgentNameError(AgentError):

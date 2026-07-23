@@ -1,1 +1,0 @@
-Tests: drop the superfluous `@pytest.mark.rsync` from the `test_create_with_env` e2e tutorial test. A default local `mngr create` on a git repo uses the `git-worktree` transfer mode, which never shells out to `rsync`, so the mark tripped the resource guard's "marked but never invoked" check and failed the test even though its `--env` behavior verified correctly.

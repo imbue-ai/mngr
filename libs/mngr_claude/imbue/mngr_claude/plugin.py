@@ -7,6 +7,7 @@ import importlib.resources
 import json
 import os
 import random
+import re
 import shlex
 from abc import ABC
 from abc import abstractmethod
@@ -38,11 +39,13 @@ from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.tui_utils import build_changed_token_probe
 from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
+from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
@@ -60,6 +63,7 @@ from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigError
+from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
@@ -320,6 +324,30 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=False,
         description="When True, adds `--disallowed-tools AskUserQuestion` to the agent invocation to "
         "prevent it from ever asking questions (which can cause the agent to get blocked)",
+    )
+    auto_accept_prompt_depth: Annotated[int, Field(ge=0)] = Field(
+        default=0,
+        description="After a message is delivered, if it opened a blocking interactive selector (e.g. the "
+        "/model confirmation), auto-accept the highlighted default by pressing Enter up to this many times "
+        "(clearing chained dialogs). 0 (the default) disables auto-accept: a blocking selector instead makes "
+        "the send report that the message was delivered but the agent is now blocked. Each auto-accept is "
+        "logged and recorded as an agent event.",
+    )
+    auto_accept_preflight_prompt_depth: Annotated[int, Field(ge=0)] = Field(
+        default=0,
+        description="If a blocking dialog is already present when a send starts (or when the agent is coming "
+        "up), auto-accept its highlighted default by pressing Enter up to this many times before giving up. "
+        "0 (the default) disables it: a pre-existing blocking dialog aborts the send. Independent of "
+        "auto_accept_prompt_depth (which governs dialogs opened by the just-sent message) and of "
+        "auto_dismiss_dialogs. Permission prompts are never auto-accepted by this knob.",
+    )
+    post_submit_dialog_observe_seconds: Annotated[float, Field(gt=0)] = Field(
+        default=POST_SUBMIT_DIALOG_OBSERVE_SECONDS,
+        description="How long (seconds) to keep observing the pane after a message is delivered before "
+        "concluding that no blocking selector appeared -- a selector (e.g. the /model confirmation) can "
+        "render a beat after the input is accepted. Also used as the per-accept poll window while clearing "
+        "chained dialogs and while auto-accepting a pre-existing dialog during startup. Raise it on slow or "
+        "high-latency hosts where dialogs take longer to render.",
     )
     settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
@@ -1410,6 +1438,63 @@ def _has_api_credentials_available(
     return False
 
 
+# The input-prompt glyph Claude Code renders at the start of its prompt row. A line that
+# BEGINS with it (column 0, no leading whitespace) is the input box; the same glyph indented
+# (`  ❯ 1. ...`) marks the highlighted option of a multiple-choice selector instead.
+_INPUT_PROMPT_GLYPH: Final[str] = "❯"
+# A line consisting of a horizontal rule. Claude renders one just above a selector's body. Two
+# rule glyphs occur in practice: confirmation dialogs (e.g. "Switch model?") use box-drawing
+# dashes (─, U+2500), while the model picker (bare /model) uses an upper-eighth block (▔, U+2594).
+# Match either so both selector styles are recognized.
+_SELECTOR_RULE_RE: Final[re.Pattern[str]] = re.compile(r"^\s*[─▔]{4,}")
+# The highlighted (default) option of a selector: indented, arrow, number, dot -- e.g. "  ❯ 1.".
+# The required leading whitespace is what distinguishes it from the column-0 input prompt.
+_SELECTOR_HIGHLIGHTED_OPTION_RE: Final[re.Pattern[str]] = re.compile(r"^[ \t]+❯[ \t]*\d+\.")
+# Any numbered option of a selector (highlighted or not): indented number, dot -- e.g. "    2.".
+_SELECTOR_ANY_OPTION_RE: Final[re.Pattern[str]] = re.compile(r"^[ \t]+(?:❯[ \t]*)?\d+\.")
+# A line that begins with the input-prompt glyph at column 0 (the input box, not a selector).
+_INPUT_PROMPT_LINE_RE: Final[re.Pattern[str]] = re.compile(rf"^{_INPUT_PROMPT_GLYPH}", re.MULTILINE)
+
+
+@pure
+def has_input_prompt_line(pane_content: str) -> bool:
+    """Whether the pane shows Claude Code's input prompt (a line beginning with the glyph at column 0)."""
+    return _INPUT_PROMPT_LINE_RE.search(pane_content) is not None
+
+
+@pure
+def extract_blocking_selector_block(pane_content: str) -> str | None:
+    """Return the text block of a blocking numbered selector if one is open, else None.
+
+    Recognizes Claude Code's interactive multiple-choice dialog: a horizontal-rule line
+    (``────`` for confirmation dialogs, ``▔▔▔▔`` for the model picker) followed below by an
+    indented, highlighted ``❯``-arrow numbered option (``  ❯ 1. ...``). The leading indentation
+    on the option distinguishes a real selector from the input prompt row (glyph at column 0),
+    and requiring a preceding rule line guards against ordinary output that merely contains an
+    arrow. Returns the block from the rule line through the last option line, for logging /
+    diagnostics.
+    """
+    lines = pane_content.splitlines()
+    highlighted_option_idx: int | None = None
+    for idx, line in enumerate(lines):
+        if _SELECTOR_HIGHLIGHTED_OPTION_RE.match(line):
+            highlighted_option_idx = idx
+    if highlighted_option_idx is None:
+        return None
+    rule_idx: int | None = None
+    for idx in range(highlighted_option_idx - 1, -1, -1):
+        if _SELECTOR_RULE_RE.match(lines[idx]):
+            rule_idx = idx
+            break
+    if rule_idx is None:
+        return None
+    last_option_idx = highlighted_option_idx
+    for idx in range(highlighted_option_idx + 1, len(lines)):
+        if _SELECTOR_ANY_OPTION_RE.match(lines[idx]):
+            last_option_idx = idx
+    return "\n".join(lines[rule_idx : last_option_idx + 1]).strip()
+
+
 class DialogIndicator(FrozenModel, ABC):
     """Base class for dialog indicators that can block agent input."""
 
@@ -1503,6 +1588,24 @@ class CostThresholdDialogIndicator(DialogIndicator):
     def matches(self, content: str) -> bool:
         """Check for both the spending text and the docs URL in the pane content."""
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
+
+
+class NumberedSelectorDialogIndicator(DialogIndicator):
+    """Detects a generic Claude Code interactive numbered selector (── rule + indented ``❯ N.`` option).
+
+    Unlike the fixed-caption indicators, this matches by structure, so it catches new/unknown
+    confirmation dialogs (e.g. the ``/model`` switch prompt) that block input.
+    """
+
+    def get_match_string(self) -> str:
+        # Structural match only; matches() is overridden, so this is informational.
+        return _INPUT_PROMPT_GLYPH
+
+    def get_description(self) -> str:
+        return "interactive selection dialog"
+
+    def matches(self, content: str) -> bool:
+        return extract_blocking_selector_block(content) is not None
 
 
 class ClaudeCoreAgent(
@@ -2192,12 +2295,12 @@ class ClaudeAgent(
     capabilities.
     """
 
-    # The input-prompt glyph rendered by Claude Code's prompt box. Unlike the
-    # "Claude Code" welcome banner, it appears on BOTH a fresh start and a
-    # resume (the welcome banner is absent when resuming a saved session) and
-    # stays visible while a turn is processing, making it a universal readiness
-    # signal for every send path.
-    TUI_READY_INDICATOR = "❯"
+    # Readiness = a line that BEGINS with the input-prompt glyph at column 0. Unlike the
+    # "Claude Code" welcome banner, the prompt appears on BOTH a fresh start and a resume and
+    # stays visible while a turn is processing, making it a universal readiness signal. Anchored
+    # to column 0 (a re.Pattern matched via re.search) so an open selector's indented option line
+    # (`  ❯ 1. ...`) is never mistaken for the input prompt.
+    TUI_READY_INDICATOR: ClassVar[re.Pattern[str]] = _INPUT_PROMPT_LINE_RE
 
     # Path expression for mngr's always-provisioned raw mirror of Claude's
     # session JSONL, read by the submission-evidence probes. The embedded
@@ -2228,6 +2331,7 @@ class ClaudeAgent(
         ThemeSelectionIndicator(),
         EffortCalloutIndicator(),
         CostThresholdDialogIndicator(),
+        NumberedSelectorDialogIndicator(),
     )
 
     def _build_native_transcript_path_expression(self) -> str:
@@ -2342,18 +2446,19 @@ class ClaudeAgent(
                 assert_never(unreachable)
 
     def _detect_preexisting_input_text(self, pane_content: str) -> str | None:
-        """Detect leftover text on Claude Code's input row (the ``❯`` prompt line).
+        """Detect leftover text on Claude Code's input row (the column-0 ``❯`` prompt line).
 
-        Scans from the bottom of the pane for the last line carrying the input
-        prompt glyph and reports any text after it -- typically a previously
-        stranded, never-submitted message that the new paste would append to.
-        The dim placeholder Claude renders in an empty input box (``Try "..."``)
-        is excluded so routine sends don't warn.
+        Scans from the bottom of the pane for the last line that BEGINS with the input
+        prompt glyph and reports any text after it -- typically a previously stranded,
+        never-submitted message that the new paste would append to. Matching the raw
+        (un-stripped) line is deliberate: it anchors to the column-0 input row, so an open
+        selector's indented option line (``  ❯ 1. ...``) is not misread as leftover input.
+        The dim placeholder Claude renders in an empty input box (``Try "..."``) is
+        excluded so routine sends don't warn.
         """
         for line in reversed(pane_content.splitlines()):
-            stripped_line = line.strip()
-            if stripped_line.startswith(self.TUI_READY_INDICATOR):
-                leftover_text = stripped_line[len(self.TUI_READY_INDICATOR) :].strip()
+            if line.startswith(_INPUT_PROMPT_GLYPH):
+                leftover_text = line[len(_INPUT_PROMPT_GLYPH) :].strip()
                 if leftover_text == "" or leftover_text.startswith('Try "'):
                     return None
                 return leftover_text
@@ -2374,25 +2479,164 @@ class ClaudeAgent(
         return SnapshotDeltaReader()
 
     def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Check for blocking dialogs before sending a message.
+        """Check for (and optionally clear) blocking dialogs before sending a message.
 
-        Checks the permissions_waiting file (set by the PermissionRequest hook)
-        and captures the tmux pane for known dialog indicators.
-        Raises DialogDetectedError if any are found.
+        Permission prompts (the ``permissions_waiting`` marker) are a distinct class that is
+        never auto-accepted -- always a hard raise. Any other blocking dialog already present (a
+        known-caption dialog or a generic numbered selector) is auto-accepted up to
+        ``auto_accept_preflight_prompt_depth`` times; if one remains, the send is aborted with
+        DialogDetectedError.
         """
         if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
             raise DialogDetectedError(str(self.name), "permission dialog")
 
+        remaining_dialog = self._accept_dialogs_up_to_depth(
+            tmux_target,
+            depth=int(self.agent_config.auto_accept_preflight_prompt_depth),
+            detect_dialog=self._detect_preflight_dialog,
+        )
+        if remaining_dialog is not None:
+            raise DialogDetectedError(str(self.name), remaining_dialog)
+
+    def _detect_preflight_dialog(self, pane_content: str) -> str | None:
+        """Return a description of a blocking dialog present in the pane, or None.
+
+        Matches both the fixed-caption indicators and the generic numbered selector; for the
+        generic selector the extracted block is returned (richer than a bare label).
+        """
+        for indicator in self._DIALOG_INDICATORS:
+            if indicator.matches(pane_content):
+                if isinstance(indicator, NumberedSelectorDialogIndicator):
+                    block = extract_blocking_selector_block(pane_content)
+                    if block is not None:
+                        return block
+                return indicator.get_description()
+        return None
+
+    def _dialog_observe_window_seconds(self) -> float:
+        """The per-agent window (seconds) used to observe the pane for blocking dialogs.
+
+        Governs the post-submit selector-appearance wait, the per-accept re-check window while
+        clearing chained dialogs, and the post-clear startup grace. Defaults to
+        POST_SUBMIT_DIALOG_OBSERVE_SECONDS but is user-configurable per agent.
+        """
+        return float(self.agent_config.post_submit_dialog_observe_seconds)
+
+    def _run_post_submit_dialog_check(self, tmux_target: TmuxWindowTarget) -> None:
+        """Detect a selector opened by the just-delivered message; auto-accept it or raise.
+
+        The message has already been confirmed delivered. A selector (e.g. the ``/model`` switch
+        prompt) may render a beat later, so first observe the pane briefly for either a selector
+        or the input prompt to appear, then auto-accept the highlighted default up to
+        ``auto_accept_prompt_depth`` times. If a selector remains, raise
+        MessageDeliveredButBlockedError so the caller learns the agent is blocked even though the
+        message landed. Seeing the column-0 input prompt with no selector means the agent is
+        clear; seeing neither (an unexpected state) is still success but is warned about.
+        """
+        # Observe the pane for at least the full window so a selector that renders a beat after
+        # delivery is caught. Early-exit only when a selector actually appears (the input prompt
+        # alone is not a reliable "no dialog" signal -- the just-submitted command echo keeps a
+        # column-0 glyph on screen while the selector is still drawing).
+        poll_until(
+            lambda: self._blocking_selector_present(tmux_target),
+            timeout=self._dialog_observe_window_seconds(),
+        )
+        content = self._capture_pane_content(tmux_target)
+        if (
+            content is not None
+            and extract_blocking_selector_block(content) is None
+            and not has_input_prompt_line(content)
+        ):
+            logger.warning(
+                "Post-submit dialog check for agent {} saw neither a blocking selector nor the input "
+                "prompt; treating the send as delivered, but the agent may be busy or in an unexpected state",
+                self.name,
+            )
+
+        depth = int(self.agent_config.auto_accept_prompt_depth)
+        remaining_selector = self._accept_dialogs_up_to_depth(
+            tmux_target,
+            depth=depth,
+            detect_dialog=extract_blocking_selector_block,
+        )
+        if remaining_selector is not None:
+            raise MessageDeliveredButBlockedError(
+                str(self.name),
+                f"the message was delivered, but a blocking dialog remained after auto-accepting up to "
+                f"{depth} time(s) and could not be resolved:\n{remaining_selector}\n\n"
+                f"Raise agent_types.claude.auto_accept_prompt_depth to auto-accept it, or run "
+                f"'mngr connect {self.name}' to resolve it.",
+            )
+
+    def _blocking_selector_present(self, tmux_target: TmuxWindowTarget) -> bool:
+        """Whether the pane currently shows a blocking numbered selector."""
         content = self._capture_pane_content(tmux_target)
         if content is None:
-            return
+            return False
+        return extract_blocking_selector_block(content) is not None
 
-        for indicator in self._DIALOG_INDICATORS:
-            if indicator.matches(content):
-                raise DialogDetectedError(str(self.name), indicator.get_description())
+    def _accept_dialogs_up_to_depth(
+        self,
+        tmux_target: TmuxWindowTarget,
+        depth: int,
+        detect_dialog: Callable[[str], str | None],
+    ) -> str | None:
+        """Accept the highlighted default of a blocking dialog up to ``depth`` times.
+
+        ``detect_dialog`` maps captured pane content to a dialog description (or None if none is
+        present). While a dialog is present and budget remains, send Enter (accepting the
+        highlighted default), log at info, record an agent event, and wait for the pane to change
+        before re-checking. Returns the description of a dialog that STILL blocks after the budget
+        is exhausted, or None if it was cleared / none was present. Bounded by ``depth``: at most
+        ``depth`` accepts plus one final detection pass, so no unbounded loop is needed.
+        """
+        for accepts_done in range(depth + 1):
+            content = self._capture_pane_content(tmux_target)
+            if content is None:
+                # Cannot read the pane; do not block the caller on an unreadable state.
+                return None
+            description = detect_dialog(content)
+            if description is None:
+                return None
+            if accepts_done >= depth:
+                return description
+            logger.info(
+                "Auto-accepting blocking dialog default for agent {} ({} accept(s) left):\n{}",
+                self.name,
+                depth - accepts_done,
+                description,
+            )
+            self.record_message_delivery_event("auto_accepted_dialog", description)
+            self._press_enter(tmux_target)
+            previous_description = description
+            # Wait for the dialog to close or change before re-checking, so a still-rendering
+            # dialog is not double-counted against the depth budget.
+            poll_until(
+                lambda prev=previous_description: self._dialog_description_differs(tmux_target, prev, detect_dialog),
+                timeout=self._dialog_observe_window_seconds(),
+            )
+        # Unreachable: the accepts_done == depth pass always returns above. Return None defensively
+        # (meaning "no dialog blocks") to keep the function total for the type checker.
+        return None
+
+    def _dialog_description_differs(
+        self,
+        tmux_target: TmuxWindowTarget,
+        previous_description: str,
+        detect_dialog: Callable[[str], str | None],
+    ) -> bool:
+        """Whether the detected dialog description changed (closed, or a different dialog)."""
+        content = self._capture_pane_content(tmux_target)
+        if content is None:
+            return False
+        return detect_dialog(content) != previous_description
+
+    def _press_enter(self, tmux_target: TmuxWindowTarget) -> None:
+        """Send a single Enter keystroke to the agent's pane (accepts a selector's highlighted default)."""
+        send_enter_keystroke(self, tmux_target)
 
     def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+        self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
         """Wait for the agent to become ready, executing start_action then polling.
 
@@ -2408,14 +2652,39 @@ class ClaudeAgent(
         session_started_path = self._get_agent_dir() / "session_started"
 
         with log_span("Waiting for session_started file (timeout={}s)", timeout):
-            # Run the start action (e.g., start the agent)
+            # Run the start action, but always skip the base class's generic TUI-ready wait
+            # (is_readiness_awaited=False): Claude's authoritative readiness signal is the
+            # session_started marker polled below, a stronger signal than the input-prompt glyph.
+            # Leaving the generic wait on would, for a freshly created agent, block for the full
+            # timeout if a startup dialog suppressed the column-0 prompt -- never reaching the
+            # dialog auto-accept fallback further down.
             with log_span("Calling start_action..."):
-                super().wait_for_ready_signal(is_creating, start_action, timeout)
+                super().wait_for_ready_signal(is_readiness_awaited=False, start_action=start_action, timeout=timeout)
 
             # Poll for the session_started file (created by SessionStart hook)
             if poll_until(
                 lambda: self._check_file_exists(session_started_path),
                 timeout=timeout,
+                poll_interval=0.05,
+            ):
+                return
+
+            # Readiness never signaled. An unexpected startup dialog may be blocking it. Auto-accept
+            # it up to the preflight depth (independent of auto_dismiss_dialogs, which pre-dismisses
+            # known dialogs via config flags); if one remains, surface it as a blocking dialog rather
+            # than a generic start failure.
+            remaining_dialog = self._accept_dialogs_up_to_depth(
+                self.tmux_target,
+                depth=int(self.agent_config.auto_accept_preflight_prompt_depth),
+                detect_dialog=self._detect_preflight_dialog,
+            )
+            if remaining_dialog is not None:
+                raise DialogDetectedError(str(self.name), remaining_dialog)
+
+            # A blocking dialog (if any) was cleared; give the session a short grace to signal.
+            if poll_until(
+                lambda: self._check_file_exists(session_started_path),
+                timeout=self._dialog_observe_window_seconds(),
                 poll_interval=0.05,
             ):
                 return

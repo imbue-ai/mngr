@@ -52,7 +52,7 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
 # Version of the upstream ``latchkey`` CLI to install on the VPS.
-LATCHKEY_VERSION: Final[str] = "2.20.2"
+LATCHKEY_VERSION: Final[str] = "2.21.0"
 
 # Port inside the container on which the VPS-resident gateway is reachable (the
 # VPS->container reverse tunnel binds it). Deliberately distinct from
@@ -71,6 +71,14 @@ OUTER_PORT: Final[int] = 1989
 # package, so it needs a reasonably recent Node runtime; the Debian-shipped
 # nodejs is too old, hence the NodeSource setup script.
 _NODE_MAJOR_VERSION: Final[str] = "24"
+
+# Oldest pre-existing Node.js major version accepted on the VPS without
+# reinstalling from NodeSource. A VPS image frequently ships a distro node
+# that *exists* but is too old to run the pinned latchkey (Debian bookworm
+# ships 18.x, and modern npm releases refuse node < 20.17), so the install
+# gate must be a version check, not a presence check. Anything below this
+# major is replaced with the NodeSource ``_NODE_MAJOR_VERSION`` install.
+_MINIMUM_NODE_MAJOR_VERSION: Final[int] = 20
 
 # Generous wall-clock ceiling: ``apt-get update`` + a NodeSource install +
 # ``npm install -g`` on a cold VPS routinely runs into the low minutes.
@@ -215,11 +223,15 @@ class RemoteGatewayError(LatchkeyError, RuntimeError):
     """Raised when provisioning the latchkey CLI on a remote VPS fails."""
 
 
-def _build_ensure_installed_script(latchkey_version: str, node_major_version: str) -> str:
+def _build_ensure_installed_script(
+    latchkey_version: str, node_major_version: str, minimum_node_major_version: int
+) -> str:
     """Build an idempotent POSIX-sh script that installs curl, Node.js, supervisor, and latchkey.
 
-    Each component is gated behind a presence check so a re-run on an
-    already-provisioned VPS does no install work. The script avoids
+    Each component is gated behind a presence check -- except Node.js, which is
+    gated behind a *version* check: a preinstalled distro node (e.g. Debian
+    bookworm's 18.x) exists but cannot run the pinned latchkey/npm, so mere
+    presence must not skip the NodeSource install. The script avoids
     ``pipefail`` (unsupported by Debian's default ``/bin/sh``, dash) by
     downloading the NodeSource setup script to a file instead of piping it,
     so ``set -e`` still aborts on a failed download. supervisord is installed
@@ -228,6 +240,12 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
     round-trip.
     """
     nodesource_url = f"https://deb.nodesource.com/setup_{node_major_version}.x"
+    # POSIX-sh probe for the installed node's major version; a missing node or
+    # unparseable output normalizes to 0, which always triggers the install.
+    # The pipeline tolerates a missing node under ``set -e`` because the exit
+    # status is the last command's (sed/cut), not node's.
+    node_major_probe = "_node_major=\"$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)\""
+    node_major_normalize = "case \"$_node_major\" in ''|*[!0-9]*) _node_major=0;; esac"
     return "\n".join(
         (
             "set -e",
@@ -238,12 +256,29 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
             "  apt-get update",
             "  apt-get install -y curl",
             "fi",
-            # Node.js + npm via NodeSource (Debian's own nodejs is too old).
-            "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then",
+            # Node.js + npm via NodeSource. Version-gated (not presence-gated):
+            # a too-old preinstalled node must be replaced, or the npm install
+            # below crashes (modern npm refuses node < 20.17).
+            node_major_probe,
+            node_major_normalize,
+            f'if [ "$_node_major" -lt {minimum_node_major_version} ] || ! command -v npm >/dev/null 2>&1; then',
             f"  curl -fsSL {nodesource_url} -o /tmp/nodesource_setup.sh",
             "  bash /tmp/nodesource_setup.sh",
             "  apt-get install -y nodejs",
             "  rm -f /tmp/nodesource_setup.sh",
+            "fi",
+            # Re-probe after the (possible) install: a stale node earlier on
+            # PATH (e.g. a manually installed /usr/local/bin/node) can still
+            # shadow the freshly installed /usr/bin/node. Fail with an
+            # actionable message now instead of a cryptic npm crash below.
+            node_major_probe,
+            node_major_normalize,
+            f'if [ "$_node_major" -lt {minimum_node_major_version} ]; then',
+            '  echo "node at $(command -v node || echo missing) reports version'
+            " $(node --version 2>/dev/null || echo none) after the NodeSource install;"
+            f" latchkey needs Node.js >= {minimum_node_major_version}."
+            ' Remove or upgrade the shadowing installation." >&2',
+            "  exit 1",
             "fi",
             # supervisor: supervises the gateway + tunnel and restarts either on
             # crash.
@@ -273,7 +308,7 @@ def _ensure_latchkey_installed(host: OuterHostInterface) -> None:
     latchkey, when the installed version differs from :data:`LATCHKEY_VERSION`).
     Raises :class:`RemoteGatewayError` if the install fails.
     """
-    script = _build_ensure_installed_script(LATCHKEY_VERSION, _NODE_MAJOR_VERSION)
+    script = _build_ensure_installed_script(LATCHKEY_VERSION, _NODE_MAJOR_VERSION, _MINIMUM_NODE_MAJOR_VERSION)
     host_name = host.get_name()
     with log_span("Ensuring latchkey {} is installed on VPS {}", LATCHKEY_VERSION, host_name):
         started_at = time.monotonic()

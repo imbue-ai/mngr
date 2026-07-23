@@ -13,6 +13,7 @@ Authentication semantics:
 
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from loguru import logger
@@ -23,6 +24,7 @@ from pydantic import SecretStr
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr_imbue_cloud.data_types import AccountInfo
 from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeaseResult
@@ -35,21 +37,41 @@ from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
 from imbue.mngr_imbue_cloud.data_types import ServiceInfo
+from imbue.mngr_imbue_cloud.data_types import StorageCleanupGrant
+from imbue.mngr_imbue_cloud.data_types import StorageRecheckResult
+from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
+from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.data_types import TunnelInfo
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
+
+# Tunnel-name convention mirrored from the connector
+# (``apps/remote_service_connector/.../app.py``): every tunnel is named
+# ``<username>--<agent-prefix>``, where ``<agent-prefix>`` is the first 16 hex
+# chars of the agent UUID (``"agent-"`` prefix stripped). Used only by the
+# ``find_tunnel_for_agent`` back-compat fallback, which enumerates tunnels and
+# matches on this trailing slug when the connector lacks the O(1) by-agent
+# endpoint. Keep in lockstep with the connector's ``TUNNEL_NAME_SEP`` /
+# ``_AGENT_ID_PREFIX_LENGTH``.
+_TUNNEL_NAME_SEP = "--"
+_AGENT_ID_PREFIX_LENGTH = 16
 
 # Transient-transport retry policy for connector calls. The connector is a
 # Modal app that scales to zero, so a call hitting a cold/scaling instance can
@@ -98,12 +120,51 @@ class ImbueCloudConnectorClient(MutableModel):
     def _bearer(self, access_token: SecretStr) -> dict[str, str]:
         return {"Authorization": f"Bearer {access_token.get_secret_value()}"}
 
+    def _raise_if_quota_exceeded(self, response: httpx.Response) -> None:
+        """Raise the typed quota error when a 403 carries the connector's structured detail."""
+        if response.status_code != 403:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "quota_exceeded":
+            raise ImbueCloudQuotaExceededError(
+                str(detail.get("message", "Quota exceeded")),
+                entitlement=str(detail.get("entitlement", "")),
+                limit=float(detail.get("limit", 0)),
+                current=float(detail.get("current", 0)),
+            )
+
+    def _raise_if_grant_budget_exhausted(self, response: httpx.Response) -> None:
+        """Raise the typed grant-budget error when a 403 carries the connector's structured detail."""
+        if response.status_code != 403:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "cleanup_grant_budget_exhausted":
+            raise ImbueCloudCleanupGrantBudgetError(
+                str(detail.get("message", "Cleanup-grant budget exhausted")),
+                limit=int(detail.get("limit", 0)),
+                current=int(detail.get("current", 0)),
+                window_hours=int(detail.get("window_hours", 0)),
+            )
+
     def _check(self, response: httpx.Response, exc_cls: type[Exception]) -> dict[str, Any]:
         """Raise ``exc_cls`` on non-2xx, otherwise return parsed JSON.
 
-        Special-cases 401/403 -> ImbueCloudAuthError so callers can treat them
-        uniformly across all endpoints.
+        Special-cases the structured quota rejection ->
+        ImbueCloudQuotaExceededError (and the grant-budget rejection ->
+        ImbueCloudCleanupGrantBudgetError), then 401/403 ->
+        ImbueCloudAuthError so callers can treat them uniformly across all
+        endpoints.
         """
+        self._raise_if_quota_exceeded(response)
+        self._raise_if_grant_budget_exhausted(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
         if response.status_code in (200, 201, 204):
@@ -509,6 +570,50 @@ class ImbueCloudConnectorClient(MutableModel):
             return []
         return [_parse_tunnel_info(entry) for entry in body if isinstance(entry, dict)]
 
+    def find_tunnel_for_agent(self, access_token: SecretStr, agent_id: str) -> TunnelInfo | None:
+        """Resolve the caller's tunnel for ``agent_id``, or ``None`` if there is none.
+
+        Fast path: ``GET /tunnels/by-agent/{agent_id}`` resolves the exact
+        tunnel through Cloudflare's server-side name filter (2 Cloudflare
+        calls) rather than enumerating every tunnel and fetching each one's
+        config. On that endpoint, HTTP 200 with ``null`` means "no tunnel for
+        this agent yet".
+
+        Back-compat: a connector deployed before this endpoint existed answers
+        the unknown route with a generic 404. Clients update independently of
+        (and often ahead of) the connector, so a 404 here is treated as "this
+        connector is too old" and we transparently fall back to the O(n)
+        ``GET /tunnels`` enumeration, matching on the ``<username>--<agent>``
+        name convention. This keeps sharing working during the rollout window;
+        once the connector is redeployed, every call takes the fast path.
+        """
+        response = self._send(
+            "GET",
+            self._url(f"/tunnels/by-agent/{agent_id}"),
+            exc_cls=ImbueCloudTunnelError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            return self._find_tunnel_for_agent_via_list(access_token, agent_id)
+        body = self._check(response, ImbueCloudTunnelError)
+        if not body:
+            return None
+        return _parse_tunnel_info(body)
+
+    def _find_tunnel_for_agent_via_list(self, access_token: SecretStr, agent_id: str) -> TunnelInfo | None:
+        """O(n) fallback for connectors without the ``by-agent`` endpoint.
+
+        Enumerates the caller's tunnels and matches on the trailing
+        ``--<agent-prefix>`` slug the connector uses for tunnel names.
+        """
+        short_agent = agent_id.removeprefix("agent-")[:_AGENT_ID_PREFIX_LENGTH]
+        suffix = f"{_TUNNEL_NAME_SEP}{short_agent}"
+        for tunnel in self.list_tunnels(access_token):
+            if tunnel.tunnel_name.endswith(suffix):
+                return tunnel
+        return None
+
     def delete_tunnel(self, access_token: SecretStr, tunnel_name: str) -> None:
         response = self._send(
             "DELETE",
@@ -549,6 +654,49 @@ class ImbueCloudConnectorClient(MutableModel):
         if not isinstance(body, list):
             return []
         return [_parse_service_info(entry) for entry in body if isinstance(entry, dict)]
+
+    def enable_sharing(
+        self,
+        access_token: SecretStr,
+        agent_id: str,
+        service_name: str,
+        service_url: str,
+        policy: AuthPolicy,
+    ) -> tuple[TunnelInfo, ServiceInfo]:
+        """Enable (or update) sharing for one service in a single connector call.
+
+        Wraps ``POST /sharing/enable``, which ensures the tunnel exists
+        (idempotent), adds the service, and applies ``policy`` directly to
+        its Access Application -- replacing the previous create-tunnel +
+        add-service + set-service-auth three-call sequence. The returned
+        tunnel carries the cloudflared token, so no follow-up reads are
+        needed.
+        """
+        response = self._send(
+            "POST",
+            self._url("/sharing/enable"),
+            exc_cls=ImbueCloudTunnelError,
+            headers=self._bearer(access_token),
+            json={
+                "agent_id": agent_id,
+                "service_name": service_name,
+                "service_url": service_url,
+                "auth_policy": _auth_policy_to_connector_body(policy),
+            },
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudTunnelError)
+        tunnel_raw = body.get("tunnel")
+        service_raw = body.get("service")
+        if not isinstance(tunnel_raw, dict) or not isinstance(service_raw, dict):
+            # Describe only the body's shape, never its contents: a well-formed
+            # "tunnel" half carries the cloudflared token, which must not leak
+            # into an error message that ends up in CLI stderr and client logs.
+            raise ImbueCloudTunnelError(
+                f"Malformed /sharing/enable response: expected 'tunnel' and 'service' objects, "
+                f"got dict with keys {sorted(body)}"
+            )
+        return _parse_tunnel_info(tunnel_raw), _parse_service_info(service_raw)
 
     def remove_service(self, access_token: SecretStr, tunnel_name: str, service_name: str) -> None:
         response = self._send(
@@ -621,6 +769,7 @@ class ImbueCloudConnectorClient(MutableModel):
 
     def _check_bucket(self, response: httpx.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""
+        self._raise_if_quota_exceeded(response)
         if response.status_code in (200, 201, 204):
             if not response.content:
                 return {}
@@ -680,20 +829,11 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._check_bucket(response)
 
-    def create_bucket_key(
-        self,
-        access_token: SecretStr,
-        name: str,
-        alias: str | None,
-        access: str,
-    ) -> R2KeyMaterial:
-        body: dict[str, Any] = {"access": access}
-        if alias is not None:
-            body["alias"] = alias
+    def roll_bucket_key(self, access_token: SecretStr, name: str) -> R2KeyMaterial:
+        """Return fresh credentials for a bucket's single key (same Access Key ID, new secret)."""
         response = httpx.post(
-            self._url(f"/buckets/{name}/keys"),
+            self._url(f"/buckets/{name}/roll-key"),
             headers=self._bearer(access_token),
-            json=body,
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         return R2KeyMaterial.model_validate(self._check_bucket(response))
@@ -711,13 +851,264 @@ class ImbueCloudConnectorClient(MutableModel):
             return []
         return [R2KeyInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
 
-    def destroy_bucket_key(self, access_token: SecretStr, access_key_id: str) -> None:
-        response = httpx.delete(
-            self._url(f"/bucket-keys/{access_key_id}"),
+    # ------------------------------------------------------------------
+    # Account (plan + entitlements + usage)
+    # ------------------------------------------------------------------
+
+    def get_account(self, access_token: SecretStr) -> AccountInfo:
+        """Fetch the account's plan, entitlement values, and live usage."""
+        response = self._send(
+            "GET",
+            self._url("/account"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            # Live usage fans out to Cloudflare + LiteLLM server-side; allow
+            # the same generous budget as the other multi-upstream calls.
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return AccountInfo.model_validate(self._check(response, ImbueCloudAccountError))
+
+    def set_account_plan(self, access_token: SecretStr, plan: str) -> dict[str, Any]:
+        """Switch the account's plan; returns ``{plan_name, entitlements}``.
+
+        Idempotent server-side (re-selecting the current plan is a no-op), so
+        transport-level retries are safe.
+        """
+        response = self._send(
+            "POST",
+            self._url("/account/plan"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            json={"plan": plan},
+            timeout=self.timeout_seconds,
+        )
+        # A 403 here is a refusal with a stated reason (e.g. the ally plan
+        # requires a paid-listed email), not an authentication failure, so
+        # surface the server's plain-string detail directly instead of letting
+        # ``_check`` wrap it as "Unauthenticated". Structured quota 403s still
+        # get the typed quota error first.
+        if response.status_code == 403:
+            self._raise_if_quota_exceeded(response)
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = None
+            if isinstance(detail, str) and detail:
+                raise ImbueCloudAccountError(detail)
+        return self._check(response, ImbueCloudAccountError)
+
+    def create_storage_cleanup_grant(self, access_token: SecretStr) -> StorageCleanupGrant:
+        """Request a temporary readwrite restore of storage-downgraded keys for client-side cleanup.
+
+        Idempotent server-side (an active grant is returned as-is; an account
+        with nothing downgraded gets a 'not_needed' no-op), so transport-level
+        retries are safe. Raises :class:`ImbueCloudCleanupGrantBudgetError`
+        when the account's failed-grant budget is exhausted.
+        """
+        response = self._send(
+            "POST",
+            self._url("/account/storage-cleanup-grant"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            # The grant measures live usage server-side (one Cloudflare call
+            # per bucket), like the other multi-upstream calls.
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return StorageCleanupGrant.model_validate(self._check(response, ImbueCloudAccountError))
+
+    def recheck_storage(self, access_token: SecretStr) -> StorageRecheckResult:
+        """Re-measure live storage usage and apply enforcement immediately (settling any grant).
+
+        Idempotent server-side (re-measuring converges to the same state), so
+        transport-level retries are safe.
+        """
+        response = self._send(
+            "POST",
+            self._url("/account/storage-recheck"),
+            exc_cls=ImbueCloudAccountError,
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        self._check_bucket(response)
+        return StorageRecheckResult.model_validate(self._check(response, ImbueCloudAccountError))
+
+    # ------------------------------------------------------------------
+    # Account admin (email-addressed, MINDS_PAID_ADMIN_KEY authenticated)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _admin_account_path(email: str) -> str:
+        """The /admin/accounts path segment for an email, percent-encoded.
+
+        Email local parts may legally contain URL-reserved characters like
+        ``?`` or ``#``; encoding (keeping ``@`` literal) stops them from
+        splitting the URL. FastAPI decodes the path param server-side.
+        """
+        return f"/admin/accounts/{quote(email, safe='@')}"
+
+    def admin_get_account(self, admin_api_key: SecretStr, email: str) -> AccountInfo:
+        response = self._send(
+            "GET",
+            self._url(self._admin_account_path(email)),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return AccountInfo.model_validate(self._check(response, ImbueCloudAccountError))
+
+    def admin_set_account_plan(self, admin_api_key: SecretStr, email: str, plan: str) -> dict[str, Any]:
+        # Always resets to the plan's defaults, so a retried request lands in
+        # the same state (safe to retry on transport errors).
+        response = self._send(
+            "POST",
+            self._url(f"{self._admin_account_path(email)}/plan"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            json={"plan": plan},
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    def admin_set_account_quota(
+        self, admin_api_key: SecretStr, email: str, entitlement: str, value: float
+    ) -> dict[str, Any]:
+        # A plain overwrite of one entitlement value (safe to retry on
+        # transport errors).
+        response = self._send(
+            "POST",
+            self._url(f"{self._admin_account_path(email)}/quota"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            json={"entitlement": entitlement, "value": value},
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    def admin_run_r2_sweep(self, admin_api_key: SecretStr, email: str | None) -> dict[str, Any]:
+        """Run one R2 storage-quota sweep pass on demand; ``email`` scopes it to one account.
+
+        The sweep converges to the same state however often it runs, so
+        transport-level retries are safe.
+        """
+        params = {"email": email} if email else None
+        response = self._send(
+            "POST",
+            self._url("/admin/sweep/r2"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            params=params,
+            # A full pass fans out to Cloudflare per over-quota account.
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    # ------------------------------------------------------------------
+    # Workspace sync (records + account key bundle)
+    # ------------------------------------------------------------------
+
+    def list_sync_records(self, access_token: SecretStr) -> list[SyncWorkspaceRecord]:
+        response = self._send(
+            "GET",
+            self._url("/sync/records"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudSyncError)
+        records = body.get("records", [])
+        return [SyncWorkspaceRecord.model_validate(entry) for entry in records if isinstance(entry, dict)]
+
+    def put_sync_record(self, access_token: SecretStr, record: SyncWorkspaceRecord) -> SyncWorkspaceRecord:
+        """Push one record (CAS on revision); returns the stored row after the write.
+
+        Raises :class:`ImbueCloudSyncConflictError` on a 409, carrying the
+        server's current row for a revision conflict so the caller can merge
+        and retry.
+        """
+        response = self._send(
+            "PUT",
+            self._url(f"/sync/records/{record.host_id}"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            json=record.model_dump(mode="json"),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 409:
+            detail = _detail_from_response(response)
+            stored = self._parse_conflict_stored_record(response)
+            raise ImbueCloudSyncConflictError(detail, stored)
+        body = self._check(response, ImbueCloudSyncError)
+        return SyncWorkspaceRecord.model_validate(body)
+
+    def _parse_conflict_stored_record(self, response: httpx.Response) -> dict[str, object] | None:
+        """Extract the ``detail.stored`` row from a 409 record-push response, if present."""
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            logger.warning("Could not parse the 409 conflict body as JSON: {}", exc)
+            return None
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if not isinstance(detail, dict):
+            return None
+        stored = detail.get("stored")
+        return stored if isinstance(stored, dict) else None
+
+    def delete_sync_record(self, access_token: SecretStr, host_id: str) -> None:
+        """Remove one workspace record outright (disassociation; idempotent)."""
+        response = self._send(
+            "DELETE",
+            self._url(f"/sync/records/{host_id}"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._check(response, ImbueCloudSyncError)
+
+    def scrub_sync_secrets(self, access_token: SecretStr) -> int:
+        """Strip encrypted_secrets from all the account's records; returns how many were scrubbed."""
+        response = self._send(
+            "POST",
+            self._url("/sync/scrub-secrets"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudSyncError)
+        return int(body.get("scrubbed", 0))
+
+    def get_key_bundle(self, access_token: SecretStr) -> SyncKeyBundle | None:
+        """Fetch the account's password-wrapped key bundle, or None when none is stored."""
+        response = self._send(
+            "GET",
+            self._url("/sync/bundle"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            return None
+        body = self._check(response, ImbueCloudSyncError)
+        return SyncKeyBundle.model_validate(body)
+
+    def put_key_bundle(self, access_token: SecretStr, bundle: SyncKeyBundle) -> None:
+        response = self._send(
+            "PUT",
+            self._url("/sync/bundle"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            json=bundle.model_dump(mode="json"),
+            timeout=self.timeout_seconds,
+        )
+        self._check(response, ImbueCloudSyncError)
+
+    def delete_key_bundle(self, access_token: SecretStr) -> None:
+        response = self._send(
+            "DELETE",
+            self._url("/sync/bundle"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._check(response, ImbueCloudSyncError)
 
     # ------------------------------------------------------------------
     # Paid lists (admin-key authenticated)

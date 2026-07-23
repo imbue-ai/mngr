@@ -1,12 +1,15 @@
 import json
 import os
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -26,10 +29,12 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -42,13 +47,11 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backup_password_rotation import rotate_backup_master_password
-from imbue.minds.desktop_client.backup_password_store import ensure_backup_password_hash
-from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
-from imbue.minds.desktop_client.backup_password_store import is_master_password_set
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
+from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import delete_destroying
 from imbue.minds.desktop_client.destroying import is_host_still_active
@@ -59,6 +62,7 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
@@ -94,14 +98,18 @@ from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
+from imbue.minds.desktop_client.templates import render_account_plan_section
+from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -119,8 +127,10 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_settings_modal_page
 from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
+from imbue.minds.desktop_client.templates import render_sharing_modal_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
@@ -128,7 +138,12 @@ from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
-from imbue.minds.errors import InvalidJsonBodyError
+from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
+from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
+from imbue.minds.errors import SyncCryptoError
+from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -138,6 +153,7 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -180,28 +196,6 @@ def _system_interface_status_payload(
 def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
     """Build a ``discovery_health`` SSE payload for the app-global pipeline state."""
     return {"type": "discovery_health", "state": health.value}
-
-
-# -- Request-body + dependency helpers --
-
-
-def _read_json_body() -> Any:
-    """Parse the request body as JSON, raising ``ValueError`` on missing/invalid input.
-
-    Mirrors the FastAPI ``await request.json()`` contract closely enough that
-    the existing ``except (json.JSONDecodeError, ValueError)`` handlers around
-    the call sites keep working: Flask's ``get_json(silent=True)`` returns
-    ``None`` on a malformed body, which we turn into a ``ValueError``.
-
-    ``force=True`` parses the body regardless of the request's ``Content-Type``
-    so a client that POSTs JSON without an ``application/json`` header is still
-    accepted -- matching the FastAPI ``request.json()`` behavior (which ignored
-    the content type) and avoiding a wire-behavior regression for API callers.
-    """
-    data = request.get_json(silent=True, force=True)
-    if data is None:
-        raise InvalidJsonBodyError("Invalid or empty JSON body")
-    return data
 
 
 def _get_mngr_forward_origin() -> str:
@@ -436,14 +430,49 @@ def _handle_error_reporting_settings() -> Response:
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
+def _push_new_password_state(
+    record_store: WorkspaceRecordStore,
+    resolver: BackendResolverInterface,
+    user_id: str,
+    account_email: str,
+    bundle: Mapping[str, object],
+) -> None:
+    """A non-empty password was just set: push the new bundle + any pending secrets."""
+    if record_store.cli is not None:
+        record_store.cli.sync_bundle_push(account_email, bundle)
+    record_store.push_all_secrets(user_id, account_email, resolver)
+
+
+def _scrub_cleared_password_server_state(record_store: WorkspaceRecordStore, account_email: str) -> None:
+    """The password was cleared: nothing secret may stay server-side."""
+    if record_store.cli is None:
+        return
+    record_store.cli.sync_bundle_delete(account_email)
+    record_store.cli.sync_scrub_secrets(account_email)
+
+
+def _is_any_account_password_set(paths: WorkspacePaths | None) -> bool:
+    """Whether any signed-in account has a non-empty master password (per its bundle mirror)."""
+    if paths is None:
+        return False
+    session_store = get_state().session_store
+    if session_store is None:
+        return False
+    return any(
+        is_master_password_set_for_account(paths, str(account.user_id)) for account in session_store.list_accounts()
+    )
+
+
 def _handle_backup_password_change() -> Response:
-    """Rotate the shared backup master password (POST /_chrome/backup-password).
+    """Change the sync master password (POST /_chrome/backup-password).
 
     Deliberately a desktop-only cookie-auth route (not part of /api/v1): agents
-    must never be able to rotate the master password. The rotation is
-    synchronous -- it rekeys every existing backed-up workspace's repository --
-    and the response carries per-workspace results for the Settings page to
-    render inline.
+    must never be able to change the master password. The password's only role
+    is wrapping each signed-in account's sync DEK: a change rewraps the DEK and
+    pushes the new bundle (plus any pending secrets) to the connector; clearing
+    the password deletes the server bundle and scrubs the synced secrets.
+    Workspace repositories are never touched. The response carries per-account
+    results for the Settings page to render inline.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
@@ -451,10 +480,11 @@ def _handle_backup_password_change() -> Response:
     if not isinstance(body, dict):
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
+    session_store = get_state().session_store
+    if paths is None or session_store is None or session_store.record_store is None:
         return make_response(
             status_code=503,
-            content='{"error": "Backup management is unavailable in this configuration"}',
+            content='{"error": "Sync is unavailable in this configuration"}',
             media_type="application/json",
         )
     # Wrapped in SecretStr immediately; the plaintext must never reach a log.
@@ -464,31 +494,164 @@ def _handle_backup_password_change() -> Response:
         return make_response(
             status_code=400, content='{"error": "The two passwords do not match."}', media_type="application/json"
         )
-    result = rotate_backup_master_password(
-        paths=paths,
-        resolver=get_state().backend_resolver,
-        new_password=new_password,
-        is_save_password=bool(body.get("save_password", False)),
-        parent_cg=get_state().root_concurrency_group,
-    )
+    accounts = session_store.list_accounts()
+    if not accounts:
+        return make_response(
+            status_code=400,
+            content='{"error": "Sign in to an account first -- the master password protects synced account data."}',
+            media_type="application/json",
+        )
+    record_store = session_store.record_store
+    resolver = get_state().backend_resolver
+    # Accounts that are locked on this device must unlock first: rewrapping
+    # here would mint a fresh DEK and overwrite the server bundle that wraps
+    # the account's real one, orphaning every already-synced secret.
+    locked_user_ids = set(record_store.locked_account_user_ids([str(account.user_id) for account in accounts]))
+    results: list[dict[str, object]] = []
+    for account in accounts:
+        if str(account.user_id) in locked_user_ids:
+            results.append(
+                {
+                    "account": str(account.email),
+                    "is_ok": False,
+                    "error": "This account's synced secrets are locked on this device; "
+                    "unlock them with the current master password first.",
+                }
+            )
+            continue
+        try:
+            bundle = set_master_password_for_account(paths, str(account.user_id), new_password)
+            if bundle is not None:
+                _push_new_password_state(record_store, resolver, str(account.user_id), str(account.email), bundle)
+            else:
+                _scrub_cleared_password_server_state(record_store, str(account.email))
+            results.append({"account": str(account.email), "is_ok": True, "error": None})
+        except (SyncCryptoError, WorkspaceSyncError, ImbueCloudCliError) as exc:
+            logger.warning("Master password change failed for {}: {}", account.email, exc)
+            results.append({"account": str(account.email), "is_ok": False, "error": str(exc)})
     return make_response(
         status_code=200,
-        content=json.dumps(
-            {
-                "ok": result.is_all_ok,
-                "results": [
-                    {
-                        "agent_id": entry.agent_id,
-                        "workspace_name": entry.workspace_name,
-                        "is_ok": entry.is_ok,
-                        "error": entry.error,
-                    }
-                    for entry in result.results
-                ],
-            }
-        ),
+        content=json.dumps({"ok": all(bool(entry["is_ok"]) for entry in results), "results": results}),
         media_type="application/json",
     )
+
+
+def _handle_sync_unlock() -> Response:
+    """Unlock synced secrets on this device (POST /_chrome/sync-unlock).
+
+    Tries the typed master password against every locked signed-in account's
+    key bundle (fetched from the connector when no local mirror exists);
+    whichever accounts it unwraps get their DEK installed. Reports which
+    accounts remain locked -- they may need an older password.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    session_store = get_state().session_store
+    if session_store is None or session_store.record_store is None:
+        return make_response(
+            status_code=503, content='{"error": "Sync is unavailable"}', media_type="application/json"
+        )
+    password = SecretStr(str(body.get("password") or ""))
+    record_store = session_store.record_store
+    accounts = session_store.list_accounts()
+    locked_user_ids = record_store.locked_account_user_ids([str(account.user_id) for account in accounts])
+    unlocked: list[str] = []
+    still_locked: list[str] = []
+    is_ssh_material_written = False
+    for account in accounts:
+        if str(account.user_id) not in locked_user_ids:
+            continue
+        if record_store.unlock_account(str(account.user_id), str(account.email), password):
+            unlocked.append(str(account.email))
+            # Materialize this account's synced secrets synchronously (local
+            # crypto + file writes) so the page reload right after unlock
+            # already renders its cloud workspaces as "connecting" instead of
+            # waiting a beat for the async pass.
+            is_ssh_material_written = (
+                record_store.materialize_account_synced_secrets(str(account.user_id), str(account.email))
+                or is_ssh_material_written
+            )
+        else:
+            still_locked.append(str(account.email))
+    scheduler = get_state().sync_scheduler
+    if unlocked and scheduler is not None:
+        scheduler.kick()
+    if is_ssh_material_written:
+        bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
+    if not unlocked and still_locked:
+        return make_response(
+            status_code=200,
+            content=json.dumps(
+                {
+                    "ok": False,
+                    "unlocked": unlocked,
+                    "still_locked": still_locked,
+                    "error": "That password did not unlock any account.",
+                }
+            ),
+            media_type="application/json",
+        )
+    return make_response(
+        status_code=200,
+        content=json.dumps({"ok": True, "unlocked": unlocked, "still_locked": still_locked}),
+        media_type="application/json",
+    )
+
+
+def _handle_sync_initial_status() -> Response:
+    """Report first-fetch progress for just-signed-in accounts (GET /_chrome/sync-initial-status).
+
+    Backs the post-signin banner: each entry is an account that signed in on
+    this device with no locally synced records yet -- PENDING while the first
+    record fetch is in flight, FAILED when the last pass errored (the loop
+    retries), or DONE with the fetched workspace count.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    scheduler = get_state().sync_scheduler
+    statuses = scheduler.list_initial_sync_statuses() if scheduler is not None else []
+    return make_response(
+        status_code=200,
+        content=json.dumps({"accounts": [status.model_dump(mode="json") for status in statuses]}),
+        media_type="application/json",
+    )
+
+
+def _handle_remove_workspace_record() -> Response:
+    """Remove a synced workspace record outright (POST /_chrome/workspaces/remove-record).
+
+    The manual escape hatch for stale/confusing rows on the landing list.
+    Requires connectivity (the record lives on the connector).
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict) or not str(body.get("host_id") or ""):
+        return make_response(
+            status_code=400, content='{"error": "host_id is required"}', media_type="application/json"
+        )
+    host_id = str(body["host_id"])
+    session_store = get_state().session_store
+    if session_store is None or session_store.record_store is None:
+        return make_response(
+            status_code=503, content='{"error": "Sync is unavailable"}', media_type="application/json"
+        )
+    record_store = session_store.record_store
+    for account in session_store.list_accounts():
+        owns_host = any(record.host_id == host_id for record in record_store.list_records(str(account.user_id)))
+        if not owns_host:
+            continue
+        try:
+            record_store.remove_record_or_raise(str(account.user_id), str(account.email), host_id)
+        except WorkspaceSyncError as exc:
+            return make_response(
+                status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json"
+            )
+        return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+    return make_response(status_code=404, content='{"error": "No such record"}', media_type="application/json")
 
 
 def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
@@ -666,10 +829,181 @@ def _handle_welcome_page() -> Response:
     return make_html_response(content=html)
 
 
+def _handle_welcome_skip() -> Response:
+    """Record the "Continue without an account" choice and land on home.
+
+    Setting ``is_account_setup_skipped`` stops the home route's bounce back
+    to the welcome splash (see ``_handle_landing_page``), so from here on the
+    titlebar home button lands on the workspace list / create form. The flag
+    is per-run; a fresh cold start of a functionally-empty app shows the
+    splash again (matching the startup routing).
+    """
+    if not _is_request_authenticated():
+        html = render_login_page()
+        return make_html_response(content=html)
+    get_state().is_account_setup_skipped = True
+    return make_response(status_code=303, headers={"Location": "/"})
+
+
+def _account_launcher_context(session_store: MultiAccountSessionStore | None) -> tuple[str, int]:
+    """Resolve the home screen's bottom-left account launcher label.
+
+    Returns ``(email, extra_count)``: the default (or first) signed-in
+    account's email plus how many further accounts are signed in, or
+    ``("", 0)`` when signed out (the launcher then reads "Log in").
+    """
+    accounts = session_store.list_accounts() if session_store else []
+    if not accounts:
+        return "", 0
+    minds_config: MindsConfig | None = get_state().minds_config
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    shown = accounts[0]
+    for account in accounts:
+        if default_account_id is not None and str(account.user_id) == default_account_id:
+            shown = account
+            break
+    return str(shown.email), len(accounts) - 1
+
+
+def _compute_cloud_tile_state(
+    backend_resolver: BackendResolverInterface,
+    record_store: WorkspaceRecordStore,
+    account_email: str,
+    record: ReplicaRecord,
+) -> tuple[str, str | None]:
+    """Derive the access state for one cloud row that is not in local discovery.
+
+    Everything is computed from current facts (key-file presence and mtime,
+    the provider's latest snapshot, the in-memory materialization error) --
+    no stored flags:
+
+    - ``""`` (plain remote): chips are suppressed while the account's provider
+      block is disabled, and nothing is shown before any key is materialized
+      (locked account / no synced key).
+    - ``"error"``: the last materialization attempt failed (detail in tooltip).
+    - ``"connecting"``: a key exists but no healthy provider snapshot has
+      arrived since it appeared -- discovery has not had its chance yet.
+    - ``"unreachable"``: a healthy snapshot newer than the key lacks the host
+      (the lease expired/was released, or the key does not grant access).
+    """
+    if not is_imbue_cloud_provider_enabled_for_account(account_email):
+        return "", None
+    error_detail = record_store.ssh_material_errors().get(record.agent_id)
+    if error_detail is not None:
+        return "error", error_detail
+    key_path = record_store.imbue_cloud_host_ssh_key_path(account_email, record.host_id)
+    if key_path is None or not key_path.is_file():
+        return "", None
+    provider_name = ProviderInstanceName(imbue_cloud_provider_name_for_account(account_email))
+    last_snapshot_at = backend_resolver.get_last_snapshot_at_for_provider(provider_name)
+    is_provider_errored = provider_name in backend_resolver.get_provider_errors()
+    try:
+        key_appeared_at = datetime.fromtimestamp(key_path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return "", None
+    if last_snapshot_at is None or last_snapshot_at <= key_appeared_at or is_provider_errored:
+        return "connecting", None
+    return "unreachable", None
+
+
+def _collect_remote_workspace_tiles(
+    backend_resolver: BackendResolverInterface,
+    session_store: MultiAccountSessionStore | None,
+) -> list[RemoteWorkspaceTile]:
+    """Workspaces known only from synced records (not in local discovery), for the landing list."""
+    if session_store is None or session_store.record_store is None:
+        return []
+    # "Not in local discovery" is only meaningful once discovery has produced
+    # its first complete snapshot; before that every record (including this
+    # device's own workspaces) would misclassify as remote.
+    if not backend_resolver.has_completed_initial_discovery():
+        return []
+    local_ids = {str(aid) for aid in backend_resolver.list_known_workspace_ids()}
+    tiles: list[RemoteWorkspaceTile] = []
+    seen_agent_ids: set[str] = set()
+    for account in session_store.list_accounts():
+        for record in session_store.record_store.list_records(str(account.user_id)):
+            is_remote_active = (
+                record.state == RECORD_STATE_ACTIVE
+                and record.agent_id not in local_ids
+                and record.agent_id not in seen_agent_ids
+            )
+            if not is_remote_active:
+                continue
+            seen_agent_ids.add(record.agent_id)
+            location = record.device_label or record.provider_kind or "another device"
+            state, state_detail = ("", None)
+            if is_cloud_provider_kind(record.provider_kind):
+                state, state_detail = _compute_cloud_tile_state(
+                    backend_resolver, session_store.record_store, str(account.email), record
+                )
+            tiles.append(
+                RemoteWorkspaceTile(
+                    agent_id=record.agent_id,
+                    name=record.display_name or record.agent_id,
+                    accent=record.color or DEFAULT_WORKSPACE_COLOR,
+                    location=location,
+                    host_id=record.host_id,
+                    state=state,
+                    state_detail=state_detail,
+                )
+            )
+    return tiles
+
+
+def _build_remote_tile_states(
+    backend_resolver: BackendResolverInterface,
+    session_store: MultiAccountSessionStore | None,
+) -> dict[str, str]:
+    """``agent_id -> derived state`` for every remote tile (the SSE drift payload).
+
+    A rendered remote tile whose id vanishes from this map (it flipped into
+    local discovery) or whose state changed makes the landing page reload.
+    """
+    return {tile.agent_id: tile.state for tile in _collect_remote_workspace_tiles(backend_resolver, session_store)}
+
+
+def _collect_locked_account_emails(session_store: MultiAccountSessionStore | None) -> list[str]:
+    """Emails of signed-in accounts whose synced secrets exist but whose key is absent here."""
+    if session_store is None or session_store.record_store is None:
+        return []
+    paths = get_state().api_v1_paths
+    if paths is None:
+        return []
+    accounts = session_store.list_accounts()
+    locked_user_ids = set(
+        session_store.record_store.locked_account_user_ids([str(account.user_id) for account in accounts])
+    )
+    return [str(account.email) for account in accounts if str(account.user_id) in locked_user_ids]
+
+
 def _handle_landing_page() -> Response:
     if not _is_request_authenticated():
         html = render_login_page()
         return make_html_response(content=html)
+
+    # Until the user resolves the welcome splash's account choice (sign up /
+    # log in / continue without an account), the home route bounces back to
+    # the splash: a signed-out user with no workspaces who hasn't explicitly
+    # skipped is mid-onboarding, and the titlebar home button (which always
+    # navigates "/") must return them to the choice rather than the create
+    # form. Gated on completed discovery so a workspace-owning user isn't
+    # bounced while providers are still enumerating, skipped entirely when
+    # accounts aren't configured (session_store is None), and skipped when the
+    # account listing itself failed -- an empty list from a transient
+    # subprocess failure must not bounce a just-signed-in user back to the
+    # splash.
+    landing_resolver = get_state().backend_resolver
+    onboarding_session_store = get_state().session_store
+    if (
+        not get_state().is_account_setup_skipped
+        and onboarding_session_store is not None
+        and landing_resolver.has_completed_initial_discovery()
+        and not landing_resolver.list_active_workspace_ids()
+        and not onboarding_session_store.list_accounts()
+        and not onboarding_session_store.is_last_identity_read_failed
+    ):
+        return make_response(status_code=302, headers={"Location": "/welcome"})
 
     # The error-reporting consent screen sits just after login: once the user is authenticated but
     # has not yet answered it, show it here before the landing content (the Electron content view and
@@ -683,8 +1017,11 @@ def _handle_landing_page() -> Response:
     paths: WorkspacePaths | None = get_state().api_v1_paths
     landing_session_store: MultiAccountSessionStore | None = get_state().session_store
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
+    launcher_email, launcher_extra_count = _account_launcher_context(landing_session_store)
+    remote_workspaces = _collect_remote_workspace_tiles(backend_resolver, landing_session_store)
+    locked_account_emails = _collect_locked_account_emails(landing_session_store)
 
-    if all_agent_ids:
+    if all_agent_ids or remote_workspaces:
         agent_names: dict[str, str] = {}
         agent_accents: dict[str, str] = {}
         agent_providers: dict[str, str] = {}
@@ -712,18 +1049,45 @@ def _handle_landing_page() -> Response:
             shutdown_capable_agent_ids=shutdown_capable_agent_ids,
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
             agent_providers=agent_providers,
+            account_email=launcher_email,
+            extra_account_count=launcher_extra_count,
+            remote_workspaces=remote_workspaces,
+            locked_account_emails=locked_account_emails,
         )
         return make_html_response(content=html)
 
-    # No agents discovered yet. If discovery is still in progress, show a
-    # "Discovering agents..." page with auto-refresh. Once discovery has
-    # completed with no agents found, show the create form so the user can
-    # create their first agent instead of polling forever.
-    if not backend_resolver.has_completed_initial_discovery():
+    # No live workspaces and no remote tiles. Choose between the auto-refreshing
+    # "Discovering agents..." page and the terminal create form.
+    #
+    # Never strand a user who has workspaces on the terminal create form. Show
+    # the auto-refreshing Landing page (which self-heals into the workspace list
+    # via its reload timer + chrome SSE) when either:
+    #   - discovery has not completed yet (the agent list may still be filling
+    #     in), or
+    #   - the restorable set (live primary agents unioned with the persisted
+    #     last-good topology) is non-empty -- we know workspaces exist but a
+    #     slow/partial cold-start snapshot has not re-surfaced them yet.
+    # Only show the create form once discovery has completed AND nothing anywhere
+    # (live, remote, or last-good) says a workspace exists, i.e. a genuine
+    # first-run user creating their first workspace.
+    restorable_agent_ids = backend_resolver.list_restorable_workspace_ids()
+    is_discovery_complete = backend_resolver.has_completed_initial_discovery()
+    is_showing_create_form = is_discovery_complete and not restorable_agent_ids
+    logger.debug(
+        "Resolved landing fallback: active={} remote={} discovery_complete={} restorable={} -> {}",
+        len(all_agent_ids),
+        len(remote_workspaces),
+        is_discovery_complete,
+        len(restorable_agent_ids),
+        "create-form" if is_showing_create_form else "discovering",
+    )
+    if not is_showing_create_form:
         html = render_landing_page(
             accessible_agent_ids=(),
             mngr_forward_origin=_get_mngr_forward_origin(),
             is_discovering=True,
+            account_email=launcher_email,
+            extra_account_count=launcher_extra_count,
         )
         return make_html_response(content=html)
 
@@ -731,26 +1095,25 @@ def _handle_landing_page() -> Response:
     branch = request.args.get("branch", "")
     session_store: MultiAccountSessionStore | None = get_state().session_store
     minds_config: MindsConfig | None = get_state().minds_config
-    agent_creator: AgentCreator | None = get_state().agent_creator
     geo_cache: GeoLocationCache | None = get_state().geo_location_cache
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
-    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
-        has_saved_backup_password=is_backup_password_saved,
-        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         # A deep-link that pre-fills a repo/branch wants those advanced fields
         # visible; otherwise start on the simple preset cards.
         start_advanced=bool(git_url or branch),
         color=_suggested_create_color(backend_resolver),
+        # This create form is the landing fallback (shown at "/" when no
+        # workspace exists), so wire its self-heal SSE: if a workspace appears
+        # while it is open, it navigates to "/" instead of stranding the user.
+        is_landing_fallback=True,
     )
     return make_html_response(content=html)
 
@@ -820,20 +1183,15 @@ def _handle_create_page() -> Response:
     branch = request.args.get("branch", "")
     session_store: MultiAccountSessionStore | None = get_state().session_store
     minds_config: MindsConfig | None = get_state().minds_config
-    agent_creator: AgentCreator | None = get_state().agent_creator
     geo_cache: GeoLocationCache | None = get_state().geo_location_cache
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
-    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
-        has_saved_backup_password=is_backup_password_saved,
-        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         # A deep-link that pre-fills a repo/branch wants those advanced fields
@@ -920,17 +1278,29 @@ def _finalize_destroyed_workspace(
     paths: WorkspacePaths,
     session_store: MultiAccountSessionStore | None,
 ) -> None:
-    """Disassociate a fully-destroyed workspace from its account, then delete its record.
+    """Tombstone a fully-destroyed workspace's record, then delete the destroying marker.
 
-    Runs only once the host is confirmed gone (DONE). Disassociating here --
-    rather than synchronously when the user clicks destroy -- means a failed or
-    partial teardown keeps the workspace visible instead of hiding a host that
-    is still running.
+    Runs only once the host is confirmed gone (DONE). The workspace record is
+    kept (state=DESTROYED, secrets intact) so the workspace's backups stay
+    reachable from any of the account's devices; it just disappears from the
+    active UI. Tombstoning here -- rather than synchronously when the user
+    clicks destroy -- means a failed or partial teardown keeps the workspace
+    visible instead of hiding a host that is still running.
     """
-    if session_store is not None:
-        account = session_store.get_account_for_workspace(str(agent_id))
-        if account is not None:
-            session_store.disassociate_workspace(str(account.user_id), str(agent_id))
+    if session_store is not None and session_store.record_store is not None:
+        found = session_store.record_store.find_active_record(str(agent_id))
+        if found is not None:
+            owner_user_id, _record = found
+            owner_email = session_store.get_account_email(owner_user_id)
+            if owner_email is not None:
+                session_store.record_store.tombstone_record(owner_user_id, owner_email, str(agent_id))
+            else:
+                logger.warning(
+                    "Skipping workspace-record tombstone for destroyed agent {}: owning account {} is not "
+                    "signed in on this device; the owner's next signed-in reconcile will retire the record",
+                    agent_id,
+                    owner_user_id,
+                )
     delete_destroying(agent_id, paths)
 
 
@@ -988,11 +1358,37 @@ def _handle_chrome_page() -> Response:
     backend_resolver = get_state().backend_resolver
     initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
 
+    # Optional server-side titlebar accent: the desktop shell appends
+    # ?accent=%23rrggbb when it (re)loads the wrapper for a workspace whose
+    # accent it already knows, so the bar's first paint is tinted instead of
+    # flashing neutral until the SSE color cache lands. Strictly validated;
+    # anything else renders the neutral bar exactly as before.
+    accent_arg = request.args.get("accent", "")
+    accent = accent_arg.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", accent_arg) else ""
+
+    # Optional server-side titlebar breadcrumb, mirroring the accent: the
+    # desktop shell appends ?agent=agent-<hex> for the workspace it is loading
+    # so the wrapper's first paint already shows the workspace name + tabs
+    # instead of a bare "Minds" until the content view commits. Strictly
+    # validated; an unknown or unnamed workspace renders the same ellipsis
+    # placeholder chrome.js uses (never the raw id).
+    agent_arg = request.args.get("agent", "")
+    crumb_agent_id = agent_arg if re.fullmatch(r"agent-[a-f0-9]+", agent_arg) else ""
+    crumb_workspace_name = ""
+    if crumb_agent_id:
+        crumb_workspace_name = next(
+            (ws["name"] for ws in initial_workspaces if ws.get("id") == crumb_agent_id and ws.get("name")),
+            "…",
+        )
+
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(),
         initial_workspaces=initial_workspaces,
+        accent=accent,
+        crumb_workspace_name=crumb_workspace_name,
+        crumb_agent_id=crumb_agent_id,
     )
     return make_html_response(content=html)
 
@@ -1121,6 +1517,7 @@ def _handle_chrome_events() -> Response:
             paths: WorkspacePaths | None = get_state().api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
+            last_remote_states = _build_remote_tile_states(backend_resolver, session_store)
             has_accounts = bool(session_store and session_store.list_accounts())
             # The agent ids the shell may restore windows to: live workspaces plus
             # any from the persisted last-good topology not yet re-discovered this
@@ -1135,6 +1532,7 @@ def _handle_chrome_events() -> Response:
                         "destroying_agent_ids": last_destroying_ids,
                         "has_accounts": has_accounts,
                         "restorable_workspace_ids": last_restorable_ids,
+                        "remote_workspace_states": last_remote_states,
                     }
                 )
             )
@@ -1279,15 +1677,22 @@ def _handle_chrome_events() -> Response:
                 # update below -- no separate liveness channel needed.
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
-                if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
+                current_remote_states = _build_remote_tile_states(backend_resolver, session_store)
+                if (
+                    current_data != last_workspace_data
+                    or current_destroying_ids != last_destroying_ids
+                    or current_remote_states != last_remote_states
+                ):
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
+                    last_remote_states = current_remote_states
                     yield "data: {}\n\n".format(
                         json.dumps(
                             {
                                 "type": "workspaces",
                                 "workspaces": current_data,
                                 "destroying_agent_ids": current_destroying_ids,
+                                "remote_workspace_states": current_remote_states,
                             }
                         )
                     )
@@ -1482,6 +1887,21 @@ def _build_workspace_list(
             if account is not None:
                 entry["account"] = account.email
         workspaces.append(entry)
+    # Append workspaces known only from synced records (hosted on another
+    # device). They render greyed and non-navigable; ``location`` names where
+    # they live.
+    for tile in _collect_remote_workspace_tiles(backend_resolver, session_store):
+        remote_entry: dict[str, str] = {
+            "id": tile.agent_id,
+            "name": tile.name,
+            "accent": tile.accent,
+            "is_remote": "true",
+            "location": tile.location,
+        }
+        owner = session_store.get_account_for_workspace(tile.agent_id) if session_store is not None else None
+        if owner is not None:
+            remote_entry["account"] = owner.email
+        workspaces.append(remote_entry)
     return workspaces
 
 
@@ -1661,8 +2081,14 @@ def _handle_recovery_page(
 # -- Account management routes --
 
 
-def _handle_accounts_page() -> Response:
-    """Render the manage accounts page."""
+def _handle_accounts_page(plan_error: str | None = None) -> Response:
+    """Render the manage accounts page.
+
+    The per-account plan/usage sections are NOT fetched here -- computing
+    live usage takes a connector round trip per account, so the page renders
+    loading placeholders that accounts.js fills in from
+    ``GET /accounts/<user_id>/plan-view``.
+    """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = get_state().session_store
@@ -1676,8 +2102,84 @@ def _handle_accounts_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
+        plan_error=plan_error,
     )
     return make_html_response(content=html)
+
+
+def _handle_account_plan_view(user_id: str) -> Response:
+    """Render one account's plan/usage fragment (fetched asynchronously by the accounts page).
+
+    A connector failure degrades to the fragment's "usage unavailable"
+    message rather than an error status, mirroring the old page-level
+    behavior.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    plan_view: dict[str, Any] | None = None
+    if account is not None and cli is not None:
+        try:
+            info = cli.get_account_info(str(account.email))
+        except ImbueCloudCliError as exc:
+            logger.debug("Could not fetch account info for {}: {}", account.email, exc)
+        else:
+            plan_view = build_account_plan_view(info)
+    trim_status = get_state().backup_trim_manager.get_status(user_id)
+    html = render_account_plan_section(acct_user_id=user_id, plan_view=plan_view, trim_status=trim_status)
+    return make_html_response(content=html)
+
+
+def _handle_account_trim_backups(user_id: str) -> Response:
+    """Start the over-quota backup trim flow for one account (idempotent while running)."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None or cli is None or paths is None:
+        return _handle_accounts_page(plan_error="Account not found or imbue_cloud CLI unavailable.")
+    get_state().backup_trim_manager.start_trim(
+        user_id=user_id,
+        account_email=str(account.email),
+        cli=cli,
+        paths=paths,
+        notification_dispatcher=get_state().notification_dispatcher,
+    )
+    return make_response(status_code=303, headers={"Location": "/accounts"})
+
+
+def _handle_account_set_plan(user_id: str) -> Response:
+    """Switch an account's plan; on failure re-render the page with the server's reason."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    plan = str(request.form.get("plan", "")).strip()
+    if not plan:
+        return _handle_accounts_page(plan_error="No plan selected.")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None or cli is None:
+        return _handle_accounts_page(plan_error="Account not found or imbue_cloud CLI unavailable.")
+    try:
+        cli.set_account_plan(str(account.email), plan)
+    except ImbueCloudCliError as exc:
+        # The connector's reason (e.g. "requires partner access") is the
+        # user-facing explanation -- surface it plainly.
+        return _handle_accounts_page(plan_error=f"Could not switch {account.email} to '{plan}': {exc}")
+    return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
 def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | None:
@@ -1694,19 +2196,16 @@ def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | No
     return None
 
 
-def _handle_settings_page() -> Response:
-    """Render the app-level settings page (GET /settings).
+def _build_app_settings_context() -> dict[str, Any]:
+    """Build the shared render kwargs for the app-level settings surfaces.
 
-    Hosts the Permissions subsection (predefined-service grants across all
-    active workspaces) and the per-machine error-reporting toggles (seeded from
-    ``MindsConfig``). Requires the same local session as the rest of the app; it
-    is not account-scoped.
+    Used by both the full settings page (browser-mode fallback) and the
+    centered settings modal, which render the same shared sections: the
+    permission overview (connectors / file sharing / workspace delegation
+    held across all active workspaces), the per-machine error-reporting
+    toggles, and the backup master-password section.
     """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
     minds_config: MindsConfig | None = get_state().minds_config
-    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
-    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
     paths: WorkspacePaths | None = get_state().api_v1_paths
 
     services_overview: list[object] = []
@@ -1739,17 +2238,68 @@ def _handle_settings_page() -> Response:
                 )
             )
         except LatchkeyGatewayClientError as e:
-            logger.warning("Could not build permission overview for settings page: {}", e)
+            logger.warning("Could not build permission overview for settings: {}", e)
             permissions_unavailable = True
 
-    html = render_settings_page(
-        report_unexpected_errors=report_unexpected_errors,
-        include_error_logs=include_error_logs,
-        services_overview=services_overview,
-        file_sharing_grants=file_sharing_grants,
-        workspace_delegation_grants=workspace_delegation_grants,
-        permissions_unavailable=permissions_unavailable,
-        has_saved_backup_password=has_saved_backup_password(paths) if paths is not None else False,
+    return {
+        "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else False,
+        "include_error_logs": minds_config.get_include_error_logs() if minds_config else False,
+        "services_overview": services_overview,
+        "file_sharing_grants": file_sharing_grants,
+        "workspace_delegation_grants": workspace_delegation_grants,
+        "permissions_unavailable": permissions_unavailable,
+        "is_master_password_set": _is_any_account_password_set(paths),
+    }
+
+
+def _handle_settings_page() -> Response:
+    """Render the app-level settings page (GET /settings).
+
+    The full-page browser-mode fallback for the centered settings modal
+    (GET /settings/modal): Connectors, Local files, Workspace delegation,
+    Error reporting, and Backup password -- all per-machine / app-level
+    settings. Requires the same local session as the rest of the app; it is
+    not account-scoped.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    return make_html_response(content=render_settings_page(**_build_app_settings_context()))
+
+
+def _handle_settings_modal() -> Response:
+    """Render the centered "Minds Settings" modal page (GET /settings/modal).
+
+    Served into the shared modal WebContentsView; opened from the home
+    screen's bottom-left "Minds Settings" launcher and the workspace
+    switcher's "Minds Settings" entry. Shows the same sections as the full
+    settings page, minus the "back to workspaces" link.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    return make_html_response(content=render_settings_modal_page(**_build_app_settings_context()))
+
+
+def _handle_accounts_modal() -> Response:
+    """Render the centered "Manage Accounts" modal page (GET /accounts/modal).
+
+    Served into the shared modal WebContentsView; opened from the home
+    screen's bottom-left account launcher and the workspace switcher's
+    account entry. The full page (GET /accounts) remains as the
+    browser-mode fallback.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    minds_config: MindsConfig | None = get_state().minds_config
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    enabled_by_user_id = {
+        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
+    }
+    html = render_accounts_modal_page(
+        accounts=accounts,
+        default_account_id=default_account_id,
+        enabled_by_user_id=enabled_by_user_id,
     )
     return make_html_response(content=html)
 
@@ -1991,13 +2541,6 @@ def _handle_workspace_settings(
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     is_stale = _is_workspace_provider_errored(info, errored_provider_names)
 
-    # The backup section's configure form needs to know whether a shared
-    # master password is already saved (it then never re-prompts) and whether
-    # an account is associated (imbue_cloud backups require one).
-    paths = get_state().api_v1_paths
-    is_backup_password_saved = has_saved_backup_password(paths) if paths is not None else False
-    is_backup_password_set = is_master_password_set(paths) if paths is not None else False
-
     html = render_workspace_settings(
         agent_id=agent_id,
         ws_name=ws_name,
@@ -2007,8 +2550,6 @@ def _handle_workspace_settings(
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
-        has_saved_backup_password=is_backup_password_saved,
-        is_master_password_set=is_backup_password_set,
         has_account=current_account is not None,
     )
     return make_html_response(content=html)
@@ -2227,13 +2768,10 @@ def _handle_requests_auto_open() -> Response:
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config:
-        try:
-            body = _read_json_body()
-            enabled = body.get("enabled", True)
-            minds_config.set_auto_open_requests_panel(bool(enabled))
-        except (json.JSONDecodeError, ValueError):
-            pass
+    if minds_config is not None:
+        body = request.get_json(silent=True, force=True)
+        enabled = body.get("enabled", True) if isinstance(body, dict) else True
+        minds_config.set_auto_open_requests_panel(bool(enabled))
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
@@ -2283,22 +2821,34 @@ def _handle_sharing_page(
     return make_html_response(content=html)
 
 
-_SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
+def _handle_sharing_modal(
+    agent_id: str,
+    service_name: str,
+) -> Response:
+    """Render the sharing editor as the centered overlay modal (Electron; the full page is the browser fallback).
 
-
-def _probe_share_url_readiness(http_client: httpx.Client, url: str) -> bool:
-    """Fetch ``url`` once and report whether the Cloudflare Access app is live.
-
-    Uses the app's shared (``follow_redirects=False``) client so the Access
-    login redirect is observed rather than followed. Any transport error or
-    timeout is treated as "not ready yet".
+    Same context as :func:`_handle_sharing_page`; the empty ``redirect_url``
+    (via the template default) makes the Associate flow reload in place, which
+    is the modal-safe behavior.
     """
-    try:
-        response = http_client.get(url, timeout=_SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
-    except httpx.HTTPError as exc:
-        logger.debug("Probed share URL {} but it is not ready yet: {}", url, exc)
-        return False
-    return is_share_ready_from_edge_response(response.status_code, response.headers.get("location"))
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+
+    backend_resolver = get_state().backend_resolver
+    ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
+        agent_id,
+        backend_resolver,
+    )
+
+    html = render_sharing_modal_page(
+        agent_id=agent_id,
+        service_name=service_name,
+        has_account=has_account,
+        accounts=accounts,
+        ws_name=ws_name,
+        account_email=account_email,
+    )
+    return make_html_response(content=html)
 
 
 def _handle_request_grant(
@@ -2432,6 +2982,7 @@ def create_desktop_client(
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
     mngr_caller: MngrCaller | None = None,
+    sync_scheduler: WorkspaceSyncScheduler | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2464,12 +3015,6 @@ def create_desktop_client(
     if not (_static_dir / "app.min.css").exists():
         logger.warning("Missing static/app.min.css. Run `just minds-css` from the repo root to build it.")
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
-
-    # The backup master-password hash must always exist (initially the hash of
-    # the empty password, or of a pre-hash install's saved plaintext) so every
-    # backup flow can validate against it.
-    if paths is not None:
-        ensure_backup_password_hash(paths)
 
     @app.errorhandler(Exception)
     def _unhandled_exception_handler(exc: Exception) -> Response | HTTPException:
@@ -2507,6 +3052,7 @@ def create_desktop_client(
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
         mngr_caller=mngr_caller,
+        sync_scheduler=sync_scheduler,
     )
     set_state(app, state)
 
@@ -2549,10 +3095,14 @@ def create_desktop_client(
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
     app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
+    app.add_url_rule("/_chrome/sync-unlock", view_func=_handle_sync_unlock, methods=["POST"])
+    app.add_url_rule("/_chrome/sync-initial-status", view_func=_handle_sync_initial_status, methods=["GET"])
+    app.add_url_rule("/_chrome/workspaces/remove-record", view_func=_handle_remove_workspace_record, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
+    app.add_url_rule("/welcome/skip", view_func=_handle_welcome_skip)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)
     app.add_url_rule("/", view_func=_handle_landing_page)
@@ -2560,7 +3110,9 @@ def create_desktop_client(
 
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
+    app.add_url_rule("/accounts/modal", view_func=_handle_accounts_modal)
     app.add_url_rule("/settings", view_func=_handle_settings_page)
+    app.add_url_rule("/settings/modal", view_func=_handle_settings_modal)
     app.add_url_rule("/settings/permissions/revoke", view_func=_handle_revoke_service_for_workspace, methods=["POST"])
     app.add_url_rule(
         "/settings/permissions/revoke-all", view_func=_handle_revoke_service_for_all_workspaces, methods=["POST"]
@@ -2581,6 +3133,9 @@ def create_desktop_client(
         methods=["POST"],
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
+    app.add_url_rule("/accounts/<user_id>/plan-view", view_func=_handle_account_plan_view)
+    app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
+    app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 
     # Workspace settings page (the account-association and color writes it drives
@@ -2595,8 +3150,11 @@ def create_desktop_client(
     app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/deny", view_func=_handle_request_deny, methods=["POST"])
 
-    # Sharing editor routes (used by both request approval and direct editing)
+    # Sharing editor routes (used by both request approval and direct editing).
+    # /modal is the same editor hosted in the shared overlay surface (Electron);
+    # the plain route stays as the browser-mode full page.
     app.add_url_rule("/sharing/<agent_id>/<service_name>", view_func=_handle_sharing_page)
+    app.add_url_rule("/sharing/<agent_id>/<service_name>/modal", view_func=_handle_sharing_modal)
 
     # Agent creation routes. The create form now submits to POST
     # /api/v1/workspaces and /creating/<id> polls the v1 operations resource, so

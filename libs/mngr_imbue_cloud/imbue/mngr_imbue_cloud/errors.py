@@ -47,6 +47,41 @@ class ImbueCloudPaidListError(ImbueCloudError):
     """Raised when a paid-list (paid domains / emails) admin operation fails."""
 
 
+class ImbueCloudQuotaExceededError(ImbueCloudError):
+    """Raised when the connector refuses an operation because a quota entitlement is exhausted.
+
+    Carries the structured detail from the connector's 403 (``code:
+    quota_exceeded``) so callers can render "N of M used" without parsing
+    the message text.
+    """
+
+    def __init__(self, message: str, entitlement: str, limit: float, current: float) -> None:
+        super().__init__(message)
+        self.entitlement = entitlement
+        self.limit = limit
+        self.current = current
+
+
+class ImbueCloudAccountError(ImbueCloudError):
+    """Raised when an account (plan / entitlements / usage) operation fails."""
+
+
+class ImbueCloudCleanupGrantBudgetError(ImbueCloudError):
+    """Raised when the connector refuses a storage-cleanup grant: the failed-grant budget is exhausted.
+
+    Carries the structured detail from the connector's 403 (``code:
+    cleanup_grant_budget_exhausted``). Grants that actually reduced usage
+    never count against the budget, so this only fires after repeated grants
+    that freed nothing.
+    """
+
+    def __init__(self, message: str, limit: int, current: int, window_hours: int) -> None:
+        super().__init__(message)
+        self.limit = limit
+        self.current = current
+        self.window_hours = window_hours
+
+
 class PoolHostNotMatchedError(ImbueCloudError):
     """Raised when create_agent is invoked on a leased host that has no pre-baked agent or has more than one."""
 
@@ -73,6 +108,23 @@ class ImbueCloudBucketNotFoundError(ImbueCloudBucketError):
 
 class ImbueCloudBucketLimitError(ImbueCloudBucketError):
     """Raised when the account is already at the per-account bucket cap."""
+
+
+class ImbueCloudSyncError(ImbueCloudError):
+    """Raised when a workspace-record / key-bundle sync operation fails."""
+
+
+class ImbueCloudSyncConflictError(ImbueCloudSyncError):
+    """Raised on a 409 from a record push (revision CAS or active-agent conflict).
+
+    ``stored_record`` carries the server's current row (as a plain dict) when
+    the conflict was a revision CAS failure, so the caller can merge and retry;
+    it is None for an active-agent uniqueness conflict.
+    """
+
+    def __init__(self, message: str, stored_record: dict[str, object] | None) -> None:
+        super().__init__(message)
+        self.stored_record = stored_record
 
 
 class OvhCatalogPricingError(ImbueCloudError):

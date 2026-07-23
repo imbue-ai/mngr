@@ -1,1 +1,0 @@
-Added an explicit `@pytest.mark.timeout(120)` to the `test_create_with_template` e2e release test. The test creates a live local agent and then runs `mngr list`/`mngr exec`, which enumerate every configured provider; that discovery could exceed the default 10s per-test timeout, causing spurious failures.

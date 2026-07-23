@@ -1,1 +1,0 @@
-Removed a spurious `@pytest.mark.rsync` mark from the release e2e test `test_connect_with_start_restarts_stopped_agent`. Connecting to a local `--type command` agent (create, stop, then `connect --start`) never invokes the rsync binary, so the resource guard rejected the mark as superfluous. This is a test-only change with no user-visible impact.

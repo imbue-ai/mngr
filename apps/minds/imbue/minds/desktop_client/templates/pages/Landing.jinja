@@ -1,15 +1,34 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
+{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, account_email="", extra_account_count=0, remote_workspaces=[], locked_account_emails=[] #}
 {#
   Landing page: list of accessible workspaces with per-row health and backup
   status. Subscribes to the chrome SSE so the page reloads
   when a destroy completes (or any other workspace-list change lands).
+
+  The bottom-left corner carries the app-level launchers: "Minds Settings"
+  and the account entry (default account email + "(+N)" when more accounts
+  are signed in, or "Log in" when signed out). In the desktop shell these
+  open the centered overlay modals via the content relay's allowlisted
+  postMessage channels; in a plain browser they navigate to the full-page
+  fallbacks.
 #}
 {% set _scripts %}
+<script src="/_static/sync_status_banner.js" defer></script>
 <script>
   (function () {
     var rendered = (document.querySelector('[data-landing-agent-ids]') || {}).dataset || {};
     var renderedIds = (rendered.landingAgentIds || '').split(',').filter(function (s) { return s.length > 0; });
     var renderedSet = new Set(renderedIds);
+    // Remote-tile derived states as rendered ("agentId=state" pairs; state may
+    // be empty). The SSE workspaces event carries the live map; any drift --
+    // a state change, a tile flipping into local discovery, a new remote
+    // record -- reloads so the tiles re-render.
+    var renderedRemoteStates = {};
+    (rendered.landingRemoteStates || '').split(',').forEach(function (pair) {
+      if (!pair) return;
+      var separatorIdx = pair.indexOf('=');
+      if (separatorIdx < 0) return;
+      renderedRemoteStates[pair.slice(0, separatorIdx)] = pair.slice(separatorIdx + 1);
+    });
 
     var healthStatusByAgent = {};
 
@@ -24,7 +43,6 @@
     // pre-action liveness) does not clobber the transient back. Cleared once the
     // authoritative state reaches the target or the action fails.
     var pendingMindActionByAgent = {};
-    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
 
     function getRow(agentId) {
       return document.querySelector('[data-agent-id="' + (window.CSS && CSS.escape ? CSS.escape(agentId) : agentId) + '"]');
@@ -59,12 +77,22 @@
       badge.style.display = badge.textContent ? '' : 'none';
     }
 
+    // Navigate to a local recovery URL through the shell bridge when present:
+    // main routes it into the persistent shell's in-place swap (recovery is a
+    // swappable page), so the titlebar never rebuilds. A bare window.location
+    // here was the last remaining full-load flash on the landing page's
+    // stopped/stuck rows. Plain browser falls back to a real navigation.
+    function goToRecovery(url) {
+      if (window.minds && window.minds.navigateContent) window.minds.navigateContent(url);
+      else window.location = url;
+    }
+
     window.landingRowClick = function (event, row) {
       var agentId = row.dataset.agentId;
       var status = healthStatusByAgent[agentId];
       var ret = row.dataset.defaultHref || '';
       if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
-        window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
+        goToRecovery('/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret));
       } else if (mindLivenessByAgent[agentId] === 'STOPPED') {
         // The mind's container is stopped, so loading the workspace directly would
         // strand the user on the loader for the full HEALTHY->STUCK probe-failure
@@ -74,9 +102,16 @@
         // the health tracker has never probed this stopped mind so it still reports
         // HEALTHY, and without the intent the recovery handler would 302 us right
         // back to the loader instead of dispatching the restart.
-        window.location = '/agents/' + encodeURIComponent(agentId)
-          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+        goToRecovery('/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart');
+      } else if (window.minds && window.minds.navigateContent) {
+        // Trusted local page on the chrome surface: hand the workspace (agent)
+        // URL to the shell bridge so it opens in the caged content view (and
+        // focuses an existing window already on this workspace) instead of
+        // navigating the chrome view's OWN frame into untrusted agent content.
+        window.minds.navigateContent(ret);
       } else {
+        // Plain browser (no shell): full-page navigate to the workspace URL.
         window.location = ret;
       }
     };
@@ -86,19 +121,47 @@
       if (!row) return;
       var agentId = row.dataset.agentId;
       var ret = row.dataset.defaultHref || '';
-      window.location = '/agents/' + encodeURIComponent(agentId)
-        + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+      goToRecovery('/agents/' + encodeURIComponent(agentId)
+        + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart');
+    };
+
+    // -- Bottom-left app-level launchers --
+    //
+    // The Landing page is a trusted local page on the chrome surface, so these
+    // open the centered overlay modals via the window.minds shell bridge
+    // directly; in a plain browser (no bridge) they navigate the page to the
+    // full-page fallbacks.
+    window.landingOpenMindsSettings = function () {
+      if (window.minds && window.minds.openMindsSettings) {
+        window.minds.openMindsSettings();
+      } else {
+        window.location = '/settings';
+      }
+    };
+
+    window.landingOpenAccounts = function () {
+      var signedIn = (document.getElementById('landing-account') || {}).dataset || {};
+      var isSignedIn = signedIn.signedIn === 'true';
+      if (window.minds && window.minds.openAccounts && window.minds.openSigninModal) {
+        // ``returnTo: '/'`` lands a successful sign-in back on this home
+        // screen (the server's return_to default is the create screen);
+        // ``mode: 'signin'`` leads with the sign-in tab to match the
+        // launcher's "Log in" label.
+        if (isSignedIn) window.minds.openAccounts();
+        else window.minds.openSigninModal('/', 'signin');
+      } else {
+        window.location = isSignedIn ? '/accounts' : '/auth/login';
+      }
     };
 
     window.landingOpenInNewWindow = function (button) {
       var row = button.closest('[data-agent-id]');
       if (!row) return;
       var agentId = row.dataset.agentId;
-      if (isElectronShell) {
-        // Route through the content relay -> main process, which opens (or
-        // focuses) a dedicated window for this workspace. Same channel the
-        // sidebar's open-in-new arrow uses.
-        window.postMessage({ type: 'minds:open-workspace-in-new-window', agentId: agentId }, '*');
+      if (window.minds && window.minds.openWorkspaceInNewWindow) {
+        // Trusted local page on the chrome surface: call the shell bridge
+        // directly (opens/focuses a dedicated window for this workspace).
+        window.minds.openWorkspaceInNewWindow(agentId);
       } else {
         // Plain browser: no native windows, so open the workspace URL in a
         // new tab instead.
@@ -189,13 +252,14 @@
       if (!row) return;
       var agentId = row.dataset.agentId;
       var name = row.dataset.mindName || agentId;
-      // In the desktop shell, route through the relay so the main process can
-      // show a native confirmation dialog and issue the stop itself (no in-page
-      // optimistic flip -- the user may still cancel that dialog, and the result
-      // arrives over the SSE). In a plain browser there is no shell, so confirm
-      // in-page and stop via fetch with an optimistic transient.
-      if (isElectronShell) {
-        window.postMessage({ type: 'minds:confirm-stop-mind', agentId: agentId, name: name }, '*');
+      // The Landing page is a trusted local page on the chrome surface: ask the
+      // main process (via the shell bridge) to show a native confirmation dialog
+      // and issue the stop itself (no in-page optimistic flip -- the user may
+      // still cancel that dialog, and the result arrives over the SSE). In a
+      // plain browser there is no shell, so confirm in-page and stop via fetch
+      // with an optimistic transient.
+      if (window.minds && window.minds.confirmStopMind) {
+        window.minds.confirmStopMind(agentId, name);
         return;
       }
       var ok = window.confirm('Stop "' + name + '"? Its agents will stop and its services become inaccessible. '
@@ -242,7 +306,13 @@
       var el2 = document.querySelector('[data-providers-last-snapshot]');
       if (el2) el2.textContent = relativeAgo(lastFullSnapshotAt);
     }
-    setInterval(tickFreshness, 1000);
+    var freshnessTimer = setInterval(tickFreshness, 1000);
+    // The chrome shell swaps this page out in place for hub navigation (no
+    // document teardown), announcing it with ``minds:page-teardown``: stop the
+    // interval so a departed landing page doesn't keep ticking.
+    window.addEventListener('minds:page-teardown', function () {
+      clearInterval(freshnessTimer);
+    }, { once: true });
 
     function badgeClassForStatus(status) {
       if (status === 'ok') return 'bg-success/15 text-success';
@@ -561,7 +631,20 @@
     loadBackupStatus();
 
     var es = null;
+    // Set when the chrome shell swaps this page out in place (no document
+    // teardown): stops the SSE reconnect loop and closes the stream so a
+    // departed landing page can't keep listening -- or worse, fire its
+    // stale ``location.reload()`` while another page is showing.
+    var pageTornDown = false;
+    window.addEventListener('minds:page-teardown', function () {
+      pageTornDown = true;
+      if (es) {
+        es.close();
+        es = null;
+      }
+    }, { once: true });
     function connect() {
+      if (pageTornDown) return;
       if (es) es.close();
       es = new EventSource('/_chrome/events');
       es.onmessage = function (event) {
@@ -595,8 +678,25 @@
           || renderedIds.some(function (id) { return !liveSet.has(id); });
         if (differs) {
           es.close();
-          location.reload();
+          // In-place refresh through the shell's swap engine (falls back to a
+          // real reload): a location.reload() would rebuild the persistent
+          // shell -- the titlebar visibly blinks out on every workspace-set
+          // change, constantly when workspaces flap between healthy and stuck.
+          window.dispatchEvent(new Event('minds:refresh-local-page'));
           return;
+        }
+        if (data.remote_workspace_states) {
+          var liveRemoteStates = data.remote_workspace_states;
+          var remoteDiffers = Object.keys(renderedRemoteStates).some(function (id) {
+            return liveRemoteStates[id] !== renderedRemoteStates[id];
+          }) || Object.keys(liveRemoteStates).some(function (id) {
+            return !(id in renderedRemoteStates);
+          });
+          if (remoteDiffers) {
+            es.close();
+            window.dispatchEvent(new Event('minds:refresh-local-page'));
+            return;
+          }
         }
         // Same set of rows: apply each shutdown-capable mind's liveness in place
         // (it rides the workspace entry now, not a separate event).
@@ -608,7 +708,7 @@
         if (!es) return;
         es.close();
         es = null;
-        setTimeout(connect, 5000);
+        if (!pageTornDown) setTimeout(connect, 5000);
       };
     }
     // Reconcile each row with its server-seeded liveness before the SSE opens.
@@ -616,16 +716,92 @@
       applyMindLiveness(agentId, mindLivenessByAgent[agentId]);
     });
     connect();
+
+    window.landingSyncUnlock = function () {
+      var input = document.getElementById('sync-unlock-password');
+      var errorEl = document.getElementById('sync-unlock-error');
+      var btn = document.getElementById('sync-unlock-btn');
+      if (!input) return;
+      if (btn) btn.disabled = true;
+      if (errorEl) errorEl.classList.add('hidden');
+      fetch('/_chrome/sync-unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: input.value }),
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { status: resp.status, data: data || {} }; });
+      }).then(function (res) {
+        if (btn) btn.disabled = false;
+        if (res.status === 200 && res.data.ok) {
+          // Guarded: the unlock fetch can resolve after this landing page was
+          // swapped out, and the refresh event targets the CURRENT page.
+          if (!pageTornDown) window.dispatchEvent(new Event('minds:refresh-local-page'));
+          return;
+        }
+        if (errorEl) {
+          errorEl.textContent = res.data.error || 'That password did not unlock any account.';
+          errorEl.classList.remove('hidden');
+        }
+      }).catch(function () {
+        if (btn) btn.disabled = false;
+        if (errorEl) {
+          errorEl.textContent = 'The unlock request failed (network error).';
+          errorEl.classList.remove('hidden');
+        }
+      });
+    };
+
+    window.landingRemoveRecord = function (ev, button) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var hostId = button.getAttribute('data-remove-host-id');
+      if (!hostId) return;
+      button.disabled = true;
+      fetch('/_chrome/workspaces/remove-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_id: hostId }),
+      }).then(function (resp) {
+        if (resp.ok) {
+          var row = button.closest('[data-agent-id]');
+          if (row) row.remove();
+          return;
+        }
+        button.disabled = false;
+      }).catch(function () { button.disabled = false; });
+    };
   })();
 </script>
 {% endset %}
-<Base title="Workspaces" scripts={{ _scripts }}>
+<ChromeShell title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
-    {% if agent_ids %}
-      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
+    {% if agent_ids or remote_workspaces %}
+      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}">
         <h1 class="type-heading text-primary">Workspaces</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
+
+      {% if locked_account_emails %}
+      {# New-device unlock banner: a bundle exists for these accounts but this
+         device has no key yet. Unlocking installs the account's sync key so
+         synced secrets (backup credentials, host keys) become usable here. #}
+      <Notice class="mb-4" id="sync-unlock-banner">
+        <div class="flex flex-col gap-2">
+          <span class="type-body text-primary">
+            Enter your master password to unlock synced workspaces for
+            {{ locked_account_emails | join(', ') }}.
+          </span>
+          <div class="flex items-center gap-2">
+            <input type="password" id="sync-unlock-password" autocomplete="current-password"
+                   placeholder="master password"
+                   class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
+            <Button variant="secondary" id="sync-unlock-btn"
+                    onclick="window.landingSyncUnlock()">Unlock</Button>
+          </div>
+          <p id="sync-unlock-error" class="hidden type-helper text-important" role="alert"></p>
+        </div>
+      </Notice>
+      {% endif %}
 
       <div class="flex flex-col gap-1.5">
         {% for agent_id in agent_ids %}
@@ -720,13 +896,56 @@
             </Card>
           {% endif %}
         {% endfor %}
+
+        {# Workspaces known only from synced records (hosted on another device,
+           or otherwise not in local discovery). Greyed and non-clickable --
+           their hosts aren't reachable from here -- but backup status and
+           download still work via the synced credentials, and the X removes
+           the record for good. #}
+        {% for remote in remote_workspaces %}
+          {% set remote_accent_style = "--workspace-accent: " ~ remote.accent ~ ";" %}
+          <Card layout="row"
+                extra="accent-spine relative overflow-hidden opacity-60"
+                :style="remote_accent_style"
+                :data-agent-id="remote.agent_id">
+            <span class="flex-1 font-semibold text-secondary pl-1">{{ remote.name }}</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">on {{ remote.location }}</span>
+            {# Derived access state for cloud rows: connecting (synced key
+               materialized, discovery hasn't resolved it yet), unreachable
+               (a healthy snapshot lacks the host), or a materialization
+               error (detail in the tooltip). Plain rows render no chip. #}
+            {% if remote.state == 'connecting' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">connecting&hellip;</span>
+            {% elif remote.state == 'unreachable' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important">unreachable</span>
+            {% elif remote.state == 'error' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important" data-tooltip="{{ remote.state_detail or 'Could not apply the synced access material.' }}">sync error</span>
+            {% endif %}
+            <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
+            <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="type-helper">download</Link>
+            <Button variant="ghost" size="icon"
+                    onclick="window.landingRemoveRecord(event, this)"
+                    :data-remove-host-id="remote.host_id"
+                    data-tooltip="Remove from this list"
+                    aria-label="Remove from this list">
+              <Icon16 name="close" />
+            </Button>
+          </Card>
+        {% endfor %}
       </div>
     {% else %}
       {% if is_discovering %}
         <div class="flex items-center justify-center min-h-[80vh]">
           <p class="text-tertiary text-center">Discovering agents...</p>
         </div>
-        <script>setTimeout(function() { location.reload(); }, 2000);</script>
+        <script>
+          (function () {
+            // In-place refresh (no titlebar rebuild) while discovery finishes.
+            var t = setTimeout(function () { window.dispatchEvent(new Event('minds:refresh-local-page')); }, 2000);
+            // Cancelled if the chrome shell swaps this page out in place first.
+            window.addEventListener('minds:page-teardown', function () { clearTimeout(t); }, { once: true });
+          })();
+        </script>
       {% else %}
         <div class="text-center py-12">
           <p class="text-tertiary mb-6">No workspaces yet</p>
@@ -755,5 +974,27 @@
         <div class="flex flex-col gap-1.5" data-providers-list></div>
       </div>
     </section>
+
+    {# Spacer so the last workspace rows can scroll clear of the fixed
+       bottom-left launchers below. #}
+    <div class="h-20" aria-hidden="true"></div>
   </PageContainer>
-</Base>
+
+  {# Bottom-left app-level launchers: Minds Settings + the account entry.
+     Fixed to the content area's bottom-left corner, matching the mockup. #}
+  <div class="fixed bottom-3 left-3 flex flex-col items-start gap-0.5">
+    <button type="button" id="landing-minds-settings"
+            onclick="window.landingOpenMindsSettings()"
+            class="flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left">
+      <Icon16 name="settings" extra="shrink-0" />
+      <span>Minds Settings</span>
+    </button>
+    <button type="button" id="landing-account"
+            onclick="window.landingOpenAccounts()"
+            data-signed-in="{{ 'true' if account_email else 'false' }}"
+            class="flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left">
+      <Icon16 name="user" extra="shrink-0" />
+      <span>{% if account_email %}{{ account_email }}{% if extra_account_count > 0 %} (+{{ extra_account_count }}){% endif %}{% else %}Log in{% endif %}</span>
+    </button>
+  </div>
+</ChromeShell>

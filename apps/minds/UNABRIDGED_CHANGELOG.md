@@ -4,6 +4,194 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-22
+
+The minds TMR mapper prompt (`apps/minds/tmr/mapper.j2`) is updated in step with the packaged mngr one, which changed how test agents report their results.
+
+Agents no longer signal "this needs wider attention" by degrading a change's status to `BLOCKED`. That status is removed; agents now report an `escalations` list that is independent of their own outcome, so a test that passes cleanly can still flag a problem. Escalations come in two kinds: `BLOCKER` (the agent could not proceed without a shared change -- the common minds case of an absent Docker daemon, snapshot, deployed env, or secret) and `SHARED_PATTERN` (the agent's local fix worked, but sibling tests already carry it, meaning one shared change should replace them all).
+
+This was a required change, not a cosmetic one: the minds prompt is a self-contained copy rather than an extension of the packaged template, and had it kept emitting `BLOCKED` its agents' outcomes would no longer parse, silently dropping every minds mapper's result from the run's report.
+
+Minds test agents also no longer write changelog entries -- the run's integrator writes one unified entry -- and are told not to adjust per-test timeout markers, since the run supplies an explicit timeout that the integrator verifies at.
+
+## 2026-07-21
+
+Polished the Google / GitHub sign-in flow on the login page so the OAuth round-trip feels responsive instead of frozen:
+
+- Clicking a provider button now gives immediate feedback: that provider's logo is replaced by a spinner and both provider buttons fade slightly while the browser round-trip runs.
+
+- The status ("blue box") message is now staged and anchored to real progress rather than a single frozen line: "Opening your browser..." on click, "Waiting for you to finish signing in with Google/GitHub..." once the flow starts, and "Finishing up..." while your account is set up.
+
+- When sign-in completes in the external browser, the Minds window promptly raises itself to the front (only if it wasn't already focused) so you land back in the app instead of having to switch back manually. It comes forward as soon as sign-in lands -- while the account finishes wiring up in the background -- and the login page polls more frequently so there's minimal lag.
+
+- OAuth failures, timeouts, and lost flows now surface in the same in-page error box (and cleanly reset the buttons) instead of interrupting with a browser `alert()` popup.
+
+- Removed the "Continue with GitHub" button from the sign-in / sign-up page, since GitHub OAuth is not enabled in the current deployment; Google is now the only third-party sign-in option. The underlying GitHub provider support is left in place so the button can return once credentials are configured.
+
+Fixed: a window sometimes came back from a Mac sleep (or screen lock) showing a blank white content area, recoverable only by moving the window or navigating Home and back. Over sleep, a view's renderer can survive but stop painting -- Electron leaves its compositor surface detached, and because the renderer never actually dies, the existing crash-page recovery (which keys on the renderer process going away) never fires.
+
+The app now listens for the OS `resume` and `unlock-screen` events and forces a full repaint of every open window's views on wake. The repaint is non-destructive (no reload), so scrollback, websockets, and terminal state are preserved. Each wake also now logs a `[wake-repaint]` line to `electron.log`, so this previously-invisible failure mode is diagnosable.
+
+Fix an intermittent bug where restarting the minds app (especially via a ToDesktop auto-update) could drop a user with existing workspaces onto the terminal "create a new workspace" screen instead of their workspace list.
+
+On a cold start, discovery marks itself "complete" on the first event from the first provider. If that arrives before the provider hosting the user's workspace has surfaced it, the landing handler (`/`) previously saw an empty live workspace list and fell through to the create form, a terminal page with no auto-refresh -- stranding the user.
+
+The landing fallback now consults `list_restorable_workspace_ids()` (the live primary agents unioned with the persisted last-good topology). When that set is non-empty -- we know workspaces exist even though a partial cold-start snapshot hasn't re-surfaced them -- it renders the auto-refreshing "Discovering agents..." page (which self-heals into the workspace list) instead of the create form. The create form is now only shown when discovery has completed and nothing anywhere (live, remote, or last-good) says a workspace exists, i.e. a genuine first-run user.
+
+As defense-in-depth, the create form, when it is the landing fallback at `/`, now also subscribes to the chrome SSE and navigates to `/` the moment a workspace appears, so a user shown the form on a cold-start race is taken to their workspace list. The explicit `/create` page keeps its previous behavior (no self-heal SSE) so a deliberate "create another workspace" flow is never bounced away by existing workspaces.
+
+Fixed the landing page getting stuck on the "Discovering..." spinner (and dead workspace windows being restored) after destroying every workspace while the app was closed.
+
+The desktop client's backend resolver keeps a persisted "last-good" agent topology so a workspace that exists but has not been re-discovered yet on a slow cold start still counts as restorable. That set could stay non-empty for workspaces that were actually gone: a destroyed host lingered in the persisted topology forever, and destroyed hosts still present in the live discovery snapshot (during the provider's destroyed-host persistence window) were also counted. The resolver now prunes a host from the last-good topology the moment discovery reports it DESTROYED (and persists the pruned topology), and excludes DESTROYED-host workspaces from the live half of the restorable set. Pruning happens only on an explicit DESTROYED observation, never on mere absence from a snapshot, so the slow-cold-start fallback is preserved.
+
+Fixed a bug where restarting the app -- especially via the "Install and Restart" auto-update prompt -- could drop you on the "create a new workspace" screen instead of restoring your open workspace windows.
+
+The desktop shell now persists its window layout continuously (debounced) as you move, resize, and navigate windows, instead of only at quit. So however the app exits (auto-update restart, crash, or force-quit), the saved layout reflects your live windows and is restored on the next launch.
+
+It also no longer lets a non-graceful quit -- which tears windows down while the save is running -- overwrite a good saved layout with an empty one, which was the direct cause of landing on the create screen.
+
+The startup log now records why the app chose its landing screen (authenticated, account/workspace counts, restorable-window count, and the chosen route), making a bad restore diagnosable from `~/.minds/logs`.
+
+Legacy workspace associations pointing at long-gone workspaces are now dropped once discovery completes, even when unconfigured providers (missing AWS/Azure/GCP/OVH/Vultr credentials) error on every poll. Previously any provider error blocked the "definitively absent" check, so a machine without cloud credentials configured retried the conversion -- and logged "Legacy association ... could not convert this pass" -- on every reconcile pass, forever. Genuinely failed polls (a configured provider erroring transiently) still block the drop, since absence from a listing that never happened proves nothing.
+
+The minds-tier Vault ACLs (the `employee` policy denies on `secrets/minds/{staging,production}` and the `minds_staging` / `minds_production` operator policies + OIDC roles) are now managed by terraform in the imbue-ai/vault repo (`terraform/employee.tf` and `terraform/minds_operators.tf`) instead of being hand-pushed with the `vault` CLI. Previously these had only ever been applied to live Vault by hand, so a `terraform apply` in the vault repo would have reverted the employee policy and re-exposed the staging/production secrets to all employees.
+
+`docs/staging-bringup.md` now points at the vault repo as the single source of truth for these ACLs, and its teammate-allowlist recipe goes through a vault-repo PR + `terraform apply` rather than a raw `vault write auth/oidc/role/...` call.
+
+## 2026-07-19
+
+Fixed: documentation drift around what a workspace is. The glossary described a workspace as a single mngr *agent* labeled `workspace=<name>`, but a workspace is a mngr *host* holding several agents, and the `workspace` label was removed some time ago (discovery keys off `is_primary`).
+
+The glossary now defines a workspace as a host, and adds entries for the four agent kinds that live in one: the primary `system-services` agent, chat agents, worktree agents, and worker agents.
+
+Fixed: the launch mode glossary entry listed a nonexistent `CLOUD` mode (the real one is `VULTR`) and omitted `AWS` and `MODAL`.
+
+Fixed: `design.md` and `user_story.md` showed a `mngr create` command with the removed `--label workspace=<name>` flag and no `--new-host`, so following them would not reproduce what minds actually runs.
+
+## 2026-07-18
+
+Added `apps/minds/docs/dev-setup.md`, a canonical "set up minds for development" guide: an install-these-first prerequisites checklist -- uv/just/git, Docker, Node 24.15.0 + pnpm 10.33.4, GNU rsync (recent macOS ships Apple's openrsync, which lacks the `--filter=':- .gitignore'` GNU feature the vendor/mngr sync needs), GitHub access to the private default-workspace-template, Vault CLI + `vault login`, and a `~/.modal.toml` Modal profile -- that then hands off to the `minds-dev-workflow` skill for bootstrap and launch. `apps/minds/README.md`'s Getting started now points to this guide instead of carrying ad-hoc setup notes inline (the earlier GNU rsync note moved into the checklist).
+
+Relatedly, `just minds-start` fails fast with an actionable message (the same `brew install rsync` fix) when it detects openrsync, instead of erroring partway through the vendor/mngr sync.
+
+`minds env deploy`'s "URL mismatch" failure now names the most likely cause -- the active Modal token is bound to a different workspace than the tier's `modal_workspace`. A profile named e.g. `minds-dev` can hold a token for another workspace, pass the activation-time section-exists check, and then misroute the deploy; the error now extracts and compares the reported-vs-computed workspace and prints the fix (`modal token new --profile <workspace>`). `apps/minds/docs/environments.md` and the dev-setup checklist now document how to obtain `minds-dev` workspace access -- it's a separate, workspace-bound Modal workspace with no shared token in Vault: get an invite, `modal token new --profile minds-dev` selecting that workspace, and verify with `modal profile list`.
+
+`minds env deploy` now also **preflights** the pinned profile's real workspace before touching any cloud state: it reads `modal profile list --json` and refuses (with the same `modal token new --profile <workspace>` fix) when the token is bound to a different workspace than the tier's `modal_workspace`. So the misroute is caught up front instead of after the first `modal deploy` has already shipped to the wrong workspace. The check is best-effort -- if `modal profile list` can't be read it's skipped, and the deploy-time URL assertion remains the backstop.
+
+## 2026-07-17
+
+Bump Latchkey to v2.21.0.
+
+## 2026-07-16
+
+Fixed a shutdown race where the background workspace-record sync loop could crash with `MngrCallerNotInitializedError`. During graceful shutdown the shared mngr caller was torn down while the sync loop was still running, so a pass that was mid-`mngr` call raced the teardown. Shutdown now stops the sync loop and waits for any in-flight pass to finish before tearing down the mngr caller.
+
+Add `apps/minds/test_latchkey_e2e.py`, an opt-in (`MNGR_LATCHKEY_E2E_TESTS=1`) release test that exercises the full Latchkey remote-workspace auth flow end to end without any cloud credentials. It fakes a VPS by running a throwaway root sshd on the local machine and pointing a `[providers.docker]` block at `ssh://root@127.0.0.1:<port>`, which makes the workspace's outer host genuinely "remote" from latchkey's perspective and drives all the real code paths: VPS gateway provisioning, the VPS->container reverse tunnel, and the credential/permission remote-state sync.
+
+The test asserts, from inside the workspace via `mngr exec`: (a) the desktop latchkey gateway answers `GET /permissions/self` on `LATCHKEY_GATEWAY`; (b) the secondary (VPS-resident) gateway is reachable on `LATCHKEY_GATEWAY_SECONDARY` and enforces the shared desktop-derived password; and (c) editing the workspace's local `latchkey_permissions.json` (granting `slack-api` with slack credentials pre-seeded) automatically syncs both `permissions.json` and the filtered `credentials.json.enc` onto the VPS outer host.
+
+The test runs in CI only via the manual `run_minds_release_tests` workflow dispatch (the plain-minds-release step of the `test-minds-release` job), which opts it in explicitly.
+
+Fixed: dev-mode launches (`pnpm start` / `just minds-start`) now pass `MINDS_RESTIC_BINARY` to the Python backend, pointing at the pinned restic that the prestart hook already downloads into `apps/minds/resources/restic/`. Previously only packaged builds set it, so from-source backends fell back to `restic` on PATH and backup provisioning failed on any machine without a system restic (macOS devs were masked by brew's).
+
+Fixed: `scripts/ensure-binaries.js` now includes desync in its required-binaries check, so a partially populated `resources/` directory (e.g. from a checkout that predates the desync bundling) gets desync downloaded instead of being skipped.
+
+Fixed: creating a workspace from a plain local directory (a non-worktree clone) with an explicit branch no longer runs `git checkout -B <branch> FETCH_HEAD` in the user's own template checkout. On a fresh clone (no FETCH_HEAD) this failed with "'FETCH_HEAD' is not a commit", and with a stale FETCH_HEAD it would silently reset the user's branch tip. Plain local directories now use a new `checkout_existing_branch` (no-op when already on the branch, plain `git checkout <branch>` otherwise); scratch clones keep the FETCH_HEAD-based path.
+
+Added: `docs/wsl.md`, a verified recipe for running the full minds stack (the Electron desktop app via WSLg, the backend, mngr, and Docker workspaces under gVisor) inside WSL2 on Windows, including the `just minds-start` launch flow (loginctl lingering for the `just` runtime dir, WSLg display) and the WSL-specific gotchas: distro auto-termination (keepalive task), the headless latchkey install, the runsc `--overlay2=none` registration, the grandparent-death watcher vs daemonization, and the CSS build.
+
+Added: `scripts/install-wsl.sh`, an idempotent one-line bring-up of the minds desktop app inside a WSL2 distro: preflight checks with actionable errors (WSL1, missing systemd, non-apt distro, low disk, `/mnt/` install dirs, Docker Desktop integration), installation of every dependency (apt basics + Electron libraries, Docker CE, lingering, uv, just, nvm/node/pnpm/latchkey at the repo's pins), a clone of mngr at the latest `minds-v*` tag (`--version`/`--dev` for development), a generated `minds-wsl-start` launcher, a "Minds (WSL)" Windows desktop shortcut, and a final launch. The launcher defaults new workspaces to the `runc` Docker runtime under WSL (via the existing `MINDS_DOCKER_RUNTIME_DEFAULT` override) -- the WSL2 VM is the container/Windows isolation boundary, matching the macOS posture -- with gVisor remaining a per-create opt-in. `docs/wsl.md` was restructured around the one-liner.
+
+## 2026-07-15
+
+Fixed tooltips being clipped on their right side and modal overlays (get help, inbox, workspace menu, sign-in) leaving an un-dimmed strip at the window's right edge on Macs with always-visible ("classic") scrollbars.
+
+The global `scrollbar-gutter: stable` rule (added so content pages don't shift sideways when a classic scrollbar appears) also applied to the edge-to-edge chrome and overlay surfaces, reserving a 15px gutter that nothing painted: the overlay host clipped tooltip bubbles mid-label, hosted modal pages stopped their dim backdrop 15px short (30px total for a modal iframe inside the overlay host), and the chrome titlebar's right-aligned buttons shifted inward. Those surfaces never scroll at the document level, so they now opt out of the reserved gutter: the overlay pages through a new `OverlaySurface` template wrapper that pins the opt-out (so future overlay surfaces get it automatically), and the chrome page through a new `html_class` argument on the Base template.
+
+Bug reports now attach the detached `mngr latchkey forward` daemon's logs (`events.jsonl` and `latchkey_forward.log` from the latchkey plugin data dir) and the shared mngr discovery event stream (`events.jsonl`), alongside the existing flat minds logs. These are where provider discovery actually logs and where the startup replay reads from, and their absence made discovery bugs (e.g. destroyed workspaces reappearing at startup) undiagnosable from a bug report alone.
+
+Each install is now assigned a stable, randomly-generated anonymous user id (no PII), persisted at `<data_dir>/anonymous_user_id`, and attached to every Sentry error report across all of minds' reporting surfaces (the Python backend, the `mngr latchkey forward` daemon, the browser web UI, and the Electron main process). This lets Sentry report the number of distinct installs affected by each issue, distinguishing a rare bug that hits many users from a noisy one that hits a single user. No PII is collected: only this opaque random id is sent.
+
+- Changed: the Electron-written rotated logs (`electron.log` and `minds.log`) now rotate at 10MB instead of 100MB, matching the Python backend's jsonl sink so all of minds' logs share a consistent 10MB cap. The newest 10 rotated copies are still kept.
+
+Workspace/account state now syncs across a user's devices, end-to-end encrypted. Each associated workspace has a record on the Imbue Cloud connector: plaintext metadata (name, color, provider, which device hosts it) plus a secrets blob (the workspace's SSH key material and its backup `restic.env`) encrypted under a per-account data key that only the user's master password can unwrap.
+
+The master password's only role is now wrapping that per-account key: new backup repositories are initialized with the workspace's own random password as their single key, the per-workspace "backup encryption method" / master-password inputs are gone from the create form and workspace settings, and the Settings page's password change rewraps the key (and pushes/clears synced secrets) instead of rekeying every repository. Clearing the password scrubs all synced secrets server-side; while the password is empty, only metadata syncs.
+
+The landing page and sidebar list workspaces that live on the user's other devices as greyed rows with an "on <device>" badge and a remove-from-list action; their backup status and download still work here (the backup credentials are materialized from the synced record once the account is unlocked). A new-device unlock banner asks for the master password once and installs the account key.
+
+Reconcile also heals a missing server-side key bundle: if this device holds the password-wrapped account key but the connector has none (the one-shot legacy conversion wraps the carried-over password locally, and only the settings password-change flow used to push bundles), the bundle is uploaded. Without this, a converted legacy install would sync its encrypted secrets while no other device -- and no reinstall after a machine loss -- could ever unlock them. An existing server bundle always wins, so a rewrap done on another device is never clobbered.
+
+Legacy local state (`workspace_associations.json` -- or the older `sessions.json` layout when that file never existed -- plus `backup_password_hash` and `backup_password`) is converted once at startup and renamed aside with a `.pre-sync` suffix. Destroying a workspace now tombstones its record (metadata and secrets kept) so its backups remain reachable from any device.
+
+New Electron-driven release tests (`apps/minds/test_sync_e2e.py`, run in the minds-snapshot sandbox against the per-run CI connector env on `run_minds_release_tests` runs): a full machine-loss-and-recover lifecycle (real imbue-cloud backups to R2, master password, wipe everything, sign back in, unlock, download and byte-verify the backup), the legacy-file one-shot migration, and the master-password lifecycle (rewrap-only change, clear-scrubs, re-set re-pushes).
+
+CI cleanup now sweeps the R2 buckets imbue-cloud backups leave behind. Nothing ever deleted them (env destroy tears down Modal, Neon, SuperTokens and Cloudflare tunnels, but not buckets), so every CI run that exercised backups leaked one permanently. The `cleanup-minds-ci-envs` stage now also deletes buckets whose owning account no longer exists -- emptying each one first, since Cloudflare refuses to delete a non-empty bucket. Because the dev and CI tiers share a Cloudflare account, the rule is deliberately positive rather than heuristic: a bucket is only swept when its owner prefix matches no user in any SuperTokens app on the shared core, and the sweep fails closed (an unreachable SuperTokens, or an empty live-owner set, aborts before deleting anything) so a developer's own backups can never be caught in it.
+
+Updated the snapshot-resume test `test_resumed_workspace_registered_expected_services` to stop asserting the `web` service. default-workspace-template removed the blank example web service (PR #270), so it no longer registers in `runtime/applications.toml` after resume; the test now checks only the always-on core services (`system_interface`, `terminal`). This unblocks the `minds-snapshot` CI job, which builds its workspace snapshot from the current template.
+
+Fixed synced workspaces being silently de-associated by a startup race: the absent-host tombstone pass could tombstone a workspace record while its provider was merely slow to produce its first discovery listing (e.g. a stopped lima VM right after app start), pushing a spurious "destroyed" state to the connector. The pass now requires the record's specific provider to have produced at least one snapshot before treating absence as evidence.
+
+Added the inverse safety net: a tombstoned record hosted by this install whose workspace is live in local discovery is automatically re-activated and re-pushed (self-healing rows tombstoned by the old race), guarded so an in-flight destroy or a genuinely-destroyed host lingering in discovery is never resurrected.
+
+Fixed a ~60s hang on app launch and on quit when the local Docker daemon is unresponsive. Minds starts and stops an mngr Docker "state container" around its lifecycle; if the Docker daemon was wedged (its socket accepts connections but never replies -- e.g. Docker Desktop still starting up, resuming from sleep, or stuck), each `docker start`/`docker stop` blocked until its 60-second command timeout, delaying the backend coming up (launch) and the app closing (quit).
+
+Launch and quit now probe daemon reachability first (`docker version`, bounded to 5 seconds) and skip the state-container operation when the daemon is unreachable, wedged, or absent. A healthy daemon answers in well under a second, so normal launches are unaffected.
+
+Release minds v0.3.8: bump the app version and the baked default-workspace-template tag (`FALLBACK_BRANCH`) to `minds-v0.3.8`. This release pairs the current mngr `main` with a default-workspace-template snapshot that adds a safe `update-self` workspace-update flow and honest rendering of workspace-permission requests. On the mngr/minds side it carries cloud workspaces accessible from any unlocked installation, the OAuth sign-in hang fix, the post-signin synced-workspace fetch banner, and auto-verification of paid users. No functional mngr/minds code change rides on the release branch itself.
+
+Also documents a fast-forward release path in `apps/minds/docs/release.md`: for low-risk bumps (no functional mngr/minds code, no `system_interface`-facing vendor change), skip the CI-surface PRs and the pre-merge launch-to-msg, fast-forward the pair onto `main` to freeze the SHA pair, tag, and run launch-to-msg once on the tags.
+
+Release minds v0.3.7: bump the app version and the baked default-workspace-template tag (`FALLBACK_BRANCH`) to `minds-v0.3.7`. This release pairs the current mngr `main` with a default-workspace-template snapshot that includes the earlyoom OOM-prioritization changes.
+
+Cloud (imbue_cloud) workspaces are now fully accessible from any installation after unlocking with the master password. Unlocking (and every sync pass for unlocked accounts) materializes each cloud record's synced SSH key material into the mngr profile's per-host layout (compare-and-write, self-healing, never touching hosts this install leased itself), eagerly materializes backup envs, sweeps key dirs for destroyed/removed workspaces, and bounces discovery so the workspace becomes reachable immediately. Remote cloud tiles now show derived access states -- "connecting" while discovery catches up, "unreachable" when a healthy snapshot lacks the host, and a "sync error" chip with detail when materialization fails -- and the workspace list updates live when a tile flips to accessible. Producers now re-push a record's secrets whenever the underlying material actually changes (tracked by a local plaintext content hash), instead of only when the record had none.
+
+Added a post-signin sync-status banner to the workspace list, create, and accounts pages. When an account signs in on a device that has no locally synced records yet (fresh install or restored machine), the first record fetch races the post-login landing decision, so returning users could land on the create form with no hint that their workspaces were still being fetched. The banner shows "Fetching synced workspaces..." while the first pull is in flight, a retrying notice if it fails, and a dismissible "Found N synced workspaces - View" link once it lands; brand-new accounts (zero synced workspaces) never see it. Backed by per-account initial-sync tracking on the sync scheduler and a new `/_chrome/sync-initial-status` endpoint.
+
+Fixed the Google/GitHub OAuth signin flow hanging on "Waiting for you to finish signing in with the browser..." after a successful signin. The OAuth background thread called `_kick_sync_scheduler()`, which resolves the desktop-client state through Flask's application-context proxy; a plain thread has no app context, so the thread crashed with `RuntimeError: Working outside of application context` before recording the flow as done -- and before registering the account's imbue_cloud provider entry, so remote workspace discovery for the just-signed-in account silently stayed broken too. The sync scheduler handle is now passed into the thread explicitly (like its other dependencies), and any unexpected crash while mirroring the signin result now records an "error" flow status so the signin page can never hang on a dead thread.
+
+## 2026-07-14
+
+Reframed the titlebar help entry point around bug reporting. The trigger now shows a bug glyph (instead of the question-mark "help" circle) with the tooltip "Ran into a bug?", and the modal it opens is retitled "Ran into a bug?" with a short lead-in ("Here's how we can help:") above the fix-or-report options.
+
+The two paths inside are unchanged -- when opened from a live workspace you can still have an agent try to fix the problem (the default there), or report the bug to Imbue -- only the entry point's icon and copy changed. Added a `bug` glyph to the 16x16 icon set.
+
+Fixed a workspace whose host was offline since before the app started being stranded on "Loading workspace" forever: the recovery page's automatic cold-boot dispatch was silently skipped whenever the health tracker had never probed the workspace (the tracker reports HEALTHY by default for agents it has no record of, and the restart endpoint's "already recovered" veto misread that default as a confirmed recovery). The same misfire delayed offline-host restarts on docker until a later STUCK-triggered reprobe.
+
+The endpoint-side veto (and the `auto_dispatched` request marker that drove it) is removed entirely. For the host tier -- the only tier dispatched for an offline host -- the race the veto guarded against (a workspace self-recovering while the recovery page's slow host-health probe is in flight) is absorbed by `mngr start` itself: the auto-dispatched host restart skips the stop step and `mngr start` only targets STOPPED agents (and starts the host idempotently), so a restart dispatched against a live workspace degrades to a no-op. The services tier's stop+start does not have that property; its narrow self-recovery race window is deliberately accepted because that tier is slated for removal.
+
+Persist the Electron main process's logs and recover gracefully when a workspace view's renderer crashes.
+
+- The Electron main process now tees all of its console output (and any uncaught exception / unhandled rejection) into a new `~/.minds/logs/electron.log`, so main-process problems are durably diagnosable instead of vanishing in packaged builds.
+
+- Both `electron.log` and the backend's `minds.log` now rotate at 100MB (keeping the 10 newest rotations, gzipped) instead of growing without bound.
+
+- Bug reports upload the current `minds.log` and `electron.log` plus the most recent gzipped rotation of each, under accurate names (`backend_logs` / `electron_logs`), and a report filed while the backend is down now attaches both logs.
+
+- When a workspace's content view crashes (e.g. its renderer is killed over a long sleep), the app now shows an "Aw, Snap!"-style crash page with the crash reason and a Reload button, rather than a blank white screen that only a manual Home-and-back would fix. Reload is manual (no auto-reload) to avoid crash loops. The page uses a white background with the distressed Minds head logo and a "Bummer" heading.
+
+- The window's other two views now recover from renderer death too: if the chrome (titlebar) renderer dies it shows a compact in-titlebar error strip with a Reload button (leaving the workspace content running) instead of a blank bar, and if the overlay/menu renderer dies it is silently reloaded so the next sidebar/inbox/help open works.
+
+- Out-of-memory renderer deaths (`oom`, in any of the three views) are now reported to Sentry automatically (subject to the existing error-reporting opt-in) and labeled by which view died, so these failures are visible without waiting for a manual bug report. Native renderer crashes already flow to Sentry as minidumps, and sleep/external kills (`killed`) are deliberately left unreported (unactionable and noisy) but remain in `electron.log`.
+
+Update Latchkey to include support for GitHub's GraphQL API.
+
+Re-trimmed the inline-function ratchet count from 9 to 7 after a shared-checker bug fix stopped double-counting a doubly-nested function. No minds source changed; the two removed counts were the same function counted once per enclosing function.
+
+Creating a workspace from a private (or nonexistent) GitHub repository URL now shows helpful guidance instead of just a raw git error. When any clone of a github.com URL fails (deliberately no matching of git's error text -- a failed GitHub clone is overwhelmingly an access problem, and the raw error stays visible alongside), the creating page explains that the repository looks private, recommends signing in with the GitHub CLI (`gh auth login`, with a link to the official quickstart), and offers the alternative of cloning the repository locally and entering its path in the form instead.
+
+The desktop client's local `git clone` of the workspace source now runs with `GIT_TERMINAL_PROMPT=0`, so cloning a repository this computer has no credentials for fails fast with a clear error instead of hanging on a credential prompt (mirroring the earlier fix in the default-workspace-template bootstrap's git calls).
+
+Non-GitHub git remotes get the same treatment without the GitHub-specific advice: a failed clone of a git URL on another host (or an ssh remote) is classified `GIT_AUTH_REQUIRED`, and the creating page shows the same "looks private / make sure your git credentials are set up, or clone it locally and use a path" guidance, minus the `gh auth login` recommendation (which only fits github.com). A local path or unrecognized source still shows just the raw error.
+
+The create-operation status API (`GET /api/v1/workspaces/operations/create/<id>`) gained an optional `error_kind` field carrying a machine-readable failure classification (`GITHUB_AUTH_REQUIRED` or `GIT_AUTH_REQUIRED`) alongside the human-readable `error` message.
+
+`propagate_changes` now tells you to create a missing default-workspace-template worktree with `just default-workspace-template-worktree` rather than a hardcoded `cd ~/project/default-workspace-template && git worktree add ...`. The `bake-slice-dev` workspace dir (documented in `docs/host-pool-setup.md`) now resolves from the explicit arg, else `DEFAULT_WORKSPACE_TEMPLATE_DIR`, else the `.external_worktrees/default-workspace-template` checkout -- no `~/project/...` path baked in.
+
+`.env.example` documents that `DEFAULT_WORKSPACE_TEMPLATE_DIR` is now read by `just default-workspace-template-worktree` and `just bake-slice-dev` (not only `sync-vendor-mngr`), and that `apps/minds/.env` is copied into each mngr agent worktree.
+
+New `apps/minds/CLAUDE.md` gives minds-scoped guidance for developing default-workspace-template (dwt) from the mngr checkout via `just default-workspace-template-worktree` -- kept out of the repo-root `CLAUDE.md` so minds specifics do not leak into mngr's top-level instructions.
+
 ## 2026-07-13
 
 Serve the workspace UI over HTTP/2 to fix the hang that occurred once enough streaming tabs were open in one workspace.

@@ -4,6 +4,38 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-17
+
+Bump Latchkey to v2.21.0.
+
+## 2026-07-16
+
+Fixed: `mngr latchkey forward` no longer treats a stopped (but not destroyed) workspace as if it were still running. Previously, when a workspace's container was stopped -- via an app restart, an idle-shutdown, or a VPS reboot -- discovery kept reporting the agent, so the supervisor would repeatedly try to provision the VPS-resident gateway against the stopped container (raising `container ... is not running`) and would keep the agent's reverse tunnel alive, leaving the tunnel health-check loop re-dialing a dead endpoint indefinitely.
+
+The discovery stream now carries each host's lifecycle state through to the discovery handler. When a host is reported as not-running, the handler tears down that agent's reverse tunnel and skips VPS gateway provisioning (the shared desktop gateway still stays up, since it is shared across all agents). When the host returns to running, discovery re-fires and both the tunnel and the VPS gateway are re-established.
+
+VPS latchkey provisioning now gates the NodeSource Node.js install behind a version check instead of a presence check. Previously, a VPS with a preinstalled but too-old node (e.g. Debian bookworm's distro nodejs 18.x) skipped the install and then crashed cryptically in `npm install -g latchkey` (modern npm refuses node < 20.17). Any node older than major 20 is now replaced with the pinned NodeSource install, and if a stale node still shadows the fresh one on PATH afterwards (e.g. a manual /usr/local/bin/node), provisioning fails with an actionable message naming the shadowing binary instead of the cryptic npm crash.
+
+Found by the new opt-in latchkey remote-workspace e2e release test (`apps/minds/test_latchkey_e2e.py`) running against a Debian host with node 18 preinstalled.
+
+## 2026-07-15
+
+The `mngr latchkey forward` daemon now attaches the install's anonymous user id (no PII) to its Sentry events, so its reports count as the same install as the minds backend's in Sentry's per-issue user counts. The id is inherited from the embedder via the new `MNGR_LATCHKEY_SENTRY_USER_ID` environment variable (required alongside the other `MNGR_LATCHKEY_SENTRY_*` infrastructure vars).
+
+- Changed: the `mngr latchkey forward` supervisor now caps its dedicated rotated `events.jsonl` log at 10MB (down from the general mngr default of 100MB), matching the 10MB cap the minds desktop client uses for its own rotated logs. Older rotated copies are still pruned to the newest 10.
+
+## 2026-07-14
+
+Update Latchkey to include support for GitHub's GraphQL API.
+
+Fixed an endless remote-sync feedback loop in the `mngr latchkey forward` supervisor's remote-state watcher.
+
+The watchdog handler that keeps a remote (VPS) host's latchkey credentials and permissions in sync reacted to *every* filesystem event on the watched files. On Linux, watchdog's inotify observer also dispatches read-lifecycle events (`FileOpenedEvent` / `FileClosedNoWriteEvent`) whenever a watched file is merely read -- and the sync itself reads those files (`sync_permissions` reads the host permissions file; `sync_credentials` re-reads it and spawns latchkey CLI subprocesses that open the credentials store). Each sync therefore re-triggered the next one, producing a full VPS re-sync (SSH upload plus a `latchkey auth re-encrypt` subprocess) roughly every 6 seconds for the supervisor's entire lifetime, even though neither file was ever modified.
+
+`_LatchkeyStateChangeHandler.dispatch` now allowlists genuine mutation events only (`FileCreatedEvent`, `FileDeletedEvent`, `FileModifiedEvent`, `FileMovedEvent`), so reads -- including the sync's own -- are inert. `FileClosedEvent` (IN_CLOSE_WRITE) is also excluded since a content-changing write always emits `FileModifiedEvent` as well, and reacting to both would double-fire syncs.
+
+A change to a host's permissions file now syncs that host's full latchkey state (permissions, then credentials) to the VPS instead of permissions only. The permissions determine which services' credentials ship to the host, so a grant must deliver the newly-allowed service's credentials and a revocation must remove the no-longer-allowed ones -- previously the VPS credential store stayed stale until the next supervisor restart or a separate credentials-file change.
+
 ## 2026-07-13
 
 The `mngr latchkey forward` daemon now tells Sentry to ignore the paramiko/pyinfra stdlib loggers. The daemon reverse-tunnels the shared gateway into every agent via paramiko; when a target went offline and the health check retried, paramiko's transport thread logged the connection-reset failure at ERROR level, and Sentry's default logging integration captured each one as an event. Those events were not even rate-limited (the stdlib records carry no exception info or fingerprint), so a handful of users produced tens of thousands of Sentry events. The daemon now drops that already-handled noise while still reporting genuine failures raised through loguru.

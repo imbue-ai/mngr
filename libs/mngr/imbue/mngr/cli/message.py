@@ -13,6 +13,8 @@ from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
+from imbue.mngr.cli.exit_codes import EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -162,8 +164,12 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
             on_error=lambda agent_name, error: _emit_jsonl_error(agent_name, error),
         )
+        # Precedence: a real delivery failure outranks a delivered-but-blocked agent,
+        # which in turn outranks clean success.
         if result.failed_agents:
-            ctx.exit(1)
+            ctx.exit(EXIT_CODE_ERROR)
+        if result.blocked_agents:
+            ctx.exit(EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED)
         return
 
     # For other formats, collect all results first
@@ -177,11 +183,18 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
 
     _emit_output(result, output_opts)
 
+    # Precedence: a real delivery failure outranks a delivered-but-blocked agent,
+    # which in turn outranks clean success.
     if result.failed_agents:
         if output_opts.output_format == OutputFormat.HUMAN:
             failed_names = " ".join(name for name, _error in result.failed_agents)
             write_human_line("Failed agents: {}", failed_names)
-        ctx.exit(1)
+        ctx.exit(EXIT_CODE_ERROR)
+    if result.blocked_agents:
+        if output_opts.output_format == OutputFormat.HUMAN:
+            blocked_names = " ".join(name for name, _error in result.blocked_agents)
+            write_human_line("Delivered but blocked on an unresolved dialog: {}", blocked_names)
+        ctx.exit(EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED)
 
 
 def _get_message_content(
@@ -256,16 +269,22 @@ def _emit_human_output(result: MessageResult) -> None:
         for agent_name in result.successful_agents:
             write_human_line("Message sent to: {}", agent_name)
 
+    if result.blocked_agents:
+        for agent_name, error in result.blocked_agents:
+            logger.warning("Message delivered to {} but a blocking dialog remained: {}", agent_name, error)
+
     if result.failed_agents:
         for agent_name, error in result.failed_agents:
             logger.error("Failed to send message to {}: {}", agent_name, error)
 
-    if not result.successful_agents and not result.failed_agents:
+    total_agent_count = len(result.successful_agents) + len(result.blocked_agents) + len(result.failed_agents)
+    if total_agent_count == 0:
         write_human_line("No agents found to send message to")
-    elif result.successful_agents:
+    if result.successful_agents:
         write_human_line("Successfully sent message to {} agent(s)", len(result.successful_agents))
-    else:
-        # Only failed agents, no successful ones - failures already logged above
+    if result.blocked_agents:
+        write_human_line("Delivered but blocked on an unresolved dialog for {} agent(s)", len(result.blocked_agents))
+    if result.failed_agents:
         write_human_line("Failed to send message to {} agent(s)", len(result.failed_agents))
 
 
@@ -274,8 +293,10 @@ def _emit_json_output(result: MessageResult) -> None:
     output_data = {
         "successful_agents": result.successful_agents,
         "failed_agents": [{"agent": name, "error": error} for name, error in result.failed_agents],
+        "blocked_agents": [{"agent": name, "error": error} for name, error in result.blocked_agents],
         "total_sent": len(result.successful_agents),
         "total_failed": len(result.failed_agents),
+        "total_blocked": len(result.blocked_agents),
     }
     write_json_line(output_data)
 
@@ -301,7 +322,12 @@ within the confirmation window -- with the Enter keystroke re-sent a bounded
 number of times along the way -- the command fails with diagnostics instead of
 silently dropping the message. Messages starting with '/' (TUI slash commands
 such as /clear) are best-effort: they succeed even when no evidence is
-observable, logging a warning and an agent event instead.""",
+observable, logging a warning and an agent event instead.
+
+Exit codes: 0 = delivered and no unresolved dialog; 7 = delivered, but a
+blocking interactive dialog (e.g. Claude's /model confirmation) could not be
+resolved and the agent is now stuck on it (see the agent-type auto_accept_*
+settings); any other non-zero = the message was not delivered.""",
     aliases=("msg",),
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),

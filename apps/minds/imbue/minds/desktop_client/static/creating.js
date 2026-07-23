@@ -15,6 +15,7 @@
   var creationFailed = false;
   var redirectUrl = null;
   var creationError = '';
+  var creationErrorKind = '';
 
   // ---- Loading screen: progress bar + rotating hints ----
   var TIPS = [
@@ -42,6 +43,8 @@
     if (!tipEl) return;
     var idx = 0;
     tipEl.innerHTML = TIPS[0];
+    // 8s per tip: long enough to comfortably read a full sentence before it
+    // swaps (workspace setup takes minutes, so there is no rush).
     tipsInterval = setInterval(function () {
       idx = (idx + 1) % TIPS.length;
       tipEl.style.opacity = '0';
@@ -49,7 +52,7 @@
         tipEl.innerHTML = TIPS[idx];
         tipEl.style.opacity = '1';
       }, 250);
-    }, 3000);
+    }, 8000);
   }
 
   // ---- Failure view ----
@@ -68,6 +71,17 @@
     if (failureView) failureView.classList.remove('hidden');
     var msgEl = document.getElementById('error-message');
     if (msgEl) msgEl.textContent = creationError || 'unknown error';
+    // Reveal extra static guidance for recognized failure kinds (a private
+    // repo on github.com, or on another git host). The copy lives hidden in
+    // the template; the backend only classifies.
+    var authHelpId =
+      creationErrorKind === 'GITHUB_AUTH_REQUIRED' ? 'github-auth-help'
+      : creationErrorKind === 'GIT_AUTH_REQUIRED' ? 'git-auth-help'
+      : null;
+    if (authHelpId) {
+      var authHelp = document.getElementById(authHelpId);
+      if (authHelp) authHelp.classList.remove('hidden');
+    }
     // The prominent error box now carries the message, so clear the faint
     // footer caption to avoid showing it twice.
     var stage = document.getElementById('stage');
@@ -92,7 +106,16 @@
     }
     if (creationDone && redirectUrl) {
       if (fill) fill.style.width = '100%';
-      window.location.href = redirectUrl;
+      // redirectUrl is the /goto/<agent>/ workspace (agent) URL. On a trusted
+      // local page on the chrome surface, hand it to the shell bridge so the new
+      // workspace opens in the caged content view instead of navigating this
+      // (chrome) frame into untrusted agent content. Plain browser (no shell)
+      // full-page navigates as before.
+      if (window.minds && window.minds.navigateContent) {
+        window.minds.navigateContent(redirectUrl);
+      } else {
+        window.location.href = redirectUrl;
+      }
       return;
     }
     var elapsed = ((window.performance && performance.now) ? performance.now() : Date.now()) - startTime;
@@ -116,8 +139,8 @@
   // the SSE 'done' event can be missed on a page reload (the log queue may
   // already be drained), so we poll the operation status. SSE is used only for
   // the live log stream. The create operation reports
-  // {status, is_done, redirect_url, error}; redirect_url is the absolute
-  // /goto/<agent>/ URL the server builds once the workspace is ready.
+  // {status, is_done, redirect_url, error, error_kind}; redirect_url is the
+  // absolute /goto/<agent>/ URL the server builds once the workspace is ready.
   var statusPoll = null;
   function applyStatus(data) {
     if (!data) return;
@@ -128,6 +151,7 @@
     } else if (data.status === 'FAILED') {
       creationFailed = true;
       creationError = data.error || 'unknown error';
+      creationErrorKind = data.error_kind || '';
       showFailure();
       if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
     } else if (data.status_text && !creationFailed) {

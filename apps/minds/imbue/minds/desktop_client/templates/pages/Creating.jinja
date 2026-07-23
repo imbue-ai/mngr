@@ -10,7 +10,8 @@
 {% set _scripts %}
 <script src="/_static/creating.js" defer></script>
 {% endset %}
-<Base title="Creating your workspace..."
+<ChromeShell title="Creating your workspace..."
+      page_label="New workspace"
       body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-6"
       scripts={{ _scripts }}>
   <main id="creating"
@@ -42,6 +43,45 @@
         <Notice variant="error">
           <span id="error-message" class="font-mono type-helper break-words whitespace-pre-wrap"></span>
         </Notice>
+        {# Private-repo guidance: revealed by creating.js only when the backend #}
+        {# classifies the failure as GITHUB_AUTH_REQUIRED (the workspace source #}
+        {# is a github.com URL none of this computer's git credentials can see). #}
+        {# The copy is static template content gated on the error kind; the #}
+        {# backend only classifies, it never generates prose. #}
+        <div id="github-auth-help" class="hidden text-left type-body text-secondary mt-3">
+          <p>
+            This repository looks private, or it does not exist: GitHub asked for
+            credentials, and none on this computer could open it. If you have access
+            to the repository, sign in to GitHub on this computer and try again.
+          </p>
+          <p class="mt-2">
+            The simplest way to sign in is the GitHub CLI: run
+            <code class="font-mono">gh auth login</code> in a terminal and follow the
+            prompts (see the
+            <Link href="https://docs.github.com/en/github-cli/github-cli/quickstart"
+                  target="_blank" rel="noopener">GitHub CLI quickstart</Link>).
+            Git then uses those credentials automatically when cloning.
+          </p>
+          <p class="mt-2">
+            Alternatively, clone or download the repository yourself to any folder on
+            this computer, and enter that folder's path in the form instead of the URL.
+          </p>
+        </div>
+        {# Generic (non-GitHub) git remote: same guidance as above but without #}
+        {# the GitHub-CLI advice, which only fits github.com. Revealed by #}
+        {# creating.js when the backend classifies the failure as GIT_AUTH_REQUIRED. #}
+        <div id="git-auth-help" class="hidden text-left type-body text-secondary mt-3">
+          <p>
+            This repository looks private, or it does not exist: it asked for
+            credentials, and none on this computer could open it. If you have access
+            to it, make sure your git credentials for this host are set up on this
+            computer, then try again.
+          </p>
+          <p class="mt-2">
+            Alternatively, clone or download the repository yourself to any folder on
+            this computer, and enter that folder's path in the form instead of the URL.
+          </p>
+        </div>
         <div class="flex items-center justify-center gap-2 mt-4">
           <ButtonLink href="/create" variant="primary">Back to setup</ButtonLink>
           <ButtonLink href="/" variant="ghost">Home</ButtonLink>
@@ -61,4 +101,4 @@
     </section>
 
   </main>
-</Base>
+</ChromeShell>

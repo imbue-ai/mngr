@@ -4,6 +4,756 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-22
+
+`mngr tmr` gained a `--reducer-env` option, documented in the generated CLI reference. It passes environment variables to the reducer agent only, never to the mappers, for credentials the reducer needs but mappers must not receive (such as a token that can push and open pull requests).
+
+The `mngr tmr` help text now describes the reducer's full role (collapsing repeated changes, writing the run's changelog, opening the pull request), the explicit per-test `--timeout` its agents run with, and the `escalations` field in the outcome schema.
+
+## 2026-07-21
+
+Fixed: agent tmux windows are no longer born collapsed (e.g. to `2x1`) when a degenerate, unsized client is attached to the host's shared tmux server. Previously mngr created agent sessions with tmux's default `window-size latest` policy, so a brand-new detached session was born at the geometry of whatever client was already attached to the shared server -- even a stray `2x1` ttyd/web-shell client -- regardless of the `new-session -x 200 -y 50` sizing. A `2x1` pane breaks Claude Code's TUI, so the initial `mngr message` delivery (which waits for the TUI to be ready) would time out and the message would be silently dropped. This is the root cause of "the agent was created but never got its first message" symptoms (e.g. the desktop `/assist` "have an agent help" flow, and launch-task workers).
+
+By default, agents are now pinned to a stable, usable geometry: the primary window is set to `window-size manual` and resized to the intended dimensions (historical `200x50`), making creation deterministic and immune to stray clients. Interactive attach still fits your terminal: per-session `client-attached` and `client-resized` hooks re-fit the pane to the current client's size (so a live terminal resize is tracked continuously, matching tmux's native `latest`), floored at a usable minimum (`80x24`) so a degenerate client can never collapse the pane below what Claude Code needs to render.
+
+An explicit `--tmux-window-size` is still honored verbatim: a client-following mode (`latest`/`largest`/`smallest`) behaves as before, and an explicit `manual` stays truly fixed (the re-fit hook leaves it untouched).
+
+Note: only newly created agents get the new pinning. Agents already running when you upgrade keep their current window-size policy until recreated.
+
+Fixed `mngr list --sort` on numeric fields (e.g. `idle`, `age`, `runtime`, `idle_seconds`), which previously ordered values as strings -- so an idle spread like 2.4, 14040.2, 111044 came out interleaved rather than sorted. Numeric sort keys now compare numerically; string fields are unchanged, and missing values still sort to the end in both directions.
+
+## 2026-07-15
+
+Fixed the discovery-events replay window being permanently pinned at the last legacy `DISCOVERY_FULL` snapshot. Installs that upgraded across the per-provider discovery migration kept that line in `events.jsonl` forever (nothing writes the type anymore), so every observe-stream attach replayed days of stale history -- destroyed workspaces reappearing with their old names at app startup, then visibly disappearing again as the destroy events re-folded. The legacy timestamp now participates only when the file contains no per-provider snapshots at all.
+
+- Added: `setup_command_context` (and `parse_output_options`) accept an optional `max_log_size_mb` override so a command can pin its own rotated-log size cap instead of inheriting `logging.max_log_size_mb` from config. Long-running daemons that write to a dedicated `--log-file` use this to keep a smaller cap than the general mngr default. The default behavior (inherit the config value) is unchanged.
+
+Regenerated the `mngr imbue_cloud` CLI reference docs for the new `sync` subcommand group (workspace-record and key-bundle transport used by the minds app).
+
+Marked `test_worker_hubs_do_not_accumulate_across_polls` as flaky: its live-gevent-hub count races against concurrently-running tests under xdist (it passes reliably in isolation).
+
+Made the remote cooperative host lock safe across SSH reconnects. Previously a dropped connection mid-critical-section silently released the `flock`, and the transient-retry machinery reconnected and kept running unlocked -- a silent mutual-exclusion violation that let another actor enter its critical section in the gap.
+
+- A monotonic acquisition counter (`host_lock.generation`) is now incremented under the lock on every acquire. A holder that reconnects while holding the lock re-acquires and verifies no other actor acquired in the gap: if the counter advanced by only its own re-acquire it transparently continues, otherwise it raises the new `LockLostError` (a `MngrError`, already isolated per-host by callers such as the `mngr_mapreduce` launch loop).
+
+- Loss is detected at every boundary: the paramiko reconnect chokepoint, an independently-dead lock channel, before each rsync (which uses a separate connection), and a single-exit release backstop that guarantees no critical section is reported successful while the lock was silently lost.
+
+- While a lock is held, a still-live SSH transport is no longer torn down on a channel-level or read-timeout error (which would needlessly drop the lock); only a confirmed-dead transport triggers reconnect-and-re-verify.
+
+- All in-host lock acquirers now participate in the counter so an in-host acquisition is visible to a reconnecting remote holder: the idle-shutdown watcher increments the counter (and holds the lock) when it takes the host down, and the local-filesystem lock path increments on acquire.
+
+## 2026-07-14
+
+The full `mngr observe` observer now detects a local agent's main process dying on its own (OOM, crash, or normal exit) within seconds instead of waiting up to 5 minutes for the next full snapshot.
+
+- It watches each local agent's main process PID (via psutil's event-driven `wait`) and treats the process exit as an activity signal, re-probing and emitting the new lifecycle state (STOPPED/DONE) promptly. Remote agents are unchanged (per-host activity streams plus the periodic snapshot).
+
+- New `mngr observe --stream-events` mode: the full observer echoes each agents-stream event (`AGENT_STATE`, `AGENTS_FULL_STATE`, and the new `AGENT_REMOVED`) to stdout as compact JSONL, in addition to writing the usual event files, so a parent process can consume live agent lifecycle state by reading the observer's stdout. Cannot be combined with `--discovery-only`.
+
+- New `AGENT_REMOVED` event on the agents stream, emitted when a previously-known agent is destroyed, so consumers learn of removals promptly rather than at the next full snapshot.
+
+- `AgentDetails` gains an optional `pid` field, populated for running agents on any provider (the PID of their main process, e.g. `claude`, in the host's PID namespace); it is a filterable/sortable listing field. The observer only PID-watches local agents, gated on the agent's host belonging to the `local` provider (the one and only user of the local connector) -- a remote PID must never be watched in-process, since psutil would bind an unrelated same-numbered local process.
+
+- The `libs/mngr` psutil floor is raised from `>=5.9` to `>=7.2` to guarantee the event-driven `wait()` path (os.pidfd_open on Linux, kqueue on macOS).
+
+Fix the Docker provider's create-time host-name collision check matching containers from other mngr environments.
+
+`_find_container_by_name` filtered only by the `host-name` and `provider` labels, which carry no environment discriminator -- two environments differing only in `MNGR_PREFIX` (e.g. two minds envs) label their containers identically, so creating a host whose name was in use in a *different* environment failed with a misleading "container already exists" error naming a container that does not exist. The lookup now also requires the container's actual name to match `<prefix><host-name>` (the same uniqueness scope Docker itself enforces and the same prefix filter discovery applies), so collisions are detected only within the current environment. The same lookup backs host resolution by name, so `mngr` commands addressed by host name also no longer resolve to (and act on) another environment's same-named container.
+
+Test-only: give `test_extras_claude_plugin_subcommand` timeout headroom (it shells out to the `claude` Node CLI, whose startup can exceed the global 10s pytest-timeout on a contended CI sandbox).
+
+Bump the release-sandbox Dockerfile's pinned Claude Code version from 2.1.160 to 2.1.207, which supports the Claude Fable 5 model. Must land together with the matching `[agent_types.claude].version` bump in default-workspace-template.
+
+Fixed the root causes of two flaky CI tests (issue #2456):
+
+- Remote host connections now retry (once, immediately) when the SSH handshake fails with paramiko's "Error reading SSH protocol banner" -- the signature of a freshly booted host (e.g. a new Modal sandbox or VPS) that accepts TCP before sshd is ready. Previously the first failed connect was fatal, surfacing to users as a spurious "Create agent failed" and making `test_snapshot_create_then_list_on_modal` flaky. Other connect failures (refused, unreachable, auth, host key) are still not retried, so genuinely-down hosts fail fast, and the two attempts bound the worst case (a host that accepts TCP but never speaks SSH) at about 30 seconds.
+
+- Extras CLI tests no longer spawn the real `claude` CLI: a shared stub-`claude` fixture replaces the Node process (whose startup on a contended CI sandbox tripped the global 10s offload pytest-timeout in `test_extras_claude_plugin_subcommand` and `test_extras_no_args_shows_status`) while still exercising the real shell-out and JSON-parsing plumbing. The real `claude` probe stays covered by a new acceptance test with a Node-startup-sized timeout.
+
+- Marked `test_worker_hubs_do_not_accumulate_across_polls` as known-flaky with a 30s per-test timeout: its 30 executor spinups and full-heap gevent-hub probes take ~5s even on an idle machine, so on a contended runner it could cross the suite-wide 10s pytest-timeout.
+
+# Robust message delivery: durable-evidence confirmation for `mngr message`
+
+- Fixed: `mngr message` could report success for a message that was never submitted. tmux latches a `wait-for -S` signal fired with no waiter, so a stale signal on the `mngr-submit-<session>` channel (left by any prompt submission no sender was waiting on, e.g. a task-notification dequeue) instantly "confirmed" the next send -- whose EXIT trap then killed the still-pending backgrounded Enter keystroke. The message stayed in the input box while every layer reported success.
+
+- Changed: submission confirmation no longer listens on tmux `wait-for` channels at all. A new submit-and-confirm engine in `tui_utils` runs ONE sequential remote script per send -- capture per-probe baselines, send Enter, poll agent-supplied durable evidence probes -- with no background jobs and no traps, so Enter is always sent before any confirmation check can run.
+
+- Changed: `InteractiveTuiAgent` subclasses now implement `_build_submission_evidence_probes` (durable on-disk evidence) instead of `_send_enter_and_validate` (send-Enter strategies). The unused `send_enter_best_effort` and `send_enter_and_poll_for_cleared_indicator` strategies were removed; agents supplying no probes degrade to a best-effort Enter. The `enter_submission_timeout_seconds` field is now `confirmation_timeout_seconds` (default 90s).
+
+- Added: bounded, pane-gated Enter retries (at ~3s/10s/30s into the confirmation window): Enter is re-sent only while the pane still shows the pasted text, and the message text itself is never re-pasted, so mngr's own retries can never duplicate a message.
+
+- Added: messages starting with `/` (TUI slash commands such as `/clear`) are confirmed under a relaxed policy: same retries and a brief evidence poll, but the send succeeds even when no evidence is observable, logging a warning and recording a structured agent event (`events/messages/events.jsonl`) instead of failing.
+
+- Added: unconfirmed strict sends fail with rich diagnostics (per-probe baseline/final tokens, Enter-retry history, pane capture). `mngr create --message` and resume-message failures now explain that the agent itself is up and how to resend (`mngr message <agent>`).
+
+- Added: a warning plus a structured agent event when the input box already contains text before a send (the new message is appended, as before).
+
+- Added: release-test harness journeys for message delivery (`run_message_delivery_journey`: idle -> busy/queued -> rapid sequential -> long buffer-pasted message -> slash command, each delivered exactly once) and concurrent delivery to two agents on one tmux server (`run_concurrent_message_delivery`).
+
+Fixed `mngr transcript` (human format) rendering assistant messages as `(no content)` when the event has no ordered `parts[]` list. The current common-transcript emitter always fills `parts[]`, but agents running an emitter version predating it (before 2026-06-15) emit only the flat `text`/`tool_calls`, so their assistant turns -- including ones with real text -- collapsed to `(no content)`. The formatter now falls back to the flat fields when `parts[]` is empty (a back-compat shim for those older agents; see MIND-113).
+
+Fixed messaging an agent whose process had exited but whose tmux session was still alive (e.g. after a ctrl-c, a crash, or an out-of-memory kill of just the agent process). Previously the message was typed into the leftover shell and lost; now the agent is restarted and the message delivered.
+
+This had two parts:
+
+- Lifecycle detection no longer mis-reports such an agent as `REPLACED`. A known-type agent whose pane foreground has dropped back to a shell prompt is now `DONE` even when non-shell background processes are still running under the pane -- in particular mngr's own in-pane helpers (the transcript streamers and background-task script, each running a `sleep` loop), which always linger after the agent process is killed. A non-shell process in the pane *foreground* (e.g. a program the user launched in the agent's window) is still treated as a genuine replacement and is never torn down. Unknown-agent-type behavior is unchanged.
+
+- Sending a message now restarts an agent that is `STOPPED` or `DONE` (neither has a live process to receive the message). For a `DONE` agent the lingering tmux session is torn down first, mirroring `mngr start --restart` -- including its host-lock serialization against `mngr gc` and concurrent starts, via a locked stop-then-start helper now shared with `mngr start --restart` -- so the relaunch actually happens rather than no-op'ing on the existing session. If this automatic (re)start fails (e.g. the relaunched agent never signals readiness), the failure is recorded against the agent in the command's output and exit code, just like a failed send, rather than only being warned about in the log.
+
+Together this is what the OOM revival path relies on: an agent whose main process was shed is brought back by the next message it receives.
+
+Fixed the remaining places where mngr shelled out to GNU-coreutils binaries and flags that stock macOS does not ship, each of which ran on the user's own machine whenever an agent used the `local` provider. All were verified failing on macOS 26.4.1 with a stock `PATH`, then verified fixed.
+
+Raw-transcript streaming re-emitted already-emitted lines on macOS. `mngr_transcript_reconcile_offset` reverse-scanned the session file with `tac` to find the last emitted line; with `tac` absent the scan read nothing and the offset reset to 0. It now scans forward and tracks the last match, which needs no reverse at all. This also fixes a latent off-by-one: the old code combined `wc -l` (which does not count an unterminated final line) with `tac` (which emits it), so a session file whose last line was still being appended -- the normal state of a live transcript -- reconciled one line too low.
+
+Transcript-streamer startup also got much faster. Both `mngr_transcript_build_id_set` and `mngr_transcript_reconcile_offset` used to extract each line's correlation field through a command substitution, which forks a subshell per line; they now match it with an inline bash regex and fork nothing. The dominant cost was `build_id_set`, which scans the whole already-emitted output: on a 50,000-line file it drops from about 32s to 0.7s on macOS, and about 14s to 0.6s on Linux (three trials each; forks are cheaper on Linux). `reconcile_offset` is subtler -- removing `tac` also removed its early exit on the first match from the end, so the new forward scan always reads the whole file (about 0.7s at 50,000 lines) instead of sometimes stopping early. But because it no longer forks, its worst case -- a match near the start, which made the old reverse scan fork through the entire file at about 12s -- is now that same bounded 0.7s. The inline match uses bash's built-in `[[ =~ ]]`, so unlike the `tac` it replaced it needs no external binary and behaves identically on macOS and Linux.
+
+`mngr gc` mis-measured orphaned work directories on macOS. `du -sb` has no BSD equivalent (`-b` is rejected), and because the command was piped into `cut`, the pipeline exit status was `cut`'s, so the failure looked like success with empty output and every orphan was reported as 0 bytes. `stat -c %Y` is likewise rejected by BSD `stat`, so each orphan's `created_at` fell back to `datetime.now()` and looked brand-new, meaning age-based collection never ran on macOS.
+
+Both `gc` call sites now go through the host interface instead of hand-rolled shell. `OuterHostInterface` gains a concrete `get_directory_size`, alongside the existing `path_exists` and `get_file_mtime`: it runs POSIX `test -d ... && du -sk` on the host -- locally via subprocess, remotely over SSH -- so callers never branch on `is_local`. Sizes are whole kibibytes, since `-k` is the only `du` block size POSIX defines, and a path that is not a directory reports 0. The trailing slash resolves a symlinked path to its target directory, and `du` exiting non-zero is tolerated because it still prints a correct total after skipping an unreadable subdirectory. The exact `du -sk <dir>/` invocation was verified on stock macOS (BSD `du`) and on Linux (GNU and busybox `du`) to agree on the load-bearing cases: a hard-linked inode counted once, a nested symlinked directory not followed, and a top-level symlink resolved.
+
+A further fix originally on this branch -- a perl `alarm` fallback for `timeout(1)` in the tmux message-submission path -- was dropped when #2475 replaced that path's confirmation engine wholesale (durable-evidence polling, no `timeout(1)`). The portable-shell technique it established, including the perl timeout form and its two pitfalls, is preserved in the repo-root `style_guide.md` instead of in code with no remaining caller.
+
+Testing: integrated the e2e/tutorial test fixes from 240 qualifying TMR test-agent branches into a single squashed commit (all test/doc; no implementation changes were required). During integration the shared e2e fixture (`e2e/conftest.py`), which 47 agents had each independently patched, was reconciled to one coherent approach:
+
+- Provider discovery is now constrained to the backends the e2e suite actually exercises (`local`, `ssh`, `modal`, plus `docker` only when a Docker daemon is reachable) via the `MNGR__ENABLED_BACKENDS` env-var layer. This prevents the credential-requiring cloud provider plugins installed in the monorepo (aws, azure, gcp, vultr, ovh, imbue_cloud) from making a bare `mngr list` exit with `EXIT_CODE_PROVIDER_INACCESSIBLE`.
+
+- Docker is dropped from the enabled backends when no daemon is reachable (probed with a plain socket connection, so it neither depends on the Docker CLI/SDK nor trips the `docker_sdk` resource guard), so the suite runs on Docker-less hosts (e.g. under `-m 'not docker'`).
+
+- Setting the allowlist through the env-var layer (rather than a settings file) keeps it invisible to the `mngr config list --scope <file>` tests that assert on per-scope file contents.
+
+Also de-duplicated a doubly-inserted `libs/overlay` entry in the install-test fixture's `_WORKSPACE_PACKAGES` and removed a now-stale `FIXME(tmr)` about `rsync` marks on the event tests (the integrated suite already drops those marks everywhere).
+
+- Removed the superfluous `@pytest.mark.rsync` mark from the `test_advanced_collect_results_loop` e2e tutorial test. The test creates local `--type command` agents and only exercises `mngr exec`, which never invokes rsync, so the resource guard failed the otherwise-passing test.
+
+- Fixed the `test_advanced_create_reuse_modal` e2e tutorial test: its post-create verification queries now scope `mngr list` to `--provider modal`, so they no longer fan out to every enabled provider (in particular the unconfigured AWS provider, whose unreachable-provider handling stalled the query past its timeout).
+
+Removed a spurious `@pytest.mark.rsync` mark from the `test_advanced_fan_out_create` e2e tutorial test. The test creates local `--type command` agents in a clean git repo, which mngr materializes via a git worktree and never rsyncs, so the resource guard correctly flagged the mark as declared-but-never-invoked.
+
+Fixed the `test_advanced_observe_stream` release test for the `mngr observe --discovery-only` tutorial block. The test now asserts on the current per-provider `DISCOVERY_PROVIDER` snapshot contract (the legacy all-providers `DISCOVERY_FULL` snapshot was deprecated when discovery moved to decoupled per-provider poll loops) and uses a longer timeout so the stream's initial snapshots are captured despite mngr's cold-start latency before the process is bounded by `timeout`.
+
+Fixed the `test_advanced_watch_dashboard_running` e2e tutorial test, which failed with exit code 6 (provider inaccessible) whenever a remote provider backend was registered but uncredentialed (e.g. AWS with no credentials). The test's dashboard-verification query now scopes `mngr list --running` to the local provider (`--provider local`), matching the rest of the e2e suite, so it enumerates only the local provider and no longer depends on or contacts any remote backend in the isolated test environment.
+
+Fixed the e2e tutorial test suite so unfiltered `mngr list` tests pass in environments without cloud credentials or Docker.
+
+The e2e fixture now restricts discovery to the backends each test can actually reach: `local` is always enabled, while `modal` and `docker` are enabled only when the test carries the matching `@pytest.mark.modal` / `@pytest.mark.docker` mark. Previously the fixture left `enabled_backends` empty, which enabled every registered backend (aws, azure, gcp, ...); an unfiltered `mngr list` would then try to reach those uncredentialed providers and exit with `EXIT_CODE_PROVIDER_INACCESSIBLE` or hang on their discovery timeouts.
+
+Also dropped the spurious `@pytest.mark.rsync` mark from `test_advanced_watch_list_live_dashboard`, which creates a local command agent and never invokes rsync.
+
+Fixed and tightened the `test_archive_command` e2e tutorial test so it reliably verifies the documented scope of `mngr archive` on a stopped agent:
+
+- Added a `timeout(120)` mark (the default 10s was too short for the create+stop+archive round-trip) and dropped the superfluous `rsync` mark (the test creates a local command agent and never invokes rsync).
+
+- Scoped the archived-listing verification to `--provider local` (matching the sibling `test_stop_archive`), since `my-task` is a local command agent and the test's scope is local-only. This removes an unnecessary remote-provider enumeration, so the `modal` mark is no longer needed.
+
+Fixed the `test_archive_running_agent_is_skipped` e2e tutorial test so it reliably verifies its scope (archiving a running agent without `--force` is a no-op): bumped its pytest timeout to 120s so the local command-agent create no longer trips the default 10s timeout, scoped the archived-list verification to the local provider (where the command agent lives) to avoid enumerating unreachable remote providers, and dropped the now-inaccurate `modal`/`rsync` resource-guard markers since the test exercises neither.
+
+Added the `@pytest.mark.rsync` resource-guard mark to the `mngr ask` release test (`test_ask_simple_query`), which invokes rsync internally when preserving agent logs. This resolves the resource-guard failure so the end-to-end round-trip test passes.
+
+Strengthened the release test for `mngr dependencies --install auto` so it also asserts the command runs the check/install flow to completion (no unhandled crash), not just that it reached the dependency reporting stage.
+
+Fixed the `test_command_agent_data_pipeline` e2e tutorial test to scope its `mngr list` verification to `--provider modal` (where the `etl-job` command agent runs). Previously the unscoped listing reached out to every enabled provider, so it failed with exit code 6 in environments where another provider (e.g. aws) is enabled but has no credentials configured.
+
+Removed a superfluous `@pytest.mark.rsync` mark from the `test_command_agent_dev_server_extra_windows` e2e tutorial test. The test exercises a purely local command agent (with an extra tmux window) and never invokes rsync, so the resource guard was failing it for carrying a mark it did not use.
+
+Tests: fixed the `test_command_agent_python_http` e2e tutorial test. It carried a spurious `@pytest.mark.rsync` mark even though a purely local command agent never invokes rsync (rsync requires one remote endpoint), so the resource guard failed the otherwise-passing test; the mark is removed. The per-test and per-command timeouts were also raised so the three sequential mngr invocations (create, exec, list) do not spuriously time out on the contended sandboxes the release suite runs in.
+
+Fixed a flaky failure in the `test_config_edit_editor_failure` e2e release test: a single `mngr config edit` cold start takes ~10s, which exceeds the default 10s func-only timeout, so the test now carries `@pytest.mark.timeout(60)` like its sibling `config edit` tests. No user-visible change.
+
+Fixed the `test_config_edit_scope_missing_editor` release test so it no longer fails with a spurious 10s func-only timeout: a single `mngr` invocation exceeds the default timeout because of startup cost, so the test now carries `@pytest.mark.timeout(60)` like its sibling config tests.
+
+Tightened the same test to also assert that the missing-editor failure surfaces the actionable "Editor not found" message rather than a bare Python traceback, matching the documented scope.
+
+Fixed the `test_config_edit_scope` e2e tutorial test to allow a 60s timeout. It runs two `mngr` subprocesses (`config path` + `config edit`) whose cumulative cold-start time exceeds the default 10s func-only timeout, matching the other multi-subprocess tests in the config tutorial suite.
+
+Fixed the `test_config_edit` e2e tutorial test, which wrongly assumed the e2e fixture pre-seeds the project `settings.toml`. The fixture deliberately leaves it unseeded so the test exercises genuine first-use behavior, where `mngr config edit` creates the file from a template before opening it in `$EDITOR`.
+
+Tests: the fresh-install test suite now installs the `overlay` workspace package into its isolated venv. mngr grew a runtime dependency on `imbue.overlay` (the extracted config-merge algebra), but the `isolated_mngr_venv` fixture did not install that workspace package, so every fresh-install command crashed with `ModuleNotFoundError: No module named 'imbue.overlay'`. The fixture now includes `libs/overlay` alongside the other editable workspace packages.
+
+Tests: `test_config_get_in_fresh_install` now asserts that `mngr config get headless` reports the default value `false`, verifying that config lookup actually falls back to the key's default rather than merely exiting cleanly.
+
+Added a `@pytest.mark.timeout(60)` marker to the `test_config_path_invalid_scope` e2e tutorial test so its single `mngr` subprocess invocation is not killed by the default 10s per-test timeout during cold start.
+
+Raised the per-test timeout on the `mngr config path` e2e tutorial test to 60s, matching the other multi-subprocess config tests, so it no longer fails against the default 10s pytest-timeout.
+
+Fixed the `test_config_set_default_provider` e2e tutorial test so it can read the value back with `mngr config get commands.create.provider --scope project`. Since the e2e fixture no longer seeds the project `settings.toml`, the test now seeds that file with the pytest opt-in before running `config set`, mirroring the existing `test_config_unset_missing_key` pattern. No user-facing behavior changed.
+
+Fixed the `test_config_set_headless_globally` e2e tutorial test to override the
+10s global pytest timeout (which the `mngr` subprocess cold-start could exceed)
+with `@pytest.mark.timeout(180)` and matching per-command subprocess timeouts,
+consistent with the other `mngr`-invoking tests in the same module.
+
+Fixed the `test_config_set_headless` e2e tutorial test so it seeds the pytest opt-in (`is_allowed_in_pytest = true`) into the project `settings.toml` before running `mngr config set headless true`. The project config is intentionally left unseeded by the e2e fixture, so without this the follow-up `mngr config get headless` (which loads the merged config) tripped the pytest config opt-in guard on the freshly-written project file.
+
+Fixed the `test_config_set_rejects_unknown_key` scripting e2e test, which was timing out under the default 10s per-test limit because it runs multiple `mngr` subprocesses: added a `@pytest.mark.timeout(60)` override matching its sibling tests.
+
+Extended the test to cover the full documented scope of `mngr config set` validation: it now also verifies that a wrong-type value for a known key (`config set headless notabool`) is accepted, since validation only rejects unknown fields (via `model_construct`) and does not check value types.
+
+Fixed the fresh-install test fixture (`isolated_mngr_venv`) to install the `overlay` workspace package. mngr's config code path imports `imbue.overlay`, so without it the isolated venv crashed with `ModuleNotFoundError: No module named 'imbue.overlay'` when running commands like `mngr config set`.
+
+Fixed the `test_config_set_unknown_key_fails` e2e tutorial test so its persistence check no longer assumes the e2e fixture pre-seeds the project `settings.toml`. The fixture deliberately does not seed that file, so a rejected `config set` never creates it; the test now reads the file back tolerating its absence and asserts the rejected key was never persisted.
+
+Fixed the `test_config_unset` e2e tutorial test so it seeds the project settings file (including the `is_allowed_in_pytest` opt-in) directly instead of establishing the value via `mngr config set`. A file written by `set` does not carry the opt-in, so the follow-up `mngr config unset` was being rejected before it could run.
+
+Fixed the isolated-venv install fixture to also editable-install the `overlay`
+workspace package, which `mngr` now depends on. Without it, the freshly built
+venv could not import `imbue.overlay` and every `minimal_install_env`-based
+release test failed at startup.
+
+Tightened the non-strict unknown-config-key release test to verify its scope
+directly: it now checks (via a provider-independent `config get` command) that an
+unknown config key is warned about but does not abort config loading, instead of
+depending on a full `mngr list` run that also required a reachable provider
+backend.
+
+Gave the `test_connect_by_agent_id_fictional` e2e test a `@pytest.mark.timeout(120)`. Connecting by agent id has no host hint, so resolution falls back to a full-provider discovery scan that exceeds the default 10s per-test timeout; the command's behavior (a clean "Agent not found" error naming the id, exit 1) was already correct.
+
+Removed a stale `@pytest.mark.rsync` mark from the `test_connect_by_name` e2e tutorial test. Connecting to a local agent execs `tmux attach` directly and never invokes rsync, so the mark (a leftover from when the test connected to a remote Modal agent) tripped the resource guard and failed the test.
+
+Gave the `test_connect_explicit_host` e2e tutorial test a 120s timeout (matching the other connect tests) so it no longer trips the default 10s per-test timeout: the `mngr conn my-task@my-host` command legitimately takes longer than 10s because of mngr's subprocess startup cost plus the full-scan discovery it triggers.
+
+Removed the superfluous `@pytest.mark.rsync` mark from the release e2e test `test_connect_no_start_fails_when_stopped`. This unhappy-path test creates a local command agent, stops it, and runs `mngr connect my-task --no-start`, which refuses before the tmux attach step that would sync the workspace. Since rsync is therefore never invoked, the resource guard failed the test with "marked with @pytest.mark.rsync but never invoked rsync". The `--no-start`-refuses-when-stopped behavior itself was already correct.
+
+Removed the superfluous `@pytest.mark.rsync` from the `test_connect_no_start` e2e tutorial test. Connecting to a local agent is a pure `tmux attach` and never invokes rsync, so the resource guard rejected the carried-but-unused mark.
+
+Fixed the release e2e test `test_connect_short_form` (connect tutorial). The test carried a superfluous `@pytest.mark.rsync` mark, but connecting to a *local* agent only execs `tmux attach` -- rsync is used solely on the remote SSH path -- so the resource guard failed the test for declaring a resource it never invokes. Removed the stale mark (the `tmux` mark, which the local attach does satisfy, is retained). No production behavior change.
+
+Removed a spurious `@pytest.mark.rsync` mark from the release e2e test `test_connect_with_start_restarts_stopped_agent`. Connecting to a local `--type command` agent (create, stop, then `connect --start`) never invokes the rsync binary, so the resource guard rejected the mark as superfluous. This is a test-only change with no user-visible impact.
+
+Removed the spurious `@pytest.mark.rsync` marker from the `test_connect_with_start` e2e tutorial test. Connecting to a local agent execs `tmux attach` directly and never syncs files, so the resource guard was failing the test for declaring an rsync mark it never exercised.
+
+Fixed the `test_control_mngr_via_env` e2e release test by removing its superfluous `@pytest.mark.rsync` mark. The test pins the create provider to `local` via `MNGR__COMMANDS__CREATE__PROVIDER`, and a local agent's workspace lives on the same machine, so no rsync ever runs -- the resource guard therefore flagged the mark as never invoked and failed the (otherwise passing) test. The mark is dropped for the same reason `@pytest.mark.modal` was already omitted here. No user-visible change.
+
+Made the `test_create_aborts_on_dirty_tree_by_default` e2e release test robust to credential-gated default cloud backends: its "no agent was created" verification now scopes `mngr list` to the local provider (`--provider local`), matching the existing idiom in `test_invalid_provider_fails`. Previously the unscoped listing fanned out to the default `aws` backend, which reports itself unavailable when no credentials are present and made `mngr list` exit non-zero for reasons unrelated to the abort behavior under test.
+
+Fixed the e2e tutorial test suite so non-cloud tests are not broken by providers that are enabled by default in the monorepo checkout but are unreachable or irrelevant to the test. The e2e fixture now disables the credential-requiring cloud providers the suite never exercises (aws, azure, gcp, vultr, ovh, imbue_cloud), disables Docker when no daemon socket is present, and only enables Modal for tests that opt in via `@pytest.mark.modal`. This stops a plain `mngr list` from exiting non-zero (provider inaccessible) or surfacing leftover agents from the shared Modal account.
+
+Also removed a stale `@pytest.mark.rsync` marker from `test_create_and_destroy_agent`, which creates a local command agent transferred via git worktree and therefore never invokes rsync.
+
+Fixed the `test_create_and_rename_agent` e2e release test so it passes in environments where extra provider plugins are installed but their backends are unreachable.
+
+The e2e fixture now pins `enabled_backends` to the backends the environment can actually reach (local and ssh always; modal when credentials are present; docker only for `@docker`/`@docker_sdk` tests) instead of leaving it empty (which enabled every installed backend). This keeps `mngr list`/`exec`/`destroy` from failing with a provider-inaccessible exit code purely because an unconfigured cloud provider plugin (aws, azure, gcp, ovh, vultr, imbue_cloud) happens to be installed.
+
+Also removed the incorrect `@pytest.mark.rsync` mark from the rename tests: they create local command agents in a git repo, which use the git-worktree transfer mode and never invoke rsync.
+
+Fixed the `test_create_codex_explicit_type` e2e tutorial test so it no longer
+requires a codex binary (or npm) on the host: it now disables the codex install
+check before creating the agent, so `--type codex` resolves and the agent is
+created without attempting `npm i -g @openai/codex`. Also dropped the stale
+`@pytest.mark.rsync` mark and the `--no-ensure-clean` flag (which had been the
+only thing triggering rsync), matching the sibling command/yolo tutorial tests.
+
+Fixed the `test_create_codex_positional` tutorial e2e test so it passes on hosts without a codex binary or npm:
+
+- The e2e fixture now sets `[agent_types.codex] check_installation = false`, so provisioning a codex agent skips the `npm i -g @openai/codex` install step (the codex tutorial tests only exercise agent-type resolution, not a real codex run).
+
+- Dropped the spurious `@pytest.mark.rsync` from the test (local agent creation uses a git worktree, not rsync) and gave the follow-up `mngr list` a longer timeout, marking the test flaky because the just-created codex agent's live state can be slow to compute.
+
+Tests: fixed the e2e tutorial test for the `--type command` post-`--` command path so it verifies its documented scope. Two test-infrastructure fixes:
+
+- The shared e2e fixture now restricts provider discovery to the backends each test actually exercises (`local` always, `modal` always, and `docker` only for `@pytest.mark.docker` tests) via `enabled_backends`. Previously `uv sync --all-packages` installed every provider plugin (aws, azure, gcp, vultr, ovh, imbue_cloud) into the dev venv, so a bare `mngr list` fanned out to all of them and aborted with the provider-inaccessible exit code because those cloud providers have no credentials in the test environment.
+
+- Dropped the spurious `@pytest.mark.rsync` from `test_create_command_agent_runs_post_dash_command_in_agent`: it creates a local agent in a git repo, which uses the `GIT_WORKTREE` transfer mode and never shells out to rsync, so the declared-but-never-invoked resource guard failed the otherwise-passing test.
+
+Made the `test_create_command_custom_script` tutorial e2e test robust to environments where an unreachable cloud provider backend (e.g. `aws`) is installed but has no credentials: its verification now scopes `mngr list` to `--provider local` (matching the sibling codex/yolo tests), since the created `command` agent lives on the local provider.
+
+Fixed the `test_create_command_python_http` e2e tutorial test so its `mngr list` verification scopes discovery to `--provider local` (matching the sibling agent-type tests). Previously it ran a plain `mngr list --format json` that fanned out to every configured provider, so the test failed with a provider-inaccessible exit code whenever a remote provider was merely enabled-by-default but unreachable in the test environment (e.g. `aws` without credentials), even though the created command agent was correctly listed.
+
+Fixed the `test_create_copy` e2e tutorial test (the `--transfer=git-mirror` "full copy" block). Two issues: the verification `mngr list --format json` did a full provider scan and exited non-zero whenever an enabled provider was unreachable (no Docker daemon, or an installed cloud backend with no credentials), so it now scopes the listing to the local provider (`mngr list --provider local`), matching the pattern used by the other e2e read commands. Also removed the incorrect `@pytest.mark.rsync` mark: `--transfer=git-mirror` transfers via git, not rsync (rsync is only the fallback for non-git directories), so the rsync resource guard's NEVER_INVOKED check was failing the test.
+
+Fixed the custom-agent-type tutorial e2e test (`test_create_custom_yolo_agent_type`) so it simulates the in-editor project-config edit with a direct file append (opting the freshly created project config into the pytest run) instead of `mngr config set`, which the pytest config-loading guard rejected on the un-opted-in project config.
+
+Removed an incorrect `@pytest.mark.rsync` mark from the release test `test_create_default_branch_distinct_per_agent`. The test creates local agents from a clean git repo, which uses the git-worktree transfer (never rsync), so the resource guard failed the test for declaring a resource it never invoked.
+
+Removed the incorrect `@pytest.mark.rsync` mark from the `test_create_default_branch` e2e tutorial test. The default `mngr create` in a local git repo uses a git worktree (not rsync) to transfer files, so the resource guard was correctly failing the test for declaring an rsync mark it never exercised.
+
+Fixed the tutorial e2e create tests so `mngr list --format json` no longer exits non-zero in a bare test environment: the isolated e2e profile now disables the credential-requiring cloud providers (aws, gcp, azure, vultr, ovh, imbue_cloud), which register default-enabled instances in the monorepo venv and would otherwise fail provider discovery with a "not available" error. Modal and Docker remain enabled.
+
+Also removed a spurious `@pytest.mark.rsync` from `test_create_default`: a bare worktree `mngr create` on a clean working tree copies no untracked/gitignored files, so rsync is never invoked and the resource guard's NEVER_INVOKED check would fail the test.
+
+Fixed the `test_create_duplicate_name_fails` e2e release test so it verifies its intended scope reliably:
+
+- Scoped the post-rejection `mngr list` to `--provider local` (matching the sibling error tests) so an unrelated unreachable remote provider (e.g. AWS without credentials) no longer makes the verification exit non-zero.
+
+- Dropped the superfluous `@pytest.mark.rsync` mark, which the resource guard rejected because the test never invokes rsync.
+
+Fixed the e2e tutorial test fixture so provider discovery is scoped to the backends the suite actually exercises. The monorepo dev environment installs every provider plugin (aws, azure, gcp, vultr, ovh, ...), each enabled by default and probing its (absent) credentials at discovery time, which made `mngr list` -- run by many e2e tests and defaulting to `--on-error abort` -- exit non-zero on the first unreachable cloud provider even when the test never touched it. The fixture now sets `enabled_backends` to `local`, `ssh`, and `modal` (which self-skips via `ProviderEmptyError` when its per-user environment is absent), plus `docker` only for docker-marked tests (the docker backend raises `ProviderUnavailableError` rather than self-skipping when its daemon is missing). This is a test-only change with no effect on installed `mngr` behavior.
+
+Fixed the `test_create_headless_no_connect_message` e2e test: it now scopes its verification listing to `mngr list --provider local` (matching the other e2e create tests) so it never queries unauthenticated cloud providers, and dropped the spurious `@pytest.mark.rsync` mark (a `--no-connect` local command-agent create does not invoke rsync).
+
+Made the `test_create_headless` e2e tutorial test robust to the ambient provider environment. Its listing check now scopes to `mngr list --provider local` (the headless agent is created on the local host), so it no longer fails when an unrelated enabled provider is unreachable in the test environment (e.g. no Docker daemon, or a cloud backend without credentials) -- that is orthogonal to whether the agent appears. Also dropped the test's `@pytest.mark.rsync` marker: a purely local create writes files directly and never invokes rsync (rsync is only used to sync to remote hosts), so the resource guard for that mark could never be satisfied. No user-visible change -- test-only.
+
+Fixed the `test_create_help_short_form_and_alias_succeed` e2e release test, which was timing out under the 10s default. It now carries a `@pytest.mark.timeout(120)` marker (like the rest of the e2e suite) to accommodate the multiple `mngr` CLI invocations it makes, and the `c`-alias branch now also asserts the SYNOPSIS section to match the documented scope.
+
+Fixed the `test_create_help_succeeds` e2e release test so it no longer hits the default 10s pytest timeout. `mngr create --help` legitimately takes ~20s because it loads every provider plugin to render the PROVIDER BUILD/START ARGUMENTS section, so the test now carries an explicit `@pytest.mark.timeout(120)` like the rest of the e2e suite.
+
+Raised the per-test timeout on the `mngr create --help` e2e tutorial test. Rendering that help imports every provider backend to build the per-provider build/start argument section, so the mngr subprocess startup routinely exceeds the global 10s pytest timeout; the test now uses `@pytest.mark.timeout(60)` like the other e2e create tests.
+
+Fixed the `minimal_install_env` test fixture so the isolated fresh-install venv also installs the `overlay` workspace package. Without it, `mngr` failed to import (`ModuleNotFoundError: No module named 'imbue.overlay'`), breaking every fresh-install CLI test (e.g. `mngr create --help`).
+
+Fixed the tutorial e2e test fixture so `mngr list` no longer fails on providers the test environment cannot reach. `uv sync --all-packages` installs every provider backend plugin, and each is enabled by default, so a bare `mngr list` enumerated the credential-backed cloud providers (aws, azure, gcp, vultr, ovh, imbue_cloud) and exited non-zero (per the consistent provider-auth-failure design) because no test environment carries their credentials. The fixture now disables those providers, and enables Docker only for `@pytest.mark.docker` tests (the Docker daemon is present in the release CI image but not in every environment, and only those tests use it). Modal stays enabled for every test since it is authenticated centrally. This is a test-only change with no effect on shipped behavior.
+
+Fixed the `test_create_modal_basic_recap` e2e tutorial test so it scopes its verification listing to `mngr list --provider modal --format json`. The previous bare `mngr list` fanned out to every enabled provider and aborted with `EXIT_CODE_PROVIDER_INACCESSIBLE` when the installed-but-unconfigured `aws` plugin was reached, even though the Modal agent was created and running. Filtering to the modal provider keeps the test within its documented scope (confirming the agent lands on a RUNNING Modal host).
+
+Marked the `test_create_modal_custom_image_base` e2e tutorial test as flaky. Modal agent creation occasionally fails when the initial-snapshot host-record write to a Modal volume hits a transient server-side error that outlasts the volume layer's retries; this is Modal infrastructure flakiness rather than a defect in the test or the custom-image-base behavior, so the test now lets offload retry it (matching the sibling Modal tests in the same file).
+
+Scoped the `mngr list` call in the `--idle-mode run` Modal tutorial e2e test to `--provider modal`, so the verification no longer queries unrelated enabled providers (e.g. aws) that may lack credentials in the test environment and cause a spurious provider-inaccessible exit.
+
+Fixed the `test_create_modal_idle_mode_ssh` e2e tutorial test so its verification listing filters by `--provider modal` (matching `test_create_modal_idle_timeout`). The unfiltered `mngr list` enumerated every enabled provider and exited non-zero when a credential-less provider (e.g. aws) could not be reached, failing the test for a reason unrelated to the `--idle-mode "ssh"` behavior under test.
+
+Scoped the `mngr list` call in the `--no-start-on-boot` Modal e2e test to `--provider modal` so it no longer fails when unrelated providers (e.g. AWS) lack credentials in the test environment.
+
+Marked the `test_create_modal_pass_host_env` release e2e test as `@pytest.mark.flaky` so offload retries it. The `mngr exec` issued right after create occasionally resolves the agent to a second, spurious host (Modal sandbox discovery is eventually consistent) and fails on that phantom host with a transient SSH "Authentication failed", flipping the exit code to 1 even though the forwarded host env var is verified correctly on the real host. Test-only change; no user-visible behavior change.
+
+Fixed the `test_create_modal_target_path` e2e tutorial test so its work-dir inspection lists only the modal provider (`mngr list --provider modal --format json`) instead of every enabled provider. The unfiltered listing failed when an enabled-but-unconfigured provider (e.g. aws without credentials) was present, which is unrelated to the `@.modal:/workspace` target-path behavior under test.
+
+Refined the `test_create_modal_upload_and_extra_provision_command` e2e/tutorial test so it exercises exactly its documented scope (the `--upload-file` and `--extra-provision-command` flags, which apply during host provisioning independent of the agent type). It now pins a lightweight `--type command -- sleep` agent instead of relying on the default `claude` agent, matching the convention used by the other host-effect create tests (rsync, volume, target-path). This removes the out-of-scope claude install and its ANTHROPIC_API_KEY dependency, keeping the test faster and less fragile.
+
+Made the `test_create_modal_upload_only` e2e release test robust to a transient window right after `mngr create --provider modal --no-connect`: a fresh `mngr exec` against the brand-new Modal host can briefly fail to reach it (discovery momentarily finds no agent, or the SSH connection is refused) before the host settles. The verification read now retries until the host becomes reachable instead of asserting on the first attempt.
+
+Fixed the `test_create_named_agent` e2e tutorial test. Its verification `mngr list` call now scopes to `--provider local` (matching the rest of the e2e suite) so it no longer exits non-zero when an unauthenticated remote provider (e.g. AWS with no credentials) is enabled in the test environment; the agents this test creates are always local. Also removed the spurious `@pytest.mark.rsync` mark, since a default `mngr create` uses a git-worktree transfer that never invokes rsync.
+
+Fixed the `test_create_named_host_new_host` e2e release test so it scopes its verification listing to the modal provider (`mngr list --addrs --provider modal`). A bare `mngr list` also queries the AWS provider, which is enabled but has no credentials in the isolated e2e profile, causing the command to exit non-zero for reasons unrelated to the `name@host.provider --new-host` host-naming syntax under test.
+
+Fixed the `test_create_provider_modal` e2e tutorial test: it now creates a lightweight always-running `command` agent (instead of relying on a default agent type that fell back to a credential-less `claude` agent, which died on startup and let the Modal host auto-stop before the listing could observe it). The agent now stays running so `mngr list --provider modal` surfaces it, matching the rest of the create-tutorial suite.
+
+Flagged (via a FIXME) a concurrency limitation in the e2e test-profile Modal environment naming: the name is truncated to 64 characters, which drops the tail of `MNGR_AGENT_NAME` so sibling `test_create_*` agents collapse to a single identifier distinguished only by a 1-second timestamp, causing environment-name collisions when many run concurrently.
+
+Fixed the `test_create_quiet_suppresses_output` e2e test: it now scopes its verification listing to `mngr list --provider local` (matching the other e2e create tests) so it never queries unauthenticated cloud providers, and dropped the spurious `@pytest.mark.rsync` mark (a `--no-connect` local create does not invoke rsync).
+
+Raised the timeout on the `test_create_rejects_unknown_option` e2e tutorial test so it no longer fails against the global 10s pytest timeout: the `mngr create` subprocess's cold startup alone routinely takes ~10s even though the unknown option is rejected at argument-parsing time before any host/agent work happens. This mirrors the other `mngr create` e2e tests.
+
+Fixed the e2e tutorial test suite so `mngr list` no longer fails on credential-backed cloud providers.
+
+The shared e2e fixture now disables the credential-backed cloud VPS providers (aws, azure, gcp, vultr, ovh) that are enabled by default in the all-packages dev/CI environment. Without credentials these providers report themselves unreachable, and a plain `mngr list` treats an enabled-but-unreachable provider as an error and exits with the provider-inaccessible code (6), which broke every tutorial test that lists agents. Modal and Docker stay enabled as before.
+
+Also dropped the superfluous `@pytest.mark.rsync` from `test_create_short_forms`: both agents use the default git-worktree transfer in a clean source repo, so `mngr create` finds no untracked files to copy and never invokes rsync, which the resource guard flags as a superfluous mark.
+
+Clarified the `test_create_stack_templates_with_unknown_template_fails` release test to document why its existing assertions (failure plus a "not found" message naming the offending template) fully cover the documented scope: a template-not-found error is only ever raised during CLI-time template resolution, before any agent or host is provisioned, and the test's lack of the tmux/modal markers means the resource guards would fail it if provisioning were reached. No behavior change.
+
+Strengthened the `test_create_stack_templates` e2e tutorial test to observe the concrete effect of stacking `--template modal-big --template with-tests` -- it now confirms the agent runs in-place (modal-big's `transfer=none` applied) rather than only asserting the create command exited 0.
+
+Added an explicit `@pytest.mark.timeout(120)` to the `test_create_template_short_form` e2e tutorial test so the two real `mngr` invocations (`create` and `exec`) it runs no longer trip the global 10s pytest timeout, matching the other slow `mngr create` tests in the same file.
+
+Tests: the e2e tutorial fixture now restricts the enabled provider backends to the ones e2e testing actually uses (`local`, `modal`, and `docker` only when a Docker daemon socket is present). Every cloud-VPS provider plugin (aws, azure, gcp, ovh, vultr, imbue_cloud) is installed in the workspace venv, and several of them (e.g. aws, azure) raise a provider-unavailable error when no credentials are configured -- which the e2e environment never has -- making every `mngr list` exit with the provider-inaccessible code (6). Gating Docker on socket presence also lets non-Docker environments run the `not docker` selection without an unreachable Docker provider failing `mngr list`.
+
+Tests: dropped the `@pytest.mark.rsync` mark from `test_create_with_agent_args`. It creates a worktree agent from a clean source repo with default transfer options, so no untracked/modified/gitignored files exist to copy and `mngr create` never shells out to rsync; the mark caused a spurious NEVER_INVOKED resource-guard failure. The test's scope is purely `--` argument forwarding, unrelated to file transfer.
+
+Fixed the release test `test_create_with_base_branch` (in `imbue/mngr/e2e/tutorial/test_create_data_and_git.py`): added the `@pytest.mark.timeout(120)` marker that `mngr create` e2e tests require (the 10s default fired mid-create), and removed the stale `@pytest.mark.rsync` marker. The default git-worktree transfer creates the worktree via `git worktree add` and only rsyncs uncommitted/gitignored extras; with a clean working tree it never invokes rsync, so the mark tripped the resource guard. No user-visible change -- test-only.
+
+Fixed the e2e tutorial test suite so `mngr list` no longer fails during tests: the shared e2e fixture now disables the credential-backed cloud VPS providers (aws, azure, gcp, imbue_cloud, ovh, vultr, lima) that are installed as workspace packages but have no credentials in the test environment. Previously each registered a default provider instance that discovery tried to reach, surfacing an inaccessible-provider error and making `mngr list` exit non-zero.
+
+Also removed an incorrect `@pytest.mark.rsync` from the `--connect-command` create test: creating a local agent from a git repo uses the git-worktree transfer mode, which never invokes rsync, so the mark tripped the resource guard's never-invoked check.
+
+Fixed the `test_create_with_env_file` e2e tutorial test timing out. Creating a local command agent (agent-state setup, git worktree, tmux and command-agent startup) takes longer than the default 10s per-test timeout. Added a `@pytest.mark.timeout(120)` override, matching the sibling `test_control_mngr_via_env` local-provider create test.
+
+Testing: fixed the `test_create_with_env_vars` e2e tutorial test for the create-time `--env KEY=VALUE` block. It now overrides the default 10s per-test timeout (the create plus follow-up `mngr exec` legitimately run longer, mirroring `test_create_with_pass_env`), and drops the superfluous `@pytest.mark.rsync` mark -- a local git-repo `--type command` create never invokes rsync (rsync is only used for non-git or remote projects), so the mark tripped the resource guard's "marked but never invoked" check.
+
+Tests: drop the superfluous `@pytest.mark.rsync` from the `test_create_with_env` e2e tutorial test. A default local `mngr create` on a git repo uses the `git-worktree` transfer mode, which never shells out to `rsync`, so the mark tripped the resource guard's "marked but never invoked" check and failed the test even though its `--env` behavior verified correctly.
+
+Fixed the `test_create_with_explicit_branch_name` e2e tutorial test: removed the spurious `@pytest.mark.rsync` mark (a local `--branch ":feature/my-task"` create uses the default git-worktree transfer, which never shells out to rsync, so the resource guard rightly flagged the unused mark), and gave the `mngr exec` verification a 60s timeout to absorb slow agent/provider discovery under load (matching the sibling git-mirror test). Test-only change; no user-facing behavior change.
+
+Fixed and tightened the `test_create_with_explicit_project` e2e tutorial test:
+
+- Added `@pytest.mark.timeout(120)` (it previously hit the 10s default and timed out) and dropped the `modal`/`rsync` resource marks, which the local `--no-connect` command-agent create never exercises.
+
+- The test now verifies the documented scope end-to-end: after the create, it reads `mngr list --provider local --format json` and asserts the new agent's `labels.project` is `other-project`, confirming `--project` overrides the directory-derived default rather than only checking that the command exited 0.
+
+Fixed the `test_create_with_extra_tmux_windows` e2e release test. Its `mngr list` verification is now scoped to `--provider local` so agent-creation discovery no longer fails when unconfigured remote provider backends (aws/azure/gcp/...) are installed but lack credentials, and the stale `@pytest.mark.rsync` mark was dropped because a create from a clean working tree transfers no extra files and never invokes rsync. Test-only change with no user-visible impact.
+
+Fixed the `test_create_with_idle_mode_and_timeout` e2e release test so it scopes its verification `mngr list` to `--provider modal` (matching the sibling modal command-agent tests). Previously the unscoped `mngr list` queried every enabled provider and failed with a non-zero exit code whenever one of them (e.g. aws) was unreachable in the test environment, even though the modal command agent had been created correctly. No user-visible change.
+
+Tests: fix the `mngr create --format json` e2e tutorial test so it runs in a credential-free environment. The shared e2e fixture now pins `enabled_backends` to the provider backends the tutorial actually exercises (local, modal, and docker only when a docker daemon is reachable), instead of leaving every installed provider plugin (aws, azure, gcp, ovh, vultr, ...) enabled. Those cloud backends treat "enabled but unconfigured" as a hard error, which made a bare `mngr list` abort with the provider-inaccessible exit code before it could report the local agent. Also dropped the incorrect `@pytest.mark.rsync` mark from `test_create_with_json_output`: it creates a default git-worktree agent in a clean repo, which never invokes rsync, so the resource guard failed the test.
+
+Fixed the tutorial e2e tests so `mngr list` no longer aborts on provider backends that are unreachable in the test environment.
+
+The e2e fixture now restricts `enabled_backends` to the backends a test actually exercises: the credential-free builtins (local, ssh) plus modal/docker only for tests that opt in via `@pytest.mark.modal` / `@pytest.mark.docker`. Previously every installed provider plugin (aws, azure, gcp, ovh, vultr, imbue_cloud, ...) was loaded, and any unreachable one (e.g. aws with no credentials, or docker with no daemon) made `mngr list` exit 6 under its default `--on-error abort`, breaking tests that only touch the local provider.
+
+Also removed the spurious `@pytest.mark.rsync` marker from `test_create_with_json_output`: creating a local `command`-type agent never invokes rsync (local agents use git worktrees, not rsync file transfer), so the resource guard correctly flagged the marker as never invoked.
+
+Fixed the `test_create_with_label` e2e tutorial test (and the shared e2e fixture it relies on) so it verifies exactly its documented scope: that `--label` attaches an agent label and `--host-label` a host tag, both visible in `mngr list --format json`.
+
+- The shared e2e fixture (`imbue/mngr/e2e/conftest.py`) now restricts provider discovery to the backends the suite actually exercises. It enables only `local` and `modal` by default (Modal opts itself out when its per-user environment does not exist), plus `docker` for tests marked `@pytest.mark.docker`. Previously, when other provider backend plugins happened to be installed (e.g. after `uv sync --all-packages`), a default instance was created for each and `mngr list` tried to reach every enabled backend; an installed-but-unreachable backend (a cloud provider without credentials, or Docker with no running daemon) made `mngr list` exit with `EXIT_CODE_PROVIDER_INACCESSIBLE` (6), failing tests that only meant to list local agents.
+
+- Removed the incorrect `@pytest.mark.rsync` marker from `test_create_with_label`: a purely local create provisions its workspace with a git worktree, not rsync, so the marker tripped the resource guard's NEVER_INVOKED check once the test body started passing.
+
+Hardened the `test_create_with_message` e2e tutorial test (no user-facing behavior change): its post-create "was the agent listed?" check now scopes `mngr list` to `--provider local` (where the local agent lives), matching the existing pattern in the e2e error tests. Unscoped, `mngr list` defaults to `--on-error abort` and aborts with a non-zero exit whenever any enabled-but-unreachable provider is present (a stopped Docker daemon, or an unconfigured cloud backend installed in the monorepo venv), which masked the actual `--message` behavior under test. Also dropped the test's `@pytest.mark.rsync` mark: it creates a local same-host command agent in a git repo, which transfers via git worktree (rsync is rejected for git repos), so rsync is never invoked.
+
+Tests: the `test_create_with_missing_env_file_is_rejected` e2e release test now sets an explicit `@pytest.mark.timeout(120)`. The test drives two `mngr` invocations (the rejected create plus a follow-up `mngr list`), which each pay mngr's startup cost and together exceed the default 10s per-test timeout, so it was timing out before the create even returned. This mirrors the timeout override already on the sibling `test_control_mngr_via_env`. No behavior change to `mngr` itself: `--env-file` pointing at a nonexistent path is still rejected up front by `click.Path(exists=True)`.
+
+Removed an incorrect `@pytest.mark.rsync` marker from the `test_create_with_multiple_labels` e2e tutorial test. The test creates a purely local agent, whose default `git-worktree` transfer never invokes rsync, so the resource guard rejected the test with a spurious "marked rsync but never invoked rsync" failure.
+
+Added a per-test timeout to the `test_create_with_nonexistent_template` e2e test so its several `mngr` subprocess calls (each with a multi-second cold start) are not killed by the default 10s per-test timeout.
+
+Removed a superfluous `@pytest.mark.rsync` from the `test_create_with_pass_env` e2e tutorial test. The test creates a local git-based command agent, which transfers via git-worktree and never invokes rsync, so the resource guard failed the otherwise-passing test.
+
+Removed a superfluous `@pytest.mark.rsync` mark from the `test_create_with_pass_env_skips_unset_var` e2e tutorial test. The test creates a local-provider agent in a git repo, which transfers files via git-worktree and never invokes rsync, so the mark tripped the resource guard's superfluous-mark check.
+
+Tests: fixed the `--pass-env` unset-variable e2e tutorial test (`test_create_with_pass_env_unset`) so it reliably verifies its documented scope. The verification listing is now scoped with `mngr list --provider local` (the created agent is a local command agent), matching the sibling command-agent tests, so it no longer fails with the provider-inaccessible exit code when an enabled remote provider (a credential-less cloud provider, or Docker with no daemon) is unreachable in the test environment. Also dropped the incorrect `@pytest.mark.rsync` mark: creating a local agent copies files locally rather than invoking rsync, so the resource guard rightly flagged the mark as never exercised.
+
+Fixed the `test_create_with_pass_env` e2e tutorial test (verifying `mngr create --pass-env`). It was failing because a `mngr list` verification step scanned remote providers and timed out, and because the test carried a `@pytest.mark.rsync` mark that local command-agent creation never actually exercises.
+
+Fixed the `test_create_with_pass_host_env` e2e tutorial test so it reliably reaches the modal agent when verifying that `--pass-host-env` propagated variables to the host. The verification `mngr exec` is now addressed as `my-task@<host>.modal`, scoping discovery to the modal provider instead of triggering a full cross-provider scan that aborts when the (default-enabled but unconfigured) `aws` provider is unavailable.
+
+Tests: hardened the tutorial e2e suite so `mngr list` assertions no longer depend on the host's cloud credentials or Docker daemon. The e2e fixture now disables the credential-requiring cloud providers (aws, azure, gcp, vultr, ovh, imbue_cloud) that are enabled by default, and disables the Docker provider when no Docker daemon socket is present. Without this, `mngr list` reached out to unreachable providers and exited non-zero (provider-inaccessible), failing every e2e test that asserts the listing succeeds. Also added the missing `@pytest.mark.timeout(120)` to `test_create_with_plugin_flags` so its `mngr create` + `mngr list` flow is not killed by the 10s default timeout.
+
+Fixed the e2e tutorial test suite so `mngr list`-based tests no longer fail purely because the monorepo dev/test venv installs every provider plugin.
+
+- The shared `e2e` fixture now sets `enabled_backends` to an explicit allowlist (`local`, `ssh`, `modal`, plus `docker` only for tests marked `docker`/`docker_sdk`) instead of leaving it empty (which enabled every installed backend). Backends such as AWS and Azure deliberately report themselves as *unavailable* (`mngr list` exit code 6) when their cloud credentials are absent, so without the allowlist any `mngr list` in the suite failed just because those unconfigured plugins happened to be installed.
+
+- Removed the inappropriate `@pytest.mark.rsync` marker from `test_create_with_project_label`: the default local worktree create it exercises never invokes rsync, so the resource guard flagged the mark as superfluous once the test body started passing.
+
+Hardened the tutorial e2e test fixture so unrelated remote providers can no longer make tests fail: the credential-backed cloud providers (aws, azure, gcp, vultr, ovh, imbue_cloud) are always disabled, and the Docker provider is disabled unless the test is `@pytest.mark.docker`. This prevents `mngr list` from exiting non-zero when those providers are unreachable in the test environment (e.g. no cloud credentials, no Docker daemon). The Docker block pins `isolate_host_volumes` so parsing it does not emit the deprecation warning that would otherwise leak past `--quiet`.
+
+Removed the `@pytest.mark.rsync` mark from `test_create_with_quiet_output`, which creates a worktree agent in a clean repo and therefore never invokes rsync.
+
+Made the e2e tutorial test fixture robust to provider backends that the test environment cannot reach. The cloud-VM provider plugins (aws, gcp, azure, ovh, vultr) are now disabled in the fixture's local config, since no e2e test exercises them and, without cloud credentials, they made `mngr list` abort with the provider-inaccessible exit code. The Docker provider is likewise disabled when no Docker daemon is reachable (detected via a low-level socket probe that honors `DOCKER_HOST` and the active Docker context, and that avoids the Docker SDK so it does not trip the `docker_sdk` resource guard), so the tutorial suite can run in Docker-less environments. Where Docker is available it stays enabled and discovery works exactly as before. This is test-infrastructure only; no user-visible change.
+
+Added the missing `@pytest.mark.timeout(120)` to the `test_create_with_source_path` release e2e test so a real `mngr create` no longer trips the 10s default pytest timeout.
+
+Flagged (via a FIXME in the e2e conftest) that the shared e2e fixture leaves every installed provider plugin (aws, azure, gcp, ovh, vultr, imbue_cloud, docker, ...) enabled, so `mngr list` aborts with the provider-inaccessible exit code when those providers have no credentials or daemon in the test environment.
+
+Added an explicit `@pytest.mark.timeout(120)` to the `test_create_with_template` e2e release test. The test creates a live local agent and then runs `mngr list`/`mngr exec`, which enumerate every configured provider; that discovery could exceed the default 10s per-test timeout, causing spurious failures.
+
+Fixed the `test_default_output_human_readable` e2e tutorial test so it passes reliably: the read-only `mngr ls` path now gets a longer per-test timeout (provider discovery, Modal in particular, can take ~30s), and the e2e fixture pins `enabled_backends` to the providers that are actually reachable in the test environment (local/ssh/modal, plus docker for docker-marked tests). Previously the monorepo dev install left every provider plugin (aws, azure, gcp, vultr, ...) enabled without credentials, so discovery surfaced a `ProviderUnavailableError` for each and `mngr ls`/`mngr list` exited non-zero.
+
+Fixed the `test_destroy_all_modal_agents` release e2e test. Its before/after
+verification listings now use `mngr list --provider modal` (scoping to the modal
+provider) instead of `mngr list --include 'host.provider == "modal"'`, so an
+enabled-but-unreachable provider (e.g. aws with no credentials) no longer makes
+the verification listing exit non-zero even though the modal listing is correct.
+The remote destroy pipeline and listings also now use the remote timeout rather
+than the short default, so the real Modal teardown has time to complete.
+
+Gave the `test_destroy_by_session_name` e2e release test an explicit `@pytest.mark.timeout(60)` so it no longer flakes against the default 10s pytest timeout. The single `mngr destroy --session` invocation takes longer than 10s on a cold start, which is well within the 60s budget every other test in the file already uses.
+
+Test fix (no user-visible change): repaired the `test_destroy_filtered_dry_run` labels/filtering e2e release test. It lacked a `@pytest.mark.timeout`, so it inherited the 10s default and timed out during the first `mngr create`; it now allows 180s like its sibling multi-command tests. The final `mngr list` verification no longer asserts a zero exit code (a bare `mngr list` exits non-zero when an enabled provider such as AWS is merely unreachable in the test env, which is orthogonal to the dry-run) and instead asserts only that the STOPPED agent survives, matching the pre-dry-run check. The spurious `@pytest.mark.rsync` mark was removed because a local git-repo command agent transfers via git-worktree and never invokes rsync.
+
+Hardened the tutorial e2e fixture so `mngr list` (and other all-provider commands) no longer aborts in environments that lack cloud credentials or a Docker daemon.
+
+The monorepo test venv registers every provider plugin, so credential-requiring VPS backends (aws, azure, gcp, vultr, ovh, lima) were enabled by default and made `mngr list` exit non-zero during discovery. The fixture now sets `enabled_backends` to just the backends the e2e suite actually reaches: `local` and `modal` always, plus `docker` only for `@pytest.mark.docker` tests (which are the only ones that exercise the docker backend and run against a real daemon).
+
+Also dropped the superfluous `@pytest.mark.rsync` from `test_destroy_no_gc`: it creates and destroys a local agent against a clean working tree, which transfers nothing and therefore never invokes rsync, so the mark tripped the resource guard's superfluous-mark check.
+
+Removed a superfluous `@pytest.mark.rsync` marker from the `test_destroy_remove_branch` e2e tutorial test. The test creates a purely local git-worktree agent and destroys it with `--remove-created-branch`, a path that never invokes rsync, so the resource guard was failing the test with a "marked but never invoked rsync" violation. This is a test-only change with no user-visible impact.
+
+Removed the superfluous `@pytest.mark.modal` and `@pytest.mark.rsync` marks from the `test_destroy_remove_created_branch_inline` git tutorial e2e test. The test exercises a purely local `--type command` agent against a git repository, so it never invokes Modal or rsync (a git repo uses git-based transfer, not rsync), and the resource guard was failing the test for marks that were never invoked.
+
+Fixed the `test_destroy_short_form` e2e tutorial test so it verifies its documented scope reliably: the post-destroy `mngr list` verification is now scoped to `--provider local` (where the local command agent lives), matching the convention used across the rest of the e2e suite, so the check no longer fails when an unrelated remote provider is unreachable. Also removed the spurious `@pytest.mark.rsync` mark, since a local git command-agent uses git-worktree transfer and never invokes rsync.
+
+Fixed the `test_destroy_specific` e2e tutorial test and its shared fixture so it runs correctly in environments without cloud credentials or a Docker daemon:
+
+- The e2e fixture now disables the credential-requiring cloud VPS provider backends (aws, azure, gcp, ovh, vultr) that the monorepo venv installs but the test environment has no credentials for. Previously they made `mngr list` exit non-zero with `EXIT_CODE_PROVIDER_INACCESSIBLE` even when the listing itself succeeded.
+
+- The e2e fixture now enables the Docker provider only when a Docker daemon is actually reachable, so non-docker tests still pass in environments without one (while the release offload image, which starts dockerd, keeps Docker enabled).
+
+- Removed the incorrect `@pytest.mark.rsync` mark from `test_destroy_specific`: it creates a local command agent from a clean git repo, which transfers via git-worktree and never invokes rsync.
+
+- Strengthened the test to assert the confirmation prompt ("Are you sure you want to continue?") is shown, so a regression that destroyed a specific agent without prompting would be caught.
+
+Tightened the `test_env_var_mngr_headless` tutorial e2e test to verify exactly its documented scope: it now checks only that `MNGR_HEADLESS=true` makes `mngr config get headless` resolve to `true` (and to `false` when unset). The out-of-scope `mngr list` smoke check was removed, since `list` reaches all enabled providers and could fail for reasons (e.g. an unreachable AWS provider) unrelated to headless config resolution.
+
+Fixed the `test_event_default` tutorial e2e test, which was incorrectly marked `@pytest.mark.rsync`. The test creates a local agent inside a git repo, which uses the `git-worktree` transfer mode and never invokes the `rsync` binary, so the resource guard failed the test for carrying a mark it never exercised. Removed the spurious `rsync` mark.
+
+Fixed the `test_event_follow_filter_source` tutorial e2e test: removed the incorrect `@pytest.mark.rsync` mark. A local command agent created in a git repo uses the `git-worktree` transfer mode, which never invokes `rsync`, so the mark was superfluous and the resource guard was (correctly) failing the otherwise-passing test.
+
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_event_follow` e2e tutorial test. The test creates a local command agent in a git repository, which syncs via a git worktree rather than rsync, so the mark was flagged by the resource guard as declared-but-never-invoked.
+
+Dropped the over-declared `@pytest.mark.rsync` from the `mngr event --head --tail`
+conflict e2e test. That test's command fails during argument validation before any
+events are read, and creating the local command agent against a git repo uses a git
+worktree rather than rsync, so rsync is never invoked and the resource guard was
+failing the test. Flagged the same over-declaration on the sibling event tests for a
+follow-up suite-wide cleanup.
+
+Removed the spurious `@pytest.mark.rsync` mark from the `mngr event --head` e2e tutorial test. A local agent created in a git repo transfers its work dir via a git worktree, not rsync, so the resource guard correctly reported that rsync was never invoked. Corrected the accompanying comments to describe the git-worktree transfer.
+
+Removed the superfluous `@pytest.mark.rsync` from the release e2e test `test_event_include_filter_rejects_invalid_cel`. That test exercises the unhappy path where an invalid CEL `--include` expression is rejected during filter parsing, before any events are read, so the event stream is never synced from the agent and rsync is never invoked. The resource guard therefore failed the test with "marked with @pytest.mark.rsync but never invoked rsync". No production behavior change.
+
+Tests: drop the incorrect `@pytest.mark.rsync` from the `mngr event --include` e2e tutorial test (`test_event_include_filter`). The e2e fixture creates the sleep agent inside a local git repo, so `mngr create` uses the git-worktree transfer mode (not rsync); the rsync resource guard correctly flagged the mark as never invoked. Removing the mark lets the test run without tripping the guard.
+
+Fixed the `test_event_tail` e2e tutorial test: removed its spurious `@pytest.mark.rsync` mark. A local agent created in a git repository on the same host uses git-worktree transfer, not rsync, so the resource guard correctly flagged the test as marked-but-unused. (The sibling event tests share the same incorrect mark; a FIXME notes the suite-wide cleanup.)
+
+Corrected the "run a command on all agents" tutorial example: `mngr exec -a "whoami"` no longer works because the `-a`/`--all` flag was removed from multi-target commands in favor of the stdin-pipe form. The tutorial (and its e2e test) now show `mngr list --ids | mngr exec - "whoami"`, matching the documented way to fan a command out across every agent.
+
+Fixed the `test_exec_all_git_status` e2e tutorial test for the WORKING WITH GIT section. Dropped a spurious `@pytest.mark.rsync` mark: the tutorial's `mngr list --ids | mngr exec - "git status --short"` fan-out runs against a local agent, which uses a git worktree (never rsync), so the mark tripped the resource guard. Also strengthened the assertion to check for the per-agent outcome line ("Command succeeded on agent my-task") rather than a bare substring, matching the test's documented scope that the fan-out actually reaches the agent.
+
+Removed the erroneous `@pytest.mark.rsync` mark from the `test_exec_as_other_user` tutorial e2e test. The test creates a local command agent in a git repo (which transfers via git-mirror and never invokes rsync) and only exercises `mngr exec`, so the rsync resource guard was failing the otherwise-passing test.
+
+Fixed the `test_exec_basic` e2e tutorial test: added a `@pytest.mark.timeout(120)` override (the default 10s timeout was too short for the create+exec workflow) and removed the superfluous `@pytest.mark.rsync` mark, since a local command agent's create+exec never invokes rsync.
+
+Removed the spurious `@pytest.mark.rsync` mark from the `test_exec_branch_show_current` git tutorial e2e test. The test never invokes rsync, so the resource guard was failing it; the test only exercises `mngr exec` running `git branch --show-current`.
+
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_exec_cwd_nonexistent` e2e tutorial test. The test creates a local `command` agent (whose work_dir is a git worktree, not an rsync copy) and its `mngr exec --cwd /nonexistent-dir-xyz` invocation fails at process spawn before any file sync, so rsync is never invoked. The resource guard therefore failed the otherwise-passing test with "marked with @pytest.mark.rsync but never invoked rsync". Removing the mark leaves the test verifying exactly its documented scope (a nonexistent `--cwd` makes exec exit nonzero without falling back to the work_dir).
+
+Removed the superfluous `@pytest.mark.rsync` from the `test_exec_cwd` e2e tutorial test. The `mngr exec --cwd` flow never invokes rsync (command agents are created via the git-mirror path), so the mark tripped the resource guard's "marked but never invoked" check.
+
+Fixed the `test_exec_filtered_remote_disk` labels tutorial e2e test, which spuriously timed out because the `mngr list ... | mngr exec -` pipeline against a remote Modal host used the default 30s command timeout. The exec now uses the same 120s remote timeout as the rest of the Modal e2e suite, and the overall per-test timeout was widened to accommodate a remote create plus an SSH exec round trip.
+
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_exec_force_commit` e2e tutorial test. The test exercises a local git-based agent, whose `mngr exec` never invokes rsync, so the resource guard failed the test for carrying a mark it never used.
+
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_exec_git_log` e2e tutorial test. The test exercises a local git-worktree agent, which never invokes rsync, so the resource guard flagged the mark as superfluous.
+
+Removed an incorrect `@pytest.mark.rsync` from the `test_exec_git_push_then_merge` tutorial e2e test. The test only exercises a local agent (`mngr create`/`mngr exec` plus a local `git fetch`/`git merge`), and local agent operations never invoke the `rsync` binary, so the resource guard correctly failed the test for declaring rsync without using it.
+
+Removed a superfluous `@pytest.mark.rsync` mark from the `test_exec_git_status_short` e2e tutorial test. The test creates its agent against a clean git repository, so `mngr create` uses git-worktree transfer and never invokes rsync; the mark tripped the rsync resource guard ("marked with @pytest.mark.rsync but never invoked rsync") and failed the test during teardown. The test's scope (verifying `mngr exec my-task "git status --short"` reports an uncommitted file) is unaffected.
+
+Tests: fix the `test_exec_no_start` tutorial e2e test so it reliably exercises `mngr exec --no-start`. It previously died at the default 10s pytest timeout during agent creation; it now carries `@pytest.mark.timeout(120)` and gives the create and exec subprocess calls enough of a budget (90s) to complete on slower hosts. Also dropped the superfluous `@pytest.mark.rsync` mark, since creating and exec-ing on a local command agent never invokes rsync (the resource guard flagged the unused mark).
+
+Tests: fix the `test_exec_on_error_continue` e2e tutorial test. It was marked `@pytest.mark.rsync`, but exec on a local `command` agent (and creating one over a git repo, which uses git transfer rather than rsync) never invokes rsync, so the resource guard failed the otherwise-passing test. Removed the superfluous mark.
+
+Tests: made the same test run the exact tutorial command (`git log --oneline -5`) instead of `git log --oneline -5 || true`. The agent's work_dir is always the fixture git repo, so `git log` succeeds and returns the fixture history; the `|| true` masked the very failure behavior the block is about and diverged from the documented tutorial command.
+
+Fixed the `test_exec_short_form` e2e tutorial test: removed the superfluous `@pytest.mark.rsync` mark (the local command agent in a git project never invokes rsync, so the resource guard flagged the mark as never invoked), and tightened its assertion to verify `git status` reports the agent's own `mngr/my-task` branch rather than any "On branch" line.
+
+Removed the spurious `@pytest.mark.rsync` mark from the `test_exec_timeout_enforced` e2e tutorial test. The test targets a local command agent, which never invokes the `rsync` binary (local agents sync via git worktrees; rsync is only used for remote hosts over SSH), so the resource guard failed the test with "marked with @pytest.mark.rsync but never invoked rsync". The mark is unrelated to the test's `--timeout` enforcement scope.
+
+Removed a spurious `@pytest.mark.rsync` mark from the `test_exec_timeout` e2e tutorial test. The test runs a local command agent inside a git repo, which syncs via git worktree/mirror rather than rsync, so the mark tripped the resource guard's "marked but never invoked" check.
+
+Removed a superfluous `@pytest.mark.rsync` from the `test_exec_with_start` e2e tutorial test. The test creates a local `command` agent inside a git repo, which transfers via `git-worktree` and never invokes `rsync`, so the resource guard failed the test with a "marked but never invoked" violation. The mark did not correspond to anything in the test's scope (`mngr exec --start`), so dropping it fixes the test without changing what it verifies.
+
+Fixed the `test_full_lifecycle` e2e test so it reflects a purely local agent lifecycle: the `mngr list` calls now scope to `--provider local` (so an unreachable remote provider, e.g. a credential-less cloud backend or an absent Docker daemon, cannot make the listing exit non-zero), and the superfluous `@pytest.mark.rsync` marker was removed since a local command agent never invokes rsync.
+
+Fixed the `test_gc_background_watch` e2e tutorial test, which was failing because it lacked a `@pytest.mark.timeout` override and inherited the 10-second default. Each `mngr` subprocess invocation costs several seconds to start, so running `mngr config set` followed by `watch -n60 mngr gc` exceeded 10 seconds. Added `@pytest.mark.timeout(60)`, matching the sibling local config-command e2e tests.
+
+Scope the `test_gc_dry_run` e2e verification to `mngr list --provider modal` so that the "dry run changed nothing" check confirms the Modal agent survived without failing when an unrelated provider backend (e.g. AWS) is enabled but unauthenticated in the test environment.
+
+Fixed the `test_gc_provider_modal` e2e tutorial test so its post-gc listing is scoped to the Modal provider (`mngr list --provider modal --format json`). An unfiltered `mngr list` reaches every enabled provider, so an enabled-but-unavailable provider (e.g. AWS with no credentials) made the test exit non-zero for reasons unrelated to the Modal agent it was verifying.
+
+Tests: fix the `test_git_merge_agent_branch` release e2e test in the WORKING WITH GIT tutorial suite. It was hitting the default 10s pytest timeout during agent creation, so it now carries `@pytest.mark.timeout(120)` like its siblings. It also declared `@pytest.mark.rsync` even though a local agent uses the git-worktree transfer mode (never invoking rsync), which tripped the resource guard's "marked rsync but never invoked rsync" check; that spurious mark has been removed.
+
+Added a `@pytest.mark.timeout(60)` override to the `test_help_succeeds` e2e tutorial test so it no longer fails under the 10s global pytest timeout. A single `mngr` CLI subprocess startup takes roughly 10 seconds, which the plain `mngr --help` invocation would exceed; this matches the timeout convention used by every other tutorial e2e test.
+
+Tightened the `test_help_succeeds` e2e tutorial test to verify exactly its documented scope: removed an out-of-scope assertion that the `mngr --help` output contains "Usage", since the scope only calls for a zero exit code and the advertised subcommands (create, list, destroy, message, connect, clone).
+
+Gave the `test_help_unknown_command_fails` e2e release test a 60s timeout override so it no longer races the 10s default while mngr's CLI starts up (the command itself already fails correctly, naming the unknown command and pointing back to `--help`).
+
+Fixed the fresh-install test fixture (`isolated_mngr_venv`) to install the `overlay` workspace package, which mngr now declares as a dependency. Without it, the isolated venv failed to import `imbue.overlay`, breaking every `test_install.py` command (including `mngr --help`).
+
+Raised the per-test timeout on the `test_invalid_provider_fails` e2e release test. It runs two full `mngr` subprocesses, each of which pays a fixed interpreter startup cost that can exceed the default 10s per-test timeout even though the command logic fails fast; the test now allows extra headroom, matching its sibling error-path tests.
+
+- Fixed the `test_jsonl_with_jq_stream` e2e tutorial test: gave the `mngr list --format jsonl | jq` pipeline a longer timeout (provider discovery is slow when Modal credentials are present) and removed the incorrect `@pytest.mark.modal` mark, which failed the resource guard's NEVER_INVOKED check because `mngr list` only reaches Modal via in-process gRPC in the subprocess (matching `test_list_format_jsonl_recap`).
+
+Fixed the `test_list_active_filter` e2e release test (`mngr list --active`), which was failing for two reasons unrelated to the command's behavior: the default 10s per-test timeout was too short for the provider-discovery path, and the fresh test environment enabled every installed provider backend by default. The dev checkout installs all provider plugins (aws, azure, gcp, ovh, vultr, ...) via `uv sync --all-packages`, so `mngr list` probed cloud providers that have no credentials (and Docker when no daemon is running) and exited with `EXIT_CODE_PROVIDER_INACCESSIBLE` (6) even though the listing itself succeeded.
+
+The e2e fixture now restricts provider discovery (`enabled_backends`) to the backends a test actually uses: `local` and `modal` always (modal skips gracefully via `ProviderEmptyError` when its per-user environment does not exist yet), plus `docker` only for tests marked `@pytest.mark.docker`. This mirrors how a real user enables only the providers they use and keeps `mngr list` discovery deterministic across the e2e suite. The `test_list_active_filter` test also gained a 60s timeout, matching the other full-discovery `mngr list` tests in the same module.
+
+Tests: the mngr e2e fixture now pins `enabled_backends` so provider discovery covers only the backends a given test needs (`local` and `modal` always, plus `docker` for docker-marked tests). Previously every installed provider plugin -- including the cloud VPS backends (aws, azure, gcp, imbue_cloud, ovh, vultr) -- was auto-loaded as a default instance, so a bare `mngr list` in an environment without cloud credentials reported the provider as inaccessible and exited non-zero (EXIT_CODE_PROVIDER_INACCESSIBLE) instead of "No agents found". This made the list-filter e2e tests (e.g. `test_list_archived_filter`) fail in credential-less and no-docker lanes; they now run against a clean discovery path.
+
+Fixed the e2e test harness so tutorial list/filter tests run cleanly in sandboxes without cloud credentials or a Docker daemon. The e2e fixture now disables the credential-requiring cloud providers (aws, azure, gcp, imbue_cloud, ovh, vultr) that no e2e test exercises, and disables the Docker provider for tests that do not declare a Docker mark. Previously an enabled-but-unreachable provider made `mngr list` exit with the provider-inaccessible code even when the local agents listed fine. No user-facing behavior change.
+
+Tightened the `test_list_combine_include_filters` e2e tutorial test so it verifies exactly its documented scope:
+
+- The combined `--include` filter test now marks `backend-running` active (via `mngr exec ... touch "$MNGR_AGENT_STATE_DIR/active"`, the established e2e pattern) so it is genuinely in the `RUNNING` state, and asserts the combined `team == backend AND state == RUNNING` filter returns exactly `{backend-running}`. Previously the agent sat in `WAITING`, the filter matched nothing, and the weak negative-only assertions let that empty result pass.
+
+- Removed the redundant single-`--include` baseline (single-filter behavior is covered by `test_list_filter_by_label_cel`) and the spurious `@pytest.mark.rsync` mark (the test never invokes rsync, which tripped the resource guard).
+
+Flagged a cross-cutting e2e-fixture gap (FIXME): bare `mngr list` tutorial commands (no `--provider`) probe every enabled backend and abort with `EXIT_CODE_PROVIDER_INACCESSIBLE` when one is unreachable, so they fail in the release/tmr environment (`-m "not docker"`, no docker daemon, no cloud credentials). The fixture should scope enabled backends to what is actually reachable.
+
+Hardened the e2e tutorial test harness so that a bare `mngr list` (and other cross-provider commands) no longer fails with a provider-inaccessible error when unused provider plugins are installed. The shared e2e fixture now disables the credential-requiring cloud backends (aws, azure, gcp, imbue_cloud, ovh, vultr) that no e2e test exercises, and disables Docker for tests not marked `@pytest.mark.docker` so non-docker tests do not require a running Docker daemon. This fixes `test_list_compound_cel` and removes a spurious `@pytest.mark.rsync` mark from it (local command agents never invoke rsync).
+
+Fixed the e2e tutorial test fixture so bare `mngr list` commands (no `--provider` filter) succeed. The fixture now pins `enabled_backends` to exactly the provider backends a test's environment can reach -- always `local`, plus `modal`/`docker` when the test declares the matching marker. Previously every installed backend (including unconfigured cloud backends like AWS, and Docker in a Modal-only sandbox) was loaded during discovery, so an unreachable provider made a bare `mngr list` abort with a non-zero exit code even though the listing itself was correct.
+
+Tests: the git tutorial e2e test `test_list_fields_original_branch_with_agent` now passes in environments without cloud credentials or a Docker daemon.
+
+The shared e2e fixture now disables the cloud providers that require credentials absent from the e2e environment (AWS, Azure, GCP, Vultr, OVH, imbue_cloud), and only enables Docker for tests marked `@pytest.mark.docker`. Previously any discovery-triggering command (e.g. `mngr list`) would exit non-zero (`EXIT_CODE_PROVIDER_INACCESSIBLE`) when one of these providers was enabled but unreachable, failing tests that had produced correct output.
+
+The `@pytest.mark.rsync` mark was removed from `test_list_fields_original_branch_with_agent`, which creates a local command agent and lists it -- it never invokes rsync, so the mark was superfluous and tripped the resource guard.
+
+Tests: fixed the LABELS/filtering e2e tutorial test `test_list_filter_by_label_cel` so it verifies exactly its scope (the `mngr list --include` CEL label filter keeps `labels.priority == "high"` and drops the rest).
+
+Two fixes were needed:
+
+- The shared e2e fixture now restricts provider discovery to the backends a test actually declares via its markers (always `local`, plus `modal`/`docker` when the test carries that marker). Previously every installed provider plugin got a default instance during `mngr list`, so an unreachable backend a local-only test never exercises -- AWS with no credentials, or Docker with no running daemon -- surfaced as `ProviderUnavailableError` and made a plain `mngr list` exit 6 (PROVIDER_INACCESSIBLE).
+
+- Dropped the superfluous `@pytest.mark.rsync` from `test_list_filter_by_label_cel`: it creates only local command agents, and rsync is a remote-only file transfer, so the resource guard correctly flagged the mark as never exercised.
+
+Fixed the `test_list_filter_by_state` e2e release test (and, via the shared e2e fixture, every e2e test that runs `mngr list`).
+
+The e2e fixture left every installed provider backend enabled. Because `uv sync --all-packages` installs the credential-only cloud backends (aws, azure, gcp, ...), `mngr list` probed them, they reported themselves unreachable for lack of credentials, and the command exited with the provider-inaccessible code. The fixture now pins `enabled_backends` to `local`, `docker`, and `modal` -- the backends the test environment can actually reach -- matching the fixture's documented "Modal, Docker left enabled" intent.
+
+Removed the stale `@pytest.mark.rsync` mark from `test_list_filter_by_state`. The test was converted from remote (Modal) agents to local `--type command` agents, which use git worktrees and never invoke rsync; the leftover mark tripped the resource guard's "marked but never invoked" check once the test began passing.
+
+Fixed the `test_list_filter_invalid_cel` e2e tutorial test so it no longer trips the default 10s pytest timeout: a subprocess `mngr list` against a fresh Modal environment needs longer than that to start up and report the invalid-CEL error. Added an explicit `@pytest.mark.timeout(60)`, matching the lightest sibling e2e tests.
+
+Tests: fixed the PROJECTS tutorial e2e test `test_list_filter_project_cel` and hardened the shared e2e fixture. The e2e fixture now restricts provider discovery to the backends each test actually declares (local/ssh always, plus docker/modal only when the test carries the matching `@pytest.mark`), instead of leaving every installed backend enabled. The dev monorepo installs all provider backends (aws, azure, gcp, ovh, vultr, ...), so any full-discovery command (`mngr list`, `mngr kanpan`, `mngr destroy --all`) previously queried backends that have no credentials or reachable daemon in the test environment and exited non-zero (and probed slowly before failing). The test also gained an explicit `@pytest.mark.timeout(60)` since a single `mngr list` subprocess exceeds the 10s default pytest timeout.
+
+Tests: the `test_list_format_json_recap` e2e tutorial test now carries `@pytest.mark.timeout(180)`, matching its identical sibling `test_list_format_jsonl_recap`. `mngr list` performs slow in-process Modal discovery when credentials are present, which exceeds the 10s default and previously made the test time out spuriously.
+
+Made the e2e tutorial test fixture's provider setup deterministic regardless of the host's cloud CLIs, credentials, or Docker availability:
+
+- The credential-only cloud providers (aws, azure, gcp, vultr, ovh, imbue_cloud) are now disabled in the e2e fixture. Their backend plugins are installed in the dev checkout, so a read-only `mngr list` would otherwise instantiate each default provider and exit non-zero (provider-inaccessible) whenever the host happened to have that CLI on PATH but no credentials configured.
+
+- The Docker provider is now enabled only for tests that declare they need it (`@pytest.mark.docker` / `@pytest.mark.docker_sdk`). Non-docker tests disable it so they no longer require a reachable Docker daemon, restoring the docker marker's contract of letting Docker-less environments skip only the docker tests.
+
+Tests: the tutorial e2e suite now pins the test environment to the core `local`, `docker`, and `modal` backends. The dev workspace installs every provider plugin (aws, azure, gcp, ovh, vultr, imbue_cloud) via `uv sync --all-packages`, so their entry points were discovered by default and each reported itself unavailable without credentials, making a plain `mngr list` exit with EXIT_CODE_PROVIDER_INACCESSIBLE. A real `mngr` install from PyPI ships only the core backends, so the fixture now mirrors that representative fresh environment.
+
+Tests: `test_list_format_jsonl` now creates two local command agents before asserting the JSONL contract, so it actually observes "one standalone JSON object per line" (each row parses as its own JSON object and the stream is not the single big array `--format json` emits) instead of passing vacuously on an empty listing.
+
+- Gave the `mngr list --host-label` malformed-input e2e test (`test_list_host_label_filter_invalid_format`) an explicit 60s timeout so it is no longer flaky under the default 10s per-test timeout. The command correctly rejects a `--host-label` value without `=` before any provider discovery, but mngr's CLI cold-start overhead alone sits right at the 10s boundary.
+
+Fixed the `test_list_jq_filter` e2e tutorial test so it reliably passes: dropped the superfluous `@pytest.mark.modal` (the `mngr list` read path never shells out to the `modal` CLI, so the mark tripped the resource guard's "marked but never invoked" check) and gave the test a generous timeout to accommodate the slow Modal gRPC discovery round-trip.
+
+Fixed the fresh-install test fixture (`minimal_install_env`) so the isolated venv installs the `overlay` workspace package that mngr now depends on; without it, `mngr` failed to import in a fresh install and every install smoke test errored. The fixture also now disables the docker provider at project scope so the `not docker`-marked install list tests (`test_list`, `test_list_json`) no longer require an ambient Docker daemon to observe the empty-state output.
+
+Tests: the `mngr list --label` invalid-format e2e release test now sets an explicit `@pytest.mark.timeout(60)`. The malformed `--label` is still rejected before any provider discovery runs, but invoking `mngr` at all pays a ~12s Python import/startup cost that exceeds the default 10s per-test timeout. The release CI lane overrides the timeout globally to 90s; the explicit per-test timeout makes this fast-fail path robust when run without that override, matching the existing pattern used by the neighbouring `mngr list` filter tests.
+
+Made the e2e tutorial test fixture disable the optional cloud provider backends (aws, azure, gcp, lima, ovh, vultr, imbue_cloud) that a full-monorepo dev checkout installs via `uv sync --all-packages`. A from-PyPI `mngr` install and the release CI image both ship only the local/docker/modal backends, so no e2e test exercises the extra providers; left enabled, a credential-gated provider such as AWS reported itself as inaccessible and made `mngr list` exit 6 instead of 0. Disabling them keeps the e2e discovery path deterministic and identical to the CI/end-user provider set regardless of which optional plugins the dev environment happens to have installed.
+
+Testing: gave the `test_list_project_dot` tutorial e2e test an explicit `@pytest.mark.timeout(180)` (and a matching 60s command timeout) so it is robust under the default local pytest timeout, consistent with the sibling `mngr list` release tests. Also flagged (via a `FIXME(tmr)`) that the shared e2e fixture leaves every credential-requiring cloud provider backend enabled, which makes bare `mngr list` release tests exit 6 when no cloud credentials are present.
+
+Hardened the e2e tutorial test harness so bare `mngr list` commands behave like a real tutorial user's environment: the test profile now restricts `enabled_backends` to the providers the suite actually exercises (local, ssh, modal, plus docker only for docker-marked tests). This stops unconfigured cloud backends (e.g. the separately-installed `imbue-mngr-aws` plugin) from making a bare `mngr list` exit with the provider-inaccessible code in the dev monorepo, where `uv sync --all-packages` registers every backend.
+
+Removed a superfluous `@pytest.mark.rsync` mark from `test_list_project_field` (it creates a local command agent and never invokes rsync).
+
+Gave the `test_list_provider_filter` e2e tutorial test an explicit `@pytest.mark.timeout(60)` override, matching the sibling `--local`/`--remote` filter tests. `mngr list --provider modal` runs the full provider-discovery path (an authenticated Modal lookup) that routinely takes ~10s, so under the default 10s per-test timeout the test timed out locally; the marker lets it pass both locally and under the release CI lane's global timeout.
+
+Fixed the `test_list_watch_mode` e2e tutorial test, which verifies that wrapping `mngr list` in `watch -n5` genuinely runs the wrapped command. The previous 8-second `timeout` window was too short: `watch` renders a frame only after the wrapped command exits, but `mngr list` runs the full provider-discovery path (~10s in a fresh environment), so `watch` was killed mid-run before rendering any frame. Widened the window to 25 seconds so the first frame (containing "No agents found") is captured, and added a `@pytest.mark.timeout(90)` mark to accommodate the longer run body.
+
+Fixed the e2e tutorial test environment so `mngr list` (and the other listing tests) behave like a genuinely fresh install. The e2e fixture now pins `enabled_backends` to the backends a real fresh user would have (local, ssh, modal, and docker only when a daemon is actually reachable) instead of letting the monorepo's fully-installed set of VPS provider plugins (aws, azure, gcp, ovh, vultr, imbue_cloud) all get probed. Previously those extra providers reported themselves as unreachable (e.g. AWS with no credentials configured), which made `mngr list` exit non-zero even in an empty environment.
+
+Fixed the fresh-install `test_list` release test. The isolated-venv fixture (`isolated_mngr_venv`) did not install the workspace `overlay` package that `mngr` now depends on (via `imbue.overlay.markers`), so `mngr list` crashed with `ModuleNotFoundError: No module named 'imbue.overlay'`; the fixture now installs it alongside the other workspace packages. Additionally, `test_list` now scopes its listing to the local provider (`mngr list --provider local`) so the empty-state path is exercised deterministically without depending on a reachable Docker daemon, which the deliberately-minimal install environment lacks. This matches how the e2e suite scopes `mngr list --provider local` to avoid querying unavailable providers. These are test-only changes with no effect on shipped behavior.
+
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_message_all` e2e tutorial test. Broadcasting a message to a local command agent via `mngr list --ids | mngr msg -` delivers over tmux and never invokes rsync, so the declared rsync resource mark tripped the resource guard ("marked with @pytest.mark.rsync but never invoked rsync"). The tmux mark is retained since message delivery does use tmux.
+
+Removed a superfluous `@pytest.mark.rsync` marker from the `test_message_commit_request` git tutorial e2e test. The test only exercises `mngr create` and `mngr msg`, neither of which invokes rsync, so the resource guard failed the test for a mark it never used. Only `mngr exec`-based sibling tests genuinely need the rsync mark.
+
+Testing: dropped the superfluous `@pytest.mark.rsync` marker from the LABELS-tutorial e2e test `test_message_filtered_backend`. The test exercises only local command agents (created from a git repo, so `mngr create` uses git-mirror rather than rsync) piped through `mngr message -`, and never invokes the rsync binary, so the resource guard failed the test for carrying a mark it never used. The `@pytest.mark.tmux` marker is retained since command agents are tmux-backed.
+
+Fixed the e2e release test `test_message_filtered_via_stdin_delivers_to_matching_agents` so it verifies exactly its scope (the delivery half of the filtered-broadcast tutorial block).
+
+- Dropped the out-of-scope `to_succeed()` assertion on the standalone `mngr list --include ... --ids` precondition. That command runs the full provider-discovery path across every enabled backend, and an enabled-but-unconfigured cloud provider (e.g. aws) makes it exit non-zero by design, which is orthogonal to whether the `--include` filter selects the matching agents. The precondition now checks only that the filter emits exactly the two matching local ids on stdout.
+
+- Removed the superfluous `@pytest.mark.rsync` mark: messaging local command agents delivers over tmux and never syncs files to a remote host, so rsync is never invoked and the resource guard flagged the mark as unsatisfied.
+
+- Made the e2e test fixture pin `enabled_backends` to only the provider backends the run can actually reach (local and ssh always; modal when credentials are present; docker when a daemon is running). Previously every registered remote backend was enabled by default, so unconfigured cloud providers (aws/gcp/azure/ovh/vultr/imbue_cloud) surfaced as inaccessible providers and made `mngr list` (and anything that discovers, e.g. `mngr msg -`) exit non-zero or hang on their network probes. This keeps the e2e suite hermetic and independent of whatever ambient cloud credentials or daemons the host happens to have.
+
+Tests: drop the spurious `@pytest.mark.rsync` from the `mngr msg agent-1 agent-2 agent-3` e2e tutorial test. The test creates local git-worktree command agents and delivers over tmux, so rsync is never invoked; the resource guard was failing the otherwise-passing test with a "marked rsync but never invoked rsync" violation. The tmux mark (genuinely exercised) is retained.
+
+Gave the `test_message_nonexistent_agent` e2e test explicit timeout headroom (`@pytest.mark.timeout(60)`) so a single `mngr message` invocation's CLI startup cost no longer trips the default 10s func-only timeout on slower filesystems.
+
+Fixed the `mngr message --on-error continue` end-to-end tutorial test: it now carries a realistic per-test timeout, gives the `mngr list | mngr msg` pipeline enough time for provider enumeration, and drops the `modal`/`rsync` resource marks that the test never actually exercises. The test also now verifies the message is delivered to the listed agent, not merely that the command exits 0.
+
+Fixed the `test_message_one_agent` tutorial e2e test. It was missing a per-test `@pytest.mark.timeout` override, so the default 10s func-only timeout fired during `mngr create` (agent creation takes longer than 10s); added `@pytest.mark.timeout(120)` to match the sibling agent-creating message tests. It was also incorrectly marked `@pytest.mark.rsync`: the test creates a local agent inside a git repo, which uses the `git-worktree` transfer mode and never invokes the `rsync` binary, so the resource guard failed the test for carrying a mark it never exercised. Removed the spurious `rsync` mark.
+
+Removed the incorrect `@pytest.mark.rsync` mark from the `mngr msg` short-form e2e tutorial test. Delivering a message to a local agent goes through its tmux session and never invokes rsync, so the mark tripped the resource guard ("marked but never invoked").
+
+Fixed the `test_multiple_agents_coexist` e2e release test so it reliably verifies its documented scope (three local agents coexisting as independent, isolated entities). The verification `mngr list` is now scoped to the local provider so an unconfigured cloud backend (e.g. aws) can no longer make the command exit with the provider-inaccessible code even though the local agents are all listed; per-command and whole-test timeouts were widened to tolerate the CLI's fixed startup cost on slow filesystems; and the stale `@pytest.mark.rsync` mark was removed, since creating local agents in a git repo uses a git worktree (not rsync).
+
+Fixed the `isolated_mngr_venv` test fixture (used by the fresh-install tests in `test_install.py`) to also install the `overlay` workspace package. mngr declares `overlay` as a workspace dependency, but the fixture's hand-maintained `_WORKSPACE_PACKAGES` list omitted it, so `overlay` was never installed into the isolated venv (workspace members are exported as editable lines and filtered out, and the workspace packages are installed with `--no-deps`). This caused every fresh-install test to fail with `ModuleNotFoundError: No module named 'imbue.overlay'` when importing `imbue.mngr.main`. No user-visible change -- this is test infrastructure only.
+
+Tests: the `mngr observe --discovery-only` tutorial e2e test (`test_observe_discovery_only`) no longer carries `@pytest.mark.modal`. Like the fresh-environment `mngr list` filter tests, discovery-only observe reaches the Modal provider via the in-process gRPC SDK (invisible to the resource guard across the mngr subprocess boundary) and never shells out to the `modal` CLI, so the mark tripped the guard's "marked but never invoked" check.
+
+Tests: the same test now masks only the `timeout`-expiry exit (124) to a clean pass instead of a blanket `|| true`, so it still fails if `mngr observe` crashes early with any other exit code -- verifying the command actually starts and streams without error rather than merely that a `|| true` pipeline exited 0.
+
+Updated the `mngr observe --discovery-only` e2e tutorial test to assert on the current discovery snapshot event. The first line a fresh run emits is now the per-provider full snapshot (`DISCOVERY_PROVIDER`), which superseded the deprecated legacy global snapshot (`DISCOVERY_FULL`); the test now parses that first JSONL line and verifies it is a full snapshot carrying `agents`/`hosts` arrays. No user-facing behavior changed.
+
+Gave the `test_plugin_add_by_git` e2e test a 60s timeout so it no longer trips the 10s default while `mngr plugin add --git` pays the cold-start cost and attempts a git clone, and extended it to assert the command prints no Python traceback (matching the sibling `plugin add` tests and the test's documented scope).
+
+Gave the `test_plugin_add_by_path` e2e tutorial test a 60s timeout, matching the other subprocess-driven plugin e2e tests. Each `mngr` invocation pays a ~10s cold-start cost that alone exceeds the 10s default per-test timeout, so the test was timing out rather than exercising the `mngr plugin add --path` behavior it verifies.
+
+Fixed the `test_plugin_disable_affects_create` e2e release test so it verifies the intended behavior: disabling the claude plugin now writes to the local config scope (which the test harness opts into pytest), so `mngr create` fails with the genuine "plugin 'claude' is disabled" gate instead of tripping the pytest config-opt-in guard first. Also raised its timeout to match the sibling roundtrip test, since it runs five sequential CLI invocations.
+
+Fixed the `test_plugin_disable_enable_roundtrip` e2e release test: `mngr plugin disable`/`enable` now target the `local` config scope in the test, which the e2e fixture seeds with `is_allowed_in_pytest = true`. Previously the commands defaulted to the project scope, creating a `settings.toml` without the pytest opt-in, which caused the next `mngr` command to be refused by the pytest config guard.
+
+Fixed the `minimal_install_env` test fixture so it installs the `overlay` workspace package into the isolated venv. Previously the fresh-install tests (e.g. `mngr plugin --help`) crashed with `ModuleNotFoundError: No module named 'imbue.overlay'` because `overlay`, a workspace dependency of `mngr`, was omitted from the editable workspace installs.
+
+Increased the per-test timeout for the `mngr plugin list --active` tutorial e2e test. Each `mngr plugin list` invocation performs full plugin discovery (importing every installed plugin module), which takes several seconds; the test runs the command twice, so the combined work exceeded the default 10s timeout. This is a test-only change with no user-visible behavior difference.
+
+Test-only change: raised the `test_plugin_list_active` e2e release test's per-test timeout from 60s to 180s. The test issues five separate `mngr` subprocess invocations (two `--active` listings, a disable, and two more listings), and each invocation pays a ~20s cold-start cost to import and register all plugins, so the previous 60s budget was too tight and the test timed out mid-run.
+
+Added the missing `@pytest.mark.timeout(60)` marker to the `test_plugin_list_fields` e2e tutorial test so it no longer trips the 10s default per-test timeout on the ~10s `mngr` cold-start, matching the other subprocess-driven e2e tests in that file.
+
+Fixed the fresh-install test fixture (`isolated_mngr_venv`) to install the `overlay` workspace package. mngr declares `overlay` as a dependency, but the fixture installs workspace packages editable (they are filtered out of the exported pinned deps), and the list omitted it, so the isolated venv failed to import `imbue.overlay` and every `mngr` invocation crashed.
+
+Gave the `test_plugin_list_shows_installed` e2e test a 60s timeout so it no longer trips the 10s default pytest timeout during mngr's cold start, matching the other subprocess-driven plugin e2e tests.
+
+Fixed the `test_recipe_launch_check_cleanup` e2e release test:
+
+- Scoped its two `mngr list` invocations to the local provider (`mngr list --running --provider local` and `mngr list --provider local`), matching the local command-agent stand-in. A bare `mngr list` also queries remote provider backends (e.g. aws, docker) that are enabled by default but unreachable in the isolated e2e profile (no cloud credentials, no docker daemon), so it exited non-zero for reasons unrelated to the launch->check->cleanup recipe under test.
+
+- Removed the stale `@pytest.mark.rsync` mark. The local command-agent stand-in never invokes rsync (only the tutorial's modal agent would sync the repo to a remote host), so the resource guard correctly flagged the mark as unused.
+
+Fixed the `mngr rename --dry-run` e2e test so it verifies the local agent via `mngr list --provider local` (unscoped listing failed when an uncredentialed remote provider such as AWS is installed) and dropped its superfluous `@pytest.mark.rsync` mark, since the test never invokes rsync.
+
+Fixed the `test_snapshot_destroy_by_id_fictional` e2e test, which was failing the modal resource guard ("marked modal but never invoked modal"). The test destroys a fictional snapshot without an agent/host, so it errors during argument handling and never touches the modal provider; the erroneous `@pytest.mark.modal` marker has been removed. Also strengthened the test's assertions to trace precisely to its documented scope: it now verifies the `--snapshot` flag was actually parsed (not rejected as an unknown option) and that mngr errored cleanly rather than crashing with a traceback.
+
+Fixed the `test_snapshot_list` e2e release test, which exercises `mngr list --ids | mngr snapshot list -`. It now creates a running modal agent so the stdin pipeline resolves a real host, and it carries an explicit per-command and per-test timeout large enough for the two chained `mngr` invocations. The test also now confirms the running agent's auto-created snapshot appears in the stdin-fed listing.
+
+Fixed the `test_start_all_via_stdin` lifecycle e2e test: its `--stopped` verification queries are now scoped to `--provider local` so an unreachable remote provider (e.g. `aws` without credentials) no longer makes them exit non-zero, and the superfluous `@pytest.mark.rsync` mark was removed since creating a local git-repo agent uses git-worktree transfer and never invokes rsync.
+
+Fixed the `test_start_connect` e2e tutorial test (STARTING AND STOPPING AGENTS section).
+
+- Removed the superfluous `@pytest.mark.rsync` mark: a local command agent's work_dir is created as a same-host git worktree, so `mngr create`/`mngr start` never invoke rsync, and the resource guard rejected the unused mark.
+
+- The test now stops `my-task` before `mngr start --connect`, so it exercises the tutorial's "start a stopped agent and immediately connect to it" path rather than starting an already-running agent.
+
+Fixed the `test_start_dry_run` e2e tutorial test so it verifies the `mngr start - --dry-run` scope reliably: its before/after state-capture `mngr list` calls are now scoped to `--provider local` (the test only ever creates local agents), so they no longer fail with a provider-inaccessible error when an unrelated remote provider is enabled but unreachable. Also dropped the stale `@pytest.mark.rsync` mark, since creating a local command agent inside a git repo uses a git worktree and never invokes rsync.
+
+Fixed the `test_start_idempotent` e2e tutorial test (STARTING AND STOPPING AGENTS section): removed a superfluous `@pytest.mark.rsync` mark. Creating a local agent from a clean git repo uses a git worktree and never invokes rsync, so the resource guard failed the otherwise-passing test for carrying a mark it did not use.
+
+Strengthened the same test to confirm the agent is already running before the idempotent `mngr start`, so it genuinely verifies idempotence on a running agent rather than the stopped-agent path.
+
+Fixed the `test_start_multiple_agents` e2e tutorial test so it reliably passes: bumped its pytest timeout to 180s (creating three command agents plus a single multi-agent `mngr start` exceeds the default 10s), and removed the superfluous `@pytest.mark.rsync` mark (creating and starting clean-worktree command agents uses a git worktree and never invokes rsync).
+
+Tests: dropped the stale `@pytest.mark.rsync` mark from the `test_start_stopped_agent` e2e lifecycle test. The test exercises a local command agent (git worktree + tmux), which never invokes rsync, so the resource guard failed the otherwise-passing test with "marked with @pytest.mark.rsync but never invoked rsync". The mark was a leftover from when the block was a Modal test (where `mngr create --provider modal` rsyncs files to the remote host).
+
+Fixed the `test_stop_all_via_stdin` e2e tutorial test so it verifies exactly its documented scope. Added a `@pytest.mark.timeout(180)` (the test was hitting the default 10s per-test timeout during agent creation), scoped its verification `mngr list --running`/`--stopped` queries to `--provider local` (the local agent it operates on) so they no longer abort on uncredentialed cloud providers, and dropped a superfluous `@pytest.mark.rsync` mark since a local `--type command --no-connect` agent never invokes rsync. No behavioral change to `mngr` itself.
+
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_stop_archive` e2e tutorial test. The test creates a local git-repo command agent and exercises `mngr stop --archive` plus `mngr list`, none of which invoke rsync, so the resource guard was failing the test for carrying a mark it never satisfied.
+
+Fixed the `test_stop_basic` release e2e test. Its verification listings now use
+`mngr list --provider local --stopped` / `--running` (scoping to the local
+provider) instead of the unscoped `mngr list`, so an enabled-but-unreachable
+provider (e.g. aws with no credentials) no longer makes the verification listing
+exit non-zero even though the local listing is correct. Also dropped the
+superfluous `@pytest.mark.rsync` mark: the test only creates a local command
+agent and stops it, which never invokes rsync.
+
+- Fixed the `test_stop_dry_run` e2e lifecycle test: added a `@pytest.mark.timeout(180)` so the create + provider-enumeration + stop round-trip is not killed by the 10s default pytest timeout, gave the provider-enumerating `mngr list --ids | mngr stop - --dry-run` pipe a 120s subprocess timeout (the remote-discovery budget), and removed the superfluous `@pytest.mark.modal` and `@pytest.mark.rsync` marks (the test exercises only tmux among guarded resources).
+
+Fixed the `test_templates_setup_via_config_edit` e2e release test: added a 120s timeout (the `mngr create` step exceeded the 10s default), dropped the spurious `@pytest.mark.modal` mark (the template is substituted with `transfer="none"` for the local test, so modal is never invoked), and added a check that `mngr config edit` actually creates the project config file on disk.
+
+Fixed the `test_tips_exec_env_inspect` tutorial e2e test so it no longer hangs contacting an unconfigured `aws` provider: the agent-id cross-check now scopes `mngr list` to `--provider local`, matching the local command agent the test substitutes for the tutorial's agent. Also dropped the spurious `@pytest.mark.rsync` mark, since creating a local `--type command` agent never invokes rsync.
+
+The e2e tutorial test harness now disables provider plugins it cannot reach in the test environment. The cloud provider plugins (aws, azure, gcp, vultr, ovh, imbue_cloud) are installed in the monorepo and enabled by default but have no credentials in CI/dev sandboxes, and the docker provider is disabled automatically when no Docker daemon is reachable. Previously these enabled-but-unreachable providers made any bare `mngr list` (which enumerates every enabled provider and exits non-zero on an unauthenticated one) fail for reasons unrelated to the behavior under test, e.g. `test_tips_exec_filtered_hosts` and other modal tutorials run under `-m 'not docker'`.
+
+Fixed the `test_tips_transcript_tail_assistant` e2e release test, which was failing under the default 10-second pytest timeout while the real `mngr create` setup step was still running. It now carries an explicit `@pytest.mark.timeout(120)` marker like its sibling release tests, giving the create and transcript-read commands enough headroom.
+
+Fixed the tutorial e2e test fixture so each test only probes the provider backends it declares via its `@pytest.mark.modal` / `@pytest.mark.docker` marks (plus the always-available local backend). Previously the fixture left `enabled_backends` empty, so `mngr list` (and name-resolving commands) fanned out to a default instance of every registered backend; an unconfigured cloud backend (e.g. `aws` with no credentials) or an unreachable `docker` daemon would make those commands abort with the provider-inaccessible exit code even when the target host was found.
+
+Added the missing `@pytest.mark.timeout(600)` marker to the `test_transcript_assistant_only` e2e test. Without it the test inherited the global 10s function timeout and was killed mid-`mngr create`, unlike its sibling transcript tests which all set the 600s timeout.
+
+Removed a superfluous `@pytest.mark.rsync` mark from the `test_transcript_default` release test. It runs entirely against a local claude agent and never invokes rsync, so the mark tripped the resource guard's "marked but never invoked" check and failed the otherwise-passing test (matching the earlier fix for the sibling transcript tests).
+
+Dropped the superfluous `@pytest.mark.rsync` mark from the `mngr transcript --format jsonl` e2e release test. The test creates a local `claude` agent (which uses git-worktree transfer, not rsync), so the mark tripped the resource guard and failed the otherwise-passing test.
+
+Removed a spurious `@pytest.mark.rsync` from the `mngr transcript --tail 5` e2e test. The test never invokes rsync (it creates a local claude agent and reads its transcript), so the resource guard failed the test at teardown. The mark is now dropped, matching the identical `--tail 1` sibling test.
+
+Tests only (no user-visible mngr change): the e2e test fixture now scopes which provider backends full-discovery commands (`mngr list`/`event`/`gc`) scan to the backends a test declares via its markers -- `local` and `modal` always, `docker` only for `@pytest.mark.docker` tests. This keeps the tutorial e2e tests deterministic regardless of which stray cloud CLIs/plugins (e.g. `aws`) happen to be installed on the host, and stops non-docker tests from failing when no Docker daemon is present. The troubleshooting `mngr list` tutorial test also drops a spurious `@pytest.mark.rsync` marker, since creating a local command agent uses a git worktree rather than rsync.
+
+Hardened the release e2e test `test_troubleshoot_destroy_and_recreate_modal` (the modal destroy-and-recreate troubleshooting flow). Its `mngr list` observation calls are now scoped with `--provider modal` so an unrelated, unreachable provider in the test environment (e.g. a stopped Docker daemon) cannot make them exit non-zero, and the `mngr destroy --force` step now gets the same generous timeout as create because its post-destroy garbage collection does real Modal network work. The shared e2e fixture now also seeds `enabled_backends` (via the `MNGR__*` env layer) to the only backends any e2e test exercises -- local, ssh, docker, modal -- so that installed-but-unconfigured cloud provider plugins (aws, azure, gcp, vultr, ovh, imbue_cloud) are no longer probed during discovery/GC, where without credentials they would abort `mngr list` or hang `mngr destroy --force`'s GC. This is a test-only change with no user-visible impact.
+
+Removed the superfluous `@pytest.mark.rsync` mark from the release test `test_troubleshoot_follow_events`. A local command agent created in a git repo uses `git worktree` (transfer mode `GIT_WORKTREE`), which never invokes rsync, so the mark tripped the resource guard's "marked but never invoked" check. This is a test-only change with no user-visible effect on `mngr` behavior.
+
+Removed the spurious `@pytest.mark.modal` mark from the `mngr gc` troubleshooting e2e test. `mngr gc` reaches Modal only through the in-process gRPC SDK inside the `mngr` subprocess (never shelling out to the `modal` CLI), so the mark always tripped the resource guard's "marked but never invoked modal" check even though gc ran correctly. This matches the existing treatment of other discovery-style commands like `mngr list` and `mngr observe`.
+
+Tests: drop the superfluous `@pytest.mark.rsync` from the `test_troubleshoot_host_diagnostics` e2e tutorial test. The test exercises `mngr exec` against a local command agent, which never invokes rsync (rsync only runs when one endpoint is a remote host), so the resource guard failed the test for carrying a mark it never satisfied. The mark also lay outside the test's documented scope, which covers only `mngr exec` forwarding commands to the host shell.
+
+Fixed: removed the superfluous `@pytest.mark.rsync` from the `test_troubleshoot_recent_events` e2e tutorial test. The test exercises `mngr event` against a locally created `command` agent, which uses tmux but never invokes rsync, so the resource guard flipped the otherwise-passing test to failed. The `@pytest.mark.tmux` mark is retained.
+
+Removed a superfluous `@pytest.mark.rsync` mark from the `test_troubleshoot_stop_restart` e2e tutorial test. The test exercises a local `command` agent, whose create/stop/start path uses git-worktree transfer and tmux, never rsync, so the resource guard correctly flagged the mark as never invoked.
+
+Testing: dropped the superfluous `@pytest.mark.rsync` from the `test_troubleshoot_transcript_for_errors` e2e tutorial test. The test creates a local `command` agent and runs `mngr transcript`, which fails fast at the client-side agent-type check and never syncs files, so the resource guard flagged the mark as never invoked. The `tmux` and `release` marks remain (the local agent genuinely runs under tmux).
+
+Raised the per-test timeout on the `test_unknown_command_fails` e2e tutorial test. Rejecting an unknown command does no host or agent work, but spawning the `mngr` subprocess still loads every plugin/backend/provider at import time, which routinely exceeds the global 10s pytest timeout on slower hosts. The test now allows the `mngr` invocation the time it needs (mirroring the other e2e tests in the file), while still verifying the same behavior: an unknown command exits with usage code 2, leaves stdout empty, and prints an error naming the command and pointing back to `mngr --help`.
+
+Tests: made the `test_usage_wait_and_create` scripting e2e test robust to bundled-but-unconfigured cloud providers. Its concrete-effect verification used an unscoped `mngr list --format json`, which enumerates every enabled provider and exits with `EXIT_CODE_PROVIDER_INACCESSIBLE` (6) when a bundled provider such as AWS lacks credentials -- unrelated to the usage-gated create under test. The verification now scopes discovery to the always-reachable local provider (`mngr list --provider local --format json`), so it confirms the gated create was skipped without depending on cloud-provider credentials.
+
+Fixed the fresh-install test fixture (`isolated_mngr_venv`) to install the `overlay` workspace package. Without it, every `mngr` command in a freshly installed venv crashed with `ModuleNotFoundError: No module named 'imbue.overlay'`, causing the install tests to fail.
+
+Strengthened `test_version_output` to assert that `mngr --version` actually prints a version string (not just the program name).
+
 ## 2026-07-13
 
 Regenerate the `mngr forward` command docs to document its new `--use-http2` flag, which terminates TLS and negotiates HTTP/2 (via ALPN) for the workspace origin instead of serving plain HTTP/1.1.

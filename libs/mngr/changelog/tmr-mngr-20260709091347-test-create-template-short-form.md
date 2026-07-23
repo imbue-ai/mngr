@@ -1,1 +1,0 @@
-Added an explicit `@pytest.mark.timeout(120)` to the `test_create_template_short_form` e2e tutorial test so the two real `mngr` invocations (`create` and `exec`) it runs no longer trip the global 10s pytest timeout, matching the other slow `mngr create` tests in the same file.

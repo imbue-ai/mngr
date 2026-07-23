@@ -1,3 +1,0 @@
-Tests: the fresh-install test suite now installs the `overlay` workspace package into its isolated venv. mngr grew a runtime dependency on `imbue.overlay` (the extracted config-merge algebra), but the `isolated_mngr_venv` fixture did not install that workspace package, so every fresh-install command crashed with `ModuleNotFoundError: No module named 'imbue.overlay'`. The fixture now includes `libs/overlay` alongside the other editable workspace packages.
-
-Tests: `test_config_get_in_fresh_install` now asserts that `mngr config get headless` reports the default value `false`, verifying that config lookup actually falls back to the key's default rather than merely exiting cleanly.

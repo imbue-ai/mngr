@@ -224,6 +224,61 @@ def apply_pool_hosts_migrations(
     return tuple(applied)
 
 
+# Column order for the connector's ``plans`` table writes. Must match the
+# columns created by migration 014_plans_entitlements.sql.
+_PLAN_QUOTA_COLUMNS: Final[tuple[str, ...]] = (
+    "max_remote_workspaces",
+    "max_tunnels",
+    "max_services_per_tunnel",
+    "max_buckets",
+    "max_total_bucket_bytes",
+    "monthly_llm_spend_usd",
+    "max_active_synced_workspaces",
+)
+
+
+def write_plan_defaults(
+    dsn: SecretStr,
+    *,
+    # plan name -> column values (the shape ``PlanQuotasConfig.to_plan_row`` emits).
+    plan_rows_by_name: dict[str, dict[str, float]],
+    parent_cg: ConcurrencyGroup,
+) -> tuple[str, ...]:
+    """Write (overwriting) the tier's plan definitions into the connector's plans table.
+
+    Unlike the paid-list seeding, this is a full upsert: deploy.toml is the
+    git-owned source of truth for plan defaults, so every deploy replaces the
+    rows. Per-user entitlement rows (copied from the plan at assignment) are
+    untouched -- changing a plan never retroactively changes existing users.
+    Returns the plan names written, sorted. Must run AFTER
+    :func:`apply_pool_hosts_migrations` (the table must exist).
+    """
+    written: list[str] = []
+    for plan_name in sorted(plan_rows_by_name):
+        row = plan_rows_by_name[plan_name]
+        missing = [column for column in _PLAN_QUOTA_COLUMNS if column not in row]
+        if missing:
+            raise MigrationRunnerError(f"Plan {plan_name!r} is missing quota columns: {missing}")
+        # Plan names come from committed deploy.toml keys (operator-controlled);
+        # escape single quotes defensively, same as _record_applied_version.
+        # Quota values are numeric (validated by PlanQuotasConfig), so they are
+        # rendered directly.
+        safe_name = plan_name.strip().lower().replace("'", "''")
+        column_sql = ", ".join(_PLAN_QUOTA_COLUMNS)
+        values_sql = ", ".join(
+            repr(float(row[column])) if column == "monthly_llm_spend_usd" else str(int(row[column]))
+            for column in _PLAN_QUOTA_COLUMNS
+        )
+        update_sql = ", ".join(f"{column} = EXCLUDED.{column}" for column in _PLAN_QUOTA_COLUMNS)
+        sql = (
+            f"INSERT INTO plans (plan_name, {column_sql}) VALUES ('{safe_name}', {values_sql}) "
+            f"ON CONFLICT (plan_name) DO UPDATE SET {update_sql}, updated_at = NOW()"
+        )
+        _run_psql_command(dsn, sql=sql, parent_cg=parent_cg, cg_name=f"psql-write-plan-{safe_name}")
+        written.append(safe_name)
+    return tuple(written)
+
+
 def seed_paid_list_defaults(
     dsn: SecretStr,
     *,

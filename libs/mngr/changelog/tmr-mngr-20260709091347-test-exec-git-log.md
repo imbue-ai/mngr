@@ -1,1 +1,0 @@
-Removed the superfluous `@pytest.mark.rsync` mark from the `test_exec_git_log` e2e tutorial test. The test exercises a local git-worktree agent, which never invokes rsync, so the resource guard flagged the mark as superfluous.

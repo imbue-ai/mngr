@@ -2,7 +2,10 @@
 
 import io
 import json
+import os
+import shlex
 import subprocess
+import tempfile
 import threading
 from collections.abc import Callable
 from datetime import datetime
@@ -34,7 +37,9 @@ from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import CommandTimeoutError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
+from imbue.mngr.errors import HostError
 from imbue.mngr.errors import InvalidActivityTypeError
+from imbue.mngr.errors import LockLostError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
@@ -44,12 +49,16 @@ from imbue.mngr.hosts.host import _LOCK_ACQUIRED_MARKER
 from imbue.mngr.hosts.host import _LOCK_TIMED_OUT_MARKER
 from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
 from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
+from imbue.mngr.hosts.host import _build_generation_increment_fragment
 from imbue.mngr.hosts.host import _build_remote_lock_command
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
+from imbue.mngr.hosts.host import _increment_local_generation_counter
 from imbue.mngr.hosts.host import _merge_agent_type_provisioning
+from imbue.mngr.hosts.host import _parse_acquired_generation_token
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
+from imbue.mngr.hosts.outer_host import ActiveRemoteLock
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -777,12 +786,61 @@ def test_build_start_agent_shell_command_uses_default_dimensions_when_unset(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """With default (all-None) tmux options, the historical 200x50 size is used and no resize policy is set."""
+    """With default (all-None) tmux options, the window is pinned to the historical 200x50.
+
+    tmux's default "latest" policy lets a degenerate client on the shared server collapse a
+    freshly-created window regardless of new-session -x/-y, so the default is to pin window-size
+    to "manual" and resize the window to 200x50 -- deterministic and immune to stray clients.
+    """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=AgentTmuxOptions())
 
     assert "-x 200 -y 50" in result
-    assert "window-size" not in result
+    assert f"set-option -t =mngr-{agent.name}:agent window-size manual" in result
+    assert f"resize-window -t =mngr-{agent.name}:agent -x 200 -y 50" in result
+
+
+def test_build_start_agent_shell_command_default_sigwinch_hook_is_fit_mode_with_client_size(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The default (pinned) policy installs the client-attached hook in "fit" mode.
+
+    Fit mode re-fits the manual-pinned window to the attaching client, so the hook must pass the
+    client geometry via tmux format tokens (expanded at hook-fire time to the attaching client).
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=AgentTmuxOptions())
+
+    assert "sigwinch_panes.sh" in result
+    assert "fit #{client_width} #{client_height}" in result
+    # The pinned window would otherwise only re-fit on attach; a client-resized hook keeps it
+    # tracking live terminal resizes (matching tmux's native continuous "latest").
+    assert "client-resized[97]" in result
+
+
+def test_build_start_agent_shell_command_explicit_window_size_uses_nudge_hook(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """An explicit window_size is honored verbatim and the hook runs in "nudge" mode.
+
+    The caller owns the policy, so we do not pin/resize, pass client geometry, or install the
+    resize-tracking hook; the attach hook only repaints (and leaves a truly-fixed, explicitly-
+    manual window untouched).
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(window_size=TmuxWindowSize.LATEST)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert f"set-option -t =mngr-{agent.name}:agent window-size latest" in result
+    assert "sigwinch_panes.sh" in result
+    assert "nudge" in result
+    assert "#{client_width}" not in result
+    assert "client-resized" not in result
+    assert f"resize-window -t =mngr-{agent.name}:agent" not in result
 
 
 def test_build_start_agent_shell_command_uses_custom_dimensions(
@@ -1486,16 +1544,18 @@ def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeou
 class _FakeLockChannel:
     """Fake paramiko Channel for the SSH host-lock exec path.
 
-    ``recv`` yields the acquired marker so ``_wait_for_remote_lock_acquired``
-    returns immediately; ``shutdown_write``/``close`` are counted so tests can
-    assert the lock is released on exit.
+    ``recv`` yields the acquired marker followed by the acquisition counter token so
+    ``_wait_for_remote_lock_acquired`` returns it immediately; ``shutdown_write`` /
+    ``close`` are counted so tests can assert the lock is released on exit, and
+    ``closed`` reflects channel liveness for the reconnect-safety checks.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, token: int = 1) -> None:
         self.exec_command_call_count = 0
         self.shutdown_write_call_count = 0
         self.close_call_count = 0
-        self._recv_chunks = [_LOCK_ACQUIRED_MARKER.encode() + b"\n"]
+        self.closed = False
+        self._recv_chunks = [_LOCK_ACQUIRED_MARKER.encode() + f" {token}\n".encode()]
         self._recv_call_count = 0
 
     def exec_command(self, command: str) -> None:
@@ -1513,6 +1573,7 @@ class _FakeLockChannel:
 
     def close(self) -> None:
         self.close_call_count += 1
+        self.closed = True
 
 
 class _FakeTransport:
@@ -2803,6 +2864,8 @@ def test_build_remote_lock_command_blocking_holds_flock_until_stdin_closes() -> 
     assert "flock 9" in cmd
     assert "/mngr/host_lock" in cmd
     assert _LOCK_ACQUIRED_MARKER in cmd
+    # It must increment the acquisition counter beside the lock file, under the flock.
+    assert "/mngr/host_lock.generation" in cmd
     # It must wait on stdin (so closing the channel releases the lock).
     assert "read" in cmd
 
@@ -2814,6 +2877,26 @@ def test_build_remote_lock_command_with_timeout_uses_flock_wait() -> None:
     assert "flock -w 12 9" in cmd
     assert _LOCK_ACQUIRED_MARKER in cmd
     assert _LOCK_TIMED_OUT_MARKER in cmd
+
+
+def test_generation_increment_fragment_increments_and_reports_counter() -> None:
+    """The increment fragment must read-modify-write the counter file and report the new value in ``$gen``.
+
+    Exercised directly (rather than via the full lock command) because ``flock`` is
+    Linux-only and absent on macOS; the increment arithmetic itself is portable.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        generation_file_path = Path(temp_dir) / "host_lock.generation"
+        fragment = _build_generation_increment_fragment(shlex.quote(str(generation_file_path)))
+        script = f"{fragment} && printf '%s' \"$gen\""
+        first = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+        assert first.returncode == 0, first.stderr
+        assert first.stdout == "1"
+        assert generation_file_path.read_text().strip() == "1"
+        # A second run observes the counter advance to 2 (monotonic).
+        second = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+        assert second.stdout == "2"
+        assert generation_file_path.read_text().strip() == "2"
 
 
 def test_host_lock_cooperatively_acquires_and_releases_blocking(
@@ -2865,7 +2948,9 @@ def test_hold_remote_host_lock_wraps_persistent_ssh_error_in_host_connection_err
     """
 
     class _HostWithImmediateLockSSHFailure(Host):
-        def _open_remote_lock_channel(self, lock_file_path: Path, timeout_seconds: float | None) -> Channel:
+        def _open_remote_lock_channel(
+            self, lock_file_path: Path, timeout_seconds: float | None
+        ) -> tuple[Channel, int]:
             raise SSHException("SSH session not active")
 
     fake = _FakePyinfraHost()
@@ -2881,6 +2966,241 @@ def test_hold_remote_host_lock_wraps_persistent_ssh_error_in_host_connection_err
     with pytest.raises(HostConnectionError, match="Could not acquire host lock"):
         with host.lock_cooperatively(timeout_seconds=None):
             pass
+
+
+# ==========================================================================
+# Reconnect-safety for a held remote host lock (acquisition counter)
+# ==========================================================================
+
+
+def _make_locked_remote_host(
+    local_provider: LocalProviderInstance,
+    *,
+    held_token: int,
+    # Values served, in order, to execute_idempotent_command (i.e. the counter reads).
+    counter_reads: list[str],
+    reacquire_open_session_results: list[object] | None = None,
+    is_held_channel_closed: bool = False,
+    is_transport_active: bool = True,
+) -> tuple[Host, _FakeLockChannel, _FakeTransport]:
+    """Build a remote Host that already holds a cooperative lock at ``held_token``.
+
+    ``execute_idempotent_command`` is overridden to serve the canned ``counter_reads``
+    (the generation-file reads), so tests drive the reconnect-safety paths without the
+    full command-output plumbing. ``reacquire_open_session_results`` feed the fake
+    transport's ``open_session`` for the authoritative re-acquire.
+    """
+    counter_read_state = {"index": 0}
+
+    class _LockedRemoteHost(Host):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Any = None,
+            timeout_seconds: float | None = None,
+            raise_on_timeout: bool = False,
+        ) -> CommandResult:
+            index = counter_read_state["index"]
+            counter_read_state["index"] += 1
+            stdout = counter_reads[index] if index < len(counter_reads) else "MISSING"
+            return CommandResult(stdout=stdout + "\n", stderr="", success=True)
+
+    transport = _FakeTransport(
+        is_active=is_transport_active,
+        open_session_results=reacquire_open_session_results if reacquire_open_session_results is not None else [],
+    )
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=transport))
+    host = _LockedRemoteHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    held_channel = _FakeLockChannel(token=held_token)
+    held_channel.closed = is_held_channel_closed
+    host._active_lock = ActiveRemoteLock(
+        lock_file_path=Path("/mngr/host_lock"),
+        generation_file_path=Path("/mngr/host_lock.generation"),
+        token=held_token,
+        channel=cast(Channel, held_channel),
+    )
+    return host, held_channel, transport
+
+
+def test_parse_acquired_generation_token_reads_full_line_only() -> None:
+    """The token parser must return the integer only once the marker line's newline has arrived."""
+    marker = _LOCK_ACQUIRED_MARKER.encode()
+    assert _parse_acquired_generation_token(marker + b" 7\n") == 7
+    # Marker present but the terminating newline (and possibly more digits) not yet received.
+    assert _parse_acquired_generation_token(marker + b" 7") is None
+    assert _parse_acquired_generation_token(b"no marker yet") is None
+    with pytest.raises(HostError, match="malformed acquisition token"):
+        _parse_acquired_generation_token(marker + b" notanumber\n")
+
+
+def test_reacquire_and_verify_lock_continues_when_uncontended(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """An uncontended reconnect re-acquires (counter token+1) and transparently continues."""
+    reacquired_channel = _FakeLockChannel(token=6)
+    host, _held, _transport = _make_locked_remote_host(
+        local_provider,
+        held_token=5,
+        counter_reads=["5"],
+        reacquire_open_session_results=[reacquired_channel],
+    )
+    host._reacquire_and_verify_lock()
+    assert host._active_lock is not None
+    assert host._active_lock.token == 6
+    # The freshly-acquired channel replaces the dead one.
+    assert host._active_lock.channel is reacquired_channel
+
+
+def test_reacquire_and_verify_lock_raises_when_another_actor_acquired(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A reconnect where the counter jumped by more than one (token+2) must raise LockLostError."""
+    reacquired_channel = _FakeLockChannel(token=7)
+    host, _held, _transport = _make_locked_remote_host(
+        local_provider,
+        held_token=5,
+        counter_reads=["5"],
+        reacquire_open_session_results=[reacquired_channel],
+    )
+    with pytest.raises(LockLostError):
+        host._reacquire_and_verify_lock()
+    # The newly-opened channel is closed rather than leaked.
+    assert reacquired_channel.close_call_count == 1
+
+
+def test_reacquire_and_verify_lock_fast_fails_without_blocking_when_counter_advanced(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When the counter is already advanced on reconnect, fast-fail without a blocking re-acquire."""
+    host, _held, transport = _make_locked_remote_host(
+        local_provider,
+        held_token=5,
+        counter_reads=["8"],
+        reacquire_open_session_results=[],
+    )
+    with pytest.raises(LockLostError):
+        host._reacquire_and_verify_lock()
+    # The blocking re-acquire (open_session) must not run behind the current holder.
+    assert transport.open_session_call_count == 0
+
+
+def test_reverify_lock_if_channel_died_reacquires_on_dead_channel(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """An independently-dead lock channel (transport alive) triggers re-acquire-and-verify."""
+    reacquired_channel = _FakeLockChannel(token=6)
+    host, _held, _transport = _make_locked_remote_host(
+        local_provider,
+        held_token=5,
+        counter_reads=["5"],
+        reacquire_open_session_results=[reacquired_channel],
+        is_held_channel_closed=True,
+    )
+    host._reverify_lock_if_channel_died()
+    assert host._active_lock is not None
+    assert host._active_lock.token == 6
+
+
+def test_reverify_lock_if_channel_died_is_noop_when_channel_live(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A live lock channel on an active transport needs no re-acquire."""
+    host, _held, transport = _make_locked_remote_host(local_provider, held_token=5, counter_reads=[])
+    host._reverify_lock_if_channel_died()
+    assert host._active_lock is not None
+    assert host._active_lock.token == 5
+    assert transport.open_session_call_count == 0
+
+
+def test_release_backstop_is_cheap_when_channel_live(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """The release backstop returns without a remote read when the lock channel is still live."""
+    host, _held, transport = _make_locked_remote_host(local_provider, held_token=5, counter_reads=[])
+    host._verify_lock_still_held_at_release()
+    # A live channel means no counter read is needed; open_session is untouched.
+    assert transport.open_session_call_count == 0
+
+
+def test_release_backstop_passes_on_uncontended_loss(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A momentary loss with an unchanged counter (no intervening acquisition) is safe at release."""
+    host, _held, _transport = _make_locked_remote_host(
+        local_provider,
+        held_token=5,
+        counter_reads=["5"],
+        is_held_channel_closed=True,
+    )
+    host._verify_lock_still_held_at_release()
+
+
+def test_release_backstop_raises_when_lock_lost(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A dead lock channel plus an advanced counter must raise LockLostError at release."""
+    host, _held, _transport = _make_locked_remote_host(
+        local_provider,
+        held_token=5,
+        counter_reads=["6"],
+        is_held_channel_closed=True,
+    )
+    with pytest.raises(LockLostError):
+        host._verify_lock_still_held_at_release()
+
+
+def test_disconnect_for_retry_preserves_live_transport_while_locked(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """While holding the lock, a still-active transport must not be torn down on retry."""
+    host, _held, _transport = _make_locked_remote_host(local_provider, held_token=5, counter_reads=[])
+    host._disconnect_for_retry()
+    assert cast(_FakeHostWithSSH, host.connector.host).disconnect_call_count == 0
+
+
+def test_disconnect_for_retry_disconnects_dead_transport_while_locked(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A confirmed-dead transport is disconnected even while locked (its reconnect re-verifies)."""
+    host, _held, _transport = _make_locked_remote_host(
+        local_provider, held_token=5, counter_reads=[], is_transport_active=False
+    )
+    host._disconnect_for_retry()
+    assert cast(_FakeHostWithSSH, host.connector.host).disconnect_call_count == 1
+
+
+def test_increment_local_generation_counter_is_monotonic_and_resets_on_garbage(
+    tmp_path: Path,
+) -> None:
+    """The local counter increments from 0, stays monotonic, and resets cleanly on a non-integer file."""
+    generation_file_path = tmp_path / "host_lock.generation"
+    _increment_local_generation_counter(generation_file_path)
+    assert generation_file_path.read_text().strip() == "1"
+    _increment_local_generation_counter(generation_file_path)
+    assert generation_file_path.read_text().strip() == "2"
+    generation_file_path.write_text("garbage")
+    _increment_local_generation_counter(generation_file_path)
+    assert generation_file_path.read_text().strip() == "1"
+
+
+def test_local_lock_cooperatively_increments_generation_counter(
+    local_host: Host,
+) -> None:
+    """Holding the local cooperative lock must bump the shared acquisition counter each time."""
+    host = local_host
+    generation_file_path = host.host_dir / "host_lock.generation"
+    with host.lock_cooperatively(timeout_seconds=None):
+        assert generation_file_path.read_text().strip() == "1"
+    with host.lock_cooperatively(timeout_seconds=None):
+        assert generation_file_path.read_text().strip() == "2"
 
 
 def test_host_lock_cooperatively_is_mutually_exclusive(
@@ -3972,3 +4292,40 @@ def test_merge_agent_type_provisioning_combines_provisioning_and_env() -> None:
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result.provisioning.extra_provision_commands == ("echo setup",)
     assert result.environment.env_vars == (EnvVar(key="KEY", value="val"),)
+
+
+def test_get_directory_size_charges_hardlinks_once_and_ignores_nested_symlinks(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """``du -sk`` sizing: a hard-linked inode counts once and a nested symlinked dir is not followed."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "a").write_bytes(b"\0" * 100 * 1024)
+    os.link(tree / "a", tree / "a_hardlink")
+    (tree / "sub" / "c").write_bytes(b"\0" * 50 * 1024)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "big").write_bytes(b"\0" * 400 * 1024)
+    (tree / "link_to_outside").symlink_to(outside)
+
+    size = host.get_directory_size(tree)
+
+    assert size % 1024 == 0
+    # ``a`` (100 KiB) + ``sub/c`` (50 KiB) + a little directory overhead. Counting
+    # ``a_hardlink`` a second time would reach ~250 KiB; following the nested
+    # symlink would add the 400 KiB behind it.
+    assert 150 * 1024 <= size < 250 * 1024, f"hard-link double-count or followed a nested symlink: {size}"
+
+
+def test_get_directory_size_is_zero_for_a_non_directory(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """A regular file or a missing path reports 0, not an error."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    a_file = tmp_path / "file"
+    a_file.write_text("x")
+    assert host.get_directory_size(a_file) == 0
+    assert host.get_directory_size(tmp_path / "does_not_exist") == 0

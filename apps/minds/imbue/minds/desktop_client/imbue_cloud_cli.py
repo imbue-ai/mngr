@@ -16,6 +16,8 @@ parses those into typed pydantic objects.
 """
 
 import json as _json
+import os
+import tempfile
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -44,12 +46,10 @@ _KEY_OP_TIMEOUT_SECONDS = 90.0
 # desktop client.
 _CONNECTOR_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
 
-# Mirrors ``apps/remote_service_connector/.../app.py`` -- the connector uses
-# the first 16 hex chars of the agent UUID (after stripping ``"agent-"``) as
-# the trailing slug of every tunnel name. Used by ``find_tunnel_for_agent``
-# to filter ``list_tunnels`` output without having to know the per-account
-# username prefix.
-_AGENT_ID_PREFIX_LENGTH = 16
+# The plugin's error_class marker for a structured quota refusal, as written
+# into its JSON stderr body by handle_imbue_cloud_errors. Substring-matched
+# (like the 503 unavailable_signal) because log lines may surround the body.
+_QUOTA_ERROR_CLASS_SIGNAL = "ImbueCloudQuotaExceededError"
 
 
 class ImbueCloudCliError(MindError):
@@ -68,6 +68,26 @@ class ImbueCloudCliError(MindError):
 
 class ImbueCloudUnavailableError(ImbueCloudCliError):
     """Subclass of CliError indicating the connector returned 503 (no matching pool host)."""
+
+
+class ImbueCloudQuotaExceededCliError(ImbueCloudCliError):
+    """Subclass of CliError indicating the connector refused the operation on a quota entitlement.
+
+    A quota refusal is deterministic -- retrying the same call cannot
+    succeed -- so callers (e.g. the backup-provisioning retry loop) treat it
+    as terminal and surface it immediately instead of burning their retry
+    budget.
+    """
+
+
+class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
+    """A record push hit a 409 (revision CAS or active-agent conflict).
+
+    ``stored_record`` carries the server's current row when the conflict was a
+    revision CAS failure, so the caller can rebase and retry; None otherwise.
+    """
+
+    stored_record: dict[str, Any] | None = None
 
 
 class ImbueCloudAuthSession(FrozenModel):
@@ -229,6 +249,15 @@ class ImbueCloudCli(MutableModel):
             exc.stdout = result.stdout
             exc.stderr = result.stderr
             raise exc
+        if _QUOTA_ERROR_CLASS_SIGNAL in result.stderr:
+            quota_message = _parse_stderr_error_message(result.stderr)
+            quota_exc = ImbueCloudQuotaExceededCliError(
+                f"{command_repr}: {quota_message}" if quota_message else f"{command_repr}: quota exceeded"
+            )
+            quota_exc.exit_code = exit_code
+            quota_exc.stdout = result.stdout
+            quota_exc.stderr = result.stderr
+            raise quota_exc
         # Log the full subprocess output server-side -- it may be a multi-line
         # Python traceback (e.g. an httpx transport error inside the connector
         # subprocess) -- but keep the exception *message* clean and
@@ -470,19 +499,49 @@ class ImbueCloudCli(MutableModel):
         )
         self._expect_success(result, "tunnels delete")
 
-    def add_service(
+    def enable_sharing(
         self,
         *,
         account: str,
-        tunnel_name: str,
+        agent_id: str,
         service_name: str,
         service_url: str,
-    ) -> dict[str, Any]:
+        policy: Mapping[str, Any],
+    ) -> tuple[TunnelInfo, dict[str, Any]]:
+        """Enable (or update) sharing for one service via a single connector call.
+
+        Wraps ``tunnels enable-sharing``: the connector ensures the tunnel,
+        adds the service, and applies the Access policy in one request.
+        Returns the tunnel (with cloudflared token) and the service dict
+        (``service_name`` / ``service_url`` / ``hostname``), so the caller
+        needs no follow-up status reads.
+        """
         result = self._run(
-            ["tunnels", "services", "add", tunnel_name, service_name, service_url, "--account", account],
-            cg_name="imbue-cloud-services-add",
+            [
+                "tunnels",
+                "enable-sharing",
+                agent_id,
+                service_name,
+                service_url,
+                "--policy",
+                _json.dumps(dict(policy)),
+                "--account",
+                account,
+            ],
+            cg_name="imbue-cloud-enable-sharing",
         )
-        return self._expect_success(result, "tunnels services add")
+        body = self._expect_success(result, "tunnels enable-sharing")
+        tunnel_raw = body.get("tunnel") if isinstance(body, dict) else None
+        service_raw = body.get("service") if isinstance(body, dict) else None
+        if not isinstance(tunnel_raw, dict) or not isinstance(service_raw, dict):
+            # Describe only the body's shape, never its contents: a well-formed
+            # "tunnel" half carries the cloudflared token, which must not leak
+            # into an error message that reaches logs and the sharing UI.
+            shape = f"dict with keys {sorted(body)}" if isinstance(body, dict) else type(body).__name__
+            raise ImbueCloudCliError(
+                f"Malformed enable-sharing output: expected 'tunnel' and 'service' objects, got {shape}"
+            )
+        return TunnelInfo.model_validate(tunnel_raw), service_raw
 
     def list_services(self, account: str, tunnel_name: str) -> list[dict[str, Any]]:
         result = self._run(
@@ -515,35 +574,6 @@ class ImbueCloudCli(MutableModel):
         )
         return self._expect_success(result, "tunnels auth get")
 
-    def set_service_auth(
-        self,
-        account: str,
-        tunnel_name: str,
-        service_name: str,
-        policy: Mapping[str, Any],
-    ) -> None:
-        """Set the per-service auth policy on a tunnel.
-
-        Wraps ``mngr imbue_cloud tunnels auth set <tunnel_name> <policy_json> --service <name>``.
-        Pass ``policy`` as ``{"emails": [...], "email_domains": [...], "require_idp": ...}``;
-        empty fields are accepted as defaults by the plugin.
-        """
-        result = self._run(
-            [
-                "tunnels",
-                "auth",
-                "set",
-                tunnel_name,
-                _json.dumps(dict(policy)),
-                "--service",
-                service_name,
-                "--account",
-                account,
-            ],
-            cg_name="imbue-cloud-service-auth-set",
-        )
-        self._expect_success(result, "tunnels auth set --service")
-
     def get_service_auth(self, account: str, tunnel_name: str, service_name: str) -> dict[str, Any]:
         """Read the per-service auth policy from a tunnel.
 
@@ -559,23 +589,25 @@ class ImbueCloudCli(MutableModel):
     def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
         """Return the tunnel registered for ``agent_id`` under ``account``, or None.
 
-        Uses ``list_tunnels`` and matches on the trailing-slug convention the
-        connector uses for tunnel names: ``<short_user>--<short_agent>``,
-        where ``short_agent`` is the first 16 hex chars of the agent UUID
-        (``"agent-"`` prefix stripped). Stable contract -- changing the
-        truncation length on the connector side requires updating
-        ``_AGENT_ID_PREFIX_LENGTH`` here in lockstep.
+        Delegates to the connector's O(1) ``tunnels find-by-agent`` lookup,
+        which resolves the exact tunnel via Cloudflare's server-side name
+        filter (2 Cloudflare calls) instead of enumerating every tunnel and
+        fetching each one's config -- the old ``list_tunnels`` path was O(n)
+        in the number of tunnels on the account and dominated the sharing
+        flow's latency.
 
         Returning ``None`` lets the sharing-status route distinguish
         "tunnel doesn't exist yet" (the user hasn't enabled sharing) from
         "tunnel exists but no service is registered for this name".
         """
-        short_agent = agent_id.removeprefix("agent-")[:_AGENT_ID_PREFIX_LENGTH]
-        suffix = f"--{short_agent}"
-        for tunnel in self.list_tunnels(account):
-            if tunnel.tunnel_name.endswith(suffix):
-                return tunnel
-        return None
+        result = self._run(
+            ["tunnels", "find-by-agent", agent_id, "--account", account],
+            cg_name="imbue-cloud-tunnels-find-by-agent",
+        )
+        body = self._expect_success(result, "tunnels find-by-agent")
+        if body is None:
+            return None
+        return TunnelInfo.model_validate(body)
 
     # ------------------------------------------------------------------
     # R2 buckets (one per workspace; used to back up the host_dir via restic)
@@ -615,21 +647,207 @@ class ImbueCloudCli(MutableModel):
         body = self._expect_success(result, "bucket info")
         return R2BucketInfo.model_validate(body)
 
-    def create_bucket_key(
+    def roll_bucket_key(
         self,
         *,
         account: str,
         name: str,
-        access: str = "readwrite",
-        alias: str | None = None,
     ) -> R2BucketKeyMaterial:
-        """Mint an additional scoped key for the bucket ``name`` (short name)."""
-        args: list[str] = ["bucket", "keys", "create", name, "--access", access, "--account", account]
-        if alias is not None:
-            args.extend(["--alias", alias])
-        result = self._run(args, cg_name="imbue-cloud-bucket-keys-create", timeout_seconds=_KEY_OP_TIMEOUT_SECONDS)
-        body = self._expect_success(result, "bucket keys create")
+        """Roll the bucket's single key (same Access Key ID, fresh secret) and return it.
+
+        Each bucket has exactly one key and the secret is shown only once, so
+        this is how re-provisioning gets working credentials for an existing
+        bucket.
+        """
+        result = self._run(
+            ["bucket", "roll-key", name, "--account", account],
+            cg_name="imbue-cloud-bucket-roll-key",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        body = self._expect_success(result, "bucket roll-key")
         return R2BucketKeyMaterial.model_validate(body)
+
+    # ------------------------------------------------------------------
+    # Account (plan + entitlements + usage)
+    # ------------------------------------------------------------------
+
+    def get_account_info(self, account: str) -> dict[str, Any]:
+        """Return the account's plan, entitlement values, and live usage as a raw dict."""
+        result = self._run(
+            ["account", "show", "--account", account],
+            cg_name="imbue-cloud-account-show",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._expect_success(result, "account show")
+
+    def set_account_plan(self, account: str, plan: str) -> dict[str, Any]:
+        """Switch the account's plan; returns ``{plan_name, entitlements}``."""
+        result = self._run(
+            ["account", "set-plan", plan, "--account", account],
+            cg_name="imbue-cloud-account-set-plan",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._expect_success(result, "account set-plan")
+
+    def create_storage_cleanup_grant(self, account: str) -> dict[str, Any]:
+        """Temporarily restore storage-downgraded bucket keys so restic cleanup can run.
+
+        Returns the connector's grant body (``status``, ``expires_at``,
+        ``baseline_bytes``, ``keys``). Idempotent while a grant is active.
+        """
+        result = self._run(
+            ["account", "cleanup-grant", "--account", account],
+            cg_name="imbue-cloud-account-cleanup-grant",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._expect_success(result, "account cleanup-grant")
+
+    def recheck_storage(self, account: str) -> dict[str, Any]:
+        """Re-measure live storage usage and apply enforcement immediately.
+
+        Returns the connector's recheck body (``usage_bytes``, ``limit_bytes``,
+        ``is_over_quota``, ``is_grant_settled``, ``keys``); settles any
+        outstanding cleanup grant.
+        """
+        result = self._run(
+            ["account", "recheck-storage", "--account", account],
+            cg_name="imbue-cloud-account-recheck-storage",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._expect_success(result, "account recheck-storage")
+
+    # ------------------------------------------------------------------
+    # Workspace sync (records + key bundle)
+    # ------------------------------------------------------------------
+
+    def sync_records_pull(self, account: str) -> list[dict[str, Any]]:
+        result = self._run(["sync", "records", "pull", "--account", account], cg_name="imbue-cloud-sync-records-pull")
+        body = self._expect_success(result, "sync records pull")
+        records = body.get("records", []) if isinstance(body, dict) else []
+        return [entry for entry in records if isinstance(entry, dict)]
+
+    def sync_record_push(self, account: str, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Push one record; returns the stored row. Raises ImbueCloudSyncConflictCliError on a 409.
+
+        The record JSON travels via a 0600 temp file (--input-file) so secret
+        payloads never ride a command line or a log.
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(record), handle)
+            input_path = handle.name
+        try:
+            result = self._run(
+                ["sync", "records", "push", "--account", account, "--input-file", input_path],
+                cg_name="imbue-cloud-sync-record-push",
+            )
+        finally:
+            Path(input_path).unlink(missing_ok=True)
+        if result.returncode != 0 and "ImbueCloudSyncConflictError" in result.stderr:
+            conflict = ImbueCloudSyncConflictCliError("sync records push: revision/agent conflict")
+            conflict.exit_code = result.returncode if result.returncode is not None else 1
+            conflict.stdout = result.stdout
+            conflict.stderr = result.stderr
+            conflict.stored_record = _parse_conflict_stored(result.stderr)
+            raise conflict
+        body = self._expect_success(result, "sync records push")
+        return body if isinstance(body, dict) else {}
+
+    def sync_record_delete(self, account: str, host_id: str) -> None:
+        result = self._run(
+            ["sync", "records", "delete", host_id, "--account", account],
+            cg_name="imbue-cloud-sync-record-delete",
+        )
+        self._expect_success(result, "sync records delete")
+
+    def sync_scrub_secrets(self, account: str) -> int:
+        result = self._run(["sync", "scrub-secrets", "--account", account], cg_name="imbue-cloud-sync-scrub")
+        body = self._expect_success(result, "sync scrub-secrets")
+        return int(body.get("scrubbed", 0)) if isinstance(body, dict) else 0
+
+    def sync_bundle_pull(self, account: str) -> dict[str, Any] | None:
+        result = self._run(["sync", "bundle", "pull", "--account", account], cg_name="imbue-cloud-sync-bundle-pull")
+        body = self._expect_success(result, "sync bundle pull")
+        bundle = body.get("bundle") if isinstance(body, dict) else None
+        return bundle if isinstance(bundle, dict) else None
+
+    def sync_bundle_push(self, account: str, bundle: Mapping[str, Any]) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(bundle), handle)
+            input_path = handle.name
+        try:
+            result = self._run(
+                ["sync", "bundle", "push", "--account", account, "--input-file", input_path],
+                cg_name="imbue-cloud-sync-bundle-push",
+            )
+        finally:
+            Path(input_path).unlink(missing_ok=True)
+        self._expect_success(result, "sync bundle push")
+
+    def sync_bundle_delete(self, account: str) -> None:
+        result = self._run(
+            ["sync", "bundle", "delete", "--account", account], cg_name="imbue-cloud-sync-bundle-delete"
+        )
+        self._expect_success(result, "sync bundle delete")
+
+
+def _parse_conflict_stored(stderr: str) -> dict[str, Any] | None:
+    """Extract the ``stored`` row from a sync-push conflict's JSON error body, if present.
+
+    The body is indent-formatted JSON (its first line is a bare ``{``) that
+    may be surrounded by log lines, so each candidate document is raw-decoded
+    from the opening brace's actual byte offset -- that consumes exactly one
+    document regardless of what precedes or follows it on the stream.
+    """
+    decoder = _json.JSONDecoder()
+    offset = 0
+    is_any_document_parsed = False
+    for line in stderr.splitlines(keepends=True):
+        lstripped = line.lstrip()
+        if lstripped.startswith("{"):
+            try:
+                parsed, _consumed_until = decoder.raw_decode(stderr, offset + len(line) - len(lstripped))
+            except _json.JSONDecodeError as exc:
+                # Some other output line merely started with a brace; keep
+                # scanning for the real error body.
+                logger.warning(
+                    "Skipping a brace-prefixed non-JSON stderr line while locating the conflict body: {}", exc
+                )
+                parsed = None
+            if isinstance(parsed, dict):
+                is_any_document_parsed = True
+                stored = parsed.get("stored")
+                if isinstance(stored, dict):
+                    return stored
+        offset += len(line)
+    if not is_any_document_parsed:
+        logger.warning("Could not locate a JSON error body on the sync-conflict stderr")
+    return None
+
+
+def _parse_stderr_error_message(stderr: str) -> str | None:
+    """Extract the ``error`` message from the plugin's JSON stderr body, if present.
+
+    Same scanning approach as ``_parse_conflict_stored``: the body is
+    indent-formatted JSON that may be surrounded by log lines.
+    """
+    decoder = _json.JSONDecoder()
+    offset = 0
+    for line in stderr.splitlines(keepends=True):
+        lstripped = line.lstrip()
+        if lstripped.startswith("{"):
+            try:
+                parsed, _consumed_until = decoder.raw_decode(stderr, offset + len(line) - len(lstripped))
+            except _json.JSONDecodeError as exc:
+                # Some other output line merely started with a brace; keep
+                # scanning for the real error body.
+                logger.warning("Skipping a brace-prefixed non-JSON stderr line while locating the error body: {}", exc)
+                parsed = None
+            if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+                return str(parsed["error"])
+        offset += len(line)
+    return None
 
 
 def _parse_stdout_json(stdout: str, command_repr: str) -> Any:

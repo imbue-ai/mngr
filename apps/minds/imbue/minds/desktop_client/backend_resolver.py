@@ -261,6 +261,14 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None, None
 
+    def get_last_snapshot_at_for_provider(self, provider_name: ProviderInstanceName) -> datetime | None:
+        """Return the most recent snapshot time for one provider, or None when it has none.
+
+        Default implementation returns None (resolvers without discovery have
+        no per-provider freshness); ``MngrCliBackendResolver`` overrides it.
+        """
+        return None
+
 
 class StaticBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from a static mapping provided at construction time.
@@ -694,7 +702,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
         the on-disk topology (if configured). Hosts with an incomplete view --
         or absent from the snapshot entirely (transient discovery loss) --
         keep their last complete record; that is the entire point of the
-        topology.
+        topology. A host observed in a terminal ``DESTROYED`` state is the sole
+        exception: it is pruned from the topology (and never re-added), so a
+        workspace the user destroyed stops counting as restorable -- but only
+        on that explicit DESTROYED observation, never on mere absence.
         """
         path = self.last_good_agents_path
         topology_to_write: _LastGoodAgentTopology | None = None
@@ -703,7 +714,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._initial_discovery_done = True
             self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
             self._sweep_workspace_name_overrides_locked()
-            if self._merge_last_good_topology_locked(result.discovered_agents) and path is not None:
+            if (
+                self._merge_last_good_topology_locked(result.discovered_agents, result.host_state_by_host_id)
+                and path is not None
+            ):
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)
@@ -749,13 +763,24 @@ class MngrCliBackendResolver(BackendResolverInterface):
             ) > _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS:
                 del self._workspace_name_override_by_agent_id[agent_id_str]
 
-    def _merge_last_good_topology_locked(self, agents: tuple[DiscoveredAgent, ...]) -> bool:
+    def _merge_last_good_topology_locked(
+        self, agents: tuple[DiscoveredAgent, ...], host_state_by_host_id: Mapping[str, HostState]
+    ) -> bool:
         """Fold a fresh discovery snapshot into the last-good per-host topology.
 
         Only hosts whose snapshot includes the system-services agent are
         treated as completely enumerated and overwrite their prior record;
         hosts with an incomplete view (or absent from the snapshot) keep their
         last complete record. Must be called with ``self._lock`` held.
+
+        A host observed in a terminal ``HostState.DESTROYED`` state is instead
+        dropped from the topology (and skipped by the add path, so a lingering
+        destroyed host that is still enumerated during the provider's
+        destroyed-host persistence window does not thrash it back in). This is
+        the ONLY removal path: a host that is merely absent from the snapshot is
+        deliberately retained, because declining to drop on absence -- and
+        removing only on a positive DESTROYED observation -- is the entire point
+        of the last-good fallback (a transient discovery loss must not erase it).
 
         Returns True if any host record changed (so the caller persists).
         """
@@ -764,11 +789,20 @@ class MngrCliBackendResolver(BackendResolverInterface):
             agents_by_host.setdefault(str(agent.host_id), []).append(agent)
         changed = False
         for host_id_str, host_agents in agents_by_host.items():
+            # Never (re-)record a host observed DESTROYED; the prune below owns removal.
+            if host_state_by_host_id.get(host_id_str) is HostState.DESTROYED:
+                continue
             if not any(str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME for agent in host_agents):
                 continue
             new_records = tuple(_to_agent_record(agent) for agent in host_agents)
             if self._last_good_agents_by_host.get(host_id_str) != new_records:
                 self._last_good_agents_by_host[host_id_str] = new_records
+                changed = True
+        # Prune any remembered host now observed DESTROYED -- and ONLY DESTROYED,
+        # never a host merely missing from this snapshot (see the docstring).
+        for host_id_str in tuple(self._last_good_agents_by_host):
+            if host_state_by_host_id.get(host_id_str) is HostState.DESTROYED:
+                del self._last_good_agents_by_host[host_id_str]
                 changed = True
         return changed
 
@@ -904,17 +938,27 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def list_restorable_workspace_ids(self) -> tuple[AgentId, ...]:
         """Union of live primary-workspace agents and last-good workspace agents.
 
-        The live set is the ``is_primary`` agents in the current snapshot (host
-        state aside -- a restore view declines to drop on absence, not on
-        DESTROYED). The last-good set is the persisted topology's
-        system-services agents (the minds' primary agents, which carry that
-        label live). Unioning them means a workspace that exists but hasn't been
-        re-discovered this session yet -- a slow provider on cold start -- stays
-        recognized, so its window isn't dropped before discovery catches up.
+        The live set is the ``is_primary`` agents in the current snapshot whose
+        host is not observed DESTROYED: a restore view declines to drop a
+        workspace on mere absence (a slow cold-start snapshot), but a host
+        positively observed DESTROYED -- which lingers in discovery for the
+        provider's destroyed-host persistence window -- is genuinely gone and
+        must not be restored. This mirrors the DESTROYED filter in
+        :meth:`list_active_workspace_ids`. The last-good set is the persisted
+        topology's system-services agents (the minds' primary agents, which
+        carry that label live); ``_merge_last_good_topology_locked`` has already
+        pruned any DESTROYED host from it. Unioning them means a workspace that
+        exists but hasn't been re-discovered this session yet -- a slow provider
+        on cold start -- stays recognized, so its window isn't dropped before
+        discovery catches up, while a destroyed workspace drops out entirely.
         """
         with self._lock:
+            host_state_by_host_id = self._agents_result.host_state_by_host_id
             ids: set[AgentId] = {
-                agent.agent_id for agent in self._agents_result.discovered_agents if "is_primary" in agent.labels
+                agent.agent_id
+                for agent in self._agents_result.discovered_agents
+                if "is_primary" in agent.labels
+                and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
             }
             for records in self._last_good_agents_by_host.values():
                 for record in records:

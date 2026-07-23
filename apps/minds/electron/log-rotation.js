@@ -1,6 +1,6 @@
 // Size-based log rotation for the Electron-written log files (electron.log and
 // minds.log). Mirrors the Python jsonl sink's scheme (imbue_common/logging.py):
-// 100MB threshold, keep the 10 newest rotated files, timestamp-suffixed names.
+// 10MB threshold, keep the 10 newest rotated files, timestamp-suffixed names.
 // Unlike the Python sink, rotated files are gzipped after rotating (so error
 // reports can upload the current file plus the most recent rotation gzip), and
 // no cross-process lock is needed -- only the Electron main process writes these
@@ -10,8 +10,9 @@ const path = require('path');
 const zlib = require('zlib');
 const { pipeline } = require('stream');
 
-// 100MB, matching the jsonl sink so all of minds' logs behave consistently.
-const DEFAULT_MAX_SIZE_BYTES = 100 * 1024 * 1024;
+// 10MB, matching the Python backend jsonl sink so all of minds' logs behave
+// consistently.
+const DEFAULT_MAX_SIZE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_ROTATED_COUNT = 10;
 
 // The compressed suffix appended to a rotated file once gzipped.
@@ -69,7 +70,7 @@ function pruneRotated(dir, baseName, maxRotatedCount) {
 /**
  * Gzip a just-rotated raw file in the background, then remove the raw file and
  * prune old rotations. Done off the main path (streamed, not gzipSync) so the
- * main process never blocks compressing a ~100MB file. Best-effort: a failure
+ * main process never blocks compressing a large file. Best-effort: a failure
  * leaves the raw rotation on disk (still uploadable) rather than crashing.
  */
 function compressRotatedFile(rawPath, dir, baseName, maxRotatedCount) {
