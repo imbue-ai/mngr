@@ -11,14 +11,18 @@ from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.report import Change
 from imbue.mngr_tmr.report import ChangeKind
 from imbue.mngr_tmr.report import ChangeStatus
+from imbue.mngr_tmr.report import Escalation
+from imbue.mngr_tmr.report import EscalationKind
 from imbue.mngr_tmr.report import IntegratorResult
 from imbue.mngr_tmr.report import ReportSection
 from imbue.mngr_tmr.report import TestMapReduceResult
 from imbue.mngr_tmr.report import TestResult
 from imbue.mngr_tmr.report import _merged_status_html
 from imbue.mngr_tmr.report import _render_markdown
-from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report import load_testing_agent_outcome
+from imbue.mngr_tmr.report import report_section_of
+from imbue.mngr_tmr.report import synthesize_missing_mapper_outcomes
 
 SUCCEEDED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
 FAILED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="failed")}
@@ -29,6 +33,7 @@ def make_test_result(
     errored: bool = False,
     before: bool | None = None,
     after: bool | None = None,
+    escalations: tuple[Escalation, ...] = (),
 ) -> TestMapReduceResult:
     """Build a minimal TestMapReduceResult for testing render-internal helpers."""
     return TestMapReduceResult(
@@ -38,6 +43,7 @@ def make_test_result(
         errored=errored,
         tests_passing_before=before,
         tests_passing_after=after,
+        escalations=escalations,
     )
 
 
@@ -53,6 +59,9 @@ def _serialize_outcome(outcome: TestResult) -> dict[str, object]:
         "summary_markdown": outcome.summary_markdown,
         "test_runs": [
             {"run_name": r.run_name, "description_markdown": r.description_markdown} for r in outcome.test_runs
+        ],
+        "escalations": [
+            {"kind": e.kind.value, "title": e.title, "detail_markdown": e.detail_markdown} for e in outcome.escalations
         ],
     }
 
@@ -82,6 +91,7 @@ def make_metadata_and_outcome(
     tests_passing_before: bool | None = None,
     tests_passing_after: bool | None = None,
     summary_markdown: str = "",
+    escalations: tuple[Escalation, ...] = (),
     write_outcome: bool = True,
 ) -> AgentMetadata:
     """Build an ``AgentMetadata`` and (unless ``write_outcome`` is False) write
@@ -105,6 +115,7 @@ def make_metadata_and_outcome(
             tests_passing_before=tests_passing_before,
             tests_passing_after=tests_passing_after,
             summary_markdown=summary_markdown,
+            escalations=escalations,
         )
         _write_test_outcome(output_dir, name, outcome)
     return metadata
@@ -123,13 +134,12 @@ def test_change_kind_values() -> None:
 def test_change_status_values() -> None:
     assert ChangeStatus.SUCCEEDED == "SUCCEEDED"
     assert ChangeStatus.FAILED == "FAILED"
-    assert ChangeStatus.BLOCKED == "BLOCKED"
 
 
 def test_report_section_values() -> None:
     assert ReportSection.NON_IMPL_FIXES == "NON_IMPL_FIXES"
     assert ReportSection.IMPL_FIXES == "IMPL_FIXES"
-    assert ReportSection.BLOCKED == "BLOCKED"
+    assert ReportSection.UNRESOLVED == "UNRESOLVED"
     assert ReportSection.CLEAN_PASS == "CLEAN_PASS"
     assert ReportSection.RUNNING == "RUNNING"
 
@@ -143,7 +153,7 @@ def test_test_result_empty() -> None:
 def test_test_result_with_changes() -> None:
     changes = {
         ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed"),
-        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="Needs work"),
+        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="Needs work"),
     }
     result = TestResult(changes=changes, tests_passing_before=False, tests_passing_after=True)
     assert len(result.changes) == 2
@@ -176,47 +186,57 @@ def test_test_map_reduce_result_without_branch() -> None:
 
 
 def test_report_section_errored() -> None:
-    assert _report_section_of(make_test_result(errored=True)) == ReportSection.FAILED
+    assert report_section_of(make_test_result(errored=True)) == ReportSection.FAILED
 
 
 def test_report_section_running() -> None:
-    assert _report_section_of(make_test_result()) == ReportSection.RUNNING
+    assert report_section_of(make_test_result()) == ReportSection.RUNNING
 
 
 def test_report_section_clean_pass() -> None:
-    assert _report_section_of(make_test_result(before=True, after=True)) == ReportSection.CLEAN_PASS
+    assert report_section_of(make_test_result(before=True, after=True)) == ReportSection.CLEAN_PASS
 
 
 def test_report_section_non_impl_fixes() -> None:
     assert (
-        _report_section_of(make_test_result(changes=SUCCEEDED_FIX, before=False, after=True))
+        report_section_of(make_test_result(changes=SUCCEEDED_FIX, before=False, after=True))
         == ReportSection.NON_IMPL_FIXES
     )
 
 
 def test_report_section_impl_fixes() -> None:
     impl_fix = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
-    assert _report_section_of(make_test_result(changes=impl_fix, before=False, after=True)) == ReportSection.IMPL_FIXES
+    assert report_section_of(make_test_result(changes=impl_fix, before=False, after=True)) == ReportSection.IMPL_FIXES
 
 
-def test_report_section_blocked_all_changes_blocked() -> None:
-    blocked_changes = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked")}
+def test_report_section_all_changes_failed_is_unresolved() -> None:
+    """Every attempted change having failed means the agent landed nothing."""
     assert (
-        _report_section_of(make_test_result(changes=blocked_changes, before=False, after=False))
-        == ReportSection.BLOCKED
+        report_section_of(make_test_result(changes=FAILED_FIX, before=False, after=False)) == ReportSection.UNRESOLVED
     )
 
 
-def test_report_section_failed_changes_are_non_impl() -> None:
-    """FAILED (not BLOCKED) changes route to NON_IMPL_FIXES, not BLOCKED."""
-    assert (
-        _report_section_of(make_test_result(changes=FAILED_FIX, before=False, after=False))
-        == ReportSection.NON_IMPL_FIXES
+def test_report_section_partial_failure_keeps_fix_section() -> None:
+    """A failed change alongside a succeeded one still counts as a fix."""
+    mixed = {
+        ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed"),
+        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="could not"),
+    }
+    assert report_section_of(make_test_result(changes=mixed, before=False, after=True)) == ReportSection.NON_IMPL_FIXES
+
+
+def test_report_section_no_changes_tests_failing_is_unresolved() -> None:
+    assert report_section_of(make_test_result(before=False, after=False)) == ReportSection.UNRESOLVED
+
+
+def test_report_section_ignores_escalations() -> None:
+    """Escalations are orthogonal: a clean pass carrying one is still a clean pass."""
+    escalated = make_test_result(
+        before=True,
+        after=True,
+        escalations=(Escalation(title="t", detail_markdown="d", kind=EscalationKind.SHARED_PATTERN),),
     )
-
-
-def test_report_section_blocked_no_changes_tests_failing() -> None:
-    assert _report_section_of(make_test_result(before=False, after=False)) == ReportSection.BLOCKED
+    assert report_section_of(escalated) == ReportSection.CLEAN_PASS
 
 
 # --- render_markdown tests ---
@@ -345,7 +365,7 @@ def test_generate_html_report_creates_output_dir(tmp_path: Path) -> None:
 def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     impl_fix = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed impl")}
-    blocked_changes = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked")}
+    unresolved_changes = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="could not fix")}
     agents = [
         make_metadata_and_outcome(output_dir, "running-agent", write_outcome=False),
         make_metadata_and_outcome(
@@ -355,7 +375,7 @@ def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
             output_dir, "impl-fix", changes=impl_fix, tests_passing_before=False, tests_passing_after=True
         ),
         make_metadata_and_outcome(
-            output_dir, "blocked", changes=blocked_changes, tests_passing_before=False, tests_passing_after=False
+            output_dir, "unresolved", changes=unresolved_changes, tests_passing_before=False, tests_passing_after=False
         ),
         make_metadata_and_outcome(output_dir, "failed", error_summary="boom"),
         make_metadata_and_outcome(output_dir, "clean", tests_passing_before=True, tests_passing_after=True),
@@ -366,7 +386,7 @@ def test_generate_html_report_all_report_sections(tmp_path: Path) -> None:
         label = {
             ReportSection.NON_IMPL_FIXES: "Non-implementation fixes",
             ReportSection.IMPL_FIXES: "Implementation fixes",
-            ReportSection.BLOCKED: "Blocked",
+            ReportSection.UNRESOLVED: "Unresolved",
             ReportSection.FAILED: "Failed",
             ReportSection.CLEAN_PASS: "Clean pass",
             ReportSection.RUNNING: "Running",
@@ -511,3 +531,149 @@ def test_generate_html_report_html_escaped(tmp_path: Path) -> None:
     content = result_path.read_text()
     assert "<script>alert" not in content
     assert "&lt;script&gt;" in content
+
+
+# --- escalation aggregation into the report ---
+
+
+def test_report_includes_mapper_escalations(tmp_path: Path) -> None:
+    """A mapper's escalation must reach the report even though its test passed."""
+    output_dir = tmp_path / "out"
+    agents = [
+        make_metadata_and_outcome(
+            output_dir,
+            "clean-but-escalating",
+            test_node_id="tests/test_a.py::test_a",
+            tests_passing_before=True,
+            tests_passing_after=True,
+            escalations=(
+                Escalation(
+                    title="rsync mark superfluous suite-wide",
+                    detail_markdown="Six siblings carry it.",
+                    kind=EscalationKind.SHARED_PATTERN,
+                ),
+            ),
+        )
+    ]
+    content = generate_html_report(agents, output_dir).read_text()
+    assert "rsync mark superfluous suite-wide" in content
+    assert "Shared pattern" in content
+    assert "tests/test_a.py::test_a" in content
+
+
+def test_report_sorts_blockers_before_shared_patterns(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    agents = [
+        make_metadata_and_outcome(
+            output_dir,
+            "pattern-agent",
+            tests_passing_before=True,
+            tests_passing_after=True,
+            escalations=(Escalation(title="PATTERN-ONE", detail_markdown="d", kind=EscalationKind.SHARED_PATTERN),),
+        ),
+        make_metadata_and_outcome(
+            output_dir,
+            "blocker-agent",
+            tests_passing_before=True,
+            tests_passing_after=True,
+            escalations=(Escalation(title="BLOCKER-ONE", detail_markdown="d", kind=EscalationKind.BLOCKER),),
+        ),
+    ]
+    content = generate_html_report(agents, output_dir).read_text()
+    assert content.index("BLOCKER-ONE") < content.index("PATTERN-ONE")
+
+
+def test_report_labels_integrator_escalations_by_source(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    agents = [make_metadata_and_outcome(output_dir, "m", tests_passing_before=True, tests_passing_after=True)]
+    integrator = AgentMetadata(
+        kind=AgentKind.REDUCER, agent_name=AgentName("red"), task_id=None, branch_name="b", error_summary=None
+    )
+    write_integrator_outcome(
+        output_dir,
+        AgentName("red"),
+        {"escalations": [{"kind": "SHARED_PATTERN", "title": "REDUCER-FOUND", "detail_markdown": "d"}]},
+    )
+    content = generate_html_report(agents, output_dir, integrator_metadata=integrator).read_text()
+    assert "REDUCER-FOUND" in content
+    assert "integrator" in content
+
+
+def test_outcome_without_escalations_still_parses(tmp_path: Path) -> None:
+    """An outcome written before the field existed must not be discarded."""
+    output_dir = tmp_path / "out"
+    target = output_dir / "legacy" / "test_output" / TESTING_AGENT_OUTCOME_FILENAME
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"changes": {}, "tests_passing_before": True, "tests_passing_after": True}))
+    outcome = load_testing_agent_outcome(AgentName("legacy"), output_dir)
+    assert outcome is not None
+    assert outcome.escalations == ()
+
+
+def test_outcome_cache_is_keyed_by_output_dir(tmp_path: Path) -> None:
+    """The same agent name under two output dirs must not return the first one's outcome.
+
+    The reducer's inputs directory and the orchestrator's output directory both
+    hold per-agent outcomes under the same agent names.
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    name = AgentName("shared-name")
+    _write_test_outcome(first, name, TestResult(summary_markdown="FROM-FIRST"))
+    _write_test_outcome(second, name, TestResult(summary_markdown="FROM-SECOND"))
+    from_first = load_testing_agent_outcome(name, first)
+    from_second = load_testing_agent_outcome(name, second)
+    assert from_first is not None and from_second is not None
+    assert from_first.summary_markdown == "FROM-FIRST"
+    assert from_second.summary_markdown == "FROM-SECOND"
+
+
+# --- synthesizing outcomes for failed mappers ---
+
+
+def _errored_mapper(name: str) -> AgentMetadata:
+    return AgentMetadata(
+        kind=AgentKind.MAPPER,
+        agent_name=AgentName(name),
+        task_id="tests/test_x.py::test_x",
+        branch_name=None,
+        error_summary="Agent timed out",
+    )
+
+
+def test_synthesize_writes_an_errored_outcome_for_a_failed_mapper(tmp_path: Path) -> None:
+    written = synthesize_missing_mapper_outcomes(tmp_path, [_errored_mapper("dead-agent")])
+    assert written == [AgentName("dead-agent")]
+    outcome = load_testing_agent_outcome(AgentName("dead-agent"), tmp_path)
+    assert outcome is not None
+    assert outcome.errored is True
+    assert outcome.summary_markdown == "Agent timed out"
+
+
+def test_synthesize_makes_a_failed_mapper_count_as_failed(tmp_path: Path) -> None:
+    """The whole point: the synthetic file lands the failed mapper in the FAILED section."""
+    synthesize_missing_mapper_outcomes(tmp_path, [_errored_mapper("dead-agent")])
+    outcome = load_testing_agent_outcome(AgentName("dead-agent"), tmp_path)
+    assert outcome is not None
+    row = TestMapReduceResult(test_node_id="t", agent_name=AgentName("dead-agent"), errored=outcome.errored)
+    assert report_section_of(row) == ReportSection.FAILED
+
+
+def test_synthesize_does_not_overwrite_a_real_outcome(tmp_path: Path) -> None:
+    """A mapper that both errored-in-metadata and left a real file keeps its file."""
+    name = AgentName("has-real-outcome")
+    _write_test_outcome(tmp_path, name, TestResult(summary_markdown="REAL", errored=False))
+    written = synthesize_missing_mapper_outcomes(tmp_path, [_errored_mapper(str(name))])
+    assert written == []
+    outcome = load_testing_agent_outcome(name, tmp_path)
+    assert outcome is not None
+    assert outcome.summary_markdown == "REAL"
+
+
+def test_synthesize_ignores_successful_mappers_and_the_reducer(tmp_path: Path) -> None:
+    ok_mapper = AgentMetadata(
+        kind=AgentKind.MAPPER, agent_name=AgentName("ok"), task_id="t", branch_name=None, error_summary=None
+    )
+    reducer = AgentMetadata(
+        kind=AgentKind.REDUCER, agent_name=AgentName("red"), task_id=None, branch_name="b", error_summary="boom"
+    )
+    assert synthesize_missing_mapper_outcomes(tmp_path, [ok_mapper, reducer]) == []

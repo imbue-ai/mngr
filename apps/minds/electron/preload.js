@@ -16,17 +16,19 @@ contextBridge.exposeInMainWorld('minds', {
   goHome: () => ipcRenderer.send('go-home'),
   navigateContent: (url) => ipcRenderer.send('navigate-content', url),
   contentGoBack: () => ipcRenderer.send('content-go-back'),
-  contentGoForward: () => ipcRenderer.send('content-go-forward'),
 
   // Content events (forwarded from main process)
-  onContentTitleChange: (callback) => {
-    ipcRenderer.on('content-title-changed', (_event, title) => callback(title));
+  // Instant local navigation: main asks the persistent chrome shell to swap a
+  // hub page in place (fetch + #local-page-root replacement) instead of a full
+  // chrome-view load. See chrome.js's swap engine. ``shellReady`` is the
+  // handshake chrome.js sends once its swap listener is registered, so main
+  // never dispatches a swap into a document that cannot hear it.
+  onSwapLocalPage: (callback) => {
+    ipcRenderer.on('swap-local-page', (_event, url) => callback(url));
   },
+  shellReady: () => ipcRenderer.send('shell-ready'),
   onContentURLChange: (callback) => {
     ipcRenderer.on('content-url-changed', (_event, url) => callback(url));
-  },
-  onWindowTitleChange: (callback) => {
-    ipcRenderer.on('window-title-changed', (_event, title) => callback(title));
   },
   onChromeEvent: (callback) => {
     ipcRenderer.on('chrome-event', (_event, data) => callback(data));
@@ -40,10 +42,10 @@ contextBridge.exposeInMainWorld('minds', {
   // (all numbers; viewport-relative). Main packs it into the sidebar's URL
   // so Sidebar.jinja can position the menu via server-rendered inline
   // style. If omitted, the server falls back to sensible defaults
-  // (anchor a 38px-tall element at the top-left, nudged 2px left and 2px below it).
+  // (anchor a 38px-tall element at the top-left, nudged 24px left and 2px below it).
   toggleSidebar: (anchor) => ipcRenderer.send('toggle-sidebar', anchor),
 
-  // Inbox modal (formerly the right-side requests panel)
+  // Requests inbox modal (opened from the titlebar's inbox button).
   toggleInbox: () => ipcRenderer.send('toggle-inbox'),
 
   // Get-help modal (report a bug). ``agentId`` is the currently-displayed
@@ -52,6 +54,10 @@ contextBridge.exposeInMainWorld('minds', {
   // ``assistAvailable`` marks the workspace healthy enough to host an /assist
   // chat, gating the "have an agent help" option (see chrome.js).
   toggleHelp: (agentId, assistAvailable) => ipcRenderer.send('toggle-help', agentId, assistAvailable),
+  // Open the get-help / report-a-bug modal scoped to a workspace. Used by the
+  // recovery page (a trusted local page on the chrome surface); main re-validates
+  // the agent id.
+  openHelp: (agentId) => ipcRenderer.send('open-help', agentId),
 
   // One-shot bug report from the full-app error takeover (shell.html) when the
   // backend is down and the normal /help flow is unreachable. Reports the
@@ -66,8 +72,36 @@ contextBridge.exposeInMainWorld('minds', {
   // (shown only when the setting is off; when on, logs are always attached).
   getLogInclusionSetting: () => ipcRenderer.invoke('get-log-inclusion-setting'),
 
-  // Modal overlay close (used by the inbox shell and any one-off dialogs)
+  // Modal overlay close (used by the overlay-hosted modal pages)
   closeModal: () => ipcRenderer.send('close-modal'),
+
+  // Centered app-level modals on the shared overlay surface. Used by
+  // overlay-hosted pages (the workspace switcher's account entry, the
+  // accounts modal's "Add account"); the content view reaches the same
+  // modals through the content relay's allowlisted postMessage channels.
+  // ``returnTo`` is the local path a successful sign-in lands on (validated
+  // by main and the server; defaults to the create screen when omitted).
+  // ``mode`` optionally leads with the sign-in tab when it is the literal
+  // 'signin' (for "Log In" callers); omitted keeps the sign-up default.
+  openMindsSettings: () => ipcRenderer.send('open-minds-settings'),
+  openAccounts: () => ipcRenderer.send('open-accounts'),
+  openSigninModal: (returnTo, mode) => ipcRenderer.send('open-signin-modal', returnTo, mode),
+  // Open the sharing editor as a centered overlay modal, called by the
+  // workspace-settings page's "Manage sharing" buttons (a trusted local page on
+  // the chrome surface). main re-validates both ids before building the URL.
+  openSharingModal: (agentId, serviceName) =>
+    ipcRenderer.send('open-sharing-modal', agentId, serviceName),
+
+  // Landing-page Stop button: ask main to show a native stop confirmation and
+  // issue the host stop itself (the SSE drives the row). Trusted local page on
+  // the chrome surface; main re-validates the agent id.
+  confirmStopMind: (agentId, name) => ipcRenderer.send('confirm-stop-mind', agentId, name),
+
+  // Workspace-settings color picker: optimistically repaint THIS window's
+  // titlebar accent while the PATCH -> mngr label -> SSE round-trip lands. main
+  // re-validates the agent id + accent and only paints the sending bundle.
+  previewWorkspaceAccent: (agentId, accent) =>
+    ipcRenderer.send('preview-workspace-accent', agentId, accent),
 
   // Overlay surface (the always-warm modal WebContentsView host page,
   // /_chrome/overlay). The overlay manager (/_static/overlay.js) receives
@@ -135,4 +169,9 @@ contextBridge.exposeInMainWorld('minds', {
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
+
+  // Bring the whole Minds app to the front (stealing focus back from the
+  // browser) after OAuth sign-in finished in the external browser. The main
+  // process only activates/raises if the window isn't already focused.
+  bringAppToFront: () => ipcRenderer.send('bring-app-to-front'),
 });

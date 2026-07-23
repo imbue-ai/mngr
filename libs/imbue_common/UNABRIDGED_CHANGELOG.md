@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-21
+
+Fixed a false positive in the `trailing comments` ratchet (`PREVENT_TRAILING_COMMENTS`): `#{...}` interpolation/format tokens (e.g. tmux format strings like `"#{client_width} #{client_height}"`) are no longer counted as trailing comments. The `#` in these tokens is interpolation syntax inside a string, not a comment. Real trailing comments, hex colors, and `PR #NNNN` references are unaffected.
+
 ## 2026-07-15
 
 `LogAttachmentGroup` gained an optional `base_dir` field: a group with `base_dir` set sweeps that directory instead of the process's log folder, so error reports can attach log files that live outside it (e.g. minds attaching the detached `mngr latchkey forward` daemon's logs). A missing directory simply matches nothing.

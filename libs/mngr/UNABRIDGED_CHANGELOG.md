@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-22
+
+`mngr tmr` gained a `--reducer-env` option, documented in the generated CLI reference. It passes environment variables to the reducer agent only, never to the mappers, for credentials the reducer needs but mappers must not receive (such as a token that can push and open pull requests).
+
+The `mngr tmr` help text now describes the reducer's full role (collapsing repeated changes, writing the run's changelog, opening the pull request), the explicit per-test `--timeout` its agents run with, and the `escalations` field in the outcome schema.
+
+## 2026-07-21
+
+Fixed: agent tmux windows are no longer born collapsed (e.g. to `2x1`) when a degenerate, unsized client is attached to the host's shared tmux server. Previously mngr created agent sessions with tmux's default `window-size latest` policy, so a brand-new detached session was born at the geometry of whatever client was already attached to the shared server -- even a stray `2x1` ttyd/web-shell client -- regardless of the `new-session -x 200 -y 50` sizing. A `2x1` pane breaks Claude Code's TUI, so the initial `mngr message` delivery (which waits for the TUI to be ready) would time out and the message would be silently dropped. This is the root cause of "the agent was created but never got its first message" symptoms (e.g. the desktop `/assist` "have an agent help" flow, and launch-task workers).
+
+By default, agents are now pinned to a stable, usable geometry: the primary window is set to `window-size manual` and resized to the intended dimensions (historical `200x50`), making creation deterministic and immune to stray clients. Interactive attach still fits your terminal: per-session `client-attached` and `client-resized` hooks re-fit the pane to the current client's size (so a live terminal resize is tracked continuously, matching tmux's native `latest`), floored at a usable minimum (`80x24`) so a degenerate client can never collapse the pane below what Claude Code needs to render.
+
+An explicit `--tmux-window-size` is still honored verbatim: a client-following mode (`latest`/`largest`/`smallest`) behaves as before, and an explicit `manual` stays truly fixed (the re-fit hook leaves it untouched).
+
+Note: only newly created agents get the new pinning. Agents already running when you upgrade keep their current window-size policy until recreated.
+
+Fixed `mngr list --sort` on numeric fields (e.g. `idle`, `age`, `runtime`, `idle_seconds`), which previously ordered values as strings -- so an idle spread like 2.4, 14040.2, 111044 came out interleaved rather than sorted. Numeric sort keys now compare numerically; string fields are unchanged, and missing values still sort to the end in both directions.
+
 ## 2026-07-15
 
 Fixed the discovery-events replay window being permanently pinned at the last legacy `DISCOVERY_FULL` snapshot. Installs that upgraded across the per-provider discovery migration kept that line in `events.jsonl` forever (nothing writes the type anymore), so every observe-stream attach replayed days of stale history -- destroyed workspaces reappearing with their old names at app startup, then visibly disappearing again as the destroy events re-folded. The legacy timestamp now participates only when the file contains no per-provider snapshots at all.
