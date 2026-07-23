@@ -125,6 +125,10 @@ test-offload-release args="":
 # Usage:
 #     just test-offload-minds-snapshot im-01...    # required: snapshot image id
 #     just test-offload-minds-snapshot im-01... '--filter test_foo'
+#     MINDS_SNAPSHOT_TEST_FILTER=test_foo just test-offload-minds-snapshot im-01...
+# CI passes its workflow_dispatch test filter via the MINDS_SNAPSHOT_TEST_FILTER
+# env var, never via `args`: `{{args}}` is interpolated verbatim into this
+# recipe's bash body, so an untrusted value there would become shell.
 # The snapshot image already has the entire mngr checkout, the DEFAULT_WORKSPACE_TEMPLATE
 # workspace's Docker container (in a stopped state), and dockerd's
 # /var/lib/docker tree baked in -- so offload skips its normal image-
@@ -158,11 +162,20 @@ test-offload-minds-snapshot snapshot_image_id args="":
             EXTRA_ENV_ARGS+=(--env "${sync_e2e_var}=${!sync_e2e_var}")
         fi
     done
+    # Scope the run to matching tests when MINDS_SNAPSHOT_TEST_FILTER is set.
+    # Read from the environment (not `{{args}}`) so CI's untrusted dispatch
+    # input stays data: it reaches offload as one quoted argument, never
+    # re-parsed by a shell.
+    FILTER_ARGS=()
+    if [ -n "${MINDS_SNAPSHOT_TEST_FILTER:-}" ]; then
+        FILTER_ARGS=(--filter "${MINDS_SNAPSHOT_TEST_FILTER}")
+    fi
     offload -c offload-modal-minds-snapshot.toml run --trace \
         --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" \
-        ${EXTRA_ENV_ARGS[@]+"${EXTRA_ENV_ARGS[@]}"} {{args}} || [[ $? -eq 2 ]]
+        ${EXTRA_ENV_ARGS[@]+"${EXTRA_ENV_ARGS[@]}"} \
+        ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
