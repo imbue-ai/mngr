@@ -31,6 +31,7 @@ function recordingHost(): { host: Host; calls: string[]; confirmResult: { value:
   const host: Host = {
     kind: "browser",
     onChromeEvent: () => undefined,
+    previewWorkspaceAccent: () => undefined,
     navigate: (url) => calls.push(`navigate:${url}`),
     goBack: () => undefined,
     openWorkspaceInNewWindow: (agentId) => calls.push(`openNew:${agentId}`),

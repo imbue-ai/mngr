@@ -333,3 +333,32 @@ export interface AccountsBootExtras {
 export interface AccountsBootIsland {
   accounts: AccountsBootExtras;
 }
+
+// Mirror of AssociateAccountPayload / WorkspaceSettingsBootExtras in
+// chrome_state.py.
+export interface AssociateAccountPayload {
+  user_id: string;
+  email: string;
+}
+
+export interface WorkspaceSettingsBootExtras {
+  agent_id: string;
+  ws_name: string;
+  // Stored workspace color hex (#rrggbb); pre-selects the picker.
+  current_color: string;
+  // The pickable palette swatches as an ordered name -> hex map.
+  palette: Record<string, string>;
+  // Provider-health flag; true disables rename/color controls.
+  is_stale: boolean;
+  // True for hosts leased from Imbue Cloud: account association is fixed.
+  is_leased_imbue_cloud: boolean;
+  has_account: boolean;
+  // The associated account's email; empty when unassociated.
+  current_account_email: string;
+  associate_accounts: AssociateAccountPayload[];
+  servers: string[];
+}
+
+export interface WorkspaceSettingsBootIsland {
+  workspace_settings: WorkspaceSettingsBootExtras;
+}

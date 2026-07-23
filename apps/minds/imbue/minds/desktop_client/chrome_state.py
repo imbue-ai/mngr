@@ -395,6 +395,44 @@ class AccountsBootExtras(FrozenModel):
         }
 
 
+class AssociateAccountPayload(FrozenModel):
+    """One signed-in account offered by the associate-workspace prompt."""
+
+    user_id: str = Field(description="The account's user id (the PATCH account_id value)")
+    email: str = Field(description="The account's email address (the option label)")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class WorkspaceSettingsBootExtras(FrozenModel):
+    """Workspace-settings page boot island data (the ``workspace_settings`` key)."""
+
+    agent_id: str = Field(description="The workspace agent id (keys every settings API call)")
+    ws_name: str = Field(description="Workspace display name (heading + rename seed)")
+    current_color: str = Field(description="Stored workspace color hex (#rrggbb); pre-selects the picker")
+    palette: dict[str, str] = Field(description="The pickable palette swatches as an ordered name -> hex map")
+    is_stale: bool = Field(
+        description="Provider-health flag; True disables rename/color (writes would not be observable)"
+    )
+    is_leased_imbue_cloud: bool = Field(
+        description="True for hosts leased from Imbue Cloud: account association is fixed"
+    )
+    has_account: bool = Field(description="Whether any account is signed in (gates the Imbue Cloud backup provider)")
+    current_account_email: str = Field(description="The associated account's email; empty when unassociated")
+    associate_accounts: tuple[AssociateAccountPayload, ...] = Field(
+        description="Signed-in accounts offered by the associate prompt (when unassociated)"
+    )
+    servers: tuple[str, ...] = Field(description="Discovered shareable servers, in listing order")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        payload = self.model_dump(mode="json")
+        payload["associate_accounts"] = [account.to_payload_dict() for account in self.associate_accounts]
+        return payload
+
+
 class ChromeBootState(FrozenModel):
     """A connect-time snapshot of the chrome data, for page boot-state islands.
 

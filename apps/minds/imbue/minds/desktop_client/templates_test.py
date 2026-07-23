@@ -206,84 +206,32 @@ def test_render_workspace_settings_data_agent_id_interpolates() -> None:
     assert "{{" not in html
 
 
-def test_render_workspace_settings_renders_all_palette_swatches() -> None:
+def test_render_workspace_settings_island_carries_picker_and_account_inputs() -> None:
+    """The page body is the mithril WorkspaceSettingsPage component; the shell
+    seeds the ``workspace_settings`` island (palette + saved color + account /
+    server / staleness state) and the server-side accent + settings crumb.
+    Picker behavior (swatch selection, custom-hex ring, stale disable) is
+    covered by WorkspaceSettingsPage.test.ts."""
     html = render_workspace_settings(
         agent_id=str(_AGENT_A),
         ws_name="ws",
         current_account=None,
         accounts=(),
-        servers=(),
-        current_color="#0b292b",
-    )
-    # All palette swatches present, with the workspace's current color
-    # marked as the checked radio so screen readers see the selection state.
-    for hex_value in WORKSPACE_PALETTE.values():
-        assert f'data-color="{hex_value}"' in html
-    assert 'aria-checked="true"' in html
-    # The hex input is pre-filled with the current saved color.
-    assert 'value="#0b292b"' in html
-    # A reachable workspace renders no disabled swatch (the counterpart
-    # of the stale test below).
-    assert "disabled></button>" not in html
-
-
-def test_render_workspace_settings_picker_disabled_when_stale() -> None:
-    """is_stale=True disables the picker controls so the user can't write
-    a label against an unreachable host (would not be observable until
-    provider recovery)."""
-    html = render_workspace_settings(
-        agent_id=str(_AGENT_A),
-        ws_name="ws",
-        current_account=None,
-        accounts=(),
-        servers=(),
+        servers=("web",),
         current_color="#0b292b",
         is_stale=True,
     )
-    assert 'data-is-stale="true"' in html
-    # Every swatch carries the real ``disabled`` attribute (ColorSwatch
-    # renders it last, so a disabled swatch ends ``disabled></button>``).
-    # Checking the attribute -- not just the substring "disabled" -- is
-    # required because the swatch and pill class strings contain the
-    # ``disabled:opacity-40`` utility on every render.
-    assert html.count("disabled></button>") == len(WORKSPACE_PALETTE)
-    # The hex input is disabled too: its tag ends with a standalone
-    # ``disabled`` attribute right before the closing ``>``.
-    hex_input_tag = re.search(r'<input[^>]*id="color-hex-input"[^>]*>', html)
-    assert hex_input_tag is not None
-    assert re.search(r"\sdisabled\s*>$", hex_input_tag.group(0))
-
-
-def test_render_workspace_settings_marks_no_swatch_selected_for_custom_hex() -> None:
-    """When the saved color is a custom hex (not in the palette), no
-    swatch shows as selected; the hex pill carries the value and the
-    blue selection ring class instead."""
-    html = render_workspace_settings(
-        agent_id=str(_AGENT_A),
-        ws_name="ws",
-        current_account=None,
-        accounts=(),
-        servers=(),
-        current_color="#123456",
-    )
-    assert 'value="#123456"' in html
-    assert 'aria-checked="true"' not in html
-    assert "is-selected" in html
-
-
-def test_render_workspace_settings_pill_not_selected_for_palette_color() -> None:
-    """When the saved color matches a palette entry, the swatch is the
-    selected control -- the hex pill must not also carry the ring."""
-    html = render_workspace_settings(
-        agent_id=str(_AGENT_A),
-        ws_name="ws",
-        current_account=None,
-        accounts=(),
-        servers=(),
-        current_color="#0b292b",
-    )
-    assert 'aria-checked="true"' in html
-    assert "is-selected" not in html
+    island = parse_boot_island(html)
+    settings = island["workspace_settings"]
+    assert settings["agent_id"] == str(_AGENT_A)
+    assert settings["current_color"] == "#0b292b"
+    assert settings["palette"] == dict(WORKSPACE_PALETTE)
+    assert settings["is_stale"] is True
+    assert settings["current_account_email"] == ""
+    assert settings["servers"] == ["web"]
+    assert "MindsUI.mountWorkspaceSettings" in html
+    # The shell still seeds the accent + settings crumb server-side.
+    assert "--titlebar-bg: #0b292b;" in html
 
 
 def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
@@ -1506,6 +1454,14 @@ def test_ui_ts_matches_python_button_and_input_recipes() -> None:
     # TEXT_INPUT_CLASSES is TextInput.jinja's default-radius recipe: the
     # single-line control's width + tight leading around INPUT_BASE, plus the
     # md radius.
+    # SELECT_CLASSES is Select.jinja's recipe: appearance-none + chevron
+    # padding + tight leading around INPUT_BASE, plus the md radius.
+    ts_select = _joined_string(_section("export const SELECT_CLASSES", "// TextInput.jinja"))
+    expected_select = (
+        "appearance-none w-full pr-8 leading-tight " + CATALOG.jinja_env.globals["INPUT_BASE"] + " rounded-md"
+    )
+    assert ts_select == expected_select, "SELECT_CLASSES drifted between ui.ts and templates.py"
+
     ts_text_input = _joined_string(_section("export const TEXT_INPUT_CLASSES", None))
     expected_text_input = "w-full leading-tight " + CATALOG.jinja_env.globals["INPUT_BASE"] + " rounded-md"
     assert ts_text_input == expected_text_input, (

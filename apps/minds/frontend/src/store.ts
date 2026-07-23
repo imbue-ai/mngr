@@ -25,6 +25,9 @@ import type { Host } from "./host";
 export interface BackupHealthBridge {
   get(agentId: string): string | null;
   onUpdate(listener: () => void): void;
+  // Fold a freshly-fetched per-workspace backups entry into the cache (the
+  // workspace-settings backup section shares its fetch with the cache).
+  ingestEntry(entry: unknown): void;
 }
 
 declare global {

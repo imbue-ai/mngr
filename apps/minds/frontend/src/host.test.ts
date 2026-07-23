@@ -21,6 +21,7 @@ function fakeBridge(): { bridge: MindsBridge; calls: string[] } {
     };
   const bridge: MindsBridge = {
     onChromeEvent: record("onChromeEvent") as MindsBridge["onChromeEvent"],
+    previewWorkspaceAccent: record("previewWorkspaceAccent") as MindsBridge["previewWorkspaceAccent"],
     onAccentChanged: record("onAccentChanged") as MindsBridge["onAccentChanged"],
     onCurrentWorkspaceChanged: record("onCurrentWorkspaceChanged") as MindsBridge["onCurrentWorkspaceChanged"],
     onContentURLChange: record("onContentURLChange") as MindsBridge["onContentURLChange"],

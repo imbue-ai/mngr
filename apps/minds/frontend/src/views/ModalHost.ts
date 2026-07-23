@@ -167,6 +167,7 @@ export function mountModalHost(target: Element | null): ModalHostHandleForPage {
   // deliberate no-ops -- same as browser mode everywhere else.
   const frameBridge: MindsBridge = {
     onChromeEvent: (callback) => frameCallbacks.push(callback),
+    previewWorkspaceAccent: () => undefined,
     onAccentChanged: () => undefined,
     onCurrentWorkspaceChanged: () => undefined,
     onContentURLChange: () => undefined,

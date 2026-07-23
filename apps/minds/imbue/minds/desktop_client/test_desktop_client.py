@@ -345,11 +345,12 @@ def test_settings_page_disables_disassociate_for_leased_host(tmp_path: Path) -> 
     client, _auth_store, agent_id = _make_leased_host_client(tmp_path)
     response = client.get(f"/workspace/{agent_id}/settings")
     assert response.status_code == 200
-    assert "leased from Imbue Cloud" in response.text
-    # The disassociate control is present but disabled, and there is no
-    # associate control (the Associate component renders a user_id select).
-    assert 'id="disassociate-btn"' in response.text
-    assert "disabled" in response.text
+    # The account section renders client-side (WorkspaceSettingsPage.test.ts
+    # covers the disabled Disassociate + fixed-association notice); the
+    # island marks the leased host.
+    island = parse_boot_island(response.text)
+    assert island["workspace_settings"]["is_leased_imbue_cloud"] is True
+    assert "MindsUI.mountWorkspaceSettings" in response.text
 
 
 # -- Agent default redirect tests --
@@ -1435,7 +1436,10 @@ def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None
     test_agent_id = AgentId()
     response = client.get(f"/workspace/{test_agent_id}/settings")
     assert response.status_code == 200
-    assert "associated with an account" in response.text.lower()
+    # An unassociated workspace seeds an empty account email, which renders
+    # the associate prompt client-side (covered by WorkspaceSettingsPage.test.ts).
+    island = parse_boot_island(response.text)
+    assert island["workspace_settings"]["current_account_email"] == ""
 
 
 def test_inbox_requires_auth(tmp_path: Path) -> None:

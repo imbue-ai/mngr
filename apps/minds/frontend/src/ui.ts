@@ -29,6 +29,14 @@ export function buttonClasses(variant: keyof typeof BTN_VARIANTS, size: keyof ty
   return `${BTN_BASE} ${BTN_SIZES[size]} ${BTN_VARIANTS[variant]}`;
 }
 
+// Select.jinja's recipe: the native arrow is hidden (appearance-none) and the
+// caller overlays a chevron icon; pr-8 leaves room for it. Wrap the <select>
+// in a relative div and place the chevron per the Select component.
+export const SELECT_CLASSES =
+  "appearance-none w-full pr-8 leading-tight p-2 type-body border border-strong bg-surface-primary " +
+  "text-primary placeholder:text-tertiary hover:border-stronger focus:border-stronger " +
+  "focus:outline-2 focus:outline-offset-2 focus:outline-accent rounded-md";
+
 // TextInput.jinja's recipe: INPUT_BASE plus the single-line control's width,
 // radius and tight leading.
 export const TEXT_INPUT_CLASSES =

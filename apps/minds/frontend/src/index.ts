@@ -21,6 +21,7 @@ import { mountStyleguidePrimitives, mountStyleguideWorkspaceRows } from "./views
 import { mountStyleguideSmoke } from "./views/StyleguideSmoke";
 import { mountTitleBar } from "./views/TitleBar";
 import { mountWelcome } from "./views/WelcomePage";
+import { mountWorkspaceSettings } from "./views/WorkspaceSettingsPage";
 import { mountWorkspaceMenu } from "./views/WorkspaceMenu";
 
 export interface MindsUINamespace {
@@ -43,6 +44,7 @@ export interface MindsUINamespace {
   mountTitleBar: typeof mountTitleBar;
   mountWelcome: typeof mountWelcome;
   mountWorkspaceMenu: typeof mountWorkspaceMenu;
+  mountWorkspaceSettings: typeof mountWorkspaceSettings;
   // chrome.js's browser-mode pushes: the content URL (crumb derivation), the
   // accent-scope workspace (accent + menu highlight), and the displayed
   // workspace (help-button assist gating).
@@ -82,6 +84,7 @@ window.MindsUI = {
   mountTitleBar,
   mountWelcome,
   mountWorkspaceMenu,
+  mountWorkspaceSettings,
   setContentUrl,
   setAccentScopeAgent: setAccentScopeAgentId,
   setDisplayedWorkspaceAgent: setDisplayedWorkspaceAgentId,

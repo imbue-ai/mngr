@@ -24,6 +24,8 @@ export interface MindsBridge {
   openWorkspaceInNewWindow(agentId: string): void;
   showWorkspaceContextMenu(agentId: string, x: number, y: number): void;
   confirmStopMind(agentId: string, name: string): void;
+  // Optimistic local titlebar repaint while a color save is in flight.
+  previewWorkspaceAccent(agentId: string, accent: string): void;
   openMindsSettings(): void;
   openAccounts(): void;
   openSigninModal(returnTo: string, mode: string): void;
@@ -72,6 +74,9 @@ export interface Host {
   // native dialog AND issues the stop itself, with the result arriving over
   // the chrome events stream.
   confirmStopMind(agentId: string, name: string): Promise<boolean>;
+  // Optimistic local titlebar repaint (Electron IPC); no-op in browser mode
+  // (the SSE round-trip repaints the bar a tick later there).
+  previewWorkspaceAccent(agentId: string, accent: string): void;
   openModal(request: ModalRequest): void;
   closeModal(): void;
   // Native window controls; no-ops in browser mode (the buttons render but
@@ -101,6 +106,7 @@ export function createElectronHost(bridge: MindsBridge): Host {
       bridge.confirmStopMind(agentId, name);
       return Promise.resolve(false);
     },
+    previewWorkspaceAccent: (agentId, accent) => bridge.previewWorkspaceAccent(agentId, accent),
     minimizeWindow: () => bridge.minimize(),
     maximizeWindow: () => bridge.maximize(),
     closeWindow: () => bridge.close(),
@@ -259,6 +265,9 @@ export function createBrowserHost(options: BrowserHostOptions): Host {
       // Browser mode has no native context menus.
     },
     confirmStopMind: (agentId, name) => Promise.resolve(window.confirm(stopMindConfirmText(name))),
+    // No overlay titlebar to repaint locally; the SSE round-trip updates the
+    // in-document bar a tick later.
+    previewWorkspaceAccent: () => undefined,
     minimizeWindow: () => undefined,
     maximizeWindow: () => undefined,
     closeWindow: () => undefined,

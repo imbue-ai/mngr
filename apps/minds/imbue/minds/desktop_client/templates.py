@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Protocol
 
 from flask import has_app_context
 from flask import request
@@ -36,6 +37,7 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.chrome_state import AccountEntryPayload
 from imbue.minds.desktop_client.chrome_state import AccountsBootExtras
+from imbue.minds.desktop_client.chrome_state import AssociateAccountPayload
 from imbue.minds.desktop_client.chrome_state import AuthErrorBootExtras
 from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
@@ -48,6 +50,7 @@ from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.chrome_state import SettingsBootExtras
 from imbue.minds.desktop_client.chrome_state import SharingBootExtras
+from imbue.minds.desktop_client.chrome_state import WorkspaceSettingsBootExtras
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -132,6 +135,25 @@ _INPUT_BASE: Final[str] = (
     "placeholder:text-tertiary hover:border-stronger focus:border-stronger "
     "focus:outline-2 focus:outline-offset-2 focus:outline-accent"
 )
+
+
+class AccountLike(Protocol):
+    """Structural shape of the account objects the render layer consumes.
+
+    Satisfied by :class:`~imbue.minds.desktop_client.session_store.AccountSession`
+    (and by test/harness stubs) without coupling this module to the session
+    store; the attributes below are exactly what the surfaces render.
+    """
+
+    @property
+    def user_id(self) -> object: ...
+
+    @property
+    def email(self) -> object: ...
+
+    @property
+    def workspace_ids(self) -> Sequence[object]: ...
+
 
 # Inner SVG markup for the 16x16 icon set (Figma "Icon" frame, node
 # 857-5091). Each glyph is rendered by Icon16.jinja, which wraps this in a
@@ -1906,8 +1928,8 @@ def render_sharing_modal_page(
 def render_workspace_settings(
     agent_id: str,
     ws_name: str,
-    current_account: object | None,
-    accounts: Sequence[object],
+    current_account: AccountLike | None,
+    accounts: Sequence[AccountLike],
     servers: Sequence[str],
     is_leased_imbue_cloud: bool = False,
     current_color: str = DEFAULT_WORKSPACE_COLOR,
@@ -1932,18 +1954,26 @@ def render_workspace_settings(
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
     """
-    return CATALOG.render(
-        "pages.WorkspaceSettings",
+    extras = WorkspaceSettingsBootExtras(
         agent_id=agent_id,
         ws_name=ws_name,
-        current_account=current_account,
-        accounts=accounts,
-        servers=servers,
-        is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
+        palette=dict(WORKSPACE_PALETTE),
         is_stale=is_stale,
+        is_leased_imbue_cloud=is_leased_imbue_cloud,
         has_account=has_account,
-        palette=WORKSPACE_PALETTE,
+        current_account_email=str(current_account.email) if current_account is not None else "",
+        associate_accounts=tuple(
+            AssociateAccountPayload(user_id=str(account.user_id), email=str(account.email)) for account in accounts
+        ),
+        servers=tuple(servers),
+    )
+    return CATALOG.render(
+        "pages.WorkspaceSettings",
+        boot_state={"workspace_settings": extras.to_payload_dict()},
+        ws_name=ws_name,
+        agent_id=agent_id,
+        current_color=current_color,
     )
 
 
@@ -1965,17 +1995,12 @@ def render_dev_styleguide_page() -> str:
 
 
 def _build_accounts_boot_extras(
-    accounts: Sequence[object],
+    accounts: Sequence[AccountLike],
     default_account_id: str | None,
     enabled_by_user_id: Mapping[str, bool] | None,
     is_modal: bool,
 ) -> AccountsBootExtras:
-    """Convert the session-store account objects into the typed island slice.
-
-    ``accounts`` are :class:`~imbue.minds.desktop_client.session_store.AccountSession`
-    models (typed loosely at this boundary, mirroring the render signatures);
-    the attributes below are what the surface renders.
-    """
+    """Convert the session-store account objects into the typed island slice."""
     enabled = dict(enabled_by_user_id or {})
     entries = []
     for account in accounts:
@@ -2032,7 +2057,7 @@ def _build_settings_boot_extras(
 
 @pure
 def render_accounts_page(
-    accounts: Sequence[object],
+    accounts: Sequence[AccountLike],
     default_account_id: str | None = None,
     enabled_by_user_id: Mapping[str, bool] | None = None,
 ) -> str:
@@ -2124,7 +2149,7 @@ def render_settings_modal_page(
 
 @pure
 def render_accounts_modal_page(
-    accounts: Sequence[object],
+    accounts: Sequence[AccountLike],
     default_account_id: str | None = None,
     enabled_by_user_id: Mapping[str, bool] | None = None,
 ) -> str:

@@ -207,6 +207,7 @@ describe("connect", () => {
     const host: Host = {
       kind: "browser",
       onChromeEvent: (callback) => callbacks.push(callback),
+      previewWorkspaceAccent: () => undefined,
       navigate: () => undefined,
       goBack: () => undefined,
       openWorkspaceInNewWindow: () => undefined,

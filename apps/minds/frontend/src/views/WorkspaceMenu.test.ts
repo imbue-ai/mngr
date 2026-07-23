@@ -30,6 +30,7 @@ function recordingHost(): { host: Host; calls: string[] } {
   const host: Host = {
     kind: "electron",
     onChromeEvent: () => undefined,
+    previewWorkspaceAccent: () => undefined,
     navigate: (url) => calls.push(`navigate:${url}`),
     goBack: () => undefined,
     openWorkspaceInNewWindow: (agentId) => calls.push(`openNew:${agentId}`),
@@ -223,6 +224,7 @@ describe("mountWorkspaceMenu overlay dismissal", () => {
     const closeCalls: string[] = [];
     window.minds = {
       onChromeEvent: () => undefined,
+      previewWorkspaceAccent: () => undefined,
       onAccentChanged: () => undefined,
       onCurrentWorkspaceChanged: () => undefined,
       onContentURLChange: () => undefined,
