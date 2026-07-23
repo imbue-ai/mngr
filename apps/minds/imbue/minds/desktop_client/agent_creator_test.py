@@ -1596,12 +1596,3 @@ def test_checkout_existing_branch_raises_for_missing_branch(tmp_path: Path) -> N
         checkout_existing_branch(dest, GitBranch("no-such-branch-55307"))
 
     assert "no-such-branch-55307" in str(excinfo.value)
-
-
-def test_onboarding_shown_is_tracked_per_creation(tmp_path: Path) -> None:
-    creator = _make_test_creator(tmp_path)
-    creation_id = CreationId()
-    assert not creator.was_onboarding_shown(creation_id)
-    creator.mark_onboarding_shown(creation_id)
-    assert creator.was_onboarding_shown(creation_id)
-    assert not creator.was_onboarding_shown(CreationId())

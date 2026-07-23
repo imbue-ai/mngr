@@ -1,4 +1,4 @@
-{#def agent_id, status_text, expected_duration_seconds, onboarding_services, is_remote, show_walkthrough=True #}
+{#def agent_id, status_text, expected_duration_seconds, onboarding_services, is_remote #}
 {#
   Progress page shown while an agent is being created. The page is keyed
   by creation_id (passed as agent_id here -- a minds-internal in-flight
@@ -7,20 +7,16 @@
   expected_duration_seconds drives the client-side time-based progress
   bar (eases toward ~80% over this duration).
 
-  Layout: on the user's FIRST-ever creation (show_walkthrough=True) the
-  screen is an eight-micro-step onboarding walkthrough (see onboarding.js),
-  one short sentence per step, over a shared scene graphic that zooms out
-  as the steps advance. Later creations show the plain loading screen
-  (errors immediate, auto-redirect on ready) asking whether the user wants
-  to learn more while they wait; the button opens the walkthrough on
-  demand. The progress strip (bar + stage caption + collapsible
-  logs) is always visible at the top in every mode, and its bar turns
-  green when creation finishes. In walkthrough-first mode any creation
-  failure stays hidden until the user reaches the LAST step, where the
-  rotating tips and the setting-up/Ready state also live; when creation
-  finishes AND the user is on the last step, a Begin button replaces Next
-  and enters the workspace. Clicking any scene icon jumps to the first
-  step that explains it.
+  Layout: every creation shows the same loading screen -- the progress
+  strip (bar + stage caption + collapsible logs) pinned at the top (the
+  bar turns green when creation finishes), and a prompt asking whether
+  the user wants to learn more about Minds while they wait. The button
+  opens an eight-micro-step onboarding walkthrough (see onboarding.js),
+  one short sentence per step, over a shared scene graphic that zooms
+  out as the steps advance. Without the walkthrough open the page
+  auto-redirects into the workspace when ready; with it open, a Begin
+  button on the last step performs the entry instead. Clicking any scene
+  icon jumps to the first step that explains it.
 
   onboarding_services is the carousel list (OnboardingService rows).
   is_remote picks the final-step copy: whether the workspace machine is a
@@ -33,17 +29,12 @@
 <Base title="Creating your workspace..."
       body_class="bg-surface-primary text-primary font-sans antialiased min-h-screen"
       scripts={{ _scripts }}>
-  {# show_walkthrough: walkthrough-first (first-ever creation). Otherwise #}
-  {# the plain loading screen shows immediately (errors surface right #}
-  {# away -- data-surface-errors preset) and asks whether the user wants #}
-  {# to learn more while they wait. #}
   <main id="creating"
         class="w-full min-h-screen flex flex-col"
         data-agent-id="{{ agent_id }}"
         data-expected-duration-seconds="{{ expected_duration_seconds }}"
         data-is-remote="{{ 'true' if is_remote else 'false' }}"
-        data-show-walkthrough="{{ 'true' if show_walkthrough else 'false' }}"
-        {% if not show_walkthrough %}data-surface-errors="true"{% endif %}>
+        data-surface-errors="true">
 
     {# Loading screen. Holds the pinned top progress strip plus two mutually #}
     {# exclusive sub-views: the onboarding walkthrough (in-flight) and the #}
@@ -74,15 +65,14 @@
       {# creating.js if creation fails. Step visibility/transitions are #}
       {# driven by the step-1/2/3 class on #onboarding (see app.css). #}
       <div id="progress-view" class="flex-1 flex flex-col min-h-0">
-        {# Plain loading view (repeat creations): shown instead of the #}
-        {# walkthrough until the user asks to learn more. #}
-        <div id="plain-loading" class="{{ 'hidden ' if show_walkthrough else '' }}flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center">
+        {# Plain loading view: shown until the user asks to learn more. #}
+        <div id="plain-loading" class="flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center">
           <div class="type-heading">Setting up your workspace</div>
           <p class="type-body text-secondary">Want to learn more about how Minds works while you wait?</p>
           <Button variant="secondary" id="learn-more">Learn more about Minds</Button>
         </div>
 
-        <div id="onboarding" class="{{ 'hidden ' if not show_walkthrough else '' }}onboarding step-1 flex-1 flex flex-col items-center justify-center w-full max-w-3xl mx-auto px-6 py-4 gap-6">
+        <div id="onboarding" class="hidden onboarding step-1 flex-1 flex flex-col items-center justify-center w-full max-w-3xl mx-auto px-6 py-4 gap-6">
 
           {# Shared scene: the four graphic nodes. Steps reveal them #}
           {# progressively (laptop -> +key -> +tunnel+server) with a #}

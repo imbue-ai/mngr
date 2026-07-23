@@ -1553,11 +1553,6 @@ class AgentCreator(MutableModel):
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
-    # Creations whose creating-page render included the onboarding
-    # walkthrough. In-memory (like the rest of the registry) so a reload of
-    # the same /creating/<id> page keeps showing the walkthrough even after
-    # the persistent first-run flag has been marked seen.
-    _onboarding_shown: set[str] = PrivateAttr(default_factory=set)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
@@ -1707,20 +1702,6 @@ class AgentCreator(MutableModel):
         """Get the log queue for an in-flight creation, or None if not tracked."""
         with self._lock:
             return self._log_queues.get(str(creation_id))
-
-    def mark_onboarding_shown(self, creation_id: CreationId) -> None:
-        """Record that this creation's page rendered the onboarding walkthrough.
-
-        Keeps a page reload of the same creation on the walkthrough even
-        after the persistent first-run flag flips to seen.
-        """
-        with self._lock:
-            self._onboarding_shown.add(str(creation_id))
-
-    def was_onboarding_shown(self, creation_id: CreationId) -> bool:
-        """Whether this creation's page already rendered the walkthrough."""
-        with self._lock:
-            return str(creation_id) in self._onboarding_shown
 
     def _create_agent_background(
         self,

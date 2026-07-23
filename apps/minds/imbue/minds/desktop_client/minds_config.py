@@ -175,19 +175,6 @@ class MindsConfig(MutableModel):
         """Set whether log/traceback attachments are included with error reports."""
         self._set_bool("include_error_logs", enabled)
 
-    def get_create_onboarding_seen(self) -> bool:
-        """Return whether the user has already seen the create-page onboarding walkthrough. Default: False.
-
-        Gates the walkthrough on the creating page: it auto-shows on the first
-        workspace creation only; afterwards the page shows the plain loading
-        screen with a "Learn more about Minds" button that reopens it on demand.
-        """
-        return self._get_bool("create_onboarding_seen", default=False)
-
-    def set_create_onboarding_seen(self, seen: bool) -> None:
-        """Record that the user has seen the create-page onboarding walkthrough."""
-        self._set_bool("create_onboarding_seen", seen)
-
     def get_auto_open_requests_panel(self) -> bool:
         """Return whether the inbox should auto-open on new pending requests. Default: True.
 

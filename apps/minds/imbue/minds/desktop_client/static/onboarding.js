@@ -2,10 +2,7 @@
 // sentence each, over a shared scene graphic (Creating.jinja).
 // creating.js keeps owning progress/status/failure; it signals readiness
 // by setting data-ready + data-redirect-url on #creating and dispatching
-// 'minds:create-ready'. The progress strip and any failure stay hidden
-// until the user reaches the LAST step: entering it sets
-// data-surface-errors and dispatches 'minds:surface-errors', which
-// creating.js listens for.
+// 'minds:create-ready'.
 //
 // Steps 1-4 show the minds phase (scene class step-1), 5-6 the latchkey
 // phase (step-2), 7-8 the full picture (step-3). The Next button also
@@ -17,17 +14,14 @@
   var onboarding = document.getElementById('onboarding');
   if (!root || !onboarding) return;
 
-  // Walkthrough-first (first-ever creation) vs plain loading screen with a
-  // "Learn more about Minds" button. data-walkthrough-active tells
-  // creating.js whether Begin gates entry (walkthrough open) or the page
-  // should auto-redirect when ready (plain screen).
-  var walkthroughOpen = root.getAttribute('data-show-walkthrough') === 'true';
+  // The walkthrough starts closed on every creation; the loading screen's
+  // "Learn more about Minds" button opens it. data-walkthrough-active
+  // tells creating.js whether Begin gates entry (walkthrough open) or the
+  // page should auto-redirect when ready (loading screen).
   var plainLoading = document.getElementById('plain-loading');
   var learnMoreBtn = document.getElementById('learn-more');
-  if (walkthroughOpen) root.setAttribute('data-walkthrough-active', 'true');
   if (learnMoreBtn) {
     learnMoreBtn.addEventListener('click', function () {
-      walkthroughOpen = true;
       root.setAttribute('data-walkthrough-active', 'true');
       if (plainLoading) plainLoading.classList.add('hidden');
       onboarding.classList.remove('hidden');
@@ -72,7 +66,6 @@
     });
   }
 
-  var errorsSurfaced = root.getAttribute('data-surface-errors') === 'true';
   function render() {
     var phase = phaseForStep(step);
     for (var p = 1; p <= 3; p++) {
@@ -89,15 +82,6 @@
     setDemoTab(DEMO_TAB_BY_STEP[step]);
 
     var onLastStep = step === LAST_STEP;
-    // The progress strip is always visible; only errors are deferred in
-    // walkthrough-first mode -- creating.js holds any failure back until
-    // the 'minds:surface-errors' signal below fires on the last step. On
-    // the plain loading screen errors are unlocked from the start.
-    if (onLastStep && !errorsSurfaced) {
-      errorsSurfaced = true;
-      root.setAttribute('data-surface-errors', 'true');
-      root.dispatchEvent(new Event('minds:surface-errors'));
-    }
 
     if (prevBtn) prevBtn.disabled = step === 1;
     // On the last step, Next gives way to Begin -- shown once the

@@ -1,4 +1,4 @@
-The workspace-creation loading page now shows an onboarding walkthrough while the workspace is created: eight one-sentence steps with Previous/Next, over a shared scene graphic that zooms out from the minds icon to the full computer-tunnel-workspace picture.
+The workspace-creation loading page now offers an onboarding walkthrough while the workspace is created: eight one-sentence steps with Previous/Next, over a shared scene graphic that zooms out from the minds icon to the full computer-tunnel-workspace picture.
 
 - minds phase: what minds is, and how workspace tabs work (a demo tab-space that the Next button walks through: chat, apps, web -- with the user's message on the right and the agent's on the left).
 
@@ -6,10 +6,8 @@ The workspace-creation loading page now shows an onboarding walkthrough while th
 
 - full picture: your computer connecting over an encrypted tunnel to the workspace machine, with copy adapting to local vs cloud workspaces.
 
-The progress bar (with stage caption and collapsible logs) is always visible at the top and turns green when creation finishes; the rotating tips and any creation failure wait until the user reaches the last step. There, the workspace tile fills in lockstep with the progress bar, its caption reads "setting up..." and flips to a glowing green "Ready" when creation finishes, and a pulsing Begin button (replacing the old auto-redirect) plays a zoom-in animation and enters the workspace. Clicking any scene icon jumps back to the step that explains it.
+The progress bar (with stage caption and collapsible logs) is always visible at the top and turns green when creation finishes; rotating tips live on the walkthrough's last step. There, the workspace tile fills in lockstep with the progress bar, its caption reads "setting up..." and flips to a glowing green "Ready" when creation finishes, and a pulsing Begin button (replacing the old auto-redirect) plays a zoom-in animation and enters the workspace. Clicking any scene icon jumps back to the step that explains it.
 
-The walkthrough is now fully integrated with the create flow:
-
-- It auto-shows only on the user's first-ever workspace creation (persisted flag). Later creations show the plain loading screen (auto-redirect on ready) asking whether the user wants to learn more about Minds while they wait; the button reopens the walkthrough on demand.
+Every creation shows the same loading screen: the progress strip up top and a prompt asking whether the user wants to learn more about Minds while they wait; the button opens the walkthrough. With the walkthrough closed the page auto-redirects into the workspace when ready, exactly as before.
 
 Workspace color selection is unchanged: the create form's auto-chosen hidden color is used as before (no picker anywhere in this flow).

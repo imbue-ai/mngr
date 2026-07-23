@@ -522,26 +522,23 @@ def test_render_creating_page_renders_onboarding_walkthrough() -> None:
     assert "display: none" in html[tag_start:tag_end]
 
 
-def test_render_creating_page_plain_mode_defers_walkthrough() -> None:
-    """With show_walkthrough=False (repeat creations), the page shows the
-    plain loading screen: progress strip visible immediately, errors
-    unlocked up front, walkthrough hidden behind a Learn-more button."""
+def test_render_creating_page_prompts_learn_more_with_walkthrough_hidden() -> None:
+    """Every creation gets the same loading screen: visible progress strip,
+    errors surfaced immediately, a learn-more prompt, and the walkthrough
+    shipped hidden until the button opens it."""
     creation_id = CreationId()
     info = AgentCreationInfo(
         creation_id=creation_id,
         status=AgentCreationStatus.INITIALIZING,
         launch_mode=LaunchMode.DOCKER,
     )
-    html = render_creating_page(creation_id=creation_id, info=info, show_walkthrough=False)
-    assert 'data-show-walkthrough="false"' in html
+    html = render_creating_page(creation_id=creation_id, info=info)
     assert 'data-surface-errors="true"' in html
     assert "Learn more about Minds" in html
     assert "Setting up your workspace" in html
-    # The top strip is NOT hidden in plain mode...
     strip_index = html.index('id="top-strip"')
     strip_tag = html[html.rindex("<div", 0, strip_index) : html.index(">", strip_index)]
     assert "hidden" not in strip_tag
-    # ...while the walkthrough is.
     onboarding_index = html.index('id="onboarding"')
     onboarding_tag = html[html.rindex("<div", 0, onboarding_index) : html.index(">", onboarding_index)]
     assert "hidden" in onboarding_tag
