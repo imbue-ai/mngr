@@ -332,6 +332,40 @@ html {
 html.no-scrollbar-gutter {
   scrollbar-gutter: auto;
 }
+/*
+ * Contain the DOCUMENT scrollbar below the fixed 38px titlebar. Local pages
+ * (Settings, Home, ...) scroll the document, whose native scrollbar spans the
+ * full window edge -- riding over the titlebar. Styling the html scrollbar
+ * (Chromium-specific, which every minds surface is) lets the track carry a
+ * 38px top margin so the thumb can never travel over the bar, and painting
+ * the html background with the titlebar color makes the strip's top notch
+ * read as the bar extending edge-to-edge (chrome.js maintains --titlebar-bg
+ * on the html element). Scoped to ``html`` only so inner scrollables keep
+ * native scrollbars, and a no-op wherever the document cannot scroll (the
+ * viewport-locked wrapper/overlay surfaces): no overflow, no thumb, and the
+ * track matches the page surface -- so leaving a scrolling page through an
+ * in-place swap visibly removes the scrollbar with it.
+ */
+html::-webkit-scrollbar {
+  width: 10px;
+  background: transparent;
+}
+html::-webkit-scrollbar-track {
+  background: var(--c-surface-primary);
+  margin-top: 38px;
+}
+html::-webkit-scrollbar-thumb {
+  background: var(--c-border-default);
+  border-radius: 5px;
+  border: 2px solid var(--c-surface-primary);
+  background-clip: padding-box;
+}
+html::-webkit-scrollbar-thumb:hover {
+  background: var(--c-text-tertiary);
+}
+html {
+  background: var(--titlebar-bg, var(--c-surface-primary));
+}
 
 .accent-spine::before {
   content: '';
