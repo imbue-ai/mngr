@@ -4552,20 +4552,29 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     template.push({ type: 'separator' });
   }
   const goToRecoveryView = () => {
-    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      // The restart POST has already moved the health tracker to RESTARTING,
-      // so the recovery page renders its "Restarting…" progress state and
-      // auto-refreshes itself until the workspace is healthy again, then
-      // navigates back to ``workspaceUrl``. Reloading the workspace URL directly would
-      // instead race the restart: the container is still up at dispatch
-      // time, so the reload would just show the pre-restart workspace.
-      bundle.contentView.webContents.loadURL(
-        toAbsoluteUrl(
-          '/agents/' + encodeURIComponent(agentId)
-          + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
-        ),
-      );
-    }
+    if (bundle.window.isDestroyed()) return;
+    // The restart POST has already moved the health tracker to RESTARTING, so
+    // the recovery page renders its "Restarting…" progress state and
+    // auto-refreshes itself until the workspace is healthy again, then
+    // navigates back to ``workspaceUrl``. Reloading the workspace URL directly
+    // would instead race the restart: the container is still up at dispatch
+    // time, so the reload would just show the pre-restart workspace.
+    //
+    // Route through navigateBundle (NOT contentView.loadURL) so the recovery
+    // page lands on the CHROME surface, exactly as the automatic did-fail-load
+    // and home-button restart paths do. The recovery page is a trusted
+    // backend-origin page whose driver script depends on the chrome surface's
+    // ``window.minds.navigateContent`` bridge to send the user home once the
+    // workspace is healthy -- the caged content view has no such bridge, and
+    // its content-guard would block the recovery page's fallback same-origin
+    // navigation outright, stranding it on "Restarting…" forever.
+    navigateBundle(
+      bundle,
+      toAbsoluteUrl(
+        '/agents/' + encodeURIComponent(agentId)
+        + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
+      ),
+    );
   };
   template.push({
     label: 'Restart workspace…',
