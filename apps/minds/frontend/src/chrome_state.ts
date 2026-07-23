@@ -362,3 +362,34 @@ export interface WorkspaceSettingsBootExtras {
 export interface WorkspaceSettingsBootIsland {
   workspace_settings: WorkspaceSettingsBootExtras;
 }
+
+// Mirror of CreateFormBootExtras in chrome_state.py. Carries the effective
+// (preset-resolved) selections plus the option lists; the advanced selects
+// are the source of truth on submit.
+export interface CreateFormBootExtras {
+  git_url: string;
+  branch: string;
+  host_name: string;
+  color: string;
+  launch_modes: string[];
+  selected_launch_mode: string;
+  ai_providers: string[];
+  selected_ai_provider: string;
+  docker_runtimes: string[];
+  selected_docker_runtime: string;
+  backup_providers: string[];
+  selected_backup_provider: string;
+  backup_api_key_env: string;
+  accounts: AssociateAccountPayload[];
+  default_account_id: string;
+  anthropic_api_key: string;
+  error_message: string;
+  region_options_by_launch_mode: Record<string, string[]>;
+  region_selected_by_launch_mode: Record<string, string>;
+  selected_preset: string;
+  start_advanced: boolean;
+}
+
+export interface CreateFormBootIsland {
+  create: CreateFormBootExtras;
+}

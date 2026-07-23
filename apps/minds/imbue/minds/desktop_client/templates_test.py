@@ -1,7 +1,6 @@
 import json
 import re
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Final
 
 import pytest
@@ -281,235 +280,79 @@ def test_agent_id_accepts_valid_format() -> None:
     assert agent_id == "agent-00000000000000000000000000000001"
 
 
-def test_render_create_form_has_default_values() -> None:
+def _create_island(html: str) -> dict:
+    """The ``create`` island slice of a rendered create form."""
+    island = parse_boot_island(html)
+    return island["create"]
+
+
+def test_render_create_form_island_carries_defaults_and_mount() -> None:
+    """A fresh form seeds the operator-default repository, the remote preset's
+    effective providers, the auto color, and the option lists. (The form body
+    -- preset cards, advanced selects, sign-in modal guard, live name
+    validation -- renders client-side; covered by CreateFormPage.test.ts.)"""
     html = render_create_form()
-    # The repository git URL still has a hardcoded fallback (in the advanced
-    # view); the compute provider select is present.
-    assert "default-workspace-template" in html
-    assert "launch_mode" in html
+    create = _create_island(html)
+    assert "default-workspace-template" in create["git_url"]
+    assert create["selected_preset"] == "remote"
+    assert create["selected_launch_mode"] == "IMBUE_CLOUD"
+    assert create["selected_ai_provider"] == "IMBUE_CLOUD"
+    assert create["selected_backup_provider"] == "IMBUE_CLOUD"
+    assert create["launch_modes"] == [mode.value for mode in LaunchMode]
+    assert create["ai_providers"] == [provider.value for provider in AIProvider]
+    assert create["docker_runtimes"] == [runtime.value for runtime in DockerRuntime]
+    assert create["selected_docker_runtime"] == default_docker_runtime().value
+    assert create["color"] == DEFAULT_WORKSPACE_COLOR
+    assert create["host_name"] == ""
+    assert create["start_advanced"] is False
+    assert "MindsUI.mountCreateForm" in html
+    assert 'id="create-root"' in html
 
 
-def test_render_create_form_has_optional_name_field() -> None:
-    # The advanced view exposes an explicit "Name" (host_name) field so a user
-    # can name the workspace; left empty, the server auto-names it (workspace-N).
-    html = render_create_form()
-    assert 'name="host_name"' in html
-
-
-def test_render_create_form_prefills_host_name() -> None:
-    # A submitted name survives a validation-error re-render.
-    html = render_create_form(host_name="my-mind")
-    assert 'name="host_name"' in html
-    assert 'value="my-mind"' in html
-
-
-def test_render_create_form_shows_preset_cards() -> None:
-    html = render_create_form()
-    assert 'data-preset="remote"' in html
-    assert 'data-preset="local"' in html
-    assert "Imbue Cloud" in html
-    assert "Directly on your computer" in html
-    assert "Advanced Configuration" in html
-
-
-def test_render_create_form_opens_signin_modal_via_overlay_bridge() -> None:
-    # Choosing Imbue Cloud while signed out opens the sign-in modal in the
-    # desktop client's shared overlay layer (so it covers the title bar), not an
-    # in-page dialog. The create page therefore no longer embeds the auth form
-    # or loads auth.js itself; being a trusted local page on the chrome surface,
-    # it asks the Electron main process to open the /auth/signin-modal page via
-    # the window.minds shell bridge (falling back to navigating there directly in
-    # the browser).
-    html = render_create_form(accounts=[])
-    assert "window.minds.openSigninModal()" in html
-    assert "/auth/signin-modal" in html
-    # The auth form + its script now live in the overlay page, not here.
-    assert 'id="signin-modal"' not in html
-    assert 'id="signin-form"' not in html
-    assert "/_static/auth.js" not in html
-
-
-def test_render_create_form_has_account_picker_error_element() -> None:
-    # A signed-in user who selects Imbue Cloud but "No account" is shown a red
-    # account-picker error (toggled client-side); the element must be present.
-    html = render_create_form()
-    assert 'id="account-error"' in html
-    assert "text-important" in html
-
-
-def test_render_create_form_does_not_redirect_on_card_click() -> None:
-    # The old behavior redirected to the sign-in page on card click / used a
-    # "Sign in & create" submit label. Both are gone: card click only selects,
-    # and the button stays "Create".
-    html = render_create_form(accounts=[])
-    assert "SIGNIN_URL" not in html
-    assert "Sign in & create" not in html
-
-
-def test_render_create_form_prefills_values() -> None:
-    html = render_create_form(git_url="https://custom/repo", branch="feature/test")
-    assert "https://custom/repo" in html
-    assert "feature/test" in html
-
-
-def test_render_create_form_contains_all_launch_modes() -> None:
-    html = render_create_form()
-    for mode in LaunchMode:
-        # Assert on the option's ``value=`` attribute (the exact enum value),
-        # not the visible text: Modal renders a friendly label instead of the
-        # lowercased value (it shows "Modal (1-day ephemeral)").
-        assert f'value="{mode.value}"' in html
-
-
-def test_render_create_form_selects_imbue_cloud_compute_by_default() -> None:
-    # A fresh form defaults to the remote ("Imbue Cloud") preset regardless of
-    # whether an account is signed in, so the compute provider starts on
-    # IMBUE_CLOUD rather than the local LIMA default.
-    html = render_create_form()
-    assert 'value="IMBUE_CLOUD" selected' in html
-    assert 'value="LIMA" selected' not in html
-
-
-def test_render_create_form_selects_specified_launch_mode() -> None:
-    # VULTR instead of the default LIMA so the "selection honored over the
-    # default" assertion is meaningful.
-    html = render_create_form(launch_mode=LaunchMode.VULTR)
-    assert 'value="VULTR" selected' in html
-    assert 'value="LIMA" selected' not in html
-
-
-def test_render_create_form_contains_ai_provider_options() -> None:
-    html = render_create_form()
-    for provider in AIProvider:
-        assert f'value="{provider.value}"' in html
-
-
-def test_render_create_form_contains_docker_runtime_options() -> None:
-    html = render_create_form()
-    for runtime in DockerRuntime:
-        assert f'value="{runtime.value}"' in html
-
-
-def test_render_create_form_defaults_docker_runtime_to_platform_value() -> None:
-    # The runtime select pre-selects the platform-appropriate default (runc on
-    # macOS, runsc on Linux) so the form works out of the box on either host.
-    html = render_create_form()
-    assert f'value="{default_docker_runtime().value}" selected' in html
-
-
-def test_render_create_form_selects_specified_docker_runtime() -> None:
-    # Pick the runtime that is NOT this platform's default so the "selection
-    # honored over the default" assertion is meaningful on both macOS and Linux.
-    non_default = DockerRuntime.RUNSC if default_docker_runtime() is DockerRuntime.RUNC else DockerRuntime.RUNC
-    html = render_create_form(docker_runtime=non_default)
-    assert f'value="{non_default.value}" selected' in html
-
-
-def test_render_create_form_defaults_ai_provider_to_imbue_cloud() -> None:
-    # The remote preset is the default, so the AI provider starts on IMBUE_CLOUD
-    # rather than the local SUBSCRIPTION default.
-    html = render_create_form()
-    assert 'value="SUBSCRIPTION" selected' not in html
+def test_render_create_form_island_carries_submitted_values() -> None:
+    """A validation-error re-render carries every submitted field back so the
+    user's choices survive (name, repo/branch, providers, runtime, color)."""
+    non_default_runtime = DockerRuntime.RUNSC if default_docker_runtime() is DockerRuntime.RUNC else DockerRuntime.RUNC
+    html = render_create_form(
+        git_url="https://custom/repo",
+        branch="feature/test",
+        host_name="my-mind",
+        launch_mode=LaunchMode.VULTR,
+        docker_runtime=non_default_runtime,
+        color="#cecd0c",
+        start_advanced=True,
+        error_message="Imbue cloud requires an account.",
+    )
+    create = _create_island(html)
+    assert create["git_url"] == "https://custom/repo"
+    assert create["branch"] == "feature/test"
+    assert create["host_name"] == "my-mind"
+    assert create["selected_launch_mode"] == "VULTR"
+    # A non-IMBUE_CLOUD submitted compute derives the local preset.
+    assert create["selected_preset"] == "local"
+    assert create["selected_docker_runtime"] == non_default_runtime.value
+    assert create["color"] == "#cecd0c"
+    assert create["start_advanced"] is True
+    assert create["error_message"] == "Imbue cloud requires an account."
 
 
 def test_render_create_form_local_preset_selects_lima_and_subscription() -> None:
-    # Selecting the local preset (e.g. a re-render of a LIMA submission) keeps
-    # the compute / AI providers on the local LIMA / SUBSCRIPTION defaults.
-    html = render_create_form(selected_preset="local")
-    assert 'value="LIMA" selected' in html
-    assert 'value="SUBSCRIPTION" selected' in html
-    assert 'aria-checked="true"' in _preset_card_tag(html, "local")
-
-
-def test_render_create_form_omits_env_file_checkbox() -> None:
-    html = render_create_form()
-    assert "include_env_file" not in html
-
-
-def test_render_create_form_carries_color_in_hidden_input_without_swatches() -> None:
-    # The color is auto-chosen, so there is no visible palette picker; a hidden
-    # ``color`` input carries the selection through the POST.
-    html = render_create_form()
-    assert 'name="color"' in html
-    assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
-    # No visible swatches (the palette picker markup is gone).
-    assert "color-swatch" not in html
-    for hex_value in WORKSPACE_PALETTE.values():
-        assert f'data-color="{hex_value}"' not in html
-
-
-def test_render_create_form_carries_provided_color_in_hidden_input() -> None:
-    html = render_create_form(color="#cecd0c")
-    assert 'value="#cecd0c"' in html
-
-
-def _preset_card_tag(html: str, preset: str) -> str:
-    """Return the opening ``<button>`` tag for the given preset card.
-
-    Attribute order is whatever JinjaX's ``attrs.render`` emits, so callers
-    check attributes by membership within the tag rather than by position.
-    """
-    match = re.search(r'<button[^>]*data-preset="' + preset + r'"[^>]*>', html)
-    assert match is not None, f"no preset card for {preset!r}"
-    return match.group(0)
+    """The local preset keeps the compute / AI providers on the local
+    LIMA / SUBSCRIPTION defaults."""
+    create = _create_island(render_create_form(selected_preset="local"))
+    assert create["selected_preset"] == "local"
+    assert create["selected_launch_mode"] == "LIMA"
+    assert create["selected_ai_provider"] == "SUBSCRIPTION"
+    assert create["selected_backup_provider"] == "CONFIGURE_LATER"
 
 
 def test_render_create_form_default_preset_is_remote_without_account() -> None:
-    # The remote ("Imbue Cloud") preset is the default even with no account
-    # signed in; a no-account user is nudged toward signing in via the card
-    # click, not by flipping the default to local.
-    html = render_create_form()
-    assert 'aria-checked="true"' in _preset_card_tag(html, "remote")
-    assert 'aria-checked="false"' in _preset_card_tag(html, "local")
-
-
-def test_render_create_form_default_preset_is_remote_with_account() -> None:
-    acct = SimpleNamespace(user_id="u-1", email="a@b.com")
-    html = render_create_form(accounts=[acct], default_account_id="u-1")
-    assert 'aria-checked="true"' in _preset_card_tag(html, "remote")
-    assert 'aria-checked="false"' in _preset_card_tag(html, "local")
-    # Selection styling is driven by the aria-checked Tailwind variant on the
-    # PresetCard, not a server-toggled class.
-    assert "aria-checked:outline-accent" in html
-
-
-def test_render_create_form_preset_cards_use_badge_check_icons() -> None:
-    # The feature checklists use the badge-check glyphs rather than a plain
-    # check: the remote (Imbue Cloud) card shows the *filled* badge
-    # (``badge-check-filled`` -- the lone evenodd-knockout glyph) in the accent
-    # (blue) color, and the local card the *unfilled* outline badge
-    # (``badge-check``) with no color class of its own, so it inherits the
-    # adjacent feature text's color. Both render at the native 16px (``w-4``),
-    # each nudged down 2px (``mt-0.5``) to sit on the text line. Icons render to
-    # raw path data, so scope each card's region and assert on the icon-span
-    # signature plus the glyph fingerprints.
-    html = render_create_form()
-    remote_region = html[html.index('data-preset="remote"') : html.index('data-preset="local"')]
-    local_region = html[html.index('data-preset="local"') : html.index('id="advanced-view"')]
-    # Remote: accent (blue) filled badge -- the only glyph with an evenodd
-    # knockout. ``shrink-0 mt-0.5`` pins the assertion to the icon span.
-    assert "text-accent shrink-0 mt-0.5" in remote_region
-    assert 'fill-rule="evenodd"' in remote_region
-    # Local: outline badge whose span carries only layout classes (no text-*),
-    # so it inherits the feature line's color. No filled-badge knockout.
-    assert 'class="shrink-0 mt-0.5"' in local_region
-    assert "text-secondary shrink-0 mt-0.5" not in local_region
-    assert "M14.0635 7.99966" in local_region
-    assert 'fill-rule="evenodd"' not in local_region
-    # Both badges render at the native 16px (md = w-4), not the small 14px (sm).
-    assert "w-3.5 h-3.5" not in remote_region + local_region
-    assert "w-4 h-4" in remote_region and "w-4 h-4" in local_region
-
-
-def test_render_create_form_start_advanced_opens_advanced_view() -> None:
-    # ``start_advanced`` drives the inline init so the advanced view shows first.
-    assert "showAdvanced(true)" in render_create_form(start_advanced=True)
-    assert "showAdvanced(false)" in render_create_form(start_advanced=False)
-
-
-def test_render_create_form_shows_error_message_when_supplied() -> None:
-    html = render_create_form(error_message="Imbue cloud requires an account.")
-    assert "Imbue cloud requires an account." in html
+    """The remote preset is the default even with no account signed in; a
+    no-account user is nudged toward signing in via the Create press (the
+    component opens the sign-in modal), not by flipping the default."""
+    create = _create_island(render_create_form(accounts=[]))
+    assert create["selected_preset"] == "remote"
+    assert create["accounts"] == []
 
 
 def test_render_creating_page_island_carries_creation_handle_and_progress_inputs() -> None:

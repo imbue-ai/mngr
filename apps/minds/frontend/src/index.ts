@@ -11,6 +11,7 @@ import { mountAccountsModal, mountAccountsPage } from "./views/AccountsPage";
 import { mountSettingsModal, mountSettingsPage } from "./views/AppSettings";
 import { mountAuthError, mountLoginPrompt } from "./views/AuthTextPages";
 import { mountConsent } from "./views/ConsentPage";
+import { mountCreateForm } from "./views/CreateFormPage";
 import { mountCreating } from "./views/CreatingPage";
 import { mountDestroying } from "./views/DestroyingPage";
 import { mountInboxList } from "./views/InboxList";
@@ -29,6 +30,7 @@ export interface MindsUINamespace {
   mountAccountsPage: typeof mountAccountsPage;
   mountAuthError: typeof mountAuthError;
   mountConsent: typeof mountConsent;
+  mountCreateForm: typeof mountCreateForm;
   mountCreating: typeof mountCreating;
   mountDestroying: typeof mountDestroying;
   mountInboxList: typeof mountInboxList;
@@ -69,6 +71,7 @@ window.MindsUI = {
   mountAccountsPage,
   mountAuthError,
   mountConsent,
+  mountCreateForm,
   mountCreating,
   mountDestroying,
   mountInboxList,

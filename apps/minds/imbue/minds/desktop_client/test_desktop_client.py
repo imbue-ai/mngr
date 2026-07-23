@@ -452,7 +452,10 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Where should it run?" in response.text
+    # The form body renders client-side; the create island + mount are the
+    # server-visible markers.
+    assert "MindsUI.mountCreateForm" in response.text
+    assert parse_boot_island(response.text)["create"]["selected_preset"] == "remote"
     assert "git_url" in response.text
 
 
@@ -483,9 +486,8 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Where should it run?" in response.text
-    assert 'data-preset="remote"' in response.text
-    assert 'data-preset="local"' in response.text
+    assert "MindsUI.mountCreateForm" in response.text
+    assert parse_boot_island(response.text)["create"]["selected_preset"] == "remote"
 
 
 def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
@@ -667,11 +669,10 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "launch_mode" in response.text
-    assert "docker" in response.text
-    assert "cloud" in response.text
-    assert "lima" in response.text
-    assert "imbue_cloud" in response.text
+    create = parse_boot_island(response.text)["create"]
+    assert "DOCKER" in create["launch_modes"]
+    assert "LIMA" in create["launch_modes"]
+    assert "IMBUE_CLOUD" in create["launch_modes"]
 
 
 def test_create_form_shows_ai_provider_dropdown(tmp_path: Path) -> None:
@@ -680,10 +681,8 @@ def test_create_form_shows_ai_provider_dropdown(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert 'name="ai_provider"' in response.text
-    assert 'value="IMBUE_CLOUD"' in response.text
-    assert 'value="API_KEY"' in response.text
-    assert 'value="SUBSCRIPTION"' in response.text
+    create = parse_boot_island(response.text)["create"]
+    assert set(create["ai_providers"]) == {"IMBUE_CLOUD", "SUBSCRIPTION", "API_KEY"}
 
 
 def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:

@@ -44,6 +44,7 @@ from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
 from imbue.minds.desktop_client.chrome_state import ConsentBootExtras
+from imbue.minds.desktop_client.chrome_state import CreateFormBootExtras
 from imbue.minds.desktop_client.chrome_state import CreatingBootExtras
 from imbue.minds.desktop_client.chrome_state import DestroyingBootExtras
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
@@ -489,7 +490,7 @@ def render_create_form(
     docker_runtime: DockerRuntime | None = None,
     backup_provider: BackupProvider | None = None,
     backup_api_key_env: str = "",
-    accounts: Sequence[object] | None = None,
+    accounts: Sequence[AccountLike] | None = None,
     default_account_id: str = "",
     anthropic_api_key: str = "",
     error_message: str = "",
@@ -564,21 +565,24 @@ def render_create_form(
         if backup_provider is not None
         else (BackupProvider.IMBUE_CLOUD if is_remote_preset else BackupProvider.CONFIGURE_LATER)
     )
-    return CATALOG.render(
-        "pages.Create",
+    extras = CreateFormBootExtras(
         git_url=effective_url,
         branch=effective_branch,
         host_name=host_name,
-        launch_modes=list(LaunchMode),
+        color=color,
+        launch_modes=tuple(mode.value for mode in LaunchMode),
         selected_launch_mode=effective_launch_mode.value,
-        ai_providers=list(AIProvider),
+        ai_providers=tuple(provider.value for provider in AIProvider),
         selected_ai_provider=effective_ai_provider.value,
-        docker_runtimes=list(DockerRuntime),
+        docker_runtimes=tuple(runtime.value for runtime in DockerRuntime),
         selected_docker_runtime=effective_docker_runtime.value,
-        backup_providers=list(BackupProvider),
+        backup_providers=tuple(provider.value for provider in BackupProvider),
         selected_backup_provider=effective_backup_provider.value,
         backup_api_key_env=backup_api_key_env,
-        accounts=accounts or [],
+        accounts=tuple(
+            AssociateAccountPayload(user_id=str(account.user_id), email=str(account.email))
+            for account in (accounts or [])
+        ),
         default_account_id=default_account_id,
         anthropic_api_key=anthropic_api_key,
         error_message=error_message,
@@ -588,8 +592,8 @@ def render_create_form(
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
         selected_preset=effective_preset,
         start_advanced=start_advanced,
-        color=color,
     )
+    return CATALOG.render("pages.Create", boot_state={"create": extras.to_payload_dict()})
 
 
 _STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {

@@ -433,6 +433,45 @@ class WorkspaceSettingsBootExtras(FrozenModel):
         return payload
 
 
+class CreateFormBootExtras(FrozenModel):
+    """Create-form page boot island data (the ``create`` island key).
+
+    Carries the *effective* (preset-resolved) selections render_create_form
+    computes, plus the option lists the selects render. The advanced selects
+    are always the source of truth on submit; the preset cards just pre-fill
+    them client-side."""
+
+    git_url: str = Field(description="Repository URL/path seed (operator default or a re-rendered submission)")
+    branch: str = Field(description="Branch seed (operator default or a re-rendered submission)")
+    host_name: str = Field(description="Explicit workspace name seed; empty auto-names server-side")
+    color: str = Field(description="Auto-chosen color hex carried in the create request (no visible picker)")
+    launch_modes: tuple[str, ...] = Field(description="Compute provider option values, in enum order")
+    selected_launch_mode: str = Field(description="The effective compute provider selection")
+    ai_providers: tuple[str, ...] = Field(description="AI provider option values, in enum order")
+    selected_ai_provider: str = Field(description="The effective AI provider selection")
+    docker_runtimes: tuple[str, ...] = Field(description="Container runtime option values, in enum order")
+    selected_docker_runtime: str = Field(description="The platform-default (or submitted) container runtime")
+    backup_providers: tuple[str, ...] = Field(description="Backup provider option values, in enum order")
+    selected_backup_provider: str = Field(description="The effective backup provider selection")
+    backup_api_key_env: str = Field(description="Restic env seed; empty renders the annotated example")
+    accounts: tuple[AssociateAccountPayload, ...] = Field(description="Signed-in accounts for the picker")
+    default_account_id: str = Field(description="The pre-selected account id; empty selects 'No account'")
+    anthropic_api_key: str = Field(description="API-key seed for a re-rendered submission")
+    error_message: str = Field(description="Server-side validation error from a submitted form; empty hides it")
+    region_options_by_launch_mode: dict[str, list[str]] = Field(
+        description="Region options per compute provider (absent/empty hides the region select)"
+    )
+    region_selected_by_launch_mode: dict[str, str] = Field(description="The pre-selected region per compute provider")
+    selected_preset: str = Field(description="Which preset card starts selected: remote / local")
+    start_advanced: bool = Field(description="Open the advanced view on first paint (submit-error re-render)")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        payload = self.model_dump(mode="json")
+        payload["accounts"] = [account.to_payload_dict() for account in self.accounts]
+        return payload
+
+
 class ChromeBootState(FrozenModel):
     """A connect-time snapshot of the chrome data, for page boot-state islands.
 
