@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect] [--dry-run]
+mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--resume-message <TEXT>] [--connect] [--dry-run]
 ```
 
 Start stopped agent(s).
@@ -20,6 +20,8 @@ the host starts.
 
 Use --restart to stop any running agents first, ensuring a clean start.
 Use --no-resume to skip sending the resume message after starting.
+Use --resume-message to send a specific message after starting, overriding
+any resume message stored on the agent (cannot be combined with --no-resume).
 
 Use '-' in place of agent names to read them from stdin, one per line.
 

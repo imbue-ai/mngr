@@ -315,7 +315,7 @@ def _maybe_connect(
 CommandHelpMetadata(
     key="start",
     one_line_description="Start stopped agent(s)",
-    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect] [--dry-run]",
+    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--resume-message <TEXT>] [--connect] [--dry-run]",
     description="""For remote hosts, this restores from the most recent snapshot and starts
 the container/instance. For local agents, this starts the agent's tmux
 session.
@@ -325,6 +325,8 @@ the host starts.
 
 Use --restart to stop any running agents first, ensuring a clean start.
 Use --no-resume to skip sending the resume message after starting.
+Use --resume-message to send a specific message after starting, overriding
+any resume message stored on the agent (cannot be combined with --no-resume).
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
