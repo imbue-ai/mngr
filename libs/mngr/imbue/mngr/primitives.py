@@ -246,6 +246,14 @@ class HostState(UpperCaseStrEnum):
 
     BUILDING = auto()
     STARTING = auto()
+    # The host is up per the provider's liveness read. This does NOT assert that we connected to the
+    # host's inner sshd or otherwise observed it from the inside: a provider that reads liveness
+    # out-of-band (docker from the daemon's container status, imbue_cloud from an outer-host
+    # `docker exec`) reports RUNNING with no inner-SSH round-trip. UNREACHABLE is the strict
+    # refinement a provider emits only when it *attempted* to reach the inside and could not, so the
+    # same physical condition (container up, inner sshd dead) reads RUNNING via an out-of-band path
+    # and UNREACHABLE via an inside-attempting one. Both mean "observed up" and consumers treat them
+    # alike for liveness; UNREACHABLE additionally carries "and we know we can't get in".
     RUNNING = auto()
     STOPPING = auto()
     STOPPED = auto()
@@ -261,8 +269,12 @@ class HostState(UpperCaseStrEnum):
     UNAUTHENTICATED = auto()
     # The host was observed up but its inner sshd is not answering, so we cannot enumerate inside it
     # (e.g. a running container whose inner sshd died, or an inner-SSH connection error). A host
-    # restart can revive it. Distinct from UNAUTHENTICATED (our credential was rejected at the access
-    # boundary, where a restart routes through the same rejected key) and UNKNOWN (transient).
+    # restart can revive it. A strict refinement of RUNNING (see above): only a provider that
+    # *attempts* to reach the inside can distinguish this from RUNNING, so an out-of-band observer
+    # reports RUNNING for the very same host -- which of the two a host reads is a property of the
+    # observing path's effort, not only of the host. Distinct from UNAUTHENTICATED (our credential
+    # was rejected at the access boundary, where a restart routes through the same rejected key) and
+    # UNKNOWN (transient).
     UNREACHABLE = auto()
     # The host could not be observed during the most recent discovery attempt, so its actual state
     # is unknown: either the provider that owns it could not be accessed (emitted by AgentObserver
