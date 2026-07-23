@@ -1092,14 +1092,15 @@ class Latchkey(MutableModel):
         registered up front, keeps the two common cases (already registered and
         no registration neeeded) to a single latchkey call.
         """
-        is_success, detail = self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
-        if is_success:
-            return True, ""
-        if "latchkey auth browser-prepare" not in detail.lower():
-            return False, detail
+        if not is_ephemeral:
+            is_success, detail = self.auth_browser_login(service_name)
+            if is_success:
+                return True, ""
+            if "latchkey auth browser-prepare" not in detail.lower():
+                return False, detail
         # No client is registered yet (that is exactly what the browser-prepare
-        # hint means). For a Minds Google OAuth service, prefer the Minds client
-        # before offering the user the self-setup flow.
+        # hint means) or we're in the ephemeral mode (typically a new account).
+        # For a Minds Google OAuth service, prefer the Minds client before offering the user the self-setup flow.
         if service_name in MINDS_GOOGLE_OAUTH_SERVICES:
             is_minds_success, minds_detail = self._authenticate_with_minds_google_client(
                 service_name, is_ephemeral=is_ephemeral
@@ -1145,14 +1146,7 @@ class Latchkey(MutableModel):
         )
         if not is_prepared:
             return False, prepare_detail
-        is_success, login_detail = self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
-        if is_success:
-            return True, login_detail
-        # The Minds client we just registered did not yield a working sign-in;
-        # clear it (credentials *and* the prepared client, via ``--all``) so the
-        # self-setup fallback's browser-prepare can run from a clean slate.
-        self.auth_clear(service_name, is_all=True)
-        return False, login_detail
+        return self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
 
     def auth_browser_login(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
         """Run a single ``latchkey auth browser <service>`` with no preparation fallback.
