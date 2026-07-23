@@ -81,11 +81,11 @@ function getResticPath() {
  * so both must be present (see ``latchkeyCurlEnv`` in electron/backend.js).
  */
 function getLatchkeyCurlDispatchPath() {
-  return path.join(getResourcesDir(), 'curl', 'frankweiler-latchkey-curl-dispatch');
+  return path.join(getResourcesDir(), 'curl', 'latchkey-curl-dispatch');
 }
 
 function getLatchkeyCurlImpersonatePath() {
-  return path.join(getResourcesDir(), 'curl', 'frankweiler-latchkey-curl-impersonate');
+  return path.join(getResourcesDir(), 'curl', 'latchkey-curl-impersonate');
 }
 
 /**

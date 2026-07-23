@@ -69,8 +69,8 @@ DATALIB_CURL_VERSION: Final[str] = "v0.22.0"
 # Where the two binaries land on the VPS. ``/usr/local/bin`` is already on the
 # gateway run script's PATH, and the dispatch curl finds the impersonator as a sibling.
 _CURL_IMPERSONATE_INSTALL_DIR: Final[str] = "/usr/local/bin"
-_CURL_DISPATCH_BIN: Final[str] = "frankweiler-latchkey-curl-dispatch"
-_CURL_IMPERSONATE_BIN: Final[str] = "frankweiler-latchkey-curl-impersonate"
+_CURL_DISPATCH_BIN: Final[str] = "latchkey-curl-dispatch"
+_CURL_IMPERSONATE_BIN: Final[str] = "latchkey-curl-impersonate"
 _CURL_DISPATCH_PATH: Final[str] = f"{_CURL_IMPERSONATE_INSTALL_DIR}/{_CURL_DISPATCH_BIN}"
 _CURL_IMPERSONATE_PATH: Final[str] = f"{_CURL_IMPERSONATE_INSTALL_DIR}/{_CURL_IMPERSONATE_BIN}"
 

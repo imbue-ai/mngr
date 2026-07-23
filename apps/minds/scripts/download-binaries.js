@@ -384,7 +384,7 @@ async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
   execSync(`tar xzf "${tarPath}" -C "${curlDir}" --strip-components=1`, { stdio: 'inherit' });
   fs.unlinkSync(tarPath);
 
-  for (const name of ['frankweiler-latchkey-curl-dispatch', 'frankweiler-latchkey-curl-impersonate']) {
+  for (const name of ['latchkey-curl-dispatch', 'latchkey-curl-impersonate']) {
     const binPath = path.join(curlDir, name);
     if (!fs.existsSync(binPath)) {
       throw new Error(`${name} not found at ${binPath} after extraction`);

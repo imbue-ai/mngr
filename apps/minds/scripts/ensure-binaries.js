@@ -27,7 +27,7 @@ const REQUIRED = [
   path.join(RESOURCES, 'desync', 'desync'),
   // FOLLOWUP: once the datalib curl download is pinned (see
   // download-binaries.js DATALIB_CURL_VERSION / EXPECTED_SHA256), add
-  //   path.join(RESOURCES, 'curl', 'frankweiler-latchkey-curl-dispatch'),
+  //   path.join(RESOURCES, 'curl', 'latchkey-curl-dispatch'),
   // here so dev `pnpm start` fetches it too. Left out until then: while the
   // download is a sentinel no-op, listing it would make every start re-run
   // the (always-full) downloader for a file that never appears.
