@@ -4,9 +4,9 @@ Backs both the local "report a bug" form and the authenticated ``/api/v1`` bug-r
 from either path carry the same shape and are submitted the same way. All Sentry submission is owned by
 the outer minds app -- agents never reach Sentry directly.
 
-What is collected scales with what the user opted into: the description and a handful of always-cheap
-"basics" (versions, OS) are unconditional; app diagnostics and per-workspace context are added only when
-requested. Each collected value comes from an in-process source (build info, the session store, the
+What is collected depends on the report's context: the description and a handful of always-cheap
+"basics" (versions, OS) are unconditional; app diagnostics are added when requested, and per-workspace
+context whenever the report was opened from a known workspace. Each collected value comes from an in-process source (build info, the session store, the
 backend resolver, the standard library), so collection is fast and side-effect free.
 """
 
