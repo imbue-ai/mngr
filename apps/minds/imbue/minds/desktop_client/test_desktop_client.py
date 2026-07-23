@@ -3,6 +3,7 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
+from typing import Any
 
 import httpx
 from flask import Request
@@ -27,6 +28,8 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
+from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
@@ -829,13 +832,16 @@ def test_chrome_page_renders_without_auth(tmp_path: Path) -> None:
     assert "content-frame" in response.text
 
 
-def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
+def test_chrome_page_includes_workspace_switcher(tmp_path: Path) -> None:
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/_chrome")
     assert response.status_code == 200
-    assert "sidebar-toggle" in response.text
+    # The workspace switcher menu anchors to the breadcrumb's workspace-name
+    # button; the old hamburger toggle is gone.
+    assert "workspace-switcher-btn" in response.text
     assert "sidebar-menu" in response.text
+    assert "sidebar-toggle" not in response.text
 
 
 def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
@@ -846,12 +852,12 @@ def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
 
     response = client.get("/_chrome")
     assert response.status_code == 200
-    assert 'data-tooltip="Main Menu"' in response.text
-    assert 'data-tooltip="Ran into a bug?"' in response.text
+    assert 'data-tooltip="Switch workspace"' in response.text
+    assert 'data-tooltip="Report a bug"' in response.text
     # data-tooltip is not exposed to assistive tech, so each icon-only titlebar
     # button also needs an aria-label to keep an accessible name.
-    assert 'aria-label="Main Menu"' in response.text
-    assert 'aria-label="Ran into a bug?"' in response.text
+    assert 'aria-label="Switch workspace"' in response.text
+    assert 'aria-label="Report a bug"' in response.text
 
 
 def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
@@ -1114,8 +1120,9 @@ class _AllAgentsKnownStaticResolver(StaticBackendResolver):
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    assert _build_requests_payload(None, resolver) == {"count": 0, "request_ids": []}
-    assert _build_requests_payload(RequestInbox(), resolver) == {"count": 0, "request_ids": []}
+    expected = {"count": 0, "request_ids": []}
+    assert _build_requests_payload(None, resolver) == expected
+    assert _build_requests_payload(RequestInbox(), resolver) == expected
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1126,7 +1133,8 @@ def test_build_requests_payload_carries_pending_ids() -> None:
     )
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
     payload = _build_requests_payload(RequestInbox().add_request(event), resolver)
-    assert payload == {"count": 1, "request_ids": [str(event.event_id)]}
+    assert payload["count"] == 1
+    assert payload["request_ids"] == [str(event.event_id)]
 
 
 def test_build_requests_payload_distinguishes_equal_count_different_contents() -> None:
@@ -1170,6 +1178,10 @@ def _create_test_client_with_stores(
     tmp_path: Path,
     cli: ImbueCloudCli | None = None,
     mngr_caller: MngrCaller | None = None,
+    # When set, also wired into the app state as ``imbue_cloud_cli`` so routes
+    # that reach the connector through ``get_state().imbue_cloud_cli`` (e.g.
+    # the accounts plan-view fragment) hit the fake instead of degrading.
+    imbue_cloud_cli: ImbueCloudCli | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with session store and config for testing new routes.
 
@@ -1195,6 +1207,7 @@ def _create_test_client_with_stores(
         request_inbox=request_inbox,
         paths=WorkspacePaths(data_dir=tmp_path),
         mngr_caller=mngr_caller,
+        imbue_cloud_cli=imbue_cloud_cli,
     )
     client = app.test_client()
     return client, auth_store
@@ -1248,6 +1261,18 @@ def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) 
     assert "run your workspace on Imbue Cloud" in response.text
 
 
+def test_signin_modal_mode_signin_leads_with_signin_tab(tmp_path: Path) -> None:
+    """GET /auth/signin-modal?mode=signin shows the sign-in tab first; the default stays sign-up."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    default = client.get("/auth/signin-modal")
+    assert default.status_code == 200
+    assert 'id="signin-tab" class="hidden"' in default.text
+    signin = client.get("/auth/signin-modal", query_string={"mode": "signin"})
+    assert signin.status_code == 200
+    assert 'id="signup-tab" class="hidden"' in signin.text
+    assert 'id="signin-tab" class="hidden"' not in signin.text
+
+
 def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
     """GET /auth/signin-modal serves the overlay sign-in page (transparent
     backdrop + the shared auth form) loaded into the shared modal view."""
@@ -1259,21 +1284,35 @@ def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -
     assert "run your workspace on Imbue Cloud" in response.text
 
 
+def test_signin_modal_honors_valid_return_to(tmp_path: Path) -> None:
+    """A safe local ?return_to= is embedded as the post-auth landing and
+    switches the intro copy from the create-flow text to the generic one."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal", query_string={"return_to": "/"})
+    assert response.status_code == 200
+    assert 'window.MINDS_AUTH_RETURN_TO = "/";' in response.text
+    assert "run your workspace on Imbue Cloud" not in response.text
+
+
+def test_signin_modal_rejects_unsafe_return_to(tmp_path: Path) -> None:
+    """Off-origin ?return_to= values (open-redirect shapes) fall back to the
+    /create default and never reach the page; absent return_to does the same."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    for unsafe in ("//evil.com", "https://evil.com", "/\\evil.com"):
+        response = client.get("/auth/signin-modal", query_string={"return_to": unsafe})
+        assert response.status_code == 200
+        assert "evil.com" not in response.text
+        assert 'window.MINDS_AUTH_RETURN_TO = "/create";' in response.text
+
+    response = client.get("/auth/signin-modal")
+    assert 'window.MINDS_AUTH_RETURN_TO = "/create";' in response.text
+
+
 def test_signin_modal_close_button_has_tooltip(tmp_path: Path) -> None:
     """The sign-in modal's close button (DialogCloseButton) carries a Close tooltip,
     wired by the shared trigger script on the overlay surface."""
     client = _create_test_client_with_auth_routes(tmp_path)
     response = client.get("/auth/signin-modal")
-    assert response.status_code == 200
-    assert 'data-tooltip="Close"' in response.text
-    assert "/_static/tooltip_triggers.js" in response.text
-
-
-def test_inbox_close_button_has_tooltip(tmp_path: Path) -> None:
-    """The inbox modal's close button carries a Close tooltip on the overlay surface."""
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-    response = client.get("/inbox")
     assert response.status_code == 200
     assert 'data-tooltip="Close"' in response.text
     assert "/_static/tooltip_triggers.js" in response.text
@@ -1326,6 +1365,74 @@ def test_accounts_page_no_longer_hosts_error_reporting_toggles(tmp_path: Path) -
     assert "report-errors-toggle" not in response.text
 
 
+class _PlanInfoImbueCloudCli(FakeImbueCloudCli):
+    """FakeImbueCloudCli whose ``get_account_info`` returns a canned plan/usage dict.
+
+    Backs the ``GET /accounts/<user_id>/plan-view`` route tests without
+    spawning a real ``mngr imbue_cloud account show`` subprocess.
+    """
+
+    def get_account_info(self, account: str) -> dict[str, Any]:
+        return {
+            "plan_name": "explorer",
+            "available_plans": ["ally", "explorer"],
+            "entitlements": {
+                "max_remote_workspaces": 2,
+                "max_tunnels": 50,
+                "max_services_per_tunnel": 10,
+                "max_buckets": 5,
+                "max_total_bucket_bytes": 50 * 1024**3,
+                "monthly_llm_spend_usd": 0.0,
+                "max_active_synced_workspaces": 200,
+            },
+            "usage": {
+                "remote_workspaces": 1,
+                "tunnels": 3,
+                "buckets": 2,
+                "total_bucket_bytes": int(1.5 * 1024**3),
+                "llm_spend_usd_this_period": 12.345,
+                "llm_budget_resets_at": "2026-08-01T00:00:00Z",
+                "active_synced_workspaces": 4,
+            },
+        }
+
+
+def test_account_plan_view_requires_auth(tmp_path: Path) -> None:
+    """The plan-view fragment endpoint requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/accounts/user-test-123/plan-view")
+    assert response.status_code == 403
+
+
+def test_account_plan_view_renders_plan_for_known_account(tmp_path: Path) -> None:
+    """A signed-in account's fragment carries its plan and usage from the CLI."""
+    cli = _PlanInfoImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli, imbue_cloud_cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/accounts/user-test-123/plan-view")
+
+    assert response.status_code == 200
+    assert "Explorer" in response.text
+    assert "1 of 2" in response.text
+    assert 'data-trim-running="0"' in response.text
+    assert "unavailable" not in response.text
+
+
+def test_account_plan_view_degrades_to_unavailable_without_cli(tmp_path: Path) -> None:
+    """With no imbue_cloud CLI wired the fragment renders its unavailable message, not an error."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/accounts/user-test-123/plan-view")
+
+    assert response.status_code == 200
+    assert "Plan and usage are unavailable right now" in response.text
+
+
 def test_settings_page_requires_auth(tmp_path: Path) -> None:
     """The /settings page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
@@ -1346,6 +1453,132 @@ def test_settings_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
     # With reporting on, the include-logs row is revealed (not ``hidden``).
     logs_row = response.text.split('id="include-logs-row"')[1].split(">")[0]
     assert "hidden" not in logs_row
+
+
+def test_settings_modal_requires_auth(tmp_path: Path) -> None:
+    """The centered settings modal page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/settings/modal")
+    assert response.status_code == 403
+
+
+def test_settings_modal_renders_app_settings_in_overlay(tmp_path: Path) -> None:
+    """GET /settings/modal renders the same app-level settings sections as the
+    /settings page (Connectors, Error reporting, Master password) inside the
+    centered overlay chrome (backdrop + closeModal-based dismissal), with no
+    "back to workspaces" link."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/settings/modal")
+    assert response.status_code == 200
+    body = response.text
+    # The shared sections (AppSettingsSections.jinja) and their external shell JS.
+    assert "Connectors" in body
+    assert "Master password" in body
+    assert 'id="report-errors-toggle"' in body
+    assert "/_static/app_settings.js" in body
+    # The modal drops the back link (X + backdrop click dismiss instead).
+    assert "Back to workspaces" not in body
+    # Modal chrome: dim backdrop over a transparent body, dismissed through
+    # the Electron modal host (with a plain-page fallback).
+    assert 'id="settings-modal-backdrop"' in body
+    assert "window.minds.closeModal" in body
+
+
+def test_accounts_modal_requires_auth(tmp_path: Path) -> None:
+    """The centered accounts modal page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/accounts/modal")
+    assert response.status_code == 403
+
+
+def test_accounts_modal_lists_logged_in_accounts(tmp_path: Path) -> None:
+    """GET /accounts/modal lists the signed-in accounts inside the centered
+    overlay chrome, with the Add account launcher."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/accounts/modal")
+    assert response.status_code == 200
+    body = response.text
+    assert "test@example.com" in body
+    assert 'id="accounts-modal-backdrop"' in body
+    assert "Add account" in body
+
+
+def _create_sharing_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore, str]:
+    """Client whose session store has a workspace associated with a signed-in account.
+
+    The sharing editor only renders its editor body (rather than the Associate
+    prompt) when the workspace has an account, so the association is seeded
+    through a record store over the same data dir before the app's own store
+    is built.
+    """
+    agent_id = str(AgentId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-share-1", email="sharer@example.com")
+    seed_store = make_session_store_for_test(tmp_path, cli=cli)
+    seed_store.associate_created_workspace(
+        user_id="user-share-1",
+        agent_id=agent_id,
+        host_id=str(HostId.generate()),
+        display_name="my-workspace",
+        color=None,
+        is_cloud_row=False,
+    )
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    return client, auth_store, agent_id
+
+
+def test_sharing_modal_requires_auth(tmp_path: Path) -> None:
+    """The centered sharing modal page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/sharing/agent-0123abc/web/modal")
+    assert response.status_code == 403
+
+
+def test_sharing_modal_renders_editor_in_overlay(tmp_path: Path) -> None:
+    """GET /sharing/<id>/<svc>/modal renders the shared sharing-editor body
+    inside the centered overlay chrome (backdrop + closeModal-based dismissal).
+    Nothing in the modal may navigate the overlay iframe to a full page: the
+    heading names are plain text (no /goto or /accounts links) and Cancel
+    dismisses the modal instead of linking back to workspace settings."""
+    client, auth_store, agent_id = _create_sharing_test_client(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get(f"/sharing/{agent_id}/web/modal")
+    assert response.status_code == 200
+    body = response.text
+    # The shared editor body (SharingEditor.jinja) and its external JS.
+    assert 'id="sharing-config"' in body
+    assert "/_static/sharing.js" in body
+    # Modal chrome: dim backdrop over a transparent body, dismissed through
+    # the Electron modal host (with a plain-page fallback).
+    assert 'id="sharing-modal-backdrop"' in body
+    assert "window.minds.closeModal" in body
+    # The heading is plain text -- no workspace /goto link, no /accounts link --
+    # and sharing.js keeps its rebuilt heading link-free via data-plain-links.
+    assert "/goto/" not in body
+    assert 'href="/accounts"' not in body
+    assert 'data-plain-links="true"' in body
+    # Cancel dismisses the modal; there is no ButtonLink back to settings.
+    assert f'href="/workspace/{agent_id}/settings"' not in body
+    assert "dismissSharingModal()" in body
+
+
+def test_sharing_page_renders_full_page_fallback(tmp_path: Path) -> None:
+    """The full /sharing page (the browser-mode fallback) still renders the
+    editor with its linked heading and the Cancel link to workspace settings."""
+    client, auth_store, agent_id = _create_sharing_test_client(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get(f"/sharing/{agent_id}/web")
+    assert response.status_code == 200
+    body = response.text
+    assert 'id="sharing-config"' in body
+    assert "/_static/sharing.js" in body
+    assert f"/goto/{agent_id}/" in body
+    assert f'href="/workspace/{agent_id}/settings"' in body
+    assert 'id="sharing-modal-backdrop"' not in body
 
 
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
@@ -1691,26 +1924,6 @@ def test_set_default_account(tmp_path: Path) -> None:
     assert config.get_default_account_id() == "user-default-123"
 
 
-def test_auto_open_toggle(tmp_path: Path) -> None:
-    """The inbox auto-open setting can be toggled.
-
-    The on-disk setting key and the toggle route both keep
-    ``requests-panel`` / ``auto_open_requests_panel`` for backward
-    compatibility with existing user configs; "panel" now refers to the
-    inbox modal.
-    """
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-    response = client.post(
-        "/_chrome/requests-auto-open",
-        json={"enabled": False},
-    )
-    assert response.status_code == 200
-
-    config = MindsConfig(data_dir=tmp_path)
-    assert config.get_auto_open_requests_panel() is False
-
-
 # -- error-reporting consent + settings tests --
 
 
@@ -1723,33 +1936,116 @@ def test_landing_shows_login_not_consent_when_unauthenticated(tmp_path: Path) ->
     assert "Login" in response.text
 
 
-def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path) -> None:
-    """Once authenticated, "/" shows the consent screen until it is answered."""
+def test_landing_bounces_to_welcome_until_account_choice(tmp_path: Path) -> None:
+    """Signed out with no workspaces, "/" bounces to the welcome splash until an option is chosen.
+
+    The titlebar home button always navigates "/", so this is what sends a
+    mid-onboarding user (e.g. on the sign-up page) back to the Sign Up /
+    Log In / Continue-without-an-account choice instead of the create form.
+    """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/welcome"
+
+
+def test_landing_does_not_bounce_to_welcome_when_signed_in(tmp_path: Path) -> None:
+    """With a signed-in account, "/" renders the landing directly (no welcome bounce)."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="user@example.com", is_active=True)
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 200
+    # Consent still unanswered, so the consent screen shows (not the splash).
+    assert "Help improve Minds" in response.text
+
+
+def test_landing_shows_consent_screen_after_account_choice_when_unanswered(tmp_path: Path) -> None:
+    """After the account choice (here: skip), "/" shows the consent screen until it is answered."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    skip = client.get("/welcome/skip")
+    assert skip.status_code == 303
     response = client.get("/")
     assert response.status_code == 200
     assert "Help improve Minds" in response.text
     assert "Report unexpected errors" in response.text
 
 
-def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:
-    """ "Continue without an account" sends the user to "/" so the consent screen is offered.
+def test_welcome_signup_login_open_signin_modal_with_page_fallbacks(tmp_path: Path) -> None:
+    """The welcome splash's Sign Up / Log In open the centered sign-in modal in Electron.
 
-    Reporting is not gated behind an Imbue account: the account-less skip path lands on "/", whose
-    handler shows the "Help improve Minds" consent screen (when unanswered) before the create form.
+    The splash is a trusted local page on the chrome surface, so the buttons call
+    the ``openSigninModal`` shell bridge (with the tab mode and a home
+    return_to); in a plain browser (no bridge) the links fall back to the
+    full-page /auth/* routes.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    welcome = client.get("/welcome")
+    assert welcome.status_code == 200
+    assert "window.minds.openSigninModal('/', mode)" in welcome.text
+    assert 'id="welcome-signup-btn"' in welcome.text
+    assert 'id="welcome-login-btn"' in welcome.text
+    assert 'href="/auth/signup"' in welcome.text
+    assert 'href="/auth/login"' in welcome.text
+
+
+def test_welcome_self_advances_when_an_account_appears(tmp_path: Path) -> None:
+    """The splash watches the chrome SSE and lands on home once an account exists.
+
+    A sign-in can complete without the splash navigating (an OAuth flow
+    finished in the external browser after the modal was dismissed), so the
+    page subscribes to /_chrome/events and navigates to "/" when a
+    ``workspaces`` payload reports ``has_accounts``.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    welcome = client.get("/welcome")
+    assert welcome.status_code == 200
+    assert "/_chrome/events" in welcome.text
+    assert "has_accounts" in welcome.text
+
+
+def test_landing_does_not_bounce_to_welcome_when_account_listing_fails(tmp_path: Path) -> None:
+    """A transient auth-list failure must not bounce a possibly-signed-in user to the splash.
+
+    ``list_accounts()`` returns empty on an ImbueCloudCliError; the landing
+    bounce distinguishes that from a genuine "no accounts" via
+    ``is_last_identity_read_failed`` and renders the landing normally.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.is_auth_list_failing = True
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 200
+
+
+def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:
+    """ "Continue without an account" records the skip, then "/" offers the consent screen.
+
+    Reporting is not gated behind an Imbue account: the account-less skip path goes through
+    "/welcome/skip" (recording the choice so the home route stops bouncing to the splash) and
+    redirects to "/", whose handler shows the "Help improve Minds" consent screen (when
+    unanswered) before the create form.
     """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     welcome = client.get("/welcome")
     assert welcome.status_code == 200
     # Isolate the full opening <a> tag that carries the skip-account id, regardless of
-    # attribute order, and assert it links to "/" (the consent-bearing landing route)
-    # rather than straight to "/create".
+    # attribute order, and assert it links to the skip route (which redirects to the
+    # consent-bearing landing route) rather than straight to "/create".
     before, after = welcome.text.split('id="skip-account-btn"', 1)
     skip_tag = before.rsplit("<a", 1)[1] + after.split(">", 1)[0]
-    assert 'href="/"' in skip_tag
-    # Following that link while consent is unanswered shows the consent screen.
+    assert 'href="/welcome/skip"' in skip_tag
+    # Following that link redirects to "/", which shows the consent screen while unanswered.
+    skip = client.get("/welcome/skip")
+    assert skip.status_code == 303
+    assert skip.headers["location"] == "/"
     landing = client.get("/")
     assert "Help improve Minds" in landing.text
 
@@ -1792,8 +2088,12 @@ def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> 
     assert config.get_report_unexpected_errors() is True
     assert config.get_include_error_logs() is True
 
-    # With consent answered, the authenticated "/" no longer shows the consent screen.
+    # With consent answered (and the account choice made, so "/" renders the
+    # landing rather than bouncing to the welcome splash), the authenticated
+    # "/" no longer shows the consent screen.
+    client.get("/welcome/skip")
     landing = client.get("/")
+    assert landing.status_code == 200
     assert "Help improve Minds" not in landing.text
 
 
@@ -2256,12 +2556,14 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert "/api/v1/workspaces/" in response.text
     assert "/health" in response.text
     assert "/restart" in response.text
-    # The recovery page offers an in-page report button that opens the get-help modal
-    # via the ``minds:open-help`` relay message. It renders hidden by default so it
-    # never shows on the transient "Loading workspace" spinner; the recovery JS
-    # reveals it only on the terminal restart/retry states.
+    # The recovery page offers an in-page report button that opens the get-help
+    # modal. The recovery screen renders on the trusted chrome surface, so it
+    # calls the window.minds.openHelp bridge directly (falling back to /help in a
+    # plain browser). It renders hidden by default so it never shows on the
+    # transient "Loading workspace" spinner; the recovery JS reveals it only on
+    # the terminal restart/retry states.
     assert '<button type="button" id="recovery-report-btn" class="hidden">' in response.text
-    assert "minds:open-help" in response.text
+    assert "window.minds.openHelp(agentId)" in response.text
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:

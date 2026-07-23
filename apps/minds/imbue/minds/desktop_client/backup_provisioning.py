@@ -249,11 +249,12 @@ def _create_or_reuse_bucket(
     account_email: str,
     bucket_short_name: str,
 ) -> tuple[str, str, R2BucketKeyMaterial]:
-    """Create the per-workspace bucket, or reuse it (minting a fresh key) if it exists.
+    """Create the per-workspace bucket, or reuse it (rolling its single key) if it exists.
 
     Returns ``(bucket_name, s3_endpoint, key_material)``. Idempotent so the
     same provisioning can be re-applied to a host whose bucket was already
-    created on an earlier run.
+    created on an earlier run: each bucket has exactly one key, and rolling
+    it yields fresh credentials with the same Access Key ID.
     """
     try:
         result = imbue_cloud_cli.create_bucket(account=account_email, name=bucket_short_name, access="readwrite")
@@ -261,9 +262,9 @@ def _create_or_reuse_bucket(
     except ImbueCloudCliError as e:
         if not _is_bucket_already_exists_error(e):
             raise
-        logger.debug("Bucket {} already exists; reusing it with a fresh key", bucket_short_name)
+        logger.debug("Bucket {} already exists; reusing it by rolling its key", bucket_short_name)
         info = imbue_cloud_cli.get_bucket_info(account_email, bucket_short_name)
-        key = imbue_cloud_cli.create_bucket_key(account=account_email, name=bucket_short_name, access="readwrite")
+        key = imbue_cloud_cli.roll_bucket_key(account=account_email, name=bucket_short_name)
         return info.bucket_name, str(info.s3_endpoint), key
 
 

@@ -1,4 +1,4 @@
-{#def title, padding="default", max_width="max-w-[420px]", scripts="" #}
+{#def title, padding="default", max_width="max-w-[420px]", scripts="", page_label="", show_back=False #}
 {#
   Narrow, vertically-centered page layout. Renders the Base scaffold with
   a body that flex-centers a single max-width column; the page's entire
@@ -24,10 +24,12 @@
   and overlay dialogs go outside both.
 #}
 {%- set _padding_cls = "p-8" if padding == "default" else "p-6" -%}
-<Base title={{ title }}
+<ChromeShell title={{ title }}
+      :page_label="page_label"
+      :show_back="show_back"
       body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-4"
       scripts={{ scripts }}>
   <div class="{{ _padding_cls }} {{ max_width }} w-full">
     {{ content }}
   </div>
-</Base>
+</ChromeShell>

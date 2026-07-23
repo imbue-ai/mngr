@@ -1939,7 +1939,7 @@ def _handle_sharing_enable(agent_id: str, service_name: str) -> SharingToggleRes
     body = request.get_json(silent=True, force=True) or {}
     emails = [str(email) for email in body.get("emails", [])]
     try:
-        enable_sharing_via_cloudflare(
+        _tunnel, share_url = enable_sharing_via_cloudflare(
             agent_id=parsed_id,
             service_name=ServiceName(service_name),
             emails=emails,
@@ -1947,7 +1947,7 @@ def _handle_sharing_enable(agent_id: str, service_name: str) -> SharingToggleRes
         )
     except SharingError as exc:
         return _json_error(str(exc), 502)
-    return SharingToggleResponse(agent_id=str(parsed_id), service_name=service_name, enabled=True)
+    return SharingToggleResponse(agent_id=str(parsed_id), service_name=service_name, enabled=True, url=share_url)
 
 
 @require_api_or_cookie_auth
