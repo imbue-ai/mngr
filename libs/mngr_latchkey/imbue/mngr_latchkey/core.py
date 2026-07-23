@@ -31,7 +31,6 @@ from enum import auto
 from importlib import resources
 from pathlib import Path
 from typing import Final
-from typing import cast
 
 from loguru import logger
 from packaging.version import InvalidVersion
@@ -344,6 +343,20 @@ def _parse_one_credential_status(raw_status: object, service_name: str) -> Crede
     return status
 
 
+def _extract_credential_status_value(entry: object) -> object:
+    """Pull the ``credentialStatus`` value out of one account entry, or ``None``.
+
+    Scans ``entry.items()`` rather than indexing so the untyped JSON mapping
+    (whose key/value types are unknown) is handled without an escape hatch.
+    """
+    if not isinstance(entry, Mapping):
+        return None
+    for key, value in entry.items():
+        if key == "credentialStatus":
+            return value
+    return None
+
+
 def _parse_accounts(payload: Mapping[str, object], service_name: str) -> tuple[ServiceAccountCredential, ...]:
     """Pull the per-account ``credentials`` object out of ``payload``.
 
@@ -363,12 +376,9 @@ def _parse_accounts(payload: Mapping[str, object], service_name: str) -> tuple[S
             raw_credentials,
         )
         return ()
-    credentials = cast(Mapping[str, object], raw_credentials)
     accounts: list[ServiceAccountCredential] = []
-    for account, entry in credentials.items():
-        raw_status: object = None
-        if isinstance(entry, Mapping):
-            raw_status = cast(Mapping[str, object], entry).get("credentialStatus")
+    for account, entry in raw_credentials.items():
+        raw_status = _extract_credential_status_value(entry)
         accounts.append(
             ServiceAccountCredential(
                 account=str(account),
