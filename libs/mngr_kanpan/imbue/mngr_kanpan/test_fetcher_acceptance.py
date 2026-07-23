@@ -135,6 +135,12 @@ def _collect_stream_updates(
     return updates
 
 
+def _entries_by_name(update: FetchUpdate) -> dict[AgentName, AgentBoardEntry]:
+    """Index a non-error update's board entries by agent name."""
+    assert update.snapshot is not None
+    return {entry.name: entry for entry in update.snapshot.entries}
+
+
 @pytest.fixture
 def local_host(local_provider: LocalProviderInstance) -> Host:
     """Create a local Host via the local provider."""
@@ -348,8 +354,8 @@ def test_stream_board_snapshot_posts_base_before_source_result(
     assert base.is_final is False
     assert final.is_final is True
 
-    base_entry = {e.name: e for e in base.snapshot.entries}[AgentName("stream-base-agent")]
-    final_entry = {e.name: e for e in final.snapshot.entries}[AgentName("stream-base-agent")]
+    base_entry = _entries_by_name(base)[AgentName("stream-base-agent")]
+    final_entry = _entries_by_name(final)[AgentName("stream-base-agent")]
     # The base snapshot shows the agent but not yet the source's repo_path.
     assert FIELD_REPO_PATH not in base_entry.fields
     # The final snapshot carries the freshly computed repo_path.
@@ -372,7 +378,7 @@ def test_stream_board_snapshot_seeds_base_from_cache_then_replaces(
     """
     agent = create_test_agent_state(local_host, work_dir, "stream-seed-agent")
     agent.set_labels({"remote": "git@github.com:org/myrepo.git"})
-    seeded = {
+    seeded: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("stream-seed-agent"): {
             FIELD_REPO_PATH: RepoPathField(path="old/seeded", created=datetime(2020, 1, 1, tzinfo=timezone.utc))
         }
@@ -380,8 +386,8 @@ def test_stream_board_snapshot_seeds_base_from_cache_then_replaces(
     updates = _collect_stream_updates(stream_board_snapshot, temp_mngr_ctx, [RepoPathsDataSource()], seeded)
 
     base, final = updates[0], updates[-1]
-    base_entry = {e.name: e for e in base.snapshot.entries}[AgentName("stream-seed-agent")]
-    final_entry = {e.name: e for e in final.snapshot.entries}[AgentName("stream-seed-agent")]
+    base_entry = _entries_by_name(base)[AgentName("stream-seed-agent")]
+    final_entry = _entries_by_name(final)[AgentName("stream-seed-agent")]
 
     base_repo = base_entry.fields[FIELD_REPO_PATH]
     assert isinstance(base_repo, RepoPathField)
@@ -406,7 +412,7 @@ def test_stream_board_snapshot_drops_seeded_key_when_source_returns_nothing(
 ) -> None:
     """A successful source governs its key entirely: a stale seed is dropped."""
     create_test_agent_state(local_host, work_dir, "stream-drop-agent")
-    seeded = {
+    seeded: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("stream-drop-agent"): {
             FIELD_REPO_PATH: RepoPathField(path="old/seeded", created=datetime(2020, 1, 1, tzinfo=timezone.utc))
         }
@@ -414,8 +420,8 @@ def test_stream_board_snapshot_drops_seeded_key_when_source_returns_nothing(
     updates = _collect_stream_updates(stream_board_snapshot, temp_mngr_ctx, [_FakeEmptyRepoPathSource()], seeded)
 
     base, final = updates[0], updates[-1]
-    base_entry = {e.name: e for e in base.snapshot.entries}[AgentName("stream-drop-agent")]
-    final_entry = {e.name: e for e in final.snapshot.entries}[AgentName("stream-drop-agent")]
+    base_entry = _entries_by_name(base)[AgentName("stream-drop-agent")]
+    final_entry = _entries_by_name(final)[AgentName("stream-drop-agent")]
     # Seeded in the base render, dropped once the owning source returned empty.
     assert FIELD_REPO_PATH in base_entry.fields
     assert FIELD_REPO_PATH not in final_entry.fields
@@ -438,7 +444,7 @@ def test_stream_board_snapshot_final_matches_batch(
     final = _collect_stream_updates(stream_board_snapshot, temp_mngr_ctx, sources)[-1]
 
     batch_entry = {e.name: e for e in batch.snapshot.entries}[AgentName("stream-parity-agent")]
-    final_entry = {e.name: e for e in final.snapshot.entries}[AgentName("stream-parity-agent")]
+    final_entry = _entries_by_name(final)[AgentName("stream-parity-agent")]
     assert set(final_entry.fields.keys()) == set(batch_entry.fields.keys())
     assert final_entry.section == batch_entry.section
     assert set(final.cached_fields.keys()) == set(batch.cached_fields.keys())
@@ -453,7 +459,7 @@ def test_stream_local_snapshot_carries_forward_remote_fields_via_seed(
 ) -> None:
     """A local streaming refresh keeps remote fields (skipped sources) via the seed."""
     create_test_agent_state(local_host, temp_git_repo, "stream-local-agent")
-    seeded = {
+    seeded: dict[AgentName, dict[str, FieldValue]] = {
         AgentName("stream-local-agent"): {
             FIELD_REPO_PATH: RepoPathField(path="seed/repo", created=datetime(2020, 1, 1, tzinfo=timezone.utc))
         }
@@ -465,7 +471,7 @@ def test_stream_local_snapshot_carries_forward_remote_fields_via_seed(
         seeded,
     )
 
-    final_entry = {e.name: e for e in updates[-1].snapshot.entries}[AgentName("stream-local-agent")]
+    final_entry = _entries_by_name(updates[-1])[AgentName("stream-local-agent")]
     # The remote (repo_path) source is skipped, so its seeded value is carried forward.
     carried = final_entry.fields[FIELD_REPO_PATH]
     assert isinstance(carried, RepoPathField)
