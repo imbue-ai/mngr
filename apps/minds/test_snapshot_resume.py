@@ -1122,7 +1122,8 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     # restore --delete) and persisted the pinned version.
     version_after = _exec_in_container(container_name, "restic version", timeout=30)
     assert version_after.returncode == 0, version_after.stderr
-    assert "restic 0.1" in version_after.stdout
+    # The pinned minor (the script pins 0.18.x); update alongside a pin bump.
+    assert "restic 0.18" in version_after.stdout, version_after.stdout
     assert "restic 0.14" not in version_after.stdout, version_after.stdout
 
     # The repository timeline tells the story: the source snapshot, the
