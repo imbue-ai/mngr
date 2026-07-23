@@ -583,12 +583,66 @@ The phases, in landing order (9A ships first; letters are separate PRs):
   (`resolve_create_host_name` etc.) moves out of `templates.py` into a
   non-rendering module; form defaults ride the island.
 - **9F -- Inbox detail + permission forms**: the deliberate Phase-5
-  deferral is now in scope. `RequestEventHandler.render_request_detail_fragment`
-  (HTML string) becomes a structured-payload method; per-request-type
-  mithril detail views replace `PermissionsForm`/`PermissionsHeader`/
-  `PermissionsError`/`PermissionsManualCredentials` and the Latchkey*
-  permission pages. Hardest phase; also Sharing/SharingModal shells and
-  the supertokens `templates/auth/` pages land here or alongside (9F').
+  deferral is now in scope. Concrete design (settled 2026-07-23 after
+  9F'/9F'' landed the sharing shells + help modal):
+
+  * **Payload union** (chrome_state.py + chrome_state.ts mirror), tagged
+    by `kind`, replacing the HTML fragments. All fields are plain
+    strings/lists (no latchkey imports in the contract module):
+    - `unavailable {message}` (replaces InboxUnavailable.jinja)
+    - `predefined {agent_id, request_id, ws_name, rationale,
+      display_name, permission_schemas: [str],
+      description_by_permission_name: {str: str},
+      checked_permissions: [str], wildcard_permission, wildcard_label,
+      will_open_browser}` -- the unknown-scope case renders as a
+      deny-only variant (empty permission_schemas; the component offers
+      Deny + explains the unknown scope via `unknown_scope: str`)
+    - `file_sharing {agent_id, request_id, ws_name, rationale,
+      file_path, access (READ|WRITE), access_human_label,
+      allowed_roots: [str], home_dir}`
+    - `accounts {agent_id, request_id, ws_name, rationale}`
+    - `workspace {agent_id, request_id, ws_name, rationale,
+      verbs: [{permission, display_name, description, is_targeted,
+      is_checked}], target_workspace_id, target_workspace_name,
+      show_target_choice}`
+    (`mngr_forward_origin`/`scope` are dropped -- the old templates
+    declared but never rendered them.)
+  * **Interface**: `RequestEventHandler.render_request_detail_fragment`
+    -> `build_request_detail_payload(req_event, backend_resolver) ->
+    InboxDetailPayload`; the four latchkey handlers port their arg
+    computation verbatim; latchkey/handlers/templates.py is deleted.
+  * **Routes**: `GET /inbox/detail/<id>` returns JSON `{detail: ...}`;
+    `render_inbox_page` seeds the initial payload in the island
+    (`inbox.detail`) instead of `detail_html`; the unavailable cases
+    build the `unavailable` payload; `render_inbox_unavailable_fragment`
+    is deleted.
+  * **Frontend**: a new `InboxDetail.ts` renders the per-kind views and
+    owns the ported shell-script logic: Approve gating (any
+    `permissions` selection; the wildcard `any`/`all` exclusivity that
+    disables specific checkboxes), file-sharing path validation
+    (~-expansion + within-roots check mirroring the server, hint +
+    Approve block) and the Electron native pickers
+    (`window.minds.showFilePicker`, file/folder buttons hidden without
+    the bridge), grant submission via FormData-equivalent POST to
+    `/requests/<id>/grant` handling outcomes GRANTED/DENIED (advance),
+    NEEDS_MANUAL_CREDENTIALS (info box + command), FAILED (retryable
+    error), plus the busy state (both buttons disabled, spinner +
+    "Approving..."), and the fire-and-forget deny with the denying-card
+    marker. `InboxList.ts`'s detail fetch consumes the JSON payload and
+    renders the detail component (nested mount in `#inbox-detail`);
+    `Inbox.jinja` shrinks to shell + island + mounts (the inbox-card
+    style block stays in the shell head until 9G). The drawer chrome
+    (header/backdrop/escape/drag regions/is-empty layout) moves into
+    the component tree.
+  * **Tests**: handler tests assert payloads instead of HTML; the
+    detail route tests assert JSON; vitest covers the four detail views
+    + submit outcomes; the visual-diff latchkey scenarios switch to
+    rendering the inbox page with a seeded detail island (they have
+    NEVER captured -- bare fragments lack the stylesheet link).
+
+  Also in 9F: the supertokens `templates/auth/` pages + static/auth.js +
+  SigninModal (the sharing shells and help modal already landed as 9F'
+  and 9F'').
 - **9G -- Shell collapse**: DevStyleguide port, then the endgame --
   titlebar first paint moves to a synchronous inline mount seeded from
   data attributes/island; `ChromeShell`/`Base`/`Chrome`/`Sidebar`/
