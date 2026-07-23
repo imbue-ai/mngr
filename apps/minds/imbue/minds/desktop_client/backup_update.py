@@ -27,7 +27,6 @@ the ``BLOCKED_BY_RUNNING_CHATS:`` prefix so the UI can offer the
 "Stop all chats and retry" action.
 """
 
-from collections.abc import Callable
 from typing import Final
 
 from loguru import logger
@@ -201,10 +200,8 @@ def _run_update_phases(
     registry.complete(agent_id)
 
 
-def _make_exec_log_forwarder(
-    registry: WorkspaceOperationRegistryInterface, agent_id: AgentId
-) -> Callable[[str, bool], None]:
-    """Build an ``on_output`` callback that streams exec output into the operation log.
+class _ExecLogForwarder(MutableModel):
+    """``on_output`` callback streaming a workspace exec's output into the operation log.
 
     The scripts' marker verdict line is excluded -- it is machine-readable
     plumbing, parsed separately -- and blank lines are dropped. Everything
@@ -212,15 +209,18 @@ def _make_exec_log_forwarder(
     tracebacks on stderr) lands in the log so the user can follow along live.
     """
 
-    def _forward(line: str, is_stdout: bool) -> None:
+    workspace_agent_id: AgentId = Field(frozen=True, description="Workspace whose operation log receives the lines.")
+    registry: WorkspaceOperationRegistryInterface = Field(
+        frozen=True, description="In-memory operation registry holding the log."
+    )
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
         stripped = line.rstrip()
         if not stripped.strip():
             return
         if stripped.startswith(RESTORE_RESULT_MARKER) or stripped.startswith(UPDATE_RESULT_MARKER):
             return
-        registry.append_log(agent_id, stripped)
-
-    return _forward
+        self.registry.append_log(self.workspace_agent_id, stripped)
 
 
 def _apply_update_and_verify(
@@ -256,7 +256,7 @@ def _apply_update_and_verify(
         apply_command,
         parent_cg=parent_cg,
         timeout_seconds=_APPLY_EXEC_TIMEOUT_SECONDS,
-        on_output=_make_exec_log_forwarder(registry, agent_id),
+        on_output=_ExecLogForwarder(workspace_agent_id=agent_id, registry=registry),
     )
     payload = extract_marker_json(apply_result.stdout, UPDATE_RESULT_MARKER)
     if payload is None:
@@ -560,7 +560,7 @@ def _run_restore_phases(
         restore_command,
         parent_cg=parent_cg,
         timeout_seconds=_RESTORE_EXEC_TIMEOUT_SECONDS,
-        on_output=_make_exec_log_forwarder(registry, agent_id),
+        on_output=_ExecLogForwarder(workspace_agent_id=agent_id, registry=registry),
     )
     payload = extract_marker_json(restore_result.stdout, RESTORE_RESULT_MARKER)
     if payload is None:

@@ -145,7 +145,8 @@ def run_mngr_exec_on_agent(
     parent_cg: ConcurrencyGroup | None,
     timeout_seconds: float = _MNGR_EXEC_TIMEOUT_SECONDS,
     # Invoked with (line, is_stdout) for each output line as it arrives, so a
-    # long exec (a restore) can stream live progress into an operation log.
+    # long-running command (a restore) can stream live progress into an
+    # operation log.
     on_output: Callable[[str, bool], None] | None = None,
 ) -> FinishedProcess:
     """Run a single shell command on the agent's host via ``mngr exec``.

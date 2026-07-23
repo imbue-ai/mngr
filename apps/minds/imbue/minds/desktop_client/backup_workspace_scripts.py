@@ -865,13 +865,11 @@ def _restic_streaming(args, env_map, restic_binary, timeout=_RESTIC_TIMEOUT_SECO
             last_progress_at = now
         _progress(message)
 
-    while True:
+    # Loop until restic closes its output (break) or the deadline passes (the
+    # loop condition fails and the while's else reports the timeout).
+    while _time.monotonic() < deadline:
         remaining = deadline - _time.monotonic()
-        if remaining <= 0:
-            process.kill()
-            process.wait()
-            return 124, "restic %s timed out after %d seconds" % (args[0], int(timeout))
-        ready, _, _ = _select.select([fd], [], [], min(remaining, 5.0))
+        ready, _, _ = _select.select([fd], [], [], max(min(remaining, 5.0), 0.0))
         if not ready:
             continue
         chunk = _os.read(fd, 65536)
@@ -881,6 +879,10 @@ def _restic_streaming(args, env_map, restic_binary, timeout=_RESTIC_TIMEOUT_SECO
         while b"\n" in buffered:
             raw, buffered = buffered.split(b"\n", 1)
             _handle_line(raw.decode("utf-8", "replace"))
+    else:
+        process.kill()
+        process.wait()
+        return 124, "restic %s timed out after %d seconds" % (args[0], int(timeout))
     if buffered:
         _handle_line(buffered.decode("utf-8", "replace"))
     try:

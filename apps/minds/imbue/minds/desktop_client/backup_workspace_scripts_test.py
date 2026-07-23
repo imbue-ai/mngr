@@ -380,6 +380,32 @@ def test_gate_probe_ignores_a_stale_dead_tick_once_a_newer_tick_finished(tmp_pat
     assert payload["backup_tick_in_flight"] is False
 
 
+def test_gate_probe_treats_a_tick_as_dead_when_the_backup_service_is_not_running(tmp_path: Path) -> None:
+    # Self-healing: ticks are restic runs owned by the supervised host-backup
+    # service, so a stopped service means no tick can be alive -- an orphaned
+    # BACKUP_STARTED journal entry (e.g. from a tick a restore's `stop all`
+    # killed) must not read as in flight, or a retry would wait 900s for a
+    # tick that will never finish.
+    repo = _make_workspace_repo(tmp_path)
+    host_dir = tmp_path / "host"
+    events_path = host_dir / "agents" / "agent-x" / "events" / "backup" / "events.jsonl"
+    events_path.parent.mkdir(parents=True)
+    events_path.write_text(json.dumps({"type": "BACKUP_STARTED", "tick_id": "orphan"}) + "\n")
+    # The is_restart_ok=False supervisorctl stub reports the service STOPPED.
+    stub_bin = _make_stub_bin(tmp_path, restart_ok=False)
+    command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"))
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_bin}:{env['PATH']}"
+    env["MNGR_HOST_DIR"] = str(host_dir)
+    env.pop("MNGR_AGENT_STATE_DIR", None)
+    result = subprocess.run(
+        ["bash", "-c", command], cwd=repo, capture_output=True, text=True, check=False, timeout=120, env=env
+    )
+    payload = extract_marker_json(result.stdout, GATE_RESULT_MARKER)
+    assert payload is not None, result.stdout + result.stderr
+    assert payload["backup_tick_in_flight"] is False
+
+
 # --- apply update script ---
 
 
