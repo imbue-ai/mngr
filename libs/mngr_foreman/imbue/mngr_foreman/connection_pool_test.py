@@ -85,10 +85,6 @@ def test_send_via_pool_never_auto_starts(monkeypatch: pytest.MonkeyPatch) -> Non
     handle = pool._handle_for("a")
     handle.matches = ["m"]  # seed cached matches so no resolution runs
     handle.matches_at = time.monotonic()
-    # Seed the resolved (agent, host) too: the send now runs under the per-host lock via
-    # run_on_host, which resolves only if these are None.
-    handle.agent = cast(Any, SimpleNamespace())
-    handle.host = cast(Any, SimpleNamespace())
     assert cp.send_via_pool(pool, "a", "hello") == []
     assert captured["is_start_desired"] is False
 
@@ -112,7 +108,7 @@ def test_run_on_host_caches_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_run_on_host_keeps_handle_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     # A transient command failure must NOT tear down the cached connection: the
     # handle is reused (no re-resolve) and the error just propagates. Reconnection
-    # is the keepalive's job alone (see test_warm_one_reconnects_on_ping_failure).
+    # is the keepalive's job alone.
     calls = {"r": 0}
     monkeypatch.setattr(cp, "parse_agent_address", lambda name: name)
     monkeypatch.setattr(cp, "find_one_agent", lambda addr, ctx: ("hr", "ar"))
@@ -134,58 +130,25 @@ def test_run_on_host_keeps_handle_on_error(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls["r"] == 1
 
 
-def test_warm_one_reconnects_on_ping_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A failed keepalive ping means the connection dropped: _warm_one must forget
-    # the handle and re-resolve once so it reconnects on the same tick.
-    calls = {"r": 0}
+def test_warm_one_no_reconnect_on_touch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The keepalive no longer pings/reconnects the paramiko connection (that churn was
+    # the leak). A failed _touch just logs and moves on -- it must NOT re-touch/reconnect.
     monkeypatch.setattr(cp, "parse_agent_address", lambda name: name)
-    monkeypatch.setattr(cp, "find_all_agents", lambda **_kw: ["m"])
-    monkeypatch.setattr(cp, "find_one_agent", lambda addr, ctx: ("hr", "ar"))
-    pings = {"n": 0}
+    calls = {"touch": 0}
 
-    class _FlakyHost:
-        is_local = False
+    def _boom_matches(**_kw: object) -> list[str]:
+        calls["touch"] += 1
+        raise RuntimeError("discovery hiccup")
 
-        def execute_stateful_command(self, command: str, timeout_seconds: float | None = None) -> object:
-            pings["n"] += 1
-            if pings["n"] == 1:
-                raise RuntimeError("connection reset")  # first ping: the drop
-            return SimpleNamespace(success=True)
-
-    def _resolve(**_kw: object) -> tuple[object, object]:
-        calls["r"] += 1
-        return SimpleNamespace(), _FlakyHost()
-
-    monkeypatch.setattr(cp, "resolve_to_started_host_and_agent", _resolve)
+    monkeypatch.setattr(cp, "find_all_agents", _boom_matches)
     pool = _pool()
-    pool._warm_one("a")  # ping fails -> invalidate -> re-resolve -> ping ok
-    assert calls["r"] == 2  # re-resolved after the drop (reconnected)
-    assert pings["n"] == 2
+    pool._warm_one("a")  # must not raise, must not retry
+    assert calls["touch"] == 1  # exactly one attempt -- no reconnect loop
 
 
-def test_ping_host_skips_local() -> None:
-    class _LocalHost:
-        is_local = True
-
-        def execute_stateful_command(self, command: str, timeout_seconds: float | None = None) -> object:
-            raise AssertionError("should not touch a local host")
-
-    cp._ping_host(cast(Any, SimpleNamespace()), cast(Any, _LocalHost()))  # must not raise
-
-
-def test_ping_host_touches_remote_with_timeout() -> None:
-    seen: list[tuple[str, float | None]] = []
-
-    class _RemoteHost:
-        is_local = False
-
-        def execute_stateful_command(self, command: str, timeout_seconds: float | None = None) -> object:
-            seen.append((command, timeout_seconds))
-            return SimpleNamespace(success=True)
-
-    cp._ping_host(cast(Any, SimpleNamespace()), cast(Any, _RemoteHost()))
-    # The keepalive touch is bounded so a hung host can't wedge the connection.
-    assert seen == [("true", cp._KEEPALIVE_TIMEOUT_SECONDS)]
+def _touch_host(_agent: Any, host: Any) -> None:
+    """A trivial run_on_host fn used to exercise the per-host lock in the tests below."""
+    host.execute_stateful_command("true")
 
 
 class _RecordingHost:
@@ -226,7 +189,7 @@ def test_run_on_host_serializes_two_agents_on_one_host() -> None:
     _seed_handle(pool, "a", shared)
     _seed_handle(pool, "b", shared)
 
-    threads = [threading.Thread(target=lambda n=n: pool.run_on_host(n, cp._ping_host)) for n in ("a", "b")]
+    threads = [threading.Thread(target=lambda n=n: pool.run_on_host(n, _touch_host)) for n in ("a", "b")]
     for t in threads:
         t.start()
     for t in threads:
@@ -242,7 +205,7 @@ def test_run_on_host_allows_distinct_hosts_concurrently() -> None:
     _seed_handle(pool, "a", _RecordingHost("a", 0.1, tracker))
     _seed_handle(pool, "b", _RecordingHost("b", 0.1, tracker))
 
-    threads = [threading.Thread(target=lambda n=n: pool.run_on_host(n, cp._ping_host)) for n in ("a", "b")]
+    threads = [threading.Thread(target=lambda n=n: pool.run_on_host(n, _touch_host)) for n in ("a", "b")]
     for t in threads:
         t.start()
     for t in threads:
@@ -259,11 +222,29 @@ def _wait_until(predicate: Any, timeout: float = 2.0) -> bool:
     return predicate()
 
 
+def _track_prewarm(monkeypatch: pytest.MonkeyPatch, warmed: set[str], delay: float = 0.0) -> None:
+    """Patch out the two things _touch does (refresh matches + prewarm ControlMaster)
+    and record which agents got warmed via the ControlMaster prewarm. No paramiko."""
+    monkeypatch.setattr(cp, "parse_agent_address", lambda name: name)
+    monkeypatch.setattr(cp, "find_all_agents", lambda **_kw: [])  # get_send_matches -> no discovery
+    lock = threading.Lock()
+
+    def _fake_prewarm(_pool: Any, name: str) -> None:
+        if delay:
+            time.sleep(delay)
+        with lock:
+            warmed.add(name)
+
+    monkeypatch.setattr("imbue.mngr_foreman.terminal.prewarm_agent_control_master", _fake_prewarm)
+
+
 def test_maintainer_registers_wake_and_warms_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The maintainer must register its wake with the registry and warm "on" agents
-    # right away (immediate first tick), not after a full keepalive interval.
+    # The maintainer registers its wake with the registry and warms "on" agents right
+    # away -- warming = refresh send matches + prewarm the ControlMaster socket (NO
+    # paramiko ping; that ping was the leak).
     monkeypatch.setattr(cp, "_KEEPALIVE_INTERVAL_SECONDS", 100.0)  # so any tick is immediate/wake-driven
-    tracker: dict[str, Any] = {"lock": threading.Lock(), "live": 0, "max_live": 0, "pinged": set()}
+    warmed: set[str] = set()
+    _track_prewarm(monkeypatch, warmed)
     captured: list[Any] = []
     registry = cast(
         Any,
@@ -273,34 +254,29 @@ def test_maintainer_registers_wake_and_warms_immediately(monkeypatch: pytest.Mon
         ),
     )
     pool = _pool()
-    _seed_handle(pool, "a", _RecordingHost("a", 0.0, tracker))
     pool.start_maintainer(registry)
     try:
-        assert _wait_until(lambda: "a" in tracker["pinged"])  # warmed without the 100s wait
+        assert _wait_until(lambda: "a" in warmed)  # warmed without the 100s wait
         assert captured == [pool._wake.set]  # registered its wake callback
-        # A change notification triggers another tick promptly.
-        with tracker["lock"]:
-            tracker["pinged"].clear()
+        warmed.clear()
         captured[0]()  # simulate the registry firing on a new agent
-        assert _wait_until(lambda: "a" in tracker["pinged"])
+        assert _wait_until(lambda: "a" in warmed)
     finally:
         pool.stop()
 
 
-def test_tick_warms_all_hosts_concurrently_despite_lag() -> None:
-    # A slow host must not serialize the keepalive: two ~0.4s hosts warmed in
-    # parallel finish in ~0.4s, not ~0.8s, and both get pinged.
-    tracker: dict[str, Any] = {"lock": threading.Lock(), "live": 0, "max_live": 0, "pinged": set()}
+def test_tick_warms_all_agents_concurrently_despite_lag(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A slow host must not serialize the maintainer: two ~0.4s prewarms run in parallel
+    # (~0.4s, not ~0.8s), and both agents get warmed.
+    warmed: set[str] = set()
+    _track_prewarm(monkeypatch, warmed, delay=0.4)
     pool = _pool()
-    _seed_handle(pool, "a", _RecordingHost("a", 0.4, tracker))
-    _seed_handle(pool, "b", _RecordingHost("b", 0.4, tracker))
     pool._registry = cast(
         Any,
         SimpleNamespace(snapshot=lambda: [{"name": "a", "state": "RUNNING"}, {"name": "b", "state": "RUNNING"}]),
     )
-
     start = time.monotonic()
     pool._tick()
     elapsed = time.monotonic() - start
-    assert tracker["pinged"] == {"a", "b"}  # loop reached every host
+    assert warmed == {"a", "b"}  # loop reached every agent
     assert elapsed < 0.7  # concurrent (serial would be ~0.8s)

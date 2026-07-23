@@ -299,24 +299,23 @@ class ConnectionPool:
             logger.trace("warm-pool tick error: {}", e)
 
     def _warm_one(self, name: str) -> None:
-        """Refresh one agent's send matches and ping its SSH connection to keep it hot.
+        """Refresh one agent's send matches + keep its ControlMaster socket warm.
 
-        A failed ping means the connection dropped (or the agent moved hosts):
-        forget the cached handle and re-resolve once, so it reconnects immediately
-        on this same tick rather than at the next send.
+        Does NOT ping the paramiko connection anymore. That ping was the leak engine:
+        under load it timed out, we panic-reconnected, and the old connection's reader
+        thread failed to die -> 100s-1000s of leaked threads that starved the box. The
+        paramiko connection is now kept warm the honest way -- by the 1s input-state
+        probe actually USING it (a redundant ping added nothing but the churn). A
+        connection that genuinely dies is simply re-resolved on next use; nothing here
+        reconnects on a timeout, so there is no churn to leak.
         """
         try:
-            try:
-                self._touch(name)
-            except Exception:  # noqa: BLE001 - reconnect on any keepalive failure
-                self.invalidate(name)
-                self._touch(name)
+            self._touch(name)
+        except Exception as e:  # noqa: BLE001 - a bad warm must not kill the maintainer or churn
+            logger.trace("warm-pool touch for {} failed (no reconnect): {}", name, e)
         finally:
-            # This task ran pyinfra/paramiko work, which spins up a thread-local
-            # gevent Hub with an OS-level wakeup pipe. Destroy it now so the pooled
-            # worker thread carries nothing over between ticks -- otherwise those
-            # epoll+eventfd fds accumulate for the life of the process. No-op on a
-            # thread that never touched gevent. (mngr/utils/thread_cleanup.py)
+            # This task may touch pyinfra/gevent; destroy the thread-local Hub so its
+            # epoll+eventfd fds don't accumulate. No-op if none was created.
             cleanup_thread_local_resources()
 
     def _touch(self, name: str) -> None:
@@ -324,11 +323,9 @@ class ConnectionPool:
         # it at module load would be circular. Mirrors send_via_pool's lazy import.
         from imbue.mngr_foreman.terminal import prewarm_agent_control_master
 
-        # Send path (paramiko): keep matches fresh and the mngr connection hot.
+        # Keep the send-match list fresh (send needs it; no connection opened here).
         self.get_send_matches(name)
-        self.run_on_host(name, _ping_host)
-        # Terminal path (system-ssh): keep the ControlMaster socket hot too, so the
-        # first terminal open is warm -- not just repeat opens.
+        # Keep the terminal's system-ssh ControlMaster socket hot (no paramiko).
         prewarm_agent_control_master(self, name)
 
     def _tick(self) -> None:
@@ -371,17 +368,6 @@ class ConnectionPool:
         # Tear down the keepalive workers (and let their gevent Hubs go with them).
         if executor is not None:
             executor.shutdown(wait=False)
-
-
-def _ping_host(_agent: AgentInterface, host: OnlineHostInterface) -> None:
-    """Cheap liveness touch to keep an SSH connection warm; no-op for local hosts.
-
-    Bounded by a timeout so a host that accepts TCP but never replies can't wedge
-    the keepalive on this connection.
-    """
-    if getattr(host, "is_local", False):
-        return
-    host.execute_stateful_command("true", timeout_seconds=_KEEPALIVE_TIMEOUT_SECONDS)
 
 
 def send_via_pool(pool: ConnectionPool, agent_name: str, message: str) -> list[tuple[str, str]]:
