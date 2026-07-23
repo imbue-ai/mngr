@@ -34,6 +34,7 @@ def test_cli_help_contains_provider_env_label_options(cli_runner: CliRunner) -> 
     result = cli_runner.invoke(tmr, ["--help"])
     assert "--provider" in result.output
     assert "--env" in result.output
+    assert "--reducer-env" in result.output
     assert "--label" in result.output
 
 

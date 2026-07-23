@@ -279,11 +279,6 @@
 # it to check that per-env .sh files declare every template key.
 !/.minds/template/
 !/.minds/template/**
-# Vault ACL policies for the minds tiers. The HCL is non-sensitive and is
-# the source of truth for the policies pushed to Vault via
-# `vault policy write <name> .minds/policies/<name>.hcl`.
-!/.minds/policies/
-!/.minds/policies/**
 
 # Autofix session artifacts
 **/.autofix/
