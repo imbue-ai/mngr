@@ -32,6 +32,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `mngr observe --stream-events` echoes each agents-stream event (`AGENT_STATE`, `AGENTS_FULL_STATE`, and the new `AGENT_REMOVED`) to stdout as compact JSONL, so a parent process can consume live agent lifecycle state by reading the observer's stdout. Cannot be combined with `--discovery-only`.
 - Added: `AGENT_REMOVED` event on the agents stream, emitted when a previously-known agent is destroyed, so consumers learn of removals promptly rather than at the next full snapshot.
 - Added: `AgentDetails.pid` field populated for running agents on any provider (the PID of their main process, in the host's PID namespace); filterable/sortable in listings. The observer only PID-watches local agents (gated on the `local` provider) — a remote PID must never be watched in-process.
+- Added: `mngr tmr --reducer-env KEY=VALUE` passes environment variables to the reducer agent only, never to mappers (for credentials the reducer needs but mappers must not receive, e.g. a token that can push and open PRs).
 
 ### Changed
 
@@ -48,6 +49,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Bumped the release Dockerfile's pinned `CLAUDE_CODE_VERSION` from `2.1.141` to `2.1.160` to match forever-claude-template's `[agent_types.claude].version`; the drift was causing agent provisioning to fail with "Claude version mismatch".
 - Changed: Bumped the release-sandbox Dockerfile's pinned Claude Code from 2.1.160 to 2.1.207 (adds Claude Fable 5 support); must land with the matching `[agent_types.claude].version` bump in default-workspace-template.
 - Changed: `mngr message` submission confirmation no longer uses tmux `wait-for` channels — a new engine polls agent-supplied durable evidence probes (content-based for claude, `active` marker for antigravity/codex) with bounded pane-gated Enter retries. `InteractiveTuiAgent` subclasses now implement `_build_submission_evidence_probes` instead of `_send_enter_and_validate`; the `send_enter_best_effort` / `send_enter_and_poll_for_cleared_indicator` strategies are removed, and `enter_submission_timeout_seconds` is renamed `confirmation_timeout_seconds` (default 90s). Slash commands (e.g. `/clear`) use a relaxed policy that never hard-fails. Unconfirmed strict sends emit rich diagnostics (per-probe baseline/final tokens, Enter-retry history, pane capture).
+- Changed: `mngr tmr` help text now documents the reducer's full role (collapsing repeated changes, writing the run's changelog, opening the pull request), the explicit per-test `--timeout` its agents run with, and the `escalations` field in the outcome schema.
 
 ### Fixed
 

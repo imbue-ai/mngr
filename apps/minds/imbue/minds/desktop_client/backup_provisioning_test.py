@@ -63,9 +63,7 @@ class _FakeImbueCloudCli(ImbueCloudCli):
     def get_bucket_info(self, account: str, name: str) -> R2BucketInfo:
         return R2BucketInfo(bucket_name=f"u--{name}", s3_endpoint=AnyUrl(_ENDPOINT))
 
-    def create_bucket_key(
-        self, *, account: str, name: str, access: str = "readwrite", alias: str | None = None
-    ) -> R2BucketKeyMaterial:
+    def roll_bucket_key(self, *, account: str, name: str) -> R2BucketKeyMaterial:
         self.minted_key_names.append(name)
         return _fake_key(f"u--{name}")
 

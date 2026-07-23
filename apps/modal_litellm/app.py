@@ -153,9 +153,15 @@ def _write_config_file() -> str:
     return config_path
 
 
+# litellm is pinned: the proxy's auth/budget behavior (user-level budgets
+# enforce the per-account monthly LLM spend quota) must not drift under us on
+# a redeploy. Bump deliberately, re-verifying budget enforcement + the price
+# map for the models in LITELLM_CONFIG.
+_LITELLM_VERSION = "1.93.0"
+
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("litellm[proxy]", "prisma", "pyyaml")
+    .pip_install(f"litellm[proxy]=={_LITELLM_VERSION}", "prisma", "pyyaml")
     .run_commands(
         'python -c "import litellm.proxy; import os; print(os.path.dirname(litellm.proxy.__file__))" > /tmp/litellm_proxy_dir.txt',
         "prisma generate --schema $(cat /tmp/litellm_proxy_dir.txt)/schema.prisma",

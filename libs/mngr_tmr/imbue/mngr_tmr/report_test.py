@@ -22,6 +22,7 @@ from imbue.mngr_tmr.report import _render_markdown
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.report import load_testing_agent_outcome
 from imbue.mngr_tmr.report import report_section_of
+from imbue.mngr_tmr.report import synthesize_missing_mapper_outcomes
 
 SUCCEEDED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
 FAILED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="failed")}
@@ -624,3 +625,55 @@ def test_outcome_cache_is_keyed_by_output_dir(tmp_path: Path) -> None:
     assert from_first is not None and from_second is not None
     assert from_first.summary_markdown == "FROM-FIRST"
     assert from_second.summary_markdown == "FROM-SECOND"
+
+
+# --- synthesizing outcomes for failed mappers ---
+
+
+def _errored_mapper(name: str) -> AgentMetadata:
+    return AgentMetadata(
+        kind=AgentKind.MAPPER,
+        agent_name=AgentName(name),
+        task_id="tests/test_x.py::test_x",
+        branch_name=None,
+        error_summary="Agent timed out",
+    )
+
+
+def test_synthesize_writes_an_errored_outcome_for_a_failed_mapper(tmp_path: Path) -> None:
+    written = synthesize_missing_mapper_outcomes(tmp_path, [_errored_mapper("dead-agent")])
+    assert written == [AgentName("dead-agent")]
+    outcome = load_testing_agent_outcome(AgentName("dead-agent"), tmp_path)
+    assert outcome is not None
+    assert outcome.errored is True
+    assert outcome.summary_markdown == "Agent timed out"
+
+
+def test_synthesize_makes_a_failed_mapper_count_as_failed(tmp_path: Path) -> None:
+    """The whole point: the synthetic file lands the failed mapper in the FAILED section."""
+    synthesize_missing_mapper_outcomes(tmp_path, [_errored_mapper("dead-agent")])
+    outcome = load_testing_agent_outcome(AgentName("dead-agent"), tmp_path)
+    assert outcome is not None
+    row = TestMapReduceResult(test_node_id="t", agent_name=AgentName("dead-agent"), errored=outcome.errored)
+    assert report_section_of(row) == ReportSection.FAILED
+
+
+def test_synthesize_does_not_overwrite_a_real_outcome(tmp_path: Path) -> None:
+    """A mapper that both errored-in-metadata and left a real file keeps its file."""
+    name = AgentName("has-real-outcome")
+    _write_test_outcome(tmp_path, name, TestResult(summary_markdown="REAL", errored=False))
+    written = synthesize_missing_mapper_outcomes(tmp_path, [_errored_mapper(str(name))])
+    assert written == []
+    outcome = load_testing_agent_outcome(name, tmp_path)
+    assert outcome is not None
+    assert outcome.summary_markdown == "REAL"
+
+
+def test_synthesize_ignores_successful_mappers_and_the_reducer(tmp_path: Path) -> None:
+    ok_mapper = AgentMetadata(
+        kind=AgentKind.MAPPER, agent_name=AgentName("ok"), task_id="t", branch_name=None, error_summary=None
+    )
+    reducer = AgentMetadata(
+        kind=AgentKind.REDUCER, agent_name=AgentName("red"), task_id=None, branch_name="b", error_summary="boom"
+    )
+    assert synthesize_missing_mapper_outcomes(tmp_path, [ok_mapper, reducer]) == []

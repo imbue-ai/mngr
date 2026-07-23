@@ -479,11 +479,17 @@ def _handle_resend_verification_api() -> Response:
 def _handle_signin_modal_page() -> Response:
     """Render the sign-in modal page (``GET /auth/signin-modal``).
 
-    Served into the desktop client's shared modal WebContentsView (the overlay
-    layer that also hosts the inbox) so the create screen's sign-in prompt
-    covers the whole window, including the title bar.
+    Served into the desktop client's shared modal WebContentsView so the
+    sign-in prompt covers the whole window, including the title bar. The
+    optional ``?return_to=`` (validated as a safe local path) is where a
+    successful sign-in lands the content view; it defaults to the create
+    screen, the modal's original caller. The optional ``?mode=signin`` leads
+    with the sign-in tab (for callers labeled "Log In"); anything else keeps
+    the sign-up default.
     """
-    return make_html_response(render_signin_modal_page())
+    return_to = safe_local_redirect_path(request.args.get("return_to")) or "/create"
+    default_to_signup = request.args.get("mode") != "signin"
+    return make_html_response(render_signin_modal_page(return_to=return_to, default_to_signup=default_to_signup))
 
 
 def _handle_check_email_page() -> Response:
