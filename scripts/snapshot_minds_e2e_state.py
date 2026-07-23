@@ -406,14 +406,18 @@ def _build_snapshot_image(staged_repo: Path, default_workspace_template_worktree
         # otherwise fail the whole image build. Re-running pnpm install only
         # re-runs the postinstalls that did not complete, so a retry is cheap.
         #
-        # build:css then runs (it needs the tailwindcss binary pnpm install
-        # provides) and produces the gitignored Tailwind stylesheet app.min.css:
-        # normally made by `pnpm start`'s prestart hook, but the e2e runner runs
-        # the app straight from source and never triggers that, so without it
-        # app.min.css 404s in the renderer -- and since the onboarding driver
-        # detects a screen advancing via `wait_for_selector(state="hidden")` and
-        # the `.hidden` rule lives in that stylesheet, a missing stylesheet makes
-        # every onboarding screen look stuck. Mirrors the Electron e2e test setup.
+        # ensure-binaries + build:css then run (both need what pnpm install
+        # provides), mirroring `pnpm start`'s prestart hook, which the e2e
+        # runner never triggers because it runs the app straight from source.
+        # ensure-binaries downloads the bundled binaries (restic, uv, git,
+        # limactl, desync) into apps/minds/resources/ -- without restic there,
+        # the sync-e2e backup flows fail with "restic binary not found".
+        # build:css produces the gitignored Tailwind stylesheet app.min.css:
+        # without it app.min.css 404s in the renderer -- and since the
+        # onboarding driver detects a screen advancing via
+        # `wait_for_selector(state="hidden")` and the `.hidden` rule lives in
+        # that stylesheet, a missing stylesheet makes every onboarding screen
+        # look stuck. Mirrors the Electron e2e test setup.
         #
         # The /app -> /code/mngr symlink (independent) works around offload
         # v0.9.7's create_from_image hardcoding workdir="/app": our project is at
@@ -429,7 +433,7 @@ def _build_snapshot_image(staged_repo: Path, default_workspace_template_worktree
             "sleep $((attempt * 10)); "
             "done ) & PNPM_PID=$!; "
             "wait $UV_PID && wait $PNPM_PID && "
-            "( cd /code/mngr/apps/minds && pnpm run build:css ) && "
+            "( cd /code/mngr/apps/minds && node scripts/ensure-binaries.js && pnpm run build:css ) && "
             "ln -s /code/mngr /app",
         )
     )

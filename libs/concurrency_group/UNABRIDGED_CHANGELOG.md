@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-21
+
+Subprocess shutdown logging no longer misreports routine cleanup as a forced kill. A process that already exited by the time its shutdown is requested (the common case for single-use workers, e.g. the minds warm `mngr` processes) is now reaped quietly with a debug line stating its actual exit code, instead of logging "Terminating subprocess ... with SIGTERM because a shutdown was requested". A process that is genuinely still alive logs "Stopping subprocess (pid ...) with SIGTERM because the parent requested cleanup (shutdown_event was set)"; the timeout path keeps its explicit "exceeded its Ns timeout" wording.
+
 ## 2026-07-08
 
 `RunningProcess` (and the `run_process_to_completion` / `run_process_in_background` / `run_background` spawn APIs) now accept an optional `name`: a log-safe label used as the reader thread's name and as the display command in any `ProcessError` / `TimeoutExpired` it raises. Callers whose command carries secret argument values (e.g. `--host-env PASSWORD=...`) can pass a masked/friendly `name` so those secrets never reach the JSONL log's `thread_name` field or an error message; the real command is still what executes. Defaults to the joined command, preserving prior behavior.

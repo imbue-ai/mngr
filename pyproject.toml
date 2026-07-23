@@ -114,13 +114,18 @@ addopts = [
   "--cov=imbue.mngr_ovh",
   "--cov=imbue.mngr_gcp",
   "--cov=imbue.mngr_azure",
-  "--cov-report=term-missing",
-  "--cov-report=xml",
+  # NOTE: no --cov-report/--coverage-to-file here. Per-run coverage reports
+  # are expensive to generate (they walk every measured file) and are only
+  # useful interactively, so the local recipes that want them
+  # (just test-unit / test-integration) pass those flags explicitly. Keeping
+  # them out of addopts lets offload CI batches disable them entirely with
+  # `--cov-report=` (pytest-cov only treats the empty value as "clear all
+  # reports" when it is the sole --cov-report given) while still writing the
+  # raw .coverage data file that CI combines for the coverage gates.
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
   "--slow-tests-to-file",
-  "--coverage-to-file",
 ]
 
 [tool.ruff]
@@ -175,6 +180,13 @@ extra-paths = ["scripts"]
 source = ["imbue"]
 parallel = true
 concurrency = ["multiprocessing", "thread"]
+# sys.monitoring (PEP 669) is ~3x lower overhead than the default C tracer on
+# Python 3.12, which matters for import-heavy workloads (pytest collection
+# and short-lived batch processes are dominated by module imports). Requires
+# Python >= 3.12 and is incompatible with branch coverage, dynamic contexts,
+# and greenlet/eventlet/gevent concurrency -- none of which we use. On older
+# Pythons coverage warns and falls back to the default core.
+core = "sysmon"
 omit = [
     "*_test.py",
     "test_*.py",

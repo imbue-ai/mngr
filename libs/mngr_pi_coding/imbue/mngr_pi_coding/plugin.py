@@ -616,7 +616,7 @@ class PiCodingAgent(
         return CommandString(f'{resume_prelude}; {invocation} "$@"')
 
     def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+        self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
         """Start the agent and, on creation, wait for the lifecycle extension's sentinel.
 
@@ -626,7 +626,7 @@ class PiCodingAgent(
         sentinel does not appear in time.
         """
         start_action()
-        if not is_creating:
+        if not is_readiness_awaited:
             return
         effective_timeout = timeout if timeout is not None else _READY_TIMEOUT_SECONDS
         sentinel_path = self._get_agent_dir() / _SESSION_STARTED_SENTINEL_NAME

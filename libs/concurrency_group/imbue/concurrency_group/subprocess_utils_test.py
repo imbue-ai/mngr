@@ -259,6 +259,22 @@ def test_shutdown_popen_terminates_with_sigterm_and_returns_signal_returncode() 
     assert process.poll() == -signal.SIGTERM
 
 
+def test_shutdown_popen_reaps_already_exited_process_with_its_own_exit_code() -> None:
+    # A process that finished before the shutdown request must be reaped with its own
+    # exit code rather than reported as SIGTERMed: single-use workers routinely exit
+    # on their own right before the parent's cleanup reaches them.
+    process = subprocess.Popen(
+        ["true"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    process.wait(timeout=5)
+
+    returncode = _shutdown_popen(process, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
+
+    assert returncode == 0
+
+
 def test_gather_output_reads_from_stdout_and_stderr() -> None:
     stdout_data = b"stdout content\n"
     stderr_data = b"stderr content\n"

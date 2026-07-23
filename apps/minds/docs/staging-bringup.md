@@ -412,41 +412,27 @@ Three Vault ACL policies gate access to the minds tiers:
 
 - **`employee`** -- bound by the default `employee` OIDC role.
   Every signed-in employee lands here. Denies
-  `secrets/{data,metadata}/minds/{staging,production}/*`; allows the
+  `secrets/minds/{staging,production}` across all kv-v2 endpoints
+  (data, metadata, delete, undelete, destroy, subkeys); allows the
   rest of `secrets/*`.
 - **`minds_staging`** -- bound by the `minds_staging` OIDC role.
   Grants CRUDL on `secrets/{data,metadata}/minds/staging/*`.
 - **`minds_production`** -- bound by the `minds_production` OIDC role.
   Grants CRUDL on `secrets/{data,metadata}/minds/production/*`.
 
-The policy text is committed under `.minds/policies/`; push edits with
-`vault policy write <name> .minds/policies/<name>.hcl`.
+All three policies and the two per-tier OIDC roles are managed by
+terraform in the [imbue-ai/vault](https://github.com/imbue-ai/vault)
+repo (`terraform/employee.tf` for the employee denies,
+`terraform/minds_operators.tf` for the operator roles + policies).
+That repo is the single source of truth -- never edit these with
+`vault policy write` / `vault write auth/oidc/role/...` directly, or
+the next `terraform apply` will silently revert your change.
 
-Each tier role's allowlist is a `bound_claims.email` list on the OIDC
-role. Adding a teammate to staging:
-
-```bash
-VAULT_ADDR='...' VAULT_NAMESPACE='admin' vault write auth/oidc/role/minds_staging - <<'EOF'
-{
-  "user_claim": "email",
-  "bound_audiences": ["848426076477-10ceo4ek7i9m1p3gm7vkb3gautms9ma2.apps.googleusercontent.com"],
-  "oidc_scopes": ["email"],
-  "bound_claims": {"email": ["josh@imbue.com", "alice@imbue.com"]},
-  "bound_claims_type": "string",
-  "allowed_redirect_uris": [
-    "https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200/ui/vault/auth/oidc/oidc/callback",
-    "http://localhost:8250/oidc/callback"
-  ],
-  "token_policies": ["minds_staging"],
-  "token_ttl": "168h",
-  "token_explicit_max_ttl": "168h"
-}
-EOF
-```
-
-(The CLI's `key=value` parsing can't represent the map-shaped
-`bound_claims`; piping a JSON body via `- <<EOF` is the supported
-workaround.)
+Each tier role's allowlist is the `bound_claims.email` entry on its
+OIDC role (comma-separated = match any). To add a teammate to
+staging, append their email to the `minds_staging` role's
+`bound_claims` in `terraform/minds_operators.tf`, open a PR there,
+and run `terraform apply` after merging.
 
 Rotating an OIDC role's allowlist is non-destructive -- existing
 sessions keep their tokens (TTL 168h) until they expire. To force

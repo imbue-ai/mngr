@@ -4,6 +4,70 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-22
+
+The minds TMR mapper prompt (`apps/minds/tmr/mapper.j2`) is updated in step with the packaged mngr one, which changed how test agents report their results.
+
+Agents no longer signal "this needs wider attention" by degrading a change's status to `BLOCKED`. That status is removed; agents now report an `escalations` list that is independent of their own outcome, so a test that passes cleanly can still flag a problem. Escalations come in two kinds: `BLOCKER` (the agent could not proceed without a shared change -- the common minds case of an absent Docker daemon, snapshot, deployed env, or secret) and `SHARED_PATTERN` (the agent's local fix worked, but sibling tests already carry it, meaning one shared change should replace them all).
+
+This was a required change, not a cosmetic one: the minds prompt is a self-contained copy rather than an extension of the packaged template, and had it kept emitting `BLOCKED` its agents' outcomes would no longer parse, silently dropping every minds mapper's result from the run's report.
+
+Minds test agents also no longer write changelog entries -- the run's integrator writes one unified entry -- and are told not to adjust per-test timeout markers, since the run supplies an explicit timeout that the integrator verifies at.
+
+## 2026-07-21
+
+Polished the Google / GitHub sign-in flow on the login page so the OAuth round-trip feels responsive instead of frozen:
+
+- Clicking a provider button now gives immediate feedback: that provider's logo is replaced by a spinner and both provider buttons fade slightly while the browser round-trip runs.
+
+- The status ("blue box") message is now staged and anchored to real progress rather than a single frozen line: "Opening your browser..." on click, "Waiting for you to finish signing in with Google/GitHub..." once the flow starts, and "Finishing up..." while your account is set up.
+
+- When sign-in completes in the external browser, the Minds window promptly raises itself to the front (only if it wasn't already focused) so you land back in the app instead of having to switch back manually. It comes forward as soon as sign-in lands -- while the account finishes wiring up in the background -- and the login page polls more frequently so there's minimal lag.
+
+- OAuth failures, timeouts, and lost flows now surface in the same in-page error box (and cleanly reset the buttons) instead of interrupting with a browser `alert()` popup.
+
+- Removed the "Continue with GitHub" button from the sign-in / sign-up page, since GitHub OAuth is not enabled in the current deployment; Google is now the only third-party sign-in option. The underlying GitHub provider support is left in place so the button can return once credentials are configured.
+
+Fixed: a window sometimes came back from a Mac sleep (or screen lock) showing a blank white content area, recoverable only by moving the window or navigating Home and back. Over sleep, a view's renderer can survive but stop painting -- Electron leaves its compositor surface detached, and because the renderer never actually dies, the existing crash-page recovery (which keys on the renderer process going away) never fires.
+
+The app now listens for the OS `resume` and `unlock-screen` events and forces a full repaint of every open window's views on wake. The repaint is non-destructive (no reload), so scrollback, websockets, and terminal state are preserved. Each wake also now logs a `[wake-repaint]` line to `electron.log`, so this previously-invisible failure mode is diagnosable.
+
+Fix an intermittent bug where restarting the minds app (especially via a ToDesktop auto-update) could drop a user with existing workspaces onto the terminal "create a new workspace" screen instead of their workspace list.
+
+On a cold start, discovery marks itself "complete" on the first event from the first provider. If that arrives before the provider hosting the user's workspace has surfaced it, the landing handler (`/`) previously saw an empty live workspace list and fell through to the create form, a terminal page with no auto-refresh -- stranding the user.
+
+The landing fallback now consults `list_restorable_workspace_ids()` (the live primary agents unioned with the persisted last-good topology). When that set is non-empty -- we know workspaces exist even though a partial cold-start snapshot hasn't re-surfaced them -- it renders the auto-refreshing "Discovering agents..." page (which self-heals into the workspace list) instead of the create form. The create form is now only shown when discovery has completed and nothing anywhere (live, remote, or last-good) says a workspace exists, i.e. a genuine first-run user.
+
+As defense-in-depth, the create form, when it is the landing fallback at `/`, now also subscribes to the chrome SSE and navigates to `/` the moment a workspace appears, so a user shown the form on a cold-start race is taken to their workspace list. The explicit `/create` page keeps its previous behavior (no self-heal SSE) so a deliberate "create another workspace" flow is never bounced away by existing workspaces.
+
+Fixed the landing page getting stuck on the "Discovering..." spinner (and dead workspace windows being restored) after destroying every workspace while the app was closed.
+
+The desktop client's backend resolver keeps a persisted "last-good" agent topology so a workspace that exists but has not been re-discovered yet on a slow cold start still counts as restorable. That set could stay non-empty for workspaces that were actually gone: a destroyed host lingered in the persisted topology forever, and destroyed hosts still present in the live discovery snapshot (during the provider's destroyed-host persistence window) were also counted. The resolver now prunes a host from the last-good topology the moment discovery reports it DESTROYED (and persists the pruned topology), and excludes DESTROYED-host workspaces from the live half of the restorable set. Pruning happens only on an explicit DESTROYED observation, never on mere absence from a snapshot, so the slow-cold-start fallback is preserved.
+
+Fixed a bug where restarting the app -- especially via the "Install and Restart" auto-update prompt -- could drop you on the "create a new workspace" screen instead of restoring your open workspace windows.
+
+The desktop shell now persists its window layout continuously (debounced) as you move, resize, and navigate windows, instead of only at quit. So however the app exits (auto-update restart, crash, or force-quit), the saved layout reflects your live windows and is restored on the next launch.
+
+It also no longer lets a non-graceful quit -- which tears windows down while the save is running -- overwrite a good saved layout with an empty one, which was the direct cause of landing on the create screen.
+
+The startup log now records why the app chose its landing screen (authenticated, account/workspace counts, restorable-window count, and the chosen route), making a bad restore diagnosable from `~/.minds/logs`.
+
+Legacy workspace associations pointing at long-gone workspaces are now dropped once discovery completes, even when unconfigured providers (missing AWS/Azure/GCP/OVH/Vultr credentials) error on every poll. Previously any provider error blocked the "definitively absent" check, so a machine without cloud credentials configured retried the conversion -- and logged "Legacy association ... could not convert this pass" -- on every reconcile pass, forever. Genuinely failed polls (a configured provider erroring transiently) still block the drop, since absence from a listing that never happened proves nothing.
+
+The minds-tier Vault ACLs (the `employee` policy denies on `secrets/minds/{staging,production}` and the `minds_staging` / `minds_production` operator policies + OIDC roles) are now managed by terraform in the imbue-ai/vault repo (`terraform/employee.tf` and `terraform/minds_operators.tf`) instead of being hand-pushed with the `vault` CLI. Previously these had only ever been applied to live Vault by hand, so a `terraform apply` in the vault repo would have reverted the employee policy and re-exposed the staging/production secrets to all employees.
+
+`docs/staging-bringup.md` now points at the vault repo as the single source of truth for these ACLs, and its teammate-allowlist recipe goes through a vault-repo PR + `terraform apply` rather than a raw `vault write auth/oidc/role/...` call.
+
+## 2026-07-19
+
+Fixed: documentation drift around what a workspace is. The glossary described a workspace as a single mngr *agent* labeled `workspace=<name>`, but a workspace is a mngr *host* holding several agents, and the `workspace` label was removed some time ago (discovery keys off `is_primary`).
+
+The glossary now defines a workspace as a host, and adds entries for the four agent kinds that live in one: the primary `system-services` agent, chat agents, worktree agents, and worker agents.
+
+Fixed: the launch mode glossary entry listed a nonexistent `CLOUD` mode (the real one is `VULTR`) and omitted `AWS` and `MODAL`.
+
+Fixed: `design.md` and `user_story.md` showed a `mngr create` command with the removed `--label workspace=<name>` flag and no `--new-host`, so following them would not reproduce what minds actually runs.
+
 ## 2026-07-18
 
 Added `apps/minds/docs/dev-setup.md`, a canonical "set up minds for development" guide: an install-these-first prerequisites checklist -- uv/just/git, Docker, Node 24.15.0 + pnpm 10.33.4, GNU rsync (recent macOS ships Apple's openrsync, which lacks the `--filter=':- .gitignore'` GNU feature the vendor/mngr sync needs), GitHub access to the private default-workspace-template, Vault CLI + `vault login`, and a `~/.modal.toml` Modal profile -- that then hands off to the `minds-dev-workflow` skill for bootstrap and launch. `apps/minds/README.md`'s Getting started now points to this guide instead of carrying ad-hoc setup notes inline (the earlier GNU rsync note moved into the checklist).

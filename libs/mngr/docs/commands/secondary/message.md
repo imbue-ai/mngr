@@ -29,6 +29,11 @@ silently dropping the message. Messages starting with '/' (TUI slash commands
 such as /clear) are best-effort: they succeed even when no evidence is
 observable, logging a warning and an agent event instead.
 
+Exit codes: 0 = delivered and no unresolved dialog; 7 = delivered, but a
+blocking interactive dialog (e.g. Claude's /model confirmation) could not be
+resolved and the agent is now stuck on it (see the agent-type auto_accept_*
+settings); any other non-zero = the message was not delivered.
+
 Alias: msg
 
 **Usage:**

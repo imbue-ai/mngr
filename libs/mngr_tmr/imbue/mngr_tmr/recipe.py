@@ -30,10 +30,15 @@ from imbue.mngr_mapreduce.data_types import MapReduceRecipe
 from imbue.mngr_mapreduce.data_types import MapReduceTask
 from imbue.mngr_mapreduce.data_types import MapperInfo
 from imbue.mngr_mapreduce.data_types import ReducerInfo
+from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
+from imbue.mngr_tmr.report import EXTRACTED_TEST_OUTPUT_DIR
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report import load_integrator_outcome_file
+from imbue.mngr_tmr.report import synthesize_missing_mapper_outcomes
 from imbue.mngr_tmr.report_upload import maybe_upload_report
+from imbue.mngr_tmr.report_upload import report_url_for_run
 
 _BRANCH_BUNDLE_NAME = "branch.bundle"
 
@@ -177,6 +182,11 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         default=None,
         description="Optional override template for the reducer prompt (falls back to the packaged reducer.j2)",
     )
+    is_pull_request_enabled: bool = Field(
+        default=False,
+        description="Whether the reducer should open a pull request for this run. Only true when the reducer "
+        "was given a GH_TOKEN, so plain local runs and the reintegrate workflow do not try to push.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -217,14 +227,36 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         )
 
     def build_reducer_prompt(self, ctx: MapReduceContext) -> str:
-        return build_integrator_prompt(template_path=self.reducer_prompt_path)
+        # The reducer opens the run's PR, so it needs the report link in its
+        # prompt. The URL is derived from the run name, so it is known now even
+        # though the final report is uploaded after the reducer finishes.
+        return build_integrator_prompt(
+            report_url=report_url_for_run(ctx.run_name),
+            is_pull_request_enabled=self.is_pull_request_enabled,
+            template_path=self.reducer_prompt_path,
+        )
 
     def on_mapper_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: MapperInfo) -> None:
         bundle = agent_dir / _BRANCH_BUNDLE_NAME
         if bundle.is_file():
             _apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg)
 
+    def on_all_mappers_finalized(self, ctx: MapReduceContext, mapper_metadata: Sequence[AgentMetadata]) -> None:
+        # Failed mappers write no outcome file, so the reducer -- which reads the
+        # rsynced output dir as files -- would not see them and its PR summary
+        # would under-count failures. Synthesize an errored outcome for each so
+        # the failed tests are represented in the reducer's inputs and the PR.
+        written = synthesize_missing_mapper_outcomes(ctx.output_dir, mapper_metadata)
+        if written:
+            logger.info("Synthesized errored outcomes for {} failed mapper(s)", len(written))
+
     def on_reducer_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: ReducerInfo) -> None:
+        # The reducer opens the run's PR itself, so surface the URL it reported
+        # even when no bundle came back: a run that integrated nothing still
+        # opens a PR (on an empty commit) to carry the escalations.
+        outcome_path = agent_dir / EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
+        _emit_pull_request_url(_read_pull_request_url(outcome_path), ctx.output_opts)
+
         bundle = agent_dir / _BRANCH_BUNDLE_NAME
         if not bundle.is_file():
             logger.warning("Reducer agent '{}' did not produce a branch bundle", info.agent_name)
@@ -277,6 +309,34 @@ def _build_run_commands(
     if integrated_branch is not None:
         commands.append(("Push integrated branch", f"git push origin {integrated_branch}"))
     return commands
+
+
+def _read_pull_request_url(outcome_path: Path) -> str | None:
+    """Read the PR URL the reducer recorded, if it recorded one.
+
+    Tolerant by design: the reducer may have failed before writing the file, or
+    written one without the key (it records ``pull_request_error`` instead when
+    opening the PR failed). Either way there is simply no URL to emit.
+    """
+    outcome = load_integrator_outcome_file(outcome_path)
+    if outcome is None:
+        return None
+    if outcome.pull_request_error:
+        logger.warning("Reducer reported it could not open a pull request: {}", outcome.pull_request_error)
+    return outcome.pull_request_url or None
+
+
+def _emit_pull_request_url(url: str | None, output_opts: OutputOptions) -> None:
+    """Emit the URL of the pull request the reducer opened, when it opened one."""
+    if url is None:
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            emit_event("pull_request_url", {"url": url}, output_opts.output_format)
+        case OutputFormat.HUMAN:
+            write_human_line("Pull request: {}", url)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _emit_reducer_branch(branch_name: str, output_opts: OutputOptions) -> None:

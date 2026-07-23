@@ -196,8 +196,10 @@ def _make_reencrypt_latchkey_binary(tmp_path: Path) -> Path:
         'if sys.argv[1:3] == ["services", "info"]:\n'
         "    service = sys.argv[3]\n"
         "    missing = os.environ.get('FAKE_MISSING_SERVICES', '').split(',')\n"
-        "    status = 'missing' if service in missing else 'valid'\n"
-        "    print(json.dumps({'credentialStatus': status}))\n"
+        # latchkey 3.0.0: a missing service has an empty ``credentials`` object;
+        # a present service reports one account keyed by the empty string.
+        "    credentials = {} if service in missing else {'': {'credentialType': 'rawCurl', 'credentialStatus': 'valid'}}\n"
+        "    print(json.dumps({'credentials': credentials}))\n"
         "    sys.exit(0)\n"
         'assert sys.argv[1:3] == ["auth", "re-encrypt"], sys.argv\n'
         "rest = sys.argv[4:]\n"
@@ -303,7 +305,7 @@ def test_sync_credentials_raises_when_reencrypt_fails(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         'if sys.argv[1:3] == ["services", "info"]:\n'
-        "    print(json.dumps({'credentialStatus': 'valid'}))\n"
+        "    print(json.dumps({'credentials': {'': {'credentialType': 'rawCurl', 'credentialStatus': 'valid'}}}))\n"
         "    sys.exit(0)\n"
         "sys.exit(1)\n"
     )

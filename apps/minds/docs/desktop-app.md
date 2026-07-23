@@ -70,11 +70,38 @@ If the backend exits unexpectedly, every open window switches to the error scree
 
 Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Uniqueness is enforced across the app: at most one window per workspace.
 
-- **Open in a new window** (from the sidebar): right-click a workspace entry for a native `Open in new window` context menu, or click the hover-revealed icon on the right of the row. Both are suppressed on the entry matching the window's current workspace.
+- **Open in a new window** (from the workspace switcher): right-click a workspace entry for a native `Open in new window` context menu, or click the always-visible arrow icon on the right of the row. Both are suppressed on the entry matching the window's current workspace.
 - **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
 - **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
 - **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL, and each window's titlebar accent is re-derived from that restored URL (see below) -- the accent is not separately persisted. URLs pointing at workspaces that no longer exist are silently dropped. (Older files that still carry a per-window `lastWorkspaceAgentId` field are accepted and the field ignored.)
+
+### Deeplinks (minds://)
+
+The app registers the `minds://` URL scheme. Packaged macOS builds get the OS registration from `appProtocolScheme` in `todesktop.js` (ToDesktop emits the `CFBundleURLTypes` Info.plist entry); `app.setAsDefaultProtocolClient` is also called at every startup, using the dev-mode form (electron binary + app path) under `electron .`. Dev-mode registration is a no-op on macOS -- LaunchServices only honors schemes declared in a bundle's Info.plist -- so to exercise deeplinks against a dev app, pass the URL as an argument instead: `electron . 'minds://create?git_url=...'` (the same code path Windows/Linux cold starts use).
+
+To test real OS-level delivery (browser link clicks, `open 'minds://...'`) against a dev app on macOS, patch the checkout's dev Electron bundle once so LaunchServices knows about it. The bundle id must also be made unique: every worktree's dev Electron ships as `com.github.Electron`, and LaunchServices resolves the scheme's handler by bundle id, so a shared id can route the URL to some other checkout's copy.
+
+```bash
+PLIST=apps/minds/node_modules/electron/dist/Electron.app/Contents/Info.plist
+plutil -insert CFBundleURLTypes -json '[{"CFBundleURLName":"Minds Deeplink","CFBundleURLSchemes":["minds"]}]' "$PLIST"
+plutil -replace CFBundleIdentifier -string com.imbue.minds.dev "$PLIST"
+mv apps/minds/node_modules/electron/dist/Electron.app apps/minds/node_modules/electron/dist/Minds.app
+printf 'Minds.app/Contents/MacOS/Electron' > apps/minds/node_modules/electron/path.txt
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -f apps/minds/node_modules/electron/dist/Minds.app
+```
+
+The rename makes the browser's external-protocol prompt say "open the minds link with Minds" instead of naming the handler "Electron": macOS derives the shown app name from the bundle's on-disk name, so plist-level CFBundleDisplayName overrides alone do not change it. `path.txt` is how the `electron` npm launcher finds the binary, so it must track the rename. The prompt itself is browser UI and can't be customized further; packaged builds are already named Minds.app.
+
+Then start the dev app (its `setAsDefaultProtocolClient` call points the scheme at the patched bundle) and click minds:// links while it is running. The patch lives in `node_modules` (wiped on reinstall, never committed), and a link clicked while the dev app is *not* running launches bare Electron without the app code -- keep the dev app running. Packaged builds need none of this.
+
+Every OS delivery channel -- macOS `open-url` events, Windows/Linux second-instance argv, and cold-start argv -- routes to a single `handleDeeplink` in `main.js`, which parses the URL with the pure `electron/deeplink.js` helpers (unit-tested in `test/unit/deeplink.test.js`). The URL's host names the action:
+
+- `minds://create?git_url=<repo>&branch=<ref>` focuses the most recent window and navigates it to the create-workspace page with the repository pre-filled under advanced settings. `branch` accepts anything the form's Branch input accepts (branch, tag, or commit); when absent, the field stays blank -- submit then resolves the linked repo's latest version (the default-template branch fallback only applies when no repository was supplied). Values must be percent-encoded by the sender.
+- `minds://` bare, or any unrecognized or malformed URL, just opens/focuses the app. The browser OAuth sign-in flow relies on this: the desktop client passes `--success-redirect-url minds://` to the plugin's `auth oauth` subcommand, whose sign-in success page then offers an "Open app" link back to the app (a deliberate click, so the browser's open-external-app prompt appears on a user gesture rather than unprompted).
+
+Deeplinks never force a sign-in: `/create` loads regardless of account state and the page's own remote-vs-local flow prompts for sign-in only when needed. A deeplink that arrives before startup navigation has settled (backend still starting, or an error takeover showing) is queued last-writer-wins and applied once startup succeeds. This holds on a genuine first run too: an explicit deeplink wins over the welcome screen, landing the new user directly on the pre-filled create page. The navigated path is built from a fixed allowlist (`/create` plus re-encoded query params); raw deeplink text is never handed to `loadURL`.
 
 ### Titlebar accent and the neutral chrome
 
@@ -265,6 +292,7 @@ apps/minds/
   electron/
     main.js                 # Electron main process entry point
     preload.js              # Context bridge for renderer IPC
+    deeplink.js             # Pure minds:// URL parsing (electron-free, unit-tested)
     paths.js                # Platform-aware path resolution
     env-setup.js            # uv sync runner with progress reporting
     backend.js              # Python backend process manager
