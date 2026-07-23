@@ -14,6 +14,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.chrome_state import AccountsPermissionDetail
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -89,22 +90,20 @@ def test_handler_claims_accounts_request_type(tmp_path: Path) -> None:
     assert handler.handles_request_type() == str(RequestType.ACCOUNTS_PERMISSION)
 
 
-def test_render_request_detail_fragment_shows_rationale_and_hidden_permission(tmp_path: Path) -> None:
+def test_detail_payload_carries_rationale(tmp_path: Path) -> None:
     handler, _sender = _make_accounts_handler(tmp_path, lambda _req: httpx.Response(200))
+    agent_id = str(AgentId())
     event = create_latchkey_accounts_permission_request_event(
-        agent_id=str(AgentId()),
+        agent_id=agent_id,
         rationale="needs to find the right account",
     )
-    body = handler.render_request_detail_fragment(
-        event,
-        StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="http://forward.invalid",
-    )
-    assert "needs to find the right account" in body
-    # All-or-nothing grant: a single hidden ``permissions`` input so the inbox
-    # shell's Approve button enables (no per-permission choice).
-    assert 'name="permissions"' in body
-    assert 'value="accounts"' in body
+    payload = handler.build_request_detail_payload(event, StaticBackendResolver(url_by_agent_and_service={}))
+    # All-or-nothing grant: the accounts detail carries no per-permission
+    # choice (the component enables Approve on first paint).
+    assert isinstance(payload, AccountsPermissionDetail)
+    assert payload.rationale == "needs to find the right account"
+    assert payload.agent_id == agent_id
+    assert payload.request_id == str(event.event_id)
 
 
 def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Path) -> None:

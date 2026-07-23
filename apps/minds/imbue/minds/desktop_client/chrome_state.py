@@ -507,6 +507,143 @@ class HelpBootExtras(FrozenModel):
         return self.model_dump(mode="json")
 
 
+# -- Inbox request-detail payloads ------------------------------------------
+#
+# The typed replacement for the old server-rendered inbox right-pane HTML
+# fragments: each pending request's handler builds one of these, the
+# ``/inbox/detail/<id>`` route serves it as JSON, and the inbox page seeds
+# the initially-selected one in its island. The mithril detail views in
+# ``frontend/src/views/InboxDetail.ts`` render them (mirrored there as
+# TypeScript interfaces).
+
+
+class InboxDetailUnavailable(FrozenModel):
+    """Right-pane payload when a request can't be shown (unknown/expired id,
+    already resolved, externally resolved while open, or no handler)."""
+
+    kind: Literal["unavailable"] = Field(default="unavailable", description="Payload discriminator")
+    message: str = Field(
+        default="", description="Optional supporting sentence under the heading; empty shows the heading alone"
+    )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class PredefinedPermissionDetail(FrozenModel):
+    """Detail payload for a predefined (catalog-backed) latchkey permission
+    request. ``unknown_scope`` non-empty selects the deny-only variant (the
+    requested scope is not in the catalog, so there is nothing to offer);
+    the other fields are empty in that case."""
+
+    kind: Literal["predefined"] = Field(default="predefined", description="Payload discriminator")
+    agent_id: str = Field(description="The requesting workspace agent id")
+    request_id: str = Field(description="The request event id (keys the grant/deny POSTs)")
+    ws_name: str = Field(description="The requesting workspace's display name (falls back to the agent id)")
+    rationale: str = Field(description="The agent's stated reason for the request")
+    display_name: str = Field(description="The service's human-readable name (the dialog heading)")
+    permission_schemas: tuple[str, ...] = Field(description="Every offerable permission, in catalog order")
+    description_by_permission_name: dict[str, str] = Field(
+        description="Plain-English description per permission; absent entries render no description"
+    )
+    checked_permissions: tuple[str, ...] = Field(description="The permissions pre-checked (agent-requested)")
+    wildcard_permission: str = Field(description="The catch-all permission's stored name (Detent's wildcard)")
+    wildcard_label: str = Field(description="The user-facing label shown in place of the wildcard name")
+    will_open_browser: bool = Field(
+        description="Whether Approve will run a browser sign-in (drives the progress notice copy)"
+    )
+    unknown_scope: str = Field(
+        default="", description="The uncataloged requested scope; non-empty renders the deny-only variant"
+    )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class FileSharingPermissionDetail(FrozenModel):
+    """Detail payload for a latchkey file-sharing permission request."""
+
+    kind: Literal["file_sharing"] = Field(default="file_sharing", description="Payload discriminator")
+    agent_id: str = Field(description="The requesting workspace agent id")
+    request_id: str = Field(description="The request event id (keys the grant/deny POSTs)")
+    ws_name: str = Field(description="The requesting workspace's display name (falls back to the agent id)")
+    rationale: str = Field(description="The agent's stated reason for the request")
+    file_path: str = Field(description="The requested path (pre-fills the editable share-path field)")
+    access: str = Field(description="The requested access mode: READ or WRITE")
+    access_human_label: str = Field(description="Lower-case human rendering: 'read-only' / 'read & write'")
+    allowed_roots: tuple[str, ...] = Field(
+        description="Absolute WebDAV mount roots; the dialog blocks Approve for paths outside them"
+    )
+    home_dir: str = Field(description="Absolute home directory for client-side ~ expansion (mirrors the server)")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class AccountsPermissionDetail(FrozenModel):
+    """Detail payload for the all-or-nothing accounts-read permission request."""
+
+    kind: Literal["accounts"] = Field(default="accounts", description="Payload discriminator")
+    agent_id: str = Field(description="The requesting workspace agent id")
+    request_id: str = Field(description="The request event id (keys the grant/deny POSTs)")
+    ws_name: str = Field(description="The requesting workspace's display name (falls back to the agent id)")
+    rationale: str = Field(description="The agent's stated reason for the request")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class WorkspaceVerbOption(FrozenModel):
+    """One grantable ``minds-workspaces`` verb offered by the workspace
+    permission dialog."""
+
+    permission: str = Field(description="Detent permission-schema name (the checkbox value / revoke key)")
+    display_name: str = Field(description="Human-readable verb label")
+    description: str = Field(description="Plain-English summary of what the verb allows")
+    is_targeted: bool = Field(description="Whether the verb is scoped to a target workspace id")
+    is_checked: bool = Field(description="Whether the agent requested this verb (pre-checked)")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class WorkspacePermissionDetail(FrozenModel):
+    """Detail payload for a cross-workspace (``minds-workspaces``) request."""
+
+    kind: Literal["workspace"] = Field(default="workspace", description="Payload discriminator")
+    agent_id: str = Field(description="The requesting workspace agent id")
+    request_id: str = Field(description="The request event id (keys the grant/deny POSTs)")
+    ws_name: str = Field(description="The requesting workspace's display name (falls back to the agent id)")
+    rationale: str = Field(description="The agent's stated reason for the request")
+    display_name: str = Field(description="The dialog heading (the target workspace name, or 'workspaces')")
+    verbs: tuple[WorkspaceVerbOption, ...] = Field(description="Every grantable verb, in catalog order")
+    target_workspace_id: str = Field(description="The named target workspace id; empty when none was named")
+    target_workspace_name: str = Field(description="The named target's display name; empty when unresolved")
+    show_target_choice: bool = Field(
+        description="Whether the all-vs-selected target radio is offered (a target was named and resolved)"
+    )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        payload = self.model_dump(mode="json")
+        payload["verbs"] = [verb.to_payload_dict() for verb in self.verbs]
+        return payload
+
+
+InboxDetailPayload = (
+    InboxDetailUnavailable
+    | PredefinedPermissionDetail
+    | FileSharingPermissionDetail
+    | AccountsPermissionDetail
+    | WorkspacePermissionDetail
+)
+
+
 class ChromeBootState(FrozenModel):
     """A connect-time snapshot of the chrome data, for page boot-state islands.
 

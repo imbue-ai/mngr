@@ -1,16 +1,16 @@
-// The inbox's left pane: the pending-request card list plus the pinned
-// auto-open footer, store-fed from the chrome ``requests`` payload's card
-// summaries (the deleted /inbox/list fragment refetch). The right detail
-// pane deliberately stays a server-rendered fragment (each request handler
-// composes its own form HTML); this module owns fetching and swapping that
-// fragment, while the page's inline script keeps the form logic that must
-// survive swaps (Approve gating, share-path pickers, grant/deny submission).
+// The inbox modal: the left pending-request card list (store-fed from the
+// chrome ``requests`` payload's card summaries) plus the pinned auto-open
+// footer, the typed right detail pane (per-kind views over the JSON payloads
+// from /inbox/detail/<id> -- see InboxDetail.ts), and the drawer chrome
+// (header, backdrop, Escape, drag regions).
 import m from "mithril";
 
-import type { ChromeRequestCard, InboxBootIsland } from "../chrome_state";
+import type { ChromeRequestCard, InboxBootIsland, InboxDetailPayload } from "../chrome_state";
 import { getHost } from "../host";
 import { MindsUIError, mountWithTeardown, readBootState, requireElement } from "../mount";
 import { connect, getRequestCards, isRequestsAutoOpen, seed, subscribe } from "../store";
+import { Icon } from "./Icon";
+import { InboxDetail, InboxDetailController } from "./InboxDetail";
 
 // The controller behind the card list: selection, the local deny/resolve
 // transients, and the detail-pane fetches. Page-scoped state lives here (one
@@ -26,16 +26,9 @@ export interface InboxListController {
 
 export function InboxList(): m.Component<{ controller: InboxListController }> {
   // The empty-state layout (centered message, hidden detail pane) is keyed
-  // off ``is-empty`` on #inbox-body -- OUTSIDE this mount root, because the
-  // detail pane it hides is a sibling. Synced after every render.
-  const syncEmptyState = (controller: InboxListController): void => {
-    const body = document.getElementById("inbox-body");
-    if (body === null) return;
-    body.classList.toggle("is-empty", controller.getVisibleCards().length === 0);
-  };
+  // off ``is-empty`` on #inbox-body, computed by the enclosing modal view
+  // from the same visible-card set.
   return {
-    oncreate: (vnode) => syncEmptyState(vnode.attrs.controller),
-    onupdate: (vnode) => syncEmptyState(vnode.attrs.controller),
     view(vnode) {
       const { controller } = vnode.attrs;
       const cards = controller.getVisibleCards();
@@ -93,16 +86,9 @@ export function InboxList(): m.Component<{ controller: InboxListController }> {
   };
 }
 
-export interface MountInboxListOptions {
-  // Called after the detail pane's server fragment is swapped in, so the
-  // page's inline script can re-wire its form logic (Approve-button gating,
-  // share-path picker buttons).
-  onDetailSwapped: () => void;
-}
-
-// The glue surface the inbox page's inline script drives: grant/deny live in
-// the inline script (they own the server fragment's form), but selection and
-// advancement are list concerns owned here.
+// The glue surface the detail flow drives: grant/deny live in the detail
+// controller (InboxDetail.ts), but selection and advancement are list
+// concerns owned here.
 export interface InboxListHandle {
   getSelectedId(): string | null;
   // Fade the card and block re-selection while its deny POST is in flight;
@@ -115,11 +101,11 @@ export interface InboxListHandle {
   close(): void;
 }
 
-// Mount the inbox left pane into #inbox-left-column. Reads the page's boot
-// island ({chrome, inbox}), seeds the store, and returns the glue handle for
-// the page's inline script.
-export function mountInboxList(target: Element | null, options: MountInboxListOptions): InboxListHandle {
-  const el = requireElement(target, "inbox left column");
+// Mount the whole inbox modal (drawer + list + detail) into its container.
+// Reads the page's boot island ({chrome, inbox, inbox_detail?}), seeds the
+// store, and renders the initially-selected request's payload immediately.
+export function mountInboxModal(target: Element | null): InboxListHandle {
+  const el = requireElement(target, "inbox modal container");
   const island = readBootState() as InboxBootIsland;
   if (island.chrome === undefined || island.inbox === undefined) {
     throw new MindsUIError("inbox boot island is missing the chrome or inbox slice");
@@ -154,18 +140,39 @@ export function mountInboxList(target: Element | null, options: MountInboxListOp
     }
   };
 
-  const fetchDetailFragment = async (id: string): Promise<void> => {
+  // The current detail controller (a fresh one per selection/payload swap);
+  // null renders an empty right pane.
+  let detailController: InboxDetailController | null = null;
+
+  const listGlue = {
+    getSelectedId: () => selectedId,
+    markDenying: (id: string): void => {
+      denyingIds.add(id);
+      m.redraw();
+    },
+    advanceAfterResolution: async (resolvedId: string | null): Promise<void> => {
+      await advanceAfterResolution(resolvedId);
+    },
+  };
+
+  const setDetail = (payload: InboxDetailPayload | null): void => {
+    detailController =
+      payload === null
+        ? null
+        : new InboxDetailController(payload, listGlue, () => document.getElementById("inbox-detail"));
+    m.redraw();
+  };
+
+  const fetchDetail = async (id: string): Promise<void> => {
     const response = await fetch(`/inbox/detail/${encodeURIComponent(id)}`, { credentials: "same-origin" });
     if (!response.ok) {
-      // The server returns 200 with an "unavailable" fragment for stale ids;
+      // The server returns 200 with an "unavailable" payload for stale ids;
       // anything else is a real error, leave the pane untouched.
       return;
     }
-    const html = await response.text();
-    const detail = document.getElementById("inbox-detail");
-    if (detail === null) return;
-    detail.innerHTML = html;
-    options.onDetailSwapped();
+    const data = (await response.json()) as { detail?: InboxDetailPayload };
+    if (data.detail === undefined) return;
+    setDetail(data.detail);
   };
 
   const isSelectable = (card: ChromeRequestCard): boolean =>
@@ -194,7 +201,7 @@ export function mountInboxList(target: Element | null, options: MountInboxListOp
     selectedId = id;
     m.redraw();
     updateUrl(id);
-    await fetchDetailFragment(id);
+    await fetchDetail(id);
   };
 
   const advanceAfterResolution = async (resolvedId: string | null): Promise<void> => {
@@ -225,8 +232,8 @@ export function mountInboxList(target: Element | null, options: MountInboxListOp
 
   // Reconcile local state against every store change: prune transients the
   // server's pending set has caught up with, and swap the detail pane to the
-  // canonical "no longer available" fragment when the selection vanishes
-  // out from under the user (resolved elsewhere). Released with the mount
+  // canonical "no longer available" payload when the selection vanishes out
+  // from under the user (resolved elsewhere). Released with the mount
   // (onremove below) so a torn-down page stops reconciling.
   const unsubscribe = subscribe(() => {
     const ids = new Set(getRequestCards().map((card) => card.id));
@@ -240,7 +247,7 @@ export function mountInboxList(target: Element | null, options: MountInboxListOp
       const vanishedId = selectedId;
       selectedId = null;
       updateUrl(null);
-      void fetchDetailFragment(vanishedId);
+      void fetchDetail(vanishedId);
     }
   });
 
@@ -266,17 +273,108 @@ export function mountInboxList(target: Element | null, options: MountInboxListOp
     },
   };
 
+  // Seed the initial detail from the island (no fetch round-trip).
+  if (island.inbox_detail !== undefined) {
+    detailController = new InboxDetailController(island.inbox_detail, listGlue, () =>
+      document.getElementById("inbox-detail"),
+    );
+  }
+
+  // Escape dismisses (matching the old shell script; the Electron main
+  // process also handles Escape for any modal-view page).
+  const onKeydown = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") close();
+  };
+  document.addEventListener("keydown", onKeydown);
+
   mountWithTeardown(el, {
-    view: () => m(InboxList, { controller }),
-    onremove: () => unsubscribe(),
+    view: () =>
+      m(
+        "div",
+        {
+          id: "inbox-backdrop",
+          class: "fixed inset-0 bg-surface-overlay flex justify-start",
+          onclick: (event: Event) => {
+            if (event.target === event.currentTarget) close();
+          },
+        },
+        [
+          m(
+            "div",
+            {
+              id: "inbox-dialog",
+              class:
+                "relative w-[90vw] lg:w-[75vw] max-w-[1100px] h-full flex flex-col bg-surface-primary " +
+                "border-r border-default shadow-overlay overflow-hidden",
+            },
+            [
+              // Header row: 3-column grid so the title sits centered
+              // regardless of the close button's width; opted into
+              // app-region: drag so the user can grab it to move the window
+              // (the close button opts back out).
+              m(
+                "div",
+                {
+                  class: "grid grid-cols-3 items-center px-2 h-[38px] border-b border-default",
+                  style: { "-webkit-app-region": "drag" },
+                },
+                [
+                  m("div"),
+                  m("h1", { class: "type-section text-primary text-center" }, "Requests"),
+                  m(
+                    "button",
+                    {
+                      type: "button",
+                      "aria-label": "Close",
+                      "data-tooltip": "Close",
+                      id: "inbox-close-btn",
+                      style: { "-webkit-app-region": "no-drag" },
+                      class:
+                        "justify-self-end inline-flex items-center justify-center w-6 h-6 rounded-md " +
+                        "text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer",
+                      onclick: () => close(),
+                    },
+                    m(Icon, { name: "close" }),
+                  ),
+                ],
+              ),
+              m(
+                "div",
+                {
+                  id: "inbox-body",
+                  class:
+                    "flex flex-1 min-h-0" + (controller.getVisibleCards().length === 0 ? " is-empty" : ""),
+                },
+                [
+                  m(
+                    "div",
+                    { id: "inbox-left-column", class: "flex flex-col w-72 border-r border-default bg-fill-subtle" },
+                    m(InboxList, { controller }),
+                  ),
+                  m(
+                    "div",
+                    { id: "inbox-detail", class: "flex-1 overflow-y-auto p-6 sm:p-6" },
+                    detailController !== null ? m(InboxDetail, { controller: detailController }) : null,
+                  ),
+                ],
+              ),
+            ],
+          ),
+          // Drag strip in the backdrop to the right of the drawer, matching
+          // the chrome titlebar height. The OS swallows mousedown for
+          // dragging here; the rest of the backdrop stays click-to-dismiss.
+          m("div", { class: "flex-1 h-[38px] self-start", style: { "-webkit-app-region": "drag" } }),
+        ],
+      ),
+    onremove: () => {
+      unsubscribe();
+      document.removeEventListener("keydown", onKeydown);
+    },
   });
 
   return {
     getSelectedId: () => selectedId,
-    markDenying: (id) => {
-      denyingIds.add(id);
-      m.redraw();
-    },
+    markDenying: listGlue.markDenying,
     advanceAfterResolution,
     close,
   };

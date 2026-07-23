@@ -27,6 +27,8 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.chrome_state import InboxDetailPayload
+from imbue.minds.desktop_client.chrome_state import InboxDetailUnavailable
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
@@ -273,6 +275,13 @@ def _build_authenticated_client(
     return client
 
 
+def _get_detail(client: FlaskClient, request_id: object) -> dict:
+    """GET /inbox/detail/<id> and return the parsed ``detail`` payload dict."""
+    response = client.get(f"/inbox/detail/{request_id}")
+    assert response.status_code == 200
+    return response.get_json()["detail"]
+
+
 def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_path: Path) -> None:
     """With no existing grants, the dialog pre-checks exactly what the agent asked for.
 
@@ -290,37 +299,17 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
-    response = client.get(f"/inbox/detail/{request.event_id}")
+    detail = _get_detail(client, request.event_id)
 
-    assert response.status_code == 200
-    body = response.text
-    assert "Slack" in body
-    assert "I need to read" in body
-    # The agent-requested permission appears checked.
-    read_idx = body.find('value="slack-read-all"')
-    assert read_idx != -1
-    tag_start = body.rfind("<input", 0, read_idx)
-    tag_end = body.find(">", read_idx)
-    assert "checked" in body[tag_start:tag_end]
-    # ``any`` is offered as a checkbox but must not be pre-checked.
-    any_idx = body.find('value="any"')
-    assert any_idx != -1
-    any_tag_start = body.rfind("<input", 0, any_idx)
-    any_tag_end = body.find(">", any_idx)
-    assert "checked" not in body[any_tag_start:any_tag_end]
-    # Approve must be disabled in initial markup (JS enables it once the
-    # user confirms / interacts with the form).
-    assert 'id="permissions-approve-btn"' in body
-    assert "disabled" in body
-    # The form carries the elements the inbox shell toggles while an
-    # approval runs in the background so the user sees work is happening
-    # and can't double-submit or deny mid-flight: an id on Deny, plus a
-    # hidden spinner + a label span inside Approve. The spinner uses the
-    # inverse tone so it stays legible on the solid success button.
-    assert 'id="permissions-deny-btn"' in body
-    assert 'id="permissions-approve-spinner"' in body
-    assert 'id="permissions-approve-label"' in body
-    assert "spinner-inverse" in body
+    assert detail["kind"] == "predefined"
+    assert detail["display_name"] == "Slack"
+    assert "I need to read" in detail["rationale"]
+    # The agent-requested permission is pre-checked; the catch-all ``any``
+    # is offered but not pre-checked (the user must opt into it).
+    assert "slack-read-all" in detail["checked_permissions"]
+    assert "any" in detail["permission_schemas"]
+    assert "any" not in detail["checked_permissions"]
+    assert detail["wildcard_permission"] == "any"
 
 
 def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path: Path) -> None:
@@ -343,21 +332,14 @@ def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path:
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
-    response = client.get(f"/inbox/detail/{request.event_id}")
+    detail = _get_detail(client, request.event_id)
 
-    assert response.status_code == 200
-    body = response.text
-    # The checkbox keeps the wildcard value and is tagged so the shell's
-    # exclusivity JS can find it.
-    any_idx = body.find('value="any"')
-    assert any_idx != -1
-    any_tag_start = body.rfind("<input", 0, any_idx)
-    any_tag_end = body.find(">", any_idx)
-    assert 'data-wildcard="true"' in body[any_tag_start:any_tag_end]
-    # The wildcard is labelled ``all`` (in a <code> element), and never
-    # surfaced to the user as the raw ``any`` value.
-    assert ">all</code>" in body
-    assert ">any</code>" not in body
+    # The payload keeps the wildcard's stored value (``any``) but carries the
+    # ``all`` label the component shows in its place -- the raw ``any`` is
+    # never the user-facing text.
+    assert "any" in detail["permission_schemas"]
+    assert detail["wildcard_permission"] == "any"
+    assert detail["wildcard_label"] == "all"
 
 
 def test_inbox_page_hides_requests_whose_host_cannot_be_resolved(tmp_path: Path) -> None:
@@ -443,15 +425,15 @@ def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: P
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
-    response = client.get(f"/inbox/detail/{request.event_id}")
+    detail = _get_detail(client, request.event_id)
 
-    assert response.status_code == 200
-    body = response.text
     # The requested permission's summary comes from the catalog fixture's
-    # per-permission ``description`` field.
-    assert "All read operations across the Slack API." in body
-    # The scope-level description is intentionally not surfaced on the dialog.
-    assert "Any interaction with the Slack API." not in body
+    # per-permission ``description`` field; the scope-level description is
+    # intentionally not surfaced.
+    assert (
+        detail["description_by_permission_name"].get("slack-read-all") == "All read operations across the Slack API."
+    )
+    assert "Any interaction with the Slack API." not in detail["description_by_permission_name"].values()
 
 
 def test_get_permission_request_page_renders_no_pre_checks_when_request_and_existing_are_empty(
@@ -472,23 +454,13 @@ def test_get_permission_request_page_renders_no_pre_checks_when_request_and_exis
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
-    response = client.get(f"/inbox/detail/{request.event_id}")
+    detail = _get_detail(client, request.event_id)
 
-    assert response.status_code == 200
-    body = response.text
-    # No input element should carry the ``checked`` attribute.
-    for value_marker in ('value="any"', 'value="slack-read-all"', 'value="slack-write-all"'):
-        idx = body.find(value_marker)
-        assert idx != -1
-        tag_start = body.rfind("<input", 0, idx)
-        tag_end = body.find(">", idx)
-        assert "checked" not in body[tag_start:tag_end], (
-            f"unexpected pre-check on {value_marker}: {body[tag_start : tag_end + 1]}"
-        )
-    # Approve stays disabled in the initial markup -- the JS re-enables
-    # it as soon as the user ticks any checkbox.
-    assert 'id="permissions-approve-btn"' in body
-    assert "disabled" in body
+    # Every option is offered, but nothing is pre-checked -- the component
+    # keeps Approve disabled until the user ticks a permission.
+    for value in ("any", "slack-read-all", "slack-write-all"):
+        assert value in detail["permission_schemas"]
+    assert detail["checked_permissions"] == []
 
 
 def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) -> None:
@@ -748,17 +720,10 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
 
-    response = client.get(f"/inbox/detail/{request.event_id}")
+    detail = _get_detail(client, request.event_id)
 
-    assert response.status_code == 200
-    body = response.text
-    # The previously-granted permission appears checked.
-    chat_read_idx = body.find('value="slack-chat-read"')
-    assert chat_read_idx != -1
-    # Find the surrounding <input ...> tag and assert it has 'checked'.
-    tag_start = body.rfind("<input", 0, chat_read_idx)
-    tag_end = body.find(">", chat_read_idx)
-    assert "checked" in body[tag_start:tag_end]
+    # The previously-granted permission is pre-checked.
+    assert "slack-chat-read" in detail["checked_permissions"]
 
 
 def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(tmp_path: Path) -> None:
@@ -786,25 +751,15 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
 
-    response = client.get(f"/inbox/detail/{request.event_id}")
+    detail = _get_detail(client, request.event_id)
 
-    assert response.status_code == 200
-    body = response.text
-    for expected_checked in ("slack-chat-read", "slack-write-all"):
-        idx = body.find(f'value="{expected_checked}"')
-        assert idx != -1, f"checkbox for {expected_checked} missing from dialog"
-        tag_start = body.rfind("<input", 0, idx)
-        tag_end = body.find(">", idx)
-        assert "checked" in body[tag_start:tag_end], (
-            f"expected {expected_checked} to be pre-checked: {body[tag_start : tag_end + 1]}"
-        )
+    # The union of existing + requested is pre-checked.
+    assert "slack-chat-read" in detail["checked_permissions"]
+    assert "slack-write-all" in detail["checked_permissions"]
     # ``slack-read-all`` is in the catalog but neither requested nor
     # previously granted, so it must not be pre-checked.
-    read_all_idx = body.find('value="slack-read-all"')
-    assert read_all_idx != -1
-    read_all_tag_start = body.rfind("<input", 0, read_all_idx)
-    read_all_tag_end = body.find(">", read_all_idx)
-    assert "checked" not in body[read_all_tag_start:read_all_tag_end]
+    assert "slack-read-all" in detail["permission_schemas"]
+    assert "slack-read-all" not in detail["checked_permissions"]
 
 
 def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path: Path) -> None:
@@ -884,13 +839,12 @@ class _StubOtherHandler(RequestEventHandler):
     def display_name_for_event(self, req_event: RequestEvent) -> str:
         return ""
 
-    def render_request_detail_fragment(
+    def build_request_detail_payload(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
-        return "ok"
+    ) -> InboxDetailPayload:
+        return InboxDetailUnavailable(message="ok")
 
     def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
         self.grant_event_ids.append(str(req_event.event_id))

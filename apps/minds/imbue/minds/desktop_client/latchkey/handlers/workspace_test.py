@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.chrome_state import WorkspacePermissionDetail
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -114,7 +115,7 @@ def test_handler_claims_workspace_request_type(tmp_path: Path) -> None:
 # -- render_request_detail_fragment --
 
 
-def test_render_fragment_shows_verbs_rationale_and_target_choice(tmp_path: Path) -> None:
+def test_detail_payload_carries_verbs_rationale_and_target_choice(tmp_path: Path) -> None:
     handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
     target = AgentId()
     event = create_latchkey_workspace_permission_request_event(
@@ -127,30 +128,21 @@ def test_render_fragment_shows_verbs_rationale_and_target_choice(tmp_path: Path)
         url_by_agent_and_service={},
         workspace_name_by_agent={str(target): "Target WS"},
     )
-    body = handler.render_request_detail_fragment(
-        req_event=event,
-        backend_resolver=resolver,
-        mngr_forward_origin="http://localhost:8421",
-    )
-    assert "manage my sibling workspace" in body
-    assert PERM_WORKSPACES_DESTROY in body
-    assert 'name="target_scope"' in body
-    assert "Target WS" in body
-    assert "All workspaces" in body
-    assert "Approve" in body and "Deny" in body
-    assert "<html" not in body
-    # Targeted request: both the general and the workspace-specific groups show,
-    # and the general (non-targeted) read verb still appears alongside the
-    # targeted destroy verb. The workspace-specific group shows the plain hint,
-    # not the broad-scope caution (which is reserved for target-less requests).
-    assert "General permissions" in body
-    assert "Workspace-specific permissions" in body
-    assert PERM_WORKSPACES_READ in body
-    assert "These act on individual workspaces." in body
-    assert "c-warning-surface" not in body
+    payload = handler.build_request_detail_payload(req_event=event, backend_resolver=resolver)
+    assert isinstance(payload, WorkspacePermissionDetail)
+    assert payload.rationale == "manage my sibling workspace"
+    # Targeted request: every catalog verb is offered (general + targeted),
+    # the requested verb is pre-checked, and the resolved target name drives
+    # the all-vs-selected choice.
+    verbs_by_permission = {verb.permission: verb for verb in payload.verbs}
+    assert verbs_by_permission[PERM_WORKSPACES_DESTROY].is_checked is True
+    assert verbs_by_permission[PERM_WORKSPACES_DESTROY].is_targeted is True
+    assert verbs_by_permission[PERM_WORKSPACES_READ].is_targeted is False
+    assert payload.target_workspace_name == "Target WS"
+    assert payload.show_target_choice is True
 
 
-def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> None:
+def test_detail_payload_without_target_offers_broad_only(tmp_path: Path) -> None:
     handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
     event = create_latchkey_workspace_permission_request_event(
         agent_id=str(AgentId()),
@@ -158,24 +150,20 @@ def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> Non
         permissions=(PERM_WORKSPACES_READ,),
         target_workspace_id=None,
     )
-    body = handler.render_request_detail_fragment(
+    payload = handler.build_request_detail_payload(
         req_event=event,
         backend_resolver=_NamingBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
     )
-    # No target named: both groups still show (the workspace-specific verbs can
-    # be granted), but the only possible scope is broad, so there is a single
-    # pre-selected "All workspaces" radio and no per-workspace ("selected")
-    # option. The broad-scope caution is shown in place of the plain hint.
-    assert "General permissions" in body
-    assert "Workspace-specific permissions" in body
-    assert PERM_WORKSPACES_READ in body
-    assert PERM_WORKSPACES_DESTROY in body
-    assert 'name="target_scope" value="all"' in body
-    assert 'value="selected"' not in body
-    assert "c-warning-surface" in body
-    assert "all workspaces" in body
-    assert "These act on individual workspaces." not in body
+    # No target named: every verb is still offered (the workspace-specific
+    # verbs can be granted), but the only possible scope is broad -- the
+    # component renders a single pre-selected "All workspaces" radio and the
+    # broad-scope caution off show_target_choice=False.
+    assert isinstance(payload, WorkspacePermissionDetail)
+    verbs_by_permission = {verb.permission: verb for verb in payload.verbs}
+    assert verbs_by_permission[PERM_WORKSPACES_READ].is_checked is True
+    assert PERM_WORKSPACES_DESTROY in verbs_by_permission
+    assert payload.show_target_choice is False
+    assert payload.target_workspace_name == ""
 
 
 # -- apply_grant_request --

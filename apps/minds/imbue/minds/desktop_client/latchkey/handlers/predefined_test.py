@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.chrome_state import PredefinedPermissionDetail
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
@@ -349,14 +350,13 @@ def test_render_detail_fragment_with_unknown_credentials_does_not_promise_browse
         rationale="need to read a channel",
     )
 
-    body = handler.render_request_detail_fragment(
+    payload = handler.build_request_detail_payload(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
     )
 
-    assert "Granting permission..." in body
-    assert "Opening a browser window for you to sign in to" not in body
+    assert isinstance(payload, PredefinedPermissionDetail)
+    assert payload.will_open_browser is False
 
 
 def test_render_detail_fragment_with_missing_credentials_promises_browser(tmp_path: Path) -> None:
@@ -369,13 +369,13 @@ def test_render_detail_fragment_with_missing_credentials_promises_browser(tmp_pa
         rationale="need to read a channel",
     )
 
-    body = handler.render_request_detail_fragment(
+    payload = handler.build_request_detail_payload(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
     )
 
-    assert "Opening a browser window for you to sign in to" in body
+    assert isinstance(payload, PredefinedPermissionDetail)
+    assert payload.will_open_browser is True
 
 
 def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path) -> None:

@@ -64,13 +64,16 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
+from imbue.minds.desktop_client.chrome_state import ChromeRequestCard
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import FileSharingPermissionDetail
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
+from imbue.minds.desktop_client.chrome_state import InboxDetailPayload
+from imbue.minds.desktop_client.chrome_state import InboxDetailUnavailable
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
+from imbue.minds.desktop_client.chrome_state import PredefinedPermissionDetail
 from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
@@ -80,7 +83,6 @@ from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_inbox_page
-from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -202,6 +204,47 @@ def _landing_entry(agent_id: AgentId, name: str, liveness: str | None = None) ->
         supports_shutdown="true" if liveness is not None else None,
         liveness=liveness,
         provider="Docker",
+    )
+
+
+# Every latchkey scenario's payload carries this request id (see the
+# per-scenario builders below); the seeded card matches it.
+_INBOX_SCENARIO_REQUEST_ID: Final = "req-00000000000000000000000000000001"
+
+
+def _inbox_with_detail(detail: "InboxDetailPayload") -> str:
+    """An inbox page showing one pending card with ``detail`` selected."""
+    request_id = _INBOX_SCENARIO_REQUEST_ID
+    boot = ChromeBootState(
+        workspaces=ChromeWorkspacesPayload(
+            workspaces=(),
+            destroying_agent_ids=(),
+            destroying_status_by_agent_id={},
+            has_accounts=False,
+            restorable_workspace_ids=(),
+            remote_workspace_states={},
+        ),
+        providers=ChromeProvidersPayload(providers=(), last_event_at=None, last_full_snapshot_at=None),
+        requests=ChromeRequestsPayload(
+            count=1,
+            request_ids=(request_id,),
+            cards=(
+                ChromeRequestCard(
+                    id=request_id,
+                    kind_label="permission",
+                    ws_name="alpha",
+                    display_name="slack-api",
+                    accent=DEFAULT_WORKSPACE_COLOR,
+                ),
+            ),
+            auto_open=True,
+        ),
+        system_interface_statuses=(),
+    )
+    return render_inbox_page(
+        chrome_boot_state=boot,
+        inbox_extras=InboxBootExtras(selected_id=request_id, keep_open=True),
+        detail=detail,
     )
 
 
@@ -460,71 +503,90 @@ def _build_scenarios() -> list[Scenario]:
         ),
         # -- Inbox --------------------------------------------------------
         Scenario(
-            name="inbox_unavailable_fragment",
-            builder=lambda: render_inbox_unavailable_fragment(message="This request was already granted."),
-        ),
-        Scenario(
             name="inbox_empty",
             builder=lambda: render_inbox_page(
                 chrome_boot_state=_landing_boot((), {}),
                 inbox_extras=InboxBootExtras(selected_id="", keep_open=False),
-                detail_html="",
-                is_empty=True,
+                detail=None,
+            ),
+        ),
+        Scenario(
+            name="inbox_unavailable_detail",
+            builder=lambda: render_inbox_page(
+                chrome_boot_state=_landing_boot((), {}),
+                inbox_extras=InboxBootExtras(selected_id="", keep_open=True),
+                detail=InboxDetailUnavailable(message="This request was already granted."),
             ),
         ),
         # -- Dev styleguide ----------------------------------------------
         Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),
-        # -- Latchkey permission dialogs ---------------------------------
+        # -- Latchkey permission dialogs (inside the inbox modal) ---------
         Scenario(
             name="latchkey_predefined_some_checked",
-            builder=lambda: render_predefined_permission_dialog(
-                agent_id=str(agent_a),
-                request_id="req-00000000000000000000000000000001",
-                ws_name="alpha",
-                rationale="I want to summarize today's messages.",
-                service=slack_service,
-                checked_permissions=("slack-read",),
-                will_open_browser=True,
-                mngr_forward_origin="http://localhost:8421",
+            builder=lambda: _inbox_with_detail(
+                PredefinedPermissionDetail(
+                    agent_id=str(agent_a),
+                    request_id="req-00000000000000000000000000000001",
+                    ws_name="alpha",
+                    rationale="I want to summarize today's messages.",
+                    display_name=slack_service.display_name,
+                    permission_schemas=tuple(slack_service.permission_schemas),
+                    description_by_permission_name=dict(slack_service.description_by_permission_name),
+                    checked_permissions=("slack-read",),
+                    wildcard_permission="any",
+                    wildcard_label="all",
+                    will_open_browser=True,
+                )
             ),
         ),
         Scenario(
             name="latchkey_predefined_none_checked",
-            builder=lambda: render_predefined_permission_dialog(
-                agent_id=str(agent_a),
-                request_id="req-00000000000000000000000000000001",
-                ws_name="alpha",
-                rationale="I haven't yet decided what permissions to ask for.",
-                service=slack_service,
-                checked_permissions=(),
-                will_open_browser=False,
-                mngr_forward_origin="http://localhost:8421",
+            builder=lambda: _inbox_with_detail(
+                PredefinedPermissionDetail(
+                    agent_id=str(agent_a),
+                    request_id="req-00000000000000000000000000000001",
+                    ws_name="alpha",
+                    rationale="I haven't yet decided what permissions to ask for.",
+                    display_name=slack_service.display_name,
+                    permission_schemas=tuple(slack_service.permission_schemas),
+                    description_by_permission_name=dict(slack_service.description_by_permission_name),
+                    checked_permissions=(),
+                    wildcard_permission="any",
+                    wildcard_label="all",
+                    will_open_browser=False,
+                )
             ),
         ),
         Scenario(
             name="latchkey_file_sharing_read",
-            builder=lambda: render_file_sharing_permission_dialog(
-                agent_id=str(agent_a),
-                request_id="req-00000000000000000000000000000001",
-                ws_name="alpha",
-                rationale="I need to read this file to answer your question.",
-                file_path="/Users/alice/Documents/notes.md",
-                access="READ",
-                access_human_label="read-only",
-                mngr_forward_origin="http://localhost:8421",
+            builder=lambda: _inbox_with_detail(
+                FileSharingPermissionDetail(
+                    agent_id=str(agent_a),
+                    request_id="req-00000000000000000000000000000001",
+                    ws_name="alpha",
+                    rationale="I need to read this file to answer your question.",
+                    file_path="/Users/alice/Documents/notes.md",
+                    access="READ",
+                    access_human_label="read-only",
+                    allowed_roots=("/Users/alice",),
+                    home_dir="/Users/alice",
+                )
             ),
         ),
         Scenario(
             name="latchkey_file_sharing_write",
-            builder=lambda: render_file_sharing_permission_dialog(
-                agent_id=str(agent_a),
-                request_id="req-00000000000000000000000000000001",
-                ws_name="alpha",
-                rationale="I need to update this file in place.",
-                file_path="/Users/alice/Documents/notes.md",
-                access="WRITE",
-                access_human_label="read & write",
-                mngr_forward_origin="http://localhost:8421",
+            builder=lambda: _inbox_with_detail(
+                FileSharingPermissionDetail(
+                    agent_id=str(agent_a),
+                    request_id="req-00000000000000000000000000000001",
+                    ws_name="alpha",
+                    rationale="I need to update this file in place.",
+                    file_path="/Users/alice/Documents/notes.md",
+                    access="WRITE",
+                    access_human_label="read & write",
+                    allowed_roots=("/Users/alice",),
+                    home_dir="/Users/alice",
+                )
             ),
         ),
         # -- Auth pages (SuperTokens) ------------------------------------

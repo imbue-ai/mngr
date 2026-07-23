@@ -28,10 +28,12 @@ from pydantic import Field
 
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.chrome_state import AccountsPermissionDetail
+from imbue.minds.desktop_client.chrome_state import InboxDetailPayload
+from imbue.minds.desktop_client.chrome_state import InboxDetailUnavailable
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_accounts_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyAccountsPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -111,22 +113,20 @@ class AccountsPermissionGrantHandler(RequestEventHandler):
             return ""
         return "Account access"
 
-    def render_request_detail_fragment(
+    def build_request_detail_payload(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
+    ) -> InboxDetailPayload:
         if not isinstance(req_event, LatchkeyAccountsPermissionRequestEvent):
-            return "<p>Unsupported request type</p>"
+            return InboxDetailUnavailable(message="Unsupported request type")
         parsed_agent_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
-        return render_accounts_permission_dialog(
+        return AccountsPermissionDetail(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
             ws_name=ws_name,
             rationale=req_event.rationale,
-            mngr_forward_origin=mngr_forward_origin,
         )
 
     def apply_grant_request(

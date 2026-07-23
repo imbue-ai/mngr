@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.chrome_state import FileSharingPermissionDetail
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -162,7 +163,7 @@ def test_display_name_returns_path(tmp_path: Path) -> None:
 # -- render_request_detail_fragment --
 
 
-def test_render_request_detail_fragment_shows_path_and_rationale(tmp_path: Path) -> None:
+def test_detail_payload_carries_path_access_and_rationale(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
@@ -170,52 +171,20 @@ def test_render_request_detail_fragment_shows_path_and_rationale(tmp_path: Path)
         access="READ",
         rationale="summarize the doc",
     )
-    body = handler.render_request_detail_fragment(
+    payload = handler.build_request_detail_payload(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="http://localhost:8421",
     )
-    assert "/home/user/important.txt" in body
-    assert "summarize the doc" in body
-    assert "Approve" in body and "Deny" in body
-    # The fragment must show the human-readable access label so the user
-    # knows what's being granted.
-    assert "read-only" in body
-    # The fragment carries no page chrome of its own; the Connections
-    # shell owns the card chrome and submission JS.
-    assert "<html" not in body
-    assert "permissions-backdrop" not in body
-    assert "<script>" not in body
+    assert isinstance(payload, FileSharingPermissionDetail)
+    assert payload.file_path == "/home/user/important.txt"
+    assert payload.rationale == "summarize the doc"
+    # The human-readable access label tells the user what's being granted.
+    assert payload.access == "READ"
+    assert payload.access_human_label == "read-only"
 
 
-def test_render_request_detail_fragment_has_editable_path_and_browse(tmp_path: Path) -> None:
-    """The dialog renders the path as an editable input plus a Browse button."""
-    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    event = create_latchkey_file_sharing_permission_request_event(
-        agent_id=str(AgentId()),
-        path="/home/user/important.txt",
-        access="READ",
-        rationale="summarize the doc",
-    )
-    body = handler.render_request_detail_fragment(
-        req_event=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
-    )
-    # The path is editable: an input named ``file_path`` pre-filled with
-    # the requested path, plus separate file / folder pickers keyed for
-    # the inbox shell.
-    assert 'name="file_path"' in body
-    assert 'id="file-sharing-path-input"' in body
-    assert 'value="/home/user/important.txt"' in body
-    assert 'id="file-sharing-browse-file-btn"' in body
-    assert 'id="file-sharing-browse-folder-btn"' in body
-    assert "browseForSharePath(&#39;file&#39;)" in body or "browseForSharePath('file')" in body
-    assert "browseForSharePath(&#39;directory&#39;)" in body or "browseForSharePath('directory')" in body
-
-
-def test_render_request_detail_fragment_marks_write_grants_distinctly(tmp_path: Path) -> None:
-    """WRITE grants render the broader human-readable access label."""
+def test_detail_payload_marks_write_grants_distinctly(tmp_path: Path) -> None:
+    """WRITE grants carry the broader human-readable access label."""
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
@@ -223,21 +192,20 @@ def test_render_request_detail_fragment_marks_write_grants_distinctly(tmp_path: 
         access="WRITE",
         rationale="edit it",
     )
-    body = handler.render_request_detail_fragment(
+    payload = handler.build_request_detail_payload(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
     )
-    assert "read &amp; write" in body or "read & write" in body
-    # The read-only label must not appear when WRITE access is being
-    # requested, otherwise the fragment would be misleading.
-    assert "read-only" not in body
+    assert isinstance(payload, FileSharingPermissionDetail)
+    assert payload.access == "WRITE"
+    assert payload.access_human_label == "read & write"
 
 
-def test_render_request_detail_fragment_escapes_html_in_inputs(tmp_path: Path) -> None:
+def test_detail_payload_carries_paths_verbatim(tmp_path: Path) -> None:
+    """The payload carries user-controlled strings verbatim -- escaping is the
+    rendering layer's job (mithril vnodes escape by default), so nothing here
+    may pre-encode or mangle them."""
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    # A path crafted to break out of the value="" attribute and inject an
-    # event handler if the renderer naively interpolated it.
     malicious_path = '/tmp/" onfocus="alert(1)'
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
@@ -245,27 +213,13 @@ def test_render_request_detail_fragment_escapes_html_in_inputs(tmp_path: Path) -
         access="READ",
         rationale="<img src=x onerror=alert(2)>",
     )
-    body = str(
-        handler.render_request_detail_fragment(
-            req_event=event,
-            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-            mngr_forward_origin="",
-        )
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
     )
-    # The rationale is rendered as element text, so raw HTML must be
-    # entity-escaped.
-    assert "<img src=x" not in body
-
-    # The path is rendered into the value="" attribute of the editable
-    # input. Parse the input and verify the attribute carries the path
-    # verbatim with no injected handler -- i.e. the renderer safely quoted
-    # the value rather than letting the crafted ``"`` break out.
-    attrs = _parse_input_attrs(body, element_id="file-sharing-path-input")
-    assert attrs["value"] == malicious_path
-    assert "onfocus" not in attrs
-
-
-# -- apply_grant_request --
+    assert isinstance(payload, FileSharingPermissionDetail)
+    assert payload.file_path == malicious_path
+    assert payload.rationale == "<img src=x onerror=alert(2)>"
 
 
 def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Path) -> None:
@@ -549,10 +503,15 @@ def test_grant_rejects_tilde_user_edited_path(tmp_path: Path) -> None:
     assert gateway_called is False
 
 
-def test_render_request_detail_fragment_embeds_home_dir(tmp_path: Path) -> None:
-    """The dialog embeds the home directory so the inbox shell can expand ``~`` client-side."""
+def test_detail_payload_embeds_home_dir_and_allowed_roots(tmp_path: Path) -> None:
+    """The payload carries the home dir (client-side ~ expansion) and the
+    share roots (client-side within-roots validation), mirroring the server
+    checks."""
     handler, _sender = _make_file_sharing_handler(
-        tmp_path, lambda r: httpx.Response(200), home_dir=Path("/home/glenn")
+        tmp_path,
+        lambda r: httpx.Response(200),
+        home_dir=Path("/home/glenn"),
+        share_roots=(Path("/home/glenn"), Path("/tmp")),
     )
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
@@ -560,37 +519,13 @@ def test_render_request_detail_fragment_embeds_home_dir(tmp_path: Path) -> None:
         access="READ",
         rationale="r",
     )
-    body = str(
-        handler.render_request_detail_fragment(
-            req_event=event,
-            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-            mngr_forward_origin="",
-        )
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
     )
-    attrs = _parse_input_attrs(body, element_id="file-sharing-path-input")
-    assert attrs["data-home-dir"] == "/home/glenn"
-
-
-def test_render_request_detail_fragment_embeds_allowed_roots(tmp_path: Path) -> None:
-    """The dialog embeds the share roots so the inbox shell can validate client-side."""
-    handler, _sender = _make_file_sharing_handler(
-        tmp_path, lambda r: httpx.Response(200), share_roots=(Path("/home/glenn"), Path("/tmp"))
-    )
-    event = create_latchkey_file_sharing_permission_request_event(
-        agent_id=str(AgentId()),
-        path="/home/glenn/notes.txt",
-        access="READ",
-        rationale="r",
-    )
-    body = str(
-        handler.render_request_detail_fragment(
-            req_event=event,
-            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-            mngr_forward_origin="",
-        )
-    )
-    attrs = _parse_input_attrs(body, element_id="file-sharing-path-input")
-    assert json.loads(attrs["data-allowed-roots"]) == ["/home/glenn", "/tmp"]
+    assert isinstance(payload, FileSharingPermissionDetail)
+    assert payload.home_dir == "/home/glenn"
+    assert payload.allowed_roots == ("/home/glenn", "/tmp")
 
 
 def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:

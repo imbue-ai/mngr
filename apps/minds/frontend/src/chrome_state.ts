@@ -156,9 +156,96 @@ export interface InboxBootExtras {
   keep_open: boolean;
 }
 
+// -- Inbox request-detail payloads (mirrors of the InboxDetail* models in
+// chrome_state.py): the typed replacement for the old server-rendered inbox
+// right-pane HTML fragments, served as JSON by GET /inbox/detail/<id> and
+// seeded in the inbox island's ``inbox_detail`` key.
+
+export interface InboxDetailUnavailable {
+  kind: "unavailable";
+  // Optional supporting sentence; empty shows the heading alone.
+  message: string;
+}
+
+export interface PredefinedPermissionDetail {
+  kind: "predefined";
+  agent_id: string;
+  request_id: string;
+  ws_name: string;
+  rationale: string;
+  display_name: string;
+  permission_schemas: string[];
+  description_by_permission_name: Record<string, string>;
+  checked_permissions: string[];
+  // The catch-all permission's stored name (Detent's wildcard) and the
+  // clearer user-facing label shown in its place.
+  wildcard_permission: string;
+  wildcard_label: string;
+  // Whether Approve will run a browser sign-in (progress notice copy).
+  will_open_browser: boolean;
+  // Non-empty selects the deny-only unknown-scope variant.
+  unknown_scope: string;
+}
+
+export interface FileSharingPermissionDetail {
+  kind: "file_sharing";
+  agent_id: string;
+  request_id: string;
+  ws_name: string;
+  rationale: string;
+  file_path: string;
+  // READ or WRITE.
+  access: string;
+  access_human_label: string;
+  // Absolute WebDAV mount roots; Approve is blocked for paths outside them.
+  allowed_roots: string[];
+  // Absolute home directory for client-side ~ expansion.
+  home_dir: string;
+}
+
+export interface AccountsPermissionDetail {
+  kind: "accounts";
+  agent_id: string;
+  request_id: string;
+  ws_name: string;
+  rationale: string;
+}
+
+export interface WorkspaceVerbOption {
+  permission: string;
+  display_name: string;
+  description: string;
+  is_targeted: boolean;
+  is_checked: boolean;
+}
+
+export interface WorkspacePermissionDetail {
+  kind: "workspace";
+  agent_id: string;
+  request_id: string;
+  ws_name: string;
+  rationale: string;
+  display_name: string;
+  verbs: WorkspaceVerbOption[];
+  target_workspace_id: string;
+  target_workspace_name: string;
+  // Whether the all-vs-selected target radio is offered.
+  show_target_choice: boolean;
+}
+
+export type InboxDetailPayload =
+  | InboxDetailUnavailable
+  | PredefinedPermissionDetail
+  | FileSharingPermissionDetail
+  | AccountsPermissionDetail
+  | WorkspacePermissionDetail;
+
 export interface InboxBootIsland {
   chrome: ChromeBootState;
   inbox: InboxBootExtras;
+  // The initially-selected request's detail payload; absent when the inbox
+  // is empty or nothing could be resolved.
+  inbox_detail?: InboxDetailPayload;
 }
 
 // Sharing-editor boot island data (mirror of SharingBootExtras in

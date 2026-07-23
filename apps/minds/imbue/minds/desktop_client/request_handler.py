@@ -1,7 +1,7 @@
 """Abstract handler for a single ``RequestEvent`` subtype.
 
 The desktop client supports multiple kinds of pending requests (sharing,
-latchkey-permission, ...). Each is rendered, granted, and denied through a
+latchkey-permission, ...). Each is described, granted, and denied through a
 type-specific ``RequestEventHandler`` so the route layer can stay a thin
 dispatcher: it authenticates, looks up the request event by id, picks the
 handler that claims the event's ``request_type``, and forwards the rest
@@ -21,13 +21,14 @@ from flask import Response
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.chrome_state import InboxDetailPayload
 from imbue.minds.desktop_client.request_events import RequestEvent
 
 
 class RequestEventHandler(MutableModel, ABC):
     """Per-``RequestType`` handler for the request inbox flow.
 
-    Each implementation owns rendering the request detail fragment,
+    Each implementation owns building the request detail payload,
     applying a grant, applying a deny, and providing the human-readable
     labels the inbox list uses to describe pending requests of its
     kind. The route layer guarantees that ``req_event.request_type``
@@ -54,27 +55,19 @@ class RequestEventHandler(MutableModel, ABC):
         """
 
     @abstractmethod
-    def render_request_detail_fragment(
+    def build_request_detail_payload(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
-        """Render the right-pane HTML fragment for an inbox detail view.
+    ) -> InboxDetailPayload:
+        """Build the typed right-pane payload for an inbox detail view.
 
-        The fragment is embedded inside the inbox modal's
-        ``#inbox-detail`` container (or innerHTML-swapped into it). It
-        must not include ``<html>``, a backdrop, a close button, or any
-        per-handler script tags: chrome and submission JS live in the
-        inbox shell and operate on shared element ids the fragment
-        emits (``#permissions-form``, ``#permissions-approve-btn``,
-        ``#permissions-error``, ``#permissions-progress``,
-        ``#permissions-manual-credentials``).
-
-        ``mngr_forward_origin`` is the bare-origin URL of the
-        ``mngr forward`` plugin (e.g. ``"http://localhost:8421"``);
-        handlers thread it into rendered templates so workspace links
-        target the plugin's ``/goto/<agent>/`` route rather than minds.
+        The payload is served as JSON by ``GET /inbox/detail/<id>`` (and
+        seeded in the inbox page's boot island for the initial selection);
+        the mithril detail views in ``frontend/src/views/InboxDetail.ts``
+        render it. Grant/deny submission, Approve gating, and the modal
+        chrome all live in that frontend layer -- handlers only supply
+        data.
         """
 
     @abstractmethod

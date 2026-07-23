@@ -26,6 +26,9 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
+from imbue.minds.desktop_client.chrome_state import InboxDetailPayload
+from imbue.minds.desktop_client.chrome_state import InboxDetailUnavailable
+from imbue.minds.desktop_client.chrome_state import PredefinedPermissionDetail
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -1447,31 +1450,24 @@ def test_inbox_empty_state(tmp_path: Path) -> None:
     response = client.get("/inbox")
     assert response.status_code == 200
     body = response.text
-    # The list is client-rendered from the island; with nothing pending the
-    # chrome snapshot carries no cards (the component shows the placeholder).
+    # The whole modal is client-rendered from the island; with nothing
+    # pending the chrome snapshot carries no cards (the component shows the
+    # placeholder and computes the collapsed layout synchronously).
     island = parse_boot_island(body)
     assert island["chrome"]["requests"]["cards"] == []
     assert island["inbox"] == {"selected_id": "", "keep_open": False}
-    # The ``is-empty`` class must be on the ``inbox-body`` element itself so
-    # the pre-mount layout is already collapsed. The substring appears
-    # unconditionally inside the page's <style> block (rules keyed on
-    # ``inbox-body.is-empty``), so target the opening tag's attribute span
-    # specifically.
-    tag_start = body.find('id="inbox-body"')
-    tag_end = body.find(">", tag_start)
-    assert tag_start != -1
-    assert "is-empty" in body[tag_start:tag_end]
-    # Should not include any server-rendered inbox-card markup when empty.
-    assert 'class="inbox-card' not in body
+    assert "MindsUI.mountInboxModal" in body
+    # No server-rendered inbox-card markup (the ``.inbox-card`` style rules in
+    # the head are keyed selectors, not rendered cards).
+    assert "inbox-card" not in body.replace(".inbox-card", "")
 
 
 class _InboxStubLatchkeyHandler(RequestEventHandler):
     """Minimal LATCHKEY_PERMISSION handler used by the inbox tests.
 
-    Produces a deterministic fragment that echoes the request's
-    rationale so the master/detail tests can assert on the right pane's
-    contents without standing up the real latchkey gateway/catalog
-    machinery.
+    Builds a deterministic predefined-permission payload that echoes the
+    request's rationale so the master/detail tests can assert on the seeded
+    detail without standing up the real latchkey gateway/catalog machinery.
     """
 
     def handles_request_type(self) -> str:
@@ -1485,15 +1481,26 @@ class _InboxStubLatchkeyHandler(RequestEventHandler):
             return ""
         return req_event.scope
 
-    def render_request_detail_fragment(
+    def build_request_detail_payload(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
+    ) -> InboxDetailPayload:
         if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
-            return ""
-        return f'<div class="permissions-detail">{req_event.rationale}</div>'
+            return InboxDetailUnavailable()
+        return PredefinedPermissionDetail(
+            agent_id=req_event.agent_id,
+            request_id=str(req_event.event_id),
+            ws_name="",
+            rationale=req_event.rationale,
+            display_name=req_event.scope,
+            permission_schemas=(),
+            description_by_permission_name={},
+            checked_permissions=(),
+            wildcard_permission="",
+            wildcard_label="",
+            will_open_browser=False,
+        )
 
     def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
         return make_response(content='{"outcome": "GRANTED"}', media_type="application/json")
@@ -1548,14 +1555,14 @@ def test_inbox_master_detail_renders_first_pending_by_default(tmp_path: Path) ->
     assert response.status_code == 200
     body = response.text
 
-    # The island's card list contains the pending event, and the extras mark
-    # it as the initial selection.
+    # The island's card list contains the pending event, the extras mark it
+    # as the initial selection, and its typed detail payload rides the island
+    # so the right pane paints immediately.
     island = parse_boot_island(body)
     assert [card["id"] for card in island["chrome"]["requests"]["cards"]] == [str(event.event_id)]
     assert island["inbox"]["selected_id"] == str(event.event_id)
-    # The right-pane detail fragment was composed server-side and includes
-    # the rationale.
-    assert "Need to post status updates" in body
+    assert island["inbox_detail"]["kind"] == "predefined"
+    assert island["inbox_detail"]["rationale"] == "Need to post status updates"
 
 
 def test_inbox_preselects_query_param(tmp_path: Path) -> None:
@@ -1575,14 +1582,12 @@ def test_inbox_preselects_query_param(tmp_path: Path) -> None:
     assert response.status_code == 200
     body = response.text
     island = parse_boot_island(body)
-    # Both pending cards ride the island; the extras select the requested one.
+    # Both pending cards ride the island; the extras select the requested one,
+    # and its detail payload (not the default first-pending) rides the island.
     card_ids = {card["id"] for card in island["chrome"]["requests"]["cards"]}
     assert card_ids == {str(first.event_id), str(second.event_id)}
     assert island["inbox"]["selected_id"] == str(first.event_id)
-    # The server-rendered detail shows the selected request's rationale, not
-    # the default-first-pending one.
-    assert "first request" in body
-    assert "second request" not in body
+    assert island["inbox_detail"]["rationale"] == "first request"
 
 
 def test_inbox_stale_selected_renders_unavailable(tmp_path: Path) -> None:
@@ -1598,11 +1603,12 @@ def test_inbox_stale_selected_renders_unavailable(tmp_path: Path) -> None:
     response = client.get("/inbox?selected=evt-unknown-id")
     assert response.status_code == 200
     body = response.text
-    # The right pane shows the "no longer available" message...
-    assert "no longer available" in body
+    island = parse_boot_island(body)
+    # The seeded detail payload is the "unavailable" one...
+    assert island["inbox_detail"]["kind"] == "unavailable"
+    assert island["inbox_detail"]["message"] != ""
     # ...but the island still carries the legitimate pending card so the
     # user can pick another item.
-    island = parse_boot_island(body)
     assert [card["id"] for card in island["chrome"]["requests"]["cards"]] == [str(event.event_id)]
 
 
@@ -1616,8 +1622,8 @@ def test_inbox_list_route_removed(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-def test_inbox_detail_fragment_returns_just_the_detail(tmp_path: Path) -> None:
-    """``GET /inbox/detail/<id>`` returns the right-pane fragment."""
+def test_inbox_detail_route_returns_the_typed_payload(tmp_path: Path) -> None:
+    """``GET /inbox/detail/<id>`` returns the request's typed detail payload as JSON."""
     agent_id = str(AgentId())
     event = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="detail testing"
@@ -1627,25 +1633,22 @@ def test_inbox_detail_fragment_returns_just_the_detail(tmp_path: Path) -> None:
 
     response = client.get(f"/inbox/detail/{event.event_id}")
     assert response.status_code == 200
-    body = response.text
-    assert "detail testing" in body
-    # Fragment-only: no <html>, no backdrop, no inbox shell JS.
-    assert "<html" not in body
-    assert "inbox-backdrop" not in body
-    # The fragment must not include the shell's permissions-form submit
-    # JS or its escape/backdrop handlers; those live in the inbox page.
-    assert 'addEventListener("keydown"' not in body
-    assert "submitPermissionDeny = function" not in body
+    # The route now returns the typed detail payload as JSON, not HTML.
+    detail = response.get_json()["detail"]
+    assert detail["kind"] == "predefined"
+    assert detail["rationale"] == "detail testing"
 
 
-def test_inbox_detail_fragment_for_unknown_id_returns_unavailable_200(tmp_path: Path) -> None:
-    """An unknown id resolves to the "no longer available" fragment with HTTP 200
-    so the inbox shell JS can innerHTML-swap the response directly."""
+def test_inbox_detail_for_unknown_id_returns_unavailable_200(tmp_path: Path) -> None:
+    """An unknown id resolves to the "unavailable" payload with HTTP 200 so the
+    detail view can render it directly."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get("/inbox/detail/evt-nonexistent-id")
     assert response.status_code == 200
-    assert "no longer available" in response.text
+    # HTTP 200 with the "unavailable" payload so the detail view can swap to
+    # it directly.
+    assert response.get_json()["detail"]["kind"] == "unavailable"
 
 
 def test_inbox_auto_open_setting_reflects_config_in_island(tmp_path: Path) -> None:
@@ -1664,29 +1667,18 @@ def test_inbox_auto_open_setting_reflects_config_in_island(tmp_path: Path) -> No
     assert parse_boot_island(response.text)["chrome"]["requests"]["auto_open"] is False
 
 
-def test_inbox_shell_disables_both_buttons_and_spins_during_approval(tmp_path: Path) -> None:
-    """While an approval runs in the background the shell must give a clear
-    signal: a busy helper that disables BOTH buttons and reveals the Approve
-    spinner, invoked when the grant is submitted.
+def test_inbox_page_mounts_the_modal(tmp_path: Path) -> None:
+    """The inbox approve/deny busy state, spinner, and disabled-both-buttons
+    behavior are now the mithril InboxDetail component's job (covered by
+    InboxDetail.test.ts). The server page only mounts the modal.
 
-    Regression guard for the "scary" no-feedback approval: the user needs to
-    see that work is happening (browser sign-in, follow-up grant, etc.) and
-    must not be able to double-submit or deny mid-flight.
+    Regression guard for the port: the route still renders and seeds the mount.
     """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get("/inbox")
     assert response.status_code == 200
-    body = response.text
-    # The busy helper disables both buttons and toggles the spinner/label.
-    assert "function setApproveBusy(isBusy)" in body
-    assert 'document.getElementById("permissions-deny-btn")' in body
-    assert 'document.getElementById("permissions-approve-spinner")' in body
-    # Submitting the grant enters the busy state.
-    assert "setApproveBusy(true)" in body
-    # Non-resolving outcomes (failure, manual credentials, errors) clear it
-    # so the user can retry.
-    assert "setApproveBusy(false)" in body
+    assert "MindsUI.mountInboxModal" in response.text
 
 
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:

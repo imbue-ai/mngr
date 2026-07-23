@@ -9,6 +9,7 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.chrome_state import AccountsPermissionDetail
 from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
 from imbue.minds.desktop_client.chrome_state import ChromeRequestCard
@@ -764,7 +765,9 @@ def test_render_inbox_page_island_and_mount() -> None:
     html = render_inbox_page(
         _inbox_boot_fixture((card,)),
         _inbox_extras_fixture(selected_id="evt-1", keep_open=True),
-        detail_html="<div>detail</div>",
+        detail=AccountsPermissionDetail(
+            agent_id="agent-1", request_id="evt-1", ws_name="ws-alpha", rationale="please"
+        ),
     )
     island = parse_boot_island(html)
     assert island["chrome"]["requests"]["cards"] == [
@@ -777,34 +780,37 @@ def test_render_inbox_page_island_and_mount() -> None:
         }
     ]
     assert island["inbox"] == {"selected_id": "evt-1", "keep_open": True}
-    assert 'window.MindsUI.mountInboxList(document.getElementById("inbox-left-column")' in html
-    assert html.index('id="minds-boot-state"') < html.index("mountInboxList")
-    # The left column is an empty mount container: no server-rendered cards,
-    # no server-rendered auto-open checkbox (the component renders both).
+    # The initially-selected request's typed detail payload rides the island.
+    assert island["inbox_detail"] == {
+        "kind": "accounts",
+        "agent_id": "agent-1",
+        "request_id": "evt-1",
+        "ws_name": "ws-alpha",
+        "rationale": "please",
+    }
+    assert "window.MindsUI.mountInboxModal(document.getElementById('inbox-root'))" in html
+    assert html.index('id="minds-boot-state"') < html.index("mountInboxModal")
+    # The whole modal is client-rendered: no server-rendered cards, no
+    # server-rendered auto-open checkbox, no server detail markup.
     assert "inbox-card" not in html.replace(".inbox-card", "")
     assert 'id="inbox-auto-open"' not in html
-    # The detail pane stays a server-rendered fragment.
-    assert "<div>detail</div>" in html
     # The deleted list-refetch driver must not come back.
     assert "/inbox/list" not in html
 
 
-def test_render_inbox_page_empty_presets_the_collapsed_layout() -> None:
-    """``is_empty`` puts ``is-empty`` on ``#inbox-body`` server-side so the
-    pre-mount layout is already collapsed (the component re-syncs after)."""
-    html = render_inbox_page(_inbox_boot_fixture(), _inbox_extras_fixture(), is_empty=True)
-    tag_start = html.find('id="inbox-body"')
-    tag_end = html.find(">", tag_start)
-    assert tag_start != -1
-    assert "is-empty" in html[tag_start:tag_end]
+def test_render_inbox_page_mounts_the_modal_from_the_island() -> None:
+    """The whole inbox modal is client-rendered: an empty inbox seeds no cards
+    and no ``inbox_detail``; a non-empty one carries its cards. The component
+    computes the collapsed empty-state layout synchronously per render."""
+    empty = render_inbox_page(_inbox_boot_fixture(), _inbox_extras_fixture())
+    assert "window.MindsUI.mountInboxModal(document.getElementById('inbox-root'))" in empty
+    assert parse_boot_island(empty)["chrome"]["requests"]["cards"] == []
+    assert "inbox_detail" not in parse_boot_island(empty)
     non_empty = render_inbox_page(
         _inbox_boot_fixture((_inbox_card_fixture("evt-1"),)),
         _inbox_extras_fixture(),
-        is_empty=False,
     )
-    tag_start = non_empty.find('id="inbox-body"')
-    tag_end = non_empty.find(">", tag_start)
-    assert "is-empty" not in non_empty[tag_start:tag_end]
+    assert parse_boot_island(non_empty)["chrome"]["requests"]["cards"][0]["id"] == "evt-1"
 
 
 def test_render_sidebar_page_is_a_positioning_shell_with_a_menu_mount() -> None:

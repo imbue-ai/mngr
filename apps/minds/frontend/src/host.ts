@@ -26,6 +26,10 @@ export interface MindsBridge {
   confirmStopMind(agentId: string, name: string): void;
   // Optimistic local titlebar repaint while a color save is in flight.
   previewWorkspaceAccent(agentId: string, accent: string): void;
+  // Native OS file/directory picker (the file-sharing dialog's Browse
+  // buttons); resolves to the chosen absolute path, or null/undefined on
+  // cancel. Absent outside Electron -- callers feature-detect.
+  showFilePicker?(options: { defaultPath: string; mode: "file" | "directory" }): Promise<string | null | undefined>;
   openMindsSettings(): void;
   openAccounts(): void;
   openSigninModal(returnTo: string, mode: string): void;

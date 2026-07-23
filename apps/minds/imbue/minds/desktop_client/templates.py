@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.chrome_state import CreatingBootExtras
 from imbue.minds.desktop_client.chrome_state import DestroyingBootExtras
 from imbue.minds.desktop_client.chrome_state import HelpBootExtras
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
+from imbue.minds.desktop_client.chrome_state import InboxDetailPayload
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.chrome_state import SettingsBootExtras
 from imbue.minds.desktop_client.chrome_state import SharingBootExtras
@@ -783,46 +784,25 @@ def render_auth_error_page(message: str) -> str:
 def render_inbox_page(
     chrome_boot_state: ChromeBootState,
     inbox_extras: InboxBootExtras,
-    detail_html: str = "",
-    is_empty: bool = False,
+    detail: InboxDetailPayload | None = None,
 ) -> str:
     """Render the full inbox modal page served by ``GET /inbox``.
 
-    The left list (cards + auto-open footer) is the mithril InboxList
-    component, mounted from the boot island (the chrome snapshot's
-    ``requests.cards`` + the ``inbox`` extras). ``detail_html`` is the
-    pre-rendered right-pane fragment (handler detail, unavailable fragment,
-    or empty) -- the detail pane stays a server-rendered fragment by design.
-    ``is_empty`` sets the pre-mount collapsed layout when there are no
-    pending requests.
+    The whole modal (drawer chrome, the card list + auto-open footer, and
+    the per-kind detail views) is the mithril inbox surface, mounted from
+    the boot island: the chrome snapshot's ``requests.cards`` + the
+    ``inbox`` extras + the initially-selected request's typed detail
+    payload under ``inbox_detail`` (``None`` renders an empty right pane).
+    The component computes the collapsed empty-state layout synchronously
+    on first render.
     """
-    island = {
+    island: dict[str, Any] = {
         "chrome": chrome_boot_state.to_payload_dict(),
         "inbox": inbox_extras.to_payload_dict(),
     }
-    return CATALOG.render(
-        "pages.Inbox",
-        boot_state=island,
-        detail_html=detail_html,
-        is_empty=is_empty,
-    )
-
-
-@pure
-def render_inbox_unavailable_fragment(message: str = "") -> str:
-    """Render the inbox right-pane "no longer available" fragment.
-
-    Returned by ``GET /inbox/detail/<id>`` when the id is unknown or
-    already resolved; also innerHTML-swapped into the right pane by the
-    inbox shell JS when an SSE event resolves the currently-selected
-    item.
-
-    ``message`` is an optional supporting sentence rendered under the
-    fragment's heading. When empty (the default), only the heading is
-    shown, so callers that drop the supporting sentence don't end up
-    duplicating the heading.
-    """
-    return CATALOG.render("InboxUnavailable", message=message)
+    if detail is not None:
+        island["inbox_detail"] = detail.to_payload_dict()
+    return CATALOG.render("pages.Inbox", boot_state=island)
 
 
 # CSS for the recovery page's restart controls, appended to the shared

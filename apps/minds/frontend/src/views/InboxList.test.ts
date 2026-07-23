@@ -5,7 +5,7 @@ import type { ChromeRequestCard, InboxBootIsland } from "../chrome_state";
 import { resetHostForTesting } from "../host";
 import { applyChromeEvent, resetStoreForTesting } from "../store";
 import type { InboxListHandle } from "./InboxList";
-import { mountInboxList } from "./InboxList";
+import { mountInboxModal } from "./InboxList";
 
 afterEach(() => {
   window.dispatchEvent(new Event("minds:page-teardown"));
@@ -44,17 +44,27 @@ function island(cards: ChromeRequestCard[], selectedId = "", keepOpen = false): 
   };
 }
 
-// Builds the inbox page's static shell (island + body/left-column/detail) the
-// way Inbox.jinja renders it, then mounts. The browser host's EventSource and
-// the global fetch are stubbed: jsdom implements neither.
-function mountFixture(
-  bootIsland: InboxBootIsland,
-  onDetailSwapped: () => void = () => undefined,
-): { handle: InboxListHandle; left: HTMLElement; detail: HTMLElement; fetchCalls: string[] } {
+// Builds the inbox page's island the way Inbox.jinja renders it, then mounts
+// the whole modal. The browser host's EventSource and the global fetch are
+// stubbed: jsdom implements neither; the detail fetch answers with the
+// "unavailable" payload carrying the requested URL as its message so tests
+// can assert which detail was fetched and rendered.
+function mountFixture(bootIsland: InboxBootIsland): {
+  handle: InboxListHandle;
+  root: HTMLElement;
+  left: HTMLElement;
+  detail: HTMLElement;
+  fetchCalls: string[];
+} {
   const fetchCalls: string[] = [];
   vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
     fetchCalls.push(`${init?.method ?? "GET"} ${url}${init?.body !== undefined ? ` ${String(init.body)}` : ""}`);
-    return Promise.resolve(new Response(`<p id="fetched-fragment">${url}</p>`, { status: 200 }));
+    return Promise.resolve(
+      new Response(JSON.stringify({ detail: { kind: "unavailable", message: url } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
   });
   vi.stubGlobal(
     "EventSource",
@@ -68,17 +78,14 @@ function mountFixture(
   islandEl.id = "minds-boot-state";
   islandEl.textContent = JSON.stringify(bootIsland);
   document.body.appendChild(islandEl);
-  const body = document.createElement("div");
-  body.id = "inbox-body";
-  const left = document.createElement("div");
-  left.id = "inbox-left-column";
-  const detail = document.createElement("div");
-  detail.id = "inbox-detail";
-  body.appendChild(left);
-  body.appendChild(detail);
-  document.body.appendChild(body);
-  const handle = mountInboxList(left, { onDetailSwapped });
-  return { handle, left, detail, fetchCalls };
+  const root = document.createElement("div");
+  root.id = "inbox-root";
+  document.body.appendChild(root);
+  const handle = mountInboxModal(root);
+  m.redraw.sync();
+  const left = root.querySelector("#inbox-left-column") as HTMLElement;
+  const detail = root.querySelector("#inbox-detail") as HTMLElement;
+  return { handle, root, left, detail, fetchCalls };
 }
 
 function flushAsync(): Promise<void> {
@@ -98,7 +105,6 @@ describe("InboxList rendering", () => {
     expect(left.querySelector('[data-request-id="evt-2"]')?.classList.contains("is-selected")).toBe(false);
     expect(left.querySelector(".inbox-card-kind")?.textContent).toBe("permission: ws-alpha");
     expect(left.querySelector(".inbox-card-display")?.textContent).toBe("slack-api");
-    expect(left.getAttribute("data-minds-mounted")).toBe("true");
   });
 
   it("shows the placeholder and collapses the body when empty, expanding on a push", () => {
@@ -123,24 +129,23 @@ describe("InboxList rendering", () => {
 });
 
 describe("InboxList selection", () => {
-  it("clicking a card swaps in its detail fragment and rewires the form logic", async () => {
-    const swaps: number[] = [];
-    const { left, detail, fetchCalls } = mountFixture(island([card("evt-1"), card("evt-2")], "evt-1"), () =>
-      swaps.push(1),
-    );
+  it("clicking a card fetches and renders its typed detail payload", async () => {
+    const { root, fetchCalls } = mountFixture(island([card("evt-1"), card("evt-2")], "evt-1"));
+    const left = root.querySelector("#inbox-left-column") as HTMLElement;
 
     (left.querySelector('[data-request-id="evt-2"]') as HTMLElement).dispatchEvent(new MouseEvent("click"));
     await flushAsync();
     m.redraw.sync();
 
     expect(fetchCalls).toContain("GET /inbox/detail/evt-2");
-    expect(detail.querySelector("#fetched-fragment")?.textContent).toBe("/inbox/detail/evt-2");
-    expect(swaps).toHaveLength(1);
+    // The stubbed payload renders through the typed detail view.
+    const detail = root.querySelector("#inbox-detail") as HTMLElement;
+    expect(detail.textContent).toContain("/inbox/detail/evt-2");
     expect(left.querySelector('[data-request-id="evt-2"]')?.classList.contains("is-selected")).toBe(true);
     expect(window.location.pathname + window.location.search).toBe("/inbox?selected=evt-2");
   });
 
-  it("swaps in the unavailable fragment when a push drops the selection", async () => {
+  it("swaps in the unavailable payload when a push drops the selection", async () => {
     const { left, fetchCalls } = mountFixture(island([card("evt-1"), card("evt-2")], "evt-1", true));
 
     applyChromeEvent({ type: "requests", count: 1, request_ids: ["evt-2"], cards: [card("evt-2")], auto_open: true });

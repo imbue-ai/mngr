@@ -57,6 +57,8 @@ from imbue.minds.desktop_client.chrome_state import ChromeSystemInterfaceStatusP
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
+from imbue.minds.desktop_client.chrome_state import InboxDetailPayload
+from imbue.minds.desktop_client.chrome_state import InboxDetailUnavailable
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
@@ -130,7 +132,6 @@ from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_page
-from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -2571,22 +2572,22 @@ def _build_inbox_cards(
 def _resolve_inbox_selection(
     selected_id: str,
     backend_resolver: BackendResolverInterface,
-) -> tuple[str, str]:
-    """Resolve ``?selected=<id>`` to ``(selected_id, detail_html)``.
+) -> tuple[str, InboxDetailPayload | None]:
+    """Resolve ``?selected=<id>`` to ``(selected_id, detail_payload)``.
 
     Returns the id that should be highlighted in the left list and the
-    HTML to embed in the right pane. Falls back to the first pending
-    request when ``selected_id`` is empty; returns an "unavailable"
-    fragment when the id is unknown or already resolved. ``selected_id``
-    is the empty string if the inbox is empty or no item could be
-    resolved.
+    typed payload to seed in the right pane. Falls back to the first
+    pending request when ``selected_id`` is empty; returns the
+    "unavailable" payload when the id is unknown or already resolved.
+    ``selected_id`` is the empty string (with a ``None`` payload) if the
+    inbox is empty or no item could be resolved.
     """
     inbox: RequestInbox | None = get_state().request_inbox
     if inbox is None:
-        return "", ""
+        return "", None
     pending = _displayable_pending_requests(inbox, backend_resolver)
     if not pending:
-        return "", ""
+        return "", None
 
     handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     # Only requests in the displayable set are selectable: a request whose
@@ -2603,7 +2604,7 @@ def _resolve_inbox_selection(
         # Caller asked for a specific id but it can't be resolved: keep
         # the master list on its server-rendered default ordering and
         # surface the "no longer available" message in the right pane.
-        return "", render_inbox_unavailable_fragment(
+        return "", InboxDetailUnavailable(
             message="It may have expired, or it was opened from an old link.",
         )
     if target is None:
@@ -2611,13 +2612,11 @@ def _resolve_inbox_selection(
 
     handler = find_handler_for_event(handlers, target)
     if handler is None:
-        return str(target.event_id), (f"<p>No handler registered for request type {target.request_type!r}</p>")
-    detail_html = handler.render_request_detail_fragment(
-        req_event=target,
-        backend_resolver=backend_resolver,
-        mngr_forward_origin=_get_mngr_forward_origin(),
-    )
-    return str(target.event_id), detail_html
+        return str(target.event_id), InboxDetailUnavailable(
+            message=f"No handler is registered for request type {target.request_type!r}."
+        )
+    detail = handler.build_request_detail_payload(req_event=target, backend_resolver=backend_resolver)
+    return str(target.event_id), detail
 
 
 def _handle_inbox_page() -> Response:
@@ -2626,7 +2625,7 @@ def _handle_inbox_page() -> Response:
         return make_html_response(content="<p>Not authenticated</p>")
     backend_resolver = get_state().backend_resolver
     selected_query = request.args.get("selected", "")
-    selected_id, detail_html = _resolve_inbox_selection(selected_query, backend_resolver)
+    selected_id, detail = _resolve_inbox_selection(selected_query, backend_resolver)
     # ``keep_open=1`` is set only when the user intentionally opens the whole
     # inbox via the Requests button; without it (notification click, workspace
     # relay, or auto-open on a new request), resolving a request dismisses the
@@ -2637,54 +2636,52 @@ def _handle_inbox_page() -> Response:
         content=render_inbox_page(
             chrome_boot_state=chrome_boot_state,
             inbox_extras=InboxBootExtras(selected_id=selected_id, keep_open=keep_open),
-            detail_html=detail_html,
-            is_empty=len(chrome_boot_state.requests.cards) == 0,
+            detail=detail,
         )
     )
 
 
-def _handle_inbox_detail_fragment(
+def _inbox_detail_json_response(payload: InboxDetailPayload) -> Response:
+    """Serialize an inbox detail payload as the ``{detail: ...}`` JSON response."""
+    return make_response(
+        status_code=200,
+        content=json.dumps({"detail": payload.to_payload_dict()}),
+        media_type="application/json",
+    )
+
+
+def _handle_inbox_detail(
     request_id: str,
 ) -> Response:
-    """Return the right-pane detail fragment (``GET /inbox/detail/{id}``).
+    """Return the right-pane detail payload as JSON (``GET /inbox/detail/{id}``).
 
-    Resolved or unknown ids get the "no longer available" fragment with
-    HTTP 200 so the shell JS can innerHTML-swap it directly.
+    Resolved or unknown ids get the "unavailable" payload with HTTP 200 so
+    the inbox's detail view can swap to it directly.
     """
     if not _is_request_authenticated():
-        return make_html_response(content="<p>Not authenticated</p>")
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     backend_resolver = get_state().backend_resolver
     inbox: RequestInbox | None = get_state().request_inbox
     if inbox is None:
-        # The InboxUnavailable heading reads "This permission request is no
-        # longer available", which makes no sense when the issue is that there
-        # is no inbox at all. Drop the supporting message so only the heading
-        # shows; the template treats an empty message as the no-extra-copy case.
-        return make_html_response(content=render_inbox_unavailable_fragment())
+        # The unavailable heading reads "no longer available", which makes no
+        # sense when the issue is that there is no inbox at all; an empty
+        # message shows the heading alone.
+        return _inbox_detail_json_response(InboxDetailUnavailable())
     req_event = inbox.get_request_by_id(request_id)
     if req_event is None:
-        return make_html_response(
-            content=render_inbox_unavailable_fragment(
-                message="It may have expired, or it was opened from an old link.",
-            ),
+        return _inbox_detail_json_response(
+            InboxDetailUnavailable(message="It may have expired, or it was opened from an old link.")
         )
     if inbox.is_request_resolved(request_id):
-        return make_html_response(
-            content=render_inbox_unavailable_fragment(message="It has already been processed."),
-        )
+        return _inbox_detail_json_response(InboxDetailUnavailable(message="It has already been processed."))
     handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     handler = find_handler_for_event(handlers, req_event)
     if handler is None:
-        return make_html_response(
-            content=f"<p>No handler registered for request type {req_event.request_type!r}</p>",
-            status_code=500,
+        return _inbox_detail_json_response(
+            InboxDetailUnavailable(message=f"No handler is registered for request type {req_event.request_type!r}.")
         )
-    return make_html_response(
-        content=handler.render_request_detail_fragment(
-            req_event=req_event,
-            backend_resolver=backend_resolver,
-            mngr_forward_origin=_get_mngr_forward_origin(),
-        )
+    return _inbox_detail_json_response(
+        handler.build_request_detail_payload(req_event=req_event, backend_resolver=backend_resolver)
     )
 
 
@@ -3093,7 +3090,7 @@ def create_desktop_client(
 
     # Request inbox routes
     app.add_url_rule("/inbox", view_func=_handle_inbox_page)
-    app.add_url_rule("/inbox/detail/<request_id>", view_func=_handle_inbox_detail_fragment)
+    app.add_url_rule("/inbox/detail/<request_id>", view_func=_handle_inbox_detail)
     app.add_url_rule("/_chrome/requests-auto-open", view_func=_handle_requests_auto_open, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/deny", view_func=_handle_request_deny, methods=["POST"])

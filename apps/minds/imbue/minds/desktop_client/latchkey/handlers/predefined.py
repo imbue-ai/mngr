@@ -23,7 +23,6 @@ looks up the request event by id, and dispatches by request type. All
 the latchkey-specific work lives here.
 """
 
-import html as html_module
 import json
 import shlex
 from collections.abc import Sequence
@@ -39,10 +38,12 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.chrome_state import InboxDetailPayload
+from imbue.minds.desktop_client.chrome_state import InboxDetailUnavailable
+from imbue.minds.desktop_client.chrome_state import PredefinedPermissionDetail
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -62,6 +63,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
+from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -231,40 +233,6 @@ def _resolve_host_id(
             agent_id,
         )
         return None
-
-
-def _render_unknown_scope_fragment(request_id: str, scope: str) -> str:
-    """Render a deny-only detail fragment when the requested scope isn't in the catalog.
-
-    No catalog entry means we have no permissions to offer the user; the
-    only action that makes sense from here is Deny. Shaped to share the
-    inbox shell's deny submission JS: the fragment emits a
-    ``#permissions-form`` whose ``action`` targets ``/requests/<id>/grant``
-    so the shell's ``submitPermissionDeny`` helper (which rewrites
-    ``/grant`` to ``/deny``) auto-advances the inbox after the user clicks
-    Deny. There is no Approve button and no ``name="permissions"`` input
-    because no permissions are on offer; the form's action URL is only
-    used as the deny URL template.
-    """
-    escaped_scope = html_module.escape(scope)
-    escaped_request_id = html_module.escape(request_id, quote=True)
-    return (
-        '<div class="permissions-detail">'
-        '<h1 class="text-xl font-semibold text-zinc-900 leading-tight">Unknown scope</h1>'
-        '<p class="mt-2 text-zinc-600">'
-        f"The agent requested permissions under scope <code>{escaped_scope}</code>, "
-        "but this scope is not in the latchkey service catalog. "
-        "The request can only be denied from here."
-        "</p>"
-        '<form id="permissions-form" method="POST" '
-        f'action="/requests/{escaped_request_id}/grant" class="mt-6">'
-        '<div class="flex gap-2 mt-5 justify-end">'
-        '<button type="button" onclick="submitPermissionDeny()" '
-        'class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm '
-        'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 cursor-pointer">Deny</button>'
-        "</div></form>"
-        "</div>"
-    )
 
 
 class LatchkeyPermissionGrantHandler(RequestEventHandler):
@@ -478,24 +446,34 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         info = self.services_catalog.get_by_scope(req_event.scope)
         return info.display_name if info is not None else req_event.scope
 
-    def render_request_detail_fragment(
+    def build_request_detail_payload(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
-        """Render the inbox right-pane fragment for a latchkey permission request.
+    ) -> InboxDetailPayload:
+        """Build the inbox right-pane payload for a latchkey permission request.
 
-        Falls back to a deny-only fragment when the requested service is
-        not in the catalog, since there are no permissions to offer.
+        Falls back to the deny-only ``unknown_scope`` variant when the
+        requested service is not in the catalog, since there are no
+        permissions to offer.
         """
         if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
-            return "<p>Unsupported request type</p>"
+            return InboxDetailUnavailable(message="Unsupported request type")
         service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
-            return _render_unknown_scope_fragment(
+            return PredefinedPermissionDetail(
+                agent_id=req_event.agent_id,
                 request_id=str(req_event.event_id),
-                scope=req_event.scope,
+                ws_name="",
+                rationale="",
+                display_name="",
+                permission_schemas=(),
+                description_by_permission_name={},
+                checked_permissions=(),
+                wildcard_permission="",
+                wildcard_label="",
+                will_open_browser=False,
+                unknown_scope=req_event.scope,
             )
 
         parsed_id = AgentId(req_event.agent_id)
@@ -516,15 +494,21 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             latchkey_service_info
         )
 
-        return render_predefined_permission_dialog(
+        return PredefinedPermissionDetail(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
             ws_name=ws_name,
             rationale=req_event.rationale,
-            service=service_info,
-            checked_permissions=pre_checked,
+            display_name=service_info.display_name,
+            permission_schemas=tuple(service_info.permission_schemas),
+            description_by_permission_name=dict(service_info.description_by_permission_name),
+            checked_permissions=tuple(pre_checked),
+            wildcard_permission=WILDCARD_PERMISSION_NAME,
+            # The catch-all ``any`` permission is stored and submitted
+            # verbatim (Detent's wildcard schema), but users find ``all``
+            # clearer, so the dialog shows this label in its place.
+            wildcard_label="all",
             will_open_browser=will_open_browser,
-            mngr_forward_origin=mngr_forward_origin,
         )
 
     def apply_grant_request(
