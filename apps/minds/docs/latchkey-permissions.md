@@ -274,6 +274,36 @@ edit `services.json` in the gateway extension package (see its README).
 Schemas must already exist in detent; minds does not register custom
 schemas.
 
+## Connectors and accounts (Settings page)
+
+The app-level Settings page's **Connectors** tab lists, per connected
+service, the accounts the user has signed in to (latchkey 3.0.0 stores
+credentials per account). The account list is read from
+`latchkey services info <service> --offline` -- the `credentials` object,
+keyed by account name (the unnamed default account keyed by `""`) --
+which also drives the aggregate credential status the grant flow uses.
+
+Two per-service actions manage accounts:
+
+* **+ Add account** runs the same browser sign-in as approving a
+  permission request whose service has no credentials yet
+  (`Latchkey.add_account`), but with `LATCHKEY_EPHEMERAL_BROWSER=1` set so
+  the browser starts from a clean session and the user lands on a fresh
+  sign-in screen -- letting them add a genuinely new account instead of
+  being silently re-authenticated as an already-signed-in one. For a Minds
+  Google OAuth service, if signing in with the official Minds client does
+  not succeed, it always falls back to a fresh `auth browser-prepare`
+  self-setup step and retries.
+* **Disconnect** clears one account's stored credentials
+  (`latchkey auth clear <service> --account <account>`). Disconnecting the
+  *last* account for a service also runs the per-service "revoke all"
+  cleanup in the background -- stripping that service's grants from every
+  workspace host file, since they would otherwise have no credentials
+  behind them.
+
+Below the accounts, the panel shows the existing per-workspace grants
+("Allowed on all accounts:"), which are unchanged.
+
 ## Agent-side responsibilities
 
 Agents are expected to:

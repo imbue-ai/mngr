@@ -5,6 +5,7 @@ are exercised through the tests that import them.
 """
 
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -13,6 +14,20 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` atomically (tmp file + ``os.replace``).
+
+    Mirrors the real gateway ``permissions`` extension, which never leaves a
+    partially-written file behind. This matters because minds revokes across
+    workspaces on a background thread while other code (and tests) may read the
+    same file concurrently; a plain ``write_text`` truncates first, so a racing
+    reader could observe an empty file and fail to parse it.
+    """
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(content)
+    os.replace(tmp_path, path)
 
 
 class RecordedSetPermissionCall(FrozenModel):
@@ -87,7 +102,7 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         existing_rules = existing.get("rules", [])
         new_rules = [rule for rule in existing_rules if rule_key not in rule]
         updated = {**existing, "rules": new_rules}
-        permissions_file_path.write_text(json.dumps(updated, indent=2))
+        _atomic_write_text(permissions_file_path, json.dumps(updated, indent=2))
 
     def get_granted_permissions_for_scopes(
         self,
@@ -142,7 +157,7 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         # Mirror the real extension's spread semantics: every key other
         # than ``rules`` is preserved verbatim (notably ``schemas``).
         updated = {**existing, "rules": new_rules}
-        permissions_file_path.write_text(json.dumps(updated, indent=2))
+        _atomic_write_text(permissions_file_path, json.dumps(updated, indent=2))
 
     def delete_permission_request(self, request_id: str) -> None:
         self._deleted_request_ids.append(request_id)
