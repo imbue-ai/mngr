@@ -97,8 +97,21 @@ class MultiAccountSessionStore(MutableModel):
     )
     _cache_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _identity_cache: dict[str, ImbueCloudAuthAccount] | None = PrivateAttr(default=None)
+    _is_last_identity_read_failed: bool = PrivateAttr(default=False)
 
     # -- Identity cache (sourced from the plugin) ---------------------------
+
+    @property
+    def is_last_identity_read_failed(self) -> bool:
+        """Whether the most recent ``auth list`` read failed (empty fallback).
+
+        Lets callers distinguish "the user has no accounts" from "the account
+        listing was unavailable" -- e.g. the landing route must not bounce a
+        just-signed-in user back to the welcome splash because a transient
+        subprocess failure made ``list_accounts()`` return empty.
+        """
+        with self._cache_lock:
+            return self._is_last_identity_read_failed
 
     def invalidate_identity_cache(self) -> None:
         """Drop the cached ``auth list`` result.
@@ -124,7 +137,9 @@ class MultiAccountSessionStore(MutableModel):
                 # Don't poison the cache with the empty fallback: a transient
                 # subprocess failure would otherwise stick ``no accounts``
                 # until the next sign-in / sign-out invalidates the cache.
+                self._is_last_identity_read_failed = True
                 return {}
+            self._is_last_identity_read_failed = False
             self._identity_cache = {account.user_id: account for account in accounts}
             return dict(self._identity_cache)
 

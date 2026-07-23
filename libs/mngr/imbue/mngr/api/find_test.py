@@ -1003,7 +1003,7 @@ class _TimeoutCapturingAgent(BaseAgent[AgentTypeConfig]):
 
     def wait_for_ready_signal(
         self,
-        is_creating: bool,
+        is_readiness_awaited: bool,
         start_action: Callable[[], None],
         timeout: float | None = None,
     ) -> None:

@@ -4886,6 +4886,7 @@ dependencies = [
     { name = "psycopg2-binary" },
     { name = "pydantic" },
     { name = "supertokens-python" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
@@ -4900,6 +4901,7 @@ requires-dist = [
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "supertokens-python", specifier = ">=0.31.3" },
+    { name = "tenacity", specifier = ">=8.0" },
 ]
 
 [[package]]

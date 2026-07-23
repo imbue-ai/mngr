@@ -14,6 +14,7 @@ from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import LaunchConfig
 from imbue.mngr_mapreduce.launching import ROLE_LABEL_KEY
 from imbue.mngr_mapreduce.launching import _build_agent_options
+from imbue.mngr_mapreduce.launching import _make_reducer_identity
 
 
 def _make_config(
@@ -160,3 +161,21 @@ def test_reducer_only_env_wins_on_key_collision() -> None:
 def test_reducer_env_unchanged_when_no_reducer_only_env_is_set() -> None:
     env = _env_for(AgentKind.REDUCER, env_options=SHARED_ENV)
     assert env == {"ANTHROPIC_API_KEY": "shared"}
+
+
+# --- reducer identity ---
+
+
+def test_reducer_identity_without_a_suffix() -> None:
+    agent, branch, host = _make_reducer_identity("tmr-mngr", "20260721085455")
+    assert agent == "tmr-mngr-20260721085455-reducer"
+    assert branch == "tmr-mngr/20260721085455/reducer"
+    assert host == "tmr-mngr-20260721085455-reducer"
+
+
+def test_reducer_suffix_distinguishes_a_reintegration() -> None:
+    """A reintegration reuses the run name but must not collide with the original branch."""
+    _, original, _ = _make_reducer_identity("tmr-mngr", "20260721085455")
+    _, reintegrated, _ = _make_reducer_identity("tmr-mngr", "20260721085455", "r12345")
+    assert reintegrated == "tmr-mngr/20260721085455/reducer-r12345"
+    assert reintegrated != original

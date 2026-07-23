@@ -103,6 +103,7 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 | `-t`, `--agent-template` | text | Create template to apply for mapper agents [repeatable, stacks in order] | None |
 | `--provider` | text | Provider for agent hosts (e.g. local, docker, modal). Used for both mappers and the reducer. | `local` |
 | `--reducer-env` | text | Environment variable KEY=VALUE to pass to the reducer ONLY, not to mappers. For credentials the reducer needs but mappers must not receive (e.g. a token that can push and open pull requests) [repeatable] | None |
+| `--reducer-branch-suffix` | text | Suffix appended to the reducer's branch/agent/host names. Set this on a reintegration so its pull request is opened from a branch that does not collide with the original run's reducer branch (the two share a run name). Blank for a normal run. | `` |
 | `--env` | text | Environment variable KEY=VALUE to pass to agents [repeatable] | None |
 | `--label` | text | Agent label KEY=VALUE to attach to all launched agents [repeatable] | None |
 | `--snapshot` | text | Use an existing snapshot/image ID for all agents (skips building a fresh snapshot) | None |

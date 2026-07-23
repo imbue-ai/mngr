@@ -1,4 +1,4 @@
-"""Integration tests for the app-level settings permissions routes."""
+"""Integration tests for the permission revoke routes and the app-level settings page."""
 
 from pathlib import Path
 
@@ -13,7 +13,6 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
@@ -64,13 +63,6 @@ class _WorkspaceResolver(StaticBackendResolver):
         return self.name_by_agent.get(str(agent_id))
 
 
-class _UnavailableGatewayClient(FakeLatchkeyGatewayClient):
-    """Fake whose reads fail, standing in for a down latchkey gateway."""
-
-    def get_permission_rules(self, permissions_file_path: Path) -> dict[str, tuple[str, ...]]:
-        raise LatchkeyGatewayClientError("gateway down")
-
-
 def _build_handler(
     tmp_path: Path,
     gateway_client: FakeLatchkeyGatewayClient | None = None,
@@ -116,7 +108,10 @@ def _plugin_dir(tmp_path: Path) -> Path:
     return Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent").plugin_data_dir
 
 
-def test_settings_page_lists_granted_service_per_workspace(tmp_path: Path) -> None:
+def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
+    """The app-level Settings page hosts the permission sections: a granted
+    connector shows up with its workspace and permissions, alongside the
+    device settings (error reporting, backup password)."""
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
@@ -129,52 +124,38 @@ def test_settings_page_lists_granted_service_per_workspace(tmp_path: Path) -> No
 
     assert response.status_code == 200
     body = response.text
+    # The permission sections are back on the app-level settings page.
+    for section in ("Connectors", "Local files", "Workspaces", "Error reporting", "Master password"):
+        assert section in body
+    # The granted connector renders with its workspace + permission label.
     assert "Slack" in body
     assert "My Workspace" in body
     assert "slack-read-all" in body
     assert 'data-service-name="slack"' in body
-    # The per-permission description is surfaced as a tooltip on the pill.
-    assert 'data-tooltip="All read operations across the Slack API."' in body
-    # The service section carries a per-service revoke-all action and a workspace count.
-    assert "Revoke all" in body
-    assert "1 workspace" in body
+    # The full page keeps its "back to workspaces" link (the modal drops it).
+    assert "Back to workspaces" in body
 
 
-def test_settings_page_shows_plural_workspace_count(tmp_path: Path) -> None:
-    agent_a, host_a = str(AgentId()), HostId()
-    agent_b, host_b = str(AgentId()), HostId()
-    for host in (host_a, host_b):
-        save_permissions(
-            permissions_path_for_host(_plugin_dir(tmp_path), host),
-            LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
-        )
-    handler = _build_handler(tmp_path)
-    client = _build_client(
-        tmp_path, handler, {agent_a: str(host_a), agent_b: str(host_b)}, {agent_a: "A", agent_b: "B"}
-    )
-
-    response = client.get("/settings")
-
-    assert response.status_code == 200
-    assert "2 workspaces" in response.text
-
-
-def test_settings_sidebar_groups_nav_into_sections(tmp_path: Path) -> None:
+def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path) -> None:
+    """The centered settings modal renders the same permission sections as the
+    full page, minus the "back to workspaces" link."""
     agent, host = str(AgentId()), HostId()
+    save_permissions(
+        permissions_path_for_host(_plugin_dir(tmp_path), host),
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
 
-    response = client.get("/settings")
+    response = client.get("/settings/modal")
 
     assert response.status_code == 200
-    nav = response.text.split("Settings sections")[1].split("</nav>")[0]
-    # The two group eyebrows and the compact nav labels.
-    assert 'type-section text-tertiary px-2 mb-1">Permissions' in nav
-    assert 'type-section text-tertiary px-2 mt-4 mb-1">Other' in nav
-    for label in ("Connectors", "Local files", "Workspaces", "Error reporting", "Master password"):
-        assert label in nav
-    # The switchable entries are the nav buttons (the eyebrows are not buttons).
-    assert nav.count("data-settings-nav=") == 5
+    body = response.text
+    assert "Connectors" in body
+    assert "slack-read-all" in body
+    assert 'data-service-name="slack"' in body
+    assert "Back to workspaces" not in body
+    assert 'id="settings-modal-backdrop"' in body
 
 
 def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
@@ -247,18 +228,6 @@ def test_revoke_missing_fields_returns_400(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
-def test_settings_page_shows_unavailable_notice_when_gateway_down(tmp_path: Path) -> None:
-    agent, host = str(AgentId()), HostId()
-    handler = _build_handler(tmp_path, gateway_client=_UnavailableGatewayClient())
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
-
-    response = client.get("/settings")
-
-    assert response.status_code == 200
-    assert "can't be loaded right now" in response.text
-    assert "No connectors have been added yet." not in response.text
-
-
 # -- File sharing --------------------------------------------------------------
 
 _BASELINE_SELF_PERM = "latchkey-self-create-permission-request"
@@ -273,23 +242,6 @@ def _seed_file_sharing(
     path = permissions_path_for_host(_plugin_dir(tmp_path), host)
     save_permissions(path, LatchkeyPermissionsConfig(rules=({"latchkey-self": perms},)))
     return path
-
-
-def test_settings_page_lists_file_sharing_section(tmp_path: Path) -> None:
-    agent, host = str(AgentId()), HostId()
-    _seed_file_sharing(tmp_path, host, read_paths=("/home/docs",), write_paths=("/home/out",))
-    handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
-
-    response = client.get("/settings")
-
-    assert response.status_code == 200
-    body = response.text
-    assert "File sharing" in body
-    assert "read and write" in body
-    # The shared paths are surfaced as the chip tooltip.
-    assert 'data-tooltip="/home/docs"' in body
-    assert 'data-tooltip="/home/out"' in body
 
 
 def test_revoke_file_sharing_for_workspace_keeps_other_permissions(tmp_path: Path) -> None:
@@ -349,29 +301,6 @@ def _seed_workspace_ops(tmp_path: Path, host: HostId, names: tuple[str, ...]) ->
     path = permissions_path_for_host(_plugin_dir(tmp_path), host)
     save_permissions(path, LatchkeyPermissionsConfig(rules=({"latchkey-self": [_BASELINE_SELF_PERM, *names]},)))
     return path
-
-
-def test_settings_page_lists_workspace_delegation_by_granting_workspace(tmp_path: Path) -> None:
-    agent, host = str(AgentId()), HostId()
-    target = str(AgentId())
-    _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read", f"minds-workspaces-ssh-{target}"))
-    handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
-
-    response = client.get("/settings")
-
-    assert response.status_code == 200
-    body = response.text
-    assert "Workspace delegation" in body
-    # Grouped by the granting workspace (its name is the group heading).
-    assert "Ops Bot" in body
-    # One row per verb, each with its own revoke, keyed by the verb schema name.
-    assert ">read</code>" in body and ">ssh</code>" in body
-    assert 'data-verb-permission="minds-workspaces-read"' in body
-    assert 'data-verb-permission="minds-workspaces-ssh"' in body
-    # ``read`` is all-workspaces; ``ssh`` names the specific target.
-    assert "All workspaces" in body
-    assert target in body
 
 
 def test_revoke_workspace_delegation_verb_keeps_other_verbs(tmp_path: Path) -> None:
