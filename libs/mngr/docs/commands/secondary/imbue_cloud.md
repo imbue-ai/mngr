@@ -142,6 +142,7 @@ mngr imbue_cloud auth oauth [OPTIONS] {google|github}
 | `--account` | text | Optional account email. When set, the OAuth response must come back with the same email or the call fails (useful when re-authing a known account). When omitted, whatever email the OAuth provider returns becomes this session's account email -- this is the right shape for first-time signin via Google or GitHub. | None |
 | `--callback-port` | integer | Bind the local OAuth callback listener to a specific port (default: auto-pick free port). | None |
 | `--no-browser` | boolean | Print the authorize URL instead of launching the browser; useful when running headless. | `False` |
+| `--success-redirect-url` | text | URL the success page links to once the OAuth callback lands (e.g. a minds:// deeplink so a click returns the user to the desktop app). Default: no link; the page just says to close the tab. | None |
 | `--connector-url` | text | Override connector URL | None |
 
 ## mngr imbue_cloud auth forgot-password

@@ -1,0 +1,1 @@
+Regenerated the `mngr imbue_cloud` CLI reference docs to include the new `auth oauth --success-redirect-url` option (added in `libs/mngr_imbue_cloud` for the minds desktop app's post-sign-in browser handoff).
