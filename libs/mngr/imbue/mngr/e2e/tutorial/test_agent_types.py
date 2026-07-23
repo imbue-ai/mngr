@@ -193,10 +193,22 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
     let the type resolve without a codex binary or auth on this host.
     """
     # codex is a real agent-type plugin now (not a command-driven stub), so it
-    # can't be faked with a `command` override. Auto-approve workspace trust (-y)
-    # and don't connect (--no-connect); the e2e fixture sets
-    # `[agent_types.codex] check_installation = false` so provisioning skips the
-    # `npm i -g @openai/codex` install (no codex binary or npm on this host). This
+    # can't be faked with a `command` override. Disable the codex install check so
+    # provisioning does not try to `npm i -g @openai/codex` on a host without a
+    # codex binary (or npm); this is what lets the positional `codex` type resolve
+    # without a codex binary or auth. Write to the local scope, whose
+    # settings.local.toml carries is_allowed_in_pytest = true so the create below
+    # loads it. Generous per-command timeout: this is the first `mngr` invocation
+    # in the test, so it pays the one-time interpreter + plugin cold-start cost,
+    # which can brush the 30s default under load.
+    expect(
+        e2e.run(
+            "mngr config set --scope local agent_types.codex.check_installation false",
+            comment="skip the codex install check so no codex binary is needed",
+            timeout=90.0,
+        )
+    ).to_succeed()
+    # Auto-approve workspace trust (-y) and don't connect (--no-connect). This
     # exercises positional-argument type resolution; the codex process the agent
     # launches simply exits (no binary), which is fine since we only assert on the
     # resolved type. The real codex run is covered by the mngr_codex release test.
