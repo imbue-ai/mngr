@@ -179,11 +179,15 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # (which runs the opposite filter). A later -m on CLI overrides this.
 _skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
+# Coverage report flags are passed explicitly here (not via root addopts) so
+# offload CI batches can suppress them -- see the NOTE in root addopts.
+# --coverage-to-file keeps the term-missing report out of the terminal and
+# writes it to .test_output/ instead.
 test-unit:
-  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=term-missing --cov-report=xml --cov-report=html --coverage-to-file --ignore-glob="**/test_*.py" --cov-fail-under=36
 
 test-integration:
-  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --cov-fail-under=80
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=term-missing --cov-report=xml --cov-report=html --coverage-to-file --cov-fail-under=80
 
 # Examples:
 #   just test-quick
