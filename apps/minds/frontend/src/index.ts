@@ -14,6 +14,7 @@ import { mountConsent } from "./views/ConsentPage";
 import { mountCreateForm } from "./views/CreateFormPage";
 import { mountCreating } from "./views/CreatingPage";
 import { mountDestroying } from "./views/DestroyingPage";
+import { mountHelpModal } from "./views/HelpModal";
 import { mountInboxList } from "./views/InboxList";
 import { mountLanding } from "./views/LandingPage";
 import { adoptParentModalBridge, mountModalHost } from "./views/ModalHost";
@@ -33,6 +34,7 @@ export interface MindsUINamespace {
   mountCreateForm: typeof mountCreateForm;
   mountCreating: typeof mountCreating;
   mountDestroying: typeof mountDestroying;
+  mountHelpModal: typeof mountHelpModal;
   mountInboxList: typeof mountInboxList;
   mountLanding: typeof mountLanding;
   mountModalHost: typeof mountModalHost;
@@ -75,6 +77,7 @@ window.MindsUI = {
   mountCreateForm,
   mountCreating,
   mountDestroying,
+  mountHelpModal,
   mountInboxList,
   mountLanding,
   mountModalHost,

@@ -2056,11 +2056,12 @@ def test_help_page_renders_report_option(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
     assert response.status_code == 200
-    assert "Report a bug to Imbue" in response.text
-    assert "Have an agent help fix the problem" in response.text
-    # The agent-help radio is disabled in this phase.
-    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
-    assert "disabled" in agent_radio
+    # The modal body renders client-side (HelpModal.test.ts covers the mode
+    # choice + disabled agent option); the island carries the gating inputs.
+    island = parse_boot_island(response.text)
+    assert island["help"]["assist_available"] is False
+    assert island["help"]["workspace_agent_id"] == ""
+    assert "MindsUI.mountHelpModal" in response.text
 
 
 def test_help_page_close_button_has_tooltip(tmp_path: Path) -> None:
@@ -2069,7 +2070,8 @@ def test_help_page_close_button_has_tooltip(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
     assert response.status_code == 200
-    assert 'data-tooltip="Close"' in response.text
+    # The close button (with its data-tooltip) renders client-side; the shell
+    # still loads the shared trigger script that wires overlay tooltips.
     assert "/_static/tooltip_triggers.js" in response.text
 
 
@@ -2078,9 +2080,8 @@ def test_help_page_enables_agent_option_for_a_healthy_workspace(tmp_path: Path) 
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get(f"/help?workspace={AgentId()}&assist=1")
     assert response.status_code == 200
-    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
-    assert "disabled" not in agent_radio
-    assert "checked" in agent_radio
+    island = parse_boot_island(response.text)
+    assert island["help"]["assist_available"] is True
 
 
 def test_help_page_disables_agent_option_when_workspace_not_reachable(tmp_path: Path) -> None:
@@ -2089,12 +2090,11 @@ def test_help_page_disables_agent_option_when_workspace_not_reachable(tmp_path: 
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get(f"/help?workspace={AgentId()}")
     assert response.status_code == 200
-    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
-    assert "disabled" in agent_radio
-    # Report is the default when agent help isn't available.
-    report_radio = response.text.split('value="report"')[1].split(">")[0]
-    assert "checked" in report_radio
-    assert "Available once this workspace is responding." in response.text
+    island = parse_boot_island(response.text)
+    # The component disables agent help (with the workspace-specific copy) and
+    # defaults to report when assist is unavailable but a workspace is known.
+    assert island["help"]["assist_available"] is False
+    assert island["help"]["workspace_agent_id"] != ""
 
 
 def test_help_assist_requires_a_workspace(tmp_path: Path) -> None:
@@ -2150,7 +2150,7 @@ def test_help_page_prefills_description_from_query(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help?description=the+database+migration+failed")
     assert response.status_code == 200
-    assert "the database migration failed" in response.text
+    assert parse_boot_island(response.text)["help"]["description"] == "the database migration failed"
 
 
 def test_help_page_with_prefilled_description_defaults_to_report_mode(tmp_path: Path) -> None:
@@ -2160,12 +2160,11 @@ def test_help_page_with_prefilled_description_defaults_to_report_mode(tmp_path: 
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get(f"/help?workspace={AgentId()}&assist=1&description=it+broke")
     assert response.status_code == 200
-    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
-    report_radio = response.text.split('value="report"')[1].split(">")[0]
-    # Agent help is enabled (assist=1) but not the default when a diagnosis was pre-filled.
-    assert "disabled" not in agent_radio
-    assert "checked" not in agent_radio
-    assert "checked" in report_radio
+    island = parse_boot_island(response.text)
+    # Agent help is available but the pre-filled description makes the
+    # component default to the report form (HelpModal.test.ts pins that).
+    assert island["help"]["assist_available"] is True
+    assert island["help"]["description"] == "it broke"
 
 
 def test_help_page_agent_report_frames_as_agent_submission_and_hides_mode_choice(tmp_path: Path) -> None:
@@ -2175,15 +2174,11 @@ def test_help_page_agent_report_frames_as_agent_submission_and_hides_mode_choice
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get(f"/help?workspace={AgentId()}&description=it+broke&agent_report=1")
     assert response.status_code == 200
-    assert "wants to submit this report" in response.text
-    # The mode-choice radios are gone (so the user cannot redirect an agent report into agent-help
-    # mode). ``value="agent"`` / ``value="report"`` are unique to those radio inputs -- the submit JS
-    # references the mode by ``input[name="help-mode"]`` and bare ``"agent"`` / ``"report"`` strings,
-    # so keying off ``value="..."`` isolates the rendered radios from the always-present script.
-    assert 'value="agent"' not in response.text
-    assert 'value="report"' not in response.text
-    # The pre-filled description still survives into the textarea.
-    assert "it broke" in response.text
+    island = parse_boot_island(response.text)
+    # The agent-report framing (and the dropped mode choice) render
+    # client-side from this flag; HelpModal.test.ts pins both.
+    assert island["help"]["is_agent_report"] is True
+    assert island["help"]["description"] == "it broke"
 
 
 def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
@@ -2191,28 +2186,13 @@ def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -
     MindsConfig(data_dir=tmp_path).set_include_error_logs(True)
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
-    assert 'id="help-include-logs"' not in response.text
+    assert parse_boot_island(response.text)["help"]["include_logs_setting"] is True
 
 
 def test_help_page_shows_include_logs_checkbox_when_setting_off(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/help")
-    assert 'id="help-include-logs"' in response.text
-
-
-def test_help_page_shows_checkboxes_inline_and_report_id_affordance(tmp_path: Path) -> None:
-    """The diagnostics checkboxes are top-level (no Advanced disclosure) and the confirmation can show
-    a copyable report ID."""
-    client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.get("/help")
-    assert response.status_code == 200
-    # Checkboxes are rendered directly, not hidden behind an Advanced <details> disclosure.
-    assert "<details" not in response.text
-    assert 'id="help-app-diagnostics"' in response.text
-    assert 'id="help-remote-access"' in response.text
-    # The confirmation hosts a copyable report-ID slot populated from the response's event_id.
-    assert 'id="help-event-id"' in response.text
-    assert 'id="help-copy-id-btn"' in response.text
+    assert parse_boot_island(response.text)["help"]["include_logs_setting"] is False
 
 
 def test_help_report_requires_description(tmp_path: Path) -> None:

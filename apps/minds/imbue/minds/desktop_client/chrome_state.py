@@ -482,6 +482,31 @@ class CreateFormBootExtras(FrozenModel):
         return payload
 
 
+class HelpBootExtras(FrozenModel):
+    """Get-help modal boot island data (the ``help`` island key)."""
+
+    include_logs_setting: bool = Field(
+        description="Persistent include-logs preference; True always attaches logs and hides the one-off checkbox"
+    )
+    workspace_agent_id: str = Field(
+        description="The workspace the help flow was opened from; empty on a general screen"
+    )
+    assist_available: bool = Field(
+        description="Whether the have-an-agent-help option is offered (reachable/healthy workspace only)"
+    )
+    description: str = Field(
+        description="Pre-filled report text; non-empty when an in-workspace /assist agent escalated its diagnosis"
+    )
+    is_agent_report: bool = Field(
+        description="True for the agent-escalation flow: framed as the agent's submission, no mode choice"
+    )
+    workspace_name: str = Field(description="Workspace display name for the agent-report framing; best-effort")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class ChromeBootState(FrozenModel):
     """A connect-time snapshot of the chrome data, for page boot-state islands.
 

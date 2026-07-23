@@ -400,3 +400,24 @@ export interface CreateFormBootExtras {
 export interface CreateFormBootIsland {
   create: CreateFormBootExtras;
 }
+
+// Get-help modal boot island data (mirror of HelpBootExtras in
+// chrome_state.py).
+export interface HelpBootExtras {
+  // Persistent include-logs preference; true always attaches logs and hides
+  // the one-off checkbox.
+  include_logs_setting: boolean;
+  // The workspace the help flow was opened from; empty on a general screen.
+  workspace_agent_id: string;
+  // Whether the have-an-agent-help option is offered.
+  assist_available: boolean;
+  // Pre-filled report text (an in-workspace /assist agent's diagnosis).
+  description: string;
+  // True for the agent-escalation flow: no mode choice, agent framing.
+  is_agent_report: boolean;
+  workspace_name: string;
+}
+
+export interface HelpBootIsland {
+  help: HelpBootExtras;
+}

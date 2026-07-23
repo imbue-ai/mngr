@@ -47,6 +47,7 @@ from imbue.minds.desktop_client.chrome_state import ConsentBootExtras
 from imbue.minds.desktop_client.chrome_state import CreateFormBootExtras
 from imbue.minds.desktop_client.chrome_state import CreatingBootExtras
 from imbue.minds.desktop_client.chrome_state import DestroyingBootExtras
+from imbue.minds.desktop_client.chrome_state import HelpBootExtras
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.chrome_state import SettingsBootExtras
@@ -734,8 +735,7 @@ def render_help_page(
     report as the agent's submission (titled with ``workspace_name``, when known) and hides the mode
     choice, since a report is already underway.
     """
-    return CATALOG.render(
-        "pages.Help",
+    extras = HelpBootExtras(
         include_logs_setting=include_logs_setting,
         workspace_agent_id=workspace_agent_id,
         assist_available=assist_available,
@@ -743,6 +743,7 @@ def render_help_page(
         is_agent_report=is_agent_report,
         workspace_name=workspace_name,
     )
+    return CATALOG.render("pages.Help", boot_state={"help": extras.to_payload_dict()})
 
 
 @pure
