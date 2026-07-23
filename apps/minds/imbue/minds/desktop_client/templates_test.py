@@ -759,6 +759,22 @@ def test_render_inspiration_page_gates_each_step_on_the_previous() -> None:
     assert "'Create a new workspace'" in html
 
 
+def test_render_inspiration_page_has_animations_and_copy_feedback() -> None:
+    # Revealed steps slide up; the Copy button turns green before advancing.
+    html = _render_inspiration()
+    assert "animateReveal" in html
+    assert "!bg-success" in html
+    assert "'Copied'" in html
+
+
+def test_render_inspiration_page_number_and_title_go_back() -> None:
+    # Both the step number and its title are click-to-change affordances.
+    html = _render_inspiration()
+    assert "function wireGoBack" in html
+    assert "[data-step-circle]" in html
+    assert "[data-step-title]" in html
+
+
 def test_render_inspiration_page_skill_message_has_stable_id() -> None:
     # The copy handler reads the message by id, so the CopyField must carry it.
     html = _render_inspiration()

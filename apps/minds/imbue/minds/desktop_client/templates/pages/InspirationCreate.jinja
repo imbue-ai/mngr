@@ -45,6 +45,15 @@
     };
 
     function byId(id) { return document.getElementById(id); }
+
+    function animateReveal(el) {
+      // Slide the newly-revealed step up into place with a soft fade.
+      if (!el.animate) return;
+      el.animate(
+        [{opacity: 0, transform: 'translateY(12px)'}, {opacity: 1, transform: 'translateY(0)'}],
+        {duration: 340, easing: 'cubic-bezier(0.16, 1, 0.3, 1)'}
+      );
+    }
     var el = {
       s1: byId('inspiration-step-1'),
       c2: byId('inspiration-step-create-2'),
@@ -76,16 +85,22 @@
       var summary = node.querySelector('[data-step-summary]');
       var circle = node.querySelector('[data-step-circle]');
       var title = node.querySelector('[data-step-title]');
-      if (body) body.classList.toggle('hidden', !opts.active);
+      if (body) {
+        var wasHidden = body.classList.contains('hidden');
+        body.classList.toggle('hidden', !opts.active);
+        if (wasHidden && opts.active) animateReveal(body);
+      }
       if (summary) {
         summary.textContent = opts.summary || '';
         summary.classList.toggle('hidden', !(opts.done && opts.summary));
       }
       // Active or completed steps get the accent circle; only completed steps
-      // fill it (and their header becomes a "click to change" affordance).
+      // fill it. A completed step's number and title are both a "click to
+      // change" affordance (see wireGoBack).
       circle.classList.toggle('border-accent', opts.active || opts.done);
       circle.classList.toggle('text-accent', opts.active || opts.done);
       circle.classList.toggle('bg-accent/15', opts.done);
+      circle.classList.toggle('cursor-pointer', opts.done);
       title.classList.toggle('cursor-pointer', opts.done);
       title.classList.toggle('hover:underline', opts.done);
     }
@@ -138,16 +153,15 @@
       render();
     }
 
-    // Header click on a completed step reopens it (activeStep steps back).
-    el.s1.querySelector('[data-step-title]').addEventListener('click', function () {
-      if (activeStep > 1) { activeStep = 1; render(); }
-    });
-    el.c2.querySelector('[data-step-title]').addEventListener('click', function () {
-      if (activeStep > 2) { activeStep = 2; render(); }
-    });
-    el.a2.querySelector('[data-step-title]').addEventListener('click', function () {
-      if (activeStep > 2) { activeStep = 2; render(); }
-    });
+    // Clicking a completed step's number or title reopens it (steps back).
+    function wireGoBack(node, target) {
+      function go() { if (activeStep > target) { activeStep = target; render(); } }
+      node.querySelector('[data-step-title]').addEventListener('click', go);
+      node.querySelector('[data-step-circle]').addEventListener('click', go);
+    }
+    wireGoBack(el.s1, 1);
+    wireGoBack(el.c2, 2);
+    wireGoBack(el.a2, 2);
 
     byId('choose-new-workspace').addEventListener('click', function () { chooseBranch('create'); });
     byId('choose-add-existing').addEventListener('click', function () { chooseBranch('add'); });
@@ -160,16 +174,21 @@
       var message = byId('inspiration-skill-message').value;
       try {
         if (navigator.clipboard) navigator.clipboard.writeText(message);
-        copyBtn.textContent = 'Copied';
-        setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
       } catch (e) {
         /* ignore */
       }
+      // Confirm the copy by turning the button green, then move along.
+      copyBtn.textContent = 'Copied';
+      copyBtn.classList.add('!bg-success', '!text-white', '!border-success');
+      setTimeout(function () {
+        copyBtn.textContent = 'Copy';
+        copyBtn.classList.remove('!bg-success', '!text-white', '!border-success');
+      }, 1800);
       // Copying is what advances to the picker, so the user cannot enter a
-      // workspace without the message in hand.
+      // workspace without the message in hand. Hold briefly so the green
+      // "Copied" state registers before the next step slides up.
       isMessageCopied = true;
-      activeStep = 3;
-      render();
+      setTimeout(function () { activeStep = 3; render(); }, 650);
     });
 
     window.inspirationRowClick = function (row) {
@@ -320,7 +339,7 @@
     <div id="inspiration-step-1" class="inspiration-step">
       <div class="flex gap-4">
         <div class="flex flex-col items-center self-stretch">
-          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">1</span>
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0 transition-colors duration-300">1</span>
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
@@ -338,7 +357,7 @@
     <div id="inspiration-step-create-2" class="inspiration-step hidden">
       <div class="flex gap-4">
         <div class="flex flex-col items-center self-stretch">
-          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">2</span>
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0 transition-colors duration-300">2</span>
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
@@ -355,7 +374,7 @@
     <div id="inspiration-step-create-3" class="inspiration-step hidden">
       <div class="flex gap-4">
         <div class="flex flex-col items-center self-stretch">
-          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">3</span>
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0 transition-colors duration-300">3</span>
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
@@ -416,7 +435,7 @@
     <div id="inspiration-step-add-2" class="inspiration-step hidden">
       <div class="flex gap-4">
         <div class="flex flex-col items-center self-stretch">
-          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">2</span>
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0 transition-colors duration-300">2</span>
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
@@ -428,7 +447,7 @@
               this Inspiration to.
             </p>
             <CopyField :value="'/use-inspiration ' ~ git_url" id="inspiration-skill-message" aria-label="Inspiration chat message">
-              <Button variant="secondary" id="inspiration-copy-btn">Copy</Button>
+              <Button variant="secondary" id="inspiration-copy-btn" extra="transition-colors duration-200">Copy</Button>
             </CopyField>
             {% if branch %}
               <p class="type-helper text-tertiary mt-2">
@@ -445,7 +464,7 @@
     <div id="inspiration-step-add-3" class="inspiration-step hidden">
       <div class="flex gap-4">
         <div class="flex flex-col items-center self-stretch">
-          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0">3</span>
+          <span data-step-circle class="flex items-center justify-center w-8 h-8 rounded-full border border-default type-body font-semibold text-secondary shrink-0 transition-colors duration-300">3</span>
           <span data-step-connector class="flex-1 border-l border-default mt-2 hidden"></span>
         </div>
         <div class="flex-1 pb-8">
