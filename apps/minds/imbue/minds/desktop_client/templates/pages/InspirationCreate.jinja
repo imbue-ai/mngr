@@ -211,11 +211,7 @@
       <p class="type-label uppercase tracking-wide text-secondary">Inspiration</p>
       <h1 class="type-heading-lg text-primary mt-1">You've opened an Inspiration</h1>
     </div>
-    <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 mb-8">
-      <input type="text" readonly value="{{ git_url }}" aria-label="Inspiration repository"
-             class="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none"
-             onclick="this.select()">
-    </div>
+    <CopyField :value="git_url" aria-label="Inspiration repository" extra="mb-8" />
     <div class="flex flex-col gap-3">
       <Button variant="primary" block id="choose-new-workspace">Create a new workspace</Button>
       <Button variant="secondary" block id="choose-add-existing">Add to an existing workspace</Button>
@@ -236,13 +232,10 @@
         Copy this message, then paste it into the chat of the workspace you want
         to add this Inspiration to.
       </p>
-      <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 mb-4">
-        <input type="text" id="inspiration-skill-message" readonly
-               value="/use-inspiration {{ git_url }}"
-               class="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none"
-               onclick="this.select()">
+      {% set skill_message = "/use-inspiration " ~ git_url %}
+      <CopyField id="inspiration-skill-message" :value="skill_message" extra="mb-4">
         <Button variant="secondary" id="inspiration-copy-btn">Copy</Button>
-      </div>
+      </CopyField>
       {% if branch %}
         <p class="type-helper text-tertiary mb-4">
           The link's branch ({{ branch }}) applies only when creating a new workspace;
@@ -343,11 +336,7 @@
 
       <div class="mt-8">
         <FormLabel target="inspiration-repo-display">Inspiration</FormLabel>
-        <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 mt-1">
-          <input type="text" id="inspiration-repo-display" readonly value="{{ git_url }}"
-                 class="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none"
-                 onclick="this.select()">
-        </div>
+        <CopyField id="inspiration-repo-display" :value="git_url" extra="mt-1" />
         {% if branch %}
           <p class="type-helper text-tertiary mt-1">Version: {{ branch }}</p>
         {% endif %}

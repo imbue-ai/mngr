@@ -44,6 +44,7 @@
   ("sidebar-items", "Sidebar items"),
   ("accent-spine", "Accent spine"),
   ("form-controls", "Form controls"),
+  ("copy-field", "Copy field"),
   ("spinner", "Spinner"),
   ("buttons", "Buttons"),
   ("button-sizes", "Button sizes"),
@@ -877,6 +878,18 @@
       <div class="mt-1 type-helper text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (p-2, border-strong -> border-stronger on hover, placeholder-tertiary; focus ring drawn outside via outline-offset, keeping the border). Single-line TextInput / Select add leading-tight; Textarea keeps type-body's 1.5.</div>
     </section>
 
+
+    {# Copy field -- read-only monospace value the user selects/copies #}
+    <section id="copy-field" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Copy field</h2>
+      <div class="max-w-md flex flex-col gap-3">
+        <CopyField value="https://github.com/acme/inspiration" aria-label="Repository" />
+        <CopyField value="/use-inspiration https://github.com/acme/inspiration">
+          <Button variant="secondary">Copy</Button>
+        </CopyField>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">CopyField.jinja :: read-only mono value in a subtle-fill box; click selects it. Trailing controls (a Copy button) render as children. Sharing editor link row + Inspiration repo/skill-message displays.</div>
+    </section>
 
     {# Spinner #}
     <section id="spinner" class="scroll-mt-8 mb-6">
