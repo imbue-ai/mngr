@@ -1,0 +1,374 @@
+{#def git_url, branch="", accounts=[], default_account_id="", color="#0b292b", mngr_forward_origin="", workspace_rows=[] #}
+{#
+  Create from Inspiration page (GET /create/inspiration?git_url=...).
+
+  Landing page for an Inspiration deeplink (minds://create?git_url=...). Three
+  views toggled via .hidden, sharing one render:
+
+  - Chooser: shows the inspiration repo and asks whether to create a new
+    workspace from it or add it to an existing one.
+  - Add flow (two steps): a copyable "/use-inspiration <git-url>" message (the
+    skill accepts only a URL -- a deeplink branch is deliberately dropped
+    here), then the user's workspaces to open so they can paste the message
+    into the target workspace's chat. Clicking a row mirrors the landing
+    page's gating: STOPPED minds detour through recovery with intent=restart,
+    everything else goes straight to the workspace.
+  - New flow: only the cloud/local preset cards plus the compact account
+    picker; the repo rides along read-only, and a required "I trust this
+    Inspiration" acknowledgment gates the submit. The POST body carries the
+    preset's provider values directly (there are no advanced selects here);
+    host name, region, and runtime are omitted so the server defaults apply.
+#}
+{% set _scripts %}
+<script src="/_static/api_errors.js"></script>
+<script>
+  (function () {
+    var HAS_ANY_ACCOUNT = {{ 'true' if accounts else 'false' }};
+
+    // Same preset -> provider mapping as the create form (see Create.jinja:
+    // remote defaults the AI provider to the user's own subscription because
+    // imbue-cloud inference keys are quota-gated per plan).
+    var PRESETS = {
+      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'SUBSCRIPTION', backup_provider: 'IMBUE_CLOUD'},
+      local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER'}
+    };
+
+    var views = {
+      chooser: document.getElementById('inspiration-chooser'),
+      add: document.getElementById('inspiration-add'),
+      create: document.getElementById('inspiration-new')
+    };
+    var addStep1 = document.getElementById('inspiration-add-step1');
+    var addStep2 = document.getElementById('inspiration-add-step2');
+    var accountSelect = document.getElementById('account_id');
+    var accountError = document.getElementById('inspiration-account-error');
+    var trustCheckbox = document.getElementById('inspiration-trust');
+    var trustError = document.getElementById('inspiration-trust-error');
+    var createError = document.getElementById('inspiration-create-error');
+    var submitBtn = document.getElementById('inspiration-submit');
+    var presetCards = document.querySelectorAll('[data-preset]');
+
+    function showView(name) {
+      for (var key in views) views[key].classList.toggle('hidden', key !== name);
+      if (name === 'add') {
+        addStep1.classList.remove('hidden');
+        addStep2.classList.add('hidden');
+      }
+    }
+
+    document.getElementById('choose-new-workspace').addEventListener('click', function () { showView('create'); });
+    document.getElementById('choose-add-existing').addEventListener('click', function () { showView('add'); });
+    document.getElementById('inspiration-add-back').addEventListener('click', function () { showView('chooser'); });
+    document.getElementById('inspiration-new-back').addEventListener('click', function () { showView('chooser'); });
+    document.getElementById('inspiration-choose-workspace').addEventListener('click', function () {
+      addStep1.classList.add('hidden');
+      addStep2.classList.remove('hidden');
+    });
+    var emptyToNew = document.getElementById('inspiration-empty-to-new');
+    if (emptyToNew) emptyToNew.addEventListener('click', function () { showView('create'); });
+
+    var copyBtn = document.getElementById('inspiration-copy-btn');
+    copyBtn.addEventListener('click', function () {
+      var message = document.getElementById('inspiration-skill-message').value;
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(message);
+        copyBtn.textContent = 'Copied';
+        setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
+      } catch (e) {
+        /* ignore */
+      }
+    });
+
+    window.inspirationRowClick = function (row) {
+      var agentId = row.dataset.agentId;
+      var ret = row.dataset.defaultHref || '';
+      var target;
+      if (row.dataset.liveness === 'STOPPED') {
+        // Same shortcut as the landing rows: the mind is known-stopped, so
+        // route straight to recovery, which cold-boots the host immediately
+        // (intent=restart is required -- the health tracker has never probed
+        // a stopped mind, so without it recovery bounces back to the loader).
+        target = '/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+      } else {
+        target = ret;
+      }
+      if (window.minds && window.minds.navigateContent) window.minds.navigateContent(target);
+      else window.location = target;
+    };
+
+    function selectedPreset() {
+      var card = document.querySelector('[data-preset][aria-checked="true"]');
+      return card ? card.getAttribute('data-preset') : 'remote';
+    }
+
+    function markPresetSelected(name) {
+      for (var i = 0; i < presetCards.length; i++) {
+        var isOn = presetCards[i].getAttribute('data-preset') === name;
+        presetCards[i].setAttribute('aria-checked', isOn ? 'true' : 'false');
+      }
+    }
+
+    function hideAccountError() {
+      accountError.classList.add('hidden');
+      accountSelect.classList.remove('!ring-1', 'ring-important');
+    }
+
+    function showAccountError() {
+      accountError.classList.remove('hidden');
+      accountSelect.classList.add('!ring-1', 'ring-important');
+    }
+
+    for (var i = 0; i < presetCards.length; i++) {
+      presetCards[i].addEventListener('click', function () {
+        var name = this.getAttribute('data-preset');
+        markPresetSelected(name);
+        // Create-form parity: picking the remote card while signed in but on
+        // "No account" auto-selects the first account instead of erroring.
+        if (name === 'remote' && HAS_ANY_ACCOUNT && accountSelect.value === '') {
+          var firstAccount = accountSelect.querySelector('option[value]:not([value=""])');
+          if (firstAccount) accountSelect.value = firstAccount.value;
+        }
+        hideAccountError();
+      });
+    }
+
+    accountSelect.addEventListener('change', hideAccountError);
+    trustCheckbox.addEventListener('change', function () {
+      if (trustCheckbox.checked) trustError.classList.add('hidden');
+    });
+
+    function openSigninModal() {
+      if (window.minds && window.minds.openSigninModal) {
+        window.minds.openSigninModal();
+      } else {
+        window.location.href = '/auth/signin-modal';
+      }
+    }
+
+    function showCreateError(message) {
+      createError.textContent = message || 'Something went wrong. Please try again.';
+      createError.classList.remove('hidden');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Create from Inspiration';
+    }
+
+    document.getElementById('inspiration-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      createError.classList.add('hidden');
+      if (!trustCheckbox.checked) {
+        trustError.classList.remove('hidden');
+        return;
+      }
+      var preset = PRESETS[selectedPreset()];
+      // Imbue Cloud needs an account: signed out opens the sign-in modal,
+      // signed in surfaces the picker error (create-form parity).
+      if (preset.launch_mode === 'IMBUE_CLOUD' && accountSelect.value === '') {
+        if (HAS_ANY_ACCOUNT) showAccountError();
+        else openSigninModal();
+        return;
+      }
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Creating...';
+      var body = {
+        git_url: document.getElementById('inspiration-git-url').value,
+        branch: document.getElementById('inspiration-branch').value,
+        color: document.getElementById('inspiration-color').value,
+        launch_mode: preset.launch_mode,
+        ai_provider: preset.ai_provider,
+        backup_provider: preset.backup_provider,
+        account_id: accountSelect.value
+      };
+      fetch('/api/v1/workspaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().then(function (data) { return { status: r.status, data: data || {} }; });
+      }).then(function (res) {
+        if (res.status === 202 && res.data.operation_id) {
+          window.location = '/creating/' + res.data.operation_id;
+          return;
+        }
+        var err = normalizeApiError(res.data);
+        if (err.redirect_url) {
+          window.location = err.redirect_url;
+          return;
+        }
+        showCreateError(err.message);
+      }).catch(function () {
+        showCreateError('Could not reach the server. Please try again.');
+      });
+    });
+  })();
+</script>
+{% endset %}
+<PageNarrowContainer title="Create from Inspiration" page_label="New workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+
+  {# ---- Chooser: new workspace vs add to existing ---- #}
+  <div id="inspiration-chooser">
+    <div class="text-center mb-8">
+      <p class="type-label uppercase tracking-wide text-secondary">Inspiration</p>
+      <h1 class="type-heading-lg text-primary mt-1">You've opened an Inspiration</h1>
+    </div>
+    <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 mb-8">
+      <input type="text" readonly value="{{ git_url }}" aria-label="Inspiration repository"
+             class="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none"
+             onclick="this.select()">
+    </div>
+    <div class="flex flex-col gap-3">
+      <Button variant="primary" block id="choose-new-workspace">Create a new workspace</Button>
+      <Button variant="secondary" block id="choose-add-existing">Add to an existing workspace</Button>
+    </div>
+  </div>
+
+  {# ---- Add flow: copy the skill message, then pick a workspace ---- #}
+  <div id="inspiration-add" class="hidden">
+    <span>
+      <Button variant="ghost" id="inspiration-add-back"
+              extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
+        &larr; Back
+      </Button>
+    </span>
+    <div id="inspiration-add-step1" class="mt-4">
+      <h2 class="type-heading text-primary mb-2">Add to an existing workspace</h2>
+      <p class="type-body text-secondary mb-4">
+        Copy this message, then paste it into the chat of the workspace you want
+        to add this Inspiration to.
+      </p>
+      <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 mb-4">
+        <input type="text" id="inspiration-skill-message" readonly
+               value="/use-inspiration {{ git_url }}"
+               class="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none"
+               onclick="this.select()">
+        <Button variant="secondary" id="inspiration-copy-btn">Copy</Button>
+      </div>
+      {% if branch %}
+        <p class="type-helper text-tertiary mb-4">
+          The link's branch ({{ branch }}) applies only when creating a new workspace;
+          the message above always uses the Inspiration's published version.
+        </p>
+      {% endif %}
+      <Button variant="primary" block id="inspiration-choose-workspace">Choose workspace</Button>
+    </div>
+    <div id="inspiration-add-step2" class="hidden mt-4">
+      <h2 class="type-heading text-primary mb-2">Open the workspace</h2>
+      <p class="type-body text-secondary mb-4">
+        Pick the workspace to open, then paste the copied message into its chat.
+      </p>
+      {% if workspace_rows %}
+        <div class="flex flex-col gap-1.5">
+          {% for row in workspace_rows %}
+            {% set accent_style = "--workspace-accent: " ~ row.accent ~ ";" %}
+            {% set goto_href = mngr_forward_origin ~ "/goto/" ~ row.agent_id ~ "/" %}
+            <Card layout="row" interactive
+                  extra="accent-spine relative overflow-hidden"
+                  :style="accent_style"
+                  :data-agent-id="row.agent_id"
+                  :data-liveness="row.liveness"
+                  :data-default-href="goto_href"
+                  onclick="window.inspirationRowClick(this)">
+              <span class="flex-1 font-semibold text-primary pl-1">{{ row.name }}</span>
+              {% if row.liveness == "STOPPED" %}
+                <StatusBadge>Stopped</StatusBadge>
+              {% endif %}
+            </Card>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="type-body text-secondary">
+          You don't have any workspaces yet.
+          <a href="#" id="inspiration-empty-to-new" class="text-accent hover:underline">Create a new one from this Inspiration</a> instead.
+        </p>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ---- New flow: presets + trust acknowledgment + create ---- #}
+  <div id="inspiration-new" class="hidden">
+    <span>
+      <Button variant="ghost" id="inspiration-new-back"
+              extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
+        &larr; Back
+      </Button>
+    </span>
+    <form id="inspiration-form" class="mt-4">
+      <input type="hidden" id="inspiration-git-url" value="{{ git_url }}">
+      <input type="hidden" id="inspiration-branch" value="{{ branch }}">
+      <input type="hidden" id="inspiration-color" value="{{ color }}">
+
+      <div class="text-center mb-8">
+        <p class="type-label uppercase tracking-wide text-secondary">Create from Inspiration</p>
+        <h1 class="type-heading-lg text-primary mt-1">Where should it run?</h1>
+      </div>
+
+      <p id="inspiration-create-error" role="alert" class="hidden mb-6 type-helper text-important text-center"></p>
+
+      <div role="radiogroup" aria-label="Where to run your workspace">
+        <div class="flex gap-6 items-stretch">
+          <PresetCard preset="remote" :selected="True" extra="flex-1">
+            <div class="flex items-center gap-2">
+              <span class="type-heading text-primary">Imbue Cloud</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper uppercase font-bold bg-accent/15 text-accent">Recommended</span>
+            </div>
+            <ul class="flex flex-col gap-1.5 mt-1">
+              <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>30 second setup</li>
+              <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Runs even if your computer is off</li>
+              <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Accessible from mobile</li>
+            </ul>
+          </PresetCard>
+          <PresetCard preset="local" :selected="False" extra="flex-1">
+            <span class="type-heading text-primary">Directly on your computer</span>
+            <ul class="flex flex-col gap-1.5 mt-1">
+              <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>5-10 minute setup</li>
+              <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>Runs only when your computer is on</li>
+              <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>Uses your computer's memory</li>
+            </ul>
+          </PresetCard>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between mt-8 type-helper">
+        <select id="account_id" name="account_id"
+                class="max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
+          {% for acct in accounts %}
+            <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
+          {% endfor %}
+          <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
+        </select>
+      </div>
+      <p id="inspiration-account-error" class="hidden mt-2 type-helper text-important text-center">
+        Pick an account to use Imbue Cloud, or choose the local preset.
+      </p>
+
+      <div class="mt-8">
+        <FormLabel target="inspiration-repo-display">Inspiration</FormLabel>
+        <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 mt-1">
+          <input type="text" id="inspiration-repo-display" readonly value="{{ git_url }}"
+                 class="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none"
+                 onclick="this.select()">
+        </div>
+        {% if branch %}
+          <p class="type-helper text-tertiary mt-1">Version: {{ branch }}</p>
+        {% endif %}
+      </div>
+
+      <div class="mt-6">
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" id="inspiration-trust" class="shrink-0">
+          <span>
+            <span class="type-body text-primary font-semibold">I trust this Inspiration</span>
+            <span class="block type-helper text-tertiary">Inspirations are community content. This one has not been approved or verified by Imbue.</span>
+          </span>
+        </label>
+        <p id="inspiration-trust-error" class="hidden mt-2 type-helper text-important">
+          Check "I trust this Inspiration" to continue.
+        </p>
+      </div>
+
+      <div class="mt-8">
+        <ButtonSubmit id="inspiration-submit" variant="primary" block>Create from Inspiration</ButtonSubmit>
+      </div>
+    </form>
+  </div>
+</PageNarrowContainer>

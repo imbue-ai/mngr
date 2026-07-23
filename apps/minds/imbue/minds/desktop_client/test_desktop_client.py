@@ -738,6 +738,75 @@ def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Pat
     assert "/create" in response.text
 
 
+def test_inspiration_page_shows_chooser(tmp_path: Path) -> None:
+    """GET /create/inspiration with a repo shows the new-vs-existing chooser."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/create/inspiration?git_url=https://github.com/acme/inspiration")
+    assert response.status_code == 200
+    assert "You've opened an Inspiration" in response.text
+    assert "Add to an existing workspace" in response.text
+    assert "/use-inspiration https://github.com/acme/inspiration" in response.text
+    assert "Create from Inspiration" in response.text
+
+
+def test_inspiration_page_without_git_url_redirects_to_create(tmp_path: Path) -> None:
+    """Without a repo there is no Inspiration to show; degrade to /create."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/create/inspiration", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/create"
+
+
+def test_inspiration_page_rejects_unauthenticated(tmp_path: Path) -> None:
+    """GET /create/inspiration returns 403 without authentication."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, _ = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.get("/create/inspiration?git_url=https://github.com/acme/inspiration")
+    assert response.status_code == 403
+
+
+def test_inspiration_page_lists_workspaces(tmp_path: Path) -> None:
+    """The add-to-existing step offers the known workspaces as pickable rows."""
+    agent_id_1 = AgentId()
+    agent_id_2 = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={
+            str(agent_id_1): {"web": "http://test:9100"},
+            str(agent_id_2): {"web": "http://test:9200"},
+        },
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/create/inspiration?git_url=https://github.com/acme/inspiration")
+    assert response.status_code == 200
+    assert f'data-agent-id="{agent_id_1}"' in response.text
+    assert f'data-agent-id="{agent_id_2}"' in response.text
+
+
 def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:
     """GET /create returns 403 without authentication."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})

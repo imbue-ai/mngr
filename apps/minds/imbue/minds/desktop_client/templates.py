@@ -268,6 +268,15 @@ def _build_catalog() -> Catalog:
 CATALOG: Final[Catalog] = _build_catalog()
 
 
+class InspirationWorkspaceRow(FrozenModel):
+    """One pickable workspace on the Create from Inspiration page's add flow."""
+
+    agent_id: str = Field(description="The workspace agent id (drives the /goto/ href)")
+    name: str = Field(description="Display name")
+    accent: str = Field(description="Accent color hex")
+    liveness: str = Field(description="RUNNING, STOPPED, or UNKNOWN (drives the recovery-restart detour)")
+
+
 class RemoteWorkspaceTile(FrozenModel):
     """A workspace known only from another device's synced record, for the landing list."""
 
@@ -622,6 +631,40 @@ def render_create_form(
         start_advanced=start_advanced,
         color=color,
         is_landing_fallback=is_landing_fallback,
+    )
+
+
+@pure
+def render_inspiration_create_page(
+    git_url: str,
+    branch: str = "",
+    accounts: Sequence[object] | None = None,
+    default_account_id: str = "",
+    color: str = DEFAULT_WORKSPACE_COLOR,
+    mngr_forward_origin: str = "",
+    workspace_rows: Sequence[InspirationWorkspaceRow] = (),
+) -> str:
+    """Render the Create from Inspiration page (GET /create/inspiration).
+
+    The landing page for an Inspiration deeplink: a chooser between creating
+    a new workspace from ``git_url`` and adding the Inspiration to an
+    existing workspace. The add flow shows a copyable ``/use-inspiration
+    <git-url>`` message (the skill accepts only a URL, so ``branch`` is
+    deliberately absent from it) plus ``workspace_rows`` to open. The new
+    flow offers only the cloud/local presets with the repo read-only and a
+    required trust acknowledgment; ``branch`` rides along verbatim in a
+    hidden input (blank means the repo's latest version, matching the create
+    form's explicit-repo rule).
+    """
+    return CATALOG.render(
+        "pages.InspirationCreate",
+        git_url=git_url,
+        branch=branch,
+        accounts=accounts or [],
+        default_account_id=default_account_id,
+        color=color,
+        mngr_forward_origin=mngr_forward_origin,
+        workspace_rows=list(workspace_rows),
     )
 
 

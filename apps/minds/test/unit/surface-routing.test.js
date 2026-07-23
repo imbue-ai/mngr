@@ -62,6 +62,7 @@ test('selectSurfaceForUrl: agent content -> content view; every trusted local pa
   for (const path of [
     '/',
     '/create',
+    '/create/inspiration',
     '/settings',
     '/accounts',
     '/welcome',
@@ -80,6 +81,7 @@ test('isSwappableLocalPath: hub pages (including recovery) swap in place; lifecy
   for (const path of [
     '/',
     '/create',
+    '/create/inspiration',
     '/settings',
     '/accounts',
     '/_chrome',
