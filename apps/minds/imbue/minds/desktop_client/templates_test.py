@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
+from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_account_plan_section
@@ -262,6 +263,28 @@ def test_render_create_form_has_default_values() -> None:
     # view); the compute provider select is present.
     assert "default-workspace-template" in html
     assert "launch_mode" in html
+
+
+def test_render_create_form_branch_default_pairs_with_default_repo() -> None:
+    # With no explicit repository the branch input shows the operator/env
+    # default (FALLBACK_BRANCH absent any env override).
+    html = render_create_form()
+    assert f'value="{FALLBACK_BRANCH}"' in html
+
+
+def test_render_create_form_explicit_repo_keeps_branch_blank() -> None:
+    # An explicitly-supplied repository (e.g. an inspiration deeplink's
+    # git_url) must NOT inherit the default template's branch: the pinned
+    # minds tag is meaningless on another repo, and a blank branch means
+    # "the repo's latest version" at submit time (resolve_template_version).
+    html = render_create_form(git_url="https://github.com/acme/inspiration")
+    assert "https://github.com/acme/inspiration" in html
+    assert FALLBACK_BRANCH not in html
+
+
+def test_render_create_form_explicit_repo_keeps_explicit_branch() -> None:
+    html = render_create_form(git_url="https://github.com/acme/inspiration", branch="feature-x")
+    assert 'value="feature-x"' in html
 
 
 def test_render_create_form_has_optional_name_field() -> None:

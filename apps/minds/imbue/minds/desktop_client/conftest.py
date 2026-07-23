@@ -77,6 +77,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
         provider_id: str,
         callback_port: int | None = None,
         no_browser: bool = False,
+        success_redirect_url: str | None = None,
     ) -> ImbueCloudAuthSession:
         if self.oauth_session_to_return is None:
             raise ImbueCloudCliError("auth oauth: no fake OAuth session configured on FakeImbueCloudCli")
