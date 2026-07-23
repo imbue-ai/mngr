@@ -20,6 +20,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import AgentDataOptions
+from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -82,6 +83,25 @@ def _make_mapper_identity(
     return AgentName(f"{recipe_name}-{run_name}-{suffix}"), f"{recipe_name}/{run_name}/{suffix}"
 
 
+def _make_reducer_identity(
+    recipe_name: str, run_name: str, branch_suffix: str = ""
+) -> tuple[AgentName, str, HostName]:
+    """Generate (agent_name, branch_name, host_name) for the reducer agent.
+
+    ``branch_suffix`` distinguishes reducers that share a ``run_name`` -- namely
+    a reintegration, which reuses the original run's name (to rediscover its
+    mappers by label) but must open its own pull request from a branch that does
+    not collide with the original run's reducer branch. A normal run passes no
+    suffix and keeps the historical ``<recipe>/<run>/reducer`` names.
+    """
+    stem = f"{recipe_name}-{run_name}-reducer"
+    branch = f"{recipe_name}/{run_name}/reducer"
+    if branch_suffix:
+        stem = f"{stem}-{branch_suffix}"
+        branch = f"{branch}-{branch_suffix}"
+    return AgentName(stem), branch, HostName(stem)
+
+
 def _make_launch_failure_metadata(
     task_id: str, agent_name: AgentName, branch_name: str, error: object
 ) -> AgentMetadata:
@@ -112,6 +132,28 @@ def _resolve_build_options(config: LaunchConfig, mngr_ctx: MngrContext) -> NewHo
 def _build_host_environment(config: LaunchConfig) -> HostEnvironmentOptions:
     """Build HostEnvironmentOptions for hosts created by the framework."""
     return HostEnvironmentOptions(authorized_keys=config.additional_authorized_keys)
+
+
+def _resolve_agent_environment(config: LaunchConfig, kind: AgentKind) -> AgentEnvironmentOptions:
+    """Resolve the environment for one agent, adding reducer-only vars for the reducer.
+
+    Every agent gets ``config.env_options``. The reducer additionally gets
+    ``config.reducer_env_options`` merged over the top (so a reducer-only value
+    wins on a key collision), which is how credentials that mappers must not
+    receive reach it.
+    """
+    if kind is not AgentKind.REDUCER or config.reducer_env_options is None:
+        return config.env_options
+
+    reducer_only = config.reducer_env_options
+    overridden = {var.key for var in reducer_only.env_vars}
+    merged_vars = (
+        tuple(var for var in config.env_options.env_vars if var.key not in overridden) + reducer_only.env_vars
+    )
+    return AgentEnvironmentOptions(
+        env_vars=merged_vars,
+        env_files=config.env_options.env_files + reducer_only.env_files,
+    )
 
 
 def _build_agent_options(
@@ -150,7 +192,7 @@ def _build_agent_options(
             new_branch_name=branch_name,
         ),
         data_options=AgentDataOptions(is_rsync_enabled=False),
-        environment=config.env_options,
+        environment=_resolve_agent_environment(config, kind),
         label_options=label_options,
         ready_timeout_seconds=60.0 if is_remote else 10.0,
     )
@@ -537,6 +579,7 @@ def launch_reducer_agent(
     mngr_ctx: MngrContext,
     run_name: str,
     output_dir: Path,
+    branch_suffix: str = "",
 ) -> tuple[ReducerInfo, OnlineHostInterface]:
     """Launch a reducer agent that consumes the per-mapper output directories.
 
@@ -549,9 +592,7 @@ def launch_reducer_agent(
     ``output_dir`` into ``<work_dir>/REDUCER_INPUTS_DIRNAME/`` and deliver
     the reducer prompt via ``send_message``.
     """
-    agent_name = AgentName(f"{recipe_name}-{run_name}-reducer")
-    branch_name = f"{recipe_name}/{run_name}/reducer"
-    host_name = HostName(f"{recipe_name}-{run_name}-reducer")
+    agent_name, branch_name, host_name = _make_reducer_identity(recipe_name, run_name, branch_suffix)
 
     logger.info("Launching reducer agent '{}'", agent_name)
     create_result = _create_agent(

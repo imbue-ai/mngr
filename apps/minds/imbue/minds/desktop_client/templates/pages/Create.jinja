@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b", is_landing_fallback=False #}
 {#
   Workspace creation form.
 
@@ -29,10 +29,9 @@
     // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
     // user presses "Create" with it selected, open the shared sign-in modal in
     // the desktop client's overlay layer (covering the whole window, title bar
-    // included) via an allowlisted postMessage relayed to the Electron main
-    // process. In the browser (no shell) navigate to the standalone sign-in
-    // page instead.
-    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
+    // included) via the shell bridge -- the create page is a trusted local page
+    // on the chrome surface. In the browser (no shell) navigate to the
+    // standalone sign-in page instead.
 
     var form = document.getElementById('create-form');
     var simpleView = document.getElementById('simple-view');
@@ -75,6 +74,10 @@
     var createError = document.getElementById('create-error');
     // The field highlighted by the last create error, cleared before the next try.
     var lastErrorField = null;
+    // Set once a create actually POSTs (the point of no return that redirects to
+    // /creating). The landing-fallback self-heal SSE reads it so an in-flight
+    // submission is never interrupted by a navigation to "/".
+    var hasStartedCreate = false;
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
@@ -128,11 +131,12 @@
     }
 
     function openSigninModal() {
-      if (isElectronShell) {
-        // Relayed to the main process (content-relay-preload.js), which opens
-        // the shared modal WebContentsView loaded with /auth/signin-modal.
-        window.postMessage({ type: 'minds:open-signin-modal' }, '*');
+      if (window.minds && window.minds.openSigninModal) {
+        // Trusted local page on the chrome surface: open the shared modal
+        // overlay (loaded with /auth/signin-modal) via the shell bridge.
+        window.minds.openSigninModal();
       } else {
+        // Plain browser: navigate to the standalone sign-in page.
         window.location.href = '/auth/signin-modal';
       }
     }
@@ -419,6 +423,7 @@
         hostNameInput.focus();
         return;
       }
+      hasStartedCreate = true;
       submitBtn.disabled = true;
       submitBtn.textContent = 'Creating...';
       submitCreate();
@@ -526,10 +531,63 @@
     update();
     // Validate any pre-filled name on load (e.g. a re-rendered submit error).
     validateHostName();
+
+{% if is_landing_fallback %}
+    // ---- Landing-fallback self-heal ------------------------------------
+    // This create form was shown at "/" only because no workspace was known
+    // when the page rendered -- which, on a cold-start race, can happen even
+    // though the user HAS workspaces (a slow provider hadn't re-surfaced them
+    // yet). Subscribe to the chrome SSE and, the moment a workspace exists
+    // (live, remote, or restorable from the last-good topology), navigate to
+    // "/" so the user lands on their workspace list instead of being trapped on
+    // this terminal form. Mirrors the Landing page's own SSE self-heal. Skipped
+    // once a create has started so an in-flight submission (which redirects to
+    // /creating) is never interrupted.
+    function workspaceNowExists(data) {
+      if (Array.isArray(data.workspaces) && data.workspaces.length > 0) return true;
+      if (data.remote_workspace_states && Object.keys(data.remote_workspace_states).length > 0) return true;
+      if (Array.isArray(data.restorable_workspace_ids) && data.restorable_workspace_ids.length > 0) return true;
+      return false;
+    }
+    var selfHealEs = null;
+    // Set when the chrome shell swaps this page out in place (no document
+    // teardown): stops the SSE reconnect loop and the self-heal navigation so
+    // a departed fallback form can't yank the user to "/" from another page.
+    var selfHealTornDown = false;
+    window.addEventListener('minds:page-teardown', function () {
+      selfHealTornDown = true;
+      if (selfHealEs) {
+        selfHealEs.close();
+        selfHealEs = null;
+      }
+    }, { once: true });
+    function connectSelfHeal() {
+      if (selfHealTornDown) return;
+      if (selfHealEs) selfHealEs.close();
+      selfHealEs = new EventSource('/_chrome/events');
+      selfHealEs.onmessage = function (event) {
+        if (selfHealTornDown || hasStartedCreate) return;
+        var data;
+        try { data = JSON.parse(event.data); } catch (e) { return; }
+        if (data.type !== 'workspaces') return;
+        if (workspaceNowExists(data)) {
+          selfHealEs.close();
+          window.location = '/';
+        }
+      };
+      selfHealEs.onerror = function () {
+        if (!selfHealEs) return;
+        selfHealEs.close();
+        selfHealEs = null;
+        setTimeout(connectSelfHeal, 5000);
+      };
+    }
+    connectSelfHeal();
+{% endif %}
   })();
 </script>
 {% endset %}
-<PageNarrowContainer title="Create a workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+<PageNarrowContainer title="Create a workspace" page_label="New workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
   {# Submission is a JS fetch to POST /api/v1/workspaces (the same create front
      door agents use); see the submit handler in the scripts block. The form
      element keeps the field layout + native required-field validation. #}

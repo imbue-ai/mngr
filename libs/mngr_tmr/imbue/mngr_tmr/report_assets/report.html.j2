@@ -9,9 +9,9 @@
     has_artifacts     -- bool                                whether to inject the asciinema head + JS + panels
     artifact_panels   -- list[PanelView]                     slide-in panels (one per agent that has artifacts)
     integrator        -- IntegratorResult | None             reduced-branch summary (drives merged-status cells)
-    escalation_views  -- list[{title, detail_html}]          integrator blockers surfaced to the user (detail pre-rendered)
+    escalation_views  -- list[{title, detail_html, kind, kind_label, source}]  mapper + integrator escalations (detail pre-rendered)
     normalization_views -- list[{summary_html}]              suite-wide cleanups the integrator applied (summary pre-rendered)
-    run_commands      -- list[(label, cmd)]                  top-of-report command hints (and reintegrate is used in BLOCKED hint)
+    run_commands      -- list[(label, cmd)]                  top-of-report command hints (and reintegrate is used in UNRESOLVED hint)
     reintegrate_cmd   -- str                                 pre-extracted "Reintegrate" command (HTML-escaped)
     asciinema_css_url -- str                                 only meaningful when has_artifacts
     asciinema_js_url  -- str                                 only meaningful when has_artifacts
@@ -56,10 +56,15 @@
 {%- if escalation_views %}
     <div class="escalations">
       <h2 style="color: rgb(244, 67, 54);">Escalations ({{ escalation_views|length }})</h2>
-      <p>These cross-cutting blockers could not be resolved automatically and need your attention:</p>
+      <p>Raised by the agents for attention beyond their own test. <strong>Blocker</strong> stopped
+      an agent; <strong>Shared pattern</strong> means the fix worked but the same problem recurs
+      across sibling tests, so one suite-wide change should replace the local ones.</p>
       <ul>
 {%- for esc in escalation_views %}
-        <li><strong>{{ esc.title }}</strong><div class="md">{{ esc.detail_html|safe }}</div></li>
+        <li><strong>{{ esc.title }}</strong>
+          <span class="esc-kind">{{ esc.kind_label }}</span>
+          <span class="esc-source"><code>{{ esc.source }}</code></span>
+          <div class="md">{{ esc.detail_html|safe }}</div></li>
 {%- endfor %}
       </ul>
     </div>
@@ -76,9 +81,9 @@
 {%- endif %}
 {%- for section in sections %}
     <h2 id="{{ section.anchor }}" style="color: {{ section.color }};">{{ section.label }} ({{ section.rows|length }})</h2>
-{%- if section.kind == "BLOCKED" %}
-    <div class="blocked-hint">
-      <p>To resolve issues with a blocked agent:</p>
+{%- if section.kind == "UNRESOLVED" %}
+    <div class="unresolved-hint">
+      <p>To resolve issues with an agent that could not land its fix:</p>
       <ol>
         <li><code>mngr connect $agent_name</code></li>
         <li>When done, tell it to "regenerate the outcome file"</li>

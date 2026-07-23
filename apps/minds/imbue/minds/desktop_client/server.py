@@ -49,6 +49,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.region_preference import start_geo_detection
 from imbue.minds.desktop_client.state import DesktopClientState
+from imbue.minds.desktop_client.templates import warm_template_caches
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import flush_sentry_on_shutdown
 
@@ -93,6 +94,15 @@ def desktop_client_runtime(state: DesktopClientState, is_externally_managed_clie
     # form can default each provider's region to the user's nearest datacenter.
     if state.root_concurrency_group is not None:
         start_geo_detection(state.root_concurrency_group, state.geo_location_cache)
+        # Pay the lazy JinjaX template compiles up front so the first open of the
+        # workspace switcher / inbox / help modal is as fast as every later one
+        # (the first render otherwise showed up as a ~2s stall).
+        state.root_concurrency_group.start_new_thread(
+            target=warm_template_caches,
+            name="template-cache-warmup",
+            # Warmup failures must not poison the root group; the target swallows its own.
+            is_checked=False,
+        )
     try:
         yield
     finally:

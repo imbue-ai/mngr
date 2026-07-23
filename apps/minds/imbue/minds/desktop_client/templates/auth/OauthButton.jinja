@@ -9,8 +9,17 @@
 
   The ``oauth-btn`` class hook on the rendered button is load-bearing:
   ``static/auth.js`` finds every OAuth button across the page via
-  ``document.querySelectorAll('.oauth-btn')`` to enable/disable them as
-  a group during an OAuth flow.
+  ``document.querySelectorAll('.oauth-btn')`` to enable/disable and fade them
+  as a group during an OAuth flow. The button holds two same-size (18px)
+  glyphs in one slot: the brand icon (``oauth-btn-icon``, shown at rest) and a
+  spinner (``oauth-btn-spinner``, hidden at rest). On the button the user
+  clicks, auth.js hides the icon and reveals the spinner in its place, giving
+  immediate feedback without shifting the button's width while the browser
+  round-trip runs. ``hidden`` MUST live on these plain wrapper spans, not on
+  the Spinner component itself -- Spinner renders its own ``inline-block``
+  display utility, which is emitted after ``.hidden`` in the compiled CSS and
+  would override ``display:none``, leaving the spinner visible at rest (mirrors
+  the PermissionsForm hidden-spinner pattern).
 
   ``extra`` is for one-off layout shims (``mb-2`` to space buttons in a
   vertical stack).
@@ -18,5 +27,5 @@
 {%- set _label = {"google": "Continue with Google", "github": "Continue with GitHub"}[provider] -%}
 <button data-oauth="{{ provider }}"
         class="oauth-btn w-full py-2 px-3 bg-surface-primary border border-default rounded-lg type-body cursor-pointer flex items-center justify-center gap-2 text-primary hover:bg-fill-hover {{ extra }}">
-  <auth.OauthIcon :provider="provider" /> {{ _label }}
+  <span class="oauth-btn-spinner hidden"><Spinner size="md" /></span><span class="oauth-btn-icon"><auth.OauthIcon :provider="provider" /></span> {{ _label }}
 </button>
