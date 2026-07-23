@@ -27,6 +27,7 @@ def test_start_cli_options_fields() -> None:
         connect_command=None,
         restart=False,
         no_resume=False,
+        resume_message=None,
         dry_run=False,
         host=(),
         output_format="human",
