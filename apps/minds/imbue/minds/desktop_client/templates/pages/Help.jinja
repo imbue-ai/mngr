@@ -32,7 +32,7 @@
     // who files several reports does not have to re-tick the same diagnostics each time.
     // Keyed by element id; the description text is intentionally NOT persisted.
     var STICKY_PREFIX = "minds.help.";
-    var STICKY_IDS = ["help-workspace-details", "help-remote-access"];
+    var STICKY_IDS = ["help-remote-access"];
 
     function restoreSticky(box) {
       var stored = window.localStorage.getItem(STICKY_PREFIX + box.id);
@@ -152,10 +152,8 @@
         submitAgentHelp(description);
         return;
       }
-      var workspaceBox = document.getElementById("help-workspace-details");
       var payload = {
         description: description,
-        include_workspace_details: workspaceBox ? workspaceBox.checked : false,
         remote_access: document.getElementById("help-remote-access").checked,
         workspace_agent_id: WORKSPACE_AGENT_ID,
       };
@@ -289,25 +287,17 @@
 
         {# Report-only options. Hidden in agent-help mode, where the agent gathers its own context. #}
         <div id="help-report-options">
-          <p class="type-label text-secondary mt-4 mb-2">Included with every report</p>
-          <p class="type-helper text-tertiary mb-3">
-            Recent logs and app diagnostics (app version, signed-in accounts, your list of workspaces,
-            and system info) are always attached to help us diagnose the problem.
-          </p>
-          <p class="type-label text-secondary mb-2">Optionally include</p>
-          <div class="flex flex-col gap-2">
-            {% if workspace_agent_id %}
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" id="help-workspace-details" class="shrink-0">
-              <span class="type-body text-primary">Details about the current workspace</span>
-            </label>
-            {% endif %}
+          <div class="flex flex-col gap-2 mt-4">
             <label class="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" id="help-remote-access" class="shrink-0">
               <span class="type-body text-primary">Allow Imbue to request remote access to help debug</span>
             </label>
           </div>
-          <p class="type-helper text-tertiary mt-3">Imbue will never look into your workspaces without your consent.</p>
+          <p class="type-helper text-tertiary mt-3">
+            Recent logs and app diagnostics (app version, signed-in accounts, your list of workspaces,
+            details of the workspace you're reporting from, and system info) are always attached to help
+            us diagnose the problem. Imbue will never look into your workspaces without your consent.
+          </p>
         </div>
 
         <Button variant="primary" block id="help-submit" extra="mt-4">Send report</Button>

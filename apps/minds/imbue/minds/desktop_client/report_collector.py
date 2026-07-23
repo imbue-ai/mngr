@@ -100,7 +100,6 @@ def build_bug_report(
     *,
     description: str,
     include_app_diagnostics: bool,
-    include_workspace_details: bool,
     remote_access_requested: bool,
     workspace_agent_id: str | None,
     session_store: MultiAccountSessionStore | None,
@@ -110,8 +109,8 @@ def build_bug_report(
     """Assemble the structured report attached to the Sentry event.
 
     ``remote_access_requested`` is recorded as a flag only -- no remote access is provisioned here.
-    Workspace details are gathered only when both a ``workspace_agent_id`` is known and the user opted
-    into them; otherwise the workspace section is omitted entirely (the help flow was not in a workspace).
+    Workspace details are gathered whenever a ``workspace_agent_id`` is known; otherwise the workspace
+    section is omitted entirely (the help flow was not opened from a workspace).
     """
     report: dict[str, Any] = {
         "description": description,
@@ -124,7 +123,7 @@ def build_bug_report(
             backend_resolver=backend_resolver,
             data_dir=data_dir,
         )
-    if workspace_agent_id and include_workspace_details:
+    if workspace_agent_id:
         report["workspace"] = _collect_workspace_context(
             backend_resolver=backend_resolver,
             workspace_agent_id=workspace_agent_id,
@@ -136,7 +135,6 @@ def submit_bug_report(
     *,
     description: str,
     include_app_diagnostics: bool,
-    include_workspace_details: bool,
     remote_access_requested: bool,
     workspace_agent_id: str | None,
     session_store: MultiAccountSessionStore | None,
@@ -152,7 +150,6 @@ def submit_bug_report(
     report = build_bug_report(
         description=description,
         include_app_diagnostics=include_app_diagnostics,
-        include_workspace_details=include_workspace_details,
         remote_access_requested=remote_access_requested,
         workspace_agent_id=workspace_agent_id,
         session_store=session_store,
@@ -178,7 +175,8 @@ def submit_bug_report_from_body(
     Shared by the local ``POST /help/report`` handler and the ``/api/v1`` bug-report route so both
     interpret the same fields identically. Recent logs and app diagnostics (app version, signed-in
     accounts, the list of workspaces, and host/system info -- no workspace contents) are always
-    included. Per-workspace details and remote access remain opt-in (Imbue does not look into a
+    included, as are details of the workspace the report was opened from (its id, name, host, and
+    provider -- no workspace contents). Remote access remains opt-in (Imbue does not look into a
     workspace without consent). The caller is responsible for validating that a description is present.
 
     Returns the Sentry event id (or None when Sentry is inactive / the event was dropped).
@@ -187,7 +185,6 @@ def submit_bug_report_from_body(
     return submit_bug_report(
         description=str(body.get("description", "")).strip(),
         include_app_diagnostics=True,
-        include_workspace_details=bool(body.get("include_workspace_details", False)),
         remote_access_requested=bool(body.get("remote_access", False)),
         workspace_agent_id=str(workspace_agent_id) if workspace_agent_id else None,
         session_store=session_store,
