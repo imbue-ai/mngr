@@ -262,6 +262,45 @@ class InboxBootExtras(FrozenModel):
         return self.model_dump(mode="json")
 
 
+class CreatingBootExtras(FrozenModel):
+    """Creating-page boot island data (the ``creating`` island key).
+
+    Like the sharing island there is no ``chrome`` sibling: the page's live
+    state comes from the create-operation status endpoint
+    (``GET /api/v1/workspaces/operations/create/<id>``) and its SSE log
+    stream, not the chrome SSE stream."""
+
+    agent_id: str = Field(
+        description="The creation id (minds-internal in-flight handle) the status poll and log stream are keyed by"
+    )
+    status_text: str = Field(description="Server-resolved caption for the current creation status (first paint)")
+    expected_duration_seconds: float = Field(
+        description="Expected wall-clock creation duration; drives the time-based progress bar easing"
+    )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class DestroyingBootExtras(FrozenModel):
+    """Destroying-page boot island data (the ``destroying`` island key).
+
+    No ``chrome`` sibling: the page's live state comes from the
+    destroy-operation status endpoint
+    (``GET /api/v1/workspaces/operations/destroy/<agent_id>``) and its SSE
+    log stream, not the chrome SSE stream."""
+
+    agent_id: str = Field(description="The workspace agent id being destroyed (keys the operation endpoints)")
+    agent_name: str = Field(description="Workspace display name for the page heading")
+    pid: int = Field(description="The destroy worker's pid, shown in the heading's helper line")
+    status: str = Field(description="Initial server-computed operation status: running / failed / done")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class ChromeBootState(FrozenModel):
     """A connect-time snapshot of the chrome data, for page boot-state islands.
 

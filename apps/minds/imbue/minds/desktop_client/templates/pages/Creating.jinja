@@ -1,104 +1,25 @@
-{#def agent_id, status_text, expected_duration_seconds #}
+{#def boot_state #}
 {#
-  Progress page shown while an agent is being created. The page is keyed
-  by creation_id (passed as agent_id here -- a minds-internal in-flight
-  handle) rather than the canonical agent_id, because the canonical id
-  only comes into existence once the inner mngr create returns.
-  expected_duration_seconds drives the client-side time-based progress
-  bar (eases toward ~80% over this duration).
+  Progress page shown while an agent is being created. The whole body is the
+  mithril CreatingPage component (frontend/src/views/CreatingPage.ts),
+  mounted from the ``#minds-boot-state`` island this shell seeds (the
+  ``creating`` slice: creation id, initial status caption, expected
+  duration). The page is keyed by creation_id (a minds-internal in-flight
+  handle) rather than the canonical agent_id, because the canonical id only
+  comes into existence once the inner mngr create returns. The component
+  polls the create operation for status (progress bar + failure view) and
+  streams its logs over SSE; on completion it hands the /goto/<agent>/ URL
+  to the host (content view in Electron, full-page navigation in browser).
 #}
 {% set _scripts %}
-<script src="/_static/creating.js" defer></script>
+<script>
+  window.MindsUI.mountCreating(document.getElementById('creating-root'));
+</script>
 {% endset %}
 <ChromeShell title="Creating your workspace..."
       page_label="New workspace"
       body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-6"
+      :boot_state="boot_state"
       scripts={{ _scripts }}>
-  <main id="creating"
-        class="w-full"
-        data-agent-id="{{ agent_id }}"
-        data-expected-duration-seconds="{{ expected_duration_seconds }}">
-
-    {# Loading screen: full-width. Holds two mutually exclusive sub-views #}
-    {# (progress vs. failure) plus a shared logs/details footer, so the #}
-    {# streamed logs stay in one place regardless of which sub-view is showing. #}
-    <section class="screen w-full" data-screen="loading">
-      {# Progress sub-view: shown while creation is in flight. #}
-      <div id="progress-view">
-        <div class="text-center pt-2 pb-1">
-          <div class="type-heading mb-1.5">Setting up your workspace</div>
-          <p id="tip" class="type-body text-secondary min-h-[34px] transition-opacity"></p>
-        </div>
-        <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
-          <div id="bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>
-        </div>
-      </div>
-
-      {# Failure sub-view: revealed by creating.js the moment creation fails. #}
-      <div id="failure-view" class="hidden">
-        <div class="text-center pt-2 pb-1">
-          <div class="type-heading mb-1.5 text-important">We couldn't set up your workspace</div>
-          <p class="type-body text-secondary">Setup stopped before your workspace was ready.</p>
-        </div>
-        <Notice variant="error">
-          <span id="error-message" class="font-mono type-helper break-words whitespace-pre-wrap"></span>
-        </Notice>
-        {# Private-repo guidance: revealed by creating.js only when the backend #}
-        {# classifies the failure as GITHUB_AUTH_REQUIRED (the workspace source #}
-        {# is a github.com URL none of this computer's git credentials can see). #}
-        {# The copy is static template content gated on the error kind; the #}
-        {# backend only classifies, it never generates prose. #}
-        <div id="github-auth-help" class="hidden text-left type-body text-secondary mt-3">
-          <p>
-            This repository looks private, or it does not exist: GitHub asked for
-            credentials, and none on this computer could open it. If you have access
-            to the repository, sign in to GitHub on this computer and try again.
-          </p>
-          <p class="mt-2">
-            The simplest way to sign in is the GitHub CLI: run
-            <code class="font-mono">gh auth login</code> in a terminal and follow the
-            prompts (see the
-            <Link href="https://docs.github.com/en/github-cli/github-cli/quickstart"
-                  target="_blank" rel="noopener">GitHub CLI quickstart</Link>).
-            Git then uses those credentials automatically when cloning.
-          </p>
-          <p class="mt-2">
-            Alternatively, clone or download the repository yourself to any folder on
-            this computer, and enter that folder's path in the form instead of the URL.
-          </p>
-        </div>
-        {# Generic (non-GitHub) git remote: same guidance as above but without #}
-        {# the GitHub-CLI advice, which only fits github.com. Revealed by #}
-        {# creating.js when the backend classifies the failure as GIT_AUTH_REQUIRED. #}
-        <div id="git-auth-help" class="hidden text-left type-body text-secondary mt-3">
-          <p>
-            This repository looks private, or it does not exist: it asked for
-            credentials, and none on this computer could open it. If you have access
-            to it, make sure your git credentials for this host are set up on this
-            computer, then try again.
-          </p>
-          <p class="mt-2">
-            Alternatively, clone or download the repository yourself to any folder on
-            this computer, and enter that folder's path in the form instead of the URL.
-          </p>
-        </div>
-        <div class="flex items-center justify-center gap-2 mt-4">
-          <ButtonLink href="/create" variant="primary">Back to setup</ButtonLink>
-          <ButtonLink href="/" variant="ghost">Home</ButtonLink>
-        </div>
-      </div>
-
-      {# Shared footer: live stage caption + collapsible logs. #}
-      <div class="flex items-center justify-between mt-2 type-helper text-tertiary">
-        <span id="stage">{{ status_text }}</span>
-        <button type="button" id="details-toggle"
-                class="js-details inline-flex items-center gap-1 text-tertiary hover:text-primary cursor-pointer">
-          Show details
-        </button>
-      </div>
-      <div id="logs"
-           class="dark hidden mt-3 p-3 bg-surface-primary text-secondary font-mono type-helper rounded-lg max-h-[260px] overflow-y-auto whitespace-pre-wrap border border-subtle"></div>
-    </section>
-
-  </main>
+  <main id="creating-root" class="w-full"></main>
 </ChromeShell>

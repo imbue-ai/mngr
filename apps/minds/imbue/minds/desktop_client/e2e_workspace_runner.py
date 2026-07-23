@@ -629,7 +629,7 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
     DIFFERENT WebContentsViews (separate CDP pages):
 
     - **success**: the ready workspace opens on the CONTENT view -- its own page
-      on the ``agent-<id>.localhost`` origin. ``creating.js`` hands the ready
+      on the ``agent-<id>.localhost`` origin. The CreatingPage component hands the ready
       workspace's ``/goto`` URL to the ``window.minds`` bridge, which shows it on
       the content surface while the chrome view that drove the form
       (``creating_page``) returns to the ``/_chrome`` wrapper. (Before the split
@@ -638,8 +638,8 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
       page that reached the agent subdomain.)
     - **failure**: the loading screen's failure sub-view (``#failure-view``)
       becomes visible on ``creating_page`` (still showing the ``/creating``
-      loader) -- ``creating.js``'s ``showFailure()`` un-hides it once the status
-      poll/SSE reports FAILED.
+      loader) -- the CreatingPage component renders it once the status
+      poll reports FAILED.
 
     Polls both rather than only waiting for success, so a creation failure raises
     ``WorkspaceCreationFailedError`` with the surfaced error text immediately
@@ -789,7 +789,7 @@ def _attach_renderer_diagnostics(page: Page) -> None:
     requests to loguru.
 
     Electron's stderr only carries main-process output, so a renderer-side
-    fault (e.g. ``creating.js`` throwing before it attaches its handlers, or
+    fault (e.g. the CreatingPage mount throwing before it attaches its handlers, or
     failing to load) is otherwise invisible in CI. Mirroring those events into
     the run log makes a stuck create step diagnosable.
     """
@@ -836,7 +836,7 @@ def _attempt_create_workspace_via_electron(
             # must propagate (the attach phase above is the launch-flake part).
             try:
                 # Surface renderer console/JS errors into the run log so a stuck
-                # create step (creating.js handlers not attaching) is diagnosable.
+                # create step (the CreatingPage mount not attaching) is diagnosable.
                 _attach_renderer_diagnostics(page)
                 workspace_page = _drive_create_flow(
                     browser,

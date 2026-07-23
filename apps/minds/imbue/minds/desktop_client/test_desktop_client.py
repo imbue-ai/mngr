@@ -575,7 +575,11 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
     assert "Creating your workspace" in response.text
-    assert "Setting up your workspace" in response.text
+    # The loading view renders client-side (the mithril CreatingPage
+    # component); the server shell seeds the island keyed by this creation.
+    island = parse_boot_island(response.text)
+    assert island["creating"]["agent_id"] == str(agent_id)
+    assert "MindsUI.mountCreating" in response.text
     # The onboarding question UI was removed, so none of its markers render.
     assert "data-question" not in response.text
     assert 'class="opt' not in response.text

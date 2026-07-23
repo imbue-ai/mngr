@@ -2050,8 +2050,8 @@ class AgentCreator(MutableModel):
                 self._wait_for_workspace_ready(canonical_id, log_queue)
 
                 # The redirect URL is *absolute* and points at the plugin's
-                # bare origin. ``creating.js`` does
-                # ``window.location.href = data.redirect_url`` directly; a
+                # bare origin. The CreatingPage component hands
+                # ``data.redirect_url`` to the host adapter as-is; a
                 # relative ``/goto/...`` would navigate to the minds origin
                 # (port :8420) where ``/goto/`` is unrouted -- the user
                 # would land on FastAPI's default ``{"detail":"Not Found"}``

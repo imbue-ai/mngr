@@ -7,6 +7,8 @@
 // section (never from #local-page-scripts, which would re-run it per swap);
 // the per-page mount calls live in #local-page-scripts.
 import { setAccentScopeAgentId, setContentUrl, setDisplayedWorkspaceAgentId } from "./store";
+import { mountCreating } from "./views/CreatingPage";
+import { mountDestroying } from "./views/DestroyingPage";
 import { mountInboxList } from "./views/InboxList";
 import { mountLanding } from "./views/LandingPage";
 import { adoptParentModalBridge, mountModalHost } from "./views/ModalHost";
@@ -17,6 +19,8 @@ import { mountTitleBar } from "./views/TitleBar";
 import { mountWorkspaceMenu } from "./views/WorkspaceMenu";
 
 export interface MindsUINamespace {
+  mountCreating: typeof mountCreating;
+  mountDestroying: typeof mountDestroying;
   mountInboxList: typeof mountInboxList;
   mountLanding: typeof mountLanding;
   mountModalHost: typeof mountModalHost;
@@ -46,6 +50,8 @@ declare global {
 adoptParentModalBridge();
 
 window.MindsUI = {
+  mountCreating,
+  mountDestroying,
   mountInboxList,
   mountLanding,
   mountModalHost,

@@ -38,6 +38,8 @@ from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import CreatingBootExtras
+from imbue.minds.desktop_client.chrome_state import DestroyingBootExtras
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.chrome_state import SharingBootExtras
@@ -653,14 +655,14 @@ def render_creating_page(
     truth for caption resolution (consistent with the SSE status events).
     """
     status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
-    return CATALOG.render(
-        "pages.Creating",
-        agent_id=creation_id,
+    extras = CreatingBootExtras(
+        agent_id=str(creation_id),
         status_text=status_text,
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
     )
+    return CATALOG.render("pages.Creating", boot_state={"creating": extras.to_payload_dict()})
 
 
 @pure
@@ -1619,12 +1621,16 @@ def render_destroying_page(
     server-side computed value (``running``/``failed``/``done``) so the page
     renders correctly even before the first poll completes.
     """
-    return CATALOG.render(
-        "pages.Destroying",
+    extras = DestroyingBootExtras(
         agent_id=str(agent_id),
         agent_name=agent_name,
         pid=pid,
         status=status,
+    )
+    return CATALOG.render(
+        "pages.Destroying",
+        boot_state={"destroying": extras.to_payload_dict()},
+        agent_name=agent_name,
     )
 
 

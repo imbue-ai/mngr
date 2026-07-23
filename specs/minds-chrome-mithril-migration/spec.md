@@ -14,11 +14,20 @@ The plan is phased so each phase is an independently shippable PR that
 deletes a specific piece of duplication. It is written to be handed to an
 implementing agent with no prior context.
 
+> **2026-07-23 update:** Phases 0-8 are complete. The "keep Jinja for the
+> static tail" scoping below is SUPERSEDED: the endgame is now ALL
+> rendering in mithril, with the server reduced to a minimal document
+> shell + boot-state seeding and no JinjaX at all. See "Phases 9+ -- full
+> JS rendering" at the end of this document. The original phase plan and
+> its dispositions are kept for the mechanisms they document (mount
+> protocol, islands, host adapter), which phases 9+ reuse unchanged.
+
 **Out of scope:** the content surface (untrusted agent pages), the
 three-WebContentsView process architecture and its IPC contracts
-(`electron/main.js` stays as-is), the supertokens auth pages, and any
-question of dropping browser mode (browser mode is a first-class surface;
-`minds run` on a remote box serves exactly this UI).
+(`electron/main.js` stays as-is), and any question of dropping browser
+mode (browser mode is a first-class surface; `minds run` on a remote box
+serves exactly this UI). (The supertokens auth pages were originally out
+of scope too; phases 9+ pull them in.)
 
 ## Required reading for the implementing agent
 
@@ -532,3 +541,62 @@ browser-mode payoff and needs a go/no-go. Phase 8 (S) locks it in.
 Estimated total: 9 PRs (Phases 0-8). Do not parallelize phases that
 touch chrome.js (0-4 are strictly sequential; 5 and 6 can proceed in
 parallel after 4; 7 waits for the go/no-go; 8 is last).
+
+## Phases 9+ -- full JS rendering (added 2026-07-23)
+
+Decision (Gleb): move ALL rendering to mithril. No page keeps a JinjaX
+body; `templates.py` shrinks to boot-state seeding plus a minimal
+document shell; the JinjaX dependency is dropped at the end. Everything
+established in phases 0-8 (mount protocol, boot islands, typed
+chrome-state contract, host adapter, swap engine compatibility) carries
+over unchanged -- each page port is "shell seeds island -> component
+mounts synchronously -> old Jinja body and page ES5 deleted -> template
+tests become island assertions + vitest component tests".
+
+What the server still owns at the end (and why that is all):
+
+- The document shell: CSS/bundle/script tags and empty mount containers.
+- First-paint seeding: the `#minds-boot-state` island, the `--titlebar-bg`
+  accent + crumb seeds, `is_mac` / auth / forward-origin data attributes.
+  Mount calls are inline classic scripts that run during parse, so
+  synchronous mounting keeps first paint flash-free (invariant 1 holds).
+- Nothing else. The titlebar's server-rendered skeleton becomes an empty
+  container once its mount call moves inline before first paint (9G).
+
+The phases, in landing order (9A ships first; letters are separate PRs):
+
+- **9A -- Creating + Destroying** (DONE, this branch): `CreatingPage` /
+  `DestroyingPage` components absorb `creating.js` / `destroying.js`
+  (status polls, SSE log tails, retry/dismiss, progress bar, failure
+  guidance). `CreatingBootExtras` / `DestroyingBootExtras` seed the
+  islands. The e2e workspace runner's `#failure-view` / `#error-message`
+  contract is preserved.
+- **9B -- Auth cluster**: Welcome, Consent, Login, LoginRedirect,
+  AuthError (+ the relevant parts of `auth.js`). Redirect-based pages
+  stay dumb: tiny components, no store dependency.
+- **9C -- Settings/Accounts cluster**: Settings, SettingsModal, Accounts,
+  AccountsModal, SigninModal + `app_settings.js`;
+  `AppSettingsSections.jinja` goes away.
+- **9D -- WorkspaceSettings + Recovery** (+ `workspace_settings.js`,
+  `workspace_backups.js`, the recovery poll loop).
+- **9E -- Create form**: the 738-line form. Validation logic
+  (`resolve_create_host_name` etc.) moves out of `templates.py` into a
+  non-rendering module; form defaults ride the island.
+- **9F -- Inbox detail + permission forms**: the deliberate Phase-5
+  deferral is now in scope. `RequestEventHandler.render_request_detail_fragment`
+  (HTML string) becomes a structured-payload method; per-request-type
+  mithril detail views replace `PermissionsForm`/`PermissionsHeader`/
+  `PermissionsError`/`PermissionsManualCredentials` and the Latchkey*
+  permission pages. Hardest phase; also Sharing/SharingModal shells and
+  the supertokens `templates/auth/` pages land here or alongside (9F').
+- **9G -- Shell collapse**: DevStyleguide port, then the endgame --
+  titlebar first paint moves to a synchronous inline mount seeded from
+  data attributes/island; `ChromeShell`/`Base`/`Chrome`/`Sidebar`/
+  `OverlayHost` and every component `.jinja` are deleted; `templates.py`
+  becomes a small document builder; the `jinjax` dependency is removed.
+  The no-flash protocol from Phase 4 gates this phase too.
+
+Per-phase discipline, invariants, and the testing strategy above apply
+unchanged (both hosts per PR, no net coverage loss, visual-diff runs for
+every phase -- converted pages already flow through the harness's
+`data-minds-mounted` wait).

@@ -26,6 +26,7 @@ from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_page
@@ -38,6 +39,7 @@ from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import resolve_create_host_name
+from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.testing import parse_boot_island
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_NAME
@@ -559,11 +561,13 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
     assert "Imbue cloud requires an account." in html
 
 
-def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:
-    """The creating page ships the private-repo guidance as static, hidden
-    content: creating.js reveals it only when the create-operation status
-    reports error_kind GITHUB_AUTH_REQUIRED. It must name the GitHub CLI sign-in
-    command, link the official docs, and offer the local-path alternative."""
+def test_render_creating_page_island_carries_creation_handle_and_progress_inputs() -> None:
+    """The creating page body is the mithril CreatingPage component; the shell
+    seeds the ``creating`` island slice with the creation handle the poll/log
+    endpoints are keyed by, the server-resolved status caption, and the
+    launch-mode progress-bar duration. (The auth-guidance copy the old server
+    template carried lives in the component now -- covered by
+    frontend/src/views/CreatingPage.test.ts.)"""
     creation_id = CreationId()
     info = AgentCreationInfo(
         creation_id=creation_id,
@@ -571,37 +575,32 @@ def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:
         launch_mode=LaunchMode.DOCKER,
     )
     html = render_creating_page(creation_id=creation_id, info=info)
-    assert 'id="github-auth-help"' in html
-    assert "gh auth login" in html
-    assert "https://docs.github.com/en/github-cli/github-cli/quickstart" in html
-    assert "path in the form instead of the URL" in html
-    # Hidden on first paint -- the block only shows for the classified failure.
-    guidance_index = html.index('id="github-auth-help"')
-    tag_end = html.index(">", guidance_index)
-    assert "hidden" in html[guidance_index:tag_end]
+    island = parse_boot_island(html)
+    assert island["creating"] == {
+        "agent_id": str(creation_id),
+        "status_text": status_text_for(str(AgentCreationStatus.INITIALIZING)),
+        "expected_duration_seconds": 30.0,
+    }
+    assert "MindsUI.mountCreating(document.getElementById('creating-root'))" in html
+    assert 'id="creating-root"' in html
 
 
-def test_render_creating_page_carries_hidden_generic_git_auth_guidance() -> None:
-    """The creating page also ships generic (non-GitHub) git-auth guidance,
-    revealed for error_kind GIT_AUTH_REQUIRED. It offers the local-path
-    alternative but must NOT name the GitHub CLI (which only fits github.com)."""
-    creation_id = CreationId()
-    info = AgentCreationInfo(
-        creation_id=creation_id,
-        status=AgentCreationStatus.INITIALIZING,
-        launch_mode=LaunchMode.DOCKER,
-    )
-    html = render_creating_page(creation_id=creation_id, info=info)
-    assert 'id="git-auth-help"' in html
-    assert "path in the form instead of the URL" in html
-    # Hidden on first paint.
-    guidance_index = html.index('id="git-auth-help"')
-    tag_end = html.index(">", guidance_index)
-    assert "hidden" in html[guidance_index:tag_end]
-    # The generic block must not carry the GitHub-CLI advice. Scope the check
-    # to this block (the sibling github-auth-help block legitimately has it).
-    block_end = html.index("</div>", guidance_index)
-    assert "gh auth login" not in html[guidance_index:block_end]
+def test_render_destroying_page_island_carries_operation_inputs() -> None:
+    """The destroying page body is the mithril DestroyingPage component; the
+    shell seeds the ``destroying`` island slice with the operation handle,
+    heading inputs, and the initial server-computed status."""
+    agent_id = AgentId()
+    html = render_destroying_page(agent_id=agent_id, agent_name="alpha", pid=12345, status="failed")
+    island = parse_boot_island(html)
+    assert island["destroying"] == {
+        "agent_id": str(agent_id),
+        "agent_name": "alpha",
+        "pid": 12345,
+        "status": "failed",
+    }
+    assert "MindsUI.mountDestroying(document.getElementById('destroying-root'))" in html
+    assert 'id="destroying-root"' in html
+    assert "Destroying: alpha" in html
 
 
 def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:

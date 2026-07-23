@@ -184,3 +184,38 @@ export interface SharingBootExtras {
 export interface SharingBootIsland {
   sharing: SharingBootExtras;
 }
+
+// Creating-page boot island data (mirror of CreatingBootExtras in
+// chrome_state.py). No ``chrome`` sibling: the page's live state comes from
+// the create-operation status endpoint and its SSE log stream.
+export interface CreatingBootExtras {
+  // The creation id (minds-internal in-flight handle) the status poll and
+  // log stream are keyed by.
+  agent_id: string;
+  // Server-resolved caption for the current creation status (first paint).
+  status_text: string;
+  // Expected wall-clock creation duration; drives the progress bar easing.
+  expected_duration_seconds: number;
+}
+
+export interface CreatingBootIsland {
+  creating: CreatingBootExtras;
+}
+
+// Destroying-page boot island data (mirror of DestroyingBootExtras in
+// chrome_state.py). No ``chrome`` sibling: the page's live state comes from
+// the destroy-operation status endpoint and its SSE log stream.
+export interface DestroyingBootExtras {
+  // The workspace agent id being destroyed (keys the operation endpoints).
+  agent_id: string;
+  // Workspace display name for the page heading.
+  agent_name: string;
+  // The destroy worker's pid, shown in the heading's helper line.
+  pid: number;
+  // Initial server-computed operation status: running / failed / done.
+  status: string;
+}
+
+export interface DestroyingBootIsland {
+  destroying: DestroyingBootExtras;
+}

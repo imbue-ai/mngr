@@ -847,7 +847,7 @@ def _create_workspace_and_first_message(
             break
         if state == "FAILED":
             raise E2EFailure(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
-        # On DONE, creating.js auto-navigates the page to the workspace; the
+        # On DONE, the CreatingPage component auto-navigates to the workspace; the
         # /status fetch then hits the workspace origin and returns HTML, so
         # `state` reads empty. Landing on the workspace URL *is* success -- the
         # page is already where the redirect below would send it -- so the poll
