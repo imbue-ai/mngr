@@ -54,8 +54,10 @@
     onSuccess: function () { loadPage(); },
   });
 
-  var openRestoreDialog = window.mindsBackupTable.setupRestoreDialog(function (snapshot) {
-    opUi.startRestore(snapshot.snapshot_id, false, new Date(snapshot.time).toLocaleString());
+  var openRestoreDialog = window.mindsBackupTable.setupRestoreDialog(function (snapshot, dialogChoices) {
+    opUi.startRestore(snapshot.snapshot_id, new Date(snapshot.time).toLocaleString(), {
+      updateAfter: dialogChoices.updateAfter,
+    });
   });
 
   function renderPage(entry, pageSnapshots) {

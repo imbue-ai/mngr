@@ -9,8 +9,17 @@
   else to speak from. A restore reports itself on its own table row instead --
   see backup_table.js -- and only its terminal message lands here.
 
-  Terminal messages are Notices (the styleguide's success/error boxes), filled
-  and unhidden by the operation UI.
+  Every operation streams its full output into the collapsible details log
+  (mirroring the workspace-creation details toggle), so a stuck operation is
+  distinguishable from a slow one. The retry buttons are failure-specific
+  affordances offered by the dispatching page: "Stop chats and try again" for
+  a chats block, "Restore without backing up first" after the safety snapshot
+  failed, and "Force restore" when the workspace can no longer answer the
+  chat gate.
+
+  Terminal messages are Notices (the styleguide's boxes), filled and unhidden
+  by the operation UI: success/error, a warn Notice for a success that
+  carries a caveat, and an info Notice for a user cancel.
 #}
 <div id="backup-operation-strip" class="hidden mb-6">
   <div class="flex flex-wrap items-center gap-2 mb-2">
@@ -18,11 +27,25 @@
     <span id="backup-stop-chats-btn-wrap" class="hidden">
       <Button variant="secondary" id="backup-stop-chats-btn">Stop chats and try again</Button>
     </span>
+    <span id="backup-skip-safety-btn-wrap" class="hidden">
+      <Button variant="secondary" id="backup-skip-safety-btn">Restore without backing up first</Button>
+    </span>
+    <span id="backup-force-restore-btn-wrap" class="hidden">
+      <Button variant="secondary" id="backup-force-restore-btn">Force restore</Button>
+    </span>
     <span id="backup-cancel-btn-wrap" class="hidden">
       <Button variant="secondary" id="backup-cancel-btn">Cancel</Button>
     </span>
   </div>
   <p id="backup-op-progress" class="hidden type-helper text-tertiary mb-2" aria-live="polite"></p>
+  <button type="button" id="backup-op-details-toggle"
+          class="hidden bg-transparent border-0 p-0 mb-2 type-helper text-accent hover:underline cursor-pointer">
+    Show details
+  </button>
+  <pre id="backup-op-log"
+       class="hidden mb-2 p-3 rounded-md bg-surface-secondary type-helper font-mono text-secondary max-h-64 overflow-y-auto whitespace-pre-wrap break-words"></pre>
   <Notice variant="error" id="backup-error" class="hidden" role="alert"></Notice>
+  <Notice variant="warn" id="backup-warning" class="hidden" role="status"></Notice>
   <Notice variant="success" id="backup-success" class="hidden" role="status"></Notice>
+  <Notice variant="info" id="backup-cancelled" class="hidden" role="status"></Notice>
 </div>

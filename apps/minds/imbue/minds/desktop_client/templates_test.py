@@ -120,6 +120,9 @@ def test_render_workspace_settings_carries_the_restore_dialog() -> None:
     assert 'id="restore-dialog-time"' in html
     assert 'id="restore-cancel-btn"' in html
     assert 'id="restore-confirm-btn"' in html
+    # The chained-update choice ships in the dialog, checked by default.
+    assert 'id="restore-update-after-checkbox"' in html
+    assert "checked" in html
 
 
 def test_render_workspace_settings_puts_the_operation_strip_below_the_backups_table() -> None:
@@ -138,9 +141,15 @@ def test_render_workspace_settings_puts_the_operation_strip_below_the_backups_ta
         "backup-op-spinner",
         "backup-cancel-btn",
         "backup-stop-chats-btn",
+        "backup-skip-safety-btn",
+        "backup-force-restore-btn",
         "backup-op-progress",
+        "backup-op-details-toggle",
+        "backup-op-log",
         "backup-error",
+        "backup-warning",
         "backup-success",
+        "backup-cancelled",
     ):
         assert f'id="{element_id}"' in html
     assert html.index('id="backup-history-card"') < html.index('id="backup-operation-strip"')
@@ -163,13 +172,20 @@ def test_render_workspace_backup_history_page_shell() -> None:
         "restore-dialog-time",
         "restore-cancel-btn",
         "restore-confirm-btn",
+        "restore-update-after-checkbox",
         "backup-operation-strip",
         "backup-op-spinner",
         "backup-op-progress",
+        "backup-op-details-toggle",
+        "backup-op-log",
         "backup-error",
+        "backup-warning",
         "backup-success",
+        "backup-cancelled",
         "backup-cancel-btn",
         "backup-stop-chats-btn",
+        "backup-skip-safety-btn",
+        "backup-force-restore-btn",
     ):
         assert f'id="{element_id}"' in html
     assert f"/workspace/{_AGENT_A}/settings" in html

@@ -20,17 +20,25 @@ out of arbitrarily noisy output:
   ``uv sync``, restart the service, verify it comes back, and auto-rollback
   (``git revert``) on failure. Optionally stops running chats first.
 - the *restore* script: rewinds the whole host dir to a chosen restic
-  snapshot -- gate on chats/ticks, stop every supervisord service (they all
-  run from and write into the host dir this restore rewrites), take a
-  ``pre-restore`` safety snapshot (so any restore is undoable), restore the
-  snapshot into a staging dir, swap it into place (preserving the current
-  ``restic.env``), append a ``restored`` snapshot of the swapped-in state
-  (tagged with the source snapshot's time, so the timeline shows the restored
-  version as a new "Restored from ..." entry), ``uv sync``, and restart every
-  supervisord service. Every exit path after the service stop restarts the
-  services (best-effort). The snapshot's root and timestamp are resolved by
-  minds and passed in via argv, so the script never queries restic for
-  metadata minds already holds.
+  snapshot, in place -- gate on chats/ticks, stop every supervisord service
+  (they all run from and write into the host dir this restore rewrites), take
+  a ``pre-restore`` safety snapshot (so any restore is undoable), then
+  ``restic restore <id>:<subpath> --target <host_dir> --delete`` with
+  ``--overwrite if-changed``: no staging copy, only changed files are
+  rewritten, and a failed restore converges when simply re-run. The current
+  ``restic.env`` is written back afterwards, a ``restored`` snapshot of the
+  restored state is appended (tagged with the source snapshot's time, so the
+  timeline shows the restored version as a new "Restored from ..." entry),
+  then ``uv sync`` and a restart of every supervisord service. Every exit
+  path after the service stop restarts the services (best-effort). The
+  snapshot's subpath (the directory inside the snapshot that corresponds to
+  the host dir) and timestamp are resolved by minds and passed in via argv,
+  so the script never queries restic for metadata minds already holds. The
+  in-place restore needs restic >= 0.17; when the workspace's restic is
+  older, the script downloads the pinned, sha256-verified build and installs
+  it persistently (shadowing the distro binary, so the whole workspace
+  converges on the pinned version). Long restic operations stream throttled
+  progress lines on stdout so the desktop can show a live accounting.
 
 The scripts are shipped base64-encoded through the shell (the base64 alphabet
 contains no shell-significant characters), decoded and piped into ``python3 -``
@@ -323,6 +331,13 @@ def _backup_events_path(agent_id):
 
 def _is_backup_tick_in_flight(agent_id):
     """Return whether a backup tick is running right now, per the event journal."""
+    # Ticks are restic runs owned by the supervised host-backup service; when
+    # that service is not RUNNING (or supervisord is unreachable) no tick can
+    # be alive, and any started-but-unfinished journal entry is an orphan from
+    # a killed tick (e.g. a restore's `stop all`), not live work to wait for.
+    service_state, _ = _service_state()
+    if service_state != "running":
+        return False
     events_path = _backup_events_path(agent_id)
     if not events_path or not _os.path.isfile(events_path):
         return False
@@ -358,29 +373,33 @@ def _is_backup_tick_in_flight(agent_id):
     return last_started_tick is not None and last_started_tick not in finished
 
 
-def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats):
+def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats, is_chat_gate_skipped=False):
     """Gate a mutating script: no RUNNING chats (optionally stop them), no in-flight tick.
 
     Returns (status, extra, detail) with status in ok | blocked | failed;
     ``extra`` carries payload fields (e.g. running_chats) for the result.
+    ``is_chat_gate_skipped`` bypasses only the chat half (the user explicitly
+    forced a restore on a workspace that can no longer answer `mngr list`);
+    the tick wait still applies -- it needs no workspace code to answer.
     """
-    chats, gate_error = _list_running_chats()
-    if chats is None:
-        return "failed", {}, "cannot determine running chats: %s" % gate_error
-    if chats and is_stop_chats:
-        for chat_name in chats:
-            stopped = _run(["uv", "run", "mngr", "stop", chat_name], timeout=180)
-            if stopped.returncode != 0:
-                detail = "could not stop chat %s: %s" % (
-                    chat_name,
-                    (stopped.stderr or stopped.stdout).strip()[-300:],
-                )
-                return "failed", {}, detail
+    if not is_chat_gate_skipped:
         chats, gate_error = _list_running_chats()
         if chats is None:
-            return "failed", {}, "cannot re-check running chats: %s" % gate_error
-    if chats:
-        return "blocked", {"running_chats": chats}, "chat agents are running"
+            return "failed", {}, "cannot determine running chats: %s" % gate_error
+        if chats and is_stop_chats:
+            for chat_name in chats:
+                stopped = _run(["uv", "run", "mngr", "stop", chat_name], timeout=180)
+                if stopped.returncode != 0:
+                    detail = "could not stop chat %s: %s" % (
+                        chat_name,
+                        (stopped.stderr or stopped.stdout).strip()[-300:],
+                    )
+                    return "failed", {}, detail
+            chats, gate_error = _list_running_chats()
+            if chats is None:
+                return "failed", {}, "cannot re-check running chats: %s" % gate_error
+        if chats:
+            return "blocked", {"running_chats": chats}, "chat agents are running"
     wait_deadline = _time.monotonic() + TICK_WAIT_TIMEOUT_SECONDS
     while _is_backup_tick_in_flight(agent_id):
         if _time.monotonic() >= wait_deadline:
@@ -586,20 +605,47 @@ _main()
 
 
 # Rewinds the whole host dir (/mngr) to one restic snapshot, in place.
-# Parameterized via argv: --agent-id, --snapshot-id, --snapshot-root and
-# --source-time (both resolved by minds from its own view of the repository),
-# and optionally --stop-chats. Verdict: ok | blocked (running chats) | failed.
+# Parameterized via argv: --agent-id, --snapshot-id, --snapshot-subpath (the
+# directory inside the snapshot that corresponds to the host dir, resolved by
+# minds from its own view of the repository) and --source-time, plus the
+# optional flags --stop-chats, --skip-chat-gate (an explicit user "force
+# restore" on a workspace that can no longer answer `mngr list`) and
+# --skip-safety-snapshot (an explicit user "restore without backing up first"
+# after the safety snapshot failed). Verdict: ok | blocked (running chats) |
+# failed.
 BACKUP_RESTORE_SCRIPT: Final[str] = (
     _SCRIPT_PREAMBLE
     + r"""
+import bz2 as _bz2
+import platform as _platform
+import select as _select
+import tempfile as _tempfile
+import tomllib as _tomllib
+import urllib.request as _urllib_request
+
 _RESTIC_TIMEOUT_SECONDS = 3000.0
-_STAGING_DIR_NAME = ".minds-restore-staging"
-# Mirrors the host_backup service's default excludes: the safety snapshot must
-# look like every hourly snapshot (regenerable trees excluded), or it would be
-# slower and larger than any backup ever taken. Mirrored by hand (host_backup
-# lives in the workspace-template repo); drift only affects the safety
-# snapshot's size and speed, never what a restore can recover.
-_SAFETY_SNAPSHOT_EXCLUDES = (
+# The in-place restore needs `restic restore --delete` / `--overwrite`,
+# which landed in restic 0.17. When the workspace's restic is older (Debian
+# bookworm ships 0.14), the pinned build below is downloaded, sha256-verified
+# and installed persistently.
+_MINIMUM_RESTIC_VERSION = (0, 17, 0)
+_PINNED_RESTIC_VERSION = "0.18.1"
+_PINNED_RESTIC_SHA256_BY_ARCH = {
+    "amd64": "680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d",
+    "arm64": "87f53fddde38764095e9c058a3b31834052c37e5826d2acf34e18923c006bd45",
+}
+_RESTIC_DOWNLOAD_TIMEOUT_SECONDS = 300.0
+# Where the downloaded restic lands when /usr/local/bin is not writable. Kept
+# out of snapshots (excluded below): it is a regenerable 25MB binary.
+_FALLBACK_RESTIC_DIR_NAME = ".minds-restic"
+# Forward at most one restic --json status line per interval: restic emits
+# them far faster than a human (or the SSE log stream) needs.
+_PROGRESS_INTERVAL_SECONDS = 2.0
+# Fallback excludes for the safety/restored snapshots when the workspace has
+# no readable runtime/backup.toml excludes. Matches host_backup's built-in
+# defaults so those snapshots look like every hourly snapshot; when the user
+# customized excludes in backup.toml, theirs are used instead (read below).
+_DEFAULT_SNAPSHOT_EXCLUDES = (
     "**/.venv",
     "**/node_modules",
     "**/__pycache__",
@@ -610,22 +656,17 @@ _SAFETY_SNAPSHOT_EXCLUDES = (
     "**/build",
     "**/.next",
     "**/.cache",
-    "**/" + _STAGING_DIR_NAME,
 )
 
 
 # Cleanup obligations of the current run. Every side effect the restore takes
 # registers its cleanup here, and _finish pays the debts (best-effort) before
 # reporting -- so no individual failure path can forget to bring the services
-# back or leave a staged download behind. `is_resume_owed` flips on right
-# after `stop all` and off once the success path has run its own verified
-# restart; `staging_dir` is set while a staged download may exist on disk.
-_DEBTS = {"is_resume_owed": False, "staging_dir": ""}
+# back. `is_resume_owed` flips on right after `stop all` and off once the
+# success path has run its own verified restart.
+_DEBTS = {"is_resume_owed": False}
 
 def _finish(result, status, detail=""):
-    if _DEBTS["staging_dir"]:
-        _shutil.rmtree(_DEBTS["staging_dir"], ignore_errors=True)
-        _DEBTS["staging_dir"] = ""
     if _DEBTS["is_resume_owed"]:
         restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
         result["services_restarted"] = restarted.returncode == 0
@@ -635,6 +676,12 @@ def _finish(result, status, detail=""):
         result["detail"] = detail
     _emit("MINDS_BACKUP_RESTORE_JSON:", result)
     _sys.exit(0)
+
+
+def _progress(message):
+    # One live progress line; the desktop streams these into the operation log.
+    _sys.stdout.write(message + "\n")
+    _sys.stdout.flush()
 
 
 def _parse_env_lines(content):
@@ -648,10 +695,220 @@ def _parse_env_lines(content):
     return env_map
 
 
-def _restic(args, env_map, timeout=_RESTIC_TIMEOUT_SECONDS):
+def _restic_environment(env_map):
     env = dict(_os.environ)
     env.update(env_map)
-    return _run(["restic"] + list(args), timeout=timeout, env=env)
+    return env
+
+
+def _restic_version_tuple(binary):
+    # The (major, minor, patch) of `binary`, or None when it is unusable.
+    result = _run([binary, "version"], timeout=30)
+    if result.returncode != 0:
+        return None
+    for token in (result.stdout or "").split():
+        parts = token.split(".")
+        if len(parts) < 2 or not all(part.isdigit() for part in parts):
+            continue
+        padded = parts + ["0", "0"]
+        return (int(padded[0]), int(padded[1]), int(padded[2]))
+    return None
+
+
+def _download_pinned_restic(fallback_path):
+    # Download + verify the pinned restic; returns (installed_path, error).
+    machine = _platform.machine().lower()
+    arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
+    if arch is None:
+        return "", "no pinned restic build for architecture %s" % machine
+    url = "https://github.com/restic/restic/releases/download/v%s/restic_%s_linux_%s.bz2" % (
+        _PINNED_RESTIC_VERSION,
+        _PINNED_RESTIC_VERSION,
+        arch,
+    )
+    _progress("Downloading restic %s (%s)..." % (_PINNED_RESTIC_VERSION, arch))
+    try:
+        with _urllib_request.urlopen(url, timeout=_RESTIC_DOWNLOAD_TIMEOUT_SECONDS) as response:
+            compressed = response.read()
+    except OSError as e:
+        return "", "could not download restic from %s: %s" % (url, e)
+    if _hashlib.sha256(compressed).hexdigest() != _PINNED_RESTIC_SHA256_BY_ARCH[arch]:
+        return "", "the downloaded restic does not match its pinned sha256; refusing to install it"
+    try:
+        binary_bytes = _bz2.decompress(compressed)
+    except (OSError, ValueError) as e:
+        return "", "could not decompress the restic download: %s" % e
+    # Persist: prefer /usr/local/bin (shadows the distro binary on PATH, so
+    # the whole workspace -- including the hourly host-backup service --
+    # converges on the pinned version); fall back to a host-dir location when
+    # that is not writable. Written via a temp file + rename so a concurrent
+    # reader never sees a half-written binary.
+    for destination in ("/usr/local/bin/restic", fallback_path):
+        try:
+            _os.makedirs(_os.path.dirname(destination), exist_ok=True)
+            fd, temp_path = _tempfile.mkstemp(dir=_os.path.dirname(destination))
+            with _os.fdopen(fd, "wb") as fh:
+                fh.write(binary_bytes)
+            _os.chmod(temp_path, 0o755)
+            _os.replace(temp_path, destination)
+        except OSError:
+            continue
+        version = _restic_version_tuple(destination)
+        if version is not None and version >= _MINIMUM_RESTIC_VERSION:
+            _progress("Installed restic %s at %s." % (_PINNED_RESTIC_VERSION, destination))
+            return destination, ""
+    return "", "could not install the downloaded restic binary"
+
+
+def _resolve_restic_binary(host_dir, result):
+    # Returns (binary, error): any restic at/above the minimum, downloading
+    # the pinned one if needed.
+    fallback_path = _os.path.join(host_dir, _FALLBACK_RESTIC_DIR_NAME, "restic")
+    for candidate in ("restic", fallback_path):
+        version = _restic_version_tuple(candidate)
+        if version is not None and version >= _MINIMUM_RESTIC_VERSION:
+            return candidate, ""
+    installed, error = _download_pinned_restic(fallback_path)
+    if installed:
+        result["restic_downloaded"] = True
+    return installed, error
+
+
+def _read_snapshot_excludes(code_dir):
+    # The user's current backup.toml excludes, or host_backup's defaults when
+    # absent/unreadable.
+    toml_path = _os.path.join(code_dir, "runtime", "backup.toml")
+    excludes = list(_DEFAULT_SNAPSHOT_EXCLUDES)
+    if _os.path.isfile(toml_path):
+        try:
+            with open(toml_path, "rb") as fh:
+                raw = _tomllib.load(fh)
+        except (OSError, ValueError):
+            raw = {}
+        configured = raw.get("excludes")
+        if isinstance(configured, list) and configured and all(isinstance(p, str) for p in configured):
+            excludes = list(configured)
+    # The downloaded restic fallback binary is regenerable; never snapshot it.
+    return excludes + ["**/" + _FALLBACK_RESTIC_DIR_NAME]
+
+
+def _human_bytes(count):
+    value = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024.0:
+            return "%.1f %s" % (value, unit)
+        value /= 1024.0
+    return "%.1f TB" % value
+
+
+def _format_restic_progress(line):
+    # Translates one restic --json output line into a progress line, or None
+    # to drop it.
+    if not line.startswith("{"):
+        return line[:300]
+    try:
+        payload = _json.loads(line)
+    except ValueError:
+        return line[:300]
+    if not isinstance(payload, dict):
+        return None
+    message_type = payload.get("message_type")
+    if message_type == "status":
+        percent = payload.get("percent_done")
+        if not isinstance(percent, (int, float)):
+            return None
+        done = payload.get("bytes_done", payload.get("bytes_restored"))
+        total = payload.get("total_bytes")
+        detail = ""
+        if isinstance(done, (int, float)) and isinstance(total, (int, float)) and total:
+            detail = " (%s / %s)" % (_human_bytes(done), _human_bytes(total))
+        return "progress: %d%%%s" % (int(percent * 100), detail)
+    if message_type == "summary":
+        return "progress: 100%"
+    if message_type == "error":
+        return "restic error: %s" % _json.dumps(payload)[:300]
+    return None
+
+
+def _restic_streaming(args, env_map, restic_binary, timeout=_RESTIC_TIMEOUT_SECONDS):
+    # Runs one restic command, streaming throttled progress; returns
+    # (returncode, output_tail).
+    try:
+        process = _subprocess.Popen(
+            [restic_binary] + list(args) + ["--json"],
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.STDOUT,
+            env=_restic_environment(env_map),
+        )
+    except OSError as e:
+        return 127, "failed to run %s: %s" % (restic_binary, e)
+    deadline = _time.monotonic() + timeout
+    tail = []
+    last_progress_at = 0.0
+    fd = process.stdout.fileno()
+    buffered = b""
+
+    def _handle_line(raw_line):
+        nonlocal last_progress_at
+        stripped = raw_line.strip()
+        if not stripped:
+            return
+        tail.append(stripped)
+        del tail[:-40]
+        message = _format_restic_progress(stripped)
+        if message is None:
+            return
+        if message.startswith("progress:"):
+            now = _time.monotonic()
+            if now - last_progress_at < _PROGRESS_INTERVAL_SECONDS:
+                return
+            last_progress_at = now
+        _progress(message)
+
+    while True:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            process.kill()
+            process.wait()
+            return 124, "restic %s timed out after %d seconds" % (args[0], int(timeout))
+        ready, _, _ = _select.select([fd], [], [], min(remaining, 5.0))
+        if not ready:
+            continue
+        chunk = _os.read(fd, 65536)
+        if chunk == b"":
+            break
+        buffered += chunk
+        while b"\n" in buffered:
+            raw, buffered = buffered.split(b"\n", 1)
+            _handle_line(raw.decode("utf-8", "replace"))
+    if buffered:
+        _handle_line(buffered.decode("utf-8", "replace"))
+    try:
+        returncode = process.wait(timeout=60)
+    except _subprocess.TimeoutExpired:
+        process.kill()
+        returncode = process.wait()
+    return returncode, "\n".join(tail)
+
+
+def _is_repository_lock_failure(returncode, output):
+    # restic >= 0.17 exits 11 on a locked repository; the message match covers
+    # subcommand/version variance.
+    return returncode == 11 or "repository is already locked" in output or "unable to create lock" in output
+
+
+def _restic_step_with_unlock_retry(args, env_map, restic_binary):
+    # Runs a restic step, clearing a stale repository lock and retrying once
+    # if needed. A tick killed by this restore's own `stop all` leaves a lock
+    # owned by a dead process; `restic unlock` removes exactly such locks (it
+    # never touches a live holder's), so one unlock+retry converges -- the
+    # same pattern the host_backup service uses.
+    returncode, output = _restic_streaming(args, env_map, restic_binary)
+    if returncode == 0 or not _is_repository_lock_failure(returncode, output):
+        return returncode, output
+    _progress("The repository is locked (likely a backup this restore interrupted); clearing the stale lock...")
+    _run([restic_binary, "unlock"], timeout=120, env=_restic_environment(env_map))
+    return _restic_streaming(args, env_map, restic_binary)
 
 
 def _main():
@@ -659,24 +916,34 @@ def _main():
     snapshot_id = _arg_value("--snapshot-id")
     # Resolved by minds from its own view of the repository and passed in, so
     # this script never queries restic for snapshot metadata.
-    snapshot_root = _arg_value("--snapshot-root")
+    snapshot_subpath = _arg_value("--snapshot-subpath")
     source_time = _arg_value("--source-time")
     is_stop_chats = _has_flag("--stop-chats")
+    is_chat_gate_skipped = _has_flag("--skip-chat-gate")
+    is_safety_snapshot_skipped = _has_flag("--skip-safety-snapshot")
     result = {
-        "schema": 1,
+        "schema": 2,
         "safety_snapshot_taken": False,
-        "swapped": False,
+        "safety_snapshot_skipped": is_safety_snapshot_skipped,
+        "restored": False,
         "services_restarted": False,
         "restored_snapshot_taken": False,
+        "restic_downloaded": False,
     }
     if not snapshot_id:
         _finish(result, "failed", "no --snapshot-id provided")
-    if not snapshot_root:
-        _finish(result, "failed", "no --snapshot-root provided")
+    if not snapshot_subpath:
+        _finish(result, "failed", "no --snapshot-subpath provided")
 
-    # Everything that needs the current workspace code (`uv run mngr`) must
-    # run before the swap replaces the code dir this process started in.
-    gate_status, gate_extra, gate_detail = _gate_chats_and_wait_for_tick(agent_id, is_stop_chats)
+    # Gate before anything mutates. The chat half needs the current workspace
+    # code (`uv run mngr`); a forced restore skips only that half -- the tick
+    # wait is self-healing (a stopped host-backup service means no live tick)
+    # and needs no workspace code.
+    if is_chat_gate_skipped:
+        _progress("Skipping the running-chats check (forced restore).")
+    gate_status, gate_extra, gate_detail = _gate_chats_and_wait_for_tick(
+        agent_id, is_stop_chats, is_chat_gate_skipped=is_chat_gate_skipped
+    )
     result.update(gate_extra)
     if gate_status != "ok":
         _finish(result, gate_status, gate_detail)
@@ -693,83 +960,68 @@ def _main():
     if not env_map.get("RESTIC_REPOSITORY"):
         _finish(result, "failed", "%s has no RESTIC_REPOSITORY" % RESTIC_ENV_PATH)
 
+    # Resolve a usable restic (downloading the pinned build if the installed
+    # one is too old) and the snapshot excludes before anything is stopped or
+    # mutated, so these failures are cheap and leave the workspace untouched.
+    restic_binary, restic_error = _resolve_restic_binary(host_dir, result)
+    if not restic_binary:
+        _finish(result, "failed", restic_error)
+    excludes = _read_snapshot_excludes(code_dir)
+
     # Quiesce the workspace: every supervisord service runs from (and writes
     # into) the host dir this restore rewrites, so a service left running
-    # could recreate files mid-swap and break the delete/rename pass. Stop
-    # them all -- the exec channel this script runs through is not
-    # supervisord-managed, so it survives. Best-effort: already-stopped (or
-    # missing) services must not abort the restore. From here on, every exit
-    # owes a `restart all` -- registered as a debt that _finish itself pays,
-    # so no failure path can forget it.
+    # could recreate or hold files mid-restore. Stop them all -- the exec
+    # channel this script runs through is not supervisord-managed, so it
+    # survives. Best-effort: already-stopped (or missing) services must not
+    # abort the restore. From here on, every exit owes a `restart all` --
+    # registered as a debt that _finish itself pays, so no failure path can
+    # forget it.
+    _progress("Stopping the workspace services...")
     _run(["supervisorctl", "stop", "all"], timeout=300)
     _DEBTS["is_resume_owed"] = True
 
-    # Safety snapshot of the current state, so this restore is itself undoable.
-    backup_args = ["backup", host_dir, "--tag", "pre-restore"]
-    for pattern in _SAFETY_SNAPSHOT_EXCLUDES:
-        backup_args += ["--exclude", pattern]
-    backed_up = _restic(backup_args, env_map)
-    if backed_up.returncode != 0:
-        detail = "pre-restore safety snapshot failed: %s" % (backed_up.stderr or backed_up.stdout).strip()[-500:]
-        _finish(result, "failed", detail)
-    result["safety_snapshot_taken"] = True
-
-    # Restore into a staging dir first: nothing is deleted until the whole
-    # snapshot has downloaded successfully. Clearing stale leftovers from a
-    # prior run happens here; from then on the staging dir is a registered
-    # debt that _finish removes on every exit.
-    staging_dir = _os.path.join(host_dir, _STAGING_DIR_NAME)
-    _shutil.rmtree(staging_dir, ignore_errors=True)
-    _DEBTS["staging_dir"] = staging_dir
-    restored = _restic(["restore", snapshot_id, "--target", staging_dir], env_map)
-    if restored.returncode != 0:
-        detail = "restic restore failed: %s" % (restored.stderr or restored.stdout).strip()[-500:]
-        _finish(result, "failed", detail)
-    source_root = _os.path.join(staging_dir, snapshot_root.lstrip("/"))
-    if not _os.path.isdir(source_root):
-        _finish(result, "failed", "restored tree is missing the snapshot root %s" % snapshot_root)
-    # On btrfs providers the hourly backup snapshots the whole unified host
-    # volume, so the host dir's contents live one level down in a `host_dir/`
-    # child (next to volume-level `agents/` + `host_state.json`); on plain
-    # docker (and for the pre-restore safety snapshots this script takes) the
-    # snapshot root is the host dir itself. Identify the host dir by its
-    # `code/` checkout and refuse to swap in anything else -- swapping in the
-    # wrong level would wreck the workspace.
-    if not _os.path.isdir(_os.path.join(source_root, "code")):
-        nested_root = _os.path.join(source_root, "host_dir")
-        if _os.path.isdir(_os.path.join(nested_root, "code")):
-            source_root = nested_root
-        else:
-            detail = "restored tree has no code/ checkout under %s; refusing to swap it in" % snapshot_root
+    # Safety snapshot of the current state, so this restore is itself
+    # undoable. Skipped only on an explicit user re-dispatch after this very
+    # step failed.
+    if not is_safety_snapshot_skipped:
+        _progress("Backing up the current state (safety snapshot)...")
+        backup_args = ["backup", host_dir, "--tag", "pre-restore"]
+        for pattern in excludes:
+            backup_args += ["--exclude", pattern]
+        backed_up, backup_output = _restic_step_with_unlock_retry(backup_args, env_map, restic_binary)
+        if backed_up != 0:
+            detail = "pre-restore safety snapshot failed: %s" % backup_output[-500:]
             _finish(result, "failed", detail)
+        result["safety_snapshot_taken"] = True
 
-    # Swap: clear the host dir (except staging) and move the restored entries
-    # in. This deletes the dir this process was started from, so leave it
-    # first; rename within one filesystem is instant, keeping the
-    # inconsistent window to the deletes.
+    # The in-place sync restore: only files that differ from the snapshot are
+    # rewritten, files the snapshot lacks are deleted, and nothing is staged
+    # -- so no double disk, and a restore that fails midway converges when
+    # simply re-run. The subpath maps the snapshot's recorded layout (volume-
+    # level on btrfs providers, the host dir itself on plain docker) onto the
+    # host dir; minds resolved and validated it before dispatch.
+    _progress("Restoring the selected backup into place...")
+    # The restore may rewrite or delete this process's original cwd entries.
     _os.chdir("/")
-    try:
-        for name in _os.listdir(host_dir):
-            if name == _STAGING_DIR_NAME:
-                continue
-            path = _os.path.join(host_dir, name)
-            if _os.path.islink(path) or not _os.path.isdir(path):
-                _os.remove(path)
-            else:
-                _shutil.rmtree(path)
-        for name in _os.listdir(source_root):
-            # A snapshot taken while an earlier restore was staging (the
-            # hourly backup does not exclude the staging dir) carries a stale
-            # staging dir of its own. It is garbage by definition, and moving
-            # it onto the live staging dir would fail (rename onto a
-            # non-empty directory) -- skip it.
-            if name == _STAGING_DIR_NAME:
-                continue
-            _os.rename(_os.path.join(source_root, name), _os.path.join(host_dir, name))
-    except OSError as e:
-        detail = "the in-place swap failed midway (%s); the workspace may be incomplete -- run the restore again." % e
+    restore_args = [
+        "restore",
+        "%s:%s" % (snapshot_id, snapshot_subpath),
+        "--target",
+        host_dir,
+        "--delete",
+        "--overwrite",
+        "if-changed",
+    ]
+    restored, restore_output = _restic_step_with_unlock_retry(restore_args, env_map, restic_binary)
+    if restored != 0:
+        detail = (
+            "the in-place restore failed (%s); the workspace may be mixed between versions -- "
+            "running the restore again picks up where this one stopped." % restore_output[-500:]
+        )
         _finish(result, "failed", detail)
-    result["swapped"] = True
+    if not _os.path.isdir(_os.path.join(host_dir, "code")):
+        _finish(result, "failed", "the restore completed but left no code/ checkout at %s" % host_dir)
+    result["restored"] = True
 
     # The snapshot carries whatever restic.env it had at backup time (possibly
     # none); the current credentials must keep working, so write them back.
@@ -788,26 +1040,31 @@ def _main():
     # nothing is writing to the tree. Best-effort: the restore itself already
     # succeeded and the next backup tick would capture this state anyway, so a
     # failure here must not fail the operation.
+    _progress("Recording the restored state in the backup timeline...")
     restored_backup_args = ["backup", host_dir, "--tag", "restored"]
     if source_time:
         restored_backup_args += ["--tag", "restored-from:%s" % source_time]
-    for pattern in _SAFETY_SNAPSHOT_EXCLUDES:
+    for pattern in excludes:
         restored_backup_args += ["--exclude", pattern]
-    restored_snapshot = _restic(restored_backup_args, env_map)
-    result["restored_snapshot_taken"] = restored_snapshot.returncode == 0
+    restored_snapshot, _restored_output = _restic_step_with_unlock_retry(
+        restored_backup_args, env_map, restic_binary
+    )
+    result["restored_snapshot_taken"] = restored_snapshot == 0
 
     # Backups exclude regenerable trees (.venv etc.), so rebuild dependencies
     # before the services come back.
+    _progress("Reinstalling dependencies (uv sync)...")
     synced = _run(["uv", "sync"], timeout=900, cwd=code_dir)
     if synced.returncode != 0:
         detail = "restored, but uv sync failed: %s" % (synced.stderr or synced.stdout).strip()[-800:]
         _finish(result, "failed", detail)
 
-    # Every supervisord service was stopped before the swap; bounce them all
-    # onto the restored tree (`restart all` starts stopped programs too).
+    # Every supervisord service was stopped before the restore; bounce them
+    # all onto the restored tree (`restart all` starts stopped programs too).
     # This pays the resume debt directly (and clears it first, so a failed
     # restart is not blindly retried by _finish) because the success path
     # must also verify the service actually came back.
+    _progress("Restarting the workspace services...")
     _DEBTS["is_resume_owed"] = False
     restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
     result["services_restarted"] = restarted.returncode == 0

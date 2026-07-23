@@ -162,11 +162,14 @@
   // Wire the shared restore-confirmation dialog (markup shipped by every
   // page that offers Restore, via the RestoreDialog template component) and
   // return the function that opens it for one snapshot. What a confirmed
-  // restore *does* is the caller's business, though both current callers run
-  // the tracked operation in place through the shared operation strip.
+  // restore *does* is the caller's business -- onConfirm receives the
+  // snapshot plus { updateAfter } from the dialog's checkbox -- though both
+  // current callers run the tracked operation in place through the shared
+  // operation strip.
   function setupRestoreDialog(onConfirm) {
     var dialog = document.getElementById('restore-dialog');
     var timeEl = document.getElementById('restore-dialog-time');
+    var updateAfterCheckbox = document.getElementById('restore-update-after-checkbox');
     var cancelBtn = document.getElementById('restore-cancel-btn');
     var confirmBtn = document.getElementById('restore-confirm-btn');
     // The snapshot the open dialog is about.
@@ -178,11 +181,14 @@
     });
     confirmBtn.addEventListener('click', function () {
       close();
-      if (pendingSnapshot) onConfirm(pendingSnapshot);
+      if (pendingSnapshot) onConfirm(pendingSnapshot, { updateAfter: updateAfterCheckbox.checked });
     });
     return function (snapshot) {
       pendingSnapshot = snapshot;
       timeEl.textContent = new Date(snapshot.time).toLocaleString();
+      // Recommended default: every open starts checked, regardless of what a
+      // previous restore chose.
+      updateAfterCheckbox.checked = true;
       dialog.classList.remove('hidden');
     };
   }

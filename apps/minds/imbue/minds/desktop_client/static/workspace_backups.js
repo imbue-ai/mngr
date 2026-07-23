@@ -281,8 +281,10 @@
 
   // -- Restore confirmation dialog (shared wiring in backup_table.js) --------
 
-  var openRestoreDialog = window.mindsBackupTable.setupRestoreDialog(function (snapshot) {
-    opUi.startRestore(snapshot.snapshot_id, false, new Date(snapshot.time).toLocaleString());
+  var openRestoreDialog = window.mindsBackupTable.setupRestoreDialog(function (snapshot, dialogChoices) {
+    opUi.startRestore(snapshot.snapshot_id, new Date(snapshot.time).toLocaleString(), {
+      updateAfter: dialogChoices.updateAfter,
+    });
   });
 
   // -- Configure form (enable / change destination / disable) ---------------

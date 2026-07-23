@@ -3,6 +3,10 @@
   Restore action (workspace settings, backup history). The ids are
   load-bearing: window.mindsBackupTable.setupRestoreDialog (backup_table.js)
   wires them and each page decides what a confirmed restore does.
+
+  The "update afterwards" checkbox defaults on: a restored snapshot may carry
+  arbitrarily old backup-service code, and leaving it stale means the
+  verification banner starts complaining immediately.
 #}
 <Modal id="restore-dialog">
   <h2 class="type-heading text-primary mb-3">Restore this backup?</h2>
@@ -12,6 +16,16 @@
     then will be replaced. A backup of the current state is taken first,
     so you can undo this by restoring that backup.
   </p>
+  <label class="flex items-start gap-2 type-body text-primary mb-4 cursor-pointer">
+    <input type="checkbox" id="restore-update-after-checkbox" checked class="mt-1" />
+    <span>
+      Update the backup service afterwards
+      <span class="block type-helper text-tertiary">
+        Recommended: the backup software inside the restored workspace may be
+        out of date, which would stop future backups from working.
+      </span>
+    </span>
+  </label>
   <div class="flex justify-end gap-3">
     <Button variant="secondary" id="restore-cancel-btn">Cancel</Button>
     <Button variant="danger" id="restore-confirm-btn">Restore</Button>

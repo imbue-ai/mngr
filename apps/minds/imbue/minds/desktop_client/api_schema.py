@@ -48,6 +48,7 @@ from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
 from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
+from imbue.minds.desktop_client.api_models import BackupRestoreRequest
 from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
 from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
 from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
@@ -126,7 +127,7 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("GET", "/api/v1/workspaces/{agent_id}/version"): _RouteModels(response_model=WorkspaceVersionResponse),
     ("GET", "/api/v1/workspaces/{agent_id}/backups"): _RouteModels(response_model=WorkspaceBackupsResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/backups/{snapshot_id}/restore"): _RouteModels(
-        request_model=BackupServiceUpdateRequest, response_model=OperationHandleResponse, success_status=202
+        request_model=BackupRestoreRequest, response_model=OperationHandleResponse, success_status=202
     ),
     ("POST", "/api/v1/workspaces/{agent_id}/destroy"): _RouteModels(
         response_model=OperationHandleResponse, success_status=202

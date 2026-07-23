@@ -49,7 +49,6 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.testing import restic_backup_a_file
-from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.primitives import AIProvider
@@ -448,13 +447,17 @@ def test_workspace_backups_limit_and_offset_page_the_newest_first_window(tmp_pat
     assert none_page["snapshots_total"] == 3
 
 
-def test_workspace_backups_rejects_a_negative_limit(tmp_path: Path) -> None:
+def test_workspace_backups_rejects_a_negative_or_malformed_limit_and_offset(tmp_path: Path) -> None:
+    # Flask's `type=int` silently swallows garbage as the default, which would
+    # make `?limit=abc` mean "all snapshots"; the route must parse strictly
+    # and 400 instead.
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
-    response = client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=-1", headers=_auth_header())
-
-    assert response.status_code == 400
+    for query in ("limit=-1", "offset=-1", "limit=abc", "offset=abc", "limit=1.5"):
+        response = client.get(f"/api/v1/workspaces/{agent_id}/backups?{query}", headers=_auth_header())
+        assert response.status_code == 400, query
+        assert "non-negative integers" in json.loads(response.data)["error"]
 
 
 def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> None:
@@ -1692,18 +1695,20 @@ def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
 
 
 def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: AgentId) -> dict[str, Any]:
-    """Drain the restart worker's log queue to its terminal sentinel, then fetch the status.
+    """Tail the restart worker's stored log to its terminal chunk, then fetch the status.
 
     Waits for the dispatched restart worker to finish (condition-based, no arbitrary
     sleeps) and returns the parsed body of the typed restart-operation resource,
     asserting the resource responds 200.
     """
     registry = get_state(client.application).workspace_operation_registry
-    log_queue = registry.get_log_queue(agent_id)
-    assert log_queue is not None
+    from_index = 0
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
-        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
+        chunk = registry.read_log_chunk(agent_id, from_index, timeout_seconds=1.0)
+        assert chunk is not None
+        from_index = chunk.next_index
+        if chunk.is_terminal:
             break
     status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
     assert status_resp.status_code == 200
@@ -2104,7 +2109,7 @@ def test_backup_operation_status_reports_no_snapshot_for_a_whole_workspace_opera
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
-    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc), None)
 
     body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
 
@@ -2140,6 +2145,65 @@ def test_backup_operation_status_reports_configure_as_never_cancellable(tmp_path
     body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
 
     assert body["is_cancellable"] is False
+
+
+def test_backup_operation_status_reports_a_cancelled_operation_neutrally(tmp_path: Path) -> None:
+    # A cancel honored before mutation ends the operation as CANCELLED: not
+    # done, but with no error either -- the UI renders a neutral notice, never
+    # a red failure box, for something the user asked for.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    registry.cancel(agent_id)
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["status"] == "CANCELLED"
+    assert body["is_done"] is False
+    assert body["error"] is None
+    assert body["is_cancellable"] is False
+
+
+def test_backup_operation_status_carries_a_completion_warning(tmp_path: Path) -> None:
+    # A restore that succeeded but whose chained update failed ends DONE with
+    # a warning; the status must surface it so the UI can show success plus
+    # the caveat.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    registry.complete_with_warning(agent_id, "The backup service update failed afterwards.")
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["is_done"] is True
+    assert body["error"] is None
+    assert body["warning"] == "The backup service update failed afterwards."
+
+
+def test_backup_operation_logs_replay_full_history_to_a_late_reader(tmp_path: Path) -> None:
+    # The log is stored on the operation, not consumed from a queue: a stream
+    # opened after lines were appended (or after the operation finished) still
+    # sees the complete history, so a page attaching mid-operation shows the
+    # same accounting as the dispatching page.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    registry.append_log(agent_id, "phase one")
+    registry.append_log(agent_id, "phase two")
+    registry.complete(agent_id)
+
+    # Each streaming response is consumed fully before the next request opens
+    # (the test client keeps one request context alive per unconsumed stream).
+    for _ in range(2):
+        response = client.get(f"/api/v1/workspaces/operations/backup/{agent_id}/logs", headers=_auth_header())
+        assert response.status_code == 200
+        text = response.get_data(as_text=True)
+        assert '"phase one"' in text
+        assert '"phase two"' in text
+        assert '"done": true' in text
 
 
 def test_backup_service_update_cancel_rejects_a_too_late_cancel(tmp_path: Path) -> None:

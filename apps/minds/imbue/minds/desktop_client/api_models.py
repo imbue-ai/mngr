@@ -112,9 +112,16 @@ class BackupOperationStatusResponse(FrozenModel):
 
     operation_id: str = Field(description="The workspace agent id the operation acts on")
     kind: str = Field(description="'backup_update', 'backup_configure', or 'backup_restore'")
-    status: str = Field(description="Raw operation status (RUNNING/DONE/FAILED)")
+    status: str = Field(description="Raw operation status (RUNNING/DONE/FAILED/CANCELLED)")
     is_done: bool = Field(description="Whether the operation has finished successfully")
     error: str | None = Field(default=None, description="Failure message, when the operation failed")
+    warning: str | None = Field(
+        default=None,
+        description=(
+            "Non-fatal caveat on a DONE operation (e.g. the restore succeeded but its chained backup-service "
+            "update failed), when there is one"
+        ),
+    )
     blocked_chats: tuple[str, ...] = Field(
         default=(),
         description="Chat agents whose RUNNING state blocked the update (offer 'Stop all chats and retry')",
@@ -141,6 +148,36 @@ class BackupServiceUpdateRequest(ApiRequestModel):
     stop_chats: bool = Field(
         default=False,
         description="Stop actively-RUNNING chat agents first (the 'Stop all chats and retry' flow)",
+    )
+
+
+class BackupRestoreRequest(ApiRequestModel):
+    """Body for the in-place restore of one workspace to one snapshot."""
+
+    stop_chats: bool = Field(
+        default=False,
+        description="Stop actively-RUNNING chat agents first (the 'Stop chats and try again' flow)",
+    )
+    update_after: bool = Field(
+        default=True,
+        description=(
+            "Converge the backup-service code after a successful restore (the restored snapshot may carry "
+            "arbitrarily old code). On by default; an update failure downgrades to a completion warning."
+        ),
+    )
+    skip_safety_snapshot: bool = Field(
+        default=False,
+        description=(
+            "Skip the pre-restore safety snapshot ('Restore without backing up first') -- only set by the "
+            "explicit retry offered after the safety snapshot failed"
+        ),
+    )
+    skip_chat_gate: bool = Field(
+        default=False,
+        description=(
+            "Skip the in-workspace running-chats check ('Force restore') -- only set by the explicit retry "
+            "offered when the workspace can no longer answer the chat gate"
+        ),
     )
 
 

@@ -11,7 +11,14 @@
 //     row: "Restoring..." with a Cancel beside it. Identical on both tables.
 //   - an update or storage change acts on the whole workspace, so it speaks
 //     from the strip (BackupOperationStrip): spinner, progress, Cancel.
-// Terminal success/error messages land in the strip's Notices for both.
+// Terminal messages land in the strip's Notices for both: success, error, a
+// warn Notice for a success that carries a caveat (e.g. the restore's chained
+// update failed), and an info Notice for a user cancel (CANCELLED is not a
+// failure).
+//
+// Every operation also streams its full output (the server stores the log and
+// replays history to any late attacher) into a collapsible details panel, so
+// the user can follow along and tell a stuck operation from a slow one.
 //
 // Usage: var opUi = window.mindsBackupOperationUi.setup({
 //   agentId: ...,
@@ -31,16 +38,28 @@
     var spinner = document.getElementById('backup-op-spinner');
     var progressEl = document.getElementById('backup-op-progress');
     var errorEl = document.getElementById('backup-error');
+    var warningEl = document.getElementById('backup-warning');
     var successEl = document.getElementById('backup-success');
+    var cancelledEl = document.getElementById('backup-cancelled');
+    var detailsToggle = document.getElementById('backup-op-details-toggle');
+    var logEl = document.getElementById('backup-op-log');
     var stopChatsBtn = document.getElementById('backup-stop-chats-btn');
     var stopChatsBtnWrap = document.getElementById('backup-stop-chats-btn-wrap');
+    var skipSafetyBtn = document.getElementById('backup-skip-safety-btn');
+    var skipSafetyBtnWrap = document.getElementById('backup-skip-safety-btn-wrap');
+    var forceRestoreBtn = document.getElementById('backup-force-restore-btn');
+    var forceRestoreBtnWrap = document.getElementById('backup-force-restore-btn-wrap');
     var cancelBtn = document.getElementById('backup-cancel-btn');
     var cancelBtnWrap = document.getElementById('backup-cancel-btn-wrap');
 
     var isOperationRunning = false;
-    // What "Stop chats and try again" retries: set by whichever chat-gated
-    // operation (update or restore) was dispatched last.
+    // The failure-specific retry closures for the operation dispatched from
+    // this page session: what "Stop chats and try again" / "Restore without
+    // backing up first" / "Force restore" re-dispatch. A poller reattached
+    // after a reload has no dispatch context, so it offers no retry buttons.
     var retryWithStopChats = null;
+    var retrySkipSafety = null;
+    var retryForce = null;
     // The success confirmation for the operation dispatched from this page
     // session; a poller reattached after a reload falls back to a generic
     // per-kind message (it has no dispatch context, e.g. the restored-to time).
@@ -63,6 +82,10 @@
       backup_update: 'The backup software update completed successfully.',
       backup_configure: 'Your backup settings were updated.',
     };
+    var OPERATION_CANCELLED_MESSAGES = {
+      backup_restore: 'Restore cancelled. Nothing was changed.',
+      backup_update: 'Update cancelled. Nothing was changed.',
+    };
     // Spinner labels for the strip-driven operations only; a restore has no
     // entry because it never reaches the spinner.
     var OPERATION_RUNNING_LABELS = {
@@ -70,22 +93,43 @@
       backup_configure: 'Changing backup settings...',
     };
 
+    // The worker words these failures distinctively (see backup_update.py);
+    // the failure-specific retry buttons key on that wording. Keep in sync.
+    function isSafetySnapshotFailure(message) {
+      return (message || '').indexOf('pre-restore safety snapshot failed') !== -1;
+    }
+    function isChatGateFailure(message) {
+      var text = message || '';
+      return text.indexOf('cannot determine running chats') !== -1
+        || text.indexOf('Could not probe the workspace') !== -1;
+    }
+
     function setShown(el, isShown) {
       if (el) el.classList.toggle('hidden', !isShown);
     }
 
     // The strip only takes up space while one of its controls is showing.
     function syncOperationStrip() {
-      var isAnyVisible = [spinner, progressEl, errorEl, successEl, stopChatsBtnWrap, cancelBtnWrap].some(
-        function (el) { return el && !el.classList.contains('hidden'); }
-      );
+      var isAnyVisible = [
+        spinner, progressEl, errorEl, warningEl, successEl, cancelledEl,
+        stopChatsBtnWrap, skipSafetyBtnWrap, forceRestoreBtnWrap, cancelBtnWrap,
+        detailsToggle, logEl,
+      ].some(function (el) { return el && !el.classList.contains('hidden'); });
       setShown(operationStrip, isAnyVisible);
     }
 
-    // Error and success are mutually exclusive terminal messages: showing one
-    // clears the other, and both persist until the next operation starts.
-    function showError(message) {
+    // The terminal notices are mutually exclusive, except that a warning may
+    // accompany a success (a restore that succeeded with a caveat). All of
+    // them persist until the next operation starts.
+    function clearTerminalNotices() {
+      errorEl.classList.add('hidden');
+      warningEl.classList.add('hidden');
       successEl.classList.add('hidden');
+      cancelledEl.classList.add('hidden');
+      syncOperationStrip();
+    }
+    function showError(message) {
+      clearTerminalNotices();
       errorEl.textContent = message;
       errorEl.classList.remove('hidden');
       syncOperationStrip();
@@ -94,15 +138,52 @@
       errorEl.classList.add('hidden');
       syncOperationStrip();
     }
-    function showSuccess(message) {
-      errorEl.classList.add('hidden');
+    function showSuccess(message, warning) {
+      clearTerminalNotices();
       successEl.textContent = message;
       successEl.classList.remove('hidden');
+      if (warning) {
+        warningEl.textContent = warning;
+        warningEl.classList.remove('hidden');
+      }
       syncOperationStrip();
     }
-    function clearSuccess() {
-      successEl.classList.add('hidden');
+    function showCancelled(message) {
+      clearTerminalNotices();
+      cancelledEl.textContent = message;
+      cancelledEl.classList.remove('hidden');
       syncOperationStrip();
+    }
+
+    // -- The collapsible details log ------------------------------------------
+    // Every streamed log line accumulates here (the server stores the log and
+    // replays the full history on attach, so the panel is complete even for a
+    // page opened mid-operation). Collapsed by default, like the
+    // workspace-creation details toggle.
+    function resetOperationLog() {
+      logEl.textContent = '';
+      setShown(detailsToggle, false);
+      syncOperationStrip();
+    }
+    function appendLogLine(line) {
+      var isAtBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 8;
+      logEl.textContent += line + '\n';
+      setShown(detailsToggle, true);
+      if (!logEl.classList.contains('hidden') && isAtBottom) {
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      syncOperationStrip();
+    }
+    detailsToggle.addEventListener('click', function () {
+      var isHidden = logEl.classList.toggle('hidden');
+      detailsToggle.textContent = isHidden ? 'Show details' : 'Hide details';
+      if (!isHidden) logEl.scrollTop = logEl.scrollHeight;
+    });
+
+    function hideRetryButtons() {
+      setShown(stopChatsBtnWrap, false);
+      setShown(skipSafetyBtnWrap, false);
+      setShown(forceRestoreBtnWrap, false);
     }
 
     // Whether the running operation can still be cancelled, per the backend's
@@ -147,24 +228,30 @@
       if (isRunning && !isRowDriven) spinner.textContent = label || 'Working...';
       spinner.classList.toggle('hidden', !isRunning || isRowDriven);
       stopChatsBtn.disabled = isRunning;
+      skipSafetyBtn.disabled = isRunning;
+      forceRestoreBtn.disabled = isRunning;
       setShown(cancelBtnWrap, isCancellableNow && !isRowDriven);
       if (!isRunning) progressEl.classList.add('hidden');
       onRunningChange(isRunning);
       syncOperationStrip();
     }
 
-    // Step-level progress for the strip-driven operations. A restore says all
-    // it needs to on its row, so it streams no progress line -- but the stream
-    // is still opened, because its terminal frame is what closes the server's
-    // log queue.
+    // Step-level progress for the strip-driven operations shows the latest
+    // line inline; a restore says all it needs to on its row. Every line --
+    // restore included -- accumulates in the details log, and the stream is
+    // (re)opened for all kinds because the server replays the stored history.
     function streamOperationLogs() {
+      resetOperationLog();
       var source = new EventSource('/api/v1/workspaces/operations/backup/' + encodeURIComponent(agentId) + '/logs');
       source.onmessage = function (event) {
         try {
           var frame = JSON.parse(event.data);
-          if (frame.log && !isRestoreRunning) {
-            progressEl.textContent = frame.log;
-            progressEl.classList.remove('hidden');
+          if (frame.log) {
+            appendLogLine(frame.log);
+            if (!isRestoreRunning) {
+              progressEl.textContent = frame.log;
+              progressEl.classList.remove('hidden');
+            }
           }
           if (frame.done) source.close();
         } catch (e) { /* keepalive frames etc. */ }
@@ -194,12 +281,22 @@
             return;
           }
           setOperationRunning(false);
-          setShown(stopChatsBtnWrap, false);
+          hideRetryButtons();
+          if (op.status === 'CANCELLED') {
+            // The user asked for this; it is a neutral outcome, not an error.
+            showCancelled(
+              OPERATION_CANCELLED_MESSAGES[op.kind] || 'The operation was cancelled. Nothing was changed.'
+            );
+            return;
+          }
           if (op.is_done) {
             // A destructive multi-minute operation must end with an explicit
-            // confirmation, not just a spinner that quietly disappears.
+            // confirmation, not just a spinner that quietly disappears -- and
+            // a success with a caveat (e.g. the chained update failed) shows
+            // the caveat alongside, never instead.
             showSuccess(
-              pendingSuccessMessage || OPERATION_SUCCESS_MESSAGES[op.kind] || 'The operation completed successfully.'
+              pendingSuccessMessage || OPERATION_SUCCESS_MESSAGES[op.kind] || 'The operation completed successfully.',
+              op.warning
             );
             onSuccess();
             return;
@@ -215,6 +312,13 @@
             return;
           }
           showError(op.error || 'The backup operation failed.');
+          // Failure-specific retries, offered only when this page dispatched
+          // the operation (a reattached poller has no dispatch context): skip
+          // the safety snapshot after exactly that step failed, or force past
+          // a chat gate the workspace can no longer answer.
+          setShown(skipSafetyBtnWrap, !!retrySkipSafety && isSafetySnapshotFailure(op.error));
+          setShown(forceRestoreBtnWrap, !!retryForce && isChatGateFailure(op.error));
+          syncOperationStrip();
         })
         // A transient fetch failure must not end the Working state while the
         // backend operation is still running -- keep polling (like creating.js).
@@ -223,15 +327,18 @@
 
     // Dispatch one tracked operation and drive its UI until it ends.
     // opts: { isCancellable, label, successMessage, retryWithStopChats,
-    //         isRestore, snapshotId }. isRestore routes the running state onto
-    //         snapshotId's row instead of the strip.
+    //         retrySkipSafety, retryForce, isRestore, snapshotId }. isRestore
+    //         routes the running state onto snapshotId's row instead of the
+    //         strip.
     function start(url, body, opts) {
-      clearError();
-      clearSuccess();
+      clearTerminalNotices();
+      hideRetryButtons();
       isRestoreRunning = !!opts.isRestore;
       restoringSnapshotId = opts.snapshotId || null;
       pendingSuccessMessage = opts.successMessage || null;
       retryWithStopChats = opts.retryWithStopChats || null;
+      retrySkipSafety = opts.retrySkipSafety || null;
+      retryForce = opts.retryForce || null;
       setOperationRunning(true, !!opts.isCancellable, opts.label);
       fetch(url, {
         method: 'POST',
@@ -258,11 +365,20 @@
     // The restore dispatch both pages share. Naming the snapshot before
     // ``start`` is what puts the operation in row-driven mode, so the strip
     // stays out of it: the row reports the restore, and only the terminal
-    // success/error message lands in the strip.
-    function startRestore(snapshotId, isStopChats, timeText) {
+    // message lands in the strip. ``restoreOptions``:
+    //   { stopChats, updateAfter, skipSafetySnapshot, skipChatGate }
+    // The retry closures re-dispatch with exactly one more flag flipped, so a
+    // user choice (e.g. unchecking "update afterwards") survives a retry.
+    function startRestore(snapshotId, timeText, restoreOptions) {
+      var opts = restoreOptions || {};
       start(
         '/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups/' + encodeURIComponent(snapshotId) + '/restore',
-        { stop_chats: isStopChats },
+        {
+          stop_chats: !!opts.stopChats,
+          update_after: opts.updateAfter !== false,
+          skip_safety_snapshot: !!opts.skipSafetySnapshot,
+          skip_chat_gate: !!opts.skipChatGate,
+        },
         {
           isRestore: true,
           snapshotId: snapshotId,
@@ -270,7 +386,15 @@
           successMessage: timeText
             ? 'Workspace restored to the backup from ' + timeText + '. A safety backup of your previous state was saved first.'
             : OPERATION_SUCCESS_MESSAGES.backup_restore,
-          retryWithStopChats: function () { startRestore(snapshotId, true, timeText); },
+          retryWithStopChats: function () {
+            startRestore(snapshotId, timeText, Object.assign({}, opts, { stopChats: true }));
+          },
+          retrySkipSafety: function () {
+            startRestore(snapshotId, timeText, Object.assign({}, opts, { skipSafetySnapshot: true }));
+          },
+          retryForce: function () {
+            startRestore(snapshotId, timeText, Object.assign({}, opts, { skipChatGate: true }));
+          },
         }
       );
     }
@@ -315,6 +439,14 @@
     stopChatsBtn.addEventListener('click', function () {
       setShown(stopChatsBtnWrap, false);
       if (retryWithStopChats) retryWithStopChats();
+    });
+    skipSafetyBtn.addEventListener('click', function () {
+      setShown(skipSafetyBtnWrap, false);
+      if (retrySkipSafety) retrySkipSafety();
+    });
+    forceRestoreBtn.addEventListener('click', function () {
+      setShown(forceRestoreBtnWrap, false);
+      if (retryForce) retryForce();
     });
 
     // One cancel route serves every cancellable backup operation (there is

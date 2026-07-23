@@ -68,6 +68,7 @@ from imbue.minds.desktop_client.api_models import AccountSummary
 from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
+from imbue.minds.desktop_client.api_models import BackupRestoreRequest
 from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
 from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
 from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
@@ -134,7 +135,6 @@ from imbue.minds.desktop_client.workspace_create import build_create_on_created_
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
-from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRecord
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
@@ -446,10 +446,17 @@ def _parse_snapshot_limit_offset() -> "tuple[int | None, int] | Response":
     """Parse the optional non-negative ``limit``/``offset`` snapshot-window params.
 
     ``limit`` absent means "all snapshots" (backward compatible); ``limit=0``
-    means "none".
+    means "none". Parsed from the raw strings (not Flask's ``type=int``, which
+    silently swallows garbage as the default) so a malformed value is a loud
+    400 rather than silently meaning "all"/"0".
     """
-    limit = request.args.get("limit", default=None, type=int)
-    offset = request.args.get("offset", default=0, type=int)
+    raw_limit = request.args.get("limit", default=None)
+    raw_offset = request.args.get("offset", default=None)
+    try:
+        limit = int(raw_limit) if raw_limit is not None else None
+        offset = int(raw_offset) if raw_offset is not None else 0
+    except ValueError:
+        return _json_error("'limit' and 'offset' must be non-negative integers", 400)
     if (limit is not None and limit < 0) or offset < 0:
         return _json_error("'limit' and 'offset' must be non-negative integers", 400)
     return limit, offset
@@ -1258,15 +1265,18 @@ def _handle_backup_service_update_cancel(agent_id: str) -> EmptyResponse | Respo
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=BackupServiceUpdateRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+@API_SPEC.validate(json=BackupRestoreRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
 def _handle_workspace_backup_restore(
     agent_id: str, snapshot_id: str
 ) -> tuple[OperationHandleResponse, int] | Response:
     """Dispatch an in-place restore of the workspace to one snapshot; return a handle to poll.
 
-    Body: ``{"stop_chats"?: bool}`` -- same contract as the update route. One
-    tracked operation runs per workspace at a time; ``start_if_idle`` rejects a
-    second dispatch (of any kind) with a 409 rather than stacking.
+    Body: ``{"stop_chats"?, "update_after"?, "skip_safety_snapshot"?,
+    "skip_chat_gate"?}`` (see :class:`BackupRestoreRequest`; the skip flags
+    are only ever set by the explicit retry affordances the failure notice
+    offers). One tracked operation runs per workspace at a time;
+    ``start_if_idle`` rejects a second dispatch (of any kind) with a 409
+    rather than stacking.
     """
     context = _resolve_backup_route_context(agent_id)
     if isinstance(context, Response):
@@ -1274,16 +1284,22 @@ def _handle_workspace_backup_restore(
     parsed_id, paths, parent_cg = context
     if not has_canonical_env(paths, parsed_id):
         return _json_error(f"Backups are not configured for {agent_id}", 409)
+    state = get_state()
+    body = request.get_json(silent=True, force=True) or {}
     return _dispatch_backup_worker(
         parsed_id=parsed_id,
         parent_cg=parent_cg,
-        registry=get_state().workspace_operation_registry,
+        registry=state.workspace_operation_registry,
         kind=WorkspaceOperationKind.BACKUP_RESTORE,
         target=backup_update_module.run_backup_restore_sequence,
         worker_kwargs={
             "paths": paths,
+            "resolver": state.backend_resolver,
             "snapshot_id": snapshot_id,
-            "is_stop_chats": _is_stop_chats_requested(),
+            "is_stop_chats": bool(body.get("stop_chats", False)),
+            "is_update_after": bool(body.get("update_after", True)),
+            "is_skip_safety_snapshot": bool(body.get("skip_safety_snapshot", False)),
+            "is_skip_chat_gate": bool(body.get("skip_chat_gate", False)),
         },
         operation_target=snapshot_id,
     )
@@ -1337,7 +1353,9 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
         return _json_error(error_message or "Invalid backup configuration", 400)
 
     is_destination_change = has_canonical_env(paths, parsed_id)
-    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc)):
+    if not registry.start_if_idle(
+        parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc), None
+    ):
         return _operation_conflict_error(registry.get(parsed_id))
     registry.append_log(
         parsed_id, "Changing the backup destination..." if is_destination_change else "Enabling backups..."
@@ -1388,7 +1406,9 @@ def _handle_backup_service_disable(agent_id: str) -> tuple[OperationHandleRespon
     parsed_id, paths, parent_cg = context
     state = get_state()
     registry = state.workspace_operation_registry
-    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc)):
+    if not registry.start_if_idle(
+        parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc), None
+    ):
         return _operation_conflict_error(registry.get(parsed_id))
     registry.append_log(parsed_id, "Disabling backups...")
     try:
@@ -1463,6 +1483,7 @@ def _handle_backup_operation_status(operation_id: str) -> BackupOperationStatusR
         status=str(record.status),
         is_done=record.status == WorkspaceOperationStatus.DONE,
         error=record.error,
+        warning=record.warning,
         blocked_chats=blocked_chats,
         is_cancellable=is_cancellable,
         snapshot_id=record.target,
@@ -1471,14 +1492,13 @@ def _handle_backup_operation_status(operation_id: str) -> BackupOperationStatusR
 
 @require_api_or_cookie_auth
 def _handle_backup_operation_logs(operation_id: str) -> Response:
-    """Drain a backup operation's in-memory registry log queue as server-sent events."""
+    """Stream a backup operation's stored registry log (full history + live tail) as server-sent events."""
     parsed_id = AgentId(operation_id)
     registry = get_state().workspace_operation_registry
-    log_queue = registry.get_log_queue(parsed_id) if registry.get(parsed_id) is not None else None
-    if log_queue is None:
+    if registry.get(parsed_id) is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return make_streaming_response(
-        _stream_workspace_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+        _stream_workspace_operation_logs(registry, parsed_id), media_type="text/event-stream", headers=_SSE_HEADERS
     )
 
 
@@ -1507,25 +1527,33 @@ def _stream_create_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str
         yield _sse({"log": line})
 
 
-def _stream_workspace_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str]:
-    """Yield SSE frames draining a workspace operation's in-memory log queue.
+def _stream_workspace_operation_logs(
+    registry: WorkspaceOperationRegistryInterface, parsed_id: AgentId
+) -> Iterator[str]:
+    """Yield SSE frames tailing a workspace operation's stored registry log.
 
-    Serves the restart and backup update/configure log routes alike (any
-    operation tracked by the workspace-operation registry). Mirrors
-    :func:`_stream_create_operation_logs` but keys on the registry's
-    ``OPERATION_LOG_SENTINEL`` end-of-stream marker.
+    Serves the restart and backup update/configure/restore log routes alike
+    (any operation tracked by the workspace-operation registry). The log is
+    stored on the operation rather than in a consume-once queue, so every
+    stream replays the full history from index 0 before tailing live lines --
+    a page attaching mid-operation (or a second window) sees the same
+    complete output.
     """
     shutdown_event = get_state().shutdown_event
+    from_index = 0
     while not shutdown_event.is_set():
-        try:
-            line = log_queue.get(block=True, timeout=1.0)
-        except queue.Empty:
-            yield ": keepalive\n\n"
-            continue
-        if line == OPERATION_LOG_SENTINEL:
+        chunk = registry.read_log_chunk(parsed_id, from_index, timeout_seconds=1.0)
+        if chunk is None:
             yield _sse({"done": True})
             return
-        yield _sse({"log": line})
+        for line in chunk.lines:
+            yield _sse({"log": line})
+        from_index = chunk.next_index
+        if chunk.is_terminal and not chunk.lines:
+            yield _sse({"done": True})
+            return
+        if not chunk.lines:
+            yield ": keepalive\n\n"
 
 
 def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> Iterator[str]:
@@ -1592,14 +1620,13 @@ def _handle_destroy_operation_logs(operation_id: str) -> Response:
 
 @require_api_or_cookie_auth
 def _handle_restart_operation_logs(operation_id: str) -> Response:
-    """Drain a restart operation's in-memory registry log queue as server-sent events."""
+    """Stream a restart operation's stored registry log (full history + live tail) as server-sent events."""
     parsed_id = AgentId(operation_id)
     registry = get_state().workspace_operation_registry
-    log_queue = registry.get_log_queue(parsed_id) if registry.get(parsed_id) is not None else None
-    if log_queue is None:
+    if registry.get(parsed_id) is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return make_streaming_response(
-        _stream_workspace_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+        _stream_workspace_operation_logs(registry, parsed_id), media_type="text/event-stream", headers=_SSE_HEADERS
     )
 
 

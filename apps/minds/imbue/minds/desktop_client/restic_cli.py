@@ -359,6 +359,54 @@ def list_snapshots(
     return parse_restic_snapshots(result.stdout or "[]")
 
 
+def list_snapshot_directory(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    snapshot_id: str,
+    directory: str,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[str, ...]:
+    """List the absolute paths directly under ``directory`` in ``snapshot_id`` (non-recursive).
+
+    ``restic ls`` filtered by a directory lists only that directory's own
+    entries, so this stays cheap even for huge snapshots. Used to locate the
+    host-dir subtree inside a snapshot before dispatching a restore.
+    """
+    env, flags = _env_and_flags(repository, backend_env, password)
+    result = _run_restic(
+        [*flags, "--no-lock", "ls", snapshot_id, directory, "--json"],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise BackupProvisioningError(f"restic ls failed (exit {result.returncode}): {result.stderr.strip()}")
+    paths: list[str] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            payload = json.loads(stripped)
+        except ValueError:
+            logger.warning("Skipping non-JSON restic ls line: {!r}", stripped[:200])
+            continue
+        if not isinstance(payload, dict):
+            continue
+        # restic >= 0.17 labels node lines with message_type; older builds
+        # used struct_type. The snapshot-descriptor first line has neither
+        # a "node" label nor a path we care about.
+        if payload.get("message_type") != "node" and payload.get("struct_type") != "node":
+            continue
+        node_path = payload.get("path")
+        if isinstance(node_path, str):
+            paths.append(node_path)
+    return tuple(paths)
+
+
 def is_backup_in_progress(
     *,
     repository: str,

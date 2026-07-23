@@ -27,6 +27,7 @@ the ``BLOCKED_BY_RUNNING_CHATS:`` prefix so the UI can offer the
 "Stop all chats and retry" action.
 """
 
+from collections.abc import Callable
 from typing import Final
 
 from loguru import logger
@@ -181,10 +182,64 @@ def _run_update_phases(
     # the whole mutating exec. From this point the status API reports the
     # operation as no longer cancellable.
     if not registry.begin_mutation(agent_id):
-        registry.fail(agent_id, "Cancelled before any changes were made.")
+        registry.cancel(agent_id)
         return
 
-    # Phase 2: the mutating apply script (stash/checkout/commit/sync/restart).
+    # Phases 2-4: apply, re-inject the env, verify (shared with the restore's
+    # chained update).
+    update_error = _apply_update_and_verify(
+        agent_id=agent_id,
+        paths=paths,
+        resolver=resolver,
+        registry=registry,
+        parent_cg=parent_cg,
+        is_stop_chats=is_stop_chats,
+    )
+    if update_error is not None:
+        registry.fail(agent_id, update_error)
+        return
+    registry.complete(agent_id)
+
+
+def _make_exec_log_forwarder(
+    registry: WorkspaceOperationRegistryInterface, agent_id: AgentId
+) -> Callable[[str, bool], None]:
+    """Build an ``on_output`` callback that streams exec output into the operation log.
+
+    The scripts' marker verdict line is excluded -- it is machine-readable
+    plumbing, parsed separately -- and blank lines are dropped. Everything
+    else (the restore script's phase/progress lines, stray warnings, crash
+    tracebacks on stderr) lands in the log so the user can follow along live.
+    """
+
+    def _forward(line: str, is_stdout: bool) -> None:
+        stripped = line.rstrip()
+        if not stripped.strip():
+            return
+        if stripped.startswith(RESTORE_RESULT_MARKER) or stripped.startswith(UPDATE_RESULT_MARKER):
+            return
+        registry.append_log(agent_id, stripped)
+
+    return _forward
+
+
+def _apply_update_and_verify(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    resolver: BackendResolverInterface,
+    registry: WorkspaceOperationRegistryInterface,
+    parent_cg: ConcurrencyGroup | None,
+    is_stop_chats: bool,
+) -> str | None:
+    """Run the mutating update script, re-inject the env, and verify convergence.
+
+    Returns the failure detail (possibly ``BLOCKED_BY_RUNNING_CHATS_PREFIX``-
+    prefixed), or None on success. Shared by the standalone update operation
+    (which fails the operation on error) and the restore's chained update
+    (which downgrades an error to a completion warning).
+    """
+    # The mutating apply script (stash/checkout/commit/sync/restart).
     registry.append_log(agent_id, "Applying the backup service update...")
     apply_command = build_workspace_script_command(
         BACKUP_APPLY_UPDATE_SCRIPT,
@@ -197,25 +252,26 @@ def _run_update_phases(
         + (("--stop-chats",) if is_stop_chats else ()),
     )
     apply_result = run_mngr_exec_on_agent(
-        agent_id, apply_command, parent_cg=parent_cg, timeout_seconds=_APPLY_EXEC_TIMEOUT_SECONDS
+        agent_id,
+        apply_command,
+        parent_cg=parent_cg,
+        timeout_seconds=_APPLY_EXEC_TIMEOUT_SECONDS,
+        on_output=_make_exec_log_forwarder(registry, agent_id),
     )
     payload = extract_marker_json(apply_result.stdout, UPDATE_RESULT_MARKER)
     if payload is None:
         detail = (apply_result.stderr or apply_result.stdout).strip()[-800:]
-        registry.fail(agent_id, f"The update script produced no result: {detail}")
-        return
+        return f"The update script produced no result: {detail}"
     status = str(payload.get("status", "failed"))
     if status == "blocked":
         running_chats = payload.get("running_chats")
         chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-        registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
-        return
+        return f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}"
     if status != "ok":
         detail = str(payload.get("detail", "unknown failure"))
         rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
         stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if payload.get("stash_conflict") else ""
-        registry.fail(agent_id, f"{detail}{rolled_back_note}{stash_note}")
-        return
+        return f"{detail}{rolled_back_note}{stash_note}"
     if payload.get("committed"):
         registry.append_log(agent_id, f"Updated backup service code to {payload.get('tag', 'the target tag')}.")
     else:
@@ -223,24 +279,23 @@ def _run_update_phases(
     if payload.get("stash_conflict"):
         registry.append_log(agent_id, f"Warning: {_STASH_CONFLICT_GUIDANCE}")
 
-    # Phase 3: re-inject the canonical env (rotates a drifted workspace copy).
+    # Re-inject the canonical env (rotates a drifted workspace copy).
     if has_canonical_env(paths, agent_id):
         registry.append_log(agent_id, "Re-injecting backup credentials...")
         reinject_canonical_env(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
 
-    # Phase 4: verify convergence with a fresh check.
+    # Verify convergence with a fresh check.
     registry.append_log(agent_id, "Verifying the backup service...")
     check = check_backup_service_for_workspace(paths, agent_id, resolver=resolver, parent_cg=parent_cg)
     failing = tuple(problem for problem in check.problems if problem in _PROBLEMS_THAT_FAIL_UPDATE)
     if check.state == BackupServiceCheckState.PROBLEMS and failing:
         problem_names = ", ".join(problem.value for problem in failing)
-        registry.fail(agent_id, f"The update ran but verification still reports: {problem_names}. {check.detail}")
-        return
+        return f"The update ran but verification still reports: {problem_names}. {check.detail}"
     if BackupServiceProblem.NOT_CONFIGURED in check.problems:
         registry.append_log(
             agent_id, "Backups are still not configured for this workspace; enable them from the backup settings."
         )
-    registry.complete(agent_id)
+    return None
 
 
 def _wait_for_quiet_workspace(
@@ -292,7 +347,7 @@ def _wait_for_quiet_workspace(
             is_waiting_logged = True
         # Wakes immediately on a cancel request instead of sleeping it out.
         registry.wait_for_cancel(agent_id, _GATE_POLL_INTERVAL_SECONDS)
-    registry.fail(agent_id, "Cancelled before any changes were made.")
+    registry.cancel(agent_id)
     return False
 
 
@@ -300,24 +355,33 @@ def run_backup_restore_sequence(
     *,
     agent_id: AgentId,
     paths: WorkspacePaths,
+    resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     snapshot_id: str,
     is_stop_chats: bool,
+    is_update_after: bool,
+    is_skip_safety_snapshot: bool,
+    is_skip_chat_gate: bool,
 ) -> None:
     """Worker-thread entry point: restore one workspace to one restic snapshot, in place.
 
     The caller has already registered the operation (``registry.start``); this
-    function ends it via ``registry.complete`` / ``registry.fail``.
+    function ends it via ``registry.complete`` / ``registry.fail`` /
+    ``registry.cancel``.
     """
     try:
         _run_restore_phases(
             agent_id=agent_id,
             paths=paths,
+            resolver=resolver,
             registry=registry,
             parent_cg=parent_cg,
             snapshot_id=snapshot_id,
             is_stop_chats=is_stop_chats,
+            is_update_after=is_update_after,
+            is_skip_safety_snapshot=is_skip_safety_snapshot,
+            is_skip_chat_gate=is_skip_chat_gate,
         )
     except BackupProvisioningError as exc:
         logger.warning("Backup restore for {} failed: {}", agent_id, exc)
@@ -351,20 +415,100 @@ def _resolve_restore_snapshot(
     raise BackupProvisioningError(f"No backup {snapshot_id} exists for this workspace")
 
 
+def _resolve_restore_subpath(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    snapshot: restic_cli.ResticSnapshot,
+    parent_cg: ConcurrencyGroup | None,
+) -> str:
+    """Locate the host-dir subtree inside the snapshot (identified by its ``code/`` checkout).
+
+    On plain docker the snapshot root *is* the host dir; on btrfs providers
+    the hourly backup snapshots the whole unified host volume, so the host
+    dir's contents live one level down in a ``host_dir/`` child (next to
+    volume-level ``agents/`` + ``host_state.json``). Resolved here, from
+    minds' own view of the repository, so the in-workspace script only ever
+    consumes a validated ``<snapshot>:<subpath>`` -- restoring the wrong
+    level would wreck the workspace.
+    """
+    root = snapshot.paths[0]
+    root_entries = backup_status.list_workspace_snapshot_directory(
+        paths,
+        agent_id,
+        snapshot_id=snapshot.snapshot_id,
+        directory=root,
+        parent_cg=parent_cg,
+        timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS,
+    )
+    if f"{root}/code" in root_entries:
+        return root
+    nested_root = f"{root}/host_dir"
+    if nested_root in root_entries:
+        nested_entries = backup_status.list_workspace_snapshot_directory(
+            paths,
+            agent_id,
+            snapshot_id=snapshot.snapshot_id,
+            directory=nested_root,
+            parent_cg=parent_cg,
+            timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS,
+        )
+        if f"{nested_root}/code" in nested_entries:
+            return nested_root
+    raise BackupProvisioningError(
+        f"Snapshot {snapshot.short_id} does not contain a workspace (no code/ checkout); it cannot be restored"
+    )
+
+
+def _chained_update_warning(update_error: str) -> str:
+    """Word a chained-update failure as a completion warning (the restore itself succeeded)."""
+    if update_error.startswith(BLOCKED_BY_RUNNING_CHATS_PREFIX):
+        names = update_error[len(BLOCKED_BY_RUNNING_CHATS_PREFIX) :]
+        names_note = f" ({names})" if names else ""
+        return (
+            f"The restore succeeded, but the backup service update afterwards was blocked by running "
+            f'chats{names_note}. Run "Update backup software" from Settings once they are stopped.'
+        )
+    return (
+        f"The restore succeeded, but updating the backup service afterwards failed: {update_error} "
+        'You can retry it from Settings with "Update backup software".'
+    )
+
+
 def _run_restore_phases(
     *,
     agent_id: AgentId,
     paths: WorkspacePaths,
+    resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     snapshot_id: str,
     is_stop_chats: bool,
+    is_update_after: bool,
+    is_skip_safety_snapshot: bool,
+    is_skip_chat_gate: bool,
 ) -> None:
-    # Phase 0: resolve the snapshot before anything waits or mutates, so an
-    # unknown id fails fast and cheaply.
+    # Phase 0: resolve the snapshot and its host-dir subpath before anything
+    # waits or mutates, so an unknown id (or a snapshot with no workspace in
+    # it) fails fast and cheaply.
     snapshot = _resolve_restore_snapshot(agent_id=agent_id, paths=paths, snapshot_id=snapshot_id, parent_cg=parent_cg)
+    snapshot_subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=parent_cg)
 
-    # Phase 1: gate + wait (cancellable; nothing has been mutated yet).
+    # Phase 0.5: converge the workspace's restic.env to the canonical copy
+    # before dispatch -- the restore script reads its credentials from the
+    # workspace file, and precisely the workspaces most in need of a restore
+    # (ENV_MISSING / ENV_MISMATCH) would otherwise fail. A differing
+    # workspace copy is archived aside, never destroyed. Also proves, before
+    # anything mutates, that the snapshot the user picked lives in the same
+    # repository the script will read: both came from the canonical env.
+    registry.append_log(agent_id, "Making sure the workspace has the right backup credentials...")
+    reinject_canonical_env(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
+
+    # Phase 1: gate + wait (cancellable; nothing has been mutated yet). Kept
+    # even for a forced restore: the probe tolerates a broken `mngr list`
+    # (gate_error) by design, and real knowledge of running chats must still
+    # block -- the force flag only skips the check the workspace can no
+    # longer answer.
     registry.append_log(agent_id, "Checking for running chats and in-progress backups...")
     if not _wait_for_quiet_workspace(
         agent_id=agent_id,
@@ -383,11 +527,13 @@ def _run_restore_phases(
     # already withdrawn -- a dispatched exec cannot be stopped, and nothing
     # has mutated while it waits.
     if not registry.begin_mutation(agent_id):
-        registry.fail(agent_id, "Cancelled before any changes were made.")
+        registry.cancel(agent_id)
         return
 
-    # Phase 2: one exec runs the whole restore (safety snapshot / restore to
-    # staging / swap / uv sync / restart services) and reports a verdict.
+    # Phase 2: one exec runs the whole restore (safety snapshot / in-place
+    # sync restore / env write-back / uv sync / restart services) and reports
+    # a verdict, streaming its phase + restic progress lines into the
+    # operation log as it runs.
     registry.append_log(
         agent_id, "Backing up the current state, then restoring the selected backup. This can take a while..."
     )
@@ -400,15 +546,21 @@ def _run_restore_phases(
             snapshot_id,
             # Resolved above from minds' own view of the repository, so the
             # script never re-queries restic for this metadata.
-            "--snapshot-root",
-            snapshot.paths[0],
+            "--snapshot-subpath",
+            snapshot_subpath,
             "--source-time",
             snapshot.time.isoformat(),
         )
-        + (("--stop-chats",) if is_stop_chats else ()),
+        + (("--stop-chats",) if is_stop_chats else ())
+        + (("--skip-chat-gate",) if is_skip_chat_gate else ())
+        + (("--skip-safety-snapshot",) if is_skip_safety_snapshot else ()),
     )
     restore_result = run_mngr_exec_on_agent(
-        agent_id, restore_command, parent_cg=parent_cg, timeout_seconds=_RESTORE_EXEC_TIMEOUT_SECONDS
+        agent_id,
+        restore_command,
+        parent_cg=parent_cg,
+        timeout_seconds=_RESTORE_EXEC_TIMEOUT_SECONDS,
+        on_output=_make_exec_log_forwarder(registry, agent_id),
     )
     payload = extract_marker_json(restore_result.stdout, RESTORE_RESULT_MARKER)
     if payload is None:
@@ -449,13 +601,35 @@ def _run_restore_phases(
         agent_id, "Restored the backup, reinstalled dependencies, and restarted the workspace services."
     )
 
-    # Phase 3: the swap wrote back the pre-restore restic.env, but re-inject the
-    # canonical copy anyway so the workspace ends converged even if the env had
-    # drifted before the restore.
+    # Phase 3: the script wrote back the pre-restore restic.env, but re-inject
+    # the canonical copy anyway so the workspace ends converged even if the
+    # env had drifted before the restore.
     if has_canonical_env(paths, agent_id):
         registry.append_log(agent_id, "Re-injecting backup credentials...")
         reinject_canonical_env(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
-    registry.complete(agent_id)
+
+    # Phase 4 (default-on): converge the backup-service code afterwards. The
+    # restored snapshot may carry arbitrarily old libs/host_backup code; the
+    # idempotent update brings it back to the current version. Its failure
+    # must not fail the operation -- the user's data is restored, which is
+    # what they asked for -- so it downgrades to a completion warning.
+    if not is_update_after:
+        registry.complete(agent_id)
+        return
+    registry.append_log(agent_id, "Updating the backup service to the current version...")
+    update_error = _apply_update_and_verify(
+        agent_id=agent_id,
+        paths=paths,
+        resolver=resolver,
+        registry=registry,
+        parent_cg=parent_cg,
+        is_stop_chats=is_stop_chats,
+    )
+    if update_error is None:
+        registry.complete(agent_id)
+        return
+    logger.warning("Chained backup-service update after restore for {} failed: {}", agent_id, update_error)
+    registry.complete_with_warning(agent_id, _chained_update_warning(update_error))
 
 
 def run_backup_configure_sequence(
