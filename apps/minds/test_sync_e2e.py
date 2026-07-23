@@ -641,10 +641,17 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
     settings_url = f"{origin}/workspace/{agent_id}/settings"
     download_selector = "#backup-history a"
 
+    # Navigate ONCE, then poll the selector without reloading: the Recent
+    # backups rows only render after the page's async /backups fetch (restic
+    # against the remote repository, seconds), so a goto inside the poll loop
+    # would restart that fetch on every iteration and starve the very state
+    # being waited on (the same reload-polling trap _read_settled_badge
+    # documents for the landing badge).
+    page.goto(settings_url, wait_until="domcontentloaded")
+
     def download_visible() -> bool | None:
-        page.goto(settings_url, wait_until="domcontentloaded")
-        # Recent backups rows appear once /backups returns; the first Download
-        # is the newest snapshot (same data the Landing badge used to gate on).
+        # The first Download is the newest snapshot (same data the Landing
+        # badge used to gate on).
         link = page.query_selector(download_selector)
         return True if link is not None else None
 

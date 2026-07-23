@@ -30,6 +30,7 @@ import queue
 import shlex
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from typing import Final
@@ -1163,8 +1164,8 @@ def _dispatch_backup_worker(
     registry: WorkspaceOperationRegistryInterface,
     kind: WorkspaceOperationKind,
     target: Callable[..., None],
-    worker_kwargs: dict[str, object],
-    operation_target: str | None = None,
+    worker_kwargs: Mapping[str, object],
+    operation_target: str | None,
 ) -> tuple[OperationHandleResponse, int] | Response:
     """Claim the workspace's single operation slot and spawn the worker that ends it.
 
@@ -1238,6 +1239,7 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
             "resolver": state.backend_resolver,
             "is_stop_chats": _is_stop_chats_requested(),
         },
+        operation_target=None,
     )
 
 

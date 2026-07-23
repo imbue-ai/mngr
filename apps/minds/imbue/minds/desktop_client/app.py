@@ -2360,11 +2360,13 @@ def _handle_workspace_backup_history(agent_id: str) -> Response:
         return make_response(status_code=403, content="Not authenticated")
     backend_resolver = get_state().backend_resolver
     parsed_agent_id = AgentId(agent_id)
-    ws_name = backend_resolver.get_workspace_name(parsed_agent_id)
-    if not ws_name:
+    resolved_name = backend_resolver.get_workspace_name(parsed_agent_id)
+    if resolved_name:
+        display_name = resolved_name
+    else:
         info = backend_resolver.get_agent_display_info(parsed_agent_id)
-        ws_name = info.agent_name if info else agent_id
-    html = render_workspace_backup_history(agent_id=agent_id, ws_name=ws_name)
+        display_name = info.agent_name if info else agent_id
+    html = render_workspace_backup_history(agent_id=agent_id, ws_name=display_name)
     return make_html_response(content=html)
 
 

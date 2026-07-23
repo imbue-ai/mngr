@@ -21,8 +21,8 @@
 # exceed it, offload reuses sandboxes, and test_snapshot_resume's
 # stopped-container-state check is order-dependent against the resume
 # tests (a reused sandbox has the baked containers already started).
-# 12 tests today; headroom for a few more.
-max_parallel = 16
+# 14 tests today; headroom for a few more.
+max_parallel = 20
 # The sync e2e lifecycle tests (test_sync_e2e.py) are the longest in this
 # suite: each drives the real Electron app through workspace creation, a real
 # backup, a full install wipe and a restore, and takes ~5 minutes. Their

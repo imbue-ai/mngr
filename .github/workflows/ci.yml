@@ -18,6 +18,10 @@ on:
         description: "Run all remote-ci-env minds tests (minds_services + minds_deployment: deploy/rollback/round-trip)"
         type: boolean
         default: false
+      minds_snapshot_test_filter:
+        description: "Run only snapshot-resume tests matching this offload --filter expression (e.g. test_sync_e2e); empty runs them all"
+        type: string
+        default: ""
 
 jobs:
   # Changelog gate. Runs on the orchestrator (not in an offload
@@ -882,9 +886,17 @@ jobs:
             echo "MINDS_SYNC_E2E_SUPERTOKENS_API_KEY=${SUPERTOKENS_API_KEY}"
           } >> "$GITHUB_ENV"
 
+      # A dispatch may scope the snapshot-resume run to a single test via the
+      # minds_snapshot_test_filter input (forwarded as offload's --filter),
+      # e.g. to exercise just the sync e2e against a branch.
       - name: Run minds snapshot-resume tests via offload
         id: tests
-        run: just test-offload-minds-snapshot "${{ needs.build-minds-snapshot.outputs.image_id }}"
+        run: |
+          FILTER_ARGS=""
+          if [ -n "${{ inputs.minds_snapshot_test_filter }}" ]; then
+            FILTER_ARGS="--filter ${{ inputs.minds_snapshot_test_filter }}"
+          fi
+          just test-offload-minds-snapshot "${{ needs.build-minds-snapshot.outputs.image_id }}" "$FILTER_ARGS"
 
       # The minds_services tests run directly on the runner (not in the offload
       # sandbox): they only need network access to the per-run env's connector +

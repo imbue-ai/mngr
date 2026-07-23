@@ -22,8 +22,11 @@ import hashlib
 import json
 import os
 import pwd
+import shutil
 import subprocess
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -36,13 +39,16 @@ from loguru import logger
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import change_backup_destination_for_host
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.backup_provisioning import disable_backups_for_host
 from imbue.minds.desktop_client.backup_provisioning import reinject_canonical_env
+from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCRIPT
@@ -64,6 +70,9 @@ from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_work
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
+from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.primitives import BackupProvider
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import AgentId
@@ -947,3 +956,186 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     assert f"RESTIC_REPOSITORY={repo_three}" in canonical_three
     assert (repo_three / "config").is_file()
     assert read_workspace_env() == canonical_three
+
+
+# -- In-place restore (the real worker + script, against the resumed workspace) --
+
+
+def _cp_repo_host_to_container(container_name: str, repository: Path) -> None:
+    _run_docker(["cp", str(repository), f"{container_name}:{repository.parent}"], timeout=120)
+
+
+def _cp_repo_container_to_host(container_name: str, repository: Path) -> None:
+    if repository.exists():
+        shutil.rmtree(repository)
+    _run_docker(["cp", f"{container_name}:{repository}", str(repository.parent)], timeout=120)
+
+
+def _restic_env_prefix() -> str:
+    """Shell prefix exporting the injected restic.env for an in-container restic call."""
+    return "set -a; . /code/runtime/secrets/restic.env; set +a; "
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.timeout(900)
+def test_backup_restore_rewinds_the_resumed_workspace_in_place(
+    running_workspace: _ResumedWorkspace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore the real workspace to a real snapshot via the real product path.
+
+    Drives ``run_backup_restore_sequence`` (the actual desktop worker) end to
+    end: minds-side snapshot + subpath resolution, canonical env reinjection,
+    the gate probe, and the in-workspace restore script -- which must notice
+    the workspace's distro restic predates ``restore --delete``, install the
+    pinned build, take the safety snapshot, sync-restore the host dir in
+    place, and bring every service back.
+
+    The restic repository must be reachable from both sides (in production it
+    is remote object storage): the same absolute path is used on the sandbox
+    host and in the container, and the repository directory is copied across
+    with ``docker cp`` at the two hand-off points (host->container after
+    provisioning initializes it; container->host after the in-container
+    source snapshot exists, so minds-side resolution can see it).
+    """
+    _ensure_restic_on_sandbox_host(tmp_path, monkeypatch)
+    # Same desktop-side mngr wiring as the enable/repair test above: the baked
+    # host dir + prefix so `mngr exec` can reach the resumed container.
+    root_name = os.environ.get("MINDS_ROOT_NAME", "minds-staging")
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    baked_mngr_host_dir = real_home / f".{root_name}" / "mngr"
+    assert baked_mngr_host_dir.is_dir(), f"No baked desktop-side mngr host dir at {baked_mngr_host_dir}"
+    baked_profile_dir = find_profile_dir_lightweight(baked_mngr_host_dir)
+    assert baked_profile_dir is not None, f"No mngr profile under {baked_mngr_host_dir} in the snapshot"
+    _opt_into_pytest_config_guard(baked_profile_dir / "settings.toml")
+    monkeypatch.setenv("MNGR_HOST_DIR", str(baked_mngr_host_dir))
+    monkeypatch.setenv("MNGR_PREFIX", mngr_prefix_for(root_name))
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(_isolated_host_config_root(tmp_path) / ".mngr"))
+    monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
+    monkeypatch.setenv("MNGR__PROVIDERS__AWS__IS_ENABLED", "false")
+    monkeypatch.chdir(tmp_path)
+
+    container_name = running_workspace.container_name
+    agent_id = AgentId(running_workspace.services_agent_id)
+    data_dir = tmp_path / "minds-data"
+    data_dir.mkdir()
+    paths = WorkspacePaths(data_dir=data_dir)
+    # The repository path must be identical on the sandbox host and inside the
+    # container (the same RESTIC_REPOSITORY string is read by both), so it
+    # lives under /tmp rather than the per-test tmp_path.
+    repository = Path(f"/tmp/restore-e2e-repo-{get_short_random_string()}")
+
+    # Enable backups for real (restic init on the host + env injection into
+    # the container), then hand the initialized repository to the container.
+    configure_backups_for_host(
+        agent_id=agent_id,
+        host_id="host-restore-e2e",
+        request=BackupSetupRequest(
+            backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repository}"
+        ),
+        imbue_cloud_cli=None,
+        paths=paths,
+    )
+    assert (repository / "config").is_file()
+    _cp_repo_host_to_container(container_name, repository)
+
+    # A sentinel captures "the state worth restoring"; the source snapshot is
+    # taken from inside the container (like the hourly service would), with
+    # the workspace's own restic -- the distro 0.14 is fine for backup, which
+    # is exactly why the restore script must upgrade for restore --delete.
+    sentinel = "/code/restore-e2e-sentinel.txt"
+    written = _exec_in_container(container_name, f"printf 'version-one\\n' > {sentinel}", timeout=30)
+    assert written.returncode == 0, written.stderr
+    source_backup = _exec_in_container(
+        container_name,
+        _restic_env_prefix() + "restic backup /mngr --tag e2e-source --exclude '**/.venv' --exclude '**/node_modules' "
+        "--exclude '**/__pycache__' --exclude '**/.cache'",
+        timeout=600,
+    )
+    assert source_backup.returncode == 0, (source_backup.stdout, source_backup.stderr)
+
+    # Work done after the snapshot: the restore must undo both of these.
+    mutated = _exec_in_container(
+        container_name,
+        f"printf 'version-two\\n' > {sentinel} && printf 'after\\n' > /code/restore-e2e-extra.txt",
+        timeout=30,
+    )
+    assert mutated.returncode == 0, mutated.stderr
+
+    # Hand the repository (now carrying the source snapshot) back to the host
+    # so minds-side resolution can read it, and find the snapshot to restore.
+    _cp_repo_container_to_host(container_name, repository)
+    snapshots = backup_status.list_workspace_snapshots(paths, agent_id, parent_cg=None, timeout_seconds=120.0)
+    source_snapshots = [snapshot for snapshot in snapshots if "e2e-source" in snapshot.tags]
+    assert len(source_snapshots) == 1, [snapshot.tags for snapshot in snapshots]
+    snapshot_id = source_snapshots[0].snapshot_id
+
+    # Dispatch the real worker, exactly as the API route does (registered
+    # operation, then the worker run synchronously in this thread). The
+    # chained update is exercised by its own converge test above; keeping it
+    # off here keeps this test focused on the restore path.
+    registry = InMemoryWorkspaceOperationRegistry()
+    assert registry.start_if_idle(
+        agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc), snapshot_id
+    )
+    run_backup_restore_sequence(
+        agent_id=agent_id,
+        paths=paths,
+        resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        registry=registry,
+        parent_cg=None,
+        snapshot_id=snapshot_id,
+        is_stop_chats=False,
+        is_update_after=False,
+        is_skip_safety_snapshot=False,
+        is_skip_chat_gate=False,
+    )
+
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.status == WorkspaceOperationStatus.DONE, (record.status, record.error)
+    assert record.warning is None
+    # The streamed script output landed in the operation log (the live
+    # details panel feed), proving exec streaming worked end to end.
+    log_chunk = registry.read_log_chunk(agent_id, 0, timeout_seconds=1.0)
+    assert log_chunk is not None
+    log_text = "\n".join(log_chunk.lines)
+    assert "Restoring the selected backup into place..." in log_text
+
+    # The workspace content was rewound: the sentinel is back at version-one
+    # and the post-snapshot file is gone.
+    sentinel_after = _exec_in_container(container_name, f"cat {sentinel}", timeout=30)
+    assert sentinel_after.returncode == 0, sentinel_after.stderr
+    assert sentinel_after.stdout.strip() == "version-one"
+    extra_after = _exec_in_container(container_name, "test -f /code/restore-e2e-extra.txt", timeout=30)
+    assert extra_after.returncode != 0, "the post-snapshot file should have been deleted by the restore"
+
+    # The injected credentials survived the restore (the snapshot predates
+    # them only logically -- the script writes the current env back).
+    env_after = _exec_in_container(container_name, "cat /code/runtime/secrets/restic.env", timeout=30)
+    assert env_after.returncode == 0, env_after.stderr
+    assert f"RESTIC_REPOSITORY={repository}" in env_after.stdout
+
+    # The script upgraded the workspace's restic (the distro build predates
+    # restore --delete) and persisted the pinned version.
+    version_after = _exec_in_container(container_name, "restic version", timeout=30)
+    assert version_after.returncode == 0, version_after.stderr
+    assert "restic 0.1" in version_after.stdout
+    assert "restic 0.14" not in version_after.stdout, version_after.stdout
+
+    # The repository timeline tells the story: the source snapshot, the
+    # pre-restore safety snapshot, and the restored state tagged with its
+    # lineage.
+    timeline = _exec_in_container(container_name, _restic_env_prefix() + "restic snapshots --json", timeout=120)
+    assert timeline.returncode == 0, (timeline.stdout, timeline.stderr)
+    entries = json.loads(timeline.stdout)
+    tags_by_snapshot = [tuple(entry.get("tags") or ()) for entry in entries]
+    assert any("pre-restore" in tags for tags in tags_by_snapshot), tags_by_snapshot
+    assert any("restored" in tags for tags in tags_by_snapshot), tags_by_snapshot
+
+    # Every supervisord service came back onto the restored tree; the script
+    # verified host-backup itself, and the system interface serving again
+    # proves the broader workspace is alive.
+    assert _wait_for_system_interface_up(container_name)
