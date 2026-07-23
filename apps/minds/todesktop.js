@@ -8,7 +8,7 @@ module.exports = {
   appProtocolScheme: 'minds',
   icon: './electron/assets/icon.png',
   appPath: '.',
-  uploadSizeLimit: 600,
+  uploadSizeLimit: 650,
   nodeVersion: pkg.engines.node,
   pnpmVersion: pkg.engines.pnpm,
   extraResources: [{ from: 'resources/', to: '.' }],
@@ -17,6 +17,7 @@ module.exports = {
     additionalBinariesToSign: [
       'resources/lima/bin/limactl',
       'resources/restic/restic',
+      'resources/desync/desync',
     ],
   },
 };

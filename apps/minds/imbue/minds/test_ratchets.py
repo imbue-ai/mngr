@@ -361,10 +361,10 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    # One of the inline functions is the ``record_loss`` helper nested in the
-    # ported Sentry HTTP transport's ``_send_request`` (it closes over the
-    # envelope being sent). The recorded count reflects the actual finder count
-    # for the current tree.
+    # The remaining inline functions are closures that capture the local state they were
+    # defined next to: the SSE generator and its watch callbacks plus the unhandled-exception
+    # hook in app.py, a thread target in api_v1.py, the signal handler in server.py, the WSGI
+    # app in webdav.py, and the ``record_loss`` helper in the ported Sentry HTTP transport.
     rc.check_inline_functions(_DIR, snapshot(7))
 
 

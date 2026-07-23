@@ -61,6 +61,14 @@ _BUNDLED_RESTIC = Path(__file__).parent / "resources" / "restic" / "restic"
 if _BUNDLED_RESTIC.exists() and "MINDS_RESTIC_BINARY" not in os.environ:
     os.environ["MINDS_RESTIC_BINARY"] = str(_BUNDLED_RESTIC)
 
+# Likewise point the pre-baked-image tools at their bundled binaries so lima_image
+# tests do not need a system-wide desync. It is left unset
+# when its binary isn't staged (``pnpm build`` / the download hasn't run), so the
+# caller falls back to a PATH lookup.
+_BUNDLED_DESYNC = Path(__file__).parent / "resources" / "desync" / "desync"
+if _BUNDLED_DESYNC.exists() and "MINDS_DESYNC_BINARY" not in os.environ:
+    os.environ["MINDS_DESYNC_BINARY"] = str(_BUNDLED_DESYNC)
+
 suppress_warnings()
 register_marker(
     "minds_deployment: tests that exercise the minds deploy process itself by minting their own "

@@ -179,44 +179,74 @@ gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
   -r main -f commit_sha="$VERSION" -f template_ref="$VERSION"
 ```
 
-**Green here concludes the release.** Note the build ID in the `build` summary.
+**Green here concludes the *binary*.** Note the build ID in the `build` summary. If any tier you are releasing configures a pre-baked Lima image, the release is not finished until §8b has published one for this tag and §8c has proven it — otherwise those users silently lose the fast create path.
 
-### 8b. Build + publish the pre-baked Lima image (issue 2306)
+### 8b. Build + publish the pre-baked Lima image
 
-Optional but recommended once the tag exists: bake + publish the pre-baked Lima VM image so local Lima creates of the default workspace boot the baked toolchain instead of building it in-VM. **Operator-run, not CI** — the R2 credentials and the minisign signing **private** key stay on your machine; only a public URL + public key are committed.
+Bake + publish the pre-baked Lima VM image so local Lima creates of the default workspace boot the baked toolchain instead of building it in-VM. **Operator-run, not CI** — the R2 credentials and the minisign signing **private** key stay on your machine; only a public URL + public key are committed.
+
+> **Whether this step is optional depends on the tier, and getting it wrong is silent.**
+>
+> - A tier whose `client.toml` sets **no** `lima_image_base_url` never looks for an image. Skipping this step changes nothing.
+> - A tier that **does** set it asks for an image keyed to the binary's `FALLBACK_BRANCH`. If you bumped `FALLBACK_BRANCH` (step 1) and did not publish an image for the new tag, every client asks for a manifest that does not exist, gets `VERSION_UNAVAILABLE`, and **silently falls back to building in-VM** — creates quietly go from ~45s back to ~5 minutes, nothing turns red, and no one finds out until someone asks why creates got slow again.
+>
+> So: **if the tier you are releasing configures an image, this step is required, and §8c is how you prove you did it.**
 
 The bake runs *with Lima itself* (the image is built by the same virtualizer that consumes it — `vz` on Apple Silicon, accelerated QEMU on Linux). What a desktop client uses is decided entirely by the per-tier `client.toml` (`lima_image_base_url` + `lima_image_minisign_public_key`); if those are unset, or no image is published for the tag/arch, the client **backs off to building in-VM** (so this whole step is safe to skip and safe to half-finish).
 
-#### One-time tier setup (do once per tier, not per release)
+#### One-time environment setup (do once per environment, not per release)
 
-1. **Generate the tier's minisign keypair** and store the secret key somewhere durable + private (a password manager / the operator's machine — never the repo, never CI):
+Setup is one script, `scripts/lima_image/setup_tier.py`. It is idempotent (re-running reports what exists and changes nothing) and takes a full environment name rather than a tier, so each dev gets their own bucket and cannot overwrite another dev's image or production's: `production`, `staging`, `dev-<name>`.
+
+1. **Provision the bucket, the custom domain, and a publish credential**, using the environment's existing Vault `cloudflare` entry:
    ```bash
-   minisign -G -p minds-lima-<tier>.pub -s minds-lima-<tier>.key   # protect the .key
+   export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200 VAULT_NAMESPACE=admin
+   for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_DOMAIN; do
+     export $key=$(vault kv get -mount=secrets -field=value minds/<tier>/cloudflare/$key)
+   done
+   uv run python scripts/lima_image/setup_tier.py --env production --dry-run   # review, then drop --dry-run
    ```
-2. **Create the R2 bucket** (convention: `minds-lima-images-<tier>`, e.g. `minds-lima-images-production`) and enable a public origin. For dev/test the managed `r2.dev` domain is fine; for **production prefer a custom CDN domain** (`r2.dev` is rate-limited and not meant for production traffic). Either way, note the public base URL (e.g. `https://lima-images.minds.example`).
-3. **Commit the public values** into the tier's `config/envs/<tier>/client.toml`:
+   It creates `minds-lima-images-<env>`, attaches `lima-images-<env>.<domain>`, and mints an R2 token **scoped to that one bucket**, printing the `R2_*` credentials the publish step needs. The account-wide token above is only used to provision; whoever publishes only ever holds the bucket-scoped credential, which is `AccessDenied` against every other bucket.
+
+   The custom domain is **required, in every environment including dev** — not a production nicety. The managed `r2.dev` origin is rate-limited, and a client extract pulls ~65,000 chunks: against `r2.dev` this reliably fails partway with `unexpected status code 429`, so the image never assembles and the fast path is dead. A custom domain is served through Cloudflare's CDN and is not throttled this way. Check the hostname is not behind a Cloudflare Access policy, which would answer the client with `401`.
+
+2. **Generate the environment's minisign keypair** and store the secret key somewhere durable + private (a password manager / the operator's machine — never the repo, never CI). It is the trust anchor for code the app executes as a VM:
+   ```bash
+   minisign -G -W -p minds-lima-<env>.pub -s minds-lima-<env>.key   # -W: unencrypted, for non-interactive signing
+   ```
+3. **Commit the public values** into the tier's `config/envs/<tier>/client.toml` (the script prints them):
    ```toml
-   lima_image_base_url = "https://lima-images.minds.example"          # the public CDN/r2.dev base
-   lima_image_minisign_public_key = "RW...."                          # contents of minds-lima-<tier>.pub line 2
+   lima_image_base_url = "https://lima-images-production.minds.example"
+   lima_image_minisign_public_key = "RW...."                          # contents of minds-lima-<env>.pub line 2
    ```
    These are public (a URL + a public key), so they belong in the committed `client.toml` next to the other URLs. A dev env can set the same two keys in `~/.minds-<name>/client.toml` (the `minds env deploy` writer round-trips them when present on the `ClientEnvConfig`).
 
 #### Per-release publish
 
-Build one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac), then publish each into the tier bucket. Credentials: the simplest path reuses the tier's existing Vault `cloudflare` account token (it already has `Workers R2 Storage: Edit`) with `--uploader cloudflare-api`; alternatively mint dedicated R2 S3 keys and use `--uploader s3` with `R2_ACCOUNT_ID`/`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`.
+Build one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac), then publish each into the tier bucket.
+
+The bake host needs a Lima that can actually boot a VM. On macOS that is `brew install lima qemu` (Lima uses `vz`, and `qemu-img` is only for the final flatten). On Linux, Lima drives **qemu** and boots the guest via UEFI, so the system emulator alone is not enough -- it also needs the EDK2 firmware and the virtio option ROMs, which `qemu-utils` does not pull in:
 
 ```bash
-export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200 VAULT_NAMESPACE=admin
-export CLOUDFLARE_API_TOKEN=$(vault kv get -mount=secrets -field=value minds/production/cloudflare/CLOUDFLARE_API_TOKEN)
-export CLOUDFLARE_ACCOUNT_ID=$(vault kv get -mount=secrets -field=value minds/production/cloudflare/CLOUDFLARE_ACCOUNT_ID)
+# Debian/Ubuntu, amd64 bake host:
+sudo apt install lima qemu-system-x86 qemu-utils ovmf ipxe-qemu
+```
+
+Without the firmware, `limactl start` dies with `could not find firmware for "x86_64"`; without the ROMs, with `failed to find romfile "efi-virtio.rom"`. `build-lima-image.sh` checks for the binaries up front and names these packages, but it cannot check the firmware itself. The bake user must also be in the `kvm` group.
+
+Credentials are the three `R2_*` values `setup_tier.py` printed. Cloudflare's REST object API is not a usable alternative: it falls under the global `api.cloudflare.com` limit of 1200 requests per 5 minutes, and one image is roughly 65,000 chunks, so a publish cannot finish within that budget and starts returning `429` partway through. The S3 API is not rate-limited this way.
+
+```bash
+export R2_ACCOUNT_ID=...         # printed by setup_tier.py
+export R2_ACCESS_KEY_ID=...      # bucket-scoped; cannot touch any other environment's bucket
+export R2_SECRET_ACCESS_KEY=...
 
 ./scripts/build-lima-image.sh --default-workspace-template-ref "$VERSION"     # emits qcow2 + raw under scripts/lima_image/output-<arch>/
 uv run python scripts/lima_image/publish.py \
   --version "$VERSION" --arch "$(uname -m | sed 's/arm64/aarch64/')" \
   --raw-image scripts/lima_image/output-*/mngr-lima-*.raw \
   --bucket minds-lima-images-production \
-  --secret-key-file /path/to/minds-lima-production.key \
-  --uploader cloudflare-api
+  --secret-key-file /path/to/minds-lima-production.key
 ```
 
 Notes:
@@ -224,6 +254,27 @@ Notes:
 - Re-publishing a near-identical image only uploads the changed chunks (content-addressed dedup); chunks are immutable, so this is safe to re-run.
 - Both arches publish into the **same** bucket (the per-(version, arch) index + the shared chunk store), and the signed root manifest merges arch entries, so publishing arm64 after amd64 adds to the manifest rather than replacing it.
 - Measure the real `desync` delta between two consecutive builds before investing further in reproducibility (the dominant residual churn is `/root/.cache/uv`, which `desync` largely dedups by content).
+
+### 8c. Gate: prove the released tag actually has an image
+
+**Do not skip this.** The failure mode of §8b is silence — a tier that configures an image but has none published just gets slow creates forever. This check is the only thing standing between that and a release, so run it for **every tier whose `client.toml` sets `lima_image_base_url`**, using the same `$VERSION` the binary ships as `FALLBACK_BRANCH`:
+
+```bash
+BASE_URL=$(grep -h '^lima_image_base_url' apps/minds/imbue/minds/config/envs/production/client.toml | cut -d'"' -f2)
+if [ -z "$BASE_URL" ]; then
+  echo "This tier configures no image, so it never looks for one: 8b and 8c do not apply."
+else
+  curl -fsS "$BASE_URL/manifests/$VERSION/root.json" | python3 -m json.tool
+fi
+```
+
+It must print a manifest naming `$VERSION` and listing an entry per shipped arch. Anything else — a 404, a manifest for a different version, a missing arch — means clients will fall back to building in-VM, and the release is **not** done:
+
+- **404** → nothing was published for this tag. Go back to §8b.
+- **Manifest names a different `minds_version`** → you published under the wrong `--version`. It must equal `FALLBACK_BRANCH` exactly.
+- **Your arch is missing from `entries`** → that arch was never baked. Users on it silently take the slow path.
+
+A tag that has an image published under it is **immutable**: never move it and never republish different bytes under it. Clients cache on `(version, arch)` and only re-fetch when the signed manifest names a different hash, so a moved tag means the image and the code a create clones can silently disagree. Need different content? Cut a new tag.
 
 ### 9. Optional: dev verify + ship
 

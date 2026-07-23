@@ -225,6 +225,14 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
+      // desync is not staged on win32, and naming a missing file here would make the
+      // backend exec that instead of falling back to a PATH lookup.
+      const desyncPath = paths.getDesyncPath();
+      const hasBundledDesync = fs.existsSync(desyncPath);
+      const limaImageToolEnv = {
+        ...(hasBundledDesync ? { MINDS_DESYNC_BINARY: desyncPath } : {}),
+      };
+
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
         uvBin = 'uv';
@@ -247,6 +255,11 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          // The prestart hook (ensure-binaries.js) stages resources/desync/ before the
+          // dev app launches. Dev mode inherits the developer's PATH untouched, so the
+          // bundled binary is only reachable by absolute path -- without this the
+          // fast-create path would need a system-wide desync.
+          ...limaImageToolEnv,
           // The prestart hook (ensure-binaries.js) downloads the pinned
           // restic into resources/restic/; without this the backend falls
           // back to `restic` on PATH, which only works on machines that
@@ -262,6 +275,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const gitBinDir = paths.getGitBinDir();
         const limaBinDir = paths.getLimaBinDir();
         const desyncBinDir = paths.getDesyncBinDir();
+        const bundledBinDirs = [uvBinDir, gitBinDir, limaBinDir, desyncBinDir];
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();
@@ -302,7 +316,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           : systemPath;
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${augmentedSystemPath}`,
+          PATH: `${bundledBinDirs.join(':')}:${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
@@ -312,6 +326,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           MINDS_RESTIC_BINARY: paths.getResticPath(),
+          ...limaImageToolEnv,
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
           // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses

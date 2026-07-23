@@ -246,6 +246,59 @@ def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
     )
 
 
+def test_bundled_desync_is_in_signing_list() -> None:
+    """Guard: the bundled desync must be signed by ToDesktop.
+
+    It is a Mach-O binary that ``build.js`` stages into ``resources/`` and
+    ToDesktop packages into ``Contents/Resources``. Under the hardened runtime
+    every shipped Mach-O must be code-signed with the app's Developer ID or
+    notarization rejects the build -- and notarization only runs in the release
+    pipeline, so a missing entry surfaces there rather than in PR CI.
+    """
+    todesktop = _load_todesktop_config()
+    additional = todesktop.get("mac", {}).get("additionalBinariesToSign", [])
+    assert "resources/desync/desync" in additional, (
+        "todesktop.js mac.additionalBinariesToSign must include the bundled desync "
+        f"so ToDesktop signs it under the hardened runtime; got {additional}."
+    )
+
+
+def test_build_js_stages_every_runtime_binary() -> None:
+    """Guard: build.js's main() must stage every binary the packaged app resolves
+    under ``resources/``.
+
+    ``build.js`` is the only stage whose output reaches the app: ToDesktop maps the
+    uploaded ``resources/`` into ``Contents/Resources`` via ``extraResources``, which
+    is what ``paths.getResourcesDir()`` reads. The ``todesktop:beforeInstall`` hook
+    also downloads binaries, but it runs against ``app-wrapper/app/``, so its output
+    is folded into ``app.asar`` and never read at runtime.
+
+    A binary fetched only by the hook therefore ships dead. That already happened:
+    ``desync`` was staged by the hook alone, so no packaged release ever carried a
+    usable copy and the pre-baked-image download was broken in every build, silently
+    -- dev is unaffected, because ``ensure-binaries.js`` populates ``resources/``
+    there. This guard fails if a downloader is dropped from ``main()``.
+    """
+    text = (APP_ROOT / "scripts" / "build.js").read_text()
+    match = re.search(r"async function main\(\) \{(.*?)\n\}\n", text, re.DOTALL)
+    assert match is not None, "Could not locate main() in build.js"
+    body = match.group(1)
+
+    for downloader in (
+        "downloadUv",
+        "downloadLima",
+        "downloadGit",
+        "downloadRestic",
+        "downloadDesync",
+    ):
+        assert f"{downloader}(" in body, (
+            f"build.js main() must call {downloader}(). build.js is the only stage "
+            "whose resources/ reaches the packaged app -- a binary fetched solely by "
+            "the todesktop:beforeInstall hook lands in app.asar and is unreachable at "
+            "runtime."
+        )
+
+
 def test_bundle_latchkey_uses_pnpm_deploy_against_lockfile() -> None:
     """Guard: bundleLatchkey() must use ``pnpm deploy --prod`` so the shipped
     latchkey tree is pinned by ``pnpm-lock.yaml``, not a fresh registry resolve.

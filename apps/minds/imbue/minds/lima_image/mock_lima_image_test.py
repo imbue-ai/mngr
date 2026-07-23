@@ -1,12 +1,11 @@
 """Concrete in-memory mock implementations of the lima_image interfaces for unit tests.
 
 These let ``ensure_test.py`` exercise the full ensure-image orchestration (seeding,
-verification, retention, progress, fallbacks) without the real desync / minisign /
-qemu-img binaries -- the binaries are exercised separately by the binary-gated
+verification, retention, progress, fallbacks) without the real desync / minisign
+binaries -- the binaries are exercised separately by the binary-gated
 ``test_lima_image_e2e.py`` integration test.
 """
 
-import shutil
 from pathlib import Path
 
 from pydantic import Field
@@ -15,7 +14,6 @@ from imbue.minds.errors import LimaImageDownloadError
 from imbue.minds.errors import LimaImageVerificationError
 from imbue.minds.lima_image.data_types import LimaImagePrefetchState
 from imbue.minds.lima_image.interfaces import ImageChunkStoreInterface
-from imbue.minds.lima_image.interfaces import ImageFormatConverterInterface
 from imbue.minds.lima_image.interfaces import LimaImageProgressSinkInterface
 from imbue.minds.lima_image.interfaces import ManifestFetcherInterface
 from imbue.minds.lima_image.interfaces import ProcessOutputCallback
@@ -61,6 +59,10 @@ class FixedRawChunkStore(ImageChunkStoreInterface):
     seed_index_names_seen: list[str] = Field(
         default_factory=list, description="Index names for which a seed blob was supplied (asserts seeding fired)"
     )
+    seed_blob_bytes_by_index_name: dict[str, bytes] = Field(
+        default_factory=dict,
+        description="Contents the seed blob had when it was read, keyed by the index file's name",
+    )
 
     def extract_image(
         self,
@@ -75,6 +77,8 @@ class FixedRawChunkStore(ImageChunkStoreInterface):
     ) -> None:
         if seed_index_file is not None and seed_blob_file is not None:
             self.seed_index_names_seen.append(index_file.name)
+            # Read it, as real desync does: the seed must still exist at this point.
+            self.seed_blob_bytes_by_index_name[index_file.name] = seed_blob_file.read_bytes()
         body = self.raw_bytes_by_index_name.get(index_file.name)
         if body is None:
             raise LimaImageDownloadError(f"No assembled bytes configured for index {index_file.name}")
@@ -82,18 +86,6 @@ class FixedRawChunkStore(ImageChunkStoreInterface):
         output_file.write_bytes(body)
         if on_output is not None:
             on_output("100% assembled", False)
-
-
-class CopyingImageFormatConverter(ImageFormatConverterInterface):
-    """Stands in for qemu-img by copying bytes through unchanged (preserves identity for seeding tests)."""
-
-    def convert_raw_to_qcow2(self, *, raw_file: Path, qcow2_file: Path) -> None:
-        qcow2_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(raw_file, qcow2_file)
-
-    def convert_qcow2_to_raw(self, *, qcow2_file: Path, raw_file: Path) -> None:
-        raw_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(qcow2_file, raw_file)
 
 
 class RecordingProgressSink(LimaImageProgressSinkInterface):

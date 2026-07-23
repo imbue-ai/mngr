@@ -89,11 +89,9 @@ def write_client_config(
     doc = tomlkit.document()
     doc["connector_url"] = str(config.connector_url)
     doc["litellm_proxy_url"] = str(config.litellm_proxy_url)
-    # Pre-baked Lima image source (issue 2306). Both are optional and only
-    # emitted when set, so an env that doesn't configure a chunk store omits
-    # them entirely and the desktop client falls back to building in-VM. They
-    # are public (a CDN URL + a minisign public key), never secrets, so they
-    # belong in client.toml alongside the other URLs rather than secrets.toml.
+    # Both are optional and only emitted when set, so an env that doesn't configure a
+    # chunk store omits them entirely and the desktop client builds in-VM. They are public
+    # (a CDN URL + a minisign public key), so they belong in client.toml, not secrets.toml.
     if config.lima_image_base_url is not None:
         doc["lima_image_base_url"] = str(config.lima_image_base_url)
     if config.lima_image_minisign_public_key is not None:
