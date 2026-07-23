@@ -27,6 +27,10 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('swap-local-page', (_event, url) => callback(url));
   },
   shellReady: () => ipcRenderer.send('shell-ready'),
+  // Ack that a swap-local-page dispatch was RECEIVED (sent before the fetch
+  // starts): main relaxes its lost-swap watchdog so a slow-but-alive swap
+  // fetch is not demoted to a full load at the short grace period.
+  swapReceived: (url) => ipcRenderer.send('swap-received', url),
   onContentURLChange: (callback) => {
     ipcRenderer.on('content-url-changed', (_event, url) => callback(url));
   },
