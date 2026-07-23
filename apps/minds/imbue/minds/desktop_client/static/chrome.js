@@ -704,6 +704,10 @@
     // milliseconds after a full page load, before deferred scripts ran).
     if (window.minds.onSwapLocalPage) {
       window.minds.onSwapLocalPage(function (url) {
+        // Ack receipt BEFORE the fetch: main relaxes its lost-swap watchdog so
+        // a slow swap fetch (busy backend) is not demoted to a full load. The
+        // catch below still full-navigates if the fetch itself fails.
+        if (window.minds.swapReceived) window.minds.swapReceived(url);
         if (canSwapTo(url)) {
           swapLocalPage(url).catch(function () { window.location = url; });
         } else {
