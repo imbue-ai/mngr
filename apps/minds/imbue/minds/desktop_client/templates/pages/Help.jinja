@@ -15,13 +15,13 @@
   (or null when Sentry is inactive), shown in the confirmation so the user can quote
   it. The report diagnostics are hidden in agent mode (the agent gathers its own
   context). Recent logs are always attached to a submitted report (there is no logs
-  checkbox). ``workspace_agent_id`` scopes the optional workspace
+  checkbox). ``workspace_agent_id`` scopes the workspace
   details to the workspace the help flow was opened from. ``description`` pre-fills the
   report textarea -- non-empty when an in-workspace ``/assist`` agent asked the app to
   open this modal with its diagnosis already written in.
 
-  The diagnostics checkboxes are shown at the top level (not under a disclosure) and
-  are "sticky": their checked state persists in localStorage across reports.
+  The diagnostics checkbox is shown at the top level (not under a disclosure) and
+  is "sticky": its checked state persists in localStorage across reports.
 #}
 {% set _scripts %}
 <script>
