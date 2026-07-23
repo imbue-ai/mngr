@@ -363,7 +363,13 @@ html::-webkit-scrollbar-thumb {
 html::-webkit-scrollbar-thumb:hover {
   background: var(--c-text-tertiary);
 }
-html {
+/* Only document-scrolling local pages: the edge-to-edge surfaces
+   (no-scrollbar-gutter -- the agent wrapper, the overlay host and its hosted
+   modal pages) must NOT get an opaque html background. The overlay documents
+   in particular render in a transparent WebContentsView layered over the
+   titlebar; painting their html would blank the whole window behind the
+   dropdown. */
+html:not(.no-scrollbar-gutter) {
   background: var(--titlebar-bg, var(--c-surface-primary));
 }
 
