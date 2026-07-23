@@ -760,9 +760,11 @@ def test_render_inspiration_page_gates_each_step_on_the_previous() -> None:
 
 
 def test_render_inspiration_page_has_animations_and_copy_feedback() -> None:
-    # Revealed steps slide up; the Copy button turns green before advancing.
+    # Revealed steps and answers slide up; completed circles pop; the Copy
+    # button turns green before advancing.
     html = _render_inspiration()
     assert "animateReveal" in html
+    assert "animatePop" in html
     assert "!bg-success" in html
     assert "'Copied'" in html
 

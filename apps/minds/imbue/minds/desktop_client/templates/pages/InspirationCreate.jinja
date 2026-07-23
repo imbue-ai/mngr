@@ -46,12 +46,24 @@
 
     function byId(id) { return document.getElementById(id); }
 
-    function animateReveal(el) {
-      // Slide the newly-revealed step up into place with a soft fade.
+    // A soft ease-out used for every reveal so the motion feels consistent.
+    var EASE_OUT = 'cubic-bezier(0.22, 1, 0.36, 1)';
+
+    function animateReveal(el, distance, duration) {
+      // Slide + fade an element into place.
       if (!el.animate) return;
       el.animate(
-        [{opacity: 0, transform: 'translateY(12px)'}, {opacity: 1, transform: 'translateY(0)'}],
-        {duration: 340, easing: 'cubic-bezier(0.16, 1, 0.3, 1)'}
+        [{opacity: 0, transform: 'translateY(' + (distance || 12) + 'px)'}, {opacity: 1, transform: 'translateY(0)'}],
+        {duration: duration || 420, easing: EASE_OUT}
+      );
+    }
+
+    function animatePop(el) {
+      // A gentle overshoot when a step's circle fills in on completion.
+      if (!el.animate) return;
+      el.animate(
+        [{transform: 'scale(0.82)'}, {transform: 'scale(1)'}],
+        {duration: 300, easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)'}
       );
     }
     var el = {
@@ -86,22 +98,27 @@
       var circle = node.querySelector('[data-step-circle]');
       var title = node.querySelector('[data-step-title]');
       if (body) {
-        var wasHidden = body.classList.contains('hidden');
+        var bodyWasHidden = body.classList.contains('hidden');
         body.classList.toggle('hidden', !opts.active);
-        if (wasHidden && opts.active) animateReveal(body);
+        if (bodyWasHidden && opts.active) animateReveal(body, 14, 440);
       }
       if (summary) {
         var summaryText = summary.querySelector('[data-step-summary-text]');
         if (summaryText) summaryText.textContent = opts.summary || '';
-        summary.classList.toggle('hidden', !(opts.done && opts.summary));
+        var summaryWasHidden = summary.classList.contains('hidden');
+        var showSummary = opts.done && !!opts.summary;
+        summary.classList.toggle('hidden', !showSummary);
+        if (summaryWasHidden && showSummary) animateReveal(summary, 6, 300);
       }
       // Active or completed steps get the accent circle; only completed steps
-      // fill it. A completed step's number and title are both a "click to
-      // change" affordance (see wireGoBack).
+      // fill it (with a small pop). A completed step's number and title are
+      // both a "click to change" affordance (see wireGoBack).
+      var circleWasDone = circle.classList.contains('bg-accent/15');
       circle.classList.toggle('border-accent', opts.active || opts.done);
       circle.classList.toggle('text-accent', opts.active || opts.done);
       circle.classList.toggle('bg-accent/15', opts.done);
       circle.classList.toggle('cursor-pointer', opts.done);
+      if (!circleWasDone && opts.done) animatePop(circle);
       title.classList.toggle('cursor-pointer', opts.done);
       title.classList.toggle('hover:underline', opts.done);
     }
@@ -438,14 +455,14 @@
                 <label class="flex items-center gap-3 cursor-pointer">
                   <input type="checkbox" id="inspiration-trust" class="shrink-0">
                   <span>
-                    <span id="inspiration-trust-title" class="type-body font-semibold text-important">I trust this Inspiration</span>
+                    <span id="inspiration-trust-title" class="type-body font-semibold text-important transition-colors duration-200">I trust this Inspiration</span>
                     <span class="block type-helper text-tertiary">Inspirations are community content. This one has not been approved or verified by Imbue.</span>
                   </span>
                 </label>
               </div>
 
               <div class="mt-6">
-                <ButtonSubmit id="inspiration-submit" variant="primary" block disabled>Create from Inspiration</ButtonSubmit>
+                <ButtonSubmit id="inspiration-submit" variant="primary" block disabled extra="transition-all duration-200">Create from Inspiration</ButtonSubmit>
               </div>
             </form>
           </div>
@@ -478,7 +495,7 @@
               this Inspiration to.
             </p>
             <CopyField :value="'/use-inspiration ' ~ git_url" id="inspiration-skill-message" aria-label="Inspiration chat message">
-              <Button variant="secondary" id="inspiration-copy-btn" extra="transition-colors duration-200">Copy</Button>
+              <Button variant="secondary" id="inspiration-copy-btn" extra="transition-colors duration-300">Copy</Button>
             </CopyField>
             {% if branch %}
               <p class="type-helper text-tertiary mt-2">
