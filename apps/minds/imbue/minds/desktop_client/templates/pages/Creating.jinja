@@ -93,20 +93,10 @@
                   <span class="type-helper text-tertiary">minds</span>
                 </div>
                 <div id="scene-key" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="5" title="What is latchkey?">
-                  {# Imbue latchkey logo, redrawn as SVG from the imbue.com #}
-                  {# product-page mark (olive tile, pink vintage key + tag). #}
-                  <svg viewBox="0 0 64 64" class="w-20 h-20 rounded-xl" aria-label="latchkey">
-                    <rect width="64" height="64" rx="14" fill="#4b4c08"/>
-                    <g fill="none" stroke="#e4999a" stroke-linecap="round">
-                      {# bow (thick donut, right side) #}
-                      <circle cx="40" cy="38" r="7.5" stroke-width="6.5"/>
-                      {# stem pointing left, two teeth pointing down #}
-                      <path d="M32 38 H 12 M15.5 38 v6.5 M22.5 38 v6" stroke-width="6"/>
-                      {# tag ring + tag hanging up-right off the bow #}
-                      <circle cx="46.5" cy="28" r="2.4" stroke-width="1.8"/>
-                      <path d="M48.5 26 l3 -8 6.5 -1.5 3 5.5 -6 7 z" stroke-width="2.4" stroke-linejoin="round"/>
-                    </g>
-                  </svg>
+                  {# Imbue latchkey brand mark: the real hand-drawn key glyph #}
+                  {# (from the imbue.com/product/latchkey page) recolored to #}
+                  {# brand pink on the olive tile. #}
+                  <img src="/_static/latchkey_logo.png" alt="latchkey" class="w-20 h-20 rounded-xl">
                   <span class="type-helper text-tertiary">latchkey</span>
                 </div>
               </div>
