@@ -67,6 +67,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOv
 from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
@@ -2259,6 +2260,94 @@ def _handle_revoke_workspace_delegation_verb() -> Response:
     )
 
 
+def _handle_add_connector_account() -> Response:
+    """Sign in to a new account for a connector service (POST /settings/connectors/add-account).
+
+    Body: ``{"service_name": "..."}``. Runs the ephemeral-browser sign-in
+    (:meth:`Latchkey.add_account`) synchronously -- exactly like clicking Approve
+    on a permission request whose service has no credentials yet, but starting
+    from a fresh browser session so the user can add a *new* account. Blocks
+    until the browser flow finishes; the settings page reloads on success.
+    """
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
+    service_name = str(body.get("service_name", ""))
+    if not service_name:
+        return _json_error("service_name is required.", status_code=400)
+    is_success, detail = handler.latchkey.add_account(service_name)
+    if not is_success:
+        return _json_error(detail or "Sign-in did not complete.", status_code=502)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _handle_disconnect_connector_account() -> Response:
+    """Disconnect one account from a connector service (POST /settings/connectors/disconnect-account).
+
+    Body: ``{"service_name": "...", "account": "..."}`` (the default account is the
+    empty string). Clears that account's stored credentials. When it was the
+    service's *last* account, the service's permission grants are now orphaned,
+    so we kick off the "revoke all" cleanup (remove the service's rules from
+    every workspace) in the background and return immediately.
+    """
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
+    service_name = str(body.get("service_name", ""))
+    account = str(body.get("account", ""))
+    if not service_name:
+        return _json_error("service_name is required.", status_code=400)
+    try:
+        is_last_account = disconnect_account(handler.latchkey, service_name, account)
+    except PermissionOverviewError as e:
+        return _json_error(str(e), status_code=502)
+    if is_last_account:
+        _revoke_service_for_all_workspaces_in_background(handler, service_name)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _revoke_service_for_all_workspaces_in_background(
+    handler: LatchkeyPermissionGrantHandler,
+    service_name: str,
+) -> None:
+    """Fire off ``revoke_service_for_all_workspaces`` on a daemon thread.
+
+    Disconnecting the last account leaves the service's permission grants with no
+    credentials to back them, so we strip those grants from every workspace's
+    host file. This touches one gateway call per active host, so it runs off the
+    request thread to keep the Disconnect click responsive; failures are logged
+    rather than surfaced (the grants are harmless without credentials, and the
+    user can retry via the per-service "Revoke all").
+    """
+    backend_resolver = get_state().backend_resolver
+    threading.Thread(
+        target=_run_revoke_service_for_all_workspaces,
+        args=(backend_resolver, handler, service_name),
+        name=f"revoke-all-{service_name}",
+        daemon=True,
+    ).start()
+
+
+def _run_revoke_service_for_all_workspaces(
+    backend_resolver: BackendResolverInterface,
+    handler: LatchkeyPermissionGrantHandler,
+    service_name: str,
+) -> None:
+    """Body of the background thread spawned by :func:`_revoke_service_for_all_workspaces_in_background`."""
+    try:
+        revoke_service_for_all_workspaces(
+            backend_resolver=backend_resolver,
+            gateway_client=handler.gateway_client,
+            services_catalog=handler.services_catalog,
+            latchkey=handler.latchkey,
+            service_name=service_name,
+        )
+    except (PermissionOverviewError, LatchkeyGatewayClientError) as e:
+        logger.warning("Background revoke-all for {} after last-account disconnect failed: {}", service_name, e)
+
+
 def _handle_set_default_account() -> Response:
     """Set the default account for new workspaces."""
     if not _is_request_authenticated():
@@ -2916,6 +3005,16 @@ def create_desktop_client(
     app.add_url_rule(
         "/settings/permissions/workspace/revoke",
         view_func=_handle_revoke_workspace_delegation_verb,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/settings/connectors/add-account",
+        view_func=_handle_add_connector_account,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/settings/connectors/disconnect-account",
+        view_func=_handle_disconnect_connector_account,
         methods=["POST"],
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])

@@ -1,5 +1,8 @@
 """Integration tests for the app-level settings permissions routes."""
 
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from flask.testing import FlaskClient
@@ -22,7 +25,10 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -71,13 +77,78 @@ class _UnavailableGatewayClient(FakeLatchkeyGatewayClient):
         raise LatchkeyGatewayClientError("gateway down")
 
 
+class _ConnectorLatchkey(Latchkey):
+    """``Latchkey`` double for the connector-account routes.
+
+    ``services_info`` reports the configured accounts, ``add_account`` records
+    its calls and returns a configurable result, and ``auth_clear`` records each
+    call and drops the named account so a follow-up ``services_info`` reflects
+    the change (letting :func:`disconnect_account` detect the last account).
+    """
+
+    accounts_by_service: dict[str, list[str]] = Field(default_factory=dict)
+    add_account_calls: list[str] = Field(default_factory=list)
+    add_account_result: tuple[bool, str] = Field(default=(True, ""))
+    cleared_calls: list[tuple[str, str | None]] = Field(default_factory=list)
+
+    def _accounts_for(self, service_name: str) -> tuple[ServiceAccountCredential, ...]:
+        return tuple(
+            ServiceAccountCredential(account=account, credential_status=CredentialStatus.VALID)
+            for account in self.accounts_by_service.get(service_name, [])
+        )
+
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
+        del is_offline
+        accounts = self._accounts_for(service_name)
+        return LatchkeyServiceInfo(
+            credential_status=CredentialStatus.VALID if accounts else CredentialStatus.MISSING,
+            accounts=accounts,
+            auth_options=frozenset({"browser", "set"}),
+            set_credentials_example=None,
+        )
+
+    def auth_list(self, *, is_offline: bool = False) -> dict[str, tuple[ServiceAccountCredential, ...]]:
+        del is_offline
+        return {service: self._accounts_for(service) for service in self.accounts_by_service}
+
+    def add_account(self, service_name: str) -> tuple[bool, str]:
+        self.add_account_calls.append(service_name)
+        return self.add_account_result
+
+    def auth_clear(
+        self,
+        service_name: str,
+        *,
+        account: str | None = None,
+        is_all: bool = False,
+    ) -> tuple[bool, str]:
+        del is_all
+        self.cleared_calls.append((service_name, account))
+        if account is not None and service_name in self.accounts_by_service:
+            self.accounts_by_service[service_name] = [
+                stored for stored in self.accounts_by_service[service_name] if stored != account
+            ]
+        return (True, "")
+
+
+def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``predicate`` until it is true or ``timeout`` elapses (for background work)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        threading.Event().wait(0.02)
+    return predicate()
+
+
 def _build_handler(
     tmp_path: Path,
     gateway_client: FakeLatchkeyGatewayClient | None = None,
+    latchkey: Latchkey | None = None,
 ) -> LatchkeyPermissionGrantHandler:
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
-        latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
+        latchkey=latchkey or Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
         services_catalog=ServicesCatalog.from_catalog_payload(_CATALOG_PAYLOAD),
         mngr_message_sender=MngrMessageSender(
             mngr_caller=RecordingMngrCaller(),
@@ -257,6 +328,122 @@ def test_settings_page_shows_unavailable_notice_when_gateway_down(tmp_path: Path
     assert response.status_code == 200
     assert "can't be loaded right now" in response.text
     assert "No connectors have been added yet." not in response.text
+
+
+# -- Connector accounts --------------------------------------------------------
+
+
+def test_settings_page_lists_service_accounts_and_add_button(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    save_permissions(
+        permissions_path_for_host(_plugin_dir(tmp_path), host),
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
+    latchkey = _ConnectorLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": ["hynek@imbue-ai", "hynek@glebs-corner"]},
+    )
+    handler = _build_handler(tmp_path, latchkey=latchkey)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "+ Add account" in body
+    assert "hynek@imbue-ai" in body
+    assert "hynek@glebs-corner" in body
+    assert "Disconnect" in body
+    assert 'data-account="hynek@imbue-ai"' in body
+    assert "Allowed on all accounts:" in body
+
+
+def test_add_account_invokes_latchkey_add_account(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    latchkey = _ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
+    handler = _build_handler(tmp_path, latchkey=latchkey)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.post("/settings/connectors/add-account", json={"service_name": "slack"})
+
+    assert response.status_code == 200
+    assert latchkey.add_account_calls == ["slack"]
+
+
+def test_add_account_reports_failure_as_502(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    latchkey = _ConnectorLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        add_account_result=(False, "user cancelled"),
+    )
+    handler = _build_handler(tmp_path, latchkey=latchkey)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.post("/settings/connectors/add-account", json={"service_name": "slack"})
+
+    assert response.status_code == 502
+    assert "user cancelled" in response.text
+
+
+def test_add_account_missing_service_name_returns_400(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    handler = _build_handler(tmp_path, latchkey=_ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/x"))
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.post("/settings/connectors/add-account", json={})
+
+    assert response.status_code == 400
+
+
+def test_disconnect_account_clears_but_keeps_grants_when_accounts_remain(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    path = permissions_path_for_host(_plugin_dir(tmp_path), host)
+    save_permissions(path, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
+    latchkey = _ConnectorLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": ["a@x", "b@x"]},
+    )
+    handler = _build_handler(tmp_path, latchkey=latchkey)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.post("/settings/connectors/disconnect-account", json={"service_name": "slack", "account": "a@x"})
+
+    assert response.status_code == 200
+    assert latchkey.cleared_calls == [("slack", "a@x")]
+    # An account still remains, so the service's grants are left in place.
+    assert handler.gateway_client.get_permission_rules(path) == {"slack-api": ("slack-read-all",)}
+
+
+def test_disconnect_last_account_revokes_grants_across_workspaces(tmp_path: Path) -> None:
+    agent_a, host_a = str(AgentId()), HostId()
+    agent_b, host_b = str(AgentId()), HostId()
+    path_a = permissions_path_for_host(_plugin_dir(tmp_path), host_a)
+    path_b = permissions_path_for_host(_plugin_dir(tmp_path), host_b)
+    save_permissions(path_a, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
+    save_permissions(path_b, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-write-all"]},)))
+    latchkey = _ConnectorLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": ["only@x"]},
+    )
+    handler = _build_handler(tmp_path, latchkey=latchkey)
+    client = _build_client(
+        tmp_path, handler, {agent_a: str(host_a), agent_b: str(host_b)}, {agent_a: "A", agent_b: "B"}
+    )
+
+    response = client.post(
+        "/settings/connectors/disconnect-account", json={"service_name": "slack", "account": "only@x"}
+    )
+
+    assert response.status_code == 200
+    assert latchkey.cleared_calls == [("slack", "only@x")]
+    # Disconnecting the last account triggers the background "revoke all", which
+    # strips the service's grants from every workspace host.
+    assert _wait_until(lambda: handler.gateway_client.get_permission_rules(path_a) == {})
+    assert _wait_until(lambda: handler.gateway_client.get_permission_rules(path_b) == {})
 
 
 # -- File sharing --------------------------------------------------------------

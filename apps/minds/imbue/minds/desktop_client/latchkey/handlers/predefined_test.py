@@ -156,9 +156,17 @@ def _make_latchkey_with_status(
     """
     binary = tmp_path / "latchkey"
     auth_recording = tmp_path / "auth_latchkey_report.jsonl"
+    # latchkey 3.0.0 reports per-account credentials keyed by account name (the
+    # default account keyed by ``""``); a ``missing`` service has an empty
+    # ``credentials`` object rather than a top-level status.
+    credentials = (
+        {}
+        if credential_status == "missing"
+        else {"": {"credentialType": "rawCurl", "credentialStatus": credential_status}}
+    )
     services_payload = json.dumps(
         {
-            "credentialStatus": credential_status,
+            "credentials": credentials,
             "authOptions": json.loads(auth_options_json),
             "setCredentialsExample": set_credentials_example,
         }
@@ -599,9 +607,9 @@ def test_grant_prefixes_set_example_with_pinned_latchkey_directory(tmp_path: Pat
 def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path: Path) -> None:
     """Simulate the user running ``latchkey auth set`` between two Approve clicks.
 
-    The fake binary flips ``credentialStatus`` from ``missing`` to ``valid``
-    after a sentinel file appears, modelling the user running the suggested
-    command. The first ``grant`` call must return
+    The fake binary flips its ``credentials`` object from empty (no accounts) to
+    a single valid account after a sentinel file appears, modelling the user
+    running the suggested command. The first ``grant`` call must return
     ``NEEDS_MANUAL_CREDENTIALS`` and the second call (after the sentinel
     is written) must return ``GRANTED``.
     """
@@ -613,8 +621,8 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         f"sentinel = {str(sentinel)!r}\n"
         "argv = sys.argv[1:]\n"
         "if argv[:2] == ['services', 'info']:\n"
-        "    status = 'valid' if os.path.exists(sentinel) else 'missing'\n"
-        "    print(json.dumps({'credentialStatus': status, 'authOptions': ['set'], 'setCredentialsExample': 'latchkey auth set slack ...'}))\n"
+        "    credentials = {'': {'credentialType': 'rawCurl', 'credentialStatus': 'valid'}} if os.path.exists(sentinel) else {}\n"
+        "    print(json.dumps({'credentials': credentials, 'authOptions': ['set'], 'setCredentialsExample': 'latchkey auth set slack ...'}))\n"
         "    sys.exit(0)\n"
         "sys.stderr.write('unexpected argv: ' + repr(argv))\n"
         "sys.exit(99)\n"
