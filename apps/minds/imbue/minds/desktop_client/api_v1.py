@@ -1262,7 +1262,12 @@ def _handle_backup_service_update_cancel(agent_id: str) -> EmptyResponse | Respo
             "The operation has started making changes and can no longer be cancelled.",
             409,
         )
-    registry.request_cancel(parsed_id)
+    # request_cancel re-checks under the registry lock: a worker that claimed
+    # begin_mutation (or an operation that finished) between the read above
+    # and this call refuses the cancel, and that refusal must not read as
+    # success.
+    if not registry.request_cancel(parsed_id):
+        return _json_error("The operation can no longer be cancelled.", 409)
     return EmptyResponse()
 
 

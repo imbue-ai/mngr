@@ -2222,6 +2222,22 @@ def test_backup_service_update_cancel_rejects_a_too_late_cancel(tmp_path: Path) 
     assert registry.is_cancel_requested(agent_id) is False
 
 
+def test_backup_service_update_cancel_rejects_a_finished_operation(tmp_path: Path) -> None:
+    # A cancel that arrives after the operation ended must not read as
+    # success: request_cancel refuses (nothing is running to cancel) and the
+    # route must surface that refusal instead of returning 200 over a no-op.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+    registry.complete(agent_id)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
+
+    assert response.status_code == 409
+    assert "no longer be cancelled" in json.loads(response.data)["error"]
+
+
 def test_backup_service_configure_rejects_configure_later_and_invalid_providers(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
