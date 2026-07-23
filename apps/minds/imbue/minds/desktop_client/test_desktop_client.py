@@ -1236,7 +1236,9 @@ def test_accounts_page_shows_empty_when_no_accounts(tmp_path: Path) -> None:
     _authenticate_client(client, auth_store)
     response = client.get("/accounts")
     assert response.status_code == 200
-    assert "No accounts logged in" in response.text
+    island = parse_boot_island(response.text)
+    assert island["accounts"] == {"accounts": [], "is_modal": False}
+    assert "MindsUI.mountAccountsPage" in response.text
 
 
 def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
@@ -1274,12 +1276,12 @@ def test_settings_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
     _authenticate_client(client, auth_store)
     response = client.get("/settings")
     assert response.status_code == 200
-    assert "Report unexpected errors" in response.text
-    report_input = response.text.split('id="report-errors-toggle"')[1].split(">")[0]
-    assert "checked" in report_input
-    # With reporting on, the include-logs row is revealed (not ``hidden``).
-    logs_row = response.text.split('id="include-logs-row"')[1].split(">")[0]
-    assert "hidden" not in logs_row
+    # The toggles render client-side (AppSettings.test.ts covers the reveal
+    # behavior); the island seeds their state from config.
+    island = parse_boot_island(response.text)
+    assert island["settings"]["report_unexpected_errors"] is True
+    assert island["settings"]["is_modal"] is False
+    assert "MindsUI.mountSettingsPage" in response.text
 
 
 def test_settings_modal_requires_auth(tmp_path: Path) -> None:
@@ -1299,17 +1301,13 @@ def test_settings_modal_renders_app_settings_in_overlay(tmp_path: Path) -> None:
     response = client.get("/settings/modal")
     assert response.status_code == 200
     body = response.text
-    # The shared sections (AppSettingsSections.jinja) and their external shell JS.
-    assert "Connectors" in body
-    assert "Master password" in body
-    assert 'id="report-errors-toggle"' in body
-    assert "/_static/app_settings.js" in body
-    # The modal drops the back link (X + backdrop click dismiss instead).
+    # The sections render client-side (the AppSettings modal variant, which
+    # carries the backdrop + host-adapter dismissal and no back link --
+    # covered by AppSettings.test.ts); the island marks the modal variant.
+    island = parse_boot_island(body)
+    assert island["settings"]["is_modal"] is True
+    assert "MindsUI.mountSettingsModal" in body
     assert "Back to workspaces" not in body
-    # Modal chrome: dim backdrop over a transparent body, dismissed through
-    # the Electron modal host (with a plain-page fallback).
-    assert 'id="settings-modal-backdrop"' in body
-    assert "window.minds.closeModal" in body
 
 
 def test_accounts_modal_requires_auth(tmp_path: Path) -> None:
@@ -1329,9 +1327,10 @@ def test_accounts_modal_lists_logged_in_accounts(tmp_path: Path) -> None:
     response = client.get("/accounts/modal")
     assert response.status_code == 200
     body = response.text
-    assert "test@example.com" in body
-    assert 'id="accounts-modal-backdrop"' in body
-    assert "Add account" in body
+    island = parse_boot_island(body)
+    assert island["accounts"]["is_modal"] is True
+    assert [account["email"] for account in island["accounts"]["accounts"]] == ["test@example.com"]
+    assert "MindsUI.mountAccountsModal" in body
 
 
 def _create_sharing_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore, str]:

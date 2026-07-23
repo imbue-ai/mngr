@@ -18,6 +18,7 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.testing import parse_boot_island
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -123,17 +124,19 @@ def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
     response = client.get("/settings")
 
     assert response.status_code == 200
-    body = response.text
-    # The permission sections are back on the app-level settings page.
-    for section in ("Connectors", "Local files", "Workspaces", "Error reporting", "Master password"):
-        assert section in body
-    # The granted connector renders with its workspace + permission label.
-    assert "Slack" in body
-    assert "My Workspace" in body
-    assert "slack-read-all" in body
-    assert 'data-service-name="slack"' in body
-    # The full page keeps its "back to workspaces" link (the modal drops it).
-    assert "Back to workspaces" in body
+    # The sections render client-side (frontend/src/views/AppSettings.ts,
+    # covered by AppSettings.test.ts); the island carries the granted
+    # connector with its workspace + permission label.
+    island = parse_boot_island(response.text)
+    assert island["settings"]["is_modal"] is False
+    assert island["settings"]["permissions_unavailable"] is False
+    (service,) = island["settings"]["services_overview"]
+    assert service["service_name"] == "slack"
+    assert service["display_name"] == "Slack"
+    (grant,) = service["workspace_grants"]
+    assert grant["workspace_name"] == "My Workspace"
+    assert [permission["label"] for permission in grant["permissions"]] == ["slack-read-all"]
+    assert "MindsUI.mountSettingsPage" in response.text
 
 
 def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path) -> None:
@@ -151,11 +154,14 @@ def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path
 
     assert response.status_code == 200
     body = response.text
-    assert "Connectors" in body
-    assert "slack-read-all" in body
-    assert 'data-service-name="slack"' in body
+    island = parse_boot_island(body)
+    assert island["settings"]["is_modal"] is True
+    (service,) = island["settings"]["services_overview"]
+    assert service["service_name"] == "slack"
+    (grant,) = service["workspace_grants"]
+    assert [permission["label"] for permission in grant["permissions"]] == ["slack-read-all"]
+    assert "MindsUI.mountSettingsModal" in body
     assert "Back to workspaces" not in body
-    assert 'id="settings-modal-backdrop"' in body
 
 
 def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
@@ -166,8 +172,12 @@ def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
     response = client.get("/settings")
 
     assert response.status_code == 200
-    # Each category now has its own empty state.
-    assert "No connectors have been added yet." in response.text
+    # The category empty states render client-side; an empty overview island
+    # is what drives them.
+    island = parse_boot_island(response.text)
+    assert island["settings"]["services_overview"] == []
+    assert island["settings"]["file_sharing_grants"] == []
+    assert island["settings"]["workspace_delegation_grants"] == []
 
 
 def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:

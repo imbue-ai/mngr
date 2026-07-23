@@ -67,6 +67,7 @@ from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
 from imbue.minds.desktop_client.chrome_state import ChromeRequestsPayload
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspaceEntry
 from imbue.minds.desktop_client.chrome_state import ChromeWorkspacesPayload
+from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
@@ -437,7 +438,7 @@ def _build_scenarios() -> list[Scenario]:
                 report_unexpected_errors=True,
                 include_error_logs=False,
                 permissions_unavailable=False,
-                has_saved_backup_password=True,
+                is_master_password_set=True,
             ),
         ),
         Scenario(
@@ -446,7 +447,7 @@ def _build_scenarios() -> list[Scenario]:
                 report_unexpected_errors=False,
                 include_error_logs=False,
                 permissions_unavailable=False,
-                has_saved_backup_password=False,
+                is_master_password_set=False,
             ),
         ),
         Scenario(
@@ -464,7 +465,12 @@ def _build_scenarios() -> list[Scenario]:
         ),
         Scenario(
             name="inbox_empty",
-            builder=lambda: render_inbox_page(cards=[], selected_id="", detail_html="", is_empty=True),
+            builder=lambda: render_inbox_page(
+                chrome_boot_state=_landing_boot((), {}),
+                inbox_extras=InboxBootExtras(selected_id="", keep_open=False),
+                detail_html="",
+                is_empty=True,
+            ),
         ),
         # -- Dev styleguide ----------------------------------------------
         Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),

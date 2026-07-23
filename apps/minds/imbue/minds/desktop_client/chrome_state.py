@@ -325,6 +325,76 @@ class AuthErrorBootExtras(FrozenModel):
         return self.model_dump(mode="json")
 
 
+class SettingsBootExtras(FrozenModel):
+    """App-level settings page boot island data (the ``settings`` island key).
+
+    Shared by the full /settings page and the centered settings modal
+    (``is_modal`` selects the card/backdrop chrome). The three overview
+    tuples carry the ``model_dump(mode="json")`` payloads of the
+    permission-overview models
+    (:mod:`~imbue.minds.desktop_client.latchkey.permission_overview`:
+    ``ServicePermissionOverview`` / ``WorkspaceFileSharingGrant`` /
+    ``WorkspaceDelegationGrant``) -- those models are the source of the wire
+    shape, mirrored as TypeScript interfaces in ``chrome_state.ts``. They are
+    not imported here because this contract module must stay free of the
+    latchkey dependency tree."""
+
+    report_unexpected_errors: bool = Field(description="Initial state of the report-unexpected-errors toggle")
+    include_error_logs: bool = Field(description="Initial state of the include-logs toggle")
+    services_overview: tuple[dict[str, Any], ...] = Field(
+        description="Serialized ServicePermissionOverview models (Connectors section)"
+    )
+    file_sharing_grants: tuple[dict[str, Any], ...] = Field(
+        description="Serialized WorkspaceFileSharingGrant models (Local files section)"
+    )
+    workspace_delegation_grants: tuple[dict[str, Any], ...] = Field(
+        description="Serialized WorkspaceDelegationGrant models (Workspaces section)"
+    )
+    permissions_unavailable: bool = Field(
+        description="True when the latchkey gateway could not be reached to read grants"
+    )
+    is_master_password_set: bool = Field(
+        description="Whether any signed-in account already has a non-empty sync master password"
+    )
+    is_modal: bool = Field(description="True for the centered modal variant (card/backdrop chrome, no back link)")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class AccountEntryPayload(FrozenModel):
+    """One signed-in account row in the ``accounts`` island."""
+
+    user_id: str = Field(description="The account's user id (keys the set-default / logout actions)")
+    email: str = Field(description="The account's email address")
+    workspace_count: int = Field(description="How many workspaces the account owns")
+    is_default: bool = Field(description="Whether this is the default account")
+    is_enabled: bool = Field(
+        description="Whether the account's provider block is enabled; False renders the 'Signed out' indicator"
+    )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class AccountsBootExtras(FrozenModel):
+    """Manage-accounts page boot island data (the ``accounts`` island key).
+
+    Shared by the full /accounts page and the centered accounts modal."""
+
+    accounts: tuple[AccountEntryPayload, ...] = Field(description="The signed-in accounts, in listing order")
+    is_modal: bool = Field(description="True for the centered modal variant (card/backdrop chrome)")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return {
+            "accounts": [account.to_payload_dict() for account in self.accounts],
+            "is_modal": self.is_modal,
+        }
+
+
 class ChromeBootState(FrozenModel):
     """A connect-time snapshot of the chrome data, for page boot-state islands.
 

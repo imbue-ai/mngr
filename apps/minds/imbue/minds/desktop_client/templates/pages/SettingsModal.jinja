@@ -1,54 +1,23 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
+{#def boot_state #}
 {#
   Centered "Minds Settings" modal page, hosted in the desktop client's shared
-  modal WebContentsView (the same overlay layer as the sign-in modal) so it
-  covers the whole window including the title bar. Opened from the home
-  screen's bottom-left "Minds Settings" launcher and the workspace switcher's
-  "Minds Settings" entry.
-
-  Shows the same app-level settings sections as the full /settings page
-  (templates/AppSettingsSections.jinja) -- a left nav + panel layout. There
-  is no "back to workspaces" link -- the X (top right) and a backdrop click
-  both dismiss the modal. Escape is handled by the Electron main process for
-  any modal-view page.
+  modal WebContentsView (or the browser ModalHost iframe) so it covers the
+  whole window including the title bar. Opened from the home screen's
+  bottom-left "Minds Settings" launcher and the workspace switcher's "Minds
+  Settings" entry. The body is the mithril settings surface
+  (frontend/src/views/AppSettings.ts, modal variant): same sections as the
+  full /settings page, no "back to workspaces" link -- the X and a backdrop
+  click dismiss through the host adapter; Escape is handled by the Electron
+  main process for any modal-view page.
 #}
 {% set _scripts %}
-<script src="/_static/app_settings.js" defer></script>
 <script>
-  (function () {
-    window.dismissSettingsModal = function () {
-      if (window.minds && window.minds.closeModal) window.minds.closeModal();
-      else window.location.href = "/";
-    };
-    var backdrop = document.getElementById("settings-modal-backdrop");
-    if (backdrop) {
-      backdrop.addEventListener("click", function (e) {
-        if (e.target === backdrop) window.dismissSettingsModal();
-      });
-    }
-  })();
+  window.MindsUI.mountSettingsModal(document.getElementById('settings-modal-root'));
 </script>
 {% endset %}
 <OverlaySurface title="Minds Settings"
                 body_style="-webkit-app-region: no-drag;"
+                :boot_state="boot_state"
                 scripts={{ _scripts }}>
-  <div id="settings-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
-    {# Fixed height (not max-height): the card fills 85% of the window
-       regardless of how much each section holds, so switching tabs never
-       resizes it. The header is pinned and the sections scroll inside. #}
-    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-4xl w-full p-8 h-[85vh] flex flex-col text-left">
-      <DialogCloseButton onclick="dismissSettingsModal()" />
-      <h1 class="type-heading-lg text-primary mb-8 shrink-0">Settings</h1>
-      <div class="flex-1 min-h-0 overflow-y-auto">
-        <AppSettingsSections
-          :report_unexpected_errors="report_unexpected_errors"
-          :include_error_logs="include_error_logs"
-          :services_overview="services_overview"
-          :file_sharing_grants="file_sharing_grants"
-          :workspace_delegation_grants="workspace_delegation_grants"
-          :permissions_unavailable="permissions_unavailable"
-          :is_master_password_set="is_master_password_set" />
-      </div>
-    </div>
-  </div>
+  <div id="settings-modal-root"></div>
 </OverlaySurface>

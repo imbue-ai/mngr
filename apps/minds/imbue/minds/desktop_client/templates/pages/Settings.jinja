@@ -1,27 +1,19 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
+{#def boot_state #}
 {#
   App-level ("Minds") settings as a full page: the browser-mode fallback for
-  the centered settings modal (pages.SettingsModal) the Electron shell shows.
-  Both render the same shared sections (templates/AppSettingsSections.jinja):
-  Connectors, Local files, Workspace delegation, Error reporting, and Master
-  password -- all per-machine / app-level settings (the app, not any single
-  workspace, owns permissions). See AppSettingsSections.jinja for the section
-  docs and the permission-overview model shapes.
+  the centered settings modal (pages.SettingsModal). The whole body is the
+  mithril settings surface (frontend/src/views/AppSettings.ts), mounted from
+  the ``settings`` island slice: Connectors, Local files, Workspace
+  delegation, Error reporting, and Master password -- all per-machine /
+  app-level settings (the app, not any single workspace, owns permissions).
 #}
 {% set _scripts %}
-<script src="/_static/app_settings.js" defer></script>
+<script>
+  window.MindsUI.mountSettingsPage(document.getElementById('settings-root'));
+</script>
 {% endset %}
-<ChromeShell title="Settings" page_label="Settings" :show_back="True" scripts={{ _scripts }}>
+<ChromeShell title="Settings" page_label="Settings" :show_back="True" :boot_state="boot_state" scripts={{ _scripts }}>
   <PageContainer>
-    <h1 class="type-heading-lg text-primary mb-8">Settings</h1>
-    <AppSettingsSections
-      :report_unexpected_errors="report_unexpected_errors"
-      :include_error_logs="include_error_logs"
-      :services_overview="services_overview"
-      :file_sharing_grants="file_sharing_grants"
-      :workspace_delegation_grants="workspace_delegation_grants"
-      :permissions_unavailable="permissions_unavailable"
-      :is_master_password_set="is_master_password_set" />
-    <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
+    <div id="settings-root"></div>
   </PageContainer>
 </ChromeShell>

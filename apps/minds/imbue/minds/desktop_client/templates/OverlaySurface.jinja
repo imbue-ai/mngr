@@ -1,4 +1,4 @@
-{#def title="Minds", body_class="bg-transparent text-primary font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
+{#def title="Minds", body_class="bg-transparent text-primary font-sans antialiased", body_style="", body_attrs="", head="", scripts="", boot_state=None #}
 {#
   Base variant for edge-to-edge transparent surfaces loaded into the shared
   overlay WebContentsView: the overlay host and the modal pages it hosts
@@ -36,4 +36,12 @@
       body_style={{ body_style }}
       body_attrs={{ body_attrs }}
       head={{ head }}
-      scripts={{ _scripts }}>{{ content }}</Base>
+      scripts={{ _scripts }}>
+  {#- ``boot_state`` (a JSON-ready dict) renders the #minds-boot-state island
+     MindsUI mount functions parse. Overlay pages are standalone documents (no
+     ChromeShell / swap engine), so the island simply precedes the content. -#}
+  {%- if boot_state is not none %}
+  <script type="application/json" id="minds-boot-state">{{ boot_state | tojson }}</script>
+  {%- endif %}
+  {{- content -}}
+</Base>

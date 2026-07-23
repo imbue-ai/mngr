@@ -34,6 +34,8 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.chrome_state import AccountEntryPayload
+from imbue.minds.desktop_client.chrome_state import AccountsBootExtras
 from imbue.minds.desktop_client.chrome_state import AuthErrorBootExtras
 from imbue.minds.desktop_client.chrome_state import ChromeBootState
 from imbue.minds.desktop_client.chrome_state import ChromeProvidersPayload
@@ -44,10 +46,12 @@ from imbue.minds.desktop_client.chrome_state import CreatingBootExtras
 from imbue.minds.desktop_client.chrome_state import DestroyingBootExtras
 from imbue.minds.desktop_client.chrome_state import InboxBootExtras
 from imbue.minds.desktop_client.chrome_state import LandingBootExtras
+from imbue.minds.desktop_client.chrome_state import SettingsBootExtras
 from imbue.minds.desktop_client.chrome_state import SharingBootExtras
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
+from imbue.minds.errors import MindError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
@@ -1960,6 +1964,72 @@ def render_dev_styleguide_page() -> str:
     return CATALOG.render("pages.DevStyleguide")
 
 
+def _build_accounts_boot_extras(
+    accounts: Sequence[object],
+    default_account_id: str | None,
+    enabled_by_user_id: Mapping[str, bool] | None,
+    is_modal: bool,
+) -> AccountsBootExtras:
+    """Convert the session-store account objects into the typed island slice.
+
+    ``accounts`` are :class:`~imbue.minds.desktop_client.session_store.AccountSession`
+    models (typed loosely at this boundary, mirroring the render signatures);
+    the attributes below are what the surface renders.
+    """
+    enabled = dict(enabled_by_user_id or {})
+    entries = []
+    for account in accounts:
+        user_id = str(account.user_id)
+        entries.append(
+            AccountEntryPayload(
+                user_id=user_id,
+                email=str(account.email),
+                workspace_count=len(account.workspace_ids),
+                is_default=user_id == (default_account_id or ""),
+                is_enabled=enabled.get(user_id, True),
+            )
+        )
+    return AccountsBootExtras(accounts=tuple(entries), is_modal=is_modal)
+
+
+def _dump_overview_models(models: Sequence[object]) -> tuple[dict[str, Any], ...]:
+    """Serialize permission-overview models for the settings island.
+
+    The models (``ServicePermissionOverview`` / ``WorkspaceFileSharingGrant``
+    / ``WorkspaceDelegationGrant``) are FrozenModels; they stay typed as
+    ``object`` at this boundary so templates.py does not import the latchkey
+    dependency tree. The isinstance check keeps the boundary honest.
+    """
+    dumped = []
+    for model in models:
+        if not isinstance(model, FrozenModel):
+            raise MindError(f"expected a permission-overview FrozenModel, got {type(model)!r}")
+        dumped.append(model.model_dump(mode="json"))
+    return tuple(dumped)
+
+
+def _build_settings_boot_extras(
+    report_unexpected_errors: bool,
+    include_error_logs: bool,
+    services_overview: Sequence[object] | None,
+    file_sharing_grants: Sequence[object] | None,
+    workspace_delegation_grants: Sequence[object] | None,
+    permissions_unavailable: bool,
+    is_master_password_set: bool,
+    is_modal: bool,
+) -> SettingsBootExtras:
+    return SettingsBootExtras(
+        report_unexpected_errors=report_unexpected_errors,
+        include_error_logs=include_error_logs,
+        services_overview=_dump_overview_models(list(services_overview or [])),
+        file_sharing_grants=_dump_overview_models(list(file_sharing_grants or [])),
+        workspace_delegation_grants=_dump_overview_models(list(workspace_delegation_grants or [])),
+        permissions_unavailable=permissions_unavailable,
+        is_master_password_set=is_master_password_set,
+        is_modal=is_modal,
+    )
+
+
 @pure
 def render_accounts_page(
     accounts: Sequence[object],
@@ -1970,16 +2040,17 @@ def render_accounts_page(
 
     ``enabled_by_user_id`` maps each account's user_id to whether its
     ``[providers.imbue_cloud_<slug>]`` block is enabled in settings.toml.
-    The template renders a "Signed out" indicator when an account is
-    present (still in sessions.json) but the user disabled the block
-    via the providers panel.
+    The accounts surface renders a "Signed out" indicator when an account is
+    present (still in sessions.json) but the user disabled the block via the
+    providers panel.
     """
-    return CATALOG.render(
-        "pages.Accounts",
+    extras = _build_accounts_boot_extras(
         accounts=accounts,
-        default_account_id=default_account_id or "",
-        enabled_by_user_id=dict(enabled_by_user_id or {}),
+        default_account_id=default_account_id,
+        enabled_by_user_id=enabled_by_user_id,
+        is_modal=False,
     )
+    return CATALOG.render("pages.Accounts", boot_state={"accounts": extras.to_payload_dict()})
 
 
 @pure
@@ -2009,16 +2080,17 @@ def render_settings_page(
     feeds the sync master-password section's helper copy (whether any signed-in
     account already has a non-empty sync master password).
     """
-    return CATALOG.render(
-        "pages.Settings",
+    extras = _build_settings_boot_extras(
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
-        services_overview=list(services_overview or []),
-        file_sharing_grants=list(file_sharing_grants or []),
-        workspace_delegation_grants=list(workspace_delegation_grants or []),
+        services_overview=services_overview,
+        file_sharing_grants=file_sharing_grants,
+        workspace_delegation_grants=workspace_delegation_grants,
         permissions_unavailable=permissions_unavailable,
         is_master_password_set=is_master_password_set,
+        is_modal=False,
     )
+    return CATALOG.render("pages.Settings", boot_state={"settings": extras.to_payload_dict()})
 
 
 @pure
@@ -2037,16 +2109,17 @@ def render_settings_modal_page(
     as :func:`render_settings_page`, minus the "back to workspaces" link (the
     modal is dismissed via its X or a backdrop click).
     """
-    return CATALOG.render(
-        "pages.SettingsModal",
+    extras = _build_settings_boot_extras(
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
-        services_overview=list(services_overview or []),
-        file_sharing_grants=list(file_sharing_grants or []),
-        workspace_delegation_grants=list(workspace_delegation_grants or []),
+        services_overview=services_overview,
+        file_sharing_grants=file_sharing_grants,
+        workspace_delegation_grants=workspace_delegation_grants,
         permissions_unavailable=permissions_unavailable,
         is_master_password_set=is_master_password_set,
+        is_modal=True,
     )
+    return CATALOG.render("pages.SettingsModal", boot_state={"settings": extras.to_payload_dict()})
 
 
 @pure
@@ -2060,9 +2133,10 @@ def render_accounts_modal_page(
     Hosted in the shared modal WebContentsView; the full accounts page
     (:func:`render_accounts_page`) remains as the browser-mode fallback.
     """
-    return CATALOG.render(
-        "pages.AccountsModal",
+    extras = _build_accounts_boot_extras(
         accounts=accounts,
-        default_account_id=default_account_id or "",
-        enabled_by_user_id=dict(enabled_by_user_id or {}),
+        default_account_id=default_account_id,
+        enabled_by_user_id=enabled_by_user_id,
+        is_modal=True,
     )
+    return CATALOG.render("pages.AccountsModal", boot_state={"accounts": extras.to_payload_dict()})

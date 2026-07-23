@@ -240,3 +240,96 @@ export interface AuthErrorBootExtras {
 export interface AuthErrorBootIsland {
   auth_error: AuthErrorBootExtras;
 }
+
+// -- App-level settings island ---------------------------------------------
+// Mirrors of the permission-overview models in
+// latchkey/permission_overview.py (the Python source of these shapes) plus
+// SettingsBootExtras in chrome_state.py.
+
+export interface GrantedPermissionPayload {
+  label: string;
+  // Plain-English tooltip; empty when the catalog has none.
+  description: string;
+}
+
+export interface WorkspaceServiceGrantPayload {
+  workspace_agent_id: string;
+  workspace_name: string;
+  host_id: string;
+  // Workspace accent color hex (#rrggbb) for the card header dot.
+  color: string;
+  permissions: GrantedPermissionPayload[];
+}
+
+export interface ServicePermissionOverviewPayload {
+  // Raw service name (e.g. "slack"); the revoke action key.
+  service_name: string;
+  display_name: string;
+  workspace_grants: WorkspaceServiceGrantPayload[];
+}
+
+export interface SharedPathPayload {
+  path: string;
+  // "read" or "read and write".
+  access_label: string;
+}
+
+export interface WorkspaceFileSharingGrantPayload {
+  workspace_agent_id: string;
+  workspace_name: string;
+  host_id: string;
+  color: string;
+  paths: SharedPathPayload[];
+}
+
+export interface WorkspaceDelegationVerbPayload {
+  // Detent verb schema name (e.g. "minds-workspaces-destroy"); revoke key.
+  verb_permission: string;
+  label: string;
+  description: string;
+  is_all_workspaces: boolean;
+  target_names: string[];
+}
+
+export interface WorkspaceDelegationGrantPayload {
+  workspace_agent_id: string;
+  workspace_name: string;
+  host_id: string;
+  color: string;
+  verbs: WorkspaceDelegationVerbPayload[];
+}
+
+// Mirror of SettingsBootExtras in chrome_state.py.
+export interface SettingsBootExtras {
+  report_unexpected_errors: boolean;
+  include_error_logs: boolean;
+  services_overview: ServicePermissionOverviewPayload[];
+  file_sharing_grants: WorkspaceFileSharingGrantPayload[];
+  workspace_delegation_grants: WorkspaceDelegationGrantPayload[];
+  permissions_unavailable: boolean;
+  is_master_password_set: boolean;
+  is_modal: boolean;
+}
+
+export interface SettingsBootIsland {
+  settings: SettingsBootExtras;
+}
+
+// Mirror of AccountEntryPayload / AccountsBootExtras in chrome_state.py.
+export interface AccountEntryPayload {
+  user_id: string;
+  email: string;
+  workspace_count: number;
+  is_default: boolean;
+  // False renders the "Signed out" indicator (provider block disabled).
+  is_enabled: boolean;
+}
+
+export interface AccountsBootExtras {
+  accounts: AccountEntryPayload[];
+  is_modal: boolean;
+}
+
+export interface AccountsBootIsland {
+  accounts: AccountsBootExtras;
+}

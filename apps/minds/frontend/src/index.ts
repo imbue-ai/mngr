@@ -7,6 +7,8 @@
 // section (never from #local-page-scripts, which would re-run it per swap);
 // the per-page mount calls live in #local-page-scripts.
 import { setAccentScopeAgentId, setContentUrl, setDisplayedWorkspaceAgentId } from "./store";
+import { mountAccountsModal, mountAccountsPage } from "./views/AccountsPage";
+import { mountSettingsModal, mountSettingsPage } from "./views/AppSettings";
 import { mountAuthError, mountLoginPrompt } from "./views/AuthTextPages";
 import { mountConsent } from "./views/ConsentPage";
 import { mountCreating } from "./views/CreatingPage";
@@ -22,6 +24,8 @@ import { mountWelcome } from "./views/WelcomePage";
 import { mountWorkspaceMenu } from "./views/WorkspaceMenu";
 
 export interface MindsUINamespace {
+  mountAccountsModal: typeof mountAccountsModal;
+  mountAccountsPage: typeof mountAccountsPage;
   mountAuthError: typeof mountAuthError;
   mountConsent: typeof mountConsent;
   mountCreating: typeof mountCreating;
@@ -34,6 +38,8 @@ export interface MindsUINamespace {
   mountStyleguidePrimitives: typeof mountStyleguidePrimitives;
   mountStyleguideWorkspaceRows: typeof mountStyleguideWorkspaceRows;
   mountLoginPrompt: typeof mountLoginPrompt;
+  mountSettingsModal: typeof mountSettingsModal;
+  mountSettingsPage: typeof mountSettingsPage;
   mountTitleBar: typeof mountTitleBar;
   mountWelcome: typeof mountWelcome;
   mountWorkspaceMenu: typeof mountWorkspaceMenu;
@@ -57,6 +63,8 @@ declare global {
 adoptParentModalBridge();
 
 window.MindsUI = {
+  mountAccountsModal,
+  mountAccountsPage,
   mountAuthError,
   mountConsent,
   mountCreating,
@@ -69,6 +77,8 @@ window.MindsUI = {
   mountStyleguidePrimitives,
   mountStyleguideWorkspaceRows,
   mountLoginPrompt,
+  mountSettingsModal,
+  mountSettingsPage,
   mountTitleBar,
   mountWelcome,
   mountWorkspaceMenu,
