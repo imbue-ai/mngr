@@ -1207,7 +1207,7 @@ def _dispatch_backup_worker(
 
 
 def _is_stop_chats_requested() -> bool:
-    """Read the shared ``{"stop_chats"?: bool}`` body of the update/restore routes."""
+    """Read the update route's ``{"stop_chats"?: bool}`` body (restore parses its richer body inline)."""
     body = request.get_json(silent=True, force=True) or {}
     return bool(body.get("stop_chats", False))
 
