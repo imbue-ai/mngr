@@ -53,11 +53,14 @@
   {% set _body_class = body_class if body_class else "font-sans antialiased" %}
   {% set _body_style = body_style if body_style else "background-color: var(--titlebar-bg, var(--c-surface-primary));" %}
 {% else %}
-  {# Local pages: neutral page surface, and the body content sits below the
-     fixed 38px titlebar (which is out of flow). pt-[38px] pairs with a page's
-     own ``min-h-[calc(100dvh_-_38px)]`` centering so the centered content lands
-     in the region below the titlebar rather than behind it. #}
-  {% set _body_class = (body_class if body_class else "bg-surface-primary text-primary font-sans antialiased") ~ " pt-[38px]" %}
+  {# Local pages: neutral page surface. The document is viewport-locked (see
+     _html_class below); the page scrolls inside #local-page-scroll, pinned
+     below the fixed 38px titlebar -- so the document scrollbar never exists,
+     the titlebar never shifts with gutter differences between pages, and a
+     page's scrollbar (and scroll position) is torn out with the page on every
+     in-place swap. A page's own ``min-h-[calc(100dvh_-_38px)]`` centering
+     matches the container's height exactly. #}
+  {% set _body_class = body_class if body_class else "bg-surface-primary text-primary font-sans antialiased" %}
   {% set _body_style = body_style %}
 {% endif %}
 {% if accent %}
@@ -65,20 +68,22 @@
      first paint is workspace-tinted. chrome.js takes over live updates. #}
   {% set _body_style = _body_style ~ " --titlebar-bg: " ~ accent ~ ";" %}
 {% endif %}
-{# The agent content surface (pages.Chrome) is edge-to-edge, so it opts out of
-   the global stable scrollbar gutter; scrolling local pages keep the gutter to
-   avoid a sideways layout shift when a classic scrollbar appears. #}
-{% set _html_class = "no-scrollbar-gutter agent-surface" if is_agent_content_surface else "" %}
+{# BOTH modes are edge-to-edge, viewport-locked documents now (local pages
+   scroll inside #local-page-scroll), so both opt out of the document
+   scrollbar gutter -- the titlebar spans the full window width on every page
+   and its right-edge buttons never shift. #}
+{% set _html_class = "no-scrollbar-gutter agent-surface" if is_agent_content_surface else "no-scrollbar-gutter local-surface" %}
 {% set _head %}
 <style>
   /* Things that can't easily be expressed as Tailwind utilities. */
-  /* Viewport lock for the agent content surface. Keyed off the html class
+  /* Viewport lock for both shell modes. Keyed off the html class
      (rather than emitted conditionally) because the swap engine replaces the
      html/body classes on every in-place hub swap but never touches the head:
      a conditional rule would leak the previous page's mode across swaps
      (e.g. leaving a workspace wrapper's overflow:hidden on the Home page,
      making it unscrollable). */
-  html.agent-surface, html.agent-surface body { height: 100%; overflow: hidden; }
+  html.agent-surface, html.agent-surface body,
+  html.local-surface, html.local-surface body { height: 100%; overflow: hidden; }
   #minds-titlebar { -webkit-app-region: drag; }
   #minds-titlebar button { -webkit-app-region: no-drag; }
   /* When the inbox modal (or any modal hosted in the main process's
@@ -213,8 +218,24 @@
      (and #local-page-scripts) in place for hub-page navigation, leaving the
      titlebar + switcher + shell scripts untouched. ``display: contents`` keeps
      it layout-transparent so pages whose body classes flex-center their
-     content (Creating, Welcome, ...) are unaffected by the extra wrapper. #}
+     content (Creating, Welcome, ...) are unaffected by the extra wrapper.
+
+     On local pages the content additionally sits inside #local-page-scroll,
+     the page's own scroll container pinned below the fixed titlebar: its
+     scrollbar starts under the bar and ends at the window bottom, and --
+     living inside the swappable root -- it is removed (scrollbar, scroll
+     position and all) with the page on every swap. Its stable scrollbar
+     gutter keeps page content from shifting sideways between scrolling and
+     non-scrolling pages. The agent surface keeps the bare root (its content
+     is the fixed mirror + iframe). #}
   <div id="local-page-root" style="display: contents">
+    {%- if is_agent_content_surface %}
     {{ content }}
+    {%- else %}
+    <div id="local-page-scroll"
+         class="fixed left-0 right-0 bottom-0 top-[38px] overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]">
+      {{ content }}
+    </div>
+    {%- endif %}
   </div>
 </Base>

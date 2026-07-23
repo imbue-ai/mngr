@@ -882,9 +882,11 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     assert opted_out in render_sidebar_page()
     assert opted_out in render_help_page(include_logs_setting=False, workspace_agent_id="")
     assert opted_out in render_inbox_page(cards=())
-    # Normal scrolling content pages keep the reserved gutter so their layout
-    # doesn't shift sideways when a classic scrollbar appears.
-    assert '<html lang="en">' in render_landing_page(accessible_agent_ids=())
+    # Local pages are viewport-locked too and scroll inside #local-page-scroll
+    # (whose own stable gutter absorbs classic-scrollbar layout shifts), so the
+    # document gutter is opted out everywhere and the titlebar never shifts.
+    assert '<html lang="en" class="no-scrollbar-gutter local-surface">' in render_landing_page(accessible_agent_ids=())
+    assert 'id="local-page-scroll"' in render_landing_page(accessible_agent_ids=())
 
 
 def test_render_sidebar_page_contains_workspace_list() -> None:
