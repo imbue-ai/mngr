@@ -197,6 +197,10 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
     assert "Discovering agents" in html
     assert "reload" in html
+    # Discovery may never surface the remembered workspaces (e.g. stale
+    # last-good entries), so the discovering state must not be a dead end:
+    # it always offers the create affordance.
+    assert 'href="/create"' in html
     assert "No workspaces yet" not in html
     assert "/goto/" not in html
 
