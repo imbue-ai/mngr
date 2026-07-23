@@ -19,6 +19,7 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostOfflineError
+from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -38,6 +39,11 @@ class MessageResult(MutableModel):
     )
     failed_agents: list[tuple[str, str]] = Field(
         default_factory=list, description="List of (agent_name, error_message) tuples"
+    )
+    blocked_agents: list[tuple[str, str]] = Field(
+        default_factory=list,
+        description="List of (agent_name, dialog_description) tuples for messages that were delivered but "
+        "left the agent stuck on an unresolved blocking dialog",
     )
 
 
@@ -241,6 +247,17 @@ def _send_message_to_agent(
             result.successful_agents.append(agent_name)
         if on_success:
             on_success(agent_name)
+    except MessageDeliveredButBlockedError as e:
+        # The message WAS delivered/accepted; only a post-delivery blocking dialog could not
+        # be cleared. Record it separately from a real send failure so the CLI can surface a
+        # distinct exit code. Preserve the original exception type on abort re-raise.
+        error_msg = str(e)
+        with result_lock:
+            result.blocked_agents.append((agent_name, error_msg))
+        if on_error:
+            on_error(agent_name, error_msg)
+        if error_behavior == ErrorBehavior.ABORT:
+            raise
     except MngrError as e:
         error_msg = str(e)
         with result_lock:
@@ -260,6 +277,10 @@ def send_message_with_resend_guidance(agent: AgentInterface, message: str, situa
     """
     try:
         require_interactive_agent(agent).send_message(message)
+    except MessageDeliveredButBlockedError:
+        # The message WAS delivered; only a post-delivery dialog is blocking. Do not reframe
+        # this as "NOT delivered" -- propagate it unchanged so its distinct meaning survives.
+        raise
     except SendMessageError as e:
         raise SendMessageError(
             e.agent_name,
