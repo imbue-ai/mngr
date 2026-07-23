@@ -30,14 +30,14 @@ const RESTIC_VERSION = '0.18.1';
 const DESYNC_VERSION = '1.0.3';
 
 // datalib "curl" distribution: the dispatch curl + the Chrome-impersonating
-// curl it fronts (see the `frankweiler-curl-<triple>.tar.gz` release asset).
+// curl it fronts (see the `curl-<triple>.tar.gz` release asset).
 // The latchkey gateway runs the dispatch curl as its LATCHKEY_CURL so marked
 // requests get Chrome TLS impersonation. Only macOS arm64 and Linux x86_64
 // (glibc) are bundled -- datalib publishes no x86_64-apple-darwin, and there
 // is no impersonation on Windows.
 //
 // FOLLOWUP: point DATALIB_CURL_VERSION at the first datalib release that
-// contains the `frankweiler-curl-*` tarballs (the dispatch curl was added
+// contains the `curl-*` tarballs (the dispatch curl was added
 // after v0.21.0), and replace the PENDING_DATALIB_RELEASE sentinels in
 // EXPECTED_SHA256 with the real hashes. Until then the curl download is a
 // loud no-op (see downloadLatchkeyCurl) so builds stay green and latchkey
@@ -76,9 +76,9 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_linux_amd64.tar.gz':    'ad4dd9e91b57eef8627d2038df09281d7f38dca02eeca0e66592b54087619953',
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
   // FOLLOWUP: replace these sentinels with the real hashes from the datalib
-  // release named by DATALIB_CURL_VERSION (`frankweiler-curl-<triple>.tar.gz.sha256`).
-  'frankweiler-curl-aarch64-apple-darwin.tar.gz':      PENDING_DATALIB_RELEASE,
-  'frankweiler-curl-x86_64-unknown-linux-gnu.tar.gz':  PENDING_DATALIB_RELEASE,
+  // release named by DATALIB_CURL_VERSION (`curl-<triple>.tar.gz.sha256`).
+  'curl-aarch64-apple-darwin.tar.gz':      PENDING_DATALIB_RELEASE,
+  'curl-x86_64-unknown-linux-gnu.tar.gz':  PENDING_DATALIB_RELEASE,
 };
 
 const MAX_REDIRECTS = 5;
@@ -143,7 +143,7 @@ function getLatchkeyCurlDownloadInfo({ platform, arch }) {
   if (triple === null) {
     return null;
   }
-  const filename = `frankweiler-curl-${triple}.tar.gz`;
+  const filename = `curl-${triple}.tar.gz`;
   return {
     filename,
     url: `https://github.com/${DATALIB_REPO}/releases/download/${DATALIB_CURL_VERSION}/${filename}`,
@@ -379,7 +379,7 @@ async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
 
   const tarPath = path.join(curlDir, 'curl.tar.gz');
   fs.writeFileSync(tarPath, archive);
-  // The tarball is `frankweiler-curl-<version>-<triple>/<two binaries>`;
+  // The tarball is `curl-<version>-<triple>/<two binaries>`;
   // strip the single inner dir so the binaries land directly in curlDir.
   execSync(`tar xzf "${tarPath}" -C "${curlDir}" --strip-components=1`, { stdio: 'inherit' });
   fs.unlinkSync(tarPath);

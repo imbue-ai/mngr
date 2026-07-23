@@ -60,7 +60,7 @@ LATCHKEY_VERSION: Final[str] = "2.21.0"
 # impersonation, while every other request passes through to the system curl.
 #
 # FOLLOWUP: point this at the first datalib release that ships the
-# ``frankweiler-curl-<triple>.tar.gz`` tarballs (the dispatch curl was added
+# ``curl-<triple>.tar.gz`` tarballs (the dispatch curl was added
 # after v0.21.0). Until such a release exists the VPS fetch 404s and is
 # skipped (best-effort -- it must not break provisioning); the gateway then
 # uses system curl, unchanged.
@@ -296,7 +296,7 @@ def _build_ensure_installed_script(
             "    *) _ci_triple= ;;",
             "  esac",
             '  if [ -n "$_ci_triple" ]; then',
-            '    _ci_tb="frankweiler-curl-${_ci_triple}.tar.gz"',
+            '    _ci_tb="curl-${_ci_triple}.tar.gz"',
             f'    _ci_url="https://github.com/{_DATALIB_REPO}/releases/download/{DATALIB_CURL_VERSION}/${{_ci_tb}}"',
             '    _ci_tmp="$(mktemp -d)"',
             '    if curl -fsSL --retry 3 --retry-delay 2 -o "${_ci_tmp}/${_ci_tb}" "$_ci_url" \\',

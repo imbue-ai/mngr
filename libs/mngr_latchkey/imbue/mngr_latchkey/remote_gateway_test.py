@@ -169,7 +169,7 @@ def test_ensure_latchkey_installed_best_effort_installs_impersonating_curl() -> 
     command = _stub(outer).recorded[0].command
     # Fetches the datalib curl tarball for the VPS arch from the pinned release.
     assert f"releases/download/{DATALIB_CURL_VERSION}/" in command
-    assert "frankweiler-curl-${_ci_triple}.tar.gz" in command
+    assert "curl-${_ci_triple}.tar.gz" in command
     # Installs both the dispatch curl and the impersonator it fronts.
     assert _CURL_DISPATCH_PATH.rsplit("/", 1)[1] in command
     assert _CURL_IMPERSONATE_PATH.rsplit("/", 1)[1] in command
