@@ -7,6 +7,7 @@
 import m from "mithril";
 
 import type { AssociateAccountPayload } from "../chrome_state";
+import { getHost } from "../host";
 import { buttonClasses, SELECT_CLASSES } from "../ui";
 import { Icon } from "./Icon";
 
@@ -90,7 +91,22 @@ export function AssociatePrompt(): m.Component<AssociatePromptAttrs> {
                 : null,
             ]
           : m("p", { class: "mt-2" }, [
-              m("a", { href: "/auth/login", class: "text-accent hover:underline" }, "Sign in or create an account"),
+              m(
+                "a",
+                {
+                  href: "/auth/login",
+                  class: "text-accent hover:underline",
+                  // Routed through the host so the link never navigates an
+                  // overlay iframe to the full-page auth flow (Electron lands
+                  // it in the content surface and dismisses the modal); the
+                  // href stays as the standalone fallback.
+                  onclick: (event: Event) => {
+                    event.preventDefault();
+                    getHost().navigate("/auth/login");
+                  },
+                },
+                "Sign in or create an account",
+              ),
               " to enable sharing.",
             ]),
       ]);

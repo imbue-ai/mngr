@@ -16,7 +16,10 @@ import m from "mithril";
 
 import { normalizeApiError } from "../api_errors";
 import type { SharingBootExtras, SharingBootIsland } from "../chrome_state";
+import { getHost } from "../host";
 import { MindsUIError, mountWithTeardown, readBootState, requireElement } from "../mount";
+import { AssociatePrompt } from "./AssociatePrompt";
+import { DialogCloseButton } from "./DialogCloseButton";
 import { TEXT_INPUT_CLASSES, buttonClasses } from "../ui";
 import { Spinner } from "./Spinner";
 
@@ -70,13 +73,6 @@ const ACL_ROW_VARIANTS: Record<AclVariant, string> = {
   added: "bg-success/12 border-success/30",
   removed: "bg-important/12 border-important/30 line-through",
 };
-
-export interface MountSharingEditorOptions {
-  // Modal-mode Cancel: dismiss the overlay (the modal page's inline script
-  // supplies its dismissSharingModal). Unused on the full page, whose Cancel
-  // is a link back to workspace settings.
-  onDismiss?: () => void;
-}
 
 // One controller per mount; the editor and the heading (a second, sibling
 // mount root) both render from it.
@@ -525,25 +521,112 @@ export function SharingEditor(): m.Component<{ controller: SharingController }> 
   };
 }
 
-// Mount the sharing editor into its container and take over the
-// server-rendered #page-heading (a second mount root: the two wrappers place
-// the heading differently -- the modal pins it above its scroll area).
-export function mountSharingEditor(target: Element | null, options?: MountSharingEditorOptions): void {
-  const el = requireElement(target, "sharing editor container");
+function readSharingIsland(): SharingBootIsland["sharing"] {
   const island = readBootState() as SharingBootIsland;
   if (island.sharing === undefined) {
     throw new MindsUIError("sharing boot island is missing the sharing slice");
   }
-  const controller = new SharingController(island.sharing, options?.onDismiss ?? ((): void => undefined));
+  return island.sharing;
+}
+
+// The unassociated-workspace heading (the editor's SharingHeading needs a
+// live controller; this static twin covers the associate state).
+function staticHeading(extras: SharingBootIsland["sharing"]): m.Children {
+  const wsName = extras.ws_name !== "" ? extras.ws_name : extras.agent_id;
+  return [
+    "Share ",
+    m("code", { class: "code-pill" }, extras.service_name),
+    " in ",
+    extras.is_modal || extras.mngr_forward_origin === ""
+      ? wsName
+      : m(
+          "a",
+          { href: `${extras.mngr_forward_origin}/goto/${extras.agent_id}/`, class: "text-accent hover:underline" },
+          wsName,
+        ),
+    "?",
+  ];
+}
+
+// Full-page sharing editor (/sharing/<agent>/<service>): heading + editor,
+// or the associate prompt when the workspace has no account yet.
+export function mountSharingPage(target: Element | null): void {
+  const el = requireElement(target, "sharing page container");
+  const extras = readSharingIsland();
+  if (!extras.has_account) {
+    mountWithTeardown(el, {
+      view: () => [
+        m("h1", { id: "page-heading", class: "type-heading-lg text-primary" }, staticHeading(extras)),
+        m(AssociatePrompt, {
+          agentId: extras.agent_id,
+          accounts: extras.associate_accounts,
+          redirectUrl: extras.redirect_url,
+        }),
+      ],
+    });
+    return;
+  }
+  const controller = new SharingController(extras, (): void => undefined);
   mountWithTeardown(el, {
-    view: () => m(SharingEditor, { controller }),
+    view: () => [
+      m("h1", { id: "page-heading", class: "type-heading-lg text-primary" }, m(SharingHeading, { controller })),
+      m(SharingEditor, { controller }),
+    ],
     // Released with the mount so a torn-down page's readiness poll loop
     // stops probing (mirrors InboxList's subscription release).
     onremove: () => controller.dispose(),
   });
-  const heading = document.getElementById("page-heading");
-  if (heading !== null) {
-    mountWithTeardown(heading, { view: () => m(SharingHeading, { controller }) });
-  }
   void controller.load();
+}
+
+// Centered sharing modal (/sharing/<agent>/<service>/modal, hosted in the
+// shared overlay surface): dim backdrop + fixed-height card (the heading is
+// pinned; the body scrolls inside). Cancel, the X, and a backdrop click all
+// dismiss through the host adapter; a standalone page falls back to the
+// workspace's settings screen.
+export function mountSharingModal(target: Element | null): void {
+  const el = requireElement(target, "sharing modal container");
+  const extras = readSharingIsland();
+  const dismiss = (): void => {
+    if (window.minds !== undefined) getHost().closeModal();
+    else window.location.href = `/workspace/${encodeURIComponent(extras.agent_id)}/settings`;
+  };
+  const controller = extras.has_account ? new SharingController(extras, dismiss) : null;
+  mountWithTeardown(el, {
+    view: () =>
+      m(
+        "div",
+        {
+          id: "sharing-modal-backdrop",
+          class: "fixed inset-0 flex items-center justify-center bg-surface-overlay p-4",
+          onclick: (event: Event) => {
+            if (event.target === event.currentTarget) dismiss();
+          },
+        },
+        m(
+          "div",
+          {
+            class:
+              "relative bg-surface-primary rounded-lg shadow-overlay max-w-2xl w-full p-8 h-[70vh] flex flex-col text-left",
+          },
+          [
+            m(DialogCloseButton, { onclick: dismiss }),
+            m(
+              "h1",
+              { id: "page-heading", class: "type-heading-lg text-primary shrink-0" },
+              controller !== null ? m(SharingHeading, { controller }) : staticHeading(extras),
+            ),
+            m(
+              "div",
+              { class: "flex-1 min-h-0 overflow-y-auto" },
+              controller !== null
+                ? m(SharingEditor, { controller })
+                : m(AssociatePrompt, { agentId: extras.agent_id, accounts: extras.associate_accounts }),
+            ),
+          ],
+        ),
+      ),
+    onremove: () => controller?.dispose(),
+  });
+  if (controller !== null) void controller.load();
 }

@@ -17,7 +17,7 @@ import { mountDestroying } from "./views/DestroyingPage";
 import { mountInboxList } from "./views/InboxList";
 import { mountLanding } from "./views/LandingPage";
 import { adoptParentModalBridge, mountModalHost } from "./views/ModalHost";
-import { mountSharingEditor } from "./views/SharingEditor";
+import { mountSharingModal, mountSharingPage } from "./views/SharingEditor";
 import { mountStyleguidePrimitives, mountStyleguideWorkspaceRows } from "./views/StyleguideRows";
 import { mountStyleguideSmoke } from "./views/StyleguideSmoke";
 import { mountTitleBar } from "./views/TitleBar";
@@ -36,7 +36,8 @@ export interface MindsUINamespace {
   mountInboxList: typeof mountInboxList;
   mountLanding: typeof mountLanding;
   mountModalHost: typeof mountModalHost;
-  mountSharingEditor: typeof mountSharingEditor;
+  mountSharingModal: typeof mountSharingModal;
+  mountSharingPage: typeof mountSharingPage;
   mountStyleguideSmoke: typeof mountStyleguideSmoke;
   mountStyleguidePrimitives: typeof mountStyleguidePrimitives;
   mountStyleguideWorkspaceRows: typeof mountStyleguideWorkspaceRows;
@@ -77,7 +78,8 @@ window.MindsUI = {
   mountInboxList,
   mountLanding,
   mountModalHost,
-  mountSharingEditor,
+  mountSharingModal,
+  mountSharingPage,
   mountStyleguideSmoke,
   mountStyleguidePrimitives,
   mountStyleguideWorkspaceRows,

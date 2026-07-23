@@ -1,78 +1,23 @@
-{#def agent_id, service_name, ws_name="", account_email="", has_account=True, accounts=[], boot_state=None #}
+{#def boot_state #}
 {#
   Centered sharing-editor modal page, hosted in the desktop client's shared
-  modal WebContentsView (the same overlay layer as the Minds Settings modal)
-  so it covers the whole window including the title bar. Opened from
+  modal WebContentsView (or the browser ModalHost iframe). Opened from
   Workspace Settings' "Manage sharing" buttons; the full /sharing page stays
-  as the browser-mode fallback.
-
-  Shows the same editor body as the full page (templates/SharingEditor.jinja:
-  the mithril SharingEditor's mount container + island, mounted below with
-  is_modal riding the island). The heading renders the workspace / account
-  names as PLAIN TEXT -- never links: a link here would navigate this overlay
-  iframe to a full page and strand the app inside the modal (the component's
-  heading takeover keeps the same plain-links rule from the island's
-  ``is_modal``). There is no Cancel-to-workspace-settings link -- Cancel, the
-  X (top right), and a backdrop click all dismiss the modal. Escape is
-  handled by the Electron main process for any modal-view page.
+  as the browser-mode fallback. The body is the mithril sharing surface's
+  modal variant (frontend/src/views/SharingEditor.ts): backdrop + fixed
+  card, a plain-links heading (nothing may navigate the overlay iframe),
+  the editor or associate prompt, and dismissal through the host adapter
+  (Cancel, the X, and backdrop clicks; Escape is handled by the Electron
+  main process for any modal-view page).
 #}
 {% set _scripts %}
 <script>
-  (function () {
-    var backdrop = document.getElementById("sharing-modal-backdrop");
-    // The agent id rides on a data attribute (not interpolated into this
-    // script) so the template never templates JS.
-    var settingsPath = "/workspace/" + (backdrop ? backdrop.dataset.agentId : "") + "/settings";
-    window.dismissSharingModal = function () {
-      if (window.minds && window.minds.closeModal) window.minds.closeModal();
-      else window.location.href = settingsPath;
-    };
-    if (backdrop) {
-      backdrop.addEventListener("click", function (e) {
-        if (e.target === backdrop) window.dismissSharingModal();
-      });
-    }
-    // The Associate prompt's "Sign in or create an account" link must not
-    // navigate this overlay iframe to the full-page auth flow (a sign-in
-    // completed there would strand the whole app inside the modal). Land it
-    // in the content view and dismiss (or, as a standalone page, navigate).
-    var signinLink = document.querySelector('a[href="/auth/login"]');
-    if (signinLink) {
-      signinLink.addEventListener("click", function (e) {
-        e.preventDefault();
-        if (window.minds && window.minds.navigateContent) window.minds.navigateContent("/auth/login");
-        else window.location.href = "/auth/login";
-      });
-    }
-    var root = document.getElementById("sharing-editor-root");
-    // Absent in the Associate (no-account) state -- nothing to mount.
-    if (root) window.MindsUI.mountSharingEditor(root, { onDismiss: window.dismissSharingModal });
-  })();
+  window.MindsUI.mountSharingModal(document.getElementById('sharing-modal-root'));
 </script>
 {% endset %}
 <OverlaySurface title="Sharing"
                 body_style="-webkit-app-region: no-drag;"
+                :boot_state="boot_state"
                 scripts={{ _scripts }}>
-  <div id="sharing-modal-backdrop" data-agent-id="{{ agent_id }}" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
-    {# Fixed height like the settings modal, but proportionate to this
-       smaller editor: the card never resizes as the editor's state changes
-       (share URL appearing, access-list rows, the Associate prompt). The
-       heading is pinned; the body scrolls inside. #}
-    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-2xl w-full p-8 h-[70vh] flex flex-col text-left">
-      <DialogCloseButton onclick="dismissSharingModal()" />
-      <h1 id="page-heading" class="type-heading-lg text-primary shrink-0">
-        Share <code class="code-pill">{{ service_name }}</code>
-        in {{ ws_name or agent_id }}
-        {%- if account_email %} ({{ account_email }}){% endif %}?
-      </h1>
-
-      <div class="flex-1 min-h-0 overflow-y-auto">
-        <SharingEditor
-          :agent_id="agent_id"
-          :has_account="has_account"
-          :accounts="accounts"
-          :boot_state="boot_state" />
-      </div>
-    </div>
-  </div>
+  <div id="sharing-modal-root"></div>
 </OverlaySurface>

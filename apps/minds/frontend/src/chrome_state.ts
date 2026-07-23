@@ -179,6 +179,13 @@ export interface SharingBootExtras {
   // Bare origin of the mngr forward plugin for the page heading's workspace
   // link; empty in the modal.
   mngr_forward_origin: string;
+  // Whether the workspace has an associated account; false renders the
+  // associate prompt instead of the editor.
+  has_account: boolean;
+  // Signed-in accounts offered by the associate prompt (when unassociated).
+  associate_accounts: AssociateAccountPayload[];
+  // Where a successful association returns to; empty reloads in place.
+  redirect_url: string;
 }
 
 export interface SharingBootIsland {

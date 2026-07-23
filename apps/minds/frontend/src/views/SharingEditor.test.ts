@@ -2,7 +2,7 @@ import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SharingBootExtras } from "../chrome_state";
-import { mountSharingEditor } from "./SharingEditor";
+import { mountSharingModal, mountSharingPage } from "./SharingEditor";
 
 const AGENT = "agent-" + "c".repeat(32);
 const STATUS_URL = `/api/v1/workspaces/${AGENT}/sharing/web`;
@@ -10,6 +10,7 @@ const STATUS_URL = `/api/v1/workspaces/${AGENT}/sharing/web`;
 afterEach(() => {
   window.dispatchEvent(new Event("minds:page-teardown"));
   document.body.innerHTML = "";
+  delete window.minds;
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -23,6 +24,9 @@ function extras(overrides: Partial<SharingBootExtras> = {}): SharingBootExtras {
     initial_emails: [],
     is_modal: false,
     mngr_forward_origin: "https://localhost:8421",
+    has_account: true,
+    associate_accounts: [],
+    redirect_url: "",
     ...overrides,
   };
 }
@@ -48,19 +52,20 @@ function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json" } });
 }
 
-function mountFixture(bootExtras: SharingBootExtras, onDismiss?: () => void): { root: HTMLElement; heading: HTMLElement } {
+function mountFixture(bootExtras: SharingBootExtras): { root: HTMLElement; heading: HTMLElement } {
   const island = document.createElement("script");
   island.type = "application/json";
   island.id = "minds-boot-state";
   island.textContent = JSON.stringify({ sharing: bootExtras });
   document.body.appendChild(island);
-  const heading = document.createElement("h1");
-  heading.id = "page-heading";
-  document.body.appendChild(heading);
   const root = document.createElement("div");
-  root.id = "sharing-editor-root";
+  root.id = "sharing-root";
   document.body.appendChild(root);
-  mountSharingEditor(root, onDismiss !== undefined ? { onDismiss } : undefined);
+  if (bootExtras.is_modal) mountSharingModal(root);
+  else mountSharingPage(root);
+  // The heading renders inside the mount now; expose it like the old
+  // takeover fixture did so assertions stay readable.
+  const heading = root.querySelector("#page-heading") as HTMLElement;
   return { root, heading };
 }
 
@@ -277,8 +282,9 @@ describe("SharingEditor submission", () => {
 describe("SharingEditor modal cancel", () => {
   it("routes Cancel through the dismiss callback instead of a settings link", async () => {
     stubFetch({ [`GET ${STATUS_URL}`]: () => jsonResponse({ enabled: false, policy: { emails: [] } }) });
-    const dismissals: number[] = [];
-    const { root } = mountFixture(extras({ is_modal: true, mngr_forward_origin: "" }), () => dismissals.push(1));
+    const closeCalls: number[] = [];
+    window.minds = { closeModal: () => closeCalls.push(1) } as unknown as typeof window.minds;
+    const { root } = mountFixture(extras({ is_modal: true, mngr_forward_origin: "" }));
     await flushAsync();
 
     expect(root.querySelector(`a[href="/workspace/${AGENT}/settings"]`)).toBeNull();
@@ -287,7 +293,7 @@ describe("SharingEditor modal cancel", () => {
     ) as HTMLElement;
     cancel.click();
 
-    expect(dismissals).toEqual([1]);
+    expect(closeCalls).toEqual([1]);
   });
 });
 

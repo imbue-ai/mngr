@@ -225,6 +225,17 @@ class LandingBootExtras(FrozenModel):
         return self.model_dump(mode="json")
 
 
+class AssociateAccountPayload(FrozenModel):
+    """One signed-in account offered by the associate-workspace prompt."""
+
+    user_id: str = Field(description="The account's user id (the PATCH account_id value)")
+    email: str = Field(description="The account's email address (the option label)")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class SharingBootExtras(FrozenModel):
     """Sharing-editor boot island data (the ``sharing`` island key).
 
@@ -243,6 +254,16 @@ class SharingBootExtras(FrozenModel):
     is_modal: bool = Field(description="True in the Electron overlay modal: plain-links heading + dismissing Cancel")
     mngr_forward_origin: str = Field(
         description="Bare origin of the mngr forward plugin for the page heading's workspace link; empty in the modal"
+    )
+    has_account: bool = Field(
+        default=True,
+        description="Whether the workspace has an associated account; False renders the associate prompt instead",
+    )
+    associate_accounts: tuple[AssociateAccountPayload, ...] = Field(
+        default=(), description="Signed-in accounts offered by the associate prompt (when has_account is False)"
+    )
+    redirect_url: str = Field(
+        default="", description="Where a successful association returns to; empty reloads in place"
     )
 
     @pure
@@ -393,17 +414,6 @@ class AccountsBootExtras(FrozenModel):
             "accounts": [account.to_payload_dict() for account in self.accounts],
             "is_modal": self.is_modal,
         }
-
-
-class AssociateAccountPayload(FrozenModel):
-    """One signed-in account offered by the associate-workspace prompt."""
-
-    user_id: str = Field(description="The account's user id (the PATCH account_id value)")
-    email: str = Field(description="The account's email address (the option label)")
-
-    @pure
-    def to_payload_dict(self) -> dict[str, Any]:
-        return self.model_dump(mode="json")
 
 
 class WorkspaceSettingsBootExtras(FrozenModel):

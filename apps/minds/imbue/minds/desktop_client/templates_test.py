@@ -233,9 +233,9 @@ def test_render_workspace_settings_island_carries_picker_and_account_inputs() ->
     assert "--titlebar-bg: #0b292b;" in html
 
 
-def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
-    # Regression: the workspace <Link href="...{{ }}..."> must interpolate
-    # (component quoted-attribute interpolation does not happen in JinjaX).
+def test_render_sharing_editor_island_carries_heading_inputs() -> None:
+    """The heading (with its /goto workspace link) renders client-side; the
+    island carries the forward origin + names it is built from."""
     html = render_sharing_editor(
         agent_id=str(_AGENT_A),
         service_name="svc",
@@ -243,7 +243,11 @@ def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
         mngr_forward_origin="http://localhost:8421",
         ws_name="ws",
     )
-    assert f"/goto/{_AGENT_A}/" in html
+    island = parse_boot_island(html)
+    assert island["sharing"]["mngr_forward_origin"] == "http://localhost:8421"
+    assert island["sharing"]["ws_name"] == "ws"
+    assert island["sharing"]["has_account"] is True
+    assert "MindsUI.mountSharingPage" in html
     assert "{{" not in html
 
 

@@ -1382,22 +1382,13 @@ def test_sharing_modal_renders_editor_in_overlay(tmp_path: Path) -> None:
     assert island["sharing"]["agent_id"] == str(agent_id)
     assert island["sharing"]["service_name"] == "web"
     assert island["sharing"]["is_modal"] is True
-    assert 'id="sharing-editor-root"' in body
-    assert "window.MindsUI.mountSharingEditor" in body
-    assert "onDismiss: window.dismissSharingModal" in body
-    # Modal chrome: dim backdrop over a transparent body, dismissed through
-    # the Electron modal host (with a plain-page fallback).
-    assert 'id="sharing-modal-backdrop"' in body
-    assert "window.minds.closeModal" in body
-    # The heading is plain text -- no workspace /goto link, no /accounts link --
-    # and the island's is_modal + empty mngr_forward_origin keep the
-    # component's heading takeover link-free.
-    assert "/goto/" not in body
-    assert 'href="/accounts"' not in body
+    assert island["sharing"]["has_account"] is True
+    assert "window.MindsUI.mountSharingModal" in body
+    # The modal chrome (backdrop, host-adapter dismissal, plain-text heading,
+    # dismissing Cancel) renders client-side -- covered by
+    # SharingEditor.test.ts. The island's is_modal + empty forward origin are
+    # what keep the heading link-free there.
     assert island["sharing"]["mngr_forward_origin"] == ""
-    # Cancel dismisses the modal; there is no ButtonLink back to settings.
-    assert f'href="/workspace/{agent_id}/settings"' not in body
-    assert "dismissSharingModal" in body
 
 
 def test_sharing_page_renders_full_page_fallback(tmp_path: Path) -> None:
@@ -1414,10 +1405,9 @@ def test_sharing_page_renders_full_page_fallback(tmp_path: Path) -> None:
     # The full page's island carries the forward origin so the component's
     # heading takeover keeps the workspace link.
     assert island["sharing"]["mngr_forward_origin"].startswith("http")
-    assert 'id="sharing-editor-root"' in body
-    assert "window.MindsUI.mountSharingEditor" in body
-    # The server-rendered heading keeps its links for the pre-mount paint.
-    assert f"/goto/{agent_id}/" in body
+    # The heading (with its /goto workspace link) renders client-side from
+    # the island's forward origin; the shell just mounts the page variant.
+    assert "window.MindsUI.mountSharingPage" in body
     assert 'id="sharing-modal-backdrop"' not in body
 
 

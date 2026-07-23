@@ -1833,6 +1833,9 @@ def _sharing_boot_island(
     initial_emails: list[str],
     is_modal: bool,
     mngr_forward_origin: str,
+    has_account: bool,
+    accounts: Sequence[AccountLike],
+    redirect_url: str,
 ) -> dict[str, Any]:
     """Build the ``#minds-boot-state`` island dict for the sharing editor pages."""
     extras = SharingBootExtras(
@@ -1843,6 +1846,11 @@ def _sharing_boot_island(
         initial_emails=tuple(initial_emails),
         is_modal=is_modal,
         mngr_forward_origin=mngr_forward_origin,
+        has_account=has_account,
+        associate_accounts=tuple(
+            AssociateAccountPayload(user_id=str(account.user_id), email=str(account.email)) for account in accounts
+        ),
+        redirect_url=redirect_url,
     )
     return {"sharing": extras.to_payload_dict()}
 
@@ -1855,7 +1863,7 @@ def render_sharing_editor(
     mngr_forward_origin: str = "",
     initial_emails: list[str] | None = None,
     has_account: bool = True,
-    accounts: Sequence[object] | None = None,
+    accounts: Sequence[AccountLike] | None = None,
     redirect_url: str = "",
     ws_name: str = "",
     account_email: str = "",
@@ -1871,13 +1879,7 @@ def render_sharing_editor(
         "pages.Sharing",
         title=title,
         agent_id=agent_id,
-        service_name=service_name,
-        mngr_forward_origin=mngr_forward_origin,
-        has_account=has_account,
-        accounts=accounts or [],
-        redirect_url=redirect_url,
         ws_name=ws_name,
-        account_email=account_email,
         boot_state=_sharing_boot_island(
             agent_id=agent_id,
             service_name=service_name,
@@ -1886,6 +1888,9 @@ def render_sharing_editor(
             initial_emails=initial_emails or [],
             is_modal=False,
             mngr_forward_origin=mngr_forward_origin,
+            has_account=has_account,
+            accounts=accounts or [],
+            redirect_url=redirect_url,
         ),
     )
 
@@ -1896,7 +1901,7 @@ def render_sharing_modal_page(
     service_name: str,
     initial_emails: list[str] | None = None,
     has_account: bool = True,
-    accounts: Sequence[object] | None = None,
+    accounts: Sequence[AccountLike] | None = None,
     ws_name: str = "",
     account_email: str = "",
 ) -> str:
@@ -1910,12 +1915,6 @@ def render_sharing_modal_page(
     """
     return CATALOG.render(
         "pages.SharingModal",
-        agent_id=agent_id,
-        service_name=service_name,
-        has_account=has_account,
-        accounts=accounts or [],
-        ws_name=ws_name,
-        account_email=account_email,
         boot_state=_sharing_boot_island(
             agent_id=agent_id,
             service_name=service_name,
@@ -1924,6 +1923,9 @@ def render_sharing_modal_page(
             initial_emails=initial_emails or [],
             is_modal=True,
             mngr_forward_origin="",
+            has_account=has_account,
+            accounts=accounts or [],
+            redirect_url="",
         ),
     )
 
