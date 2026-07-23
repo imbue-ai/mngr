@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-22
+
+Git commits on imbue cloud pool hosts are no longer attributed to the operator who baked the host (e.g. "Josh Albrecht").
+
+When mngr bakes a pool host it does a cross-host `mngr create`, which copies the baker's `git config user.name/email` into the baked services checkout at `/mngr/code`. Because every adopting user's agent mirrors from that checkout, users' commits inherited the baker's identity. The pool-host finalize step now unsets that repo-local identity before the host ships; on adoption the workspace bootstrap re-supplies its own neutral fallback. Per-agent commits are separately attributed to the agent by the workspace template's Bash-command rewrite hook; this only governs the leftover non-agent commits on the shared checkout. Local `mngr` worktree agents are unaffected -- they never take this copy path, so they still inherit your identity as before.
+
 ## 2026-07-16
 
 Fixed a bug where the streaming discovery path (which feeds `mngr observe` and, through it, the desktop-side Latchkey reverse tunnel) advertised each leased host's inner-container SSH endpoint (`vps_address:container_ssh_port`) without pinning that container sshd's host key in the per-host `known_hosts` file.

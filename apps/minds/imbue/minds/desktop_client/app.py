@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -108,6 +109,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
 from imbue.minds.desktop_client.templates import render_account_plan_section
+from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -125,8 +127,10 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_settings_modal_page
 from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
+from imbue.minds.desktop_client.templates import render_sharing_modal_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
@@ -138,7 +142,6 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIV
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
-from imbue.minds.errors import InvalidJsonBodyError
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import CreationId
@@ -193,28 +196,6 @@ def _system_interface_status_payload(
 def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
     """Build a ``discovery_health`` SSE payload for the app-global pipeline state."""
     return {"type": "discovery_health", "state": health.value}
-
-
-# -- Request-body + dependency helpers --
-
-
-def _read_json_body() -> Any:
-    """Parse the request body as JSON, raising ``ValueError`` on missing/invalid input.
-
-    Mirrors the FastAPI ``await request.json()`` contract closely enough that
-    the existing ``except (json.JSONDecodeError, ValueError)`` handlers around
-    the call sites keep working: Flask's ``get_json(silent=True)`` returns
-    ``None`` on a malformed body, which we turn into a ``ValueError``.
-
-    ``force=True`` parses the body regardless of the request's ``Content-Type``
-    so a client that POSTs JSON without an ``application/json`` header is still
-    accepted -- matching the FastAPI ``request.json()`` behavior (which ignored
-    the content type) and avoiding a wire-behavior regression for API callers.
-    """
-    data = request.get_json(silent=True, force=True)
-    if data is None:
-        raise InvalidJsonBodyError("Invalid or empty JSON body")
-    return data
 
 
 def _get_mngr_forward_origin() -> str:
@@ -848,6 +829,42 @@ def _handle_welcome_page() -> Response:
     return make_html_response(content=html)
 
 
+def _handle_welcome_skip() -> Response:
+    """Record the "Continue without an account" choice and land on home.
+
+    Setting ``is_account_setup_skipped`` stops the home route's bounce back
+    to the welcome splash (see ``_handle_landing_page``), so from here on the
+    titlebar home button lands on the workspace list / create form. The flag
+    is per-run; a fresh cold start of a functionally-empty app shows the
+    splash again (matching the startup routing).
+    """
+    if not _is_request_authenticated():
+        html = render_login_page()
+        return make_html_response(content=html)
+    get_state().is_account_setup_skipped = True
+    return make_response(status_code=303, headers={"Location": "/"})
+
+
+def _account_launcher_context(session_store: MultiAccountSessionStore | None) -> tuple[str, int]:
+    """Resolve the home screen's bottom-left account launcher label.
+
+    Returns ``(email, extra_count)``: the default (or first) signed-in
+    account's email plus how many further accounts are signed in, or
+    ``("", 0)`` when signed out (the launcher then reads "Log in").
+    """
+    accounts = session_store.list_accounts() if session_store else []
+    if not accounts:
+        return "", 0
+    minds_config: MindsConfig | None = get_state().minds_config
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    shown = accounts[0]
+    for account in accounts:
+        if default_account_id is not None and str(account.user_id) == default_account_id:
+            shown = account
+            break
+    return str(shown.email), len(accounts) - 1
+
+
 def _compute_cloud_tile_state(
     backend_resolver: BackendResolverInterface,
     record_store: WorkspaceRecordStore,
@@ -965,6 +982,29 @@ def _handle_landing_page() -> Response:
         html = render_login_page()
         return make_html_response(content=html)
 
+    # Until the user resolves the welcome splash's account choice (sign up /
+    # log in / continue without an account), the home route bounces back to
+    # the splash: a signed-out user with no workspaces who hasn't explicitly
+    # skipped is mid-onboarding, and the titlebar home button (which always
+    # navigates "/") must return them to the choice rather than the create
+    # form. Gated on completed discovery so a workspace-owning user isn't
+    # bounced while providers are still enumerating, skipped entirely when
+    # accounts aren't configured (session_store is None), and skipped when the
+    # account listing itself failed -- an empty list from a transient
+    # subprocess failure must not bounce a just-signed-in user back to the
+    # splash.
+    landing_resolver = get_state().backend_resolver
+    onboarding_session_store = get_state().session_store
+    if (
+        not get_state().is_account_setup_skipped
+        and onboarding_session_store is not None
+        and landing_resolver.has_completed_initial_discovery()
+        and not landing_resolver.list_active_workspace_ids()
+        and not onboarding_session_store.list_accounts()
+        and not onboarding_session_store.is_last_identity_read_failed
+    ):
+        return make_response(status_code=302, headers={"Location": "/welcome"})
+
     # The error-reporting consent screen sits just after login: once the user is authenticated but
     # has not yet answered it, show it here before the landing content (the Electron content view and
     # browser both load "/" first, and _handle_post_login_redirect routes here while it is unanswered).
@@ -977,6 +1017,7 @@ def _handle_landing_page() -> Response:
     paths: WorkspacePaths | None = get_state().api_v1_paths
     landing_session_store: MultiAccountSessionStore | None = get_state().session_store
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
+    launcher_email, launcher_extra_count = _account_launcher_context(landing_session_store)
     remote_workspaces = _collect_remote_workspace_tiles(backend_resolver, landing_session_store)
     locked_account_emails = _collect_locked_account_emails(landing_session_store)
 
@@ -1008,20 +1049,45 @@ def _handle_landing_page() -> Response:
             shutdown_capable_agent_ids=shutdown_capable_agent_ids,
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
             agent_providers=agent_providers,
+            account_email=launcher_email,
+            extra_account_count=launcher_extra_count,
             remote_workspaces=remote_workspaces,
             locked_account_emails=locked_account_emails,
         )
         return make_html_response(content=html)
 
-    # No agents discovered yet. If discovery is still in progress, show a
-    # "Discovering agents..." page with auto-refresh. Once discovery has
-    # completed with no agents found, show the create form so the user can
-    # create their first agent instead of polling forever.
-    if not backend_resolver.has_completed_initial_discovery():
+    # No live workspaces and no remote tiles. Choose between the auto-refreshing
+    # "Discovering agents..." page and the terminal create form.
+    #
+    # Never strand a user who has workspaces on the terminal create form. Show
+    # the auto-refreshing Landing page (which self-heals into the workspace list
+    # via its reload timer + chrome SSE) when either:
+    #   - discovery has not completed yet (the agent list may still be filling
+    #     in), or
+    #   - the restorable set (live primary agents unioned with the persisted
+    #     last-good topology) is non-empty -- we know workspaces exist but a
+    #     slow/partial cold-start snapshot has not re-surfaced them yet.
+    # Only show the create form once discovery has completed AND nothing anywhere
+    # (live, remote, or last-good) says a workspace exists, i.e. a genuine
+    # first-run user creating their first workspace.
+    restorable_agent_ids = backend_resolver.list_restorable_workspace_ids()
+    is_discovery_complete = backend_resolver.has_completed_initial_discovery()
+    is_showing_create_form = is_discovery_complete and not restorable_agent_ids
+    logger.debug(
+        "Resolved landing fallback: active={} remote={} discovery_complete={} restorable={} -> {}",
+        len(all_agent_ids),
+        len(remote_workspaces),
+        is_discovery_complete,
+        len(restorable_agent_ids),
+        "create-form" if is_showing_create_form else "discovering",
+    )
+    if not is_showing_create_form:
         html = render_landing_page(
             accessible_agent_ids=(),
             mngr_forward_origin=_get_mngr_forward_origin(),
             is_discovering=True,
+            account_email=launcher_email,
+            extra_account_count=launcher_extra_count,
         )
         return make_html_response(content=html)
 
@@ -1044,6 +1110,10 @@ def _handle_landing_page() -> Response:
         # visible; otherwise start on the simple preset cards.
         start_advanced=bool(git_url or branch),
         color=_suggested_create_color(backend_resolver),
+        # This create form is the landing fallback (shown at "/" when no
+        # workspace exists), so wire its self-heal SSE: if a workspace appears
+        # while it is open, it navigates to "/" instead of stranding the user.
+        is_landing_fallback=True,
     )
     return make_html_response(content=html)
 
@@ -1288,11 +1358,37 @@ def _handle_chrome_page() -> Response:
     backend_resolver = get_state().backend_resolver
     initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
 
+    # Optional server-side titlebar accent: the desktop shell appends
+    # ?accent=%23rrggbb when it (re)loads the wrapper for a workspace whose
+    # accent it already knows, so the bar's first paint is tinted instead of
+    # flashing neutral until the SSE color cache lands. Strictly validated;
+    # anything else renders the neutral bar exactly as before.
+    accent_arg = request.args.get("accent", "")
+    accent = accent_arg.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", accent_arg) else ""
+
+    # Optional server-side titlebar breadcrumb, mirroring the accent: the
+    # desktop shell appends ?agent=agent-<hex> for the workspace it is loading
+    # so the wrapper's first paint already shows the workspace name + tabs
+    # instead of a bare "Minds" until the content view commits. Strictly
+    # validated; an unknown or unnamed workspace renders the same ellipsis
+    # placeholder chrome.js uses (never the raw id).
+    agent_arg = request.args.get("agent", "")
+    crumb_agent_id = agent_arg if re.fullmatch(r"agent-[a-f0-9]+", agent_arg) else ""
+    crumb_workspace_name = ""
+    if crumb_agent_id:
+        crumb_workspace_name = next(
+            (ws["name"] for ws in initial_workspaces if ws.get("id") == crumb_agent_id and ws.get("name")),
+            "…",
+        )
+
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(),
         initial_workspaces=initial_workspaces,
+        accent=accent,
+        crumb_workspace_name=crumb_workspace_name,
+        crumb_agent_id=crumb_agent_id,
     )
     return make_html_response(content=html)
 
@@ -2100,19 +2196,16 @@ def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | No
     return None
 
 
-def _handle_settings_page() -> Response:
-    """Render the app-level settings page (GET /settings).
+def _build_app_settings_context() -> dict[str, Any]:
+    """Build the shared render kwargs for the app-level settings surfaces.
 
-    Hosts the Permissions subsection (predefined-service grants across all
-    active workspaces) and the per-machine error-reporting toggles (seeded from
-    ``MindsConfig``). Requires the same local session as the rest of the app; it
-    is not account-scoped.
+    Used by both the full settings page (browser-mode fallback) and the
+    centered settings modal, which render the same shared sections: the
+    permission overview (connectors / file sharing / workspace delegation
+    held across all active workspaces), the per-machine error-reporting
+    toggles, and the backup master-password section.
     """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
     minds_config: MindsConfig | None = get_state().minds_config
-    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
-    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
     paths: WorkspacePaths | None = get_state().api_v1_paths
 
     services_overview: list[object] = []
@@ -2145,17 +2238,68 @@ def _handle_settings_page() -> Response:
                 )
             )
         except LatchkeyGatewayClientError as e:
-            logger.warning("Could not build permission overview for settings page: {}", e)
+            logger.warning("Could not build permission overview for settings: {}", e)
             permissions_unavailable = True
 
-    html = render_settings_page(
-        report_unexpected_errors=report_unexpected_errors,
-        include_error_logs=include_error_logs,
-        services_overview=services_overview,
-        file_sharing_grants=file_sharing_grants,
-        workspace_delegation_grants=workspace_delegation_grants,
-        permissions_unavailable=permissions_unavailable,
-        is_master_password_set=_is_any_account_password_set(paths),
+    return {
+        "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else False,
+        "include_error_logs": minds_config.get_include_error_logs() if minds_config else False,
+        "services_overview": services_overview,
+        "file_sharing_grants": file_sharing_grants,
+        "workspace_delegation_grants": workspace_delegation_grants,
+        "permissions_unavailable": permissions_unavailable,
+        "is_master_password_set": _is_any_account_password_set(paths),
+    }
+
+
+def _handle_settings_page() -> Response:
+    """Render the app-level settings page (GET /settings).
+
+    The full-page browser-mode fallback for the centered settings modal
+    (GET /settings/modal): Connectors, Local files, Workspace delegation,
+    Error reporting, and Backup password -- all per-machine / app-level
+    settings. Requires the same local session as the rest of the app; it is
+    not account-scoped.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    return make_html_response(content=render_settings_page(**_build_app_settings_context()))
+
+
+def _handle_settings_modal() -> Response:
+    """Render the centered "Minds Settings" modal page (GET /settings/modal).
+
+    Served into the shared modal WebContentsView; opened from the home
+    screen's bottom-left "Minds Settings" launcher and the workspace
+    switcher's "Minds Settings" entry. Shows the same sections as the full
+    settings page, minus the "back to workspaces" link.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    return make_html_response(content=render_settings_modal_page(**_build_app_settings_context()))
+
+
+def _handle_accounts_modal() -> Response:
+    """Render the centered "Manage Accounts" modal page (GET /accounts/modal).
+
+    Served into the shared modal WebContentsView; opened from the home
+    screen's bottom-left account launcher and the workspace switcher's
+    account entry. The full page (GET /accounts) remains as the
+    browser-mode fallback.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    minds_config: MindsConfig | None = get_state().minds_config
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    enabled_by_user_id = {
+        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
+    }
+    html = render_accounts_modal_page(
+        accounts=accounts,
+        default_account_id=default_account_id,
+        enabled_by_user_id=enabled_by_user_id,
     )
     return make_html_response(content=html)
 
@@ -2624,13 +2768,10 @@ def _handle_requests_auto_open() -> Response:
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config:
-        try:
-            body = _read_json_body()
-            enabled = body.get("enabled", True)
-            minds_config.set_auto_open_requests_panel(bool(enabled))
-        except (json.JSONDecodeError, ValueError):
-            pass
+    if minds_config is not None:
+        body = request.get_json(silent=True, force=True)
+        enabled = body.get("enabled", True) if isinstance(body, dict) else True
+        minds_config.set_auto_open_requests_panel(bool(enabled))
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
@@ -2674,6 +2815,36 @@ def _handle_sharing_page(
         has_account=has_account,
         accounts=accounts,
         redirect_url=f"/sharing/{agent_id}/{service_name}",
+        ws_name=ws_name,
+        account_email=account_email,
+    )
+    return make_html_response(content=html)
+
+
+def _handle_sharing_modal(
+    agent_id: str,
+    service_name: str,
+) -> Response:
+    """Render the sharing editor as the centered overlay modal (Electron; the full page is the browser fallback).
+
+    Same context as :func:`_handle_sharing_page`; the empty ``redirect_url``
+    (via the template default) makes the Associate flow reload in place, which
+    is the modal-safe behavior.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+
+    backend_resolver = get_state().backend_resolver
+    ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
+        agent_id,
+        backend_resolver,
+    )
+
+    html = render_sharing_modal_page(
+        agent_id=agent_id,
+        service_name=service_name,
+        has_account=has_account,
+        accounts=accounts,
         ws_name=ws_name,
         account_email=account_email,
     )
@@ -2931,6 +3102,7 @@ def create_desktop_client(
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
+    app.add_url_rule("/welcome/skip", view_func=_handle_welcome_skip)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)
     app.add_url_rule("/", view_func=_handle_landing_page)
@@ -2938,7 +3110,9 @@ def create_desktop_client(
 
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
+    app.add_url_rule("/accounts/modal", view_func=_handle_accounts_modal)
     app.add_url_rule("/settings", view_func=_handle_settings_page)
+    app.add_url_rule("/settings/modal", view_func=_handle_settings_modal)
     app.add_url_rule("/settings/permissions/revoke", view_func=_handle_revoke_service_for_workspace, methods=["POST"])
     app.add_url_rule(
         "/settings/permissions/revoke-all", view_func=_handle_revoke_service_for_all_workspaces, methods=["POST"]
@@ -2976,8 +3150,11 @@ def create_desktop_client(
     app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/deny", view_func=_handle_request_deny, methods=["POST"])
 
-    # Sharing editor routes (used by both request approval and direct editing)
+    # Sharing editor routes (used by both request approval and direct editing).
+    # /modal is the same editor hosted in the shared overlay surface (Electron);
+    # the plain route stays as the browser-mode full page.
     app.add_url_rule("/sharing/<agent_id>/<service_name>", view_func=_handle_sharing_page)
+    app.add_url_rule("/sharing/<agent_id>/<service_name>/modal", view_func=_handle_sharing_modal)
 
     # Agent creation routes. The create form now submits to POST
     # /api/v1/workspaces and /creating/<id> polls the v1 operations resource, so

@@ -1,6 +1,14 @@
 // Sharing editor: rebuilds the ACL + heading via DOM methods (NOT innerHTML)
 // so a crafted email cannot inject script. The page config is passed from
 // Jinja as a JSON data island, not as template-interpolated JS.
+//
+// Runs on two surfaces sharing the same markup (templates/SharingEditor.jinja):
+// the full /sharing page (browser mode) and the centered sharing modal hosted
+// in the overlay surface (Electron). Behavior matches the full page exactly,
+// with one difference: after Update/Disable the editor re-fetches the sharing
+// state in place instead of navigating to the page URL -- a navigation (or
+// reload) would blank the modal's overlay iframe, so the editor stays visible
+// (grayed out via setSubmitting) until the fresh state is applied.
 (function () {
   var configEl = document.getElementById('sharing-config');
   if (!configEl) return;
@@ -17,6 +25,10 @@
   function setHeading(isEnabled) {
     var h = document.getElementById('page-heading');
     if (!h) return;
+    // The modal heading (data-plain-links) renders names as plain text: a
+    // link there would navigate the overlay iframe to a full page and strand
+    // the app inside the modal. The full page keeps its links.
+    var plainLinks = h.dataset.plainLinks === 'true';
     h.textContent = '';
     h.appendChild(document.createTextNode(isEnabled ? '' : 'Share '));
 
@@ -27,19 +39,27 @@
 
     h.appendChild(document.createTextNode(isEnabled ? ' shared in ' : ' in '));
 
-    var link = document.createElement('a');
-    link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
-    link.className = 'text-accent hover:underline';
-    link.textContent = wsName;
-    h.appendChild(link);
+    if (plainLinks) {
+      h.appendChild(document.createTextNode(wsName));
+    } else {
+      var link = document.createElement('a');
+      link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
+      link.className = 'text-accent hover:underline';
+      link.textContent = wsName;
+      h.appendChild(link);
+    }
 
     if (accountEmail) {
       h.appendChild(document.createTextNode(' ('));
-      var acctLink = document.createElement('a');
-      acctLink.href = '/accounts';
-      acctLink.className = 'text-accent hover:underline';
-      acctLink.textContent = accountEmail;
-      h.appendChild(acctLink);
+      if (plainLinks) {
+        h.appendChild(document.createTextNode(accountEmail));
+      } else {
+        var acctLink = document.createElement('a');
+        acctLink.href = '/accounts';
+        acctLink.className = 'text-accent hover:underline';
+        acctLink.textContent = accountEmail;
+        h.appendChild(acctLink);
+      }
       h.appendChild(document.createTextNode(')'));
     }
 
@@ -243,7 +263,7 @@
     clearError();
     setSubmitting(true);
     requestWithErrorCheck('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName, { method: 'DELETE' })
-      .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
+      .then(refreshAfterSave)
       .catch(function (err) { showError('Could not disable sharing: ' + err.message); setSubmitting(false); });
   };
 
@@ -333,50 +353,86 @@
     return policy.emails.slice();
   }
 
-  fetch('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName)
-    .then(function (r) {
-      if (!r.ok) {
-        return r.text().then(function (text) {
-          var detail = text;
-          try {
-            detail = window.normalizeApiError(JSON.parse(text)).message;
-          } catch (_) { /* leave as raw */ }
-          throw new Error(detail || ('HTTP ' + r.status));
-        });
-      }
-      return r.json();
-    })
-    .then(function (data) {
-      document.getElementById('loading-state').classList.add('hidden');
-      document.getElementById('editor-content').classList.remove('hidden');
-
-      var serverEmails = emailsFromPolicy(data.policy);
-
-      if (data.enabled) {
-        existing = serverEmails;
-        document.getElementById('action-btn').textContent = 'Update';
-        setHeading(true);
-        if (data.url) {
-          document.getElementById('share-url').value = data.url;
-          startReadinessPolling(data.url, false);
+  function fetchStatus() {
+    return fetch('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName)
+      .then(function (r) {
+        if (!r.ok) {
+          return r.text().then(function (text) {
+            var detail = text;
+            try {
+              detail = window.normalizeApiError(JSON.parse(text)).message;
+            } catch (_) { /* leave as raw */ }
+            throw new Error(detail || ('HTTP ' + r.status));
+          });
         }
-        var disableBtn = document.getElementById('disable-btn');
-        if (disableBtn) disableBtn.classList.remove('hidden');
-      } else {
-        // Treat the default policy (owner email) as the editor's
-        // initial draft so the user sees their own email pre-populated.
-        serverEmails.forEach(function (e) {
-          if (added.indexOf(e) < 0) added.push(e);
-        });
-        document.getElementById('action-btn').textContent = 'Share';
-        setHeading(false);
+        return r.json();
+      });
+  }
+
+  // Apply a fresh status payload to the editor -- exactly what the full page
+  // computes on load. ``isInitial`` folds the URL-proposed emails in only
+  // once (a page reload re-reads them from the URL; the in-place refresh
+  // must not re-add drafts the user just committed or discarded).
+  function applyLoadedState(data, isInitial) {
+    var serverEmails = emailsFromPolicy(data.policy);
+
+    if (data.enabled) {
+      existing = serverEmails;
+      document.getElementById('action-btn').textContent = 'Update';
+      setHeading(true);
+      if (data.url) {
+        document.getElementById('share-url').value = data.url;
+        startReadinessPolling(data.url, false);
       }
+      var disableBtn = document.getElementById('disable-btn');
+      if (disableBtn) disableBtn.classList.remove('hidden');
+    } else {
+      // Treat the default policy (owner email) as the editor's
+      // initial draft so the user sees their own email pre-populated.
+      serverEmails.forEach(function (e) {
+        if (added.indexOf(e) < 0) added.push(e);
+      });
+      document.getElementById('action-btn').textContent = 'Share';
+      setHeading(false);
+      // A page reload landed on the template's disabled-state chrome; the
+      // in-place refresh resets it explicitly.
+      var disableBtnOff = document.getElementById('disable-btn');
+      if (disableBtnOff) disableBtnOff.classList.add('hidden');
+      document.getElementById('url-section').classList.add('hidden');
+    }
+    if (isInitial) {
       proposedEmails.forEach(function (e) {
         if (existing.indexOf(e) < 0 && added.indexOf(e) < 0) {
           added.push(e);
         }
       });
-      renderACL();
+    }
+    renderACL();
+  }
+
+  // After a successful Update/Disable, re-fetch and apply the fresh state in
+  // place of the full page's navigation-to-self. The editor stays visible
+  // and grayed out (setSubmitting) until the state lands.
+  function refreshAfterSave() {
+    existing = [];
+    added = [];
+    removed = [];
+    return fetchStatus()
+      .then(function (data) {
+        applyLoadedState(data, false);
+        setSubmitting(false);
+      })
+      .catch(function (err) {
+        setSubmitting(false);
+        showError('Saved, but refreshing the editor failed: ' + err.message);
+      });
+  }
+
+  fetchStatus()
+    .then(function (data) {
+      document.getElementById('loading-state').classList.add('hidden');
+      document.getElementById('editor-content').classList.remove('hidden');
+      applyLoadedState(data, true);
     })
     .catch(function (err) {
       var state = document.getElementById('loading-state');

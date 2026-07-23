@@ -26,7 +26,7 @@
 <script src="/_static/sync_status_banner.js" defer></script>
 <script src="/_static/accounts.js" defer></script>
 {% endset %}
-<Base title="Manage Accounts" scripts={{ _scripts }}>
+<ChromeShell title="Manage Accounts" page_label="Accounts" :show_back="True" scripts={{ _scripts }}>
   <PageContainer>
     <h1 class="type-heading text-primary mb-4">Manage Accounts</h1>
 
@@ -86,6 +86,5 @@
       <ButtonLink href="/auth/login" variant="primary">Add account</ButtonLink>
     </div>
 
-    <div class="mt-4"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
   </PageContainer>
-</Base>
+</ChromeShell>

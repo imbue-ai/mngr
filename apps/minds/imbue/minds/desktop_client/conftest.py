@@ -61,8 +61,14 @@ class FakeImbueCloudCli(ImbueCloudCli):
     oauth_session_to_return: ImbueCloudAuthSession | None = Field(
         default=None, description="Session auth_oauth returns; raises ImbueCloudCliError when unset"
     )
+    is_auth_list_failing: bool = Field(
+        default=False,
+        description="When True, auth_list raises ImbueCloudCliError (simulates a transient subprocess failure)",
+    )
 
     def auth_list(self) -> list[ImbueCloudAuthAccount]:
+        if self.is_auth_list_failing:
+            raise ImbueCloudCliError("fake transient auth list failure")
         return list(self.accounts_to_return)
 
     def auth_oauth(

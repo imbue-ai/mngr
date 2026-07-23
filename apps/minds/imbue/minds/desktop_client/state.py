@@ -108,6 +108,16 @@ class DesktopClientState(MutableModel):
     request_inbox: RequestInbox | None = Field(
         default=None, description="Immutable pending-request inbox (reassigned)"
     )
+    is_account_setup_skipped: bool = Field(
+        default=False,
+        description=(
+            "True once the user chose 'Continue without an account' on the welcome "
+            "splash this run; until then (while signed out with no workspaces) the "
+            "home route bounces back to the welcome splash. Reset per app run, "
+            "mirroring the cold-start routing that lands a functionally-empty app "
+            "on the welcome screen."
+        ),
+    )
     request_event_handlers: tuple[RequestEventHandler, ...] = Field(
         default=(), frozen=True, description="Registered request-event grant/deny handlers"
     )

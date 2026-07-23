@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from enum import auto
 from importlib.resources import files
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment
 from jinja2 import PackageLoader
@@ -53,33 +54,70 @@ class ChangeKind(UpperCaseStrEnum):
 
 
 class ChangeStatus(UpperCaseStrEnum):
-    """Whether the change succeeded."""
+    """Whether the change succeeded.
+
+    There is deliberately no BLOCKED status. "I could not finish this change"
+    and "this needs attention beyond my test" are different axes: an agent that
+    cleanly fixes its own test may still have spotted a suite-wide problem, and
+    a status field cannot carry both. The second axis lives in ``escalations``,
+    which is orthogonal to the outcome and to every change's status.
+    """
 
     SUCCEEDED = auto()
     FAILED = auto()
-    BLOCKED = auto()
 
 
 class Change(FrozenModel):
     """One change the agent attempted."""
 
-    status: ChangeStatus = Field(description="Whether the change succeeded, failed, or is blocked")
+    status: ChangeStatus = Field(description="Whether the change succeeded or failed")
     summary_markdown: str = Field(description="Markdown description of what was done or attempted")
+
+
+class EscalationKind(UpperCaseStrEnum):
+    """Why something was escalated.
+
+    BLOCKER: the agent could not proceed without a change beyond its own test.
+    SHARED_PATTERN: the agent's fix worked, but it recognized the same problem
+    (and the same fix) recurring across sibling tests -- the signal that a
+    suite-wide change should replace N local ones.
+    """
+
+    BLOCKER = auto()
+    SHARED_PATTERN = auto()
+
+
+class Escalation(FrozenModel):
+    """Something needing attention beyond the reporting agent's own scope.
+
+    Raised by mappers (per test) and by the reducer (suite-wide). Orthogonal to
+    the reporter's own success: a passing test can still raise one.
+    """
+
+    title: str = Field(description="Short title of the issue")
+    detail_markdown: str = Field(description="Markdown detail of what is needed to resolve it")
+    kind: EscalationKind = Field(
+        default=EscalationKind.BLOCKER,
+        description="Whether this blocked the agent or is a pattern shared with other tests",
+    )
 
 
 class ReportSection(UpperCaseStrEnum):
     """Derived section for HTML report grouping and coloring.
 
-    BLOCKED is reserved for results where the coding agent itself decided
-    the work was too complex (i.e. produced changes whose status is BLOCKED).
-    FAILED is reserved for infrastructure failures: launch failures, agent
-    timeouts, missing details, etc. -- cases where the agent never had a
-    chance to produce a real verdict.
+    UNRESOLVED covers results where the coding agent tried and could not land a
+    working change. FAILED is reserved for infrastructure failures: launch
+    failures, agent timeouts, missing details, etc. -- cases where the agent
+    never had a chance to produce a real verdict.
+
+    Escalations are deliberately not a section: they are orthogonal to the
+    outcome, so they are aggregated into their own report block instead (a
+    clean pass may carry one).
     """
 
     NON_IMPL_FIXES = auto()
     IMPL_FIXES = auto()
-    BLOCKED = auto()
+    UNRESOLVED = auto()
     FAILED = auto()
     CLEAN_PASS = auto()
     RUNNING = auto()
@@ -115,19 +153,15 @@ class TestResult(FrozenModel):
     )
     summary_markdown: str = Field(default="", description="Overall markdown summary of what happened")
     test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="List of test runs performed, in order")
+    escalations: tuple[Escalation, ...] = Field(
+        default=(), description="Issues needing attention beyond this test, independent of whether the test passed"
+    )
 
 
 class Normalization(FrozenModel):
     """A suite-wide cleanup the integrator applied during the normalize stage."""
 
     summary_markdown: str = Field(description="Markdown description of the cleanup that was applied and verified")
-
-
-class Escalation(FrozenModel):
-    """A cross-cutting blocker the integrator could not resolve, surfaced to the user."""
-
-    title: str = Field(description="Short title of the blocker")
-    detail_markdown: str = Field(description="Markdown detail of what is needed to resolve it")
 
 
 class IntegratorResult(FrozenModel):
@@ -147,6 +181,12 @@ class IntegratorResult(FrozenModel):
     )
     escalations: tuple[Escalation, ...] = Field(
         default=(), description="Cross-cutting blockers the integrator could not resolve, surfaced to the user"
+    )
+    pull_request_url: str | None = Field(
+        default=None, description="URL of the pull request the integrator opened for this run"
+    )
+    pull_request_error: str | None = Field(
+        default=None, description="Why the integrator could not open a pull request, if it could not"
     )
 
 
@@ -170,20 +210,27 @@ class TestMapReduceResult(FrozenModel):
         description="Git branch name if code changes were pulled, or None",
     )
     test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="Test runs performed by the agent, in order")
+    escalations: tuple[Escalation, ...] = Field(
+        default=(), description="Issues this agent raised for attention beyond its own test"
+    )
 
 
-_EXTRACTED_TEST_OUTPUT_DIR = "test_output"
+# Subdirectory of each agent's extracted output archive holding its .test_output contents.
+EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 
-# Outcome JSON for a given agent is immutable once present. Cache keyed by
-# agent_name so generate_html_report can be called many times during polling
-# without re-parsing.
-_TESTING_OUTCOME_CACHE: dict[AgentName, TestResult] = {}
-_INTEGRATOR_OUTCOME_CACHE: dict[AgentName, IntegratorResult] = {}
+# Outcome JSON for a given agent is immutable once present, so parses are cached
+# and generate_html_report can be called many times during polling without
+# re-parsing.
+# Keyed by (output_dir, agent_name), not agent name alone: the same agent name
+# can appear under two different output directories (the orchestrator's own
+# output dir and the reducer's inputs dir), and those are different outcomes.
+_TESTING_OUTCOME_CACHE: dict[tuple[Path, AgentName], TestResult] = {}
+_INTEGRATOR_OUTCOME_CACHE: dict[tuple[Path, AgentName], IntegratorResult] = {}
 
 _SECTION_ORDER: list[ReportSection] = [
     ReportSection.NON_IMPL_FIXES,
     ReportSection.IMPL_FIXES,
-    ReportSection.BLOCKED,
+    ReportSection.UNRESOLVED,
     ReportSection.FAILED,
     ReportSection.CLEAN_PASS,
     ReportSection.RUNNING,
@@ -192,20 +239,44 @@ _SECTION_ORDER: list[ReportSection] = [
 _SECTION_LABELS: dict[ReportSection, str] = {
     ReportSection.NON_IMPL_FIXES: "Non-implementation fixes",
     ReportSection.IMPL_FIXES: "Implementation fixes",
-    ReportSection.BLOCKED: "Blocked",
+    ReportSection.UNRESOLVED: "Unresolved",
     ReportSection.FAILED: "Failed",
     ReportSection.CLEAN_PASS: "Clean pass",
     ReportSection.RUNNING: "Running",
 }
 
+_ESCALATION_KIND_LABELS: dict[EscalationKind, str] = {
+    EscalationKind.BLOCKER: "Blocker",
+    EscalationKind.SHARED_PATTERN: "Shared pattern",
+}
+
 _SECTION_COLORS: dict[ReportSection, str] = {
     ReportSection.NON_IMPL_FIXES: "rgb(33, 150, 243)",
     ReportSection.IMPL_FIXES: "rgb(76, 175, 80)",
-    ReportSection.BLOCKED: "rgb(244, 67, 54)",
+    ReportSection.UNRESOLVED: "rgb(244, 67, 54)",
     ReportSection.FAILED: "rgb(255, 152, 0)",
     ReportSection.CLEAN_PASS: "rgb(158, 158, 158)",
     ReportSection.RUNNING: "rgb(3, 169, 244)",
 }
+
+
+def escalation_kind_label(kind: EscalationKind) -> str:
+    """Human-readable label for an escalation kind.
+
+    Public so the PR-summary builder labels kinds the same way the HTML report
+    does; a third kind must not be able to render differently in the two places.
+    """
+    return _ESCALATION_KIND_LABELS[kind]
+
+
+def section_label(section: ReportSection) -> str:
+    """Human-readable label for a report section.
+
+    Public so the PR-summary builder labels statuses the same way the HTML
+    report does.
+    """
+    return _SECTION_LABELS[section]
+
 
 _md = MarkdownIt()
 
@@ -214,7 +285,6 @@ _NON_IMPL_CHANGE_KINDS = frozenset({ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST
 _CHANGE_STATUS_ICONS: dict[ChangeStatus, str] = {
     ChangeStatus.SUCCEEDED: "&#10003;",
     ChangeStatus.FAILED: "&#10007;",
-    ChangeStatus.BLOCKED: "&#9644;",
 }
 
 
@@ -263,20 +333,84 @@ def _parse_outcome_json(raw: str) -> TestResult:
         tests_passing_after=data.get("tests_passing_after"),
         summary_markdown=data.get("summary_markdown", ""),
         test_runs=test_runs,
+        escalations=_parse_escalations(data.get("escalations", ())),
+    )
+
+
+def _parse_escalations(raw: Any) -> tuple[Escalation, ...]:
+    """Parse the shared ``escalations`` list used by both mapper and reducer outcomes.
+
+    ``kind`` is optional and defaults to BLOCKER, so an outcome written before
+    the field existed still parses. Takes the raw JSON value (like the sibling
+    parsing in this module) rather than a narrowed type, since the outcome shape
+    is a contract with the agents and malformed data is caught by the callers.
+    """
+    if not raw:
+        return ()
+    return tuple(
+        Escalation(
+            title=str(entry.get("title", "")),
+            detail_markdown=str(entry.get("detail_markdown", "")),
+            kind=EscalationKind(str(entry.get("kind", EscalationKind.BLOCKER.value))),
+        )
+        for entry in raw
     )
 
 
 def _outcome_path_for_testing_agent(output_dir: Path, agent_name: AgentName) -> Path:
-    return output_dir / str(agent_name) / _EXTRACTED_TEST_OUTPUT_DIR / TESTING_AGENT_OUTCOME_FILENAME
+    return output_dir / str(agent_name) / EXTRACTED_TEST_OUTPUT_DIR / TESTING_AGENT_OUTCOME_FILENAME
 
 
 def _outcome_path_for_integrator(output_dir: Path, agent_name: AgentName) -> Path:
-    return output_dir / str(agent_name) / _EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
+    return output_dir / str(agent_name) / EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
 
 
-def _load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> TestResult | None:
-    """Read and cache a testing agent's outcome from the extracted output dir."""
-    cached = _TESTING_OUTCOME_CACHE.get(agent_name)
+def synthesize_missing_mapper_outcomes(output_dir: Path, agents: Sequence[AgentMetadata]) -> list[AgentName]:
+    """Write a synthetic errored outcome for every failed mapper that produced none.
+
+    A mapper that failed to launch, timed out, or crashed never writes an outcome
+    file. Anything that reads the output dir as *files* rather than as
+    orchestrator metadata -- the reducer, whose PR summary and should-pull
+    predicate both count outcomes on disk -- is therefore blind to it, so a run
+    with failures reports as if those tests did not exist. Give each failed
+    mapper a minimal ``errored`` outcome so it is seen and counted as failed.
+
+    Only fills gaps: a mapper that already wrote an outcome is left untouched.
+    Returns the agent names a synthetic outcome was written for.
+    """
+    written: list[AgentName] = []
+    for meta in agents:
+        if meta.kind is not AgentKind.MAPPER or meta.error_summary is None:
+            continue
+        path = _outcome_path_for_testing_agent(output_dir, meta.agent_name)
+        if path.exists():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "changes": {},
+                    "errored": True,
+                    "tests_passing_before": None,
+                    "tests_passing_after": None,
+                    "summary_markdown": meta.error_summary,
+                    "test_runs": [],
+                    "escalations": [],
+                }
+            )
+        )
+        written.append(meta.agent_name)
+    return written
+
+
+def load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> TestResult | None:
+    """Read and cache a testing agent's outcome from the extracted output dir.
+
+    Public because the PR-summary builder reads the same per-agent layout from
+    the reducer's inputs directory (see ``pr_summary``).
+    """
+    cache_key = (output_dir, agent_name)
+    cached = _TESTING_OUTCOME_CACHE.get(cache_key)
     if cached is not None:
         return cached
     path = _outcome_path_for_testing_agent(output_dir, agent_name)
@@ -289,40 +423,60 @@ def _load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> Test
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.warning("Failed to parse outcome for agent '{}': {}", agent_name, exc)
         return None
-    _TESTING_OUTCOME_CACHE[agent_name] = outcome
+    _TESTING_OUTCOME_CACHE[cache_key] = outcome
     return outcome
 
 
-def _load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> IntegratorResult:
-    """Read and cache the integrator's outcome, returning an empty result on miss."""
-    empty = IntegratorResult(agent_name=meta.agent_name, branch_name=meta.branch_name)
-    cached = _INTEGRATOR_OUTCOME_CACHE.get(meta.agent_name)
-    if cached is not None:
-        return cached
-    path = _outcome_path_for_integrator(output_dir, meta.agent_name)
-    try:
-        data = json.loads(path.read_text())
-    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to read integrator outcome for '{}': {}", meta.agent_name, exc)
-        return empty
-    result = IntegratorResult(
-        agent_name=meta.agent_name,
+def parse_integrator_outcome(data: Any, agent_name: AgentName | None, branch_name: str | None) -> IntegratorResult:
+    """Build an ``IntegratorResult`` from already-decoded outcome JSON.
+
+    Public so callers that hold the outcome file directly (the recipe, the PR
+    summary builder) go through the same model rather than re-deriving fields
+    from the raw dict.
+    """
+    return IntegratorResult(
+        agent_name=agent_name,
         squashed_branches=tuple(data.get("squashed_branches", ())),
         squashed_commit_hash=data.get("squashed_commit_hash"),
         impl_priority=tuple(data.get("impl_priority", ())),
         impl_commit_hashes=data.get("impl_commit_hashes", {}),
         failed=tuple(data.get("failed", ())),
-        branch_name=meta.branch_name,
+        branch_name=branch_name,
         normalizations=tuple(
             Normalization(summary_markdown=entry.get("summary_markdown", ""))
             for entry in data.get("normalizations", ())
         ),
-        escalations=tuple(
-            Escalation(title=entry.get("title", ""), detail_markdown=entry.get("detail_markdown", ""))
-            for entry in data.get("escalations", ())
-        ),
+        escalations=_parse_escalations(data.get("escalations", ())),
+        pull_request_url=data.get("pull_request_url"),
+        pull_request_error=data.get("pull_request_error"),
     )
-    _INTEGRATOR_OUTCOME_CACHE[meta.agent_name] = result
+
+
+def load_integrator_outcome_file(
+    outcome_path: Path, agent_name: AgentName | None = None, branch_name: str | None = None
+) -> IntegratorResult | None:
+    """Read and parse an integrator outcome file, or None if it is unreadable."""
+    try:
+        data = json.loads(outcome_path.read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read integrator outcome at {}: {}", outcome_path, exc)
+        return None
+    return parse_integrator_outcome(data, agent_name, branch_name)
+
+
+def _load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> IntegratorResult:
+    """Read and cache the integrator's outcome, returning an empty result on miss."""
+    empty = IntegratorResult(agent_name=meta.agent_name, branch_name=meta.branch_name)
+    cache_key = (output_dir, meta.agent_name)
+    cached = _INTEGRATOR_OUTCOME_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    result = load_integrator_outcome_file(
+        _outcome_path_for_integrator(output_dir, meta.agent_name), meta.agent_name, meta.branch_name
+    )
+    if result is None:
+        return empty
+    _INTEGRATOR_OUTCOME_CACHE[cache_key] = result
     return result
 
 
@@ -353,6 +507,7 @@ def _row_from_metadata(meta: AgentMetadata, outcome: TestResult | None) -> TestM
         summary_markdown=outcome.summary_markdown,
         branch_name=meta.branch_name,
         test_runs=outcome.test_runs,
+        escalations=outcome.escalations,
     )
 
 
@@ -365,32 +520,35 @@ def _build_rows(agents: Sequence[AgentMetadata], output_dir: Path) -> list[TestM
     for meta in agents:
         if meta.kind is not AgentKind.MAPPER:
             continue
-        outcome = _load_testing_agent_outcome(meta.agent_name, output_dir) if meta.error_summary is None else None
+        outcome = load_testing_agent_outcome(meta.agent_name, output_dir) if meta.error_summary is None else None
         rows.append(_row_from_metadata(meta, outcome))
     return rows
 
 
-def _report_section_of(result: TestMapReduceResult) -> ReportSection:
+def report_section_of(result: TestMapReduceResult) -> ReportSection:
     """Derive a report section from a result for report grouping/coloring.
 
     ``errored=True`` indicates an infrastructure failure (launch failed,
     agent timed out, details missing) and is rendered in the FAILED section.
-    The BLOCKED section is reserved for results where the coding agent
-    itself reported every change as BLOCKED.
+    UNRESOLVED covers results where every change the agent attempted failed,
+    plus anything that fits no other section.
+
+    Escalations do not influence the section: a result belongs to the section
+    its own outcome earns, and its escalations are aggregated separately.
     """
     if result.errored:
         return ReportSection.FAILED
     if result.tests_passing_before is None and result.tests_passing_after is None and not result.changes:
         return ReportSection.RUNNING
-    if result.changes and all(c.status == ChangeStatus.BLOCKED for c in result.changes.values()):
-        return ReportSection.BLOCKED
+    if result.changes and all(c.status is ChangeStatus.FAILED for c in result.changes.values()):
+        return ReportSection.UNRESOLVED
     if any(kind in _NON_IMPL_CHANGE_KINDS for kind in result.changes):
         return ReportSection.NON_IMPL_FIXES
     if ChangeKind.FIX_IMPL in result.changes:
         return ReportSection.IMPL_FIXES
     if not result.changes and result.tests_passing_after is True:
         return ReportSection.CLEAN_PASS
-    return ReportSection.BLOCKED
+    return ReportSection.UNRESOLVED
 
 
 def _format_test_id(test_node_id: str) -> str:
@@ -489,7 +647,7 @@ def _build_section_views(
     """Group rows by section and prepare the section views the template consumes."""
     grouped: dict[ReportSection, list[TestMapReduceResult]] = {}
     for r in rows:
-        grouped.setdefault(_report_section_of(r), []).append(r)
+        grouped.setdefault(report_section_of(r), []).append(r)
 
     sections: list[dict[str, object]] = []
     for sec in _SECTION_ORDER:
@@ -531,6 +689,43 @@ def _build_toc_links(sections: list[dict[str, object]]) -> list[dict[str, object
         }
         for s in sections
     ]
+
+
+def _build_escalation_views(
+    rows: list[TestMapReduceResult],
+    integrator: IntegratorResult | None,
+) -> list[dict[str, object]]:
+    """Aggregate escalations from every mapper plus the integrator, in that order.
+
+    Mapper escalations carry the test they came from; the integrator's carry its
+    agent name. Blockers sort ahead of shared patterns so the things that stopped
+    an agent read first.
+    """
+    views: list[dict[str, object]] = []
+    for row in rows:
+        for esc in row.escalations:
+            views.append(
+                {
+                    "title": esc.title,
+                    "detail_html": _render_markdown(esc.detail_markdown),
+                    "kind": esc.kind.value,
+                    "kind_label": _ESCALATION_KIND_LABELS[esc.kind],
+                    "source": row.test_node_id,
+                }
+            )
+    if integrator is not None:
+        for esc in integrator.escalations:
+            views.append(
+                {
+                    "title": esc.title,
+                    "detail_html": _render_markdown(esc.detail_markdown),
+                    "kind": esc.kind.value,
+                    "kind_label": _ESCALATION_KIND_LABELS[esc.kind],
+                    "source": "integrator",
+                }
+            )
+    views.sort(key=lambda v: 0 if v["kind"] == EscalationKind.BLOCKER.value else 1)
+    return views
 
 
 def _build_artifact_panels(
@@ -598,11 +793,7 @@ def generate_html_report(
 
     # Title is autoescaped by the template; detail/summary are markdown rendered
     # to HTML here and passed through with |safe, like the per-row summary cells.
-    escalation_views = (
-        [{"title": e.title, "detail_html": _render_markdown(e.detail_markdown)} for e in integrator.escalations]
-        if integrator is not None
-        else []
-    )
+    escalation_views = _build_escalation_views(rows, integrator)
     normalization_views = (
         [{"summary_html": _render_markdown(n.summary_markdown)} for n in integrator.normalizations]
         if integrator is not None

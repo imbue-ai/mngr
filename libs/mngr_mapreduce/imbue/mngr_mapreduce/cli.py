@@ -79,6 +79,7 @@ class MapReduceCliOptions(CommonCliOptions):
     agent_template: tuple[str, ...]
     provider: str
     env: tuple[str, ...]
+    reducer_env: tuple[str, ...]
     label: tuple[str, ...]
     snapshot: str | None
     max_parallel_launch: int
@@ -92,6 +93,7 @@ class MapReduceCliOptions(CommonCliOptions):
     source: str | None
     reintegrate: bool
     run_name: str | None
+    reducer_branch_suffix: str
     additional_authorized_keys: tuple[str, ...]
 
 
@@ -199,6 +201,20 @@ def add_mapreduce_options(command: TDecorated) -> TDecorated:
         "--env",
         multiple=True,
         help="Environment variable KEY=VALUE to pass to agents [repeatable]",
+    )(command)
+    command = click.option(
+        "--reducer-branch-suffix",
+        default="",
+        help="Suffix appended to the reducer's branch/agent/host names. Set this on a reintegration so its "
+        "pull request is opened from a branch that does not collide with the original run's reducer branch "
+        "(the two share a run name). Blank for a normal run.",
+    )(command)
+    command = click.option(
+        "--reducer-env",
+        multiple=True,
+        help="Environment variable KEY=VALUE to pass to the reducer ONLY, not to mappers. For credentials "
+        "the reducer needs but mappers must not receive (e.g. a token that can push and open pull "
+        "requests) [repeatable]",
     )(command)
     command = click.option(
         "--provider",
@@ -313,6 +329,11 @@ def build_launch_config(
     agents later.
     """
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
+    # None rather than an empty options object when unset, so the launcher can
+    # tell "no reducer-only env" from "reducer-only env that happens to be empty".
+    reducer_env_options = (
+        AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.reducer_env)) if opts.reducer_env else None
+    )
     label_options = resolve_labels(opts.label)
     run_labels = dict(label_options.labels)
     run_labels[RUN_NAME_LABEL_KEY] = run_name
@@ -324,6 +345,7 @@ def build_launch_config(
         agent_type=AgentTypeName(opts.agent_type),
         provider_name=ProviderInstanceName(opts.provider),
         env_options=env_options,
+        reducer_env_options=reducer_env_options,
         label_options=label_options,
         snapshot=SnapshotName(opts.snapshot) if opts.snapshot is not None else None,
         templates=opts.agent_template,
@@ -353,6 +375,11 @@ def _run_reducer_phase(
     if not has_any_successful_mapper:
         return None
 
+    # Give the recipe the full mapper set (successes and failures alike) before
+    # the reducer reads the output dir, so failed mappers that produced no file
+    # can be represented rather than silently missing.
+    recipe.on_all_mappers_finalized(ctx, mapper_metadata)
+
     prompt = recipe.build_reducer_prompt(ctx)
     try:
         info, host = launch_reducer_agent(
@@ -362,6 +389,7 @@ def _run_reducer_phase(
             mngr_ctx=mngr_ctx,
             run_name=ctx.run_name,
             output_dir=ctx.output_dir,
+            branch_suffix=opts.reducer_branch_suffix,
         )
     except (MngrError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch reducer agent: {}", exc)
