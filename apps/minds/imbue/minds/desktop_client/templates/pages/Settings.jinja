@@ -465,26 +465,33 @@
                       {{ service.display_name }}
                       <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
                     </h3>
-                    <Button variant="secondary" size="md" class="add-account-btn shrink-0">+ Add account</Button>
+                    <Button variant="ghost" size="md" class="add-account-btn shrink-0">+ Add account</Button>
                   </div>
                   {# Signed-in accounts for this service. Each can be disconnected
                      independently; disconnecting the last one also revokes the
-                     service's permissions from every workspace (server-side). #}
+                     service's permissions from every workspace (server-side). A
+                     two-column grid keeps each Disconnect button right next to its
+                     account while still aligning every button within the section
+                     (both columns size to their widest cell). #}
                   {% if service.accounts %}
-                    <div class="flex flex-col gap-1 mb-4">
+                    <div class="grid grid-cols-[auto_auto] justify-start items-center gap-x-4 gap-y-1 mb-5">
                       {% for account in service.accounts %}
-                        <div class="flex items-center justify-between gap-3 py-1.5"
-                             data-account="{{ account.account }}" data-account-label="{{ account.label }}">
-                          <span class="type-body text-primary truncate min-w-0">{{ account.label }}</span>
-                          <Button variant="ghost" size="md" class="disconnect-account-btn shrink-0">Disconnect</Button>
+                        {# ``contents`` promotes the span + button into the grid so
+                           the columns (label / button) align across every row while
+                           the button still sits right next to its account. The
+                           wrapper is a plain div so its ``data-*`` values interpolate
+                           (JinjaX components don't evaluate ``{{ }}`` in attributes). #}
+                        <div class="contents" data-account="{{ account.account }}" data-account-label="{{ account.label }}">
+                          <span class="type-body text-primary">{{ account.label }}</span>
+                          <Button variant="ghost" size="md" class="disconnect-account-btn">Disconnect</Button>
                         </div>
                       {% endfor %}
                     </div>
                   {% else %}
-                    <p class="type-helper text-tertiary mb-4">No accounts connected yet.</p>
+                    <p class="type-helper text-tertiary mb-5">No accounts connected yet.</p>
                   {% endif %}
                   <div class="flex items-center justify-between gap-3 mb-2">
-                    <p class="type-helper text-tertiary">Allowed on all accounts:</p>
+                    <p class="type-body text-secondary">Allowed on all accounts:</p>
                     <Button variant="ghost" size="md" class="remove-all-btn shrink-0">Revoke all</Button>
                   </div>
                   <div class="grid grid-cols-2 gap-3">
