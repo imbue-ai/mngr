@@ -75,15 +75,13 @@ def _make_stub_bin(
     sync_ok: bool = True,
     list_ok: bool = True,
     supervisorctl_call_log: Path | None = None,
-    supervisorctl_hook: str = "",
 ) -> Path:
     """A PATH dir with stub `uv` and `supervisorctl` acting like a healthy workspace.
 
     ``sync_ok=False`` fails `uv sync` (a post-restore failpoint for the
     restore script); ``list_ok=False`` fails `uv run mngr list` (a broken
-    workspace whose chat gate cannot answer); ``supervisorctl_call_log`` /
-    ``supervisorctl_hook`` are forwarded to the supervisorctl stub for
-    lifecycle-order assertions and deterministic race injection.
+    workspace whose chat gate cannot answer); ``supervisorctl_call_log`` is
+    forwarded to the supervisorctl stub for lifecycle-order assertions.
     """
     stub_bin = tmp_path / "stub-bin"
     stub_bin.mkdir(exist_ok=True)
@@ -100,9 +98,7 @@ def _make_stub_bin(
         + "exit 0\n"
     )
     uv_stub.chmod(0o755)
-    write_stub_supervisorctl(
-        stub_bin, is_restart_ok=restart_ok, call_log_path=supervisorctl_call_log, hook_script=supervisorctl_hook
-    )
+    write_stub_supervisorctl(stub_bin, is_restart_ok=restart_ok, call_log_path=supervisorctl_call_log)
     return stub_bin
 
 

@@ -140,7 +140,6 @@ def write_stub_supervisorctl(
     *,
     is_restart_ok: bool = True,
     call_log_path: Path | None = None,
-    hook_script: str = "",
 ) -> Path:
     """Write a stub ``supervisorctl`` into ``stub_bin`` and return its path.
 
@@ -150,17 +149,12 @@ def write_stub_supervisorctl(
 
     ``call_log_path`` appends each invocation's arguments as one line, so tests
     can assert on service-lifecycle ordering (e.g. ``stop all`` before
-    ``restart all``). ``hook_script`` is raw bash injected before the response
-    logic, for deterministic race simulation (e.g. append a BACKUP_STARTED
-    journal line when ``stop all`` arrives, standing in for a tick the stop
-    killed mid-flight).
+    ``restart all``).
     """
     stub = stub_bin / "supervisorctl"
     lines = ["#!/bin/bash"]
     if call_log_path is not None:
         lines.append(f'echo "$@" >> "{call_log_path}"')
-    if hook_script:
-        lines.append(hook_script)
     if is_restart_ok:
         lines.append('echo "host-backup RUNNING pid 123, uptime 0:00:01"')
         lines.append("exit 0")
