@@ -86,6 +86,7 @@
     pendingRevoke = request;
     revokeTitle.textContent = title;
     revokeBody.textContent = body;
+    revokeConfirmBtn.textContent = request.confirmLabel || 'Revoke';
     if (revokeErrorEl) revokeErrorEl.classList.add('hidden');
     revokeConfirmBtn.disabled = false;
     revokeDialog.classList.remove('hidden');
@@ -160,6 +161,66 @@
           body: { service_name: serviceSection.getAttribute('data-service-name') },
         }
       );
+    });
+  });
+
+  // Disconnect one account from a service. Confirmed through the shared
+  // revoke dialog; the server also revokes the service's permissions from
+  // every workspace when the last account goes.
+  document.querySelectorAll('.disconnect-account-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var serviceSection = btn.closest('[data-service-name]');
+      var row = btn.closest('[data-account]');
+      var serviceLabel = serviceSection.getAttribute('data-service-label');
+      var accountLabel = row.getAttribute('data-account-label');
+      openRevokeDialog(
+        'Disconnect ' + accountLabel + '?',
+        'This signs ' + accountLabel + ' out of ' + serviceLabel + '. Your saved credentials for this '
+          + 'account are removed; agents can reconnect it later.',
+        {
+          url: '/settings/connectors/disconnect-account',
+          confirmLabel: 'Disconnect',
+          body: {
+            service_name: serviceSection.getAttribute('data-service-name'),
+            account: row.getAttribute('data-account'),
+          },
+        }
+      );
+    });
+  });
+
+  // Add a new account for a service. This opens a browser sign-in flow and
+  // blocks until the user finishes it, so we disable the button and show a
+  // progress label rather than a confirm dialog. Reloads on success.
+  document.querySelectorAll('.add-account-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var serviceSection = btn.closest('[data-service-name]');
+      var originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Signing in...';
+      fetch('/settings/connectors/add-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service_name: serviceSection.getAttribute('data-service-name') }),
+      })
+        .then(function (resp) {
+          if (resp.ok) {
+            window.location.reload();
+            return;
+          }
+          btn.disabled = false;
+          btn.textContent = originalText;
+          resp.json().then(function (data) {
+            window.alert((data && data.error) ? data.error : 'Could not add the account (HTTP ' + resp.status + ').');
+          }).catch(function () {
+            window.alert('Could not add the account (HTTP ' + resp.status + ').');
+          });
+        })
+        .catch(function () {
+          btn.disabled = false;
+          btn.textContent = originalText;
+          window.alert('Could not add the account (network error).');
+        });
     });
   });
 

@@ -2160,7 +2160,10 @@ def render_settings_page(
 
     ``services_overview`` / ``file_sharing_grants`` /
     ``workspace_delegation_grants`` are the permission-overview models (see
-    :mod:`~imbue.minds.desktop_client.latchkey.permission_overview`);
+    :mod:`~imbue.minds.desktop_client.latchkey.permission_overview`); each
+    ``services_overview`` entry also carries the service's signed-in
+    ``accounts``, which the Connectors panel lists above the per-workspace
+    grants (with "+ Add account" and per-account "Disconnect" actions).
     ``permissions_unavailable`` is True when the latchkey gateway could not be
     reached to read grants. ``report_unexpected_errors`` / ``include_error_logs``
     seed the per-machine error-reporting toggles; ``is_master_password_set``
