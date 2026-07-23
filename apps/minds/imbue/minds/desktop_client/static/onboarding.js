@@ -1,4 +1,4 @@
-// Creating-page onboarding walkthrough: nine micro-steps, one short
+// Creating-page onboarding walkthrough: eight micro-steps, one short
 // sentence each, over a shared scene graphic (Creating.jinja).
 // creating.js keeps owning progress/status/failure; it signals readiness
 // by setting data-ready + data-redirect-url on #creating and dispatching
@@ -7,12 +7,11 @@
 // data-surface-errors and dispatches 'minds:surface-errors', which
 // creating.js listens for.
 //
-// Steps 1-5 show the minds phase (scene class step-1), 6-7 the latchkey
-// phase (step-2), 8-9 the full picture (step-3). The Next button also
+// Steps 1-4 show the minds phase (scene class step-1), 5-6 the latchkey
+// phase (step-2), 7-8 the full picture (step-3). The Next button also
 // walks the demo tab-space through its tabs (steps 2-4), so the demo is
-// deliberately not freely clickable -- only the theme swatches are.
-// Clicking a scene icon jumps to the first step that explains it
-// (data-goto-step on the node).
+// deliberately not clickable. Clicking a scene icon jumps to the first
+// step that explains it (data-goto-step on the node).
 (function () {
   var root = document.getElementById('creating');
   var onboarding = document.getElementById('onboarding');
@@ -36,27 +35,26 @@
     });
   }
 
-  var TOTAL_STEPS = 9;
+  var TOTAL_STEPS = 8;
   var LAST_STEP = TOTAL_STEPS;
   var step = 1;
 
   // Scene phase (the step-1/2/3 class CSS keys the zoom-out off) per step.
   function phaseForStep(s) {
-    if (s <= 5) return 1;
-    if (s <= 7) return 2;
+    if (s <= 4) return 1;
+    if (s <= 6) return 2;
     return 3;
   }
 
   // Which demo tab each step highlights (steps without an entry leave the
   // demo as it was).
-  var DEMO_TAB_BY_STEP = { 2: 'chat', 3: 'app', 4: 'web', 5: 'chat' };
+  var DEMO_TAB_BY_STEP = { 2: 'chat', 3: 'app', 4: 'web' };
 
   var prevBtn = document.getElementById('onboarding-prev');
   var nextBtn = document.getElementById('onboarding-next');
   var beginBtn = document.getElementById('onboarding-begin');
   var serverCaption = document.getElementById('server-caption');
   var demoWrap = document.getElementById('demo-wrap');
-  var colorPickerWrap = document.getElementById('color-picker-wrap');
   var carouselWrap = document.getElementById('carousel-wrap');
   var demo = document.getElementById('theme-demo');
 
@@ -86,9 +84,8 @@
     onboarding.querySelectorAll('.onboarding-dot').forEach(function (dot) {
       dot.classList.toggle('is-active', dot.getAttribute('data-dot') === String(step));
     });
-    if (demoWrap) demoWrap.classList.toggle('hidden', !(step >= 2 && step <= 5));
-    if (colorPickerWrap) colorPickerWrap.classList.toggle('hidden', step !== 5);
-    if (carouselWrap) carouselWrap.classList.toggle('hidden', step !== 7);
+    if (demoWrap) demoWrap.classList.toggle('hidden', !(step >= 2 && step <= 4));
+    if (carouselWrap) carouselWrap.classList.toggle('hidden', step !== 6);
     setDemoTab(DEMO_TAB_BY_STEP[step]);
 
     var onLastStep = step === LAST_STEP;
@@ -177,31 +174,6 @@
       onboarding.classList.add('is-entering');
       // Matches the onboarding-enter-zoom animation duration in app.css.
       setTimeout(function () { window.location.href = url; }, 650);
-    });
-  }
-
-  // ---- Theme-color picker (step 5) ----
-  // Picking a swatch restyles the demo tab-space via --demo-accent AND
-  // persists the pick to the in-flight creation: the color endpoint
-  // records it on the creator, which applies it as the workspace's color
-  // label (during creation, or immediately if it already finished).
-  var creationIdForColor = root.getAttribute('data-agent-id');
-  var picker = document.getElementById('onboarding-color-picker');
-  if (demo && picker) {
-    picker.addEventListener('click', function (event) {
-      var swatch = event.target.closest('.color-swatch');
-      if (!swatch) return;
-      var color = swatch.getAttribute('data-color');
-      if (!color) return;
-      demo.style.setProperty('--demo-accent', color);
-      picker.querySelectorAll('.color-swatch').forEach(function (other) {
-        other.setAttribute('aria-checked', other === swatch ? 'true' : 'false');
-      });
-      fetch('/api/v1/workspaces/operations/create/' + creationIdForColor + '/color', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ color: color })
-      }).catch(function () {});
     });
   }
 

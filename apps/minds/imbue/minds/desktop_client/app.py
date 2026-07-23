@@ -1066,10 +1066,6 @@ def _handle_landing_page() -> Response:
         # visible; otherwise start on the simple preset cards.
         start_advanced=bool(git_url or branch),
         color=_suggested_create_color(backend_resolver),
-        # First-ever creation: hide the form's color picker -- the onboarding
-        # walkthrough owns the color pick there (the hidden input still
-        # carries the auto-chosen color).
-        show_color_picker=minds_config is None or minds_config.get_create_onboarding_seen(),
         # This create form is the landing fallback (shown at "/" when no
         # workspace exists), so wire its self-heal SSE: if a workspace appears
         # while it is open, it navigates to "/" instead of stranding the user.
@@ -1158,10 +1154,6 @@ def _handle_create_page() -> Response:
         # visible; otherwise start on the simple preset cards.
         start_advanced=bool(git_url or branch),
         color=_suggested_create_color(backend_resolver),
-        # First-ever creation: hide the form's color picker -- the onboarding
-        # walkthrough owns the color pick there (the hidden input still
-        # carries the auto-chosen color).
-        show_color_picker=minds_config is None or minds_config.get_create_onboarding_seen(),
     )
     return make_html_response(content=html)
 

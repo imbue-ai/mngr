@@ -455,7 +455,6 @@ def render_create_form(
     selected_preset: str | None = None,
     start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
-    show_color_picker: bool = True,
     is_landing_fallback: bool = False,
 ) -> str:
     """Render the agent creation form page.
@@ -557,11 +556,6 @@ def render_create_form(
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,
-        palette=WORKSPACE_PALETTE,
-        # Hidden on the user's first-ever creation: the onboarding
-        # walkthrough owns the color pick there; the auto-chosen hidden
-        # input still carries a color either way.
-        show_color_picker=show_color_picker,
         is_landing_fallback=is_landing_fallback,
     )
 
@@ -666,19 +660,14 @@ def render_creating_page(
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
-        # Onboarding walkthrough context: the theme-color swatches (the pick
-        # is written to the workspace's color label via the create-operation
-        # color endpoint), the latchkey services for the carousel, and
-        # whether the workspace machine is remote (drives the final-step
-        # copy/graphic). ``show_walkthrough`` selects walkthrough-first
-        # (first-ever creation) vs the plain loading screen with a "Learn
-        # more about Minds" button. ``initial_color`` seeds the picker with
-        # the creation's current color (the create form's pick).
-        palette=WORKSPACE_PALETTE,
+        # Onboarding walkthrough context: the latchkey services for the
+        # carousel, and whether the workspace machine is remote (drives the
+        # final-step copy/graphic). ``show_walkthrough`` selects
+        # walkthrough-first (first-ever creation) vs the plain loading
+        # screen with a "Learn more about Minds" button.
         onboarding_services=list(onboarding_services),
         is_remote=info.launch_mode is LaunchMode.IMBUE_CLOUD,
         show_walkthrough=show_walkthrough,
-        initial_color=info.color or DEFAULT_WORKSPACE_COLOR,
     )
 
 

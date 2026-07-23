@@ -28,7 +28,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreationErrorKind
-from imbue.minds.desktop_client.agent_creator import UnknownCreationError
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
@@ -1597,40 +1596,6 @@ def test_checkout_existing_branch_raises_for_missing_branch(tmp_path: Path) -> N
         checkout_existing_branch(dest, GitBranch("no-such-branch-55307"))
 
     assert "no-such-branch-55307" in str(excinfo.value)
-
-
-def test_set_pending_color_stores_and_reports_through_info(tmp_path: Path) -> None:
-    creator = _make_test_creator(tmp_path)
-    creation_id = CreationId()
-    with creator._lock:
-        creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
-        creator._colors[str(creation_id)] = "#0b292b"
-
-    # In flight: the pick is stored (visible via the info snapshot) and no
-    # agent id comes back yet (the worker applies the label before DONE).
-    assert creator.set_pending_color(creation_id, "#9fbbd3") is None
-    info = creator.get_creation_info(creation_id)
-    assert info is not None
-    assert info.color == "#9fbbd3"
-
-
-def test_set_pending_color_returns_agent_id_once_done(tmp_path: Path) -> None:
-    creator = _make_test_creator(tmp_path)
-    creation_id = CreationId()
-    agent_id = AgentId()
-    with creator._lock:
-        creator._statuses[str(creation_id)] = AgentCreationStatus.DONE
-        creator._canonical_agent_ids[str(creation_id)] = agent_id
-
-    # Already finished: the caller must apply the label itself, so the
-    # canonical agent id is returned.
-    assert creator.set_pending_color(creation_id, "#9fbbd3") == agent_id
-
-
-def test_set_pending_color_raises_for_unknown_creation(tmp_path: Path) -> None:
-    creator = _make_test_creator(tmp_path)
-    with pytest.raises(UnknownCreationError):
-        creator.set_pending_color(CreationId(), "#9fbbd3")
 
 
 def test_onboarding_shown_is_tracked_per_creation(tmp_path: Path) -> None:

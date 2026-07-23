@@ -395,28 +395,14 @@ def test_render_create_form_omits_env_file_checkbox() -> None:
     assert "include_env_file" not in html
 
 
-def test_render_create_form_carries_color_in_hidden_input_with_visible_picker() -> None:
-    # A hidden ``color`` input carries the selection through the POST; the
-    # visible swatch picker (one swatch per palette entry, pre-picked entry
-    # selected) writes it on click.
+def test_render_create_form_carries_color_in_hidden_input_without_swatches() -> None:
+    # The color is auto-chosen, so there is no visible palette picker; a hidden
+    # ``color`` input carries the selection through the POST.
     html = render_create_form()
     assert 'name="color"' in html
     assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
-    assert 'id="create-color-picker"' in html
-    for hex_value in WORKSPACE_PALETTE.values():
-        assert f'data-color="{hex_value}"' in html
-
-
-def test_render_create_form_hides_picker_before_first_onboarding() -> None:
-    # On the user's first-ever creation the onboarding walkthrough owns the
-    # color pick, so the form shows no swatches -- but the hidden input still
-    # carries the auto-chosen color.
-    html = render_create_form(show_color_picker=False)
-    assert 'name="color"' in html
-    assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
-    assert 'id="create-color-picker"' not in html
-    # No swatch buttons render (the class string still appears in the page's
-    # picker-wiring JS, which is inert without the picker element).
+    # No visible swatches (the palette picker markup is gone).
+    assert "color-swatch" not in html
     for hex_value in WORKSPACE_PALETTE.values():
         assert f'data-color="{hex_value}"' not in html
 
@@ -424,11 +410,6 @@ def test_render_create_form_hides_picker_before_first_onboarding() -> None:
 def test_render_create_form_carries_provided_color_in_hidden_input() -> None:
     html = render_create_form(color="#cecd0c")
     assert 'value="#cecd0c"' in html
-    # The matching swatch is pre-selected.
-    swatch_index = html.index('data-color="#cecd0c"')
-    tag_start = html.rindex("<button", 0, swatch_index)
-    tag_end = html.index(">", swatch_index)
-    assert 'aria-checked="true"' in html[tag_start:tag_end]
 
 
 def _preset_card_tag(html: str, preset: str) -> str:
@@ -503,9 +484,9 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
 def test_render_creating_page_renders_onboarding_walkthrough() -> None:
     """The creating page carries the three-step onboarding walkthrough.
 
-    Step markers, the theme-color demo swatches (one per palette entry),
-    the services carousel, and the nav (Previous/Next/Begin, Begin hidden
-    until onboarding.js reveals it) must all be present on first paint.
+    Step markers, the services carousel, and the nav (Previous/Next/Begin,
+    Begin hidden until onboarding.js reveals it) must all be present on
+    first paint.
     """
     creation_id = CreationId()
     info = AgentCreationInfo(
@@ -518,15 +499,14 @@ def test_render_creating_page_renders_onboarding_walkthrough() -> None:
         OnboardingService(service_id="ramp", display_name="Ramp", icon_url=None),
     ]
     html = render_creating_page(creation_id=creation_id, info=info, onboarding_services=services)
-    for step_number in range(1, 10):
+    for step_number in range(1, 9):
         assert f'data-step="{step_number}"' in html
+    assert 'data-step="9"' not in html
     # The progress strip is always visible, in the walkthrough too.
     strip_index = html.index('id="top-strip"')
     strip_tag_start = html.rindex("<div", 0, strip_index)
     strip_tag_end = html.index(">", strip_index)
     assert "hidden" not in html[strip_tag_start:strip_tag_end]
-    assert 'id="onboarding-color-picker"' in html
-    assert html.count("color-swatch") >= len(WORKSPACE_PALETTE)
     assert "service-marquee" in html
     assert "/_static/service_icons/slack.svg" in html
     assert "Ramp" in html
@@ -565,24 +545,6 @@ def test_render_creating_page_plain_mode_defers_walkthrough() -> None:
     onboarding_index = html.index('id="onboarding"')
     onboarding_tag = html[html.rindex("<div", 0, onboarding_index) : html.index(">", onboarding_index)]
     assert "hidden" in onboarding_tag
-
-
-def test_render_creating_page_seeds_picker_with_creation_color() -> None:
-    """The walkthrough's color picker pre-selects the creation's current
-    color (the create form's pick) and seeds the demo accent with it."""
-    creation_id = CreationId()
-    info = AgentCreationInfo(
-        creation_id=creation_id,
-        status=AgentCreationStatus.INITIALIZING,
-        launch_mode=LaunchMode.DOCKER,
-        color="#cecd0c",
-    )
-    html = render_creating_page(creation_id=creation_id, info=info)
-    assert "--demo-accent: #cecd0c;" in html
-    swatch_index = html.index('data-color="#cecd0c"')
-    tag_start = html.rindex("<button", 0, swatch_index)
-    tag_end = html.index(">", swatch_index)
-    assert 'aria-checked="true"' in html[tag_start:tag_end]
 
 
 def test_render_creating_page_step3_copy_matches_launch_mode() -> None:

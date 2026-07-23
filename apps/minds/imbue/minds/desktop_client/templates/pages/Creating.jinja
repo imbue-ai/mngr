@@ -1,4 +1,4 @@
-{#def agent_id, status_text, expected_duration_seconds, palette, onboarding_services, is_remote, show_walkthrough=True, initial_color="#0b292b" #}
+{#def agent_id, status_text, expected_duration_seconds, onboarding_services, is_remote, show_walkthrough=True #}
 {#
   Progress page shown while an agent is being created. The page is keyed
   by creation_id (passed as agent_id here -- a minds-internal in-flight
@@ -8,7 +8,7 @@
   bar (eases toward ~80% over this duration).
 
   Layout: on the user's FIRST-ever creation (show_walkthrough=True) the
-  screen is a nine-micro-step onboarding walkthrough (see onboarding.js),
+  screen is an eight-micro-step onboarding walkthrough (see onboarding.js),
   one short sentence per step, over a shared scene graphic that zooms out
   as the steps advance. Later creations show the plain loading screen
   (errors immediate, auto-redirect on ready) asking whether the user wants
@@ -22,11 +22,9 @@
   and enters the workspace. Clicking any scene icon jumps to the first
   step that explains it.
 
-  palette is the server-side workspace color mapping (name -> #rrggbb) for
-  the theme-demo step; the pick only restyles the in-page demo, it is not
-  persisted to the workspace. onboarding_services is the carousel list
-  (OnboardingService rows). is_remote picks the final-step copy: whether
-  the workspace machine is a remote cloud host or this computer.
+  onboarding_services is the carousel list (OnboardingService rows).
+  is_remote picks the final-step copy: whether the workspace machine is a
+  remote cloud host or this computer.
 #}
 {% set _scripts %}
 <script src="/_static/creating.js" defer></script>
@@ -104,7 +102,7 @@
                   </svg>
                   <span class="type-helper text-tertiary">minds</span>
                 </div>
-                <div id="scene-key" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="6" title="What is latchkey?">
+                <div id="scene-key" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="5" title="What is latchkey?">
                   {# Imbue latchkey logo, redrawn as SVG from the imbue.com #}
                   {# product-page mark (olive tile, pink vintage key + tag). #}
                   <svg viewBox="0 0 64 64" class="w-20 h-20 rounded-xl" aria-label="latchkey">
@@ -124,7 +122,7 @@
               </div>
             </div>
 
-            <div id="scene-tunnel" class="scene-node flex flex-col items-center gap-1 self-center mt-6 cursor-pointer" data-goto-step="8" title="What is the tunnel?">
+            <div id="scene-tunnel" class="scene-node flex flex-col items-center gap-1 self-center mt-6 cursor-pointer" data-goto-step="7" title="What is the tunnel?">
               {# Tunnel: two gentle arcs with an encryption lock between them. #}
               <svg viewBox="0 0 120 48" class="w-40 h-16 text-tertiary" fill="none" stroke="currentColor" aria-label="encrypted tunnel">
                 <path d="M4 14 C 40 5, 80 5, 116 14" stroke-width="3" stroke-linecap="round"/>
@@ -145,7 +143,7 @@
                 {% endif %}
               </div>
               <div class="rounded-xl border border-subtle bg-fill-subtle px-4 py-4">
-                <div id="scene-server" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="9" title="What is the workspace?">
+                <div id="scene-server" class="scene-node flex flex-col items-center gap-1 cursor-pointer" data-goto-step="8" title="What is the workspace?">
                   {# Server with an AI sparkle, drawn as a brand-style tile #}
                   {# matching the minds / latchkey icons (palette colors: #}
                   {# confusion tile, peace glyph, comfort sparkle). The inner #}
@@ -175,7 +173,7 @@
 
           {# Micro-step text panels: one short sentence each (onboarding.js #}
           {# shows the one matching the current step). Steps 1-5 are the #}
-          {# minds phase, 6-7 latchkey, 8-9 the full picture. #}
+          
           <div class="onboarding-step text-center" data-step="1">
             <p class="type-body text-secondary max-w-xl">
               This is <b>minds</b>: your access terminal for an AI operating system.
@@ -198,26 +196,21 @@
           </div>
           <div class="onboarding-step hidden text-center" data-step="5">
             <p class="type-body text-secondary max-w-xl">
-              Pick a theme color for this workspace.
-            </p>
-          </div>
-          <div class="onboarding-step hidden text-center" data-step="6">
-            <p class="type-body text-secondary max-w-xl">
               This is <b>latchkey</b>: your credentials stay encrypted on your
               computer, never visible to agents.
             </p>
           </div>
-          <div class="onboarding-step hidden text-center" data-step="7">
+          <div class="onboarding-step hidden text-center" data-step="6">
             <p class="type-body text-secondary max-w-xl">
               latchkey can connect your agents to the tools you already use.
             </p>
           </div>
-          <div class="onboarding-step hidden text-center" data-step="8">
+          <div class="onboarding-step hidden text-center" data-step="7">
             <p class="type-body text-secondary max-w-xl">
               Your computer talks to your workspace over an encrypted tunnel.
             </p>
           </div>
-          <div class="onboarding-step hidden text-center flex flex-col items-center gap-3" data-step="9">
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-3" data-step="8">
             <p class="type-body text-secondary max-w-xl">
               Your workspace is where your agents run.
               {% if is_remote %}
@@ -231,13 +224,10 @@
             <p id="tip" class="type-helper text-tertiary min-h-[18px] transition-opacity"></p>
           </div>
 
-          {# Demo tab-space, shared by steps 2-5. NOT freely interactive: the #}
-          {# Next button walks through the tabs (chat -> app -> web); only the #}
-          {# theme swatches (step 5) take clicks. The accent follows the #}
-          {# picked color (demo only; the real workspace color came from the #}
-          {# create form). #}
+          {# Demo tab-space, shared by steps 2-4. NOT freely interactive: #}
+          {# the Next button walks through the tabs (chat -> app -> web). #}
           <div id="demo-wrap" class="hidden w-full flex flex-col items-center gap-3">
-            <div id="theme-demo" class="w-full max-w-md rounded-xl overflow-hidden border border-subtle shadow-overlay text-left" style="--demo-accent: {{ initial_color }};">
+            <div id="theme-demo" class="w-full max-w-md rounded-xl overflow-hidden border border-subtle shadow-overlay text-left">
               <div id="demo-titlebar" class="flex items-center gap-1.5 px-3 pt-2" style="background-color: var(--demo-accent);">
                 <div class="flex gap-1.5 pr-2 py-2">
                   <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
@@ -264,14 +254,6 @@
                 <div class="demo-pane hidden" data-pane="web">
                   <div class="rounded-full border border-subtle bg-surface-primary px-3 py-1.5 type-helper text-tertiary">https://example.com</div>
                 </div>
-              </div>
-            </div>
-            {# Theme swatches: revealed on the pick-a-color step only. #}
-            <div id="color-picker-wrap" class="hidden">
-              <div id="onboarding-color-picker" role="radiogroup" aria-label="Theme color" class="flex items-center gap-2 flex-wrap justify-center">
-                {% for name, hex_value in palette.items() %}
-                  <ColorSwatch :hex="hex_value" :name="name" size="sm" :selected="hex_value == initial_color" />
-                {% endfor %}
               </div>
             </div>
           </div>
@@ -302,7 +284,7 @@
           <nav class="flex items-center gap-4" aria-label="Walkthrough">
             <Button variant="secondary" size="lg" id="onboarding-prev" disabled>Previous</Button>
             <div class="flex items-center gap-1.5" id="onboarding-dots" aria-hidden="true">
-              {% for _step in range(1, 10) %}
+              {% for _step in range(1, 9) %}
                 <span class="onboarding-dot" data-dot="{{ _step }}"></span>
               {% endfor %}
             </div>

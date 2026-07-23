@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b", palette={}, show_color_picker=True, is_landing_fallback=False #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b", is_landing_fallback=False #}
 {#
   Workspace creation form.
 
@@ -71,20 +71,6 @@
     var hostNameInput = document.getElementById('host_name');
     var hostNameError = document.getElementById('host-name-error');
     var colorInput = document.getElementById('create-color-input');
-    // Visible theme-color picker writes the hidden color input.
-    var colorPicker = document.getElementById('create-color-picker');
-    if (colorPicker) {
-      colorPicker.addEventListener('click', function (event) {
-        var swatch = event.target.closest('.color-swatch');
-        if (!swatch) return;
-        var picked = swatch.getAttribute('data-color');
-        if (!picked) return;
-        colorInput.value = picked;
-        colorPicker.querySelectorAll('.color-swatch').forEach(function (other) {
-          other.setAttribute('aria-checked', other === swatch ? 'true' : 'false');
-        });
-      });
-    }
     var backupApiKeyEnvInput = document.getElementById('backup_api_key_env');
     var createError = document.getElementById('create-error');
     // The field highlighted by the last create error, cleared before the next try.
@@ -589,9 +575,7 @@
      door agents use); see the submit handler in the scripts block. The form
      element keeps the field layout + native required-field validation. #}
   <form id="create-form">
-    {# Color carried in the create request. Pre-picked server-side (first
-       unused palette entry) and adjustable via the visible swatch picker
-       below (which writes this hidden input). #}
+    {# Auto-chosen color carried in the create request; no visible picker. #}
     <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
 
     <div class="text-center mb-12">
@@ -788,20 +772,6 @@
       </div>
      </div>
     </div>
-
-    {# Theme-color picker: swatches mirror the workspace-settings picker;
-       clicking one updates the hidden color input (wired in the scripts
-       block above). #}
-    {% if palette and show_color_picker %}
-    <div class="flex flex-col items-center gap-2 mt-12">
-      <span class="type-helper text-tertiary">Theme color</span>
-      <div id="create-color-picker" role="radiogroup" aria-label="Theme color" class="flex items-center gap-2 flex-wrap justify-center">
-        {% for name, hex_value in palette.items() %}
-          <ColorSwatch :hex="hex_value" :name="name" size="sm" :selected="hex_value == color" />
-        {% endfor %}
-      </div>
-    </div>
-    {% endif %}
 
     <div class="flex justify-center mt-16">
       <ButtonSubmit form="create-form" id="create-submit" extra="w-80">Create</ButtonSubmit>
