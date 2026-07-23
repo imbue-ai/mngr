@@ -488,6 +488,51 @@ export interface CreateFormBootIsland {
   create: CreateFormBootExtras;
 }
 
+// SuperTokens auth surfaces (mirrors of the *BootExtras in chrome_state.py).
+export interface AuthFormBootExtras {
+  default_to_signup: boolean;
+  // Modal-only copy above the tabs; empty on the standalone page.
+  intro: string;
+  // Standalone-page info banner; empty otherwise.
+  message: string;
+  // Safe local path a successful sign-in / the back link returns to.
+  return_to: string;
+  // True for the overlay sign-in modal (backdrop + card + host dismissal).
+  is_modal: boolean;
+}
+
+export interface AuthFormBootIsland {
+  auth: AuthFormBootExtras;
+}
+
+export interface CheckEmailBootExtras {
+  email: string;
+}
+
+export interface CheckEmailBootIsland {
+  check_email: CheckEmailBootExtras;
+}
+
+export interface OauthCloseBootExtras {
+  email: string;
+  display_name: string;
+}
+
+export interface OauthCloseBootIsland {
+  oauth_close: OauthCloseBootExtras;
+}
+
+export interface AccountSettingsBootExtras {
+  email: string;
+  display_name: string;
+  provider: string;
+  user_id_prefix: string;
+}
+
+export interface AccountSettingsBootIsland {
+  account_settings: AccountSettingsBootExtras;
+}
+
 // Get-help modal boot island data (mirror of HelpBootExtras in
 // chrome_state.py).
 export interface HelpBootExtras {

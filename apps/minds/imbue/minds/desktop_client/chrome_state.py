@@ -644,6 +644,60 @@ InboxDetailPayload = (
 )
 
 
+class AuthFormBootExtras(FrozenModel):
+    """Boot island for the SuperTokens sign-up/sign-in surfaces (the ``auth``
+    key): the standalone /auth page and the centered sign-in modal both mount
+    the two-tab AuthForm from this."""
+
+    default_to_signup: bool = Field(description="Which tab leads on first paint (Create account vs Sign in)")
+    intro: str = Field(default="", description="Modal-only explanatory copy shown above the tabs; empty on the page")
+    message: str = Field(default="", description="Standalone-page info banner; empty otherwise")
+    return_to: str = Field(default="", description="Safe local path a successful sign-in / the back link returns to")
+    is_modal: bool = Field(
+        default=False, description="True for the overlay sign-in modal: backdrop + card + host-adapter dismissal"
+    )
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class CheckEmailBootExtras(FrozenModel):
+    """Boot island for the verify-your-email page (the ``check_email`` key)."""
+
+    email: str = Field(description="The address the verification link was sent to")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class OauthCloseBootExtras(FrozenModel):
+    """Boot island for the OAuth popup's terminal 'you can close this' page
+    (the ``oauth_close`` key)."""
+
+    email: str = Field(description="The signed-in account's email")
+    display_name: str = Field(default="", description="The signed-in account's display name; falls back to email")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class AccountSettingsBootExtras(FrozenModel):
+    """Boot island for the SuperTokens account settings page (the
+    ``account_settings`` key)."""
+
+    email: str = Field(description="The signed-in account's email")
+    display_name: str = Field(default="", description="The account's display name; empty hides the Name row")
+    provider: str = Field(description="The auth provider (``email`` gets a Change password link)")
+    user_id_prefix: str = Field(description="A short prefix of the user id, shown for support reference")
+
+    @pure
+    def to_payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class ChromeBootState(FrozenModel):
     """A connect-time snapshot of the chrome data, for page boot-state islands.
 

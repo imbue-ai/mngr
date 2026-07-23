@@ -8,6 +8,14 @@
 // the per-page mount calls live in #local-page-scripts.
 import { setAccentScopeAgentId, setContentUrl, setDisplayedWorkspaceAgentId } from "./store";
 import { mountAccountsModal, mountAccountsPage } from "./views/AccountsPage";
+import {
+  mountAccountSettings,
+  mountAuthPage,
+  mountCheckEmail,
+  mountForgotPassword,
+  mountOauthClose,
+  mountSigninModal,
+} from "./views/AuthPages";
 import { mountSettingsModal, mountSettingsPage } from "./views/AppSettings";
 import { mountAuthError, mountLoginPrompt } from "./views/AuthTextPages";
 import { mountConsent } from "./views/ConsentPage";
@@ -27,8 +35,14 @@ import { mountWorkspaceSettings } from "./views/WorkspaceSettingsPage";
 import { mountWorkspaceMenu } from "./views/WorkspaceMenu";
 
 export interface MindsUINamespace {
+  mountAccountSettings: typeof mountAccountSettings;
   mountAccountsModal: typeof mountAccountsModal;
   mountAccountsPage: typeof mountAccountsPage;
+  mountAuthPage: typeof mountAuthPage;
+  mountCheckEmail: typeof mountCheckEmail;
+  mountForgotPassword: typeof mountForgotPassword;
+  mountOauthClose: typeof mountOauthClose;
+  mountSigninModal: typeof mountSigninModal;
   mountAuthError: typeof mountAuthError;
   mountConsent: typeof mountConsent;
   mountCreateForm: typeof mountCreateForm;
@@ -70,8 +84,14 @@ declare global {
 adoptParentModalBridge();
 
 window.MindsUI = {
+  mountAccountSettings,
   mountAccountsModal,
   mountAccountsPage,
+  mountAuthPage,
+  mountCheckEmail,
+  mountForgotPassword,
+  mountOauthClose,
+  mountSigninModal,
   mountAuthError,
   mountConsent,
   mountCreateForm,

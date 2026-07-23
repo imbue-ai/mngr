@@ -1942,28 +1942,6 @@ def test_form_label_inline_drops_block_and_mb() -> None:
     assert "type-label" in html
 
 
-def test_oauth_button_renders_google_label_and_brand_icon_with_hook_class() -> None:
-    html = CATALOG.render("auth.OauthButton", provider="google")
-    # The .oauth-btn hook is load-bearing -- static/auth.js queries for
-    # it to enable/disable all OAuth buttons as a group.
-    assert "oauth-btn" in html
-    # Label text + data-oauth provider attr.
-    assert "Continue with Google" in html
-    assert 'data-oauth="google"' in html
-    # Brand glyph from auth.OauthIcon is composed inline. The path
-    # fragment is one of the four <path d="..."> values unique to
-    # Google's blue triangle.
-    assert "M22.56 12.25" in html
-
-
-def test_oauth_button_github_uses_github_label_and_glyph() -> None:
-    html = CATALOG.render("auth.OauthButton", provider="github")
-    assert "Continue with GitHub" in html
-    assert 'data-oauth="github"' in html
-    # Path fragment that opens GitHub's mark glyph.
-    assert "M12 0C5.37 0 0 5.37" in html
-
-
 def test_page_narrow_container_default_padding_and_max_width() -> None:
     html = CATALOG.render("PageNarrowContainer", title="x", _content="<p>body</p>")
     # The narrow column itself is width/padding only: p-8 + max-w-[420px] +
@@ -2090,26 +2068,6 @@ def test_spinner_default_tone_omits_accent_class() -> None:
 def test_spinner_accent_tone_adds_accent_class() -> None:
     html = CATALOG.render("Spinner", size="sm", tone="accent")
     assert "spinner-accent" in html
-
-
-def test_oauth_icon_google_includes_google_svg_path() -> None:
-    html = CATALOG.render("auth.OauthIcon", provider="google")
-    # One of the four <path d="..."> values unique to the Google glyph
-    # (the blue triangle); shows the right SVG was selected.
-    assert "M22.56 12.25" in html
-
-
-def test_oauth_icon_github_includes_github_svg_path() -> None:
-    html = CATALOG.render("auth.OauthIcon", provider="github")
-    # The opening of GitHub's mark path.
-    assert "M12 0C5.37 0 0 5.37" in html
-
-
-def test_oauth_icon_unknown_provider_renders_nothing_visible() -> None:
-    # Defensive: the icon component has no fallback path, so an unexpected
-    # provider just produces empty output (no exception).
-    html = CATALOG.render("auth.OauthIcon", provider="not-a-provider").strip()
-    assert html == ""
 
 
 def test_text_input_default_radius_is_md() -> None:

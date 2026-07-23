@@ -1,28 +1,16 @@
-{#def title, message, default_to_signup, return_to="" #}
+{#def title, boot_state #}
 {#
-  Two-tab signup/signin page. ``default_to_signup`` picks which tab is
-  visible on first paint; the inline links flip between them client-side
-  without a navigation. OAuth (Google / GitHub) sits in a "or" divider
-  below the form on each tab.
-
-  ``return_to`` is an optional same-origin path the user came from (e.g.
-  ``/create`` when they chose the remote preset without an account). When
-  set, a back link returns them there without signing in, and ``auth.js``
-  (reading ``return_to`` from the page URL) forwards it to ``/post-login``
-  so a successful sign-in lands them back there too.
+  Standalone sign-up / sign-in page. The whole body is the mithril AuthForm
+  surface (frontend/src/views/AuthPages.ts), mounted from the ``auth`` island
+  slice: the two-tab email/password form, the OAuth (Google / GitHub) flow,
+  the optional back link + info banner, and the post-auth navigation. The
+  centered sign-in modal mounts the same AuthForm from its own island.
 #}
 {% set _scripts %}
-<script src="/_static/auth.js" defer></script>
+<script>
+  window.MindsUI.mountAuthPage(document.getElementById('auth-root'));
+</script>
 {% endset %}
-<PageNarrowContainer :title="title" scripts={{ _scripts }}>
-  {% if return_to %}
-    <div class="mb-4">
-      <Link :href="return_to" weight="medium" id="auth-back-link">&larr; Back to workspace setup</Link>
-    </div>
-  {% endif %}
-  {% if message %}
-    <Notice variant="info">{{ message }}</Notice>
-  {% endif %}
-
-  <auth.AuthForm :default_to_signup="default_to_signup" />
+<PageNarrowContainer :title="title" :boot_state="boot_state" scripts={{ _scripts }}>
+  <div id="auth-root"></div>
 </PageNarrowContainer>

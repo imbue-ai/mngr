@@ -1,13 +1,14 @@
-{#def email, display_name #}
+{#def boot_state #}
 {#
-  Terminal page for the OAuth popup window: shows the signed-in identity
-  and instructs the user to close the tab. The opening tab receives a
-  postMessage and continues the flow.
+  Terminal page for the OAuth popup window (mithril OauthClose surface): shows
+  the signed-in identity and instructs the user to close the tab. The opening
+  tab continues the flow via its own status poll.
 #}
-<PageNarrowContainer title="Signed in">
-  <div class="text-center">
-    <h1 class="type-heading-lg text-primary mb-2">Signed in</h1>
-    <p class="text-secondary mb-3">Signed in as <strong>{{ display_name or email }}</strong></p>
-    <p class="type-body text-secondary">You can close this tab and return to the app.</p>
-  </div>
+{% set _scripts %}
+<script>
+  window.MindsUI.mountOauthClose(document.getElementById('oauth-close-root'));
+</script>
+{% endset %}
+<PageNarrowContainer title="Signed in" :boot_state="boot_state" scripts={{ _scripts }}>
+  <div id="oauth-close-root"></div>
 </PageNarrowContainer>

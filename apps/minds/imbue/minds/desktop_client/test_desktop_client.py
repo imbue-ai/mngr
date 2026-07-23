@@ -1152,11 +1152,11 @@ def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) 
     client = _create_test_client_with_auth_routes(tmp_path)
     response = client.get("/auth/signup", query_string={"return_to": "/create"})
     assert response.status_code == 200
-    # Back link to the picker.
-    assert "Back to workspace setup" in response.text
-    assert 'href="/create"' in response.text
-    # Default explainer banner (no explicit message supplied).
-    assert "run your workspace on Imbue Cloud" in response.text
+    # The back link + explainer render client-side (AuthPages.test.ts); the
+    # server seeds the validated return_to in the island.
+    island = parse_boot_island(response.text)
+    assert island["auth"]["return_to"] == "/create"
+    assert island["auth"]["default_to_signup"] is True
 
 
 def test_signin_modal_mode_signin_leads_with_signin_tab(tmp_path: Path) -> None:
@@ -1164,11 +1164,10 @@ def test_signin_modal_mode_signin_leads_with_signin_tab(tmp_path: Path) -> None:
     client = _create_test_client_with_auth_routes(tmp_path)
     default = client.get("/auth/signin-modal")
     assert default.status_code == 200
-    assert 'id="signin-tab" class="hidden"' in default.text
+    assert parse_boot_island(default.text)["auth"]["default_to_signup"] is True
     signin = client.get("/auth/signin-modal", query_string={"mode": "signin"})
     assert signin.status_code == 200
-    assert 'id="signup-tab" class="hidden"' in signin.text
-    assert 'id="signin-tab" class="hidden"' not in signin.text
+    assert parse_boot_island(signin.text)["auth"]["default_to_signup"] is False
 
 
 def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
@@ -1177,9 +1176,12 @@ def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -
     client = _create_test_client_with_auth_routes(tmp_path)
     response = client.get("/auth/signin-modal")
     assert response.status_code == 200
-    assert 'id="signin-modal-backdrop"' in response.text
-    assert 'id="signin-form"' in response.text
-    assert "run your workspace on Imbue Cloud" in response.text
+    # The overlay backdrop + card + auth form render client-side; the island
+    # marks the modal variant and carries the create-flow intro.
+    island = parse_boot_island(response.text)
+    assert island["auth"]["is_modal"] is True
+    assert "run your workspace on Imbue Cloud" in island["auth"]["intro"]
+    assert "MindsUI.mountSigninModal" in response.text
 
 
 def test_signin_modal_honors_valid_return_to(tmp_path: Path) -> None:
@@ -1188,8 +1190,10 @@ def test_signin_modal_honors_valid_return_to(tmp_path: Path) -> None:
     client = _create_test_client_with_auth_routes(tmp_path)
     response = client.get("/auth/signin-modal", query_string={"return_to": "/"})
     assert response.status_code == 200
-    assert 'window.MINDS_AUTH_RETURN_TO = "/";' in response.text
-    assert "run your workspace on Imbue Cloud" not in response.text
+    island = parse_boot_island(response.text)
+    assert island["auth"]["return_to"] == "/"
+    # A non-create return_to switches to the generic intro copy.
+    assert "run your workspace on Imbue Cloud" not in island["auth"]["intro"]
 
 
 def test_signin_modal_rejects_unsafe_return_to(tmp_path: Path) -> None:
@@ -1200,10 +1204,11 @@ def test_signin_modal_rejects_unsafe_return_to(tmp_path: Path) -> None:
         response = client.get("/auth/signin-modal", query_string={"return_to": unsafe})
         assert response.status_code == 200
         assert "evil.com" not in response.text
-        assert 'window.MINDS_AUTH_RETURN_TO = "/create";' in response.text
+        # Unsafe values fall back to the /create default before reaching the island.
+        assert parse_boot_island(response.text)["auth"]["return_to"] == "/create"
 
     response = client.get("/auth/signin-modal")
-    assert 'window.MINDS_AUTH_RETURN_TO = "/create";' in response.text
+    assert parse_boot_island(response.text)["auth"]["return_to"] == "/create"
 
 
 def test_signin_modal_close_button_has_tooltip(tmp_path: Path) -> None:
@@ -1212,7 +1217,8 @@ def test_signin_modal_close_button_has_tooltip(tmp_path: Path) -> None:
     client = _create_test_client_with_auth_routes(tmp_path)
     response = client.get("/auth/signin-modal")
     assert response.status_code == 200
-    assert 'data-tooltip="Close"' in response.text
+    # The close button (with its data-tooltip) renders client-side; the shell
+    # still loads the shared trigger script that wires overlay tooltips.
     assert "/_static/tooltip_triggers.js" in response.text
 
 
