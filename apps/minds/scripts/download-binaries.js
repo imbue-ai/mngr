@@ -7,10 +7,12 @@
  *
  * uv:  SHA256-verified download from astral-sh/uv releases.
  * git:
- *   macOS:   real binary via `xcrun --find git`, plus libexec/git-core
- *            helpers and templates. `/usr/bin/git` is an xcode-select shim
- *            that SIGKILLs at runtime once re-signed by ToDesktop.
- *   Linux:   copy from `which git`.
+ *   macOS/Linux: SHA256-verified dugite-native tarball (GitHub Desktop's
+ *            relocatable git distribution), pinned by git-manifest.json and
+ *            extracted flat into resources/git/. The self-contained payload
+ *            bakes in an empty prefix, so the runtime must export
+ *            GIT_EXEC_PATH/GIT_TEMPLATE_DIR/GIT_CONFIG_SYSTEM (+GIT_SSL_CAINFO
+ *            on Linux); see specs/minds-managed-git/concise.md.
  *   Windows: SHA256-verified MinGit download from git-for-windows releases.
  */
 
@@ -25,6 +27,9 @@ const UV_VERSION = '0.11.15';
 const GIT_FOR_WINDOWS_VERSION = '2.49.0';
 const GIT_FOR_WINDOWS_TAG = `v${GIT_FOR_WINDOWS_VERSION}.windows.1`;
 const RESTIC_VERSION = '0.18.1';
+// Pinned dugite-native git payload (macOS/Linux). Single source of truth for
+// the tag, version, per-target asset names, and SHA256 hashes.
+const GIT_MANIFEST_PATH = path.join(__dirname, 'git-manifest.json');
 // desync: content-defined-chunking client used to fetch the pre-baked Lima image.
 // Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
@@ -184,6 +189,21 @@ function verifyChecksum(buffer, filename) {
   console.log(`[download-binaries] ${filename} SHA256 OK`);
 }
 
+/**
+ * Like verifyChecksum, but the expected hash is supplied explicitly (e.g. from
+ * git-manifest.json) rather than looked up in EXPECTED_SHA256.
+ */
+function verifyExpectedChecksum(buffer, filename, expected) {
+  const actual = crypto.createHash('sha256').update(buffer).digest('hex');
+  if (actual !== expected) {
+    throw new Error(
+      `SHA256 mismatch for ${filename}:\n  expected ${expected}\n  got      ${actual}\n` +
+      `Refusing to install possibly-tampered binary.`,
+    );
+  }
+  console.log(`[download-binaries] ${filename} SHA256 OK`);
+}
+
 async function downloadUv(resourcesDir, { platform, arch }) {
   const uvDir = path.join(resourcesDir, 'uv');
   if (fs.existsSync(uvDir)) fs.rmSync(uvDir, { recursive: true });
@@ -298,46 +318,124 @@ async function downloadDesync(resourcesDir, { platform, arch }) {
   console.log(`[download-binaries] desync installed at ${desyncBinary}`);
 }
 
+// Maps (platform, arch) as produced by getPlatformArch() to the manifest
+// target key. win32 stays on the MinGit path below and is intentionally absent.
+const GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH = {
+  'darwin/aarch64': 'darwin-arm64',
+  'darwin/x86_64': 'darwin-x64',
+  'linux/x86_64': 'linux-x64',
+  'linux/aarch64': 'linux-arm64',
+};
+
 /**
- * Recursively copy Apple's git libexec tree into destDir, dereferencing
- * symlinks into real file copies.
- *
- * Symlinks pointing back at the main `git` binary (Apple's ~100 argv[0]
- * shims like git-add, git-commit) are skipped -- the invoked-as-subcommand
- * dispatch they enable is unused here, and dereferencing each would add
- * ~7.6 MB per shim. Other symlinks must be dereferenced because Apple's
- * targets are absolute paths into Xcode that break on any machine without
- * Xcode at that exact path, and ToDesktop's Windows packager rejects
- * absolute macOS symlinks.
+ * Write resources/git/NOTICE recording the provenance and licenses of the
+ * dugite-native payload, generated from the manifest.
  */
-function copyGitCoreDereferencingSymlinks(srcDir, destDir) {
-  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
-    const srcPath = path.join(srcDir, entry.name);
-    const destPath = path.join(destDir, entry.name);
-    if (entry.isSymbolicLink()) {
-      const realTarget = fs.realpathSync(srcPath);
-      if (path.basename(realTarget) === 'git') {
-        continue; // skip argv[0] shims pointing at the main binary
-      }
-      const realStats = fs.statSync(realTarget);
-      if (realStats.isDirectory()) {
-        fs.mkdirSync(destPath, { recursive: true });
-        copyGitCoreDereferencingSymlinks(realTarget, destPath);
-      } else {
-        fs.copyFileSync(realTarget, destPath);
-        fs.chmodSync(destPath, realStats.mode);
-      }
-    } else if (entry.isDirectory()) {
-      fs.mkdirSync(destPath, { recursive: true });
-      copyGitCoreDereferencingSymlinks(srcPath, destPath);
-    } else if (entry.isFile()) {
-      fs.copyFileSync(srcPath, destPath);
-      fs.chmodSync(destPath, fs.statSync(srcPath).mode);
-    }
-  }
+function writeGitNotice(gitDir, manifest) {
+  const releaseUrl = `https://github.com/desktop/dugite-native/releases/tag/${manifest.dugiteNativeTag}`;
+  const gitSourceUrl = `https://github.com/git/git/tree/v${manifest.gitVersion}`;
+  const notice =
+    `This directory contains the dugite-native ${manifest.dugiteNativeTag} payload\n` +
+    `(${releaseUrl}), a relocatable git distribution embedded in this app.\n` +
+    `\n` +
+    `It bundles:\n` +
+    `- git ${manifest.gitVersion} (GPLv2; source ${gitSourceUrl}; license text in\n` +
+    `  the adjacent COPYING file)\n` +
+    `- git-credential-manager (MIT)\n` +
+    `- git-lfs (MIT)\n` +
+    `- on Linux, a bundled CA certificate store (ssl/cacert.pem)\n`;
+  fs.writeFileSync(path.join(gitDir, 'NOTICE'), notice);
 }
 
-async function downloadGit(resourcesDir, { platform }) {
+/**
+ * Render the POSIX-sh shim that replaces one payload symlink. The shim
+ * resolves its own physical directory (works when invoked by absolute path,
+ * relative path, or bare PATH lookup) and execs the link's former target.
+ * When `gitSubcommand` is non-null the target is the multicall `git` binary
+ * and the shim uses the documented dashed-form equivalence:
+ * `git-<subcommand> args` == `git <subcommand> args`.
+ */
+function buildShimScript(relativeTargetPath, gitSubcommand) {
+  const targetInvocation = gitSubcommand === null
+    ? `exec "$shim_dir/${relativeTargetPath}" "$@"`
+    : `exec "$shim_dir/${relativeTargetPath}" ${gitSubcommand} "$@"`;
+  return [
+    '#!/bin/sh',
+    '# Generated by minds scripts/download-binaries.js: replaces a dugite-native',
+    '# symlink so no packaging step can materialize it into a copy of its target.',
+    'case "$0" in',
+    '  */*) shim_path="$0" ;;',
+    '  *) shim_path="$(command -v -- "$0")" || exit 127 ;;',
+    'esac',
+    'shim_dir="$(CDPATH= cd -- "$(dirname -- "$shim_path")" && pwd -P)" || exit 127',
+    targetInvocation,
+    '',
+  ].join('\n');
+}
+
+/**
+ * Replace every symlink in the extracted dugite-native payload with a tiny
+ * executable sh shim that execs the link's target.
+ *
+ * Why: the payload ships libexec/git-core mostly as symlinks to the multicall
+ * `git` binary, and the packaging steps between here and the user's disk
+ * handle symlinks in two hostile ways: ToDesktop's app-files glob silently
+ * DROPS them (the payload would arrive on the build servers missing every
+ * builtin, including git-remote-https), while symlink-dereferencing copiers
+ * (electron-builder's extraResources copy) materialize a full copy per link.
+ * Shims keep the payload behaviorally identical but symlink-free, so it is
+ * complete and size-stable no matter how it is copied, zipped, or signed.
+ *
+ * Dispatch shape:
+ * - `git-<subcommand>` -> `git` becomes `exec git <subcommand> "$@"`.
+ * - anything else (git-remote-https/ftp/ftps -> git-remote-http) becomes
+ *   `exec <target> "$@"`; remote-curl selects the protocol from the URL git
+ *   passes as an argument, not from argv[0], so no argv0 trick is needed.
+ *
+ * Returns the number of symlinks replaced. Throws on dangling links, links
+ * escaping the payload, or non-file targets -- all of which would indicate
+ * an upstream payload layout change that needs a human look.
+ */
+function convertGitPayloadSymlinksToShims(gitDir) {
+  const payloadRoot = fs.realpathSync(gitDir);
+  let shimCount = 0;
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        const targetPath = fs.realpathSync(entryPath);
+        if (targetPath !== payloadRoot && !targetPath.startsWith(payloadRoot + path.sep)) {
+          throw new Error(
+            `dugite-native payload symlink escapes the payload: ${entryPath} -> ${targetPath}`,
+          );
+        }
+        if (!fs.statSync(targetPath).isFile()) {
+          throw new Error(
+            `dugite-native payload symlink targets a non-file: ${entryPath} -> ${targetPath}`,
+          );
+        }
+        let gitSubcommand = null;
+        if (path.basename(targetPath) === 'git' && entry.name.startsWith('git-')) {
+          gitSubcommand = entry.name.slice('git-'.length);
+          if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(gitSubcommand)) {
+            throw new Error(`unexpected dashed git command name in payload: ${entry.name}`);
+          }
+        }
+        const relativeTargetPath = path.relative(path.dirname(entryPath), targetPath);
+        fs.rmSync(entryPath);
+        fs.writeFileSync(entryPath, buildShimScript(relativeTargetPath, gitSubcommand));
+        fs.chmodSync(entryPath, 0o755);
+        shimCount += 1;
+      } else if (entry.isDirectory()) {
+        walk(entryPath);
+      }
+    }
+  };
+  walk(payloadRoot);
+  return shimCount;
+}
+
+async function downloadGit(resourcesDir, { platform, arch }) {
   const gitDir = path.join(resourcesDir, 'git');
   if (fs.existsSync(gitDir)) fs.rmSync(gitDir, { recursive: true });
   const binDir = path.join(gitDir, 'bin');
@@ -362,63 +460,241 @@ async function downloadGit(resourcesDir, { platform }) {
     fs.copyFileSync(gitExe, path.join(binDir, 'git.exe'));
     fs.copyFileSync(gitExe, path.join(binDir, 'git'));
     console.log(`[download-binaries] git installed at ${path.join(binDir, 'git.exe')}`);
-  } else if (platform === 'darwin') {
-    // git invokes `git-remote-https` and friends from <prefix>/libexec/git-core/
-    // via relative-to-binary lookup, and reads default templates from
-    // <prefix>/share/git-core/templates/. Copy the binary, the libexec
-    // helpers, and the templates so the bundled git is self-contained.
-    let resolvedGit;
-    try {
-      resolvedGit = execSync('xcrun --find git', { encoding: 'utf-8' }).trim();
-    } catch (err) {
-      throw new Error(
-        'git not resolvable via `xcrun --find git`. Install Xcode Command ' +
-        `Line Tools (\`xcode-select --install\`) and retry. Underlying error: ${err.message}`,
-        { cause: err },
-      );
-    }
-    if (!resolvedGit || !fs.existsSync(resolvedGit)) {
-      throw new Error(`xcrun returned a git path that does not exist: ${resolvedGit}`);
-    }
-    const gitPrefix = path.dirname(path.dirname(resolvedGit));
-    const srcExecPath = path.join(gitPrefix, 'libexec', 'git-core');
-    const srcTemplates = path.join(gitPrefix, 'share', 'git-core', 'templates');
-    if (!fs.existsSync(srcExecPath)) {
-      throw new Error(`git exec-path not found at ${srcExecPath}`);
-    }
-
-    const destGit = path.join(binDir, 'git');
-    fs.copyFileSync(resolvedGit, destGit);
-    fs.chmodSync(destGit, 0o755);
-
-    const destExecPath = path.join(gitDir, 'libexec', 'git-core');
-    fs.mkdirSync(destExecPath, { recursive: true });
-    copyGitCoreDereferencingSymlinks(srcExecPath, destExecPath);
-
-    if (fs.existsSync(srcTemplates)) {
-      const destTemplates = path.join(gitDir, 'share', 'git-core', 'templates');
-      fs.mkdirSync(path.dirname(destTemplates), { recursive: true });
-      fs.cpSync(srcTemplates, destTemplates, { recursive: true, dereference: true });
-    }
-
-    console.log(`[download-binaries] git copied from ${gitPrefix} to ${gitDir}`);
-  } else {
-    // Linux: copy the system git binary (no shim indirection).
-    let systemGit;
-    try {
-      systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
-    } catch (err) {
-      throw new Error(
-        'git not found on system -- install git first. ' +
-        `Underlying error: ${err.message}`,
-        { cause: err },
-      );
-    }
-    const destGit = path.join(binDir, 'git');
-    fs.copyFileSync(systemGit, destGit);
-    fs.chmodSync(destGit, 0o755);
-    console.log(`[download-binaries] git copied from ${systemGit} to ${destGit}`);
+    return;
   }
+
+  // macOS/Linux: SHA256-verified dugite-native tarball, pinned by the manifest.
+  const manifest = JSON.parse(fs.readFileSync(GIT_MANIFEST_PATH, 'utf-8'));
+  const targetKey = GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH[`${platform}/${arch}`];
+  const target = targetKey && manifest.targets[targetKey];
+  if (!target) {
+    throw new Error(
+      `No dugite-native manifest entry for ${platform}/${arch}. ` +
+      `Add one to ${GIT_MANIFEST_PATH} before distributing this binary.`,
+    );
+  }
+
+  const url = `https://github.com/desktop/dugite-native/releases/download/${manifest.dugiteNativeTag}/${target.asset}`;
+  console.log(`[download-binaries] Downloading git (dugite-native) from ${url}...`);
+  const archive = await download(url);
+  verifyExpectedChecksum(archive, target.asset, target.sha256);
+
+  // The dugite-native tarball is rooted flat (bin/, etc/, libexec/, share/,
+  // and ssl/ on Linux at the archive root), so extract WITHOUT
+  // --strip-components, unlike the uv/lima archives.
+  const tarPath = path.join(gitDir, 'git.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  execSync(`tar xzf "${tarPath}" -C "${gitDir}"`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  const destGit = path.join(binDir, 'git');
+  if (!fs.existsSync(destGit)) {
+    throw new Error(`git binary not found at ${destGit} after extraction`);
+  }
+  fs.chmodSync(destGit, 0o755);
+
+  // Replace payload symlinks with shims BEFORE writing the .dugite-tag
+  // marker, so a payload that failed conversion is never tagged as complete
+  // (ensure-binaries.js would then re-run the downloader).
+  const shimCount = convertGitPayloadSymlinksToShims(gitDir);
+  console.log(`[download-binaries] replaced ${shimCount} git payload symlinks with shims`);
+
+  // Marker so ensure-binaries.js can replace a stale payload on dev machines.
+  fs.writeFileSync(path.join(gitDir, '.dugite-tag'), manifest.dugiteNativeTag + '\n');
+  writeGitNotice(gitDir, manifest);
+  fs.copyFileSync(path.join(__dirname, 'assets', 'git-COPYING'), path.join(gitDir, 'COPYING'));
+
+  console.log(`[download-binaries] git installed at ${destGit} (dugite-native ${manifest.dugiteNativeTag})`);
+}
+
+/**
+ * Total size in bytes of the file (or, recursively, directory) at `target`,
+ * following nothing further -- used to price a symlink the way an archiver
+ * that follows symlinks would.
+ */
+function sizeOfMaterializedTarget(target) {
+  const stats = fs.statSync(target);
+  if (stats.isFile()) return stats.size;
+  if (!stats.isDirectory()) return 0;
+  let total = 0;
+  for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+    total += sizeOfMaterializedTarget(path.join(target, entry.name));
+  }
+  return total;
+}
+
+/**
+ * Measure a tree the way a symlink-following archiver (ToDesktop's
+ * app-source zip) sees it: every symlink counts at its target's full
+ * (recursive) size. Dangling symlinks count as zero. Returns
+ * `{ realBytes, archivedBytes, symlinkCount }`; `archivedBytes - realBytes`
+ * is the inflation that materializing symlinks would add.
+ */
+function measureTreeAsArchived(rootDir) {
+  let realBytes = 0;
+  let archivedBytes = 0;
+  let symlinkCount = 0;
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        symlinkCount += 1;
+        realBytes += fs.lstatSync(entryPath).size;
+        try {
+          archivedBytes += sizeOfMaterializedTarget(entryPath);
+        } catch {
+          // Dangling symlink: an archiver has no bytes to store for it.
+        }
+      } else if (entry.isDirectory()) {
+        walk(entryPath);
+      } else if (entry.isFile()) {
+        const size = fs.lstatSync(entryPath).size;
+        realBytes += size;
+        archivedBytes += size;
+      }
+    }
+  };
+  walk(rootDir);
+  return { realBytes, archivedBytes, symlinkCount };
+}
+
+// ToDesktop itself prices symlinks harmlessly (its app-files glob drops
+// them; get-folder-size lstats them), but symlink-DEREFERENCING copiers
+// downstream -- electron-builder's extraResources copy into the final .app,
+// naive cpSync/rsync mirrors -- materialize a full copy per link. Legitimate
+// symlinks in resources/ are tiny (lima's share/doc templates dir), so a
+// generous threshold keeps false positives out.
+const MAX_SYMLINK_INFLATION_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Fail the build if `rootDir` would balloon past MAX_SYMLINK_INFLATION_BYTES
+ * when copied by anything that dereferences symlinks (see the constant's
+ * comment), or if even its real size alone exceeds the whole ToDesktop
+ * upload budget. Returns the measurement for logging.
+ */
+function assertTreeFitsUploadBudget(rootDir, { uploadSizeLimitMb, label }) {
+  const measurement = measureTreeAsArchived(rootDir);
+  const { realBytes, archivedBytes, symlinkCount } = measurement;
+  const inflationBytes = archivedBytes - realBytes;
+  const asMb = (bytes) => (bytes / (1024 * 1024)).toFixed(1);
+  if (inflationBytes > MAX_SYMLINK_INFLATION_BYTES) {
+    throw new Error(
+      `${label} contains ${symlinkCount} symlinks that a symlink-dereferencing copier ` +
+      `(e.g. electron-builder's extraResources copy into the final app) would materialize ` +
+      `into +${asMb(inflationBytes)}MB (${asMb(realBytes)}MB real -> ${asMb(archivedBytes)}MB ` +
+      `copied). Replace the offending symlinks with shims ` +
+      `(see convertGitPayloadSymlinksToShims) instead of shipping them.`,
+    );
+  }
+  const limitBytes = uploadSizeLimitMb * 1024 * 1024;
+  if (realBytes > limitBytes) {
+    throw new Error(
+      `${label} alone is ${asMb(realBytes)}MB, over the ${uploadSizeLimitMb}MB ` +
+      `uploadSizeLimit in todesktop.js -- the ToDesktop upload cannot succeed. ` +
+      `Shrink the staged binaries before raising the limit.`,
+    );
+  }
+  return measurement;
+}
+
+/**
+ * Estimate the ToDesktop app-source upload in bytes, mirroring how
+ * @todesktop/cli@1.23 composes it (dist/cli.js, uploadApplicationSource):
+ *
+ * - App files: every regular file under the app root matching `appFiles`
+ *   (default `['**']`), always minus `node_modules` and `.git` at any depth
+ *   and minus `.gitignore` files. Symlinks contribute NOTHING here -- the
+ *   CLI globs with `followSymbolicLinks: false, onlyFiles: true`, which
+ *   drops them. NOTE: gitignored *content* is NOT excluded; only the
+ *   `.gitignore` files themselves are.
+ * - `extraResources` / `extraContentFiles`: each `from` is uploaded whole
+ *   and priced via get-folder-size (lstat, so symlinks at link size),
+ *   REGARDLESS of the appFiles globs. This is why resources/ must be
+ *   excluded from appFiles or the whole tree uploads twice (the 701MB
+ *   launch-to-msg failures, 2026-07).
+ * - Icons / entitlements: individual small files; the icon is counted for
+ *   completeness, the rest is noise.
+ *
+ * Only the appFiles shapes this repo uses are supported: a positive `**`
+ * plus `!<dir>/**` exclusions. Any other shape throws, so the estimate can
+ * never silently diverge from the real zip's selection semantics.
+ */
+function estimateToDesktopUploadBytes(appRoot, todesktopConfig) {
+  const appFilesGlobs = todesktopConfig.appFiles || ['**'];
+  const excludedPrefixes = [];
+  for (const glob of appFilesGlobs) {
+    if (glob === '**') continue;
+    const exclusionMatch = /^!([A-Za-z0-9._/-]+)\/\*\*$/.exec(glob);
+    if (exclusionMatch) {
+      excludedPrefixes.push(exclusionMatch[1] + '/');
+      continue;
+    }
+    throw new Error(
+      `estimateToDesktopUploadBytes only understands '**' and '!<dir>/**' appFiles ` +
+      `patterns; got ${JSON.stringify(glob)}. Extend the estimator alongside todesktop.js.`,
+    );
+  }
+
+  let appFilesBytes = 0;
+  const walkAppFiles = (dir, relativePrefix) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      const relativePath = relativePrefix + entry.name;
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (excludedPrefixes.some((prefix) => (relativePath + '/').startsWith(prefix))) continue;
+        walkAppFiles(path.join(dir, entry.name), relativePath + '/');
+      } else if (entry.isFile()) {
+        if (entry.name === '.gitignore') continue;
+        if (excludedPrefixes.some((prefix) => relativePath.startsWith(prefix))) continue;
+        appFilesBytes += fs.lstatSync(path.join(dir, entry.name)).size;
+      }
+    }
+  };
+  walkAppFiles(appRoot, '');
+
+  let extraBytes = 0;
+  const extraEntries = [
+    ...(todesktopConfig.extraResources || []),
+    ...(todesktopConfig.extraContentFiles || []),
+  ];
+  for (const { from } of extraEntries) {
+    const fromPath = path.resolve(appRoot, from);
+    const stats = fs.lstatSync(fromPath);
+    extraBytes += stats.isDirectory() ? measureTreeAsArchived(fromPath).realBytes : stats.size;
+  }
+  if (todesktopConfig.icon) {
+    extraBytes += fs.lstatSync(path.resolve(appRoot, todesktopConfig.icon)).size;
+  }
+  return { appFilesBytes, extraBytes, totalBytes: appFilesBytes + extraBytes };
+}
+
+/**
+ * Fail the build if the estimated ToDesktop app-source upload exceeds
+ * todesktop.js's `uploadSizeLimit`; warn when it consumes most of it.
+ * Returns the estimate for logging.
+ */
+function assertUploadFitsToDesktopLimit(appRoot, todesktopConfig) {
+  const uploadSizeLimitMb = todesktopConfig.uploadSizeLimit;
+  const estimate = estimateToDesktopUploadBytes(appRoot, todesktopConfig);
+  // The CLI compares against uploadSizeLimit * 1e6 (decimal megabytes).
+  const limitBytes = uploadSizeLimitMb * 1e6;
+  const asMb = (bytes) => (bytes / 1e6).toFixed(1);
+  if (estimate.totalBytes > limitBytes) {
+    throw new Error(
+      `estimated ToDesktop app-source upload is ${asMb(estimate.totalBytes)}MB ` +
+      `(app files ${asMb(estimate.appFilesBytes)}MB + extraResources/icon ${asMb(estimate.extraBytes)}MB), ` +
+      `over the ${uploadSizeLimitMb}MB uploadSizeLimit in todesktop.js. Trim what uploads ` +
+      `(appFiles exclusions, staged binaries) rather than raising the limit.`,
+    );
+  }
+  if (estimate.totalBytes > limitBytes * 0.85) {
+    console.warn(
+      `[download-binaries] WARNING: estimated ToDesktop upload ${asMb(estimate.totalBytes)}MB is over ` +
+      `85% of the ${uploadSizeLimitMb}MB uploadSizeLimit in todesktop.js.`,
+    );
+  }
+  return estimate;
 }
 
 /**
@@ -437,7 +713,7 @@ async function downloadBinaries(resourcesDir) {
 
   await Promise.all([
     downloadUv(resourcesDir, { platform, arch }),
-    downloadGit(resourcesDir, { platform }),
+    downloadGit(resourcesDir, { platform, arch }),
     downloadRestic(resourcesDir, { platform, arch }),
     downloadDesync(resourcesDir, { platform, arch }),
   ]);
@@ -460,6 +736,11 @@ beforeInstall.downloadUv = downloadUv;
 beforeInstall.downloadRestic = downloadRestic;
 beforeInstall.downloadDesync = downloadDesync;
 beforeInstall.download = download;
+beforeInstall.convertGitPayloadSymlinksToShims = convertGitPayloadSymlinksToShims;
+beforeInstall.measureTreeAsArchived = measureTreeAsArchived;
+beforeInstall.assertTreeFitsUploadBudget = assertTreeFitsUploadBudget;
+beforeInstall.estimateToDesktopUploadBytes = estimateToDesktopUploadBytes;
+beforeInstall.assertUploadFitsToDesktopLimit = assertUploadFitsToDesktopLimit;
 module.exports = beforeInstall;
 
 if (require.main === module) {

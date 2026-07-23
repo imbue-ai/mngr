@@ -84,6 +84,33 @@ RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
     test -x /usr/local/bin/node
 ENV NODE_VERSION=${NODE_VERSION}
 
+# Pre-fetch the pinned dugite-native git payload for apps/minds'
+# test_bundled_git.py acceptance test. Offload sandboxes run with network
+# disabled, so the test reads the release asset from this cache (env var
+# below) instead of downloading it; its SHA256 check against
+# apps/minds/scripts/git-manifest.json runs either way. A manifest bump
+# invalidates the COPY layer checksum here, and offload-modal-acceptance.toml
+# lists the manifest in checkpoint build_inputs so the image rebuilds with the
+# new asset. See specs/minds-managed-git/concise.md.
+COPY apps/minds/scripts/git-manifest.json /tmp/git-manifest.json
+RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
+    TARGET="linux-${ARCH}" && \
+    TAG=$(jq -r '.dugiteNativeTag' /tmp/git-manifest.json) && \
+    ASSET=$(jq -r ".targets[\"${TARGET}\"].asset" /tmp/git-manifest.json) && \
+    SHA256=$(jq -r ".targets[\"${TARGET}\"].sha256" /tmp/git-manifest.json) && \
+    test -n "$ASSET" && test "$ASSET" != "null" && \
+    test -n "$SHA256" && test "$SHA256" != "null" && \
+    mkdir -p /opt/dugite-native-cache && \
+    for attempt in 1 2 3 4 5; do \
+        curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+            "https://github.com/desktop/dugite-native/releases/download/${TAG}/${ASSET}" \
+            -o "/opt/dugite-native-cache/${ASSET}" && break ; \
+        echo "dugite-native download attempt $attempt failed, retrying in $((attempt * 5))s..." ; \
+        sleep $((attempt * 5)) ; \
+    done && \
+    echo "${SHA256}  /opt/dugite-native-cache/${ASSET}" | sha256sum -c -
+ENV MINDS_DUGITE_NATIVE_CACHE_DIR=/opt/dugite-native-cache
+
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 

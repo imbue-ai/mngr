@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, downloadRestic, downloadDesync, download } = require('./download-binaries.js');
+const { downloadGit, downloadUv, downloadRestic, downloadDesync, download, assertTreeFitsUploadBudget, assertUploadFitsToDesktopLimit } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -603,7 +603,7 @@ async function main() {
   await Promise.all([
     downloadUv(RESOURCES_DIR, { platform, arch }),
     downloadLima({ platform, arch }),
-    downloadGit(RESOURCES_DIR, { platform }),
+    downloadGit(RESOURCES_DIR, { platform, arch }),
     downloadRestic(RESOURCES_DIR, { platform, arch }),
     downloadDesync(RESOURCES_DIR, { platform, arch }),
   ]);
@@ -614,6 +614,24 @@ async function main() {
   stageRuntimePyproject(wheelByPackage);
   bundleClientConfig();
   bakeBuildInfo();
+
+  // Fail at build time -- not tens of cloud-build minutes later at ToDesktop
+  // upload time -- if the app-source upload would blow todesktop.js's
+  // uploadSizeLimit.
+  const todesktopConfig = require(path.join(ROOT, 'todesktop.js'));
+  const { appFilesBytes, extraBytes, totalBytes } = assertUploadFitsToDesktopLimit(ROOT, todesktopConfig);
+  console.log(
+    `estimated ToDesktop upload: ${(totalBytes / 1e6).toFixed(1)}MB ` +
+    `(app files ${(appFilesBytes / 1e6).toFixed(1)}MB + extraResources/icon ${(extraBytes / 1e6).toFixed(1)}MB) ` +
+    `against the ${todesktopConfig.uploadSizeLimit}MB limit`,
+  );
+  // Separately: the shipped payload must stay symlink-free so downstream
+  // symlink-dereferencing copiers (electron-builder's extraResources copy)
+  // cannot balloon the final app.
+  assertTreeFitsUploadBudget(RESOURCES_DIR, {
+    uploadSizeLimitMb: todesktopConfig.uploadSizeLimit,
+    label: 'resources/',
+  });
 
   console.log('\nBuild complete!');
   console.log(`Resources directory: ${RESOURCES_DIR}`);
