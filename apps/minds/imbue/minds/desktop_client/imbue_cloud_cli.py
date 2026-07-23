@@ -304,6 +304,7 @@ class ImbueCloudCli(MutableModel):
         provider_id: str,
         callback_port: int | None = None,
         no_browser: bool = False,
+        success_redirect_url: str | None = None,
     ) -> ImbueCloudAuthSession:
         args: list[str] = [
             "auth",
@@ -316,6 +317,8 @@ class ImbueCloudCli(MutableModel):
             args.extend(["--callback-port", str(callback_port)])
         if no_browser:
             args.append("--no-browser")
+        if success_redirect_url is not None:
+            args.extend(["--success-redirect-url", success_redirect_url])
         result = self._run(args, cg_name="imbue-cloud-auth-oauth", timeout_seconds=_LEASE_TIMEOUT_SECONDS)
         body = self._expect_success(result, "auth oauth")
         return ImbueCloudAuthSession.model_validate(body)

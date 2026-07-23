@@ -557,7 +557,15 @@ def render_create_form(
     never bounced away by the user's existing workspaces.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
-    effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
+    # The env/operator branch default pairs with the default template repo, so
+    # it only applies when the repository was NOT explicitly supplied. With an
+    # explicit repository (e.g. an inspiration deeplink's git_url) the branch
+    # is kept exactly as given: blank means "the repo's latest version", which
+    # is what submit resolves it to (``resolve_template_version``).
+    if git_url:
+        effective_branch = branch
+    else:
+        effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
     # The selected preset card drives the provider defaults so the highlighted
     # card always matches what a plain submit would create. A fresh form
     # (no explicit selection, no submitted launch mode) defaults to the remote
@@ -2020,7 +2028,10 @@ def render_settings_page(
 
     ``services_overview`` / ``file_sharing_grants`` /
     ``workspace_delegation_grants`` are the permission-overview models (see
-    :mod:`~imbue.minds.desktop_client.latchkey.permission_overview`);
+    :mod:`~imbue.minds.desktop_client.latchkey.permission_overview`); each
+    ``services_overview`` entry also carries the service's signed-in
+    ``accounts``, which the Connectors panel lists above the per-workspace
+    grants (with "+ Add account" and per-account "Disconnect" actions).
     ``permissions_unavailable`` is True when the latchkey gateway could not be
     reached to read grants. ``report_unexpected_errors`` / ``include_error_logs``
     seed the per-machine error-reporting toggles; ``is_master_password_set``
