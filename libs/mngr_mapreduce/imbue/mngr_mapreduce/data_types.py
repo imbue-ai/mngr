@@ -236,6 +236,17 @@ class MapReduceRecipe(ABC):
         """
         return None
 
+    def on_all_mappers_finalized(self, ctx: MapReduceContext, mapper_metadata: Sequence[AgentMetadata]) -> None:
+        """Called once every mapper has finished, just before the reducer launches.
+
+        Unlike ``on_mapper_finalized`` (per mapper that published outputs), this
+        sees the whole set, including mappers that failed and produced no output.
+        A recipe whose reducer reads the output dir as files can use this to
+        reconcile the two views -- e.g. write a placeholder for a failed mapper
+        so it is not silently absent. Default impl is a no-op.
+        """
+        return None
+
     @abstractmethod
     def render_report(
         self,
