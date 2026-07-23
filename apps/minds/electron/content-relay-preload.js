@@ -7,6 +7,14 @@
 // from the page and forwards them to the main process over fixed IPC channels.
 // The page can therefore trigger a small set of benign shell affordances (e.g.
 // opening a permission-request modal) but can never reach arbitrary IPC.
+//
+// The allowlist is deliberately tiny: only the affordances foreign agent content
+// (and the content view's own crash page) legitimately needs. Every trusted
+// local/native page (Landing, Create, Settings, workspace settings, ...) now
+// renders on the CHROME surface with the full window.minds bridge, so their
+// launchers (sign-in / settings / accounts / sharing / stop-mind / open-in-new /
+// accent-preview) are shell-bridge calls, unreachable from -- and no longer
+// relayed for -- agent content.
 const { ipcRenderer } = require('electron');
 
 // Request ids are server-issued (`evt-<uuid hex>`). Accept only a conservative
@@ -17,13 +25,17 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 // Agent ids are server-issued (`agent-<hex>`). Accept only that conservative
 // shape so a malicious page cannot smuggle path/query characters into the
-// stop-host URL the main process builds. The main process re-validates.
+// help URL the main process builds. The main process re-validates.
 const AGENT_ID_PATTERN = /^agent-[a-f0-9]{1,64}$/i;
 
-// #rrggbb lowercase hex (the canonical form ``normalize_workspace_color``
-// emits). Accepts only the strict shape so a malicious page can't paint
-// the titlebar with arbitrary CSS values via the preview channel.
-const ACCENT_HEX_PATTERN = /^#[0-9a-f]{6}$/;
+// The one outbound (main -> page) message: Cmd+W pressed while this view
+// displays a workspace. Re-posted into the page as an ordinary window message
+// so the system interface can close its active dockview tab. Outbound is safe
+// to relay without validation -- the page can only act on itself -- and main
+// only ever sends it for its own fixed reason (see registerShortcutsFor).
+ipcRenderer.on('close-active-tab', () => {
+  window.postMessage({ type: 'minds:close-active-tab' }, '*');
+});
 
 window.addEventListener('message', (event) => {
   // Only honour messages posted by this same top-level page, never by a
@@ -37,7 +49,7 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('open-request-modal', requestId);
     return;
   }
-  // Error pages (e.g. the workspace-recovery page) ask the shell to open the
+  // Error pages (the workspace-content crash page) ask the shell to open the
   // get-help / report-a-bug modal. ``agentId`` is optional -- when present it
   // scopes the report to that workspace; it is validated to the server-issued
   // shape (or accepted as empty) so a foreign page can't smuggle path/query
@@ -56,57 +68,6 @@ window.addEventListener('message', (event) => {
   // URL, so a foreign page can't smuggle a navigation target through this channel.
   if (data.type === 'minds:reload-crashed-view') {
     ipcRenderer.send('reload-crashed-view');
-    return;
-  }
-  // Create-screen sign-in: open the shared modal overlay loaded with the
-  // sign-in page (so it covers the whole window, including the title bar).
-  // No payload -- the main process builds the fixed `/auth/signin-modal` URL.
-  if (data.type === 'minds:open-signin-modal') {
-    ipcRenderer.send('open-signin-modal');
-    return;
-  }
-  // Landing-page Stop button: ask the main process to show a native
-  // confirmation dialog and (on confirm) issue the host stop itself.
-  if (data.type === 'minds:confirm-stop-mind') {
-    const agentId = data.agentId;
-    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
-    const name = typeof data.name === 'string' ? data.name : agentId;
-    ipcRenderer.send('confirm-stop-mind', agentId, name);
-    return;
-  }
-  // Landing-page "open in new window" button: ask the main process to open
-  // (or focus) a dedicated window for this workspace. Same IPC channel the
-  // sidebar uses; the agent id is validated to the server-issued shape so a
-  // foreign page can't smuggle path/query chars into the URL main builds.
-  if (data.type === 'minds:open-workspace-in-new-window') {
-    const agentId = data.agentId;
-    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
-    ipcRenderer.send('open-workspace-in-new-window', agentId);
-    return;
-  }
-  // Settings-page color picker: paint the chrome titlebar optimistically
-  // *in this bundle's chrome view* so the user sees the picked color
-  // immediately, without waiting for the POST -> mngr label subprocess
-  // -> SSE round-trip. The actual persistence still goes through the
-  // POST endpoint; this just shortcuts the local-window UI feedback.
-  // Validated narrowly (agent id shape, #rrggbb lowercase hex, fixed
-  // foreground triples) so a foreign workspace page can't smuggle
-  // arbitrary CSS through.
-  if (data.type === 'minds:preview-workspace-accent') {
-    const agentId = data.agentId;
-    const accent = data.accent;
-    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
-    if (typeof accent !== 'string' || !ACCENT_HEX_PATTERN.test(accent)) return;
-    ipcRenderer.send('preview-workspace-accent', agentId, accent);
-    return;
-  }
-  // Login page: OAuth sign-in just finished in the external browser (which
-  // stole OS focus). Ask the shell to bring the whole app to the front so the
-  // user lands back in Minds. No payload -- the main process activates the app
-  // and focuses the window that owns this view, and only if it isn't already
-  // focused.
-  if (data.type === 'minds:bring-app-to-front') {
-    ipcRenderer.send('bring-app-to-front');
     return;
   }
 });

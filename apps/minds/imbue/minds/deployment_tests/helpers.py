@@ -133,8 +133,10 @@ def signin_and_mint_litellm_key(
     """Sign in to a shared env's connector and mint a LiteLLM key.
 
     The exact product path the litellm deployment tests exercise: POST
-    ``/auth/signin`` for an access token, then POST ``/keys/create`` (which
-    runs the paid-account gate) for the key + proxy base URL.
+    ``/auth/signin`` for an access token, move the account onto the ally plan
+    if it is not already there (its paid-listed email makes it eligible; key
+    minting needs a nonzero monthly LLM budget), then POST ``/keys/create``
+    (which runs the plan quota gate) for the key + proxy base URL.
     """
     base = connector_url.rstrip("/")
     with httpx.Client(timeout=timeout_seconds) as client:
@@ -143,13 +145,27 @@ def signin_and_mint_litellm_key(
         signin_json = signin.json()
         assert signin_json.get("status") == "OK", f"connector /auth/signin returned non-OK: {signin_json!r}"
         access_token = signin_json["tokens"]["access_token"]
+
+        account = client.get(f"{base}/account", headers={"Authorization": f"Bearer {access_token}"})
+        assert account.status_code == 200, f"GET /account failed: {account.text[:400]!r}"
+        if account.json()["plan_name"] != "ally":
+            switch = client.post(
+                f"{base}/account/plan",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"plan": "ally"},
+            )
+            assert switch.status_code == 200, (
+                f"the paid-listed user could not switch to ally ({switch.status_code}); "
+                f"plan seeding or ally eligibility is broken: {switch.text[:400]!r}"
+            )
+
         key_response = client.post(
             f"{base}/keys/create",
             headers={"Authorization": f"Bearer {access_token}"},
             json={"key_alias": key_alias, "max_budget": max_budget, "budget_duration": budget_duration},
         )
         assert key_response.status_code == 200, (
-            f"connector /keys/create failed ({key_response.status_code}); the paid-account gate or "
+            f"connector /keys/create failed ({key_response.status_code}); the plan quota or "
             f"litellm wiring is broken: {key_response.text[:400]!r}"
         )
         key_material = key_response.json()

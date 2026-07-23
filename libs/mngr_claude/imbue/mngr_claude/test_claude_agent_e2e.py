@@ -50,13 +50,17 @@ import pytest
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import _send_expecting_success
+from imbue.mngr.agents.agent_release_testing import _wait_for_user_message
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_concurrent_message_delivery
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
+from imbue.mngr_claude.plugin import extract_blocking_selector_block
 
 # claude's native resumable session store, relative to the agent state dir: the
 # per-agent Claude config dir's session JSONLs (see ``_AGENT_CLAUDE_PROJECTS_RELPATH``
@@ -212,3 +216,122 @@ def test_claude_concurrent_message_delivery(tmp_path: Path) -> None:
     cross-talk, via latched tmux wait-for signals on a shared server).
     """
     run_concurrent_message_delivery(_ClaudeReleaseProfile(), tmp_path)
+
+
+# Timeouts for the model-picker dialog tests. Create can provision a real claude; the send is a
+# single relaxed slash command whose post-submit dialog check observes for a few seconds.
+_MODEL_PICKER_CREATE_TIMEOUT_SECONDS = 600.0
+_MODEL_PICKER_SEND_TIMEOUT_SECONDS = 120.0
+_MODEL_PICKER_DESTROY_TIMEOUT_SECONDS = 150.0
+
+# Bare ``/model`` opens Claude Code's interactive model picker: a numbered selector (a rule line
+# followed by indented options, one highlighted with ``❯``) that blocks until a choice is made.
+# This is the load-bearing blocking dialog the hardening must auto-accept or surface as blocked.
+# We use the bare command (not ``/model <name>``, which on current Claude versions switches
+# directly with no dialog) because the picker is opened reliably and version-independently. The
+# highlighted default is the agent's current model, so accepting it (Enter) is a benign no-op that
+# just closes the picker.
+_MODEL_PICKER_COMMAND = "/model"
+
+# Bump the post-submit observe window above the 2s default so a real host that renders the picker a
+# beat late is still caught -- and, incidentally, exercise the configurable
+# post_submit_dialog_observe_seconds knob end to end against a live agent.
+_MODEL_PICKER_OBSERVE_SECONDS = 4.0
+
+
+def _setup_ctx_with_auto_accept_depth(
+    profile: _ClaudeReleaseProfile, tmp_path: Path, auto_accept_prompt_depth: int
+) -> AgentReleaseContext:
+    """Set up a release ctx whose project config enables (or disables) post-submit auto-accept.
+
+    Reuses the profile's standard setup, then appends an ``[agent_types.claude]`` section so the
+    created agent's config carries the requested depth and a slightly widened observe window.
+    """
+    ctx = profile.setup(tmp_path)
+    settings_path = Path(ctx.env["MNGR_PROJECT_CONFIG_DIR"]) / "settings.local.toml"
+    with settings_path.open("a") as settings_file:
+        settings_file.write(
+            f"\n[agent_types.claude]\n"
+            f"auto_accept_prompt_depth = {auto_accept_prompt_depth}\n"
+            f"post_submit_dialog_observe_seconds = {_MODEL_PICKER_OBSERVE_SECONDS}\n"
+        )
+    return ctx
+
+
+def _create_model_picker_agent(profile: _ClaudeReleaseProfile, ctx: AgentReleaseContext) -> str:
+    """Create a real haiku claude agent from ``ctx`` and return its name."""
+    agent_name = f"claude-modelpicker-{get_short_random_string()}"
+    create = profile.run_mngr(
+        ctx,
+        "create",
+        agent_name,
+        profile.agent_type,
+        "--no-connect",
+        "--yes",
+        *profile.create_extra_args(ctx),
+        timeout=_MODEL_PICKER_CREATE_TIMEOUT_SECONDS,
+    )
+    assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+    return agent_name
+
+
+def _capture_agent_pane(ctx: AgentReleaseContext, agent_name: str) -> str:
+    """Capture the agent's primary tmux window pane as plain text (colors stripped, like mngr)."""
+    session = ctx.env["MNGR_PREFIX"] + agent_name
+    result = subprocess.run(
+        ["tmux", "capture-pane", "-p", "-t", f"={session}:0"], capture_output=True, text=True, check=False
+    )
+    return result.stdout
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_model_picker_does_not_leave_agent_stuck(tmp_path: Path) -> None:
+    """Sending ``/model`` opens a blocking selector, which must not leave the agent stuck.
+
+    Bare ``/model`` opens Claude Code's interactive model picker -- a numbered selector that blocks
+    the input until a choice is made, and the real-world manifestation of the bug the dialog
+    hardening addresses (a ``/model`` prompt silently blocking the client). Against a real haiku
+    agent this asserts the user-facing outcome: the send exits 0, the picker is gone afterward (no
+    blocking selector remains in the pane -- ``extract_blocking_selector_block`` returns None), and
+    a subsequent normal message is still delivered and processed. If the picker had wedged the
+    agent, the follow-up message would never reach the transcript.
+
+    Note on scope: mngr's send-confirmation retry already clears an Enter-dismissable selector like
+    the picker, so this exercises the end-to-end "``/model`` does not wedge the agent" outcome
+    rather than the post-submit auto-accept path specifically. The auto-accept mechanics and the
+    delivered-but-blocked (exit 7) surfacing are covered deterministically by the plugin unit tests
+    (see ``plugin_test.py``), which script a selector that persists.
+    """
+    profile = _ClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = _setup_ctx_with_auto_accept_depth(profile, tmp_path, auto_accept_prompt_depth=5)
+    agent_name = _create_model_picker_agent(profile, ctx)
+    run_id = get_short_random_string()
+    try:
+        result = profile.run_mngr(
+            ctx, "message", agent_name, "--message", _MODEL_PICKER_COMMAND, timeout=_MODEL_PICKER_SEND_TIMEOUT_SECONDS
+        )
+        assert result.returncode == 0, (
+            f"expected /model to deliver and exit 0, got {result.returncode}:\n{result.stdout}\n{result.stderr}"
+        )
+        pane = _capture_agent_pane(ctx, agent_name)
+        assert extract_blocking_selector_block(pane) is None, (
+            f"the /model picker was not dismissed; a blocking selector still remains in the pane:\n{pane}"
+        )
+        # The agent must still accept and process a normal message -- i.e. it is not wedged on the picker.
+        token = f"AFTERMODEL-{run_id}"
+        _send_expecting_success(profile, ctx, agent_name, f"Remember this exact value: {token}. Reply with just OK.")
+        _wait_for_user_message(
+            ctx.host_dir,
+            profile.common_transcript_subdir,
+            token,
+            description="message sent after /model was not processed -- the agent may be stuck on the picker",
+        )
+    finally:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_MODEL_PICKER_DESTROY_TIMEOUT_SECONDS)

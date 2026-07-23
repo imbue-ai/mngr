@@ -33,6 +33,7 @@ from pydantic import PrivateAttr
 from tenacity import RetryCallState
 from tenacity import Retrying
 from tenacity import retry_if_exception_type
+from tenacity import retry_if_not_exception_type
 from tenacity import stop_after_delay
 from tenacity import wait_fixed
 
@@ -48,6 +49,7 @@ from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -2098,8 +2100,12 @@ class AgentCreator(MutableModel):
         """
 
         try:
+            # A structured quota refusal is deterministic (retrying cannot
+            # succeed), so it is excluded from the retry predicate and falls
+            # straight through to the notification below.
             for attempt in Retrying(
-                retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError)),
+                retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError))
+                & retry_if_not_exception_type(ImbueCloudQuotaExceededCliError),
                 stop=stop_after_delay(self.backup_setup_retry_budget_seconds),
                 wait=wait_fixed(self.backup_setup_retry_wait_seconds),
                 reraise=True,

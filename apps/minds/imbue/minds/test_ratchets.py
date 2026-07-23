@@ -92,7 +92,7 @@ def test_prevent_silent_decode_error_catches() -> None:
     # The added catch is ``build_info.py`` parsing the desktop app's package.json
     # for the Sentry release id: a malformed file degrades to a fallback version
     # (logged at debug) rather than crashing startup.
-    rc.check_silent_decode_error_catches(_DIR, snapshot(5))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(4))
 
 
 # --- Import style ---
@@ -174,7 +174,7 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(12))
+    rc.check_async_await(_DIR, snapshot(11))
 
 
 # --- Hardcoded paths ---
@@ -204,7 +204,7 @@ def test_prevent_trailing_comments() -> None:
     # S603 suppression must be on the same line as the call for ruff to
     # recognize it; the noqa marker is intentionally not in the
     # trailing-comment exempt list.
-    rc.check_trailing_comments(_DIR, snapshot(4))
+    rc.check_trailing_comments(_DIR, snapshot(3))
 
 
 def test_prevent_init_docstrings() -> None:
