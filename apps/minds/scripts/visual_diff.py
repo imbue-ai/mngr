@@ -378,19 +378,15 @@ def _build_scenarios() -> list[Scenario]:
         Scenario(
             name="settings_page",
             builder=lambda: render_app_settings_page(
-                report_unexpected_errors=True,
-                include_error_logs=False,
                 permissions_unavailable=False,
-                has_saved_backup_password=True,
+                is_master_password_set=True,
             ),
         ),
         Scenario(
             name="settings_modal",
             builder=lambda: render_settings_modal_page(
-                report_unexpected_errors=False,
-                include_error_logs=False,
                 permissions_unavailable=False,
-                has_saved_backup_password=False,
+                is_master_password_set=False,
             ),
         ),
         Scenario(
