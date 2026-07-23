@@ -1,14 +1,14 @@
 // Backup section of the workspace settings page: shows the combined
 // snapshot status + backup-service verification breakdown from this
 // workspace's /api/v1/workspaces/<id>/backups, and drives the actions:
-//   - the verification Enable/Disable button (top of the section: the whole
-//     breakdown below it only exists while verification is on),
-//   - "Update backup service" (one idempotent converge; tracked operation
+//   - the verification Enable/Disable button (the whole problem/version
+//     breakdown only exists while it is on),
+//   - "Update backup software" (one idempotent converge; tracked operation
 //     polled at /api/v1/workspaces/operations/backup/<id>, with a
-//     "Stop all chats and retry" follow-up when running chats block it and
+//     "Stop chats and try again" follow-up when running chats block it and
 //     a Cancel that works while the update is still waiting),
-//   - "Configure backups..." (enable, change destination, or disable via the
-//     "None" provider; same tracked-operation polling).
+//   - "Change storage location" (enable, change destination, or disable via
+//     the "None" provider; same tracked-operation polling).
 //
 // Conditional buttons are shown/hidden via their wrapper spans (a `hidden`
 // class directly on a Button loses to its inline-flex display class).
@@ -44,12 +44,12 @@
   var isVerificationEnabled = true;
 
   var PROBLEM_LABELS = {
-    NOT_CONFIGURED: 'Backups are not configured for this workspace.',
-    CODE_OUTDATED: 'The backup service code is outdated.',
-    ENV_MISSING: 'The backup credentials file is missing on the workspace.',
-    ENV_MISMATCH: "The workspace's backup credentials don't match the expected configuration.",
-    SERVICE_NOT_RUNNING: 'The backup service is not running.',
-    UNVERIFIABLE: 'The backup service could not be verified.',
+    NOT_CONFIGURED: 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.',
+    CODE_OUTDATED: 'The backup software in this workspace is out of date. Click "Update backup software" to fix this.',
+    ENV_MISSING: 'This workspace has lost its backup storage settings. Click "Update backup software" to restore them.',
+    ENV_MISMATCH: 'This workspace is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
+    SERVICE_NOT_RUNNING: 'The backup software in this workspace is not running. Click "Update backup software" to restart it.',
+    UNVERIFIABLE: "minds couldn't check on this workspace's backups. Click \"Update backup software\" to reset them.",
   };
 
   function setShown(el, isShown) {
@@ -100,7 +100,7 @@
       return;
     }
     if (entry.check_state === 'OFFLINE') {
-      statusLine.textContent += ' The workspace is offline; its backup service will be verified when it is back.';
+      statusLine.textContent += ' This workspace is offline; its backups will be checked when it is back online.';
       return;
     }
     var versionParts = [];
@@ -239,7 +239,7 @@
         if (op.blocked_chats && op.blocked_chats.length > 0) {
           showError(
             'Chats are running in this workspace (' + op.blocked_chats.join(', ') +
-            '). Stop them before updating the backup service; they resume on your next message.'
+            '). Stop them before continuing; they resume on your next message.'
           );
           setShown(stopChatsBtnWrap, true);
           return;
