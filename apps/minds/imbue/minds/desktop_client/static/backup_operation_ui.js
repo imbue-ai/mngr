@@ -411,6 +411,15 @@
         .then(function (op) {
           if (isOperationRunning) return;
           if (!op || op.status !== 'RUNNING') return;
+          // This page did not dispatch the operation being attached to, so
+          // dispatch context left by an earlier operation it did dispatch
+          // (the success wording, the retry closures that would re-dispatch
+          // that old operation) must not leak onto this one: a reattached
+          // poller offers no retry buttons and a generic success message.
+          pendingSuccessMessage = null;
+          retryWithStopChats = null;
+          retrySkipSafety = null;
+          retryForce = null;
           // A restore names its snapshot, so a page loaded mid-restore marks
           // the same row the dispatching page did -- rather than showing
           // nothing, which would read as an idle workspace and invite a
