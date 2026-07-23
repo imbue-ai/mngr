@@ -49,6 +49,7 @@ mngr start [OPTIONS] [AGENTS]...
 | ---- | ---- | ----------- | ------- |
 | `--restart` | boolean | Stop the agent first if it is already running, ensuring a clean start. | `False` |
 | `--no-resume` | boolean | Skip sending the resume message after starting. | `False` |
+| `--resume-message` | text | Message to send after starting, overriding any resume message stored on the agent. Cannot be combined with --no-resume. | None |
 | `--dry-run` | boolean | Show what would be started without actually starting anything | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after starting (only valid for single agent) | `False` |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
