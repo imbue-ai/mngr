@@ -907,8 +907,9 @@ _RECOVERY_STYLE: Final[str] = """\
       #recovery-host-btn.secondary:hover { background: #4b5563; }
 
       /* The verbatim provider error (e.g. docker's "Docker Desktop is manually
-         paused..."), shown under the generic "may be temporarily unavailable"
-         copy on the provider-unavailable tier. Set as plain text by the JS, so
+         paused..."), or the canned access-rejected reason for an UNAUTHENTICATED
+         host, shown under the generic auto-reconnect copy on the
+         provider-unavailable tier. Set as plain text by the JS, so
          it carries whatever the provider returned -- a muted, left-bordered
          block keeps it visually distinct from our own copy. ``overflow-wrap``
          keeps a long unbroken token (e.g. the http+docker URL some messages
@@ -1477,8 +1478,8 @@ _RECOVERY_SCRIPT: Final[str] = """\
           var reason = (data && data.unreachable_reason) || '';
           titleEl.textContent = "Can't connect to " + label;
           messageEl.textContent =
-            label + ' may be temporarily unavailable. This page will reconnect '
-            + 'automatically once it can reach your workspace again.';
+            'This page will reconnect you automatically the moment your workspace '
+            + 'is reachable again.';
           if (providerReasonEl) {
             providerReasonEl.textContent = reason;
             show(providerReasonEl, Boolean(reason));

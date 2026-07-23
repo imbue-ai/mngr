@@ -379,9 +379,8 @@ _UNAUTHENTICATED_STATE: Final[str] = "UNAUTHENTICATED"
 # field), so the page cannot show the provider's verbatim error; this canned
 # text covers the class of causes instead.
 HOST_ACCESS_REJECTED_REASON: Final[str] = (
-    "This machine's access to the workspace host was rejected. Retrying or "
-    "restarting won't fix this -- the workspace may need to be recreated, or "
-    "contact support."
+    "This machine's access to the workspace host was rejected. You may need to "
+    "recreate the workspace or contact support."
 )
 
 
