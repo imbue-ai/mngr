@@ -188,11 +188,17 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ report_unexpected_errors: reportToggle.checked }),
-      }).catch(function () {
-        // A failed save leaves the persisted flag unchanged; reflect that by
-        // reverting the checkbox so it matches what is actually stored.
-        reportToggle.checked = !reportToggle.checked;
-      });
+      })
+        .then(function (resp) {
+          // An HTTP-error response resolves (does not reject), so revert here too:
+          // a failed save leaves the persisted flag unchanged, so reflect that by
+          // reverting the checkbox to match what is actually stored.
+          if (!resp.ok) reportToggle.checked = !reportToggle.checked;
+        })
+        .catch(function () {
+          // Network error: same reasoning -- nothing was persisted, so revert.
+          reportToggle.checked = !reportToggle.checked;
+        });
     });
   }
 
