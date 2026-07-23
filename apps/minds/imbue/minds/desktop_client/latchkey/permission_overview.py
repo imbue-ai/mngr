@@ -33,6 +33,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -254,6 +255,10 @@ def build_permission_overview(
         path = permissions_path_for_host(plugin_data_dir, host.host_id)
         rules_by_agent[host.agent_id] = gateway_client.get_permission_rules(path)
 
+    # One ``latchkey auth list --offline`` call reports every service's stored
+    # accounts, so we don't shell out per service while rendering the page.
+    accounts_by_service = latchkey.auth_list(is_offline=True)
+
     overviews: list[ServicePermissionOverview] = []
     for service_name, service_infos in services_catalog.as_mapping().items():
         if not service_infos:
@@ -282,7 +287,7 @@ def build_permission_overview(
                 ServicePermissionOverview(
                     service_name=service_name,
                     display_name=service_infos[0].display_name,
-                    accounts=_service_accounts(latchkey, service_name),
+                    accounts=_service_accounts(accounts_by_service.get(service_name, ())),
                     workspace_grants=tuple(grants),
                 )
             )
@@ -294,15 +299,12 @@ def _account_label(account: str) -> str:
     return _DEFAULT_ACCOUNT_LABEL if account == DEFAULT_ACCOUNT else account
 
 
-def _service_accounts(latchkey: Latchkey, service_name: str) -> tuple[ServiceAccount, ...]:
-    """List the signed-in accounts for one service via ``latchkey services info --offline``.
+def _service_accounts(accounts: Sequence[ServiceAccountCredential]) -> tuple[ServiceAccount, ...]:
+    """Turn one service's stored accounts (from :meth:`Latchkey.auth_list`) into UI rows.
 
-    ``--offline`` reports the *stored* accounts without a per-account network
-    round-trip, which is all the settings page needs (it lists accounts, it does
-    not validate them). Accounts are sorted for a stable UI, with the unnamed
-    default account (if any) shown last.
+    Accounts are sorted for a stable UI, with the unnamed default account (if
+    any) shown last.
     """
-    accounts = latchkey.services_info(service_name, is_offline=True).accounts
     return tuple(
         ServiceAccount(account=account.account, label=_account_label(account.account))
         for account in sorted(accounts, key=lambda entry: (entry.account == DEFAULT_ACCOUNT, entry.account.lower()))

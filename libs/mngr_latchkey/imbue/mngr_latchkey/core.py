@@ -357,27 +357,26 @@ def _extract_credential_status_value(entry: object) -> object:
     return None
 
 
-def _parse_accounts(payload: Mapping[str, object], service_name: str) -> tuple[ServiceAccountCredential, ...]:
-    """Pull the per-account ``credentials`` object out of ``payload``.
+def _parse_account_map(raw_account_map: object, service_name: str) -> tuple[ServiceAccountCredential, ...]:
+    """Parse an account-keyed credential object into :class:`ServiceAccountCredential`s.
 
-    latchkey 3.0.0 replaced the single top-level ``credentialStatus`` field with
-    a ``credentials`` object keyed by account name (the default account keyed by
-    the empty string). A service with no stored credentials reports ``{}``. Any
-    missing/malformed ``credentials`` value yields an empty tuple so callers see
-    "no accounts" (which :func:`_aggregate_credential_status` maps to MISSING).
+    The object maps account name (the default account keyed by the empty string)
+    to ``{credentialType, credentialStatus}``. It is the value of ``services
+    info``'s ``credentials`` field and of each service entry in ``auth list``.
+    ``None`` (absent) yields an empty tuple; a malformed (non-object) value is
+    logged and also treated as "no accounts".
     """
-    raw_credentials = payload.get("credentials")
-    if raw_credentials is None:
+    if raw_account_map is None:
         return ()
-    if not isinstance(raw_credentials, Mapping):
+    if not isinstance(raw_account_map, Mapping):
         logger.warning(
-            "'latchkey services info {}' credentials was not an object: {!r}",
+            "'latchkey' account map for {} was not an object: {!r}",
             service_name,
-            raw_credentials,
+            raw_account_map,
         )
         return ()
     accounts: list[ServiceAccountCredential] = []
-    for account, entry in raw_credentials.items():
+    for account, entry in raw_account_map.items():
         raw_status = _extract_credential_status_value(entry)
         accounts.append(
             ServiceAccountCredential(
@@ -386,6 +385,18 @@ def _parse_accounts(payload: Mapping[str, object], service_name: str) -> tuple[S
             )
         )
     return tuple(accounts)
+
+
+def _parse_accounts(payload: Mapping[str, object], service_name: str) -> tuple[ServiceAccountCredential, ...]:
+    """Pull the per-account ``credentials`` object out of ``services info`` ``payload``.
+
+    latchkey 3.0.0 replaced the single top-level ``credentialStatus`` field with
+    a ``credentials`` object keyed by account name (the default account keyed by
+    the empty string). A service with no stored credentials reports ``{}``. Any
+    missing/malformed ``credentials`` value yields an empty tuple so callers see
+    "no accounts" (which :func:`_aggregate_credential_status` maps to MISSING).
+    """
+    return _parse_account_map(payload.get("credentials"), service_name)
 
 
 def _aggregate_credential_status(accounts: Sequence[ServiceAccountCredential]) -> CredentialStatus:
@@ -1027,6 +1038,59 @@ class Latchkey(MutableModel):
             auth_options=_parse_auth_options(payload, service_name),
             set_credentials_example=_parse_set_credentials_example(payload, service_name),
         )
+
+    def auth_list(self, *, is_offline: bool = False) -> dict[str, tuple[ServiceAccountCredential, ...]]:
+        """Run ``latchkey auth list`` and return the stored accounts keyed by service.
+
+        latchkey emits a JSON object ``{service: {account: {credentialType,
+        credentialStatus}}}`` (the default account keyed by the empty string).
+        We parse it into ``{service_name: (ServiceAccountCredential, ...)}`` --
+        one call that reports every service's accounts at once, so the settings
+        page does not have to shell out per service.
+
+        When ``is_offline`` is set, ``--offline`` is passed so latchkey reports
+        the *stored* accounts without any per-account network validation (their
+        status is then only ``missing`` or ``unknown``), which is all the
+        connectors page needs.
+
+        Any failure (process error, malformed output) degrades to an empty
+        mapping rather than raising, mirroring :meth:`services_info`, so a
+        transient latchkey problem renders as \"no accounts\" instead of crashing
+        the page.
+        """
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        command = [self.latchkey_binary, "auth", "list"]
+        if is_offline:
+            command.append("--offline")
+        cg = ConcurrencyGroup(name="latchkey-auth-list")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=command,
+                    timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            logger.warning("latchkey auth list failed to start: {}", group)
+            return {}
+        if result.returncode != 0:
+            logger.warning("latchkey auth list exited {}: {}", result.returncode, result.stderr.strip())
+            return {}
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("Could not parse 'latchkey auth list' output as JSON: {}", e)
+            return {}
+        if not isinstance(payload, dict):
+            logger.warning("'latchkey auth list' returned non-object JSON")
+            return {}
+        return {
+            str(service_name): _parse_account_map(account_map, str(service_name))
+            for service_name, account_map in payload.items()
+        }
 
     # -- Interactive auth ----------------------------------------------------
 

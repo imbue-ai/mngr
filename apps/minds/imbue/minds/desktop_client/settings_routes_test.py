@@ -91,18 +91,25 @@ class _ConnectorLatchkey(Latchkey):
     add_account_result: tuple[bool, str] = Field(default=(True, ""))
     cleared_calls: list[tuple[str, str | None]] = Field(default_factory=list)
 
-    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
-        del is_offline
-        accounts = tuple(
+    def _accounts_for(self, service_name: str) -> tuple[ServiceAccountCredential, ...]:
+        return tuple(
             ServiceAccountCredential(account=account, credential_status=CredentialStatus.VALID)
             for account in self.accounts_by_service.get(service_name, [])
         )
+
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
+        del is_offline
+        accounts = self._accounts_for(service_name)
         return LatchkeyServiceInfo(
             credential_status=CredentialStatus.VALID if accounts else CredentialStatus.MISSING,
             accounts=accounts,
             auth_options=frozenset({"browser", "set"}),
             set_credentials_example=None,
         )
+
+    def auth_list(self, *, is_offline: bool = False) -> dict[str, tuple[ServiceAccountCredential, ...]]:
+        del is_offline
+        return {service: self._accounts_for(service) for service in self.accounts_by_service}
 
     def add_account(self, service_name: str) -> tuple[bool, str]:
         self.add_account_calls.append(service_name)

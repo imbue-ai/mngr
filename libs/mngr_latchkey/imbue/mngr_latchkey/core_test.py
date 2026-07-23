@@ -1723,6 +1723,65 @@ def test_services_info_offline_passes_offline_flag(tmp_path: Path) -> None:
     assert json.loads(report_path.read_text()) == ["services", "info", "slack"]
 
 
+def _make_auth_list_binary(tmp_path: Path, *, payload_json: str, exit_code: int = 0) -> Path:
+    """Build a fake latchkey CLI that emits an ``auth list`` JSON payload and records argv."""
+    report_path = tmp_path / "argv_report"
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        f"open({str(report_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        f"print({payload_json!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_auth_list_parses_accounts_keyed_by_service(tmp_path: Path) -> None:
+    payload = json.dumps(
+        {
+            "slack": {
+                "hynek@imbue-ai": {"credentialType": "rawCurl", "credentialStatus": "unknown"},
+                "hynek@glebs-corner": {"credentialType": "rawCurl", "credentialStatus": "valid"},
+            },
+            "github": {"": {"credentialType": "rawCurl", "credentialStatus": "unknown"}},
+        }
+    )
+    binary = _make_auth_list_binary(tmp_path, payload_json=payload)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    result = latchkey.auth_list(is_offline=True)
+
+    assert set(result) == {"slack", "github"}
+    assert {a.account: a.credential_status for a in result["slack"]} == {
+        "hynek@imbue-ai": CredentialStatus.UNKNOWN,
+        "hynek@glebs-corner": CredentialStatus.VALID,
+    }
+    assert [a.account for a in result["github"]] == [""]
+    # ``--offline`` is forwarded (and omitted when not requested).
+    assert json.loads((tmp_path / "argv_report").read_text()) == ["auth", "list", "--offline"]
+
+
+def test_auth_list_without_offline_omits_flag(tmp_path: Path) -> None:
+    binary = _make_auth_list_binary(tmp_path, payload_json="{}")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    assert latchkey.auth_list() == {}
+    assert json.loads((tmp_path / "argv_report").read_text()) == ["auth", "list"]
+
+
+def test_auth_list_degrades_to_empty_mapping_on_failure(tmp_path: Path) -> None:
+    binary = _make_auth_list_binary(tmp_path, payload_json="{}", exit_code=1)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    assert latchkey.auth_list(is_offline=True) == {}
+
+
+def test_auth_list_degrades_to_empty_mapping_when_binary_missing(tmp_path: Path) -> None:
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "does-not-exist"))
+    assert latchkey.auth_list(is_offline=True) == {}
+
+
 def test_auth_browser_reports_success_on_zero_exit(tmp_path: Path) -> None:
     binary = _make_recording_binary(tmp_path, exit_code=0)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))

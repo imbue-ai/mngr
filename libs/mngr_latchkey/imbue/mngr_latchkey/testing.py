@@ -16,6 +16,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.core import ServiceAccountCredential
 
 
 class FakeLatchkey(Latchkey):
@@ -66,6 +67,10 @@ class FakeLatchkey(Latchkey):
     def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
         del service_name, is_offline
         return self._service_info
+
+    def auth_list(self, *, is_offline: bool = False) -> dict[str, tuple[ServiceAccountCredential, ...]]:
+        del is_offline
+        return {}
 
     def auth_prepare(self, service_name: str, client_id: str, client_secret: str) -> tuple[bool, str]:
         del service_name, client_id, client_secret
