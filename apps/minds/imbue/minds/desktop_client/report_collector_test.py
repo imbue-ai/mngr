@@ -9,7 +9,6 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 def _build(
     description: str = "something broke",
     include_app_diagnostics: bool = False,
-    include_workspace_details: bool = False,
     remote_access_requested: bool = False,
     workspace_agent_id: str | None = None,
     session_store: MultiAccountSessionStore | None = None,
@@ -19,7 +18,6 @@ def _build(
     return build_bug_report(
         description=description,
         include_app_diagnostics=include_app_diagnostics,
-        include_workspace_details=include_workspace_details,
         remote_access_requested=remote_access_requested,
         workspace_agent_id=workspace_agent_id,
         session_store=session_store,
@@ -62,14 +60,10 @@ def test_build_bug_report_includes_app_diagnostics_when_requested(tmp_path: Path
 
 def test_build_bug_report_includes_workspace_context_when_in_a_workspace() -> None:
     # Even without a backend resolver, the workspace section carries at least the agent id.
-    report = _build(include_workspace_details=True, workspace_agent_id="agent-123")
+    report = _build(workspace_agent_id="agent-123")
     assert report["workspace"]["agent_id"] == "agent-123"
 
 
 def test_build_bug_report_omits_workspace_when_not_in_a_workspace() -> None:
     # No workspace id -> the help flow was on a general screen, so there is no workspace section.
-    assert "workspace" not in _build(include_workspace_details=True, workspace_agent_id=None)
-
-
-def test_build_bug_report_omits_workspace_when_details_not_requested() -> None:
-    assert "workspace" not in _build(include_workspace_details=False, workspace_agent_id="agent-123")
+    assert "workspace" not in _build(workspace_agent_id=None)

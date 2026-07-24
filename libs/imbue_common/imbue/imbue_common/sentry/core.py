@@ -600,11 +600,9 @@ def setup_sentry(
     log_attachment_groups: Sequence[LogAttachmentGroup],
     integrations: Sequence[Integration],
     is_error_reporting_enabled: Callable[[], bool],
-    is_log_inclusion_enabled: Callable[[], bool],
     # The S3 bucket to upload log/traceback attachments to, or ``None`` to disable S3 entirely (e.g.
     # in environments that have no bucket). When set, the uploader is initialized for this bucket;
-    # whether attachments are actually collected per-event is still gated live by
-    # ``is_log_inclusion_enabled``.
+    # attachments are still only collected per-event while ``is_error_reporting_enabled`` returns True.
     s3_attachment_bucket: str | None = None,
     extra_tags: Mapping[str, str] | None = None,
     # Glob patterns (matched via ``fnmatch``) for stdlib logger names whose records must never
@@ -620,16 +618,16 @@ def setup_sentry(
     This should be done *after* setting up normal loguru loggers, to ensure that sentry handling happens after normal logging.
     In case the sentry stuff hangs or something odd, we want to make sure to at least get regular log output.
 
-    Sentry always initializes; what it actually *sends* is gated live by two callables:
+    Sentry always initializes; what it actually *sends* is gated live by ``is_error_reporting_enabled``:
 
-    * ``is_error_reporting_enabled`` is read on every event (in a before_send hook). While it returns
-      False, automatic events are dropped before they leave the process. Manually-submitted bug
-      reports (tagged ``MANUALLY_SUBMITTED_TAG``) bypass this gate.
-    * ``is_log_inclusion_enabled`` is read whenever attachments are collected; while it returns False,
-      log/traceback attachments are skipped. Attachments are additionally only uploaded when
+    * It is read on every event (in a before_send hook). While it returns False, automatic events are
+      dropped before they leave the process. Manually-submitted bug reports (tagged
+      ``MANUALLY_SUBMITTED_TAG``) bypass this gate.
+    * It also gates log/traceback attachment collection: while it returns False, no attachments are
+      collected for automatic events. Attachments are additionally only uploaded when
       ``s3_attachment_bucket`` is set.
 
-    Both callables are read live, so toggling the corresponding source takes effect without a restart.
+    The callable is read live, so toggling its source takes effect without a restart.
 
     ``integrations`` are the Sentry integrations to enable in addition to the default integrations
     (e.g. a Flask integration for the minds backend; none for the ``mngr latchkey forward`` daemon).
@@ -694,7 +692,7 @@ def setup_sentry(
 
     # The S3 attachment uploader is initialized whenever a bucket is configured. Whether
     # logs/tracebacks are actually collected and uploaded is decided live per-event by
-    # ``is_log_inclusion_enabled`` (in ``add_extra_info_hook``); with no bucket, nothing is uploaded.
+    # ``is_error_reporting_enabled`` (in ``add_extra_info_hook``); with no bucket, nothing is uploaded.
     if s3_attachment_bucket is not None:
         setup_s3_uploads(bucket=s3_attachment_bucket)
         logger.info("Sentry S3 attachment uploader ready (bucket={})", s3_attachment_bucket)
@@ -711,7 +709,7 @@ def setup_sentry(
     # reports can reach it) plus the loguru handler that turns errors/exceptions into Sentry events.
     attachments_uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=tuple(log_attachment_groups))
     register_attachments_uploader(attachments_uploader)
-    add_extra_info_hook_partial = partial(add_extra_info_hook, is_log_inclusion_enabled=is_log_inclusion_enabled)
+    add_extra_info_hook_partial = partial(add_extra_info_hook, is_error_reporting_enabled=is_error_reporting_enabled)
 
     min_sentry_level: int = SentryLoguruLoggingLevels.LOW_PRIORITY.value
     handler = SentryEventHandler(
@@ -936,7 +934,7 @@ class ErrorAttachmentsS3Uploader(MutableModel):
 
 
 def add_extra_info_hook(
-    event: Event, hint: Hint, is_log_inclusion_enabled: Callable[[], bool]
+    event: Event, hint: Hint, is_error_reporting_enabled: Callable[[], bool]
 ) -> tuple[Event, Hint, tuple[_UploadCallback, ...]]:
     """The add_extra_info_hook gets called in the SentryEventHandler. This seems a little too early in the process for
     sending things to s3.
@@ -944,14 +942,14 @@ def add_extra_info_hook(
     Sentry may still decide to discard the issue and in that scenario, executing all the uploads now would just
     blackhole them.
 
-    Log/traceback attachment collection is gated by ``is_log_inclusion_enabled`` (read live): while it
-    returns False, no log or traceback uploads are prepared, so the event carries no attachments. The
-    lightweight ``platform`` extra is always added regardless.
+    Log/traceback attachment collection is gated by ``is_error_reporting_enabled`` (read live): while it
+    returns False, the event is dropped anyway, so no log or traceback uploads are prepared and the
+    event carries no attachments. The lightweight ``platform`` extra is always added regardless.
     """
     extra = cast(dict[str, Any], event["extra"])
 
     uploader = get_attachments_uploader()
-    if is_log_inclusion_enabled() and uploader is not None:
+    if is_error_reporting_enabled() and uploader is not None:
         exception = sys.exception()
         if exception is None:
             try:
@@ -982,7 +980,6 @@ def submit_manual_bug_report(
     *,
     title: str,
     report: Mapping[str, Any],
-    include_logs: bool,
     logs_folder: Path | None,
 ) -> str | None:
     """Synthesize and send a user-submitted bug report as a Sentry event.
@@ -992,9 +989,9 @@ def submit_manual_bug_report(
     automatic error reporting is turned off. It is not tied to an exception -- ``title`` becomes the
     event message and ``report`` is attached as structured context.
 
-    When ``include_logs`` is set and a ``logs_folder`` is given, recent log files are uploaded via the
-    same S3-attachment mechanism as automatic errors (a no-op in environments without an S3 bucket).
-    No traceback is collected (a manual report has no meaningful one).
+    When a ``logs_folder`` is given, recent log files are always uploaded via the same S3-attachment
+    mechanism as automatic errors (a no-op in environments without an S3 bucket). No traceback is
+    collected (a manual report has no meaningful one).
 
     Returns the Sentry event id (a 32-char hex string the user can quote when following up), or None
     if Sentry is not active or the event was dropped before sending.
@@ -1015,7 +1012,7 @@ def submit_manual_bug_report(
     }
 
     uploader = get_attachments_uploader()
-    if include_logs and logs_folder is not None and uploader is not None:
+    if logs_folder is not None and uploader is not None:
         # exception=None -> only log files are prepared (no synthesized traceback).
         s3_uri_groups, callbacks = uploader.collect_external_attachments(exception=None, logs_folder=logs_folder)
         for group_name, s3_uris in s3_uri_groups.items():

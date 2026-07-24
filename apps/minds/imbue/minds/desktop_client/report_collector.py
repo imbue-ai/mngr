@@ -4,9 +4,9 @@ Backs both the local "report a bug" form and the authenticated ``/api/v1`` bug-r
 from either path carry the same shape and are submitted the same way. All Sentry submission is owned by
 the outer minds app -- agents never reach Sentry directly.
 
-What is collected scales with what the user opted into: the description and a handful of always-cheap
-"basics" (versions, OS) are unconditional; app diagnostics and per-workspace context are added only when
-requested. Each collected value comes from an in-process source (build info, the session store, the
+What is collected depends on the report's context: the description and a handful of always-cheap
+"basics" (versions, OS) are unconditional; app diagnostics are added when requested, and per-workspace
+context whenever the report was opened from a known workspace. Each collected value comes from an in-process source (build info, the session store, the
 backend resolver, the standard library), so collection is fast and side-effect free.
 """
 
@@ -22,7 +22,6 @@ from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.utils.sentry.core import submit_manual_bug_report
 from imbue.mngr.primitives import AgentId
@@ -101,7 +100,6 @@ def build_bug_report(
     *,
     description: str,
     include_app_diagnostics: bool,
-    include_workspace_details: bool,
     remote_access_requested: bool,
     workspace_agent_id: str | None,
     session_store: MultiAccountSessionStore | None,
@@ -111,8 +109,8 @@ def build_bug_report(
     """Assemble the structured report attached to the Sentry event.
 
     ``remote_access_requested`` is recorded as a flag only -- no remote access is provisioned here.
-    Workspace details are gathered only when both a ``workspace_agent_id`` is known and the user opted
-    into them; otherwise the workspace section is omitted entirely (the help flow was not in a workspace).
+    Workspace details are gathered whenever a ``workspace_agent_id`` is known; otherwise the workspace
+    section is omitted entirely (the help flow was not opened from a workspace).
     """
     report: dict[str, Any] = {
         "description": description,
@@ -125,7 +123,7 @@ def build_bug_report(
             backend_resolver=backend_resolver,
             data_dir=data_dir,
         )
-    if workspace_agent_id and include_workspace_details:
+    if workspace_agent_id:
         report["workspace"] = _collect_workspace_context(
             backend_resolver=backend_resolver,
             workspace_agent_id=workspace_agent_id,
@@ -136,9 +134,7 @@ def build_bug_report(
 def submit_bug_report(
     *,
     description: str,
-    include_logs: bool,
     include_app_diagnostics: bool,
-    include_workspace_details: bool,
     remote_access_requested: bool,
     workspace_agent_id: str | None,
     session_store: MultiAccountSessionStore | None,
@@ -154,7 +150,6 @@ def submit_bug_report(
     report = build_bug_report(
         description=description,
         include_app_diagnostics=include_app_diagnostics,
-        include_workspace_details=include_workspace_details,
         remote_access_requested=remote_access_requested,
         workspace_agent_id=workspace_agent_id,
         session_store=session_store,
@@ -164,7 +159,6 @@ def submit_bug_report(
     return submit_manual_bug_report(
         title=_report_title(description),
         report=report,
-        include_logs=include_logs,
         logs_folder=logs_folder,
     )
 
@@ -174,26 +168,23 @@ def submit_bug_report_from_body(
     body: Mapping[str, Any],
     session_store: MultiAccountSessionStore | None,
     backend_resolver: BackendResolverInterface | None,
-    minds_config: MindsConfig | None,
     paths: WorkspacePaths | None,
 ) -> str | None:
     """Parse a help-form / API request body and submit the resulting bug report.
 
     Shared by the local ``POST /help/report`` handler and the ``/api/v1`` bug-report route so both
-    interpret the same fields identically. Logs are included when the persistent ``include_error_logs``
-    setting is on OR the request opted in for this one report (the form surfaces that checkbox only when
-    the setting is off). The caller is responsible for validating that a description is present.
+    interpret the same fields identically. Recent logs and app diagnostics (app version, signed-in
+    accounts, the list of workspaces, and host/system info -- no workspace contents) are always
+    included, as are details of the workspace the report was opened from (its id, name, host, and
+    provider -- no workspace contents). Remote access remains opt-in (Imbue does not look into a
+    workspace without consent). The caller is responsible for validating that a description is present.
 
     Returns the Sentry event id (or None when Sentry is inactive / the event was dropped).
     """
-    include_logs_setting = minds_config.get_include_error_logs() if minds_config is not None else False
-    include_logs = include_logs_setting or bool(body.get("include_logs", False))
     workspace_agent_id = body.get("workspace_agent_id") or None
     return submit_bug_report(
         description=str(body.get("description", "")).strip(),
-        include_logs=include_logs,
-        include_app_diagnostics=bool(body.get("include_app_diagnostics", False)),
-        include_workspace_details=bool(body.get("include_workspace_details", False)),
+        include_app_diagnostics=True,
         remote_access_requested=bool(body.get("remote_access", False)),
         workspace_agent_id=str(workspace_agent_id) if workspace_agent_id else None,
         session_store=session_store,

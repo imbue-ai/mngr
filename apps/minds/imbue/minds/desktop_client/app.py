@@ -359,29 +359,26 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
 
 
 def _maybe_consent_screen() -> Response | None:
-    """Return the error-reporting consent screen if it still needs answering, else None.
+    """Return the error-reporting notice screen if it still needs acknowledging, else None.
 
     The screen is shown once per machine -- on first launch, and once more after upgrading from a
     build that predates it -- after the user has authenticated and before the landing content, until
-    they answer it via POST /consent. Callers are responsible for gating this on authentication. When
-    config is unavailable (e.g. minimal test apps) there is nothing to gate on, so this is a no-op.
+    the user acknowledges it via POST /consent. It is informational: during the alpha, unexpected
+    errors are always reported to Imbue and there is no opt-out. Callers are responsible for gating
+    this on authentication. When config is unavailable (e.g. minimal test apps) there is nothing to
+    gate on, so this is a no-op.
     """
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is None or minds_config.get_error_reporting_consent_given():
         return None
-    return make_html_response(
-        content=render_consent_page(
-            report_unexpected_errors=minds_config.get_report_unexpected_errors(),
-            include_logs=minds_config.get_include_error_logs(),
-        )
-    )
+    return make_html_response(content=render_consent_page())
 
 
 def _handle_consent_page() -> Response:
-    """Render the error-reporting consent screen (GET /consent).
+    """Render the error-reporting notice screen (GET /consent).
 
-    The consent screen sits just after login, so an unauthenticated request is bounced to the login
-    page. If consent was already answered, redirect home so the screen never reappears.
+    The notice screen sits just after login, so an unauthenticated request is bounced to the login
+    page. If it was already acknowledged, redirect home so the screen never reappears.
     """
     if not _is_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/login"})
@@ -392,45 +389,36 @@ def _handle_consent_page() -> Response:
 
 
 def _handle_consent_submit() -> Response:
-    """Record the consent-screen choices and mark consent as answered (POST /consent).
+    """Record that the user acknowledged the error-reporting notice (POST /consent).
 
-    The consent screen sits just after login, so this requires authentication. "Include logs" is only
-    persisted as on when reporting is also on, matching the screen's coupling.
+    The notice sits just after login, so this requires authentication. The screen is informational
+    (no opt-out during the alpha), so this only marks the notice as acknowledged -- reporting stays
+    on by default -- and it syncs the latchkey daemon's consent file for good measure.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is not None:
-        report = bool(body.get("report_unexpected_errors", False))
-        include_logs = bool(body.get("include_logs", False))
-        minds_config.set_report_unexpected_errors(report)
-        minds_config.set_include_error_logs(include_logs and report)
         minds_config.set_error_reporting_consent_given(True)
         _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
 def _handle_error_reporting_settings() -> Response:
-    """Persist the error-reporting toggles from the Settings page (POST /_chrome/error-reporting).
+    """Persist the error-reporting opt-out from the Settings page (POST /_chrome/error-reporting).
 
-    Accepts any subset of ``{report_unexpected_errors, include_logs}``; each present boolean is saved.
-    The settings UI clears "include logs" when reporting is turned off, so the stored pair stays
-    consistent without extra coercion here.
+    A single ``report_unexpected_errors`` boolean gates both automatic error sends and their
+    log/traceback attachments. Saved live and mirrored to the latchkey daemon's consent file so the
+    change takes effect without an app restart.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
+    if not isinstance(body, dict) or "report_unexpected_errors" not in body:
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config:
-        if "report_unexpected_errors" in body:
-            minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
-        if "include_logs" in body:
-            minds_config.set_include_error_logs(bool(body["include_logs"]))
+    if minds_config is not None:
+        minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
         _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
@@ -668,7 +656,6 @@ def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
     write_latchkey_forward_sentry_consent(
         latchkey_forward_sentry_consent_path(minds_config.data_dir),
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
-        is_log_inclusion_enabled=minds_config.get_include_error_logs(),
     )
 
 
@@ -681,8 +668,6 @@ def _handle_help_page() -> Response:
     ``/assist`` chat; the titlebar only sets it when the displayed workspace is healthy, so the
     agent-help option stays disabled on a loading/stuck workspace (whose chat couldn't be reached).
     """
-    minds_config: MindsConfig | None = get_state().minds_config
-    include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
     workspace_agent_id = request.args.get("workspace", "")
     assist_available = request.args.get("assist") == "1"
     description = request.args.get("description", "")
@@ -700,7 +685,6 @@ def _handle_help_page() -> Response:
             workspace_name = ""
     return make_html_response(
         content=render_help_page(
-            include_logs_setting=include_logs_setting,
             workspace_agent_id=workspace_agent_id,
             assist_available=assist_available,
             description=description,
@@ -734,7 +718,6 @@ def _handle_help_report() -> Response:
         body=body,
         session_store=state.session_store,
         backend_resolver=state.backend_resolver,
-        minds_config=state.minds_config,
         paths=state.api_v1_paths,
     )
     return make_response(
@@ -2307,11 +2290,11 @@ def _build_app_settings_context() -> dict[str, Any]:
     Used by both the full settings page (browser-mode fallback) and the
     centered settings modal, which render the same shared sections: the
     permission overview (connectors / file sharing / workspace delegation
-    held across all active workspaces), the per-machine error-reporting
-    toggles, and the backup master-password section.
+    held across all active workspaces), the error-reporting opt-out, and the
+    backup master-password section.
     """
-    minds_config: MindsConfig | None = get_state().minds_config
     paths: WorkspacePaths | None = get_state().api_v1_paths
+    minds_config: MindsConfig | None = get_state().minds_config
 
     services_overview: list[object] = []
     file_sharing_grants: list[object] = []
@@ -2347,13 +2330,12 @@ def _build_app_settings_context() -> dict[str, Any]:
             permissions_unavailable = True
 
     return {
-        "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else False,
-        "include_error_logs": minds_config.get_include_error_logs() if minds_config else False,
         "services_overview": services_overview,
         "file_sharing_grants": file_sharing_grants,
         "workspace_delegation_grants": workspace_delegation_grants,
         "permissions_unavailable": permissions_unavailable,
         "is_master_password_set": _is_any_account_password_set(paths),
+        "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else True,
     }
 
 

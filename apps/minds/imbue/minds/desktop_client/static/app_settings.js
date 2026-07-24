@@ -38,41 +38,6 @@
     }
   }
 
-  // -- Error reporting toggles ----------------------------------------------
-  var reportToggle = document.getElementById('report-errors-toggle');
-  var logsRow = document.getElementById('include-logs-row');
-  var logsToggle = document.getElementById('include-logs-toggle');
-  if (reportToggle && logsRow && logsToggle) {
-    function syncLogsVisibility() {
-      if (reportToggle.checked) logsRow.classList.remove('hidden');
-      else logsRow.classList.add('hidden');
-    }
-    syncLogsVisibility();
-
-    function saveErrorReporting(payload) {
-      return fetch('/_chrome/error-reporting', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-    }
-
-    reportToggle.addEventListener('change', function () {
-      var enabled = reportToggle.checked;
-      var payload = { report_unexpected_errors: enabled };
-      if (!enabled) {
-        logsToggle.checked = false;
-        payload.include_logs = false;
-      }
-      syncLogsVisibility();
-      saveErrorReporting(payload);
-    });
-
-    logsToggle.addEventListener('change', function () {
-      saveErrorReporting({ include_logs: logsToggle.checked });
-    });
-  }
-
   // -- Permission revocation -------------------------------------------
   var revokeDialog = document.getElementById('revoke-dialog');
   var revokeTitle = document.getElementById('revoke-dialog-title');
@@ -272,6 +237,31 @@
       );
     });
   });
+
+  // -- Error reporting opt-out -------------------------------------------
+  // A single per-machine flag gating both automatic error sends and their log
+  // attachments. Saved live (the backend reads it per Sentry event), so the
+  // change takes effect without a restart; no reload needed.
+  var reportToggle = document.getElementById('report-errors-toggle');
+  if (reportToggle) {
+    reportToggle.addEventListener('change', function () {
+      fetch('/_chrome/error-reporting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ report_unexpected_errors: reportToggle.checked }),
+      })
+        .then(function (resp) {
+          // An HTTP-error response resolves (does not reject), so revert here too:
+          // a failed save leaves the persisted flag unchanged, so reflect that by
+          // reverting the checkbox to match what is actually stored.
+          if (!resp.ok) reportToggle.checked = !reportToggle.checked;
+        })
+        .catch(function () {
+          // Network error: same reasoning -- nothing was persisted, so revert.
+          reportToggle.checked = !reportToggle.checked;
+        });
+    });
+  }
 
   // -- Sync master password change ---------------------------------------
   // Synchronous POST: the server rewraps each signed-in account's sync key

@@ -46,28 +46,17 @@ function readUserConfig() {
 }
 
 /**
- * Whether the user has enabled automatic error reporting (default off).
+ * Whether automatic error reporting is enabled (default ON).
  *
  * The browser web UI and this Electron main process both report automatic
  * errors only, so both honor the same per-machine `report_unexpected_errors`
- * user setting that gates the Python backend's automatic sends. Defaults to
- * false when the key is absent, so we never report without a confirmed opt-in.
+ * user setting that gates the Python backend's automatic sends. During the alpha
+ * this defaults ON and there is no opt-out, so reporting is off only if the key
+ * is explicitly `false`; matches MindsConfig.get_report_unexpected_errors
+ * (default True) in imbue/minds/desktop_client/minds_config.py.
  */
 function isErrorReportingEnabled() {
-  return readUserConfig().report_unexpected_errors === true;
-}
-
-/**
- * Whether the user has opted to include recent logs in error reports (default off).
- *
- * Mirrors the Python backend's `include_error_logs` setting (read live there by
- * imbue/minds/utils/sentry/core.py via `is_log_inclusion_enabled`), stored in the
- * same `<dataDir>/config.toml`. Gates the log attachments on the one-shot
- * backend-down manual report (see `captureManualReport`). Defaults to false when
- * the key is absent, so logs are never attached without a confirmed opt-in.
- */
-function isLogInclusionEnabled() {
-  return readUserConfig().include_error_logs === true;
+  return readUserConfig().report_unexpected_errors !== false;
 }
 
 // This install's stable anonymous user id is persisted at `<dataDir>/anonymous_user_id` as a 32-char
@@ -399,14 +388,12 @@ function collectSystemBasics() {
  * Used by the full-app error takeover (shell.html): when the Python backend has crashed its normal
  * /help report flow is unreachable, but this main-process Sentry is always initialized, so the user
  * can still file a report of the on-screen error. Alongside the message/details we attach host/system
- * basics, and -- when the user has opted into log inclusion -- recent log files (gzipped, tailed), so
- * the report is useful even though the backend's richer in-process state is gone with it.
- * Collection is best-effort: a failure to gather logs or basics never blocks the report itself.
+ * basics, and recent log files (gzipped, tailed), so the report is useful even though the backend's
+ * richer in-process state is gone with it. Collection is best-effort: a failure to gather logs or
+ * basics never blocks the report itself.
  *
- * Log attachment honors the same opt-in as the backend and the /help flow: logs are attached when the
- * persistent ``include_error_logs`` setting is on, OR when the per-report ``includeLogs`` (the
- * takeover's "Include recent logs" checkbox, shown only when that setting is off) is set. Host basics
- * carry no log/file contents and are always included.
+ * Recent logs are always attached, matching the backend and the /help flow (a manual report always
+ * carries full diagnostics). Host basics carry no log/file contents and are always included.
  *
  * The event is tagged ``manually_submitted`` so the ``beforeSend`` gate always lets it through, even
  * when automatic reporting is off (an explicit user action). Note this reports to the JavaScript
@@ -414,7 +401,7 @@ function collectSystemBasics() {
  *
  * Returns the Sentry event id (a 32-char hex string the user can quote), or null if Sentry dropped it.
  */
-function captureManualReport({ message, details, includeLogs = false }) {
+function captureManualReport({ message, details }) {
   let basics = null;
   try {
     basics = collectSystemBasics();
@@ -422,12 +409,10 @@ function captureManualReport({ message, details, includeLogs = false }) {
     console.warn(`[report-error] could not collect system basics: ${err && err.message}`);
   }
   let attachments = [];
-  if (isLogInclusionEnabled() || includeLogs) {
-    try {
-      attachments = collectLogAttachments();
-    } catch (err) {
-      console.warn(`[report-error] could not collect log attachments: ${err && err.message}`);
-    }
+  try {
+    attachments = collectLogAttachments();
+  } catch (err) {
+    console.warn(`[report-error] could not collect log attachments: ${err && err.message}`);
   }
   // captureEvent's second arg is the event hint; attachments ride the envelope as
   // separate items (not in the event body). Omit the hint entirely when there are
@@ -449,7 +434,6 @@ function captureManualReport({ message, details, includeLogs = false }) {
 module.exports = {
   initSentry,
   isErrorReportingEnabled,
-  isLogInclusionEnabled,
   resolveEnvironment,
   fixupReleaseId,
   getOrCreateAnonymousUserId,
