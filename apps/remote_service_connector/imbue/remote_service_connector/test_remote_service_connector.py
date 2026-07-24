@@ -1,25 +1,31 @@
 """Release test for remote_service_connector: exercises all Cloudflare-tunnel routes against the real Cloudflare API.
 
 Requires env vars: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID,
-                    CLOUDFLARE_DOMAIN, USER_CREDENTIALS
+                    CLOUDFLARE_DOMAIN
+
+The SuperTokens auth path and the entitlements store are faked (a stubbed
+Bearer token authenticates as a unique per-run user, so the test needs no real
+SuperTokens core or Neon DB); every Cloudflare-facing call is real.
 
 Run with:
-    cd apps/remote_service_connector && PYTEST_MAX_DURATION_SECONDS=300 uv run pytest \
-        imbue/remote_service_connector/test_remote_service_connector.py -v -s --no-cov --cov-fail-under=0
+    just test apps/remote_service_connector/imbue/remote_service_connector/test_remote_service_connector.py::test_full_lifecycle
 """
 
-import base64
-import json
 import os
 import secrets
 
 import pytest
+from fastapi import HTTPException
 from starlette.testclient import TestClient
 
 import imbue.remote_service_connector.app as app_module
 from imbue.remote_service_connector.app import ForwardingCtx
 from imbue.remote_service_connector.app import HttpCloudflareOps
+from imbue.remote_service_connector.app import UserAuth
 from imbue.remote_service_connector.app import web_app
+from imbue.remote_service_connector.testing import make_fake_entitlements_store
+
+_RELEASE_USER_EMAIL = "release-test@example.com"
 
 
 def _skip_if_missing_env() -> None:
@@ -28,24 +34,10 @@ def _skip_if_missing_env() -> None:
         "CLOUDFLARE_ACCOUNT_ID",
         "CLOUDFLARE_ZONE_ID",
         "CLOUDFLARE_DOMAIN",
-        "USER_CREDENTIALS",
     ]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
         pytest.skip(f"Missing env vars: {', '.join(missing)}")
-
-
-def _user_headers() -> dict[str, str]:
-    creds = json.loads(os.environ["USER_CREDENTIALS"])
-    username = next(iter(creds))
-    password = creds[username]
-    encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {encoded}"}
-
-
-def _user_credentials_username() -> str:
-    creds = json.loads(os.environ["USER_CREDENTIALS"])
-    return next(iter(creds))
 
 
 @pytest.mark.release
@@ -53,19 +45,23 @@ def _user_credentials_username() -> str:
 def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify the full tunnel lifecycle against the real Cloudflare API end to end.
 
-    Creating a tunnel returns the expected ``username--agent_id`` name and a non-null token.
-    Tunnel-level and service-level Access auth policies, once set, are read back with the
-    expected rules, and adding a service actually provisions a Cloudflare Access Application
-    with at least one policy. User credentials can create/configure tunnels and services;
-    a tunnel's own bearer token (tunnel-token auth) can add, list, and remove services on that
-    tunnel but is rejected (403) from creating tunnels, deleting the tunnel, or changing
-    tunnel-level auth. Deleting the tunnel succeeds and removes it from the listing,
-    confirming cascading cleanup. Each assertion would fail if the corresponding route,
-    auth check, or Cloudflare provisioning step were broken or a no-op."""
+    Creating a tunnel returns the expected ``user_id_prefix--agent_id`` name and a non-null
+    token. Tunnel-level and service-level Access auth policies, once set, are read back with
+    the expected rules, and adding a service actually provisions a Cloudflare Access
+    Application with at least one policy. A signed-in user session can create/configure
+    tunnels and services; a tunnel's own bearer token (tunnel-token auth) can add, list, and
+    remove services on that tunnel but is rejected (403) from creating tunnels, deleting the
+    tunnel, or changing tunnel-level auth. Deleting the tunnel succeeds and removes it from
+    the listing, confirming cascading cleanup. Each assertion would fail if the corresponding
+    route, auth check, or Cloudflare provisioning step were broken or a no-op."""
     _skip_if_missing_env()
 
     suffix = secrets.token_hex(4)
-    agent_id = f"release-test-{suffix}"
+    agent_id = f"reltest-{suffix}"
+    # A unique 16-hex-style prefix per run so tunnel names never collide across runs.
+    user_id_prefix = f"rt{secrets.token_hex(7)}"
+    user_id = f"release-user-{suffix}"
+    stub_session_token = f"release-session-{secrets.token_hex(8)}"
 
     ops = HttpCloudflareOps(
         api_token=os.environ["CLOUDFLARE_API_TOKEN"],
@@ -73,12 +69,34 @@ def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
         zone_id=os.environ["CLOUDFLARE_ZONE_ID"],
     )
     ctx = ForwardingCtx(ops=ops, domain=os.environ["CLOUDFLARE_DOMAIN"])
-    monkeypatch.setattr(app_module, "get_ctx", lambda: ctx)
+
+    def _stub_supertokens(token: str) -> UserAuth:
+        if token != stub_session_token:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return UserAuth(user_id_prefix=user_id_prefix, email=_RELEASE_USER_EMAIL)
+
+    # Fake the SuperTokens auth path and the entitlements store (single-loop
+    # patching, matching the app_test pattern); every Cloudflare call is real.
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://fake-supertokens.invalid")
+    entitlements_store = make_fake_entitlements_store()
+    fakes: dict[str, object] = {
+        "get_ctx": lambda: ctx,
+        "_authenticate_supertokens": _stub_supertokens,
+        "get_entitlements_store": lambda: entitlements_store,
+        "_get_user_id_from_access_token": lambda token: user_id,
+        # A post-cutoff time_joined makes the lazily-created entitlements row
+        # resolve to the explorer plan without consulting the paid-list DB.
+        "_get_user_time_joined_ms": lambda queried_user_id, user_getter=None: 2**53,
+        # The tunnel-token service path looks the owner's email up from
+        # SuperTokens; return the stub email instead of a live core lookup.
+        "_default_email_getter": lambda queried_user_id, user_getter=None: _RELEASE_USER_EMAIL,
+    }
+    for name, fake_impl in fakes.items():
+        monkeypatch.setattr(app_module, name, fake_impl)
 
     client = TestClient(web_app)
-    user_headers = _user_headers()
-    username = _user_credentials_username()
-    tunnel_name = f"{username}--{agent_id}"
+    user_headers = {"Authorization": f"Bearer {stub_session_token}"}
+    tunnel_name = f"{user_id_prefix}--{agent_id}"
 
     resp = client.post("/tunnels", json={"agent_id": agent_id}, headers=user_headers)
     assert resp.status_code == 200, f"Create tunnel failed: {resp.text}"
