@@ -1,0 +1,5 @@
+Agent-submitted bug reports are no longer silently dropped when the report modal is busy.
+
+Previously, an in-workspace agent's bug report (POST `/api/v1/agents/<id>/report`) was routed straight to the report modal and discarded whenever a modal was already open -- so a report submitted while you were filling out your own, while another agent's report was up, or while "have an agent help" was spawning, was lost. A report that arrived when no window was connected was dropped too, even though the agent got a `200 OK`.
+
+Agent reports are now held in a durable in-memory queue on the desktop backend. The route retains the report the moment it returns (so `200 OK` truthfully means "received"), and the app drains the queue one report at a time: it reopens the report modal for the next pending report as soon as one is free to show. Submitting a report removes it from the queue; closing the modal without sending discards that report and moves on to the next. Reports that can't be shown right now stay queued and surface when a window frees up, rather than being lost.

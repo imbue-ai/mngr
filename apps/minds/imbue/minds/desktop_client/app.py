@@ -63,7 +63,6 @@ from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -686,12 +685,16 @@ def _handle_help_page() -> Response:
     workspace_agent_id = request.args.get("workspace", "")
     assist_available = request.args.get("assist") == "1"
     description = request.args.get("description", "")
-    # An in-workspace agent's escalation opens this modal via the open_help flow with
+    # An in-workspace agent's escalation opens this modal (from the queued pending report) with
     # ``agent_report=1``. In that case the modal frames the pre-filled report as the
     # agent's submission (titled with the workspace it came from) and drops the
     # have-an-agent-help / report-a-bug choice -- we are already reporting. The
     # workspace name is best-effort (empty for an unknown/label-less workspace).
     is_agent_report = request.args.get("agent_report") == "1"
+    # The queued-report id (set only on the agent-escalation open): the form submits it so the
+    # backend removes that report from the pending queue on send, and the modal discards it via
+    # /help/report/dismiss if the human closes without sending.
+    report_id = request.args.get("report_id", "")
     workspace_name = ""
     if is_agent_report and workspace_agent_id:
         try:
@@ -706,6 +709,7 @@ def _handle_help_page() -> Response:
             description=description,
             is_agent_report=is_agent_report,
             workspace_name=workspace_name,
+            report_id=report_id,
         )
     )
 
@@ -737,11 +741,56 @@ def _handle_help_report() -> Response:
         minds_config=state.minds_config,
         paths=state.api_v1_paths,
     )
+    # An agent-escalation report carries the queued ``report_id``; the human has now acted on it, so
+    # drop it from the pending queue (a manual report has no id and removes nothing). Removed only
+    # after a successful collect so a submission that raised leaves the report queued to retry.
+    report_id = str(body.get("report_id", "")).strip()
+    if report_id:
+        state.pending_agent_report_store.remove(report_id)
     return make_response(
         status_code=200,
         content=json.dumps({"ok": True, "event_id": event_id}),
         media_type="application/json",
     )
+
+
+def _handle_help_pending_report() -> Response:
+    """Return the next pending agent bug report for the chrome to open (GET /help/pending-report).
+
+    Unauthenticated like ``/help``: the report modal must work even when sign-in is broken. Returns the
+    oldest pending report (``{report_id, description, workspace_agent_id}``) or ``null`` when the queue
+    is empty. The chrome pulls this when nudged by the ``pending_report`` SSE event or after a modal
+    closes, and opens the report modal for the returned head -- the store is the single source of truth,
+    so this reflects any report already submitted or discarded.
+    """
+    head = get_state().pending_agent_report_store.head()
+    payload = (
+        {
+            "report_id": head.report_id,
+            "description": head.description,
+            "workspace_agent_id": head.workspace_agent_id,
+        }
+        if head is not None
+        else None
+    )
+    return make_response(status_code=200, content=json.dumps(payload), media_type="application/json")
+
+
+def _handle_help_report_dismiss() -> Response:
+    """Discard a pending agent bug report without submitting it (POST /help/report/dismiss).
+
+    The chrome calls this when the user closes the report modal for an agent-submitted report without
+    sending it (close = discard). Idempotent: removing an unknown or already-removed id is a no-op.
+    Unauthenticated for the same reason as the rest of the help flow.
+    """
+    body = request.get_json(silent=True, force=True)
+    report_id = str(body.get("report_id", "")).strip() if isinstance(body, dict) else ""
+    if not report_id:
+        return make_response(
+            status_code=400, content='{"error": "A report_id is required"}', media_type="application/json"
+        )
+    get_state().pending_agent_report_store.remove(report_id)
+    return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
 
 
 def _handle_help_assist() -> Response:
@@ -1461,7 +1510,7 @@ def _handle_chrome_events() -> Response:
     """
     authenticated = _is_request_authenticated()
     backend_resolver = get_state().backend_resolver
-    help_broker = get_state().help_modal_request_broker
+    pending_report_store = get_state().pending_agent_report_store
 
     def _event_generator() -> Iterator[str]:
         if not authenticated:
@@ -1479,22 +1528,16 @@ def _handle_chrome_events() -> Response:
         # in the main generator loop so each subscriber sees every event.
         health_queue: queue.Queue[tuple[str, AgentHealth]] = queue.Queue()
 
-        # Agent-initiated "open the pre-filled report modal" requests arrive on a
-        # Flask request thread (the /api/v1 report route) via the broker. We
-        # accumulate them per-connection and drain them in the loop, the same
-        # way health transitions are handled.
-        open_help_queue: queue.Queue[OpenHelpRequest] = queue.Queue()
-
         def _on_change() -> None:
             change_event.set()
 
         def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
             _enqueue_health_change(health_queue, change_event, agent_id, status)
 
-        # Subscribe this connection's queue + wake event directly (no callback)
-        # so the broker fans open-help requests onto it the same way health
-        # transitions reach ``health_queue``.
-        help_broker.subscribe(open_help_queue, change_event)
+        # Agent-submitted bug reports are held in the durable pending-report store (appended by the
+        # /api/v1 report route on a Flask request thread). Subscribe this connection's wake event so
+        # add/remove wakes the loop, which re-reads the head and nudges the chrome to open it.
+        pending_report_store.subscribe(change_event)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -1576,9 +1619,18 @@ def _handle_chrome_events() -> Response:
             if discovery_watchdog is not None and discovery_watchdog.get_health() is DiscoveryHealth.BLOCKED:
                 yield "data: {}\n\n".format(json.dumps(_discovery_health_payload(DiscoveryHealth.BLOCKED)))
                 discovery_blocked_emitted = True
+            # Replay the queued agent bug report head so a freshly (re)loaded chrome reopens the
+            # report modal for it -- the store outlives SSE reconnects, so a report queued while no
+            # connection was subscribed still surfaces here. The event carries the head ``report_id``
+            # (or null when the queue is empty) so the chrome caches it and only fetches the head's
+            # content via /help/pending-report when something is actually pending; null re-syncs a
+            # chrome whose queue emptied while it was disconnected.
+            last_pending_head_id = pending_report_store.head_id()
+            yield "data: {}\n\n".format(json.dumps({"type": "pending_report", "report_id": last_pending_head_id}))
             # Anchor the periodic re-assert clock to the connect-time snapshot
             # just sent, so the first backstop re-assert is a full interval out.
             last_status_reassert = time.monotonic()
+            last_pending_reassert = time.monotonic()
 
             # Wait for changes and push updates until client disconnects.
             #
@@ -1625,16 +1677,23 @@ def _handle_chrome_events() -> Response:
                 if shutdown_event.is_set():
                     break
 
-                while not open_help_queue.empty():
-                    help_request = open_help_queue.get_nowait()
+                # Nudge the chrome about the queued agent bug report head. Emit its ``report_id`` on
+                # any change (including to null when the queue empties, so the chrome clears its
+                # cache), plus a periodic re-assert while one stays pending so a chrome that missed the
+                # one-shot (its target modal was busy, or the webview reloaded) still reopens it. The
+                # chrome caches this id and only fetches the head's content via /help/pending-report
+                # when it is non-null, keeping the common empty-queue case free of extra requests.
+                current_pending_head_id = pending_report_store.head_id()
+                pending_reassert_due = (
+                    current_pending_head_id is not None
+                    and time.monotonic() - last_pending_reassert >= _SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                )
+                if current_pending_head_id != last_pending_head_id or pending_reassert_due:
+                    last_pending_head_id = current_pending_head_id
+                    if pending_reassert_due:
+                        last_pending_reassert = time.monotonic()
                     yield "data: {}\n\n".format(
-                        json.dumps(
-                            {
-                                "type": "open_help",
-                                "description": help_request.description,
-                                "workspace_agent_id": help_request.workspace_agent_id,
-                            }
-                        )
+                        json.dumps({"type": "pending_report", "report_id": current_pending_head_id})
                     )
 
                 while not health_queue.empty():
@@ -1719,7 +1778,7 @@ def _handle_chrome_events() -> Response:
                         json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
-            help_broker.unsubscribe(open_help_queue, change_event)
+            pending_report_store.unsubscribe(change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
@@ -3292,7 +3351,9 @@ def create_desktop_client(
     app.add_url_rule("/_chrome/sync-initial-status", view_func=_handle_sync_initial_status, methods=["GET"])
     app.add_url_rule("/_chrome/workspaces/remove-record", view_func=_handle_remove_workspace_record, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
+    app.add_url_rule("/help/pending-report", view_func=_handle_help_pending_report, methods=["GET"])
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
+    app.add_url_rule("/help/report/dismiss", view_func=_handle_help_report_dismiss, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
     app.add_url_rule("/welcome/skip", view_func=_handle_welcome_skip)

@@ -1870,9 +1870,15 @@ function createBundleOverlayView(bundle) {
   bundle.window.contentView.addChildView(modal);
   registerShortcutsFor(bundle, modal.webContents);
   // Escape closes the open overlay even if a hosted page's own key handling
-  // fails -- the same main-process backstop the modal overlay had before.
+  // fails -- the same main-process backstop the modal overlay had before. The
+  // help modal is the exception: it owns its Escape handling because it must run
+  // its close = discard cleanup (POST /help/report/dismiss for a queued agent
+  // report) before closing, so we let the key reach the page there rather than
+  // closing it directly -- otherwise the report is never discarded and the
+  // reopen-next check pops it straight back up.
   modal.webContents.on('before-input-event', (event, input) => {
     if (input.type === 'keyDown' && input.key === 'Escape') {
+      if (isHelpModalOpen(bundle)) return;
       event.preventDefault();
       closeModal(bundle);
     }
@@ -2018,6 +2024,10 @@ function closeModal(bundle) {
     clearTimeout(bundle.inboxListReloadTimer);
     bundle.inboxListReloadTimer = null;
   }
+  // A freed modal is the app's cue to surface the next queued agent bug report (this drains the
+  // queue one at a time). maybeOpenPendingReport no-ops during a takeover/shutdown or if another
+  // window is still busy, so this is safe to call from every close path.
+  maybeOpenPendingReport();
 }
 
 function inboxUrlFor(query) {
@@ -2109,22 +2119,24 @@ function toggleInbox(bundle) {
 // currently-displayed workspace, or falsy on a general screen) is forwarded as a
 // ?workspace= query so the help page can scope its bug report to that workspace.
 
-function helpUrlFor(agentId, description, assistAvailable) {
+function helpUrlFor(agentId, description, assistAvailable, reportId) {
   if (!backendBaseUrl) return null;
   const params = new URLSearchParams();
   if (agentId) params.set('workspace', agentId);
   // ``assist=1`` enables the "have an agent help" option; the titlebar sets it only when the
-  // displayed workspace is healthy (chrome.js), so it stays off for the recovery / agent-escalation
-  // open-help paths that don't pass it. The workspace id is still sent for report scoping.
+  // displayed workspace is healthy (chrome.js), so it stays off for the recovery / agent-report
+  // paths that don't pass it. The workspace id is still sent for report scoping.
   if (assistAvailable) params.set('assist', '1');
-  // A description is only ever passed by the open_help (agent-escalation) flow; the
+  // A description is only ever passed for a queued agent report (maybeOpenPendingReport); the
   // titlebar button opens /help with none. So a present description marks this as an
   // agent-submitted report, which the /help page frames differently (agent wording,
-  // no mode choice).
+  // no mode choice). ``report_id`` scopes the queued report so the form removes it on submit
+  // and discards it if the human closes without sending.
   if (description) {
     params.set('description', description);
     params.set('agent_report', '1');
   }
+  if (reportId) params.set('report_id', reportId);
   const query = params.toString();
   return backendBaseUrl + '/help' + (query ? '?' + query : '');
 }
@@ -2139,9 +2151,9 @@ function isHelpModalOpen(bundle) {
   }
 }
 
-function openHelp(bundle, agentId, description, assistAvailable) {
+function openHelp(bundle, agentId, description, assistAvailable, reportId) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = helpUrlFor(agentId, description, assistAvailable);
+  const url = helpUrlFor(agentId, description, assistAvailable, reportId);
   if (!url) return;
   openModal(bundle, url);
 }
@@ -2150,6 +2162,84 @@ function toggleHelp(bundle, agentId, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isHelpModalOpen(bundle)) closeModal(bundle);
   else openHelp(bundle, agentId, undefined, assistAvailable);
+}
+
+// Guards against overlapping pending-report fetches (an SSE nudge racing a modal-close trigger),
+// so the queue head is opened at most once at a time.
+let pendingReportFetchInFlight = false;
+
+// The queued agent bug report head id, cached from the ``pending_report`` SSE event (its ``report_id``,
+// or null when the queue is empty). It lets maybeOpenPendingReport skip the /help/pending-report fetch
+// when nothing is queued -- the common case -- so a plain inbox/sidebar/help close costs no round-trip.
+// The fetch is still issued (for the head's content, and as the authoritative check that resolves a
+// report already submitted/discarded between nudge and open) whenever this is non-null.
+let pendingReportHeadId = null;
+
+// Surface the next queued agent bug report, if the app is free to show it. The backend store is the
+// single source of truth: this pulls the current head via /help/pending-report and opens the report
+// modal for it in the window showing that workspace (else the most-recent window). It is the sole
+// opener for agent reports -- driven by the ``pending_report`` SSE nudge and by any modal closing --
+// so a report that can't be shown right now (busy modal, error takeover) is never dropped; it stays
+// queued and is retried on the next trigger. A submit/discard removes it server-side, advancing the
+// head so the next trigger opens the following report.
+function maybeOpenPendingReport() {
+  // Nothing queued (per the last SSE nudge) -> skip the fetch entirely. This is what keeps the
+  // per-modal-close trigger cheap when no agent report is pending.
+  if (!pendingReportHeadId) return;
+  if (isShuttingDown || !backendBaseUrl || pendingReportFetchInFlight) return;
+  // Never pop a report over an error/quitting takeover in any window (a global takeover flips every
+  // window to isErrorState). The steady-state per-target checks below then handle a single busy window.
+  for (const b of bundles) {
+    if (!b.window.isDestroyed() && b.isErrorState) return;
+  }
+  let req;
+  try {
+    req = net.request({ url: backendBaseUrl + '/help/pending-report', method: 'GET', useSessionCookies: true });
+  } catch (e) {
+    console.warn('[pending-report] failed to construct pending-report request:', e);
+    return;
+  }
+  pendingReportFetchInFlight = true;
+  let body = '';
+  let settled = false;
+  let statusOk = false;
+  const settle = () => { if (!settled) { settled = true; pendingReportFetchInFlight = false; } };
+  const timer = setTimeout(() => {
+    console.warn(`[pending-report] request timed out after ${MIND_HTTP_TIMEOUT_MS}ms`);
+    try { req.abort(); } catch { /* noop */ }
+    settle();
+  }, MIND_HTTP_TIMEOUT_MS);
+  req.on('response', (response) => {
+    statusOk = response.statusCode < 400;
+    response.on('data', (chunk) => { body += chunk.toString(); });
+    response.on('end', () => {
+      clearTimeout(timer);
+      settle();
+      if (!statusOk) return;
+      let head;
+      try {
+        head = JSON.parse(body);
+      } catch (e) {
+        console.warn('[pending-report] failed to parse pending-report response:', e);
+        return;
+      }
+      if (!head || !head.report_id) return;
+      const wsId = head.workspace_agent_id ? String(head.workspace_agent_id) : '';
+      const target = (wsId && findBundleForWorkspace(wsId)) || getMostRecentWindow();
+      if (
+        target &&
+        !target.window.isDestroyed() &&
+        !target.isErrorState &&
+        !target.isLoadingState &&
+        !target.modalVisible
+      ) {
+        openHelp(target, wsId, String(head.description || ''), false, String(head.report_id));
+      }
+    });
+    response.on('error', (err) => { console.warn('[pending-report] response error:', err); clearTimeout(timer); settle(); });
+  });
+  req.on('error', (err) => { console.warn('[pending-report] request failed:', err); clearTimeout(timer); settle(); });
+  req.end();
 }
 
 // Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
@@ -2808,19 +2898,14 @@ function handleChromeSSEEvent(evt) {
         }
       }
     }
-  } else if (evt.type === 'open_help') {
-    // An in-workspace ``/assist`` agent asked the app to open the report-a-bug
-    // modal pre-filled with its diagnosis (the /api/v1 report route). Surface it
-    // in the window currently showing that workspace; if no window is showing it,
-    // fall back to the most-recent window so the report isn't silently lost. Leave
-    // an already-open modal alone (matching the requests auto-open), so we never
-    // yank a menu the user has up.
-    const description = typeof evt.description === 'string' ? evt.description : '';
-    const wsId = evt.workspace_agent_id ? String(evt.workspace_agent_id) : '';
-    const target = (wsId && findBundleForWorkspace(wsId)) || getMostRecentWindow();
-    if (target && !target.modalVisible) {
-      openHelp(target, wsId, description);
-    }
+  } else if (evt.type === 'pending_report') {
+    // The queued agent-report head changed (or is being re-asserted / replayed on (re)connect). Cache
+    // its id (null when the queue emptied) so modal-close triggers can skip the fetch when nothing is
+    // pending, then try to open it: maybeOpenPendingReport pulls the head's content and opens it if a
+    // window is free. If every window is busy it stays queued and reopens on the next nudge or modal
+    // close, so it is never dropped.
+    pendingReportHeadId = evt.report_id ? String(evt.report_id) : null;
+    maybeOpenPendingReport();
   } else if (evt.type === 'discovery_health') {
     // App-global discovery-pipeline health. Only the terminal `blocked` state is
     // ever sent (the reconnecting tier heals silently in the background, retrying

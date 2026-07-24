@@ -108,7 +108,6 @@ from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -1619,13 +1618,16 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=BugReportRequest, resp=json_response_model(OkResponse))
 def _handle_bug_report(agent_id: str) -> OkResponse | Response:
-    """Ask the desktop app to open the report-a-bug modal pre-filled, on behalf of an in-workspace agent.
+    """Queue an agent's bug report for a human to review, on behalf of an in-workspace agent.
 
-    The agent does not submit to Sentry itself: a human gates every send. This route hands the agent's
-    description to the desktop app, which pops the report modal -- pre-filled with that description and
-    scoped to the caller's own workspace (the path ``agent_id``, which the gateway has already
-    authorized) -- in the window showing that workspace. The user then reviews, picks what to attach, and
-    submits through the same ``/help/report`` path as a manual report.
+    The agent does not submit to Sentry itself: a human gates every send. This route appends the
+    agent's description to the durable pending-report queue, scoped to the caller's own workspace (the
+    path ``agent_id``, which the gateway has already authorized). The desktop app drains that queue one
+    report at a time, popping the report-a-bug modal pre-filled with the description; the human then
+    reviews, picks what to attach, and submits through the same ``/help/report`` path as a manual report.
+
+    The report is retained the moment this returns, independent of whether a window is connected or has
+    a modal free, so a ``200`` here truthfully means "durably received" rather than "shown right now".
     """
     # ``description`` presence/type is enforced by the spectree model; the
     # whitespace-only rejection below is value-semantic.
@@ -1634,9 +1636,7 @@ def _handle_bug_report(agent_id: str) -> OkResponse | Response:
     if not description:
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
-    get_state().help_modal_request_broker.request_open(
-        OpenHelpRequest(description=description, workspace_agent_id=agent_id)
-    )
+    get_state().pending_agent_report_store.add(description=description, workspace_agent_id=agent_id)
     # The agent never submits to Sentry itself, so no report event is written here (the
     # response carries no ``event_id``); the human-reviewed send flows through ``/help/report``.
     return OkResponse(ok=True)

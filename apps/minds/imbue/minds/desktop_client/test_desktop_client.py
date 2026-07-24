@@ -1,7 +1,5 @@
 import os
-import queue
 import subprocess
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +41,6 @@ from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.dek_store import verify_master_password_for_account
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -2488,14 +2485,14 @@ def test_api_v1_bug_report_requires_bearer_token(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path: Path) -> None:
-    """The agent report route does not submit to Sentry: it asks the app to open the report modal
-    pre-filled with the agent's description, scoped to the caller's own workspace."""
+def test_api_v1_bug_report_queues_report_without_a_subscriber(tmp_path: Path) -> None:
+    """The agent report route does not submit to Sentry: it durably queues the report for a human to
+    review, scoped to the caller's workspace. The report is retained even with no SSE connection
+    subscribed -- the fire-and-forget broker this replaces dropped reports in exactly that case."""
     client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
     agent_id = AgentId()
-    request_queue: "queue.Queue[OpenHelpRequest]" = queue.Queue()
-    wake_event = threading.Event()
-    get_state(client.application).help_modal_request_broker.subscribe(request_queue, wake_event)
+    store = get_state(client.application).pending_agent_report_store
+    assert store.head() is None
     response = client.post(
         f"/api/v1/agents/{agent_id}/report",
         json={"description": "agent saw an error"},
@@ -2506,10 +2503,69 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     assert body["ok"] is True
     # No Sentry submission happens here, so there is no event_id to return.
     assert "event_id" not in body
-    # The route published an open-help request (scoped to the caller's workspace) instead of submitting.
-    received = request_queue.get_nowait()
-    assert received.description == "agent saw an error"
-    assert received.workspace_agent_id == str(agent_id)
+    # The report is queued (no window/SSE subscriber required), scoped to the caller's workspace.
+    pending = store.list_pending()
+    assert len(pending) == 1
+    assert pending[0].description == "agent saw an error"
+    assert pending[0].workspace_agent_id == str(agent_id)
+
+
+def test_api_v1_sequential_bug_reports_are_all_queued(tmp_path: Path) -> None:
+    """Multiple agent reports in a row all survive: the durable queue never overwrites, so none is lost
+    just because it arrived while an earlier one was still awaiting review."""
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    agent_id = AgentId()
+    for index in range(3):
+        response = client.post(
+            f"/api/v1/agents/{agent_id}/report",
+            json={"description": f"error {index}"},
+            headers={"Authorization": "Bearer secret-key"},
+        )
+        assert response.status_code == 200
+    store = get_state(client.application).pending_agent_report_store
+    assert [report.description for report in store.list_pending()] == ["error 0", "error 1", "error 2"]
+
+
+def test_help_pending_report_returns_head_and_submit_removes_it(tmp_path: Path) -> None:
+    """/help/pending-report exposes the queue head for the app to open; submitting it (with the
+    report_id the form echoes back) removes exactly that report and advances the head, so agent
+    reports are drained one at a time."""
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    store = get_state(client.application).pending_agent_report_store
+    first_id = store.add(description="first", workspace_agent_id="agent-1")
+    second_id = store.add(description="second", workspace_agent_id="agent-2")
+
+    head = client.get("/help/pending-report").get_json()
+    assert head["report_id"] == first_id
+    assert head["description"] == "first"
+    assert head["workspace_agent_id"] == "agent-1"
+
+    submit = client.post("/help/report", json={"description": "first", "report_id": first_id})
+    assert submit.status_code == 200
+    # Exactly the submitted report is gone; the next becomes the head.
+    assert [report.report_id for report in store.list_pending()] == [second_id]
+    assert client.get("/help/pending-report").get_json()["report_id"] == second_id
+
+
+def test_help_report_dismiss_discards_head_without_submitting(tmp_path: Path) -> None:
+    """Closing the modal without sending discards that report (close = discard) via
+    /help/report/dismiss, leaving the rest of the queue intact. It is idempotent."""
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    store = get_state(client.application).pending_agent_report_store
+    discarded_id = store.add(description="discard me", workspace_agent_id=None)
+    kept_id = store.add(description="keep me", workspace_agent_id=None)
+
+    response = client.post("/help/report/dismiss", json={"report_id": discarded_id})
+    assert response.status_code == 200
+    assert [report.report_id for report in store.list_pending()] == [kept_id]
+    # Dismissing an already-gone id is a no-op, not an error.
+    assert client.post("/help/report/dismiss", json={"report_id": discarded_id}).status_code == 200
+    assert [report.report_id for report in store.list_pending()] == [kept_id]
+
+
+def test_help_pending_report_is_null_when_queue_empty(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    assert client.get("/help/pending-report").get_json() is None
 
 
 def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
