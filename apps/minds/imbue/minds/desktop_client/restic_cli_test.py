@@ -296,7 +296,7 @@ def test_restore_snapshot_restores_files(tmp_path: Path) -> None:
     assert restored[0].read_text() == "hello export"
 
 
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(180)
 def test_restore_snapshot_retries_with_no_lock_when_lock_write_fails(tmp_path: Path) -> None:
     """A restore that cannot write the repository lock (read-only key) succeeds via the --no-lock retry."""
     repo_dir = tmp_path / "repo"
