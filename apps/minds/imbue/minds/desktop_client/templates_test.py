@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from typing import Final
 
 import pytest
@@ -12,6 +13,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
+from imbue.minds.desktop_client.templates import InspirationWorkspaceRow
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_account_plan_section
@@ -23,6 +25,7 @@ from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_page
+from imbue.minds.desktop_client.templates import render_inspiration_create_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -641,6 +644,163 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tie
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "mngr/some-feature" not in html
+
+
+_INSPIRATION_URL = "https://github.com/acme/inspiration"
+
+
+def _render_inspiration(**kwargs: Any) -> str:
+    return render_inspiration_create_page(git_url=_INSPIRATION_URL, **kwargs)
+
+
+def test_render_inspiration_page_shows_chooser_options() -> None:
+    html = _render_inspiration()
+    assert "You've opened an Inspiration" in html
+    assert "Create a new workspace" in html
+    assert "Add to an existing workspace" in html
+    assert _INSPIRATION_URL in html
+
+
+def test_render_inspiration_page_add_flow_has_copyable_skill_message() -> None:
+    # The skill accepts only a git URL, so the message must exclude the branch
+    # even when the deeplink carried one.
+    html = _render_inspiration(branch="v1.2.3")
+    assert f"/use-inspiration {_INSPIRATION_URL}" in html
+    assert f"/use-inspiration {_INSPIRATION_URL} v1.2.3" not in html
+    assert 'id="inspiration-copy-btn"' in html
+
+
+def test_render_inspiration_page_lists_workspaces_with_liveness_gating() -> None:
+    rows = [
+        InspirationWorkspaceRow(agent_id="agent-aa", name="alpha", accent="#112233", liveness="RUNNING"),
+        InspirationWorkspaceRow(agent_id="agent-bb", name="beta", accent="#445566", liveness="STOPPED"),
+    ]
+    html = _render_inspiration(mngr_forward_origin="https://localhost:8421", workspace_rows=rows)
+    assert 'data-agent-id="agent-aa"' in html
+    assert 'data-liveness="STOPPED"' in html
+    assert 'data-default-href="https://localhost:8421/goto/agent-aa/"' in html
+    # The stopped-mind detour mirrors the landing rows' recovery shortcut.
+    assert "intent=restart" in html
+
+
+def test_render_inspiration_page_empty_workspace_list_links_to_new_flow() -> None:
+    html = _render_inspiration(workspace_rows=[])
+    assert "You don't have any workspaces yet." in html
+    assert 'id="inspiration-empty-to-new"' in html
+
+
+def test_render_inspiration_page_new_flow_requires_trust_checkbox() -> None:
+    html = _render_inspiration()
+    assert 'id="inspiration-trust"' in html
+    assert "I trust this Inspiration" in html
+    assert "not been approved or verified by Imbue" in html
+    # The submit handler gates on the checkbox before any POST.
+    assert "trustCheckbox.checked" in html
+
+
+def test_render_inspiration_page_create_button_gated_on_trust() -> None:
+    # Create starts disabled/grayed and the acknowledgment starts red; both
+    # flip when the box is checked (syncTrustGate).
+    html = _render_inspiration()
+    assert re.search(r'id="inspiration-submit"[^>]*\sdisabled', html) or re.search(
+        r'\sdisabled[^>]*id="inspiration-submit"', html
+    )
+    assert re.search(r'id="inspiration-trust-title"[^>]*text-important', html)
+    assert "submitBtn.disabled = !ok" in html
+
+
+def test_render_inspiration_page_submit_labeled_create_from_inspiration() -> None:
+    html = _render_inspiration()
+    assert "Create from Inspiration" in html
+    assert 'id="inspiration-submit"' in html
+
+
+def test_render_inspiration_page_repo_shown_as_plain_text() -> None:
+    # The repo is display-only and deliberately not rendered as an input-looking
+    # box: it appears as plain paragraph text, and the POSTed value rides in a
+    # hidden input. There is no editable git_url form field.
+    html = _render_inspiration()
+    assert 'name="git_url"' not in html
+    assert 'id="inspiration-git-url"' in html
+    assert f">{_INSPIRATION_URL}</p>" in html
+
+
+def test_render_inspiration_page_downstream_steps_start_hidden() -> None:
+    # Progressive disclosure: only step 1 is visible on load; every downstream
+    # step wrapper starts hidden and is revealed by the timeline's JS. The
+    # ``hidden`` toggle must not sit on a ``flex`` element (flex would win), so
+    # it lives on the plain step wrapper.
+    html = _render_inspiration()
+    assert re.search(r'id="inspiration-step-1" class="inspiration-step"', html)
+    for step_id in (
+        "inspiration-step-create-2",
+        "inspiration-step-create-3",
+        "inspiration-step-add-2",
+        "inspiration-step-add-3",
+    ):
+        assert re.search(rf'id="{step_id}" class="inspiration-step hidden"', html), step_id
+
+
+def test_render_inspiration_page_gates_each_step_on_the_previous() -> None:
+    # The stepper shows one step's body at a time: picking a pathway advances
+    # to step 2, and copying the message / choosing a preset advances to step
+    # 3. render() hides every non-active step's body.
+    html = _render_inspiration()
+    assert "function render()" in html
+    assert "isMessageCopied = true" in html
+    assert "activeStep = 3" in html
+    assert "chooseBranch('create')" in html
+    assert "chooseBranch('add')" in html
+    # Completed steps collapse to a summary of the choice instead of the options.
+    assert "data-step-summary" in html
+    assert "'Create a new workspace'" in html
+
+
+def test_render_inspiration_page_has_animations_and_copy_feedback() -> None:
+    # Revealed steps and answers slide up; completed circles pop; the Copy
+    # button turns green before advancing.
+    html = _render_inspiration()
+    assert "animateReveal" in html
+    assert "animatePop" in html
+    assert "!bg-success" in html
+    assert "'Copied'" in html
+
+
+def test_render_inspiration_page_number_and_title_go_back() -> None:
+    # Both the step number and its title are click-to-change affordances.
+    html = _render_inspiration()
+    assert "function wireGoBack" in html
+    assert "[data-step-circle]" in html
+    assert "[data-step-title]" in html
+
+
+def test_render_inspiration_page_skill_message_has_stable_id() -> None:
+    # The copy handler reads the message by id, so the CopyField must carry it.
+    html = _render_inspiration()
+    assert 'id="inspiration-skill-message"' in html
+
+
+def test_render_inspiration_page_carries_branch_hidden_input() -> None:
+    html = _render_inspiration(branch="v1.2.3")
+    assert 'id="inspiration-branch" value="v1.2.3"' in html
+    blank = _render_inspiration()
+    assert 'id="inspiration-branch" value=""' in blank
+
+
+def test_render_inspiration_page_opens_signin_modal_via_overlay_bridge() -> None:
+    html = _render_inspiration(accounts=[])
+    assert "window.minds.openSigninModal()" in html
+    assert "/auth/signin-modal" in html
+
+
+def test_render_inspiration_page_presets_match_create_form() -> None:
+    # Same two presets and the same provider values as the create form's
+    # PRESETS map, so both pages create identically-configured workspaces.
+    html = _render_inspiration()
+    assert 'data-preset="remote"' in html
+    assert 'data-preset="local"' in html
+    for value in ("IMBUE_CLOUD", "LIMA", "SUBSCRIPTION", "CONFIGURE_LATER"):
+        assert value in html
 
 
 def test_resolve_create_host_name_uses_submitted_value() -> None:

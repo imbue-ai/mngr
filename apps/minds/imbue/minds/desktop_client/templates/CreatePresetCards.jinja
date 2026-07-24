@@ -1,0 +1,35 @@
+{#def selected_preset="remote" #}
+{#
+  The remote/local compute-preset card pair shared by the create form and
+  the Create from Inspiration page. Both pages offer the same choice and
+  create identically-configured workspaces (their scripts carry matching
+  PRESETS provider maps keyed by the cards' data-preset values), so the
+  card markup and feature copy live here to keep the two in lockstep.
+
+  ``selected_preset`` ("remote" or "local") picks which card starts
+  aria-checked; the pages' own scripts flip aria-checked on click. The
+  caller supplies the surrounding role="radiogroup" wrapper.
+#}
+<div class="flex gap-6 items-stretch">
+  <PresetCard preset="remote" :selected="selected_preset == 'remote'" extra="flex-1">
+    <div class="flex items-center gap-2">
+      <span class="type-heading text-primary">Imbue Cloud</span>
+      <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper uppercase font-bold bg-accent/15 text-accent">Recommended</span>
+    </div>
+    <ul class="flex flex-col gap-1.5 mt-1">
+      <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>30 second setup</li>
+      <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Runs even if your computer is off</li>
+      <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Accessible from mobile</li>
+      <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Shareable with other people</li>
+    </ul>
+  </PresetCard>
+
+  <PresetCard preset="local" :selected="selected_preset == 'local'" extra="flex-1">
+    <span class="type-heading text-primary">Directly on your computer</span>
+    <ul class="flex flex-col gap-1.5 mt-1">
+      <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>5-10 minute setup</li>
+      <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>Runs only when your computer is on</li>
+      <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>Uses your computer's memory (may slow your device)</li>
+    </ul>
+  </PresetCard>
+</div>

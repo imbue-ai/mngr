@@ -52,6 +52,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `Textarea` | `<textarea>`. `rows`, `value`, `width`, `extra`. |
 | `FormLabel` | `<label for="...">`. `inline=False` (default) puts the label above the input (`block mb-1.5`); `inline=True` is for labels beside a control in a flex row. Prop is `target=` not `for=` because `for` is a Python keyword (JinjaX parses `{#def #}` as a Python signature). |
 | `ColorSwatch` | Circular `role="radio"` button for the workspace color pickers (settings + create form). `hex` / `name` (aria-label) / `selected` (aria-checked) / `size` (`"md"` 34px settings, `"sm"` 24px create) / `disabled`. Owns the markup contract the picker JS selects on (`.color-swatch`, `aria-checked`, `data-color`); the rim + selection-ring styles live in `app.css`. |
+| `CopyField` | Read-only monospace value in a subtle-fill box; the input selects itself on click. Children render as trailing controls (a secondary Copy Button). `value` / `extra` (parent-owned spacing on the box); other HTML attrs (`id=`, `aria-label=`) pass through to the input. Used by the sharing editor's link row and the Inspiration page's repo / skill-message displays. |
 
 ### Feedback
 

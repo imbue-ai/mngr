@@ -1,0 +1,19 @@
+{#def value="", extra="" #}
+{#
+  Read-only monospace value in a subtle-fill box. The input selects itself
+  on click so the value is easy to copy; pass trailing controls (e.g. a
+  secondary Copy Button) as children. Used by the sharing editor's link row
+  and the Create from Inspiration page's repo / skill-message displays.
+
+  ``extra`` holds parent-owned spacing on the wrapper box (mb-4, my-2, ...).
+  Any other HTML attribute (id=, aria-label=, ...) flows through to the
+  inner input via the attrs passthrough.
+#}
+<div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 {{ extra }}">
+  <input type="text" readonly onclick="this.select()"
+         {{ attrs.render(
+              value=value,
+              classes="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none",
+            ) }}>
+  {{ content }}
+</div>
