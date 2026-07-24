@@ -84,6 +84,21 @@ _SYSTEM_INTERFACE_PORT: Final[int] = 8000
 _MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
 _SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS: Final[int] = 120
 _PROBE_TIMEOUT_SECONDS: Final[int] = 120
+_SERVICES_REGISTERED_TIMEOUT_SECONDS: Final[int] = 120
+
+# The always-on core services that must re-register in runtime/applications.toml
+# after a resume. ``browser`` also registers but is asserted separately, with a
+# shed exception (see ``test_resumed_workspace_registered_expected_services``).
+_CORE_REGISTERED_SERVICES: Final[tuple[str, ...]] = ("system_interface", "terminal")
+_BROWSER_SERVICE_NAME: Final[str] = "browser"
+
+# earlyoom's shed ledger inside the container (written by its ``-N`` hook; path
+# pinned by ``OOM_PRIORITY_RUNTIME_DIR`` in the template's ``.mngr/settings.toml``).
+# Only human-facing corroboration in the shed evidence dump, not the decision.
+_SHED_LEDGER_PATH: Final[str] = "/mngr/code/runtime/oom_priority/events/shed.jsonl"
+# supervisord's own log; the (post-resume-scoped) browser-shed signal is read
+# from here -- see ``_gather_browser_shed_diagnostics``.
+_SUPERVISORD_LOG_PATH: Final[str] = "/var/log/supervisor/supervisord.log"
 
 # mngr lifecycle states that mean the agent's tmux window is alive (as opposed
 # to STOPPED / DONE). The system-services agent's window-0 command is
@@ -185,6 +200,80 @@ def _wait_for_system_interface_up(container_name: str) -> bool:
     return (
         _exec_in_container(container_name, poll, timeout=_SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS + 30).returncode == 0
     )
+
+
+def _wait_for_services_registered(container_name: str, service_names: tuple[str, ...]) -> str:
+    """Poll runtime/applications.toml inside the container until every expected service appears.
+
+    After resume the app-watcher / bootstrap respawns services asynchronously,
+    each re-registering its port into applications.toml via
+    ``scripts/forward_port.py`` as it comes back up, so a single read can race a
+    service that registers a moment later. Poll (in shell inside ``docker exec``,
+    so the test never calls ``time.sleep``) until all expected names are present
+    or the deadline passes, then return the final file contents so the caller can
+    assert with a useful message either way.
+    """
+    presence_checks = " && ".join(f'grep -q {name} "$f"' for name in service_names)
+    poll = (
+        "f=/code/runtime/applications.toml; "
+        "for i in $(seq 1 40); do "
+        f'if [ -f "$f" ] && {presence_checks}; then break; fi; '
+        "sleep 3; done; "
+        'cat "$f" 2>/dev/null'
+    )
+    return _exec_in_container(container_name, poll, timeout=_SERVICES_REGISTERED_TIMEOUT_SECONDS + 30).stdout
+
+
+def _gather_browser_shed_diagnostics(container_name: str) -> tuple[bool, str]:
+    """Return ``(was_shed, diagnostics)`` for an absent ``browser`` registration.
+
+    The ``browser`` supervisord program registers into applications.toml (via
+    ``forward_port.py``) *before* it launches the memory-heavy
+    browser-service/Chromium, and nothing ever removes an entry once written, so
+    the only way ``browser`` is absent after a resume is that its program never
+    finished that registration. Two states produce that absence and must be told
+    apart:
+
+    - a memory-pressure shed -- earlyoom (or the kernel) killed the program with
+      a *signal* while it was starting; supervisord records this as ``terminated
+      by SIGKILL``/``SIGTERM`` or, when the killed child is ``forward_port.py``
+      and its bash wrapper propagates the status, ``exit status 137``/``143``.
+      Nothing in the tiny pre-launch registration step (an ``echo`` and
+      ``forward_port.py``) signals itself, so a signal kill there is an external
+      OOM kill -- the browser is the single most OOM-expendable service
+      (oom_score_adj=1000). This is the legitimate, tolerated case.
+    - a genuine regression -- the program is broken or removed, so it exits with
+      an ordinary code or never spawns at all (no signal kill recorded). This is
+      a real failure and must NOT be excused.
+
+    ``was_shed`` is True iff supervisord recorded the browser program dying on an
+    OOM signal. Crucially it is scoped to the CURRENT (post-resume) supervisord
+    instance: supervisord.log is append-only and survives the snapshot, so a
+    browser signal-kill logged by the snapshot's own build or ``docker stop``
+    shutdown must not count -- an ``awk`` pass resets its match on every
+    ``supervisord started with pid`` marker so only a kill logged after the last
+    (post-resume) start is considered. If that marker is somehow absent, the pass
+    yields "not shed", so a missing marker can never mask a regression -- it just
+    makes an absent browser a hard failure. The ``diagnostics`` text is always
+    returned so the caller can surface it whether the outcome is a tolerated shed
+    or a hard failure.
+    """
+    diagnostic = (
+        # Shed decision, scoped to the current supervisord instance by resetting on
+        # each "supervisord started" marker (see docstring).
+        f"log={_SUPERVISORD_LOG_PATH}; "
+        "awk '/supervisord started with pid/{seen=1;killed=0} "
+        "seen&&/exited: browser/&&/terminated by SIGKILL|terminated by SIGTERM|exit status 137|exit status 143/{killed=1} "
+        'END{print (killed?"BROWSER_SIGNAL_KILLED=yes":"BROWSER_SIGNAL_KILLED=no")}\' "$log" 2>/dev/null; '
+        "echo '=== supervisorctl status browser ==='; supervisorctl status browser 2>&1 | head -5; "
+        "echo '=== browser lines in supervisord.log (tail) ==='; grep -aE browser \"$log\" 2>/dev/null | tail -30; "
+        "echo '=== earlyoom shed ledger ==='; "
+        f"tail -50 {_SHED_LEDGER_PATH} 2>/dev/null; "
+        "echo '=== earlyoom service log tail ==='; "
+        "tail -20 /var/log/supervisor/earlyoom-stderr.log 2>/dev/null"
+    )
+    diagnostics = _exec_in_container(container_name, diagnostic, timeout=30).stdout
+    return "BROWSER_SIGNAL_KILLED=yes" in diagnostics, diagnostics
 
 
 def _wait_for_system_interface_down(container_name: str) -> bool:
@@ -356,25 +445,47 @@ def test_resumed_workspace_system_services_agent_is_alive(running_workspace: _Re
 @pytest.mark.docker
 @pytest.mark.timeout(300)
 def test_resumed_workspace_registered_expected_services(running_workspace: _ResumedWorkspace) -> None:
-    """After resume, the bootstrap re-registered the core services in applications.toml.
+    """After resume, the bootstrap re-registered the expected services in applications.toml.
 
     The app-watcher / bootstrap respawns the standard services on restart and
-    each registers its port into ``runtime/applications.toml``; the always-on
-    core services (``system_interface`` and ``terminal``) must be present.
+    each re-registers its port into ``runtime/applications.toml`` via
+    ``scripts/forward_port.py``. Registration is asynchronous, so we poll until
+    the expected names appear rather than reading once -- a single read races a
+    service that registers a moment later (the flake this test hit in CI).
 
-    ``web`` was intentionally dropped: default-workspace-template removed the
-    blank example web service (its ``[program:web]`` supervisord entry and the
-    ``libs/web_server`` scaffold), so it no longer registers. ``browser`` does
-    autostart now, but it is memory-heavy and expendable (earlyoom can shed it
-    under pressure), so requiring it would make this test flaky -- we only
-    assert the services guaranteed to survive a resume.
+    ``system_interface`` and ``terminal`` are always-on core services and must be
+    present. ``web`` was removed from the template (its ``[program:web]`` entry
+    and ``libs/web_server`` scaffold), so it is no longer expected.
+
+    ``browser`` also autostarts and registers (its supervisord program runs
+    ``forward_port.py`` before launching the memory-heavy browser-service), so it
+    is expected too -- but it self-tags as the single most OOM-expendable process
+    (oom_score_adj=1000), so under memory pressure earlyoom can shed it. We
+    therefore require ``browser`` UNLESS there is positive evidence it was shed
+    (supervisord recorded its program dying on an OOM signal). A bare "never
+    re-registered", with no shed signal, is a real regression and fails.
     """
-    result = _exec_in_container(running_workspace.container_name, "cat /code/runtime/applications.toml", timeout=30)
-    assert result.returncode == 0, f"Could not read runtime/applications.toml: {result.stderr}"
-    for service_name in ("system_interface", "terminal"):
-        assert service_name in result.stdout, (
-            f"Service {service_name!r} not registered in applications.toml after resume:\n{result.stdout}"
+    expected_services = (*_CORE_REGISTERED_SERVICES, _BROWSER_SERVICE_NAME)
+    applications_toml = _wait_for_services_registered(running_workspace.container_name, expected_services)
+
+    for service_name in _CORE_REGISTERED_SERVICES:
+        assert service_name in applications_toml, (
+            f"Core service {service_name!r} not registered in applications.toml after resume:\n{applications_toml}"
         )
+
+    if _BROWSER_SERVICE_NAME in applications_toml:
+        return
+    was_shed, diagnostics = _gather_browser_shed_diagnostics(running_workspace.container_name)
+    assert was_shed, (
+        "browser did not re-register in applications.toml after resume, and there is no evidence it was "
+        "shed under memory pressure (supervisord shows no OOM-signal kill of the browser program) -- so it "
+        f"genuinely failed to re-register.\napplications.toml:\n{applications_toml}\ndiagnostics:\n{diagnostics}"
+    )
+    logger.info(
+        "browser did not re-register after resume but was shed under memory pressure "
+        "(expected: it is the most OOM-expendable service); diagnostics:\n{}",
+        diagnostics,
+    )
 
 
 @pytest.mark.minds_snapshot_resume
