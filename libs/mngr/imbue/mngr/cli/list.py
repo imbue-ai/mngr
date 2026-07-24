@@ -23,6 +23,8 @@ from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
+from imbue.mngr.cli.command_names import KNOWN_CONFIG_COMMAND_NAMES
+from imbue.mngr.cli.command_names import build_default_subcommand_choices
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.completion_install import write_managed_completion_scripts
@@ -268,6 +270,8 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
                 "registered_agent_types": registered_agent_types,
                 "topic_names": topic_names,
                 "installed_plugin_packages": installed_plugin_packages,
+                "config_command_names": sorted(KNOWN_CONFIG_COMMAND_NAMES),
+                "default_subcommand_choices": build_default_subcommand_choices(cli_group),
             },
             name="completion-cache-writer",
             is_checked=False,
