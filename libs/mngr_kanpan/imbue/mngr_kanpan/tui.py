@@ -1,4 +1,5 @@
 import os
+import queue
 import subprocess
 import time
 from collections.abc import Callable
@@ -59,13 +60,13 @@ from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
 from imbue.mngr_kanpan.data_types import SECTION_PREFIX
 from imbue.mngr_kanpan.data_types import SECTION_SUFFIX
 from imbue.mngr_kanpan.data_types import STALENESS_FRACTION_OF_REFRESH_INTERVAL
-from imbue.mngr_kanpan.fetcher import FetchResult
+from imbue.mngr_kanpan.fetcher import FetchUpdate
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
-from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
-from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
 from imbue.mngr_kanpan.fetcher import load_field_cache
 from imbue.mngr_kanpan.fetcher import save_field_cache
+from imbue.mngr_kanpan.fetcher import stream_board_snapshot
+from imbue.mngr_kanpan.fetcher import stream_local_snapshot
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
@@ -352,7 +353,14 @@ class _KanpanState(MutableModel):
     footer_right: Any  # urwid Text widget (right side of footer)
     loop: Any = None  # urwid MainLoop, set after construction
     spinner_index: int = 0
-    refresh_future: Future[FetchResult] | None = None
+    # The in-flight streaming refresh: `refresh_future` is the background thread
+    # running stream_board_snapshot (the "a refresh is running" marker, held until
+    # the final update is applied), `refresh_queue` is the thread-safe channel it
+    # posts incremental FetchUpdates on. Both are cleared together in
+    # `_finalize_refresh`.
+    refresh_future: Future[None] | None = None
+    # queue.Queue[FetchUpdate] the background stream posts on; set while in flight.
+    refresh_queue: Any = None
     # In-memory cache of fields from previous refresh cycle
     cached_fields: dict[AgentName, dict[str, FieldValue]] = {}
     executor: ThreadPoolExecutor | None = None
@@ -1702,35 +1710,44 @@ def _on_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
-    """Start a local-only background refresh (no GitHub API calls)."""
+    """Start a local-only streaming refresh (no GitHub API calls).
+
+    Remote fields (PR, CI) are carried forward via the seeded cache -- see
+    `stream_local_snapshot` -- so the board keeps its last-known PR sections
+    while the fast local columns update.
+    """
     if state.refresh_future is not None:
         return
-    if state.executor is None:
-        state.executor = ThreadPoolExecutor(max_workers=1)
-    state.refresh_is_local_only = True
-    state.refresh_future = state.executor.submit(
-        fetch_local_snapshot,
-        state.mngr_ctx,
-        state.data_sources,
-        state.cached_fields,
-        state.include_filters,
-        state.exclude_filters,
-    )
-    _render_footer(state)
-    _ensure_animation_running(state)
-    _schedule_refresh_poll(loop, state)
+    _launch_refresh(loop, state, stream_local_snapshot, is_local_only=True)
 
 
 def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
-    """Start a full background refresh and begin the spinner animation."""
+    """Start a full streaming refresh and begin the spinner animation."""
+    _launch_refresh(loop, state, stream_board_snapshot, is_local_only=False)
+
+
+def _launch_refresh(
+    loop: MainLoop,
+    state: _KanpanState,
+    stream_fn: Callable[..., None],
+    is_local_only: bool,
+) -> None:
+    """Submit a streaming fetch and begin polling its update queue.
+
+    `stream_fn` posts incremental FetchUpdates onto `refresh_queue` as each data
+    source returns; `_poll_refresh_completion` drains and applies them.
+    """
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
-    state.refresh_is_local_only = False
+    state.refresh_is_local_only = is_local_only
+    update_queue: queue.Queue[FetchUpdate] = queue.Queue()
+    state.refresh_queue = update_queue
     state.refresh_future = state.executor.submit(
-        fetch_board_snapshot,
+        stream_fn,
         state.mngr_ctx,
         state.data_sources,
         state.cached_fields,
+        update_queue.put,
         state.include_filters,
         state.exclude_filters,
     )
@@ -1740,64 +1757,84 @@ def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _schedule_refresh_poll(loop: MainLoop, state: _KanpanState) -> None:
-    """Schedule the next refresh-completion poll."""
+    """Schedule the next refresh-update poll."""
     loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _poll_refresh_completion, state)
 
 
 def _poll_refresh_completion(loop: MainLoop, state: _KanpanState) -> None:
-    """Alarm callback: poll the in-flight refresh and finish it when done.
+    """Alarm callback: drain any streamed updates and apply them.
 
-    The spinner glyph is animated by `_on_animation_tick`; this loop only watches
-    for completion so the footer has a single writer.
+    The spinner glyph is animated by `_on_animation_tick`; this loop only drains
+    the update queue so the footer has a single writer.
     """
-    if state.refresh_future is None:
+    if state.refresh_queue is None:
         return
 
-    if state.refresh_future.done():
-        _finish_refresh(loop, state)
+    updates = _drain_refresh_updates(state.refresh_queue)
+    if not updates:
+        _schedule_refresh_poll(loop, state)
         return
 
-    _schedule_refresh_poll(loop, state)
+    _apply_stream_updates(loop, state, updates)
 
 
-def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
-    """Complete a background refresh: update snapshot and display."""
-    if state.refresh_future is None:
-        return
+def _drain_refresh_updates(update_queue: "queue.Queue[FetchUpdate]") -> list[FetchUpdate]:
+    """Drain all FetchUpdates currently queued, without blocking.
 
+    There is a single consumer (the urwid main thread), so `not empty()`
+    guarantees the following `get_nowait()` succeeds -- the background producer
+    only ever adds items.
+    """
+    updates: list[FetchUpdate] = []
+    while not update_queue.empty():
+        updates.append(update_queue.get_nowait())
+    return updates
+
+
+def _apply_stream_updates(loop: MainLoop, state: _KanpanState, updates: list[FetchUpdate]) -> None:
+    """Render the most complete drained update and finalize on the last one.
+
+    Streamed updates are cumulative (each snapshot is a superset of the previous),
+    so only the last one is rendered; the intermediate ones it superseded are
+    skipped to avoid rebuilding the board several times in one tick.
+    """
     was_local_only = state.refresh_is_local_only
-    failed = False
-    try:
-        fetch_result = state.refresh_future.result()
-        new_snapshot = fetch_result.snapshot
-        # Update in-memory field cache only for full refreshes: local-only refreshes do not
-        # produce remote fields (PR, CI, etc.), so overwriting would lose the remote data that
-        # the next full refresh needs as its cached_fields input.
-        if not was_local_only:
-            state.cached_fields = fetch_result.cached_fields
-            save_field_cache(state.mngr_ctx, state.cached_fields)
-        # For local-only refreshes, carry forward fields from previous snapshot
-        if was_local_only and state.snapshot is not None:
-            new_snapshot = _carry_forward_fields(state.snapshot, new_snapshot)
-        state.snapshot = new_snapshot
-    except Exception as e:
-        failed = True
-        logger.debug("Refresh failed: {}", e)
-        if state.snapshot is not None:
-            state.snapshot = state.snapshot.model_copy_update(
-                to_update(
-                    state.snapshot.field_ref().errors,
-                    (*state.snapshot.errors, f"Refresh failed: {e}"),
-                ),
-            )
-    finally:
-        state.refresh_future = None
-        state.refresh_is_local_only = False
-        if not was_local_only:
-            state.last_refresh_time = time.monotonic()
+    last = updates[-1]
 
-    _refresh_display(state)
-    _prune_orphaned_marks(state)
+    if last.error is not None:
+        # Hard failure: keep the current board, surface the error, and retry.
+        if state.snapshot is not None:
+            state.snapshot = _append_snapshot_error(state.snapshot, last.error)
+        _refresh_display(state)
+        _prune_orphaned_marks(state)
+        _finalize_refresh(loop, state, failed=True)
+        return
+
+    if last.snapshot is not None:
+        state.snapshot = last.snapshot
+        # Persist the field cache only for full refreshes, and only once the fetch
+        # is complete: local-only refreshes carry remote fields forward via the
+        # seed, so their (unseeded) cached_fields omit PR/CI and must not overwrite.
+        if last.is_final and not was_local_only:
+            state.cached_fields = last.cached_fields
+            save_field_cache(state.mngr_ctx, state.cached_fields)
+        _refresh_display(state)
+        _prune_orphaned_marks(state)
+
+    if last.is_final:
+        _finalize_refresh(loop, state, failed=False)
+    else:
+        _schedule_refresh_poll(loop, state)
+
+
+def _finalize_refresh(loop: MainLoop, state: _KanpanState, failed: bool) -> None:
+    """Clear the in-flight refresh state and schedule the next cycle (or a retry)."""
+    was_local_only = state.refresh_is_local_only
+    state.refresh_future = None
+    state.refresh_queue = None
+    state.refresh_is_local_only = False
+    if not was_local_only:
+        state.last_refresh_time = time.monotonic()
 
     if state.snapshot is not None and not was_local_only:
         state.last_fetch_seconds = state.snapshot.fetch_time_seconds
@@ -1807,41 +1844,18 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     if failed:
         _request_refresh(loop, state, state.retry_cooldown_seconds)
     elif was_local_only:
+        # A local-only refresh does not schedule the next periodic full refresh;
+        # the standing auto-refresh alarm already covers that.
         pass
     else:
         _schedule_next_refresh(loop, state)
 
 
 @pure
-def _carry_forward_fields(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapshot:
-    """Carry forward field data from a previous full snapshot for local-only refreshes.
-
-    Local-only refreshes only run git_info and repo_paths. Other fields (PR, CI, etc.)
-    are carried forward from the previous snapshot.
-    """
-    old_by_name = {entry.name: entry for entry in old.entries}
-    updated_entries: list[AgentBoardEntry] = []
-    for entry in new.entries:
-        old_entry = old_by_name.get(entry.name)
-        if old_entry is not None:
-            # Merge: new fields override old, but keep old fields not produced by local sources
-            merged_fields = dict(old_entry.fields)
-            merged_fields.update(entry.fields)
-            merged_cells = {key: field.display() for key, field in merged_fields.items()}
-            section = compute_section(merged_fields)
-            ref = entry.field_ref()
-            updated = entry.model_copy_update(
-                to_update(ref.fields, merged_fields),
-                to_update(ref.cells, merged_cells),
-                to_update(ref.section, section),
-            )
-            updated_entries.append(updated)
-        else:
-            updated_entries.append(entry)
-    return BoardSnapshot(
-        entries=tuple(updated_entries),
-        errors=new.errors,
-        fetch_time_seconds=new.fetch_time_seconds,
+def _append_snapshot_error(snapshot: BoardSnapshot, message: str) -> BoardSnapshot:
+    """Return `snapshot` with `message` appended to its errors (shown at board bottom)."""
+    return snapshot.model_copy_update(
+        to_update(snapshot.field_ref().errors, (*snapshot.errors, message)),
     )
 
 
