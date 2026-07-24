@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.recovery_probe import DispatchTier
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -66,8 +67,14 @@ def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
     return log_path.read_text().splitlines()
 
 
-def _resolver_with_system_services(workspace_agent: AgentId, services_agent: AgentId) -> MngrCliBackendResolver:
-    """Build a resolver where the workspace agent and system-services agent share a host."""
+def _resolver_with_system_services(
+    workspace_agent: AgentId, services_agent: AgentId, host_state: HostState | None = None
+) -> MngrCliBackendResolver:
+    """Build a resolver where the workspace agent and system-services agent share a host.
+
+    ``host_state`` records an observed lifecycle state for that shared host in
+    the snapshot; None leaves the host state undiscovered.
+    """
     host_id = HostId.generate()
     resolver = MngrCliBackendResolver()
     resolver.update_agents(
@@ -87,6 +94,7 @@ def _resolver_with_system_services(workspace_agent: AgentId, services_agent: Age
                     provider_name=ProviderInstanceName("docker"),
                 ),
             ),
+            host_state_by_host_id=({str(host_id): host_state} if host_state is not None else {}),
         )
     )
     return resolver
@@ -102,17 +110,13 @@ def _started_registry(workspace_agent: AgentId) -> InMemoryWorkspaceOperationReg
 # -- argv builders --
 
 
-def test_build_mngr_stop_argv_appends_stop_host_only_for_host_restart() -> None:
-    """The host tier adds --stop-host; the surgical tier stops just the agent."""
+def test_build_mngr_stop_argv_always_stops_the_host() -> None:
+    """The restart is host-only (the surgical services tier is gone), so the stop
+    always carries --stop-host."""
     aid = AgentId.generate()
-
-    surgical = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=False)
-    assert surgical[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
-    assert "--stop-host" not in surgical
-
-    host = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=True)
-    assert host[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
-    assert "--stop-host" in host
+    argv = _build_mngr_stop_argv("/usr/local/bin/mngr", aid)
+    assert argv[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
+    assert "--stop-host" in argv
 
 
 def test_build_mngr_start_argv_targets_the_agent() -> None:
@@ -173,13 +177,12 @@ def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp
     """With no system-services agent discovered, the sequence ends in RESTART_FAILED."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     registry = _started_registry(workspace_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg:
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=False,
             tracker=tracker,
             backend_resolver=MngrCliBackendResolver(),
             mngr_binary="mngr",
@@ -194,6 +197,7 @@ def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp
     assert "system-services" in (tracker.get_last_restart_error(workspace_agent) or "")
     record = registry.get(workspace_agent)
     assert record is not None and record.status == WorkspaceOperationStatus.FAILED
+    assert len(error_records) == 1, error_records
 
 
 def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> None:
@@ -201,13 +205,12 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg:
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=False,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=_write_fake_mngr(tmp_path, stop_exit=1),
@@ -220,6 +223,66 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
 
     assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
     assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert len(error_records) == 1, error_records
+
+
+def test_run_restart_sequence_fails_when_start_command_errors(tmp_path: Path) -> None:
+    """A non-zero ``mngr start`` ends the sequence in RESTART_FAILED naming the start step."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent, start_only=False)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
+        run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path, start_exit=1),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            registry=_started_registry(workspace_agent),
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert "Start step" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert len(error_records) == 1, error_records
+
+
+def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp_path: Path) -> None:
+    """A clean stop+start whose interface never answers ends in RESTART_FAILED with one error log.
+
+    With a plugin route configured (nonzero forward port + cookie) but nothing
+    answering on it, the readiness wait times out; this failure branch was
+    previously unlogged, so pin that it now reports exactly once.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent, start_only=False)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
+        run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            # Port 1 refuses connections, so every readiness poll fails fast.
+            mngr_forward_port=1,
+            mngr_forward_preauth_cookie="cookie",
+            registry=_started_registry(workspace_agent),
+            startup_wait_seconds=0.1,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert "did not respond" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert len(error_records) == 1, error_records
 
 
 def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
@@ -232,14 +295,13 @@ def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Pa
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     missing_binary = str(tmp_path / "definitely_not_a_real_mngr")
 
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=False,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=missing_binary,
@@ -259,14 +321,13 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=True,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=_write_fake_mngr(tmp_path),
@@ -289,7 +350,7 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
     # A fake mngr whose ``stop`` fails with the host-shutdown-not-supported message (as Modal
@@ -309,7 +370,6 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=True,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=str(script),
@@ -326,19 +386,18 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     assert record is not None and record.status == WorkspaceOperationStatus.DONE
 
 
-def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Path) -> None:
-    """``skip_stop=True`` on a host restart goes straight to ``mngr start`` (no stop subprocess)."""
+def test_run_restart_sequence_skips_stop_for_start_only_dispatch(tmp_path: Path) -> None:
+    """``skip_stop=True`` (the API's ``start_only``) goes straight to ``mngr start`` (no stop subprocess)."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=True)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_fake_mngr(tmp_path)
 
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=True,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=mngr_binary,
@@ -361,14 +420,13 @@ def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> N
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=False)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_fake_mngr(tmp_path)
 
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=True,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=mngr_binary,
@@ -595,3 +653,136 @@ def test_probe_pairs_the_classified_host_state_with_the_freshness_gate(tmp_path:
     # the classification-time read (STOPPED).
     assert resolver._host_state_reads >= 2
     assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_probe_attempts_exec_and_resolves_when_discovery_is_stalled(tmp_path: Path) -> None:
+    """With a stalled discovery stream, the probe gathers direct evidence instead of waiting.
+
+    The dead-producer dead-end: no snapshot for the workspace's provider means
+    the resolver has no (trusted) host state and the freshness gate can never
+    open, so the old behavior re-classified INDETERMINATE forever. The probe must
+    attempt the in-container exec despite the host not reading RUNNING; the
+    exec's completed failure (the stub exits 0 with no sentinel) then resolves to
+    the consent-gated HOST_UNRESPONSIVE, whose restart also revives a genuinely
+    stopped container.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    _drive_to_stuck_with_onset(tracker, workspace_agent)
+    # No provider snapshot is ever recorded, so the classification never becomes
+    # trustworthy and the exec is the only way out of INDETERMINATE.
+
+    mngr_binary = _write_fake_mngr(tmp_path)
+    with ConcurrencyGroup(name="test-probe-stalled") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    exec_invocations = [line for line in _read_fake_mngr_invocations(mngr_binary) if line.startswith("exec ")]
+    assert exec_invocations, "the exec probe must be attempted when discovery is stalled"
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_probe_skips_exec_for_a_trusted_not_running_host(tmp_path: Path) -> None:
+    """With discovery flowing and the host trustworthily observed STOPPED, no exec fires.
+
+    The doomed-round-trip guard: a fresh post-onset snapshot already answers the
+    question, so the probe classifies HOST_OFFLINE without paying the exec's
+    provider round-trip.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPED)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+
+    mngr_binary = _write_fake_mngr(tmp_path)
+    with ConcurrencyGroup(name="test-probe-skip-exec") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    assert _read_fake_mngr_invocations(mngr_binary) == []
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_probe_attempts_exec_for_an_untrusted_non_offline_state(tmp_path: Path) -> None:
+    """A stale host state gathers direct evidence instead of waiting.
+
+    Any state the resolver cannot yet vouch for (no snapshot at/after the outage
+    onset has landed) triggers the exec immediately -- there is no fixed
+    staleness threshold to wait out. Here a pre-onset STOPPING resolves via the
+    exec's completed failure (the stub exits 0 with no sentinel) to the
+    consent-gated HOST_UNRESPONSIVE instead of spinning at INDETERMINATE.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    # A pre-onset snapshot: within the absolute freshness window but still holding
+    # the pre-outage state, so the classification stays untrustworthy.
+    _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
+
+    mngr_binary = _write_fake_mngr(tmp_path)
+    with ConcurrencyGroup(name="test-probe-untrusted-stopping") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    exec_invocations = [line for line in _read_fake_mngr_invocations(mngr_binary) if line.startswith("exec ")]
+    assert exec_invocations, "an untrusted non-offline state must gather direct evidence via the exec"
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_probe_skips_exec_for_a_trusted_transitional_host(tmp_path: Path) -> None:
+    """A trusted transitional state is left to the classifier, not execced into a false verdict.
+
+    A fresh post-onset snapshot showing STOPPING is the host genuinely
+    mid-shutdown; firing a doomed exec there would flip a normal transition into a
+    premature consent-gated HOST_UNRESPONSIVE. The probe skips the exec and yields
+    INDETERMINATE (keep checking), so the next snapshot resolves it (e.g. to
+    HOST_OFFLINE once it reads STOPPED).
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+
+    mngr_binary = _write_fake_mngr(tmp_path)
+    with ConcurrencyGroup(name="test-probe-trusted-stopping") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    assert _read_fake_mngr_invocations(mngr_binary) == []
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE

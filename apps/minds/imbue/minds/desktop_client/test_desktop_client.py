@@ -43,7 +43,6 @@ from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.dek_store import verify_master_password_for_account
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -70,6 +69,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -2491,9 +2491,9 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     pre-filled with the agent's description, scoped to the caller's own workspace."""
     client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
     agent_id = AgentId()
-    request_queue: "queue.Queue[OpenHelpRequest]" = queue.Queue()
+    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
     wake_event = threading.Event()
-    get_state(client.application).help_modal_request_broker.subscribe(request_queue, wake_event)
+    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, wake_event)
     response = client.post(
         f"/api/v1/agents/{agent_id}/report",
         json={"description": "agent saw an error"},
@@ -2504,10 +2504,13 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     assert body["ok"] is True
     # No Sentry submission happens here, so there is no event_id to return.
     assert "event_id" not in body
-    # The route published an open-help request (scoped to the caller's workspace) instead of submitting.
-    received = request_queue.get_nowait()
-    assert received.description == "agent saw an error"
-    assert received.workspace_agent_id == str(agent_id)
+    # The route broadcast an open_help SSE payload (scoped to the caller's workspace) instead of submitting.
+    assert wake_event.is_set()
+    assert event_queue.get_nowait() == {
+        "type": "open_help",
+        "description": "agent saw an error",
+        "workspace_agent_id": str(agent_id),
+    }
 
 
 def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
@@ -2548,8 +2551,7 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert str(agent_id) in response.text
     assert safe_return_to in response.text
-    # The recovery page chrome rendered: the host-restart button (the
-    # surgical tier is auto-dispatched, so it has no button) and the
+    # The recovery page chrome rendered: the host-restart button and the
     # versioned health + restart endpoints the page's JS drives once the probe
     # reports the container reachable.
     assert "Restart workspace" in response.text
@@ -2664,6 +2666,51 @@ def test_recovery_page_renders_copy_ssh_button_from_resolver(tmp_path: Path) -> 
     assert 'data-ssh-command="ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"' in response.text
 
 
+def test_recovery_page_surfaces_offline_hint_from_resolver(tmp_path: Path) -> None:
+    """The recovery route surfaces the resolver's offline reading as a display hint.
+
+    A host observed STOPPED renders ``data-host-offline="1"`` and carries
+    ``X-Workspace-Offline: 1`` on the response (the page's convergence poll
+    reads it each tick, so a hint that was stale at render time self-corrects
+    once discovery lands). The hint is display-only -- it selects the
+    "Bringing your workspace back online" copy, never what is dispatched.
+    """
+    agent_id = AgentId()
+    host_id = HostId.generate()
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    tracker = SystemInterfaceHealthTracker()
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent_id,),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=agent_id,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName("docker"),
+                    certified_data={"labels": {"is_primary": "true"}},
+                ),
+            ),
+            host_state_by_host_id={str(host_id): HostState.STOPPED},
+        )
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        system_interface_health_tracker=tracker,
+    )
+    client = app.test_client()
+    _authenticate_client(client=client, auth_store=auth_store)
+    tracker.mark_stuck(agent_id)
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+    assert response.status_code == 200
+    assert 'data-host-offline="1"' in response.text
+    assert response.headers["X-Workspace-Offline"] == "1"
+
+
 def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
     """create_desktop_client should expose the tracker on the app state for handlers."""
     auth_dir = tmp_path / "auth"
@@ -2728,16 +2775,24 @@ def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path
     """A user landing on the recovery page during an in-flight restart must see RESTARTING."""
     tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
-    tracker.mark_restarting(agent_id)
+    # A full manual bounce (the right-click "Restart workspace"), so the page
+    # renders the known "Restarting your workspace" copy rather than the neutral
+    # start-only "Loading workspace" spinner.
+    tracker.mark_restarting(agent_id, start_only=False)
     assert tracker.get_health(agent_id) == AgentHealth.RESTARTING
 
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
 
     assert response.status_code == 200
     assert 'data-initial-status="restarting"' in response.text
+    # The full-bounce flavor rides to the page so it names the restart.
+    assert 'data-restart-start-only="0"' in response.text
     # The page's background convergence poll keys off this header to tell "still
     # restarting" (keep waiting, no focus-stealing reload) from a state change.
     assert response.headers["X-Recovery-Status"] == "restarting"
+    # The static test resolver knows no host state, so the offline display
+    # hint reads 0 (the hint header rides on every recovery response).
+    assert response.headers["X-Workspace-Offline"] == "0"
 
 
 def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_path: Path) -> None:
@@ -2771,7 +2826,7 @@ def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tm
     The home-page restart control navigates here explicitly. Without the
     intent marker the healthy-redirect guard would bounce the user straight
     back to ``return_to`` and nothing would happen. With it, the page renders
-    as STUCK so its JS runs the probe and dispatches a restart.
+    as STUCK so its entry dispatches the start-only restart.
     """
     tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
@@ -2786,7 +2841,7 @@ def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tm
 
     assert response.status_code == 200
     # An explicit restart of a healthy workspace renders as STUCK so the page
-    # probes and dispatches rather than sitting idle.
+    # dispatches its start-only restart rather than sitting idle.
     assert 'data-initial-status="stuck"' in response.text
 
 

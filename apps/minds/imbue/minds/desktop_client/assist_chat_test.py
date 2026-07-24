@@ -22,7 +22,10 @@ def test_build_assist_chat_targets_workspace_by_id_and_runs_create_inside() -> N
     # Outer: exec targets the workspace agent by id (a bare id is a valid agent address),
     # and carries a single inner-command string.
     assert args[:3] == ["exec", "--agent", str(agent_id)]
-    assert len(args) == 4
+    # The chat create must not boot a stopped workspace as a side effect
+    # (mngr exec auto-starts the host by default).
+    assert "--no-start" in args
+    assert len(args) == 5
     inner = shlex.split(args[3])
     # Inner: a chat-template create on the existing host, tagged so the system interface
     # auto-opens its tab, seeded with /assist <description>. No workspace grouping label:
@@ -96,7 +99,10 @@ def test_build_assist_support_probe_args_targets_workspace_and_checks_the_skill_
     agent_id = AgentId.generate()
     args = build_assist_support_probe_args(agent_id)
     assert args[:3] == ["exec", "--agent", str(agent_id)]
-    assert len(args) == 4
+    # Opening the get-help modal runs this probe eagerly; it must never boot a
+    # stopped workspace as a side effect (mngr exec auto-starts by default).
+    assert "--no-start" in args
+    assert len(args) == 5
     # The probe checks the DEFAULT_WORKSPACE_TEMPLATE /assist skill path and echoes a present/absent sentinel.
     assert ".agents/skills/assist/SKILL.md" in args[3]
     assert "MNGR_ASSIST_SKILL_PRESENT" in args[3]

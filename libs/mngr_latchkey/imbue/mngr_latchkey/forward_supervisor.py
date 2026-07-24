@@ -250,6 +250,39 @@ def _terminate_pid(pid: int) -> None:
     _terminate_process(process)
 
 
+def _terminate_pid_and_descendants(pid: int) -> None:
+    """Terminate a forward supervisor and every descendant it owns.
+
+    The descendants (the ``mngr observe`` discovery child, the detached
+    ``latchkey gateway``, reverse ``ssh`` tunnels) are meant to die in the
+    supervisor's own SIGTERM teardown -- but a wedged supervisor that has to be
+    SIGKILLed after the grace period never runs it, and the gateway (spawned
+    with ``start_new_session=True``) then outlives every session. Capture the
+    descendant handles before signalling and terminate them after, the same
+    arrangement :meth:`LatchkeyForwardSupervisor._reap_duplicate_forwards`
+    uses; the PID-reuse guard in :func:`_terminate_process` keeps a descendant
+    the supervisor already tore down from being confused with a recycled PID.
+
+    Descendants are only captured when ``pid``'s cmdline still looks like our
+    forward. The :meth:`LatchkeyForwardSupervisor.stop` cached-pid path passes
+    a PID it deliberately does not cmdline-verify (the freshly-forked child may
+    not have exec'd its argv yet), and without this gate a PID recycled onto an
+    unrelated process would have its whole live subprocess tree reaped rather
+    than receiving just the single tolerated spurious signal. The gate loses
+    nothing: a not-yet-exec'd child has no descendants, and a real forward --
+    healthy or wedged -- keeps its matching argv.
+    """
+    looks_like_forward = False
+    try:
+        looks_like_forward = _cmdline_looks_like_mngr_latchkey_forward(psutil.Process(pid).cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
+        logger.debug("Could not read cmdline of pid {} before descendant capture: {}", pid, e)
+    descendant_processes = _descendant_processes(pid) if looks_like_forward else []
+    _terminate_pid(pid)
+    for descendant_process in descendant_processes:
+        _terminate_process(descendant_process)
+
+
 class LatchkeyForwardSupervisor(MutableModel):
     """Ensure exactly one detached ``mngr latchkey forward`` is running.
 
@@ -477,7 +510,7 @@ class LatchkeyForwardSupervisor(MutableModel):
             delete_forward_info(plugin_dir)
         if cached_pid is not None:
             logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", cached_pid)
-            _terminate_pid(cached_pid)
+            _terminate_pid_and_descendants(cached_pid)
             return
         if info is None:
             return
@@ -488,7 +521,7 @@ class LatchkeyForwardSupervisor(MutableModel):
             )
             return
         logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", info.pid)
-        _terminate_pid(info.pid)
+        _terminate_pid_and_descendants(info.pid)
 
     def bounce(self) -> None:
         """Refresh the supervisor's provider set without dropping the gateway.

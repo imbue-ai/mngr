@@ -1035,40 +1035,63 @@ function wireContentViewEvents(bundle, contentView) {
   contentView.webContents.on('did-navigate', (_e, url, httpResponseCode) => onContentNavigate(url, httpResponseCode));
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
 
-  // A workspace load that fails outright (connection refused, bad TLS cert --
-  // e.g. a stale port squatted by another checkout's forward) never fires
-  // did-navigate: the hidden content view stays parked on about:blank and the
-  // window would sit on the empty /_chrome wrapper forever, with the stale
-  // ``currentWorkspaceId`` claim swallowing every retry. Route the window Home
-  // instead, releasing the claim. errorCode -3 (ERR_ABORTED) is a superseded
-  // load (another loadURL landed first), not a failure -- ignore it, along
-  // with subframe failures. Note the reachable-but-down case is NOT this path:
+  // A failed top-level load of a workspace URL (ERR_CONNECTION_REFUSED on a
+  // stale forward port from a restored session, ERR_NETWORK_CHANGED over a
+  // network flap, a bad TLS cert from a port squatted by another checkout's
+  // forward, ...) never fires did-navigate: the hidden content view stays
+  // parked on about:blank, the window would sit on the empty /_chrome wrapper
+  // forever, and the stale ``currentWorkspaceId`` claim swallows every retry.
+  // Route the window to the workspace's recovery page instead: it keeps the
+  // user's context (they asked for THIS workspace), its probes classify the
+  // outage, and its health poll 302s straight back into the workspace --
+  // through the redirect guard, onto the content surface, at the canonical
+  // main-built URL (a return_to rebuilt against the CURRENT forward origin) --
+  // the moment it is reachable. The reachable-but-down case is NOT this path:
   // mngr_forward serves its "Loading workspace" loader as a successful HTTP
   // response, which commits normally and shows the loader.
   contentView.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (!isMainFrame || errorCode === -3) return;
-    if (bundle.isErrorState || bundle.window.isDestroyed()) return;
-    const failedAgentId = parseWorkspaceId(validatedURL);
-    if (!failedAgentId || failedAgentId !== bundle.currentWorkspaceId) return;
-    // Route to the workspace's recovery page rather than Home: it keeps the
-    // user's context (they asked for THIS workspace), shows diagnostics, and
-    // its health poll 302s straight back into the workspace -- through the
-    // redirect guard, onto the content surface, at the canonical main-built
-    // URL -- the moment it is reachable. So a failed link (wrong scheme /
-    // stale port) self-heals into the workspace instead of dumping the user
-    // on the workspace list. Home stays the fallback for the startup window
-    // where no forward origin is known yet.
-    const workspaceUrl = workspaceUrlForAgent(failedAgentId);
-    const target = workspaceUrl
-      ? toAbsoluteUrl(
-        '/agents/' + encodeURIComponent(failedAgentId)
-        + '/recovery?return_to=' + encodeURIComponent(workspaceUrl),
-      )
-      : (backendBaseUrl ? backendBaseUrl + '/' : null);
+    if (!isMainFrame) return;
+    // ERR_ABORTED: the navigation was superseded (another loadURL, a redirect
+    // taken over by the page) -- not a failure to recover from.
+    if (errorCode === -3) return;
+    if (isShuttingDown || bundle.window.isDestroyed()) return;
+    // The full-app error takeover owns the screen; don't fight it.
+    if (bundle.isErrorState) return;
+    if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
+    if (!backendBaseUrl) return;
+    // Scope to workspace loads: the failed URL names the agent (a /goto/
+    // bridge or an agent-subdomain URL), or -- when the URL is unparseable or
+    // empty -- the bundle was already stamped with the workspace it is
+    // navigating to. A failed minds-backend URL that names no workspace is
+    // excluded BEFORE that fallback: the recovery page itself failing means
+    // the backend is gone and re-navigating would loop, and a non-workspace
+    // screen (Home, settings, ...) failing must not be misattributed to the
+    // still-stamped currentWorkspaceId of the workspace the user is leaving --
+    // both are the app-level error handling's concern. (/goto/ bridge URLs can
+    // be built on backendBaseUrl during the startup window, but those parse.)
+    const parsedAgentId = parseWorkspaceId(validatedURL);
+    if (!parsedAgentId && validatedURL && validatedURL.startsWith(backendBaseUrl + '/')) return;
+    const agentId = parsedAgentId || bundle.currentWorkspaceId;
+    if (!agentId) return;
     console.warn(
-      `[content] Workspace load failed (${errorCode} ${errorDescription}) for ${validatedURL}; routing to ${target}`,
+      `[content-load-failed] workspace content load failed ` +
+        `(errorCode=${errorCode}, error=${errorDescription || 'unknown'}, url=${validatedURL || 'unknown'}); ` +
+        `routing to the recovery page for ${agentId}`
     );
-    if (target) navigateBundle(bundle, target);
+    // Never navigate synchronously inside a webContents event handler
+    // (electron#19887); defer like the render-process-gone handler below.
+    // Route through navigateBundle so the recovery URL lands on the correct
+    // surface and honors one-window-per-workspace-scope.
+    setImmediate(() => {
+      if (isShuttingDown || bundle.window.isDestroyed() || bundle.isErrorState) return;
+      if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
+      const workspaceUrl = workspaceUrlForAgent(agentId) || '';
+      navigateBundle(
+        bundle,
+        backendBaseUrl + '/agents/' + encodeURIComponent(agentId)
+        + '/recovery?return_to=' + encodeURIComponent(workspaceUrl),
+      );
+    });
   });
 
   // When the content view's renderer process dies (e.g. killed by the OS over a
@@ -2505,6 +2528,20 @@ function toRelativeBackendUrl(url) {
   }
 }
 
+// The workspace whose recovery page ``url`` is, or null for any other URL.
+// Recovery URLs need their own canonicalisation (below) because their
+// ``return_to`` query embeds an absolute URL on the session's mngr_forward
+// origin, whose port changes every run.
+function parseRecoveryPageAgentId(url) {
+  if (!url) return null;
+  try {
+    const match = new URL(url).pathname.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // Canonicalise a window's live content URL into the form persisted in
 // ``window-state.json``. A workspace window's URL is on the agent subdomain
 // (``agent-<id>.localhost:<mngr_forward_port>/...``); stripping that to a bare
@@ -2513,9 +2550,16 @@ function toRelativeBackendUrl(url) {
 // port-independent ``/goto/<agent>/`` auth-bridge path instead -- it carries
 // the agent id, is recognised by ``parseWorkspaceId`` (so dead-workspace
 // filtering works), and ``toRestoredContentUrl`` rebuilds the live origin from
-// it. Everything else round-trips as a minds-backend-relative path.
+// it. A window sitting on a workspace's RECOVERY page also persists as the
+// workspace itself: the recovery URL's ``return_to`` query embeds an absolute
+// URL on this session's forward origin, so persisting it verbatim would send
+// next session's restored window to a dead port (the restored recovery page
+// goes healthy and 302s to the stale return_to). Restoring into the workspace
+// re-enters recovery through the normal unhealthy-redirect with fresh
+// parameters if it is still down. Everything else round-trips as a
+// minds-backend-relative path.
 function toPersistedContentUrl(url) {
-  const agentId = parseWorkspaceId(url);
+  const agentId = parseWorkspaceId(url) || parseRecoveryPageAgentId(url);
   if (agentId) return `/goto/${encodeURIComponent(agentId)}/`;
   return toRelativeBackendUrl(url);
 }
@@ -2524,12 +2568,15 @@ function toPersistedContentUrl(url) {
 // into a loadable absolute URL. Workspace entries (``/goto/<agent>/``) are
 // rebuilt through ``workspaceUrlForAgent`` so the bridge targets the CURRENT
 // run's mngr_forward origin; other entries resolve against the minds backend.
+// A persisted recovery-page URL (written by a build that predates the
+// recovery-aware ``toPersistedContentUrl``) is restored as its workspace too,
+// so its embedded stale-origin ``return_to`` is never navigated to.
 // Persisted urls are backend-relative, so resolve to absolute BEFORE parsing
 // the workspace id -- ``parseWorkspaceId`` runs ``new URL(url)``, which throws
 // (yielding null) on a bare relative path.
 function toRestoredContentUrl(entry) {
   const absolute = toAbsoluteUrl(entry.url);
-  const agentId = parseWorkspaceId(absolute);
+  const agentId = parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute);
   if (agentId) {
     const workspaceUrl = workspaceUrlForAgent(agentId);
     if (workspaceUrl) return workspaceUrl;
@@ -2623,8 +2670,12 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   for (const entry of state) {
     // Persisted urls are backend-relative; resolve to absolute so
     // ``parseWorkspaceId`` (``new URL``) can read the workspace id rather than
-    // throwing on the bare path.
-    const agentId = parseWorkspaceId(toAbsoluteUrl(entry.url));
+    // throwing on the bare path. A stale persisted recovery-page URL (written
+    // by a build that predates the recovery-aware ``toPersistedContentUrl``)
+    // names its workspace too; ``toRestoredContentUrl`` restores it AS that
+    // workspace, so it must be dead-workspace-filtered like the workspace.
+    const absolute = toAbsoluteUrl(entry.url);
+    const agentId = parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute);
     // A workspace window can only be restored if its agent is known to exist
     // (live workspaces UNION the persisted last-good topology). Drop workspace
     // entries whose agent isn't in that set -- and, when the set is null
@@ -2746,6 +2797,17 @@ function handleChromeSSEEvent(evt) {
       } else {
         systemInterfaceStatusByAgent.set(String(evt.agent_id), status);
       }
+    }
+  } else if (evt.type === 'workspace_stopped') {
+    // An in-app action stopped this workspace's host (the landing-page Stop
+    // button or the agent-facing /api/v1 stop route). Any window still open to
+    // it would observe the now-unreachable system interface, get redirected to
+    // the recovery page, and auto-restart the host -- silently undoing the
+    // stop. Close those windows now (the confirm-stop-mind handler's own
+    // detach becomes a harmless redundancy for the dialog path). Skip it if
+    // the mind is mid-restart (the user is intentionally restarting it).
+    if (evt.agent_id && systemInterfaceStatusByAgent.get(String(evt.agent_id)) !== 'restarting') {
+      detachWindowsForWorkspace(String(evt.agent_id));
     }
   } else if (evt.type === 'auth_required') {
     // Clear every window's accent on the authenticated -> unauthenticated
@@ -3022,9 +3084,10 @@ function ensureChromeSSELoopRunning() {
   }
 }
 
-// POST the v1 restart endpoint with a ``scope`` ('services' to restart just the
-// system-services agent, 'host' to restart the whole host) and resolve once the
-// server has acknowledged the 202 dispatch (or the request errors / times out).
+// POST the v1 restart endpoint with a ``scope`` (only 'host' -- restart the
+// whole host -- since the services-scope restart tier was removed) and resolve
+// once the server has acknowledged the 202 dispatch (or the request errors /
+// times out).
 // The route returns 202 immediately (with an ``{operation_id, kind}`` handle we
 // don't need here) and drives recovery asynchronously; the 202 also means the
 // health tracker is already RESTARTING, so callers navigate to the recovery
@@ -3307,7 +3370,10 @@ async function stopAllMindsThenDecide(running) {
   let remaining = running;
   while (true) {
     updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 mind…' : `Stopping ${remaining.length} minds…`);
-    const { ok, stillRunning } = await postStopMinds(remaining.map((mind) => mind.id));
+    const stopIds = remaining.map((mind) => mind.id);
+    console.log('[mind-shutdown] posting bulk stop for', JSON.stringify(stopIds));
+    const { ok, stillRunning } = await postStopMinds(stopIds);
+    console.log(`[mind-shutdown] bulk stop result: ok=${ok} stillRunning=${JSON.stringify(stillRunning)}`);
     // ``ok`` && empty stillRunning = the server confirms everything is down. A
     // request-level failure (ok=false) is treated as "could not confirm", so we
     // fall through to the recovery dialog rather than quit assuming success.
@@ -3359,6 +3425,7 @@ async function promptMindShutdown() {
     if (response === 0) return { proceed: false, stop: false, running: [] };
     return { proceed: true, stop: false, running: [] };
   }
+  console.log('[mind-shutdown] prompt: running minds =', JSON.stringify(running));
   if (running.length === 0) return { proceed: true, stop: false, running: [] };
   const names = running.map((mind) => mind.name).join(', ');
   const { response } = await dialog.showMessageBox({
@@ -3373,6 +3440,7 @@ async function promptMindShutdown() {
       + 'Shutting them down stops their agents and makes their services inaccessible '
       + '(your data is preserved and you can start them again).',
   });
+  console.log(`[mind-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
   if (response === 0) return { proceed: false, stop: false, running: [] };
   if (response === 1) return { proceed: true, stop: false, running: [] };
   return { proceed: true, stop: true, running };
@@ -4568,31 +4636,30 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     template.push({ type: 'separator' });
   }
   const goToRecoveryView = () => {
-    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      // The restart POST has already moved the health tracker to RESTARTING,
-      // so the recovery page renders its "Restarting…" progress state and
-      // auto-refreshes itself until the workspace is healthy again, then
-      // navigates back to ``workspaceUrl``. Reloading the workspace URL directly would
-      // instead race the restart: the container is still up at dispatch
-      // time, so the reload would just show the pre-restart workspace.
-      bundle.contentView.webContents.loadURL(
-        toAbsoluteUrl(
-          '/agents/' + encodeURIComponent(agentId)
-          + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
-        ),
-      );
-    }
+    if (bundle.window.isDestroyed()) return;
+    // The restart POST has already moved the health tracker to RESTARTING, so
+    // the recovery page renders its "Restarting…" progress state and
+    // auto-refreshes itself until the workspace is healthy again, then
+    // navigates back to ``workspaceUrl``. Reloading the workspace URL directly
+    // would instead race the restart: the container is still up at dispatch
+    // time, so the reload would just show the pre-restart workspace.
+    //
+    // Route through navigateBundle (NOT contentView.loadURL) so the recovery
+    // page lands on the CHROME surface, exactly as the automatic did-fail-load
+    // and home-button restart paths do. The recovery page is a trusted
+    // backend-origin page whose driver script depends on the chrome surface's
+    // ``window.minds.navigateContent`` bridge to send the user home once the
+    // workspace is healthy -- the caged content view has no such bridge, and
+    // its content-guard would block the recovery page's fallback same-origin
+    // navigation outright, stranding it on "Restarting…" forever.
+    navigateBundle(
+      bundle,
+      toAbsoluteUrl(
+        '/agents/' + encodeURIComponent(agentId)
+        + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
+      ),
+    );
   };
-  template.push({
-    label: 'Restart system interface',
-    click: async () => {
-      // Close the sidebar first so the user gets immediate visual feedback
-      // while the restart dispatch is acknowledged.
-      closeModal(bundle);
-      await postRestart(agentId, 'services');
-      goToRecoveryView();
-    },
-  });
   template.push({
     label: 'Restart workspace…',
     click: async () => {

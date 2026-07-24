@@ -215,14 +215,20 @@ class PatchWorkspaceRequest(ApiRequestModel):
 
 
 class RestartWorkspaceRequest(ApiRequestModel):
-    """Body for restarting a workspace's services or whole host."""
+    """Body for restarting a workspace's host."""
 
     # ``scope`` is structurally a required string; the route validates that its
-    # value is one of services/host (a value-semantic check kept in the handler,
-    # since the lowercase wire values can't be a standard UpperCaseStrEnum).
-    scope: str = Field(description="'services' (restart system-services in place) or 'host' (bounce the host)")
-    host_already_stopped: bool | None = Field(
-        default=None, description="Skip the redundant stop step (host scope only) when the host is known stopped"
+    # value is 'host' (a value-semantic check kept in the handler, since the
+    # lowercase wire value can't be a standard UpperCaseStrEnum). The former
+    # 'services' scope (in-place system-services restart) was removed; it is
+    # rejected with a 400.
+    scope: str = Field(description="Must be 'host' (bounce the whole host); no other scope is supported")
+    start_only: bool | None = Field(
+        default=None,
+        description=(
+            "Skip the stop step and run only the idempotent ``mngr start`` -- safe to dispatch "
+            "with no knowledge of the host's state (a live host makes it a no-op)"
+        ),
     )
 
 

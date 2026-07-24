@@ -1,8 +1,10 @@
 import configparser
 import json
+import os
 import re
 import socket
 import subprocess
+import sys
 
 result = {
     "system_interface_status": None,
@@ -12,7 +14,45 @@ result = {
     "port_listener_error": None,
     "curl_status": None,
     "curl_error": None,
+    "agent_processes": None,
+    "agent_processes_error": None,
 }
+
+# Is the system-services agent itself running? Every process an agent launches
+# carries MNGR_AGENT_ID=<id> in its environment (mngr's own stop path finds
+# agent processes by this exact marker), so scanning /proc/*/environ for it
+# answers whether any of the agent's processes survive. `mngr stop
+# system-services` kills them all, which also takes down supervisord and
+# everything under it -- this probe names that cause directly. The agent id
+# arrives as argv[1]; without it the scan is skipped and the probe answers
+# unknown. Runs as root, so every /proc/<pid>/environ is readable. The scan
+# cannot match this script's own process tree: mngr exec sources the agent's
+# env file (which exports the marker) into the invoking shell, so the shell
+# command that pipes this script into python3 unsets MNGR_AGENT_ID first (see
+# build_probe_shell_command).
+agent_id = sys.argv[1] if len(sys.argv) > 1 else ""
+if agent_id:
+    try:
+        marker = ("MNGR_AGENT_ID=" + agent_id).encode()
+        matches = []
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open("/proc/{}/environ".format(pid), "rb") as fh:
+                    environ = fh.read()
+            except OSError:
+                continue
+            if marker in environ.split(b"\x00"):
+                try:
+                    with open("/proc/{}/comm".format(pid)) as fh:
+                        comm = fh.read().strip()
+                except OSError:
+                    comm = "?"
+                matches.append("{} {}".format(pid, comm))
+        result["agent_processes"] = "\n".join(matches)
+    except Exception as e:
+        result["agent_processes_error"] = repr(e)
 
 # Authoritative liveness check: ask supervisord -- which owns every background
 # service since the services.toml/bootstrap-service-manager migration -- whether

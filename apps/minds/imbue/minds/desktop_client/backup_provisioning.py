@@ -137,6 +137,18 @@ def build_canonical_env_content(
 # ---------------------------------------------------------------------------
 
 
+def build_backup_exec_argv(agent_id: AgentId, command_str: str) -> list[str]:
+    """The ``mngr exec`` argv for a backup-stack command on the agent's host.
+
+    --no-start: ``mngr exec`` auto-starts a stopped host by default, and none of
+    the backup-stack execs may cold-boot a container as a side effect -- the
+    periodic verification check in particular gates on an ``is_workspace_online``
+    reading that can be stale (a replayed pre-start RUNNING at app startup was
+    observed booting a stopped container through this path).
+    """
+    return [MNGR_BINARY, "exec", str(agent_id), command_str, "--no-start"]
+
+
 def run_mngr_exec_on_agent(
     agent_id: AgentId,
     command_str: str,
@@ -148,12 +160,13 @@ def run_mngr_exec_on_agent(
 
     Shared by env injection, the backup-service verification check, and the
     backup-service update scripts; the caller inspects the returned process.
+    Never starts a stopped host (see :func:`build_backup_exec_argv`).
     """
     name = "backup-exec"
     cg = parent_cg.make_concurrency_group(name=name) if parent_cg is not None else ConcurrencyGroup(name=name)
     with cg:
         return cg.run_process_to_completion(
-            command=[MNGR_BINARY, "exec", str(agent_id), command_str],
+            command=build_backup_exec_argv(agent_id, command_str),
             timeout=timeout_seconds,
             is_checked_after=False,
         )

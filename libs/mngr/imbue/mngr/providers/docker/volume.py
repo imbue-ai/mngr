@@ -11,6 +11,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import VolumeListingError
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.volume import BaseVolume
@@ -143,7 +144,17 @@ class DockerVolume(BaseVolume):
         # BusyBox-compatible: use ls -la and parse output
         exit_code, output = self._exec(f"ls -la '{resolved}'")
         if exit_code != 0:
-            raise FileNotFoundError(f"Directory not found on volume: {path}")
+            # Distinguish a genuinely-missing directory (normal: a fresh env's
+            # host_state, a host with no persisted agents) from every other
+            # failure -- a failed exec against the state container makes the
+            # listing look empty upstream, which discovery reports as "these
+            # hosts/agents do not exist", so it must not masquerade as the
+            # missing-directory case.
+            if "No such file or directory" in output:
+                raise FileNotFoundError(f"Directory not found on volume: {path}")
+            raise VolumeListingError(
+                f"Failed to list '{path}' on volume (ls exited {exit_code}): {output.strip()[:200]}"
+            )
         if not output.strip():
             return []
 
@@ -183,7 +194,10 @@ class DockerVolume(BaseVolume):
         resolved = self._resolve(path)
         exit_code, output = self.container.exec_run(["cat", resolved], workdir="/")
         if exit_code != 0:
-            raise FileNotFoundError(f"File not found on volume: {path}")
+            detail = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output)
+            raise FileNotFoundError(
+                f"File not found on volume: {path} (cat exited {exit_code}: {detail.strip()[:200]})"
+            )
         return output if isinstance(output, bytes) else output.encode("utf-8")
 
     def remove_file(self, path: str, *, recursive: bool = False) -> None:

@@ -1,6 +1,8 @@
 import json
 import os
+import queue
 import shlex
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -45,8 +47,10 @@ from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import status_text_for
+from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -672,6 +676,63 @@ def test_lifecycle_without_concurrency_group_returns_501(tmp_path: Path) -> None
     response = client.post(f"/api/v1/workspaces/{agent_id}/start", headers=_auth_header())
 
     assert response.status_code == 501
+
+
+def test_stop_workspace_broadcasts_workspace_stopped_event(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A successful v1 stop broadcasts a one-shot ``workspace_stopped`` chrome SSE payload.
+
+    The Electron shell closes any window still open to the workspace off this
+    event (otherwise the open view would observe the dead interface, redirect
+    to recovery, and auto-restart the host -- silently undoing an
+    agent-requested stop). The landing-page stop shares this route, so both
+    stop paths emit through the one mechanism.
+    """
+    agent_id = AgentId()
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
+    )
+    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    wake_event = threading.Event()
+    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, wake_event)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/stop", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert wake_event.is_set()
+    assert event_queue.get_nowait() == {"type": "workspace_stopped", "agent_id": str(agent_id)}
+
+
+def test_start_workspace_does_not_broadcast_workspace_stopped(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Only the STOP action emits ``workspace_stopped``; a start emits nothing."""
+    agent_id = AgentId()
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
+    )
+    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, threading.Event())
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/start", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert event_queue.empty()
 
 
 def test_operation_status_unknown_create_id_returns_404(tmp_path: Path) -> None:
@@ -1578,11 +1639,10 @@ def test_workspace_health_requires_bearer(tmp_path: Path, root_concurrency_group
     assert response.status_code == 401
 
 
-@pytest.mark.parametrize("scope", ["services", "host"])
 def test_workspace_restart_returns_202_operation_handle(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, scope: str
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    # Both restart scopes return a 202 with the workspace's own id as the
+    # A host restart returns a 202 with the workspace's own id as the
     # operation handle and a kind of "restart".
     agent_id = AgentId()
     services_id = AgentId()
@@ -1597,13 +1657,16 @@ def test_workspace_restart_returns_202_operation_handle(
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": scope})
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"})
 
     assert response.status_code == 202
     assert json.loads(response.data) == {"operation_id": str(agent_id), "kind": "restart"}
 
 
-def test_workspace_restart_rejects_invalid_scope(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
+@pytest.mark.parametrize("scope", ["nope", "services"])
+def test_workspace_restart_rejects_non_host_scope(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, scope: str
+) -> None:
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(
@@ -1613,11 +1676,12 @@ def test_workspace_restart_rejects_invalid_scope(tmp_path: Path, root_concurrenc
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "nope"})
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": scope})
 
     # ``scope`` is structurally a string (so it passes spectree), but its *value*
-    # must be one of services/host -- a value-semantic check the handler keeps,
-    # emitting the field-naming 400.
+    # must be 'host' -- a value-semantic check the handler keeps, emitting the
+    # field-naming 400. The former 'services' scope (in-place system-services
+    # restart) was removed, so it is rejected the same way.
     assert response.status_code == 400
     assert "scope" in json.loads(response.data)["error"]
 
@@ -1633,9 +1697,7 @@ def test_workspace_restart_unknown_workspace_returns_404(
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    response = client.post(
-        f"/api/v1/workspaces/{AgentId()}/restart", headers=_auth_header(), json={"scope": "services"}
-    )
+    response = client.post(f"/api/v1/workspaces/{AgentId()}/restart", headers=_auth_header(), json={"scope": "host"})
 
     assert response.status_code == 404
 
@@ -1647,9 +1709,7 @@ def test_workspace_restart_unavailable_without_tracker_returns_503(tmp_path: Pat
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver)
 
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
-    )
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"})
 
     assert response.status_code == 503
 
@@ -1659,9 +1719,44 @@ def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver)
 
-    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", json={"scope": "services"})
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", json={"scope": "host"})
 
     assert response.status_code == 401
+
+
+def test_workspace_restart_spawn_failure_returns_503_and_logs_error(tmp_path: Path) -> None:
+    """A restart whose worker thread cannot be spawned fails closed with one error log.
+
+    The spawn raises when the concurrency group is shutting down (simulated here
+    with an already-exited group). The route has already claimed RESTARTING, so
+    it must roll that into RESTART_FAILED, fail the registry operation (so the
+    operation poller doesn't hang), return 503 -- and log at error level: this is
+    the fifth restart-failure branch that must reach error reporting (Principle
+    3: the recovery surface is quiet).
+    """
+    agent_id = AgentId()
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    with ConcurrencyGroup(name="exited-restart-group") as exited_group:
+        pass
+    tracker = SystemInterfaceHealthTracker()
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=exited_group,
+        system_interface_health_tracker=tracker,
+    )
+
+    with capture_error_logs() as error_records:
+        response = client.post(
+            f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"}
+        )
+
+    assert response.status_code == 503
+    assert tracker.get_health(agent_id) == AgentHealth.RESTART_FAILED
+    record = get_state(client.application).workspace_operation_registry.get(agent_id)
+    assert record is not None and record.status == WorkspaceOperationStatus.FAILED
+    assert len(error_records) == 1, error_records
 
 
 def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: AgentId) -> dict[str, Any]:
@@ -1690,11 +1785,11 @@ def test_restart_dispatches_for_never_probed_workspace(
 
     A workspace whose host has been offline since before this process started is
     never enrolled as a probe suspect, so the tracker reports default-HEALTHY for
-    it. A veto keyed on that reading would drop the recovery page's cold-boot
-    dispatch (host scope + ``host_already_stopped``), stranding the workspace on
-    the loader forever. The dispatch must proceed to a real restart operation --
-    self-recovery races are absorbed by ``mngr start`` only targeting STOPPED
-    agents, not by an endpoint-side veto.
+    it. A veto keyed on that reading would drop the recovery page's
+    unconditional entry dispatch (host scope + ``start_only``), stranding the
+    workspace on the loader forever. The dispatch must proceed to a real restart
+    operation -- self-recovery races are absorbed by ``mngr start`` only
+    targeting STOPPED agents, not by an endpoint-side veto.
     """
     agent_id = AgentId()
     services_id = AgentId()
@@ -1715,7 +1810,7 @@ def test_restart_dispatches_for_never_probed_workspace(
     response = client.post(
         f"/api/v1/workspaces/{agent_id}/restart",
         headers=_auth_header(),
-        json={"scope": "host", "host_already_stopped": True},
+        json={"scope": "host", "start_only": True},
     )
 
     assert response.status_code == 202
@@ -1748,9 +1843,7 @@ def test_workspace_restart_registers_operation_reaching_done(
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    dispatch = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
-    )
+    dispatch = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"})
     assert dispatch.status_code == 202
 
     body = _wait_for_restart_worker_and_get_status(client, agent_id)
@@ -1935,9 +2028,7 @@ def test_workspace_restart_conflicts_with_a_running_backup_operation(
     registry = get_state(client.application).workspace_operation_registry
     registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
 
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
-    )
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"})
 
     assert response.status_code == 409
     assert "BACKUP_UPDATE" in json.loads(response.data)["error"]

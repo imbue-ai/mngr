@@ -3,7 +3,10 @@
 import json
 import shlex
 
+import pytest
+
 from imbue.minds.desktop_client.recovery_probe import DispatchTier
+from imbue.minds.desktop_client.recovery_probe import HOST_ACCESS_REJECTED_REASON
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import Probe
@@ -33,6 +36,7 @@ def _response(
     provider_label: str = "",
     mngr_exec_command: str = "",
     probe_timed_out: bool = False,
+    probe_exec_attempted: bool = False,
     classification_is_trustworthy: bool = True,
 ) -> HostHealthResponse:
     """Call ``build_host_health_response`` with resolver-sourced defaults.
@@ -49,6 +53,7 @@ def _response(
         provider_label=provider_label,
         mngr_exec_command=mngr_exec_command,
         probe_timed_out=probe_timed_out,
+        probe_exec_attempted=probe_exec_attempted,
         classification_is_trustworthy=classification_is_trustworthy,
     )
 
@@ -110,6 +115,20 @@ def test_build_probe_argv_targets_services_agent_with_timeout_and_no_start() -> 
     assert "--quiet" in argv
 
 
+def test_build_probe_argv_passes_agent_id_to_the_inner_script() -> None:
+    """The inner script's agent-process scan needs the agent id as its argv[1].
+
+    The command must also unset MNGR_AGENT_ID first: ``mngr exec`` sources the
+    services agent's env file (which exports that exact marker) into the shell,
+    so without the unset the scan would match the probe's own python3 process
+    and report a stopped agent as running.
+    """
+    argv = build_probe_argv("/usr/local/bin/mngr", _SERVICES_AGENT_ID)
+    shell_command = argv[3]
+    assert shell_command.startswith("unset MNGR_AGENT_ID && ")
+    assert shell_command.endswith(f"| python3 - {_SERVICES_AGENT_ID}")
+
+
 # --- per-probe answers ----------------------------------------------------
 
 
@@ -123,14 +142,14 @@ def test_container_running_probe_says_no_when_host_state_is_stopped() -> None:
     assert _answer(response, "container running") == ProbeAnswer.NO
 
 
-def test_container_running_probe_says_yes_when_host_state_is_unauthenticated() -> None:
-    """UNAUTHENTICATED means the container was observed running but inner SSH is dead.
+def test_container_running_probe_says_yes_when_host_state_is_unreachable() -> None:
+    """UNREACHABLE means the host was observed up but its inner sshd is dead.
 
     Both producers (docker's connection-error fallback hook and imbue_cloud's
     listing path; PR #2247) emit it only after observing a running container, so
     the "is the container running?" answer is an observed YES.
     """
-    response = _response(host_state="UNAUTHENTICATED")
+    response = _response(host_state="UNREACHABLE")
     assert _answer(response, "container running") == ProbeAnswer.YES
 
 
@@ -157,6 +176,40 @@ def test_services_agent_registered_probe_yes_when_id_resolved() -> None:
 def test_services_agent_registered_probe_unknown_when_id_not_known() -> None:
     response = _response(services_agent_id=None)
     assert _answer(response, "system-services agent registered") == ProbeAnswer.UNKNOWN
+
+
+def test_services_agent_running_probe_yes_when_agent_processes_found() -> None:
+    """Live MNGR_AGENT_ID-tagged processes mean the system-services agent is running."""
+    response = _response(in_container_stdout=_probe_stdout({"agent_processes": "42 supervisord\n43 claude"}))
+    probe = _probe_for(response, "system-services agent running")
+    assert probe.answer == ProbeAnswer.YES
+    assert probe.output == "42 supervisord\n43 claude"
+
+
+def test_services_agent_running_probe_no_when_no_agent_processes_survive() -> None:
+    """An empty scan means ``mngr stop system-services`` (or a crash) took the agent down.
+
+    This is the row that names the cause when the supervisord probes can only
+    report connection errors: supervisord died *because* the agent it runs under
+    was stopped.
+    """
+    response = _response(in_container_stdout=_probe_stdout({"agent_processes": ""}))
+    probe = _probe_for(response, "system-services agent running")
+    assert probe.answer == ProbeAnswer.NO
+    assert probe.output == f"(no live process carries MNGR_AGENT_ID={_SERVICES_AGENT_ID})"
+
+
+def test_services_agent_running_probe_unknown_when_scan_skipped_or_errored() -> None:
+    """No scan result (old script, no agent id) or a scan error cannot claim NO."""
+    skipped = _response(in_container_stdout=_probe_stdout({}))
+    assert _answer(skipped, "system-services agent running") == ProbeAnswer.UNKNOWN
+    errored = _response(in_container_stdout=_probe_stdout({"agent_processes_error": "PermissionError(...)"}))
+    assert _answer(errored, "system-services agent running") == ProbeAnswer.UNKNOWN
+
+
+def test_services_agent_running_probe_unknown_when_probe_did_not_run() -> None:
+    response = _response(in_container_stdout=None)
+    assert _answer(response, "system-services agent running") == ProbeAnswer.UNKNOWN
 
 
 def test_can_run_commands_probe_no_when_sentinel_absent() -> None:
@@ -250,28 +303,75 @@ def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
 # --- dispatch_tier classification ----------------------------------------
 
 
-def test_dispatch_tier_interface_unresponsive_when_container_running_and_exec_works() -> None:
+def test_dispatch_tier_host_unresponsive_when_exec_works_but_interface_not_answering() -> None:
+    """Exec reached the container but GET / is not answering 200 -> consent-gated verdict.
+
+    There is no in-place (surgical) restart tier anymore: an interface that is
+    not answering, with supervisord not reporting a self-heal in progress, gets
+    the consent-gated "Workspace unresponsive" page. The page's liveness poll
+    still returns the user home the moment the interface self-heals, so no
+    restart fires without a click.
+    """
     response = _response(
         host_state="RUNNING",
         in_container_stdout=_probe_stdout({"inner_port": 8000, "curl_status": "502"}),
     )
-    assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
-def test_dispatch_tier_interface_unresponsive_when_system_interface_not_running() -> None:
-    """A not-RUNNING system_interface (container up, exec works) is still INTERFACE_UNRESPONSIVE.
+@pytest.mark.parametrize(
+    "status_line",
+    [
+        "system_interface   RUNNING   pid 42, uptime 0:10:00",
+        "system_interface   FATAL     Exited too quickly",
+        "system_interface   EXITED    Jul 14 09:00 AM",
+        "system_interface   STOPPED   Not started",
+        "unix:///var/run/supervisor.sock refused connection",
+    ],
+)
+def test_dispatch_tier_host_unresponsive_for_settled_or_unparseable_supervisord_state(status_line: str) -> None:
+    """A settled (or unreadable) supervisord state carries no self-heal promise.
 
-    The supervisorctl probe is diagnostic detail, not its own tier: a surgical
-    restart bounces supervisord (and the system_interface with it), which is the
-    correct recovery, so the dispatch tier must not branch on probe 4.
+    Exec works but the interface is not answering: unless supervisord positively
+    reports a start in progress, the verdict is the consent-gated
+    HOST_UNRESPONSIVE -- including a status line we cannot parse.
     """
     response = _response(
         host_state="RUNNING",
         in_container_stdout=_probe_stdout(
-            {"system_interface_status": "system_interface   FATAL     Exited too quickly", "inner_port": 8000}
+            {"system_interface_status": status_line, "inner_port": 8000, "curl_status": "502"}
         ),
     )
-    assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+@pytest.mark.parametrize(
+    "status_line",
+    [
+        "system_interface   STARTING",
+        "system_interface   BACKOFF   Exited too quickly (process log may have details)",
+    ],
+)
+def test_dispatch_tier_indeterminate_while_supervisord_self_heals(status_line: str) -> None:
+    """supervisord STARTING/BACKOFF means it is already fixing the interface -> keep checking.
+
+    Restart-worthy conclusions must wait for the evidence to settle: a service in
+    its startsecs window (STARTING) or supervisord's own retry loop (BACKOFF) is
+    mid-self-heal, so the classifier keeps checking rather than rendering the
+    consent-gated verdict.
+    """
+    response = _response(
+        host_state="RUNNING",
+        in_container_stdout=_probe_stdout(
+            {"system_interface_status": status_line, "inner_port": 8000, "curl_status": "502"}
+        ),
+    )
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_no_interface_unresponsive_tier_exists() -> None:
+    """The surgical-restart tier is gone: no DispatchTier member carries its value."""
+    assert "interface_unresponsive" not in {tier.value for tier in DispatchTier}
 
 
 def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
@@ -279,7 +379,7 @@ def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
 
     The live in-container HTTP 200 is direct proof the interface is responding, so
     the classifier must report HEALTHY (the recovery page returns the user to the
-    workspace) rather than the by-elimination INTERFACE_UNRESPONSIVE -- this is
+    workspace) rather than a by-elimination unresponsive verdict -- this is
     the fix for a healthy workspace being misclassified (and needlessly
     restarted) just because container+exec were up.
     """
@@ -291,9 +391,52 @@ def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
     assert response.dispatch_tier == DispatchTier.HEALTHY
 
 
-def test_dispatch_tier_host_offline_when_container_is_offline() -> None:
-    response = _response(host_state="STOPPED")
+@pytest.mark.parametrize("host_state", ["STOPPED", "CRASHED"])
+def test_dispatch_tier_host_offline_when_container_observed_stopped_or_crashed(host_state: str) -> None:
+    """A trusted observed-not-running state (settled, non-FAILED) reads HOST_OFFLINE.
+
+    Display-only, like every tier: the recovery flow's start-only restart is
+    dispatched unconditionally on page entry, so this verdict just names the
+    observed condition on the failure page's diagnostics.
+    """
+    response = _response(host_state=host_state)
     assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_dispatch_tier_indeterminate_while_host_is_stopping() -> None:
+    """STOPPING is transitional: keep checking; it settles to STOPPED a moment later."""
+    response = _response(host_state="STOPPING", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_host_unresponsive_for_failed_host_state() -> None:
+    """FAILED renders the consent page, not the offline verdict.
+
+    A failed-to-create host is observed not running, but a plain start on it
+    mostly re-fails -- so it renders the "Workspace unresponsive" page (manual
+    stop+start on offer) instead of HOST_OFFLINE's offline framing.
+    """
+    response = _response(host_state="FAILED", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_backend_unreachable_for_unauthenticated_host_state_with_canned_reason() -> None:
+    """UNAUTHENTICATED (host rejected this machine's access) is terminal: retry/report only.
+
+    A restart routes through the same rejected credential, so the page must not
+    offer one. Discovery carries no per-host failure detail, so the response
+    carries the canned access-rejected reason and the provider label.
+    """
+    response = _response(host_state="UNAUTHENTICATED", in_container_stdout=None, provider_label="Imbue Cloud")
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
+    assert response.unreachable_reason == HOST_ACCESS_REJECTED_REASON
+    assert response.provider_label == "Imbue Cloud"
+
+
+def test_dispatch_tier_unauthenticated_host_state_is_subject_to_the_freshness_gate() -> None:
+    """A stale UNAUTHENTICATED reading is a negative verdict like any other -> INDETERMINATE first."""
+    response = _response(host_state="UNAUTHENTICATED", in_container_stdout=None, classification_is_trustworthy=False)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
 def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() -> None:
@@ -308,16 +451,16 @@ def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() 
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
-def test_dispatch_tier_host_unresponsive_for_unauthenticated_host_state() -> None:
+def test_dispatch_tier_host_unresponsive_for_unreachable_host_state() -> None:
     """Dead inner sshd (`pkill sshd` in the container) -> consent-gated host restart.
 
     The provider observed the container running but could not get inside, so it
-    reported UNAUTHENTICATED. The consent-gated host restart is the engineered
+    reported UNREACHABLE. The consent-gated host restart is the engineered
     recovery for this state (PR #2247): its stop step is not skipped, so the
     stop/start relaunches the inner sshd. This must NOT classify INDETERMINATE --
     a dead sshd never self-heals, so "keep checking" would strand the user.
     """
-    response = _response(host_state="UNAUTHENTICATED", in_container_stdout=None)
+    response = _response(host_state="UNREACHABLE", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
@@ -368,15 +511,156 @@ def test_dispatch_tier_indeterminate_when_snapshot_is_stale() -> None:
     assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
-def test_dispatch_tier_stale_snapshot_does_not_downgrade_offline_verdict_to_a_restart() -> None:
-    """A stale STOPPED reading is not trusted enough to auto-dispatch a host restart.
+@pytest.mark.parametrize("host_state", ["STOPPED", "CRASHED"])
+def test_dispatch_tier_stale_offline_state_is_gated_like_every_other_verdict(host_state: str) -> None:
+    """A stale STOPPED/CRASHED reading is INDETERMINATE, uniformly with other verdicts.
 
-    HOST_OFFLINE auto-dispatches an unattended restart, so it must only fire off a
-    trusted observation. With a stale snapshot the container-offline reading yields
-    INDETERMINATE instead.
+    The offline pair once carried a no-freshness-gate exemption so its verdict
+    could auto-dispatch the cold boot off a stale reading; with the restart now
+    dispatched unconditionally on page entry, the tiers are display-only and
+    the exemption is gone -- a stale offline reading keeps checking rather than
+    rendering an offline verdict off non-evidence.
     """
-    response = _response(host_state="STOPPED", in_container_stdout=None, classification_is_trustworthy=False)
+    response = _response(host_state=host_state, in_container_stdout=None, classification_is_trustworthy=False)
     assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_stale_offline_state_with_completed_exec_failure_reads_unresponsive() -> None:
+    """A stale STOPPED plus a completed exec failure resolves via the exec evidence.
+
+    The app-startup shape: only the replayed pre-start snapshot exists (reading
+    STOPPED, untrusted), discovery counts as stalled, so the exec is attempted
+    and completes without reaching the stopped container. The completed exec
+    failure is the direct evidence that resolves the page (the stale reading
+    stays gated), so the failure page renders the unresponsive verdict.
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_timeout_stays_indeterminate_even_with_a_stale_offline_state() -> None:
+    """A probe timeout keeps checking even when the (stale) state reads STOPPED.
+
+    The macOS-sleep protection keeps precedence: a timed-out exec observed
+    nothing, so no verdict fires off that probe -- the next completed probe
+    resolves to a real tier a cycle later.
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=None,
+        probe_timed_out=True,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_provider_error_beats_a_stale_offline_state() -> None:
+    """A provider error still wins over an observed-offline state.
+
+    With the provider unreachable no restart routed through it can help, and
+    the host-state reading it produced cannot be trusted either way.
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=None,
+        classification_is_trustworthy=False,
+        provider_error_message="Cannot connect to Docker daemon",
+        provider_label="Docker",
+    )
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
+
+
+def test_dispatch_tier_host_unresponsive_when_completed_exec_fails_despite_stale_snapshot() -> None:
+    """An exec that completed without the sentinel resolves the tier even with no fresh snapshot.
+
+    The dead-inner-sshd case with a stalled discovery producer: no snapshot taken
+    after the outage onset will ever land, so the freshness gate can never open --
+    but the exec itself ran to completion and failed, which is a direct fresh
+    observation that we cannot get into the container. Waiting on the gate here
+    parked the page on "Reconnecting" forever; the completed failure must yield
+    the consent-gated HOST_UNRESPONSIVE instead.
+    """
+    response = _response(
+        host_state="RUNNING",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_host_unresponsive_when_completed_exec_fails_with_no_host_state() -> None:
+    """A completed exec failure needs no host-state observation at all.
+
+    A stopped container under a stalled discovery producer: the resolver's host
+    state is absent (or stale) and can never be re-certified, but the attempted
+    exec completed and failed -- enough for the consent-gated verdict, whose
+    restart also revives a genuinely stopped container.
+    """
+    response = _response(
+        host_state="",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_timeout_stays_indeterminate_even_for_an_attempted_exec() -> None:
+    """A timed-out exec observed nothing: the attempted flag must not upgrade it.
+
+    The macOS-sleep case again: the exec was attempted but its window spanned a
+    suspend, so the timeout is absence of evidence -- INDETERMINATE, never the
+    unresponsive verdict.
+    """
+    response = _response(
+        host_state="RUNNING",
+        in_container_stdout=None,
+        probe_timed_out=True,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_trusted_offline_state_beats_a_completed_exec_failure() -> None:
+    """A trusted STOPPED observation renders HOST_OFFLINE over the exec verdict.
+
+    When discovery re-observed the host post-onset and read it STOPPED, the
+    exec's failure is just the expected consequence of a stopped container; the
+    trusted observation names the condition precisely (offline) rather than
+    downgrading the display to the generic unresponsive verdict.
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=True,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_dispatch_tier_trusted_unknown_state_falls_through_to_completed_exec_failure() -> None:
+    """A trusted UNKNOWN state says nothing; the completed exec failure still resolves.
+
+    UNKNOWN means the host was unobservable during discovery, which carries no
+    verdict of its own -- but an exec that completed without reaching the
+    container is direct evidence, so the page renders the consent-gated verdict
+    instead of checking forever.
+    """
+    response = _response(
+        host_state="UNKNOWN",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=True,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
 def test_dispatch_tier_healthy_direct_evidence_beats_a_stale_snapshot() -> None:
@@ -523,7 +807,7 @@ def test_container_running_probe_reads_state_from_discovery_snapshot() -> None:
 
 
 def test_services_agent_probe_outputs_the_resolved_agent_id() -> None:
-    probe = _probe_for(_response(services_agent_id=_SERVICES_AGENT_ID), "system-services agent")
+    probe = _probe_for(_response(services_agent_id=_SERVICES_AGENT_ID), "system-services agent registered")
     assert probe.command == "(system-services agent from the discovery snapshot)"
     assert probe.output == str(_SERVICES_AGENT_ID)
 

@@ -13,6 +13,8 @@ current version and an empty history -- callers fall back to the
 ``original_minds_version`` label, the one version fact knowable offline.
 """
 
+import json
+import shlex
 from datetime import datetime
 
 from loguru import logger
@@ -116,14 +118,23 @@ def _exec_git_in_workspace(
     git_args: tuple[str, ...],
     mngr_caller: MngrCaller,
 ) -> str | None:
-    """Run a git command inside the workspace via ``mngr exec``; return stdout or None on failure.
+    """Run a git command inside the workspace via ``mngr exec``; return its stdout or None on failure.
 
     Runs through the shared warm-process ``mngr_caller``, which surfaces a
     launch/exec failure as a non-zero ``returncode`` (rather than raising), so
     the best-effort None fallback covers every failure mode.
     """
+    # ``mngr exec`` takes the command as a single trailing COMMAND argument (its
+    # CLI is ``mngr exec [AGENTS]... COMMAND``) and runs it in a shell, so the
+    # git command is joined into one shell string -- extra tokens would be
+    # parsed as additional agent names and the whole call would error out.
+    # --no-start: ``mngr exec`` auto-starts a stopped host by default, and a
+    # best-effort version read must not cold-boot a container as a side effect.
+    # ``--format json`` keeps the captured stdout clean: in its default (human)
+    # format ``mngr exec`` appends a ``Command succeeded on agent <name>``
+    # status line to stdout after the command's own output.
     result = mngr_caller.call(
-        ["exec", str(agent_id), "--", *git_args],
+        ["exec", "--no-start", str(agent_id), shlex.join(git_args), "--format", "json"],
         timeout=_GIT_EXEC_TIMEOUT_SECONDS,
     )
     if result.is_timed_out or result.returncode != 0:
@@ -135,7 +146,15 @@ def _exec_git_in_workspace(
             result.returncode,
         )
         return None
-    return result.stdout
+    try:
+        envelope = json.loads(result.stdout)
+        return str(envelope["results"][0]["stdout"])
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        # Warning (not debug): a zero-exit exec whose ``--format json`` envelope
+        # does not parse is a broken mngr output contract, not a normal
+        # offline/no-tags fallback.
+        logger.warning("git {} in workspace {} produced an unparseable exec envelope: {}", git_args, agent_id, e)
+        return None
 
 
 def _exec_git_describe(*, agent_id: AgentId, mngr_caller: MngrCaller) -> str | None:

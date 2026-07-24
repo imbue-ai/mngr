@@ -60,7 +60,6 @@ from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -154,6 +153,8 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -1457,7 +1458,6 @@ def _handle_chrome_events() -> Response:
     """
     authenticated = _is_request_authenticated()
     backend_resolver = get_state().backend_resolver
-    help_broker = get_state().help_modal_request_broker
 
     def _event_generator() -> Iterator[str]:
         if not authenticated:
@@ -1475,11 +1475,11 @@ def _handle_chrome_events() -> Response:
         # in the main generator loop so each subscriber sees every event.
         health_queue: queue.Queue[tuple[str, AgentHealth]] = queue.Queue()
 
-        # Agent-initiated "open the pre-filled report modal" requests arrive on a
-        # Flask request thread (the /api/v1 report route) via the broker. We
-        # accumulate them per-connection and drain them in the loop, the same
-        # way health transitions are handled.
-        open_help_queue: queue.Queue[OpenHelpRequest] = queue.Queue()
+        # One-shot broadcast payloads (e.g. ``workspace_stopped``, ``open_help``)
+        # arrive on a Flask request thread via the broadcaster; we accumulate
+        # them per-connection and drain them in the loop, the same way health
+        # transitions are handled. Each payload is already the finished SSE frame.
+        broadcast_queue: queue.Queue[dict[str, str]] = queue.Queue()
 
         def _on_change() -> None:
             change_event.set()
@@ -1488,9 +1488,10 @@ def _handle_chrome_events() -> Response:
             _enqueue_health_change(health_queue, change_event, agent_id, status)
 
         # Subscribe this connection's queue + wake event directly (no callback)
-        # so the broker fans open-help requests onto it the same way health
+        # so the broadcaster fans one-shot payloads onto it the same way health
         # transitions reach ``health_queue``.
-        help_broker.subscribe(open_help_queue, change_event)
+        event_broadcaster = get_state().chrome_event_broadcaster
+        event_broadcaster.subscribe(broadcast_queue, change_event)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -1621,17 +1622,8 @@ def _handle_chrome_events() -> Response:
                 if shutdown_event.is_set():
                     break
 
-                while not open_help_queue.empty():
-                    help_request = open_help_queue.get_nowait()
-                    yield "data: {}\n\n".format(
-                        json.dumps(
-                            {
-                                "type": "open_help",
-                                "description": help_request.description,
-                                "workspace_agent_id": help_request.workspace_agent_id,
-                            }
-                        )
-                    )
+                while not broadcast_queue.empty():
+                    yield "data: {}\n\n".format(json.dumps(broadcast_queue.get_nowait()))
 
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
@@ -1715,7 +1707,7 @@ def _handle_chrome_events() -> Response:
                         json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
-            help_broker.unsubscribe(open_help_queue, change_event)
+            event_broadcaster.unsubscribe(broadcast_queue, change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
@@ -2038,6 +2030,11 @@ def _handle_recovery_page(
     tracker: SystemInterfaceHealthTracker | None = get_state().system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
+    # Whether an in-flight restart is start-only (a possible-no-op entry
+    # dispatch) vs a full manual bounce; None outside a restart. Selects the
+    # restarting-state copy on the page ("Loading workspace" vs "Restarting
+    # your workspace"). Read only while RESTARTING, so it never gates dispatch.
+    restart_is_start_only = tracker.get_restart_is_start_only(aid) if tracker is not None else None
     return_to = _sanitize_recovery_return_to(request.args.get("return_to", ""))
     is_explicit_restart = request.args.get("intent", "") == "restart"
     # The recovery page renders from ``render_status`` and then polls itself in
@@ -2049,8 +2046,9 @@ def _handle_recovery_page(
         if is_explicit_restart:
             # The user explicitly asked to restart a currently-healthy
             # workspace (the home-page restart control). Render as STUCK so
-            # the page runs the layer-2 probe and dispatches a restart instead
-            # of sitting idle on a "healthy" page.
+            # the page dispatches its start-only restart (a cold boot for a
+            # stopped mind, a no-op for a live one) instead of sitting idle
+            # on a "healthy" page.
             render_status = AgentHealth.STUCK.value
         elif return_to:
             # The workspace recovered before this page loaded -- either a race
@@ -2065,18 +2063,39 @@ def _handle_recovery_page(
             # restart button.
             pass
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
+    # Display-only offline hint: whether the resolver currently reads the
+    # workspace's host as offline. Selects the "Bringing your workspace back
+    # online" copy for the restarting state (and rides along on every poll
+    # tick as a header, so a stale reading at a cold launch self-corrects once
+    # discovery lands). Never gates what is dispatched.
+    display_info = backend_resolver.get_agent_display_info(aid)
+    host_state: HostState | None = None
+    if display_info is not None:
+        try:
+            host_state = backend_resolver.get_host_state(HostId(display_info.host_id))
+        except ValueError:
+            # Resolvers without discovery report a "localhost" placeholder that
+            # is not a parseable HostId; they carry no host state anyway.
+            host_state = None
+    is_host_offline = host_state in (HostState.STOPPED, HostState.CRASHED)
     html_body = render_recovery_page(
         agent_id=aid,
         return_to=return_to,
         initial_status=render_status,
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
+        initial_offline=is_host_offline,
+        restart_is_start_only=bool(restart_is_start_only),
     )
     # Expose the rendered status so the page's background convergence poll can
     # tell "still restarting" (keep waiting, no reload) from a state change
     # (reload to render the new state) without a focus-stealing full reload on
-    # every tick. See the recovery script's ``scheduleRefresh``.
-    return make_html_response(content=html_body, headers={"X-Recovery-Status": render_status})
+    # every tick. See the recovery script's ``scheduleRefresh``, which also
+    # reads the offline hint off every tick.
+    return make_html_response(
+        content=html_body,
+        headers={"X-Recovery-Status": render_status, "X-Workspace-Offline": "1" if is_host_offline else "0"},
+    )
 
 
 # -- Account management routes --

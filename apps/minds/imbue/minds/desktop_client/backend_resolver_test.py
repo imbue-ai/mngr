@@ -585,6 +585,22 @@ def test_host_state_override_does_not_affect_active_workspace_filtering() -> Non
     assert resolver.list_active_workspace_ids() == (agent,)
 
 
+def test_host_state_override_is_not_persisted_across_sessions(tmp_path: Path) -> None:
+    """Overrides are in-memory only: a fresh resolver on the same topology path knows nothing of them.
+
+    Host lifecycle state is deliberately not persisted across a quit -- the
+    recovery flow dispatches its start-only restart unconditionally on entry,
+    so the next launch needs no memory of which hosts were stopped (a persisted
+    lifecycle mirror proved unreconcilable against stale in-flight and replayed
+    discovery snapshots).
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    MngrCliBackendResolver(last_good_agents_path=topology_path).set_host_state_override(host, HostState.STOPPED)
+
+    assert MngrCliBackendResolver(last_good_agents_path=topology_path).get_host_state(host) is None
+
+
 def test_parse_agents_from_json_extracts_host_state() -> None:
     """mngr list --format json carries host.state, which parsing surfaces per host id."""
     json_output = json.dumps(
@@ -943,6 +959,33 @@ def test_last_good_topology_ignores_malformed_persisted_file(tmp_path: Path) -> 
 
     resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
     assert resolver.get_system_services_agent_id(AgentId.generate()) is None
+
+
+def test_last_good_topology_tolerates_unknown_fields_from_other_versions(tmp_path: Path) -> None:
+    """A topology file carrying fields this version does not know still loads its agents.
+
+    The file is a persisted cache read back across app versions (e.g. a build
+    that persisted offline host states alongside the topology). Rejecting the
+    unknown field would void the whole topology and lose the system-services
+    fallback exactly on the first launch after an upgrade.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    seed = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    seed.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
+        )
+    )
+    raw = json.loads(topology_path.read_text(encoding="utf-8"))
+    raw["offline_host_state_by_host_id"] = {str(host): "STOPPED"}
+    topology_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    assert reloaded.get_system_services_agent_id(workspace_agent) == services_agent
 
 
 def test_last_good_topology_prefers_live_discovery_when_host_present(tmp_path: Path) -> None:

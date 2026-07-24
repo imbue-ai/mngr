@@ -104,11 +104,11 @@ from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
+from imbue.minds.desktop_client.chrome_event_broadcast import build_open_help_payload
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -737,6 +737,7 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
         get_state().mngr_binary,
         get_state().mngr_host_dir,
         parent_cg,
+        chrome_event_broadcaster=get_state().chrome_event_broadcaster,
     )
     if not succeeded:
         return _json_error(f"Could not {action} the workspace host", 502)
@@ -873,19 +874,31 @@ def _handle_workspace_health(agent_id: str) -> Response:
         concurrency_group=parent_cg,
         envelope_stream_consumer=state.envelope_stream_consumer,
     )
-    logger.info("Workspace health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
+    # The reason is only populated on BACKEND_UNREACHABLE; logging it makes a
+    # transient provider error diagnosable after the fact (the tier alone says
+    # nothing about WHICH provider failure produced the verdict).
+    if response.unreachable_reason:
+        logger.info(
+            "Workspace health probe for {}: dispatch_tier={} (reason: {})",
+            parsed_id,
+            response.dispatch_tier.value,
+            response.unreachable_reason,
+        )
+    else:
+        logger.info("Workspace health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
     return make_response(content=response.model_dump_json(), media_type="application/json")
 
 
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=RestartWorkspaceRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
 def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
-    """Dispatch a workspace restart; return an operation handle to poll.
+    """Dispatch a workspace host restart; return an operation handle to poll.
 
-    Body: ``{"scope": "services" | "host", "host_already_stopped"?: bool}``. The
-    ``services`` scope restarts the system-services agent in place; ``host``
-    bounces the whole host (``host_already_stopped`` is honored only for the host
-    scope, letting a known-stopped host skip the redundant stop step). Returns
+    Body: ``{"scope": "host", "start_only"?: bool}``. The restart
+    bounces the whole host; ``start_only`` skips the stop step and runs only
+    the idempotent ``mngr start`` (the recovery page's unconditional entry
+    dispatch). The former ``services`` scope (an in-place
+    system-services restart) was removed and is rejected with a 400. Returns
     ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
     agent id), followed via ``/api/v1/workspaces/operations/restart/<id>``
     (+``/logs``) exactly like create / destroy. A restart already in flight is
@@ -895,13 +908,12 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     host under an in-flight backup mutation.
     """
     parsed_id = AgentId(agent_id)
-    # The spectree model enforces ``scope`` is a required string; its value (one
-    # of services/host) is a value-semantic check kept here.
+    # The spectree model enforces ``scope`` is a required string; its value
+    # ('host') is a value-semantic check kept here.
     body = request.get_json(silent=True, force=True) or {}
     scope = body.get("scope")
-    if scope not in ("services", "host"):
-        return _json_error("'scope' must be one of: services, host", 400)
-    is_host_restart = scope == "host"
+    if scope != "host":
+        return _json_error("'scope' must be 'host'", 400)
 
     state = get_state()
     backend_resolver = state.backend_resolver
@@ -913,20 +925,16 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         return _json_error("Workspace restart is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
-    # A recovery-page auto-dispatch can race the workspace's own self-recovery
-    # (the host-health probe that picks the restart tier is slow), but no guard
-    # is needed here: the auto-dispatched host tier runs only ``mngr start``
-    # (``host_already_stopped`` skips the stop step), and ``mngr start`` targets
-    # only STOPPED agents and starts the host idempotently -- against a
-    # self-recovered workspace the whole restart degrades to a no-op. A veto
-    # keyed on tracker health would misfire here: the tracker reports
-    # default-HEALTHY for never-probed workspaces (e.g. a host offline since
-    # before this process started), so it would silently drop the cold-boot
-    # those workspaces need.
-    # The services tier (an in-place stop+start of the system-services agent)
-    # is NOT a no-op against a self-recovered interface; its narrow race window
-    # (evidence gathered seconds earlier, cost bounded to a brief interface
-    # blip) is deliberately left unguarded: that tier is slated for removal.
+    # The recovery page dispatches its restart unconditionally on entry, with
+    # no knowledge of the host's state, and it can race the workspace's own
+    # self-recovery -- but no guard is needed here: that dispatch runs only
+    # ``mngr start`` (``start_only`` skips the stop step), which checks ground
+    # truth at commit time, targets only STOPPED agents, and starts the host
+    # idempotently -- against a live or self-recovered workspace the whole
+    # restart degrades to a no-op. A veto keyed on tracker health would
+    # misfire here: the tracker reports default-HEALTHY for never-probed
+    # workspaces (e.g. a host offline since before this process started), so
+    # it would silently drop the cold-boot those workspaces need.
     # Serialize with the backup operations: ``registry.start`` below replaces
     # the workspace's record, so a RUNNING backup update/configure must be
     # rejected here (its worker's terminal complete/fail would corrupt the
@@ -943,19 +951,21 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         return _json_error(
             f"Another operation ({existing_operation.kind.value}) is already running for {agent_id}", 409
         )
+    # start_only makes the restart a pure ``mngr start`` (the recovery page's
+    # unconditional entry dispatch, which must never bounce a live container);
+    # a manual restart keeps the stop step, since it may target a running but
+    # wedged container that only a bounce fixes. Resolved before the claim so
+    # the tracker can record the restart's flavor for the recovery page's copy.
+    skip_stop = bool(body.get("start_only", False))
+
     # A restart already in flight for this workspace -- don't stack a second
     # worker racing the first's stop/start commands. mark_restarting decides the
     # RESTARTING transition under its own lock and reports whether this caller won
     # it, so this is an atomic check-and-claim against concurrent requests.
-    if not tracker.mark_restarting(parsed_id):
+    if not tracker.mark_restarting(parsed_id, start_only=skip_stop):
         return handle, 202
 
     registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
-
-    # host_already_stopped lets an auto-dispatched host restart skip the redundant
-    # stop step; honored only for host restarts (a manual restart may target a
-    # still-running container, which must be stopped first).
-    skip_stop = is_host_restart and bool(body.get("host_already_stopped", False))
 
     # is_checked=False + on_failure: a crash of the one-shot worker transitions
     # the tracker to RESTART_FAILED and the registry to FAILED (so neither the
@@ -967,7 +977,6 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
             target=run_restart_sequence,
             kwargs={
                 "workspace_agent_id": parsed_id,
-                "is_host_restart": is_host_restart,
                 "tracker": tracker,
                 "backend_resolver": backend_resolver,
                 "mngr_binary": state.mngr_binary,
@@ -984,7 +993,9 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
             on_failure=RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=parsed_id, registry=registry),
         )
     except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
-        logger.warning("Failed to spawn restart worker for {}: {}", parsed_id, exc)
+        # Error level so the failure reaches Sentry (Principle 3: the recovery
+        # surface is quiet, so a restart that never even spawned must report).
+        logger.error("Failed to spawn restart worker for {}: {}", parsed_id, exc)
         message = f"Could not start the restart worker: {exc}"
         tracker.mark_restart_failed(parsed_id, message)
         registry.fail(parsed_id, message)
@@ -1646,8 +1657,8 @@ def _handle_bug_report(agent_id: str) -> OkResponse | Response:
     if not description:
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
-    get_state().help_modal_request_broker.request_open(
-        OpenHelpRequest(description=description, workspace_agent_id=agent_id)
+    get_state().chrome_event_broadcaster.broadcast(
+        build_open_help_payload(description=description, workspace_agent_id=agent_id)
     )
     # The agent never submits to Sentry itself, so no report event is written here (the
     # response carries no ``event_id``); the human-reviewed send flows through ``/help/report``.
@@ -1823,7 +1834,9 @@ def _handle_patch_provider(provider_name: str) -> ProviderToggleResponse | Respo
 @require_api_or_cookie_auth
 def _handle_running_workspaces() -> Response:
     """Return the shutdown-capable workspaces whose containers are currently running."""
-    return _json_response({"running": desktop_control.running_workspace_entries(get_state().backend_resolver)})
+    running = desktop_control.running_workspace_entries(get_state().backend_resolver)
+    logger.info("running-workspaces query (quit-time shutdown prompt): {}", running)
+    return _json_response({"running": running})
 
 
 @require_api_or_cookie_auth

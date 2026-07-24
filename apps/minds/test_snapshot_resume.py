@@ -380,14 +380,15 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
 @pytest.mark.docker
 @pytest.mark.timeout(360)
 def test_minds_recovery_restores_dead_system_interface() -> None:
-    """minds' recovery flow brings back a workspace whose system_interface is dead.
+    """A dead system_interface is diagnosed by minds' recovery probe and revived by an agent bounce.
 
     Drives the actual minds recovery building blocks against a deterministic
     break: stop the system-services agent (which takes system_interface down),
     confirm minds' real in-container recovery probe diagnoses it as unhealthy,
-    then perform minds' surgical restart (``mngr stop`` + ``mngr start`` on
-    the system-services agent, exactly what the desktop client's recovery
-    endpoint runs) and confirm both the live HTTP check and minds' probe see
+    then bounce the system-services agent (``mngr stop`` + ``mngr start``
+    inside the container -- the in-container analogue of the desktop client's
+    host restart, which cannot ``--stop-host`` from within the container it
+    would stop) and confirm both the live HTTP check and minds' probe see
     system_interface healthy again.
 
     Self-contained (it establishes its own broken state) so it is robust to
@@ -418,17 +419,17 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
         f"Expected system_interface unhealthy after stopping system-services; probe={broken_probe!r}"
     )
 
-    # Recover the way minds' desktop client does: surgical restart of the
-    # system-services agent (stop is idempotent here; start respawns it).
+    # Recover by bouncing the system-services agent (stop is idempotent here;
+    # start respawns it, and the bootstrap brings system_interface back up).
     restart_result = _exec_in_container(
         container_name,
         f"cd /code && mngr stop {services_agent_id} --quiet; mngr start {services_agent_id} --quiet",
         timeout=_MNGR_START_TIMEOUT_SECONDS,
     )
-    assert restart_result.returncode == 0, f"minds-style surgical restart failed: {restart_result.stderr}"
+    assert restart_result.returncode == 0, f"system-services agent restart failed: {restart_result.stderr}"
 
     assert _wait_for_system_interface_up(container_name), (
-        "system_interface did not recover after minds' surgical restart of system-services."
+        "system_interface did not recover after restarting the system-services agent."
     )
     recovered_probe = _run_minds_in_container_probe(container_name)
     assert recovered_probe.get("curl_status") in _SERVED_HTTP_STATUS_CODES, (

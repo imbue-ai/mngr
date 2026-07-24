@@ -1,7 +1,7 @@
 """Workspace recovery: host-health probe + restart worker.
 
 These are the engine behind the recovery flow (the recovery page's diagnostics
-list and its surgical / host restart actions). They are extracted here -- away
+list and its host restart action). They are extracted here -- away
 from :mod:`app` -- so the versioned ``/api/v1`` surface (:mod:`api_v1`) can
 drive them without importing :mod:`app` (which would form an import cycle, since
 ``app`` imports ``api_v1``).
@@ -66,11 +66,8 @@ _MNGR_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 # ~30s httpx) before reaching the container, so it must carry its own 30s-class
 # cap rather than inheriting the 120s default.
 _HOST_HEALTH_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
-# How long we wait for the system interface to answer again after a restart,
-# split by tier. A surgical (in-place) restart leaves the container running, so
-# the interface should answer again quickly. A host restart cold-boots the
-# container, which legitimately takes longer.
-_SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
+# How long we wait for the system interface to answer again after a restart.
+# The host restart cold-boots the container, so this is sized for a full boot.
 _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
@@ -124,13 +121,15 @@ def is_recovery_classification_trustworthy(
 ) -> bool:
     """Whether the resolver's host state is fresh enough to base a recovery verdict on.
 
-    A negative recovery verdict (or an auto-dispatched restart) leans on the host
-    state the passive discovery resolver reports. That state is only trustworthy
-    once a full snapshot taken at/after the outage onset
-    (``get_failure_run_started_wall_at``) has landed: a snapshot that predates the
-    outage still carries the pre-outage host state (a just-stopped container still
-    reads RUNNING), which would misclassify the tier. Until then the verdict path
-    treats the classification as untrustworthy and surfaces INDETERMINATE.
+    A negative recovery verdict leans on the host state the passive discovery
+    resolver reports. That state is only trustworthy once a full snapshot taken
+    at/after the outage onset (``get_failure_run_started_wall_at``) has landed:
+    a snapshot that predates the outage still carries the pre-outage host state
+    (a just-stopped container still reads RUNNING), which would misclassify the
+    tier. Until then the verdict path treats the classification as
+    untrustworthy and surfaces INDETERMINATE. The tiers are display-only (the
+    recovery restart is dispatched unconditionally on page entry), so this gate
+    protects the page copy, not an action.
 
     When no onset is recorded (only the force-``mark_stuck`` path, used in tests,
     lacks one) fall back to the absolute-age freshness gate. Only the
@@ -148,12 +147,9 @@ def is_recovery_classification_trustworthy(
     return last_snapshot_at is not None and last_snapshot_at >= onset
 
 
-def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
-    """Build the argv for ``mngr stop`` on ``agent_id`` -- with ``--stop-host`` for the host tier."""
-    argv = [mngr_binary, "stop", str(agent_id), "--quiet"]
-    if is_host_restart:
-        argv.append("--stop-host")
-    return argv
+def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
+    """Build the argv for ``mngr stop`` on ``agent_id``, stopping its host with it."""
+    return [mngr_binary, "stop", str(agent_id), "--quiet", "--stop-host"]
 
 
 def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
@@ -261,7 +257,6 @@ class RestartWorkerFailureHandler(MutableModel):
 
 def run_restart_sequence(
     workspace_agent_id: AgentId,
-    is_host_restart: bool,
     tracker: SystemInterfaceHealthTracker,
     backend_resolver: BackendResolverInterface,
     mngr_binary: str,
@@ -271,30 +266,35 @@ def run_restart_sequence(
     mngr_forward_preauth_cookie: str | None,
     registry: WorkspaceOperationRegistryInterface,
     skip_stop: bool = False,
+    startup_wait_seconds: float = _HOST_RESTART_STARTUP_WAIT_SECONDS,
 ) -> None:
-    """Background worker: stop + start the system-services agent, then await recovery.
+    """Background worker: stop + start the workspace's host, then await recovery.
 
     Drives the health tracker to HEALTHY on recovery or RESTART_FAILED (with a
-    reason) when a step errors or the system interface does not return within the
-    tier's startup-wait budget (the host tier cold-boots a container, so it waits
-    longer than the in-place surgical tier). In lockstep it appends progress lines
-    to, and completes / fails, the v1 ``registry`` operation so the
+    reason) when a step errors or the system interface does not return within
+    ``startup_wait_seconds`` (sized for a container cold boot). In lockstep it appends
+    progress lines to, and completes / fails, the v1 ``registry`` operation so the
     ``/workspaces/operations/restart/<id>`` resource can report the same restart. A crash
     of this worker is turned into RESTART_FAILED by ``RestartWorkerFailureHandler``,
     wired as the thread's ``on_failure`` callback.
 
-    ``skip_stop`` is set only for the auto-dispatched host tier, which is chosen
-    exclusively when the host-health probe found the container fully stopped --
-    there is nothing to stop, so the (idempotent but not free) ``mngr stop
-    --stop-host`` subprocess is skipped to shave a full mngr invocation off the
-    cold boot's critical path.
+    Every RESTART_FAILED transition also logs at error level: the recovery
+    surface is quiet (Principle 3), so a failed restart must reach error
+    reporting even though the page renders it for the user.
+
+    ``skip_stop`` is set by the recovery page's unconditional entry dispatch
+    (the API's ``start_only``), which fires with no knowledge of the host's
+    state: the sequence must then never bounce a live container, and ``mngr
+    start`` alone guarantees that -- it checks ground truth at commit time,
+    no-ops on a running host, and cold-boots a stopped one. The manual
+    "Restart workspace" click keeps the stop step, since it may target a
+    running-but-wedged container that only a bounce fixes.
     """
-    tier_label = "host restart" if is_host_restart else "system-interface restart"
-    startup_wait_seconds = _HOST_RESTART_STARTUP_WAIT_SECONDS if is_host_restart else _SURGICAL_STARTUP_WAIT_SECONDS
-    registry.append_log(workspace_agent_id, f"Starting {tier_label}.")
+    registry.append_log(workspace_agent_id, "Starting host restart.")
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
         message = "Could not locate the system-services agent for this workspace."
+        logger.error("Host restart of {} failed: {}", workspace_agent_id, message)
         tracker.mark_restart_failed(workspace_agent_id, message)
         registry.fail(workspace_agent_id, message)
         return
@@ -303,12 +303,12 @@ def run_restart_sequence(
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
 
     if skip_stop:
-        logger.info("Skipping stop step for {} ({}): container already fully stopped", workspace_agent_id, tier_label)
-        registry.append_log(workspace_agent_id, "Container already fully stopped; skipping stop step.")
+        logger.info("Start-only restart for {}: skipping the stop step", workspace_agent_id)
+        registry.append_log(workspace_agent_id, "Start-only restart; skipping the stop step.")
     else:
         registry.append_log(workspace_agent_id, "Stopping the system-services agent.")
         try:
-            _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
+            _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id), env)
         except MngrCommandError as exc:
             # ``mngr stop --stop-host`` raises HostShutdownNotSupportedError when a provider's
             # ``supports_shutdown_hosts`` is False (e.g. Modal). minds runs mngr as a subprocess,
@@ -320,17 +320,16 @@ def run_restart_sequence(
                 # failure: the start step below restarts it on its own (reconnect-if-alive,
                 # else recreate-from-snapshot), so skip the stop and proceed.
                 logger.info(
-                    "Stop step of {} for {} skipped: provider does not support host shutdown; "
+                    "Stop step of host restart for {} skipped: provider does not support host shutdown; "
                     "restart proceeds via start alone",
-                    tier_label,
                     workspace_agent_id,
                 )
                 registry.append_log(
                     workspace_agent_id, "Provider does not support stopping the host; skipping stop step."
                 )
             else:
-                logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
-                message = f"Stop step of {tier_label} failed: {exc}"
+                logger.error("Stop step of host restart for {} failed: {}", workspace_agent_id, exc)
+                message = f"Stop step of host restart failed: {exc}"
                 tracker.mark_restart_failed(workspace_agent_id, message)
                 registry.fail(workspace_agent_id, message)
                 return
@@ -339,8 +338,8 @@ def run_restart_sequence(
     try:
         _run_mngr(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
     except MngrCommandError as exc:
-        logger.warning("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
-        message = f"Start step of {tier_label} failed: {exc}"
+        logger.error("Start step of host restart for {} failed: {}", workspace_agent_id, exc)
+        message = f"Start step of host restart failed: {exc}"
         tracker.mark_restart_failed(workspace_agent_id, message)
         registry.fail(workspace_agent_id, message)
         return
@@ -361,7 +360,8 @@ def run_restart_sequence(
         registry.append_log(workspace_agent_id, "The system interface is responding again.")
         registry.complete(workspace_agent_id)
     else:
-        message = f"The system interface did not respond within {int(startup_wait_seconds)}s of the {tier_label}."
+        message = f"The system interface did not respond within {int(startup_wait_seconds)}s of the host restart."
+        logger.error("Host restart of {} failed: {}", workspace_agent_id, message)
         tracker.mark_restart_failed(workspace_agent_id, message)
         registry.fail(workspace_agent_id, message)
 
@@ -401,9 +401,16 @@ def probe_workspace_health(
     ``backend_resolver`` -- the single passive-discovery sampler shared with the
     rest of minds -- not re-sampled with a synchronous ``mngr list``. The reason
     the inner interface isn't answering comes from the batched in-container ``mngr
-    exec`` probe, which is fired only when the provider is reachable and the host
-    is RUNNING so an outage never pays a doomed provider round-trip. The plugin's
-    resolver-snapshot mirror supplies the last probe.
+    exec`` probe, which is fired when the provider is reachable and the passive
+    layer cannot already answer: either the host is observed RUNNING (so the
+    container should be reachable and the exec tests the inner interface), or the
+    resolver's host state is not trustworthy yet (a stale pre-onset snapshot, or a
+    dead/stalled discovery producer whose freshness gate can never open). When
+    the passive layer cannot
+    answer, the exec's own outcome is the only direct evidence available; a fresh,
+    trustworthy, actionable state is left to the classifier so an outage never
+    pays a doomed provider round-trip. The plugin's resolver-snapshot mirror
+    supplies the last probe.
 
     The recovery page can be reached before discovery has re-observed the host
     after an outage (the STUCK redirect is no longer gated on freshness -- that
@@ -412,8 +419,9 @@ def probe_workspace_health(
     negative verdict off the resolver's host state can be trusted yet. When it
     cannot (a pre-outage snapshot), or the in-container probe timed out (observed
     nothing), the classifier yields INDETERMINATE rather than a verdict -- unless
-    the probe returned direct evidence (a live GET / 200), which is trusted
-    regardless of freshness.
+    the probe returned direct evidence: a live GET / 200 is trusted regardless of
+    freshness, and an exec that completed without reaching the container is
+    likewise direct (fresh) evidence for the consent-gated HOST_UNRESPONSIVE.
 
     The host state that feeds the classifier is re-read after the exec, at the
     same instant the trustworthiness check runs, so the freshness gate always
@@ -437,14 +445,32 @@ def probe_workspace_health(
         backend_resolver.get_provider_errors(), provider_name
     )
 
-    # In-container exec probe, only when the provider is reachable and the host is
-    # RUNNING. The exec SSHes to the container via ``get_host`` (the connector's
-    # ~30s httpx), so it carries an explicit 30s-class cap and is skipped entirely
-    # unless the provider has no surfaced error and the host is RUNNING. A
+    # Whether the resolver's host state can be trusted for a verdict yet (a
+    # snapshot taken at/after the outage onset has landed). Computed here to gate
+    # the exec; re-read after the exec for the actual classification (see below).
+    state_is_trustworthy = is_recovery_classification_trustworthy(backend_resolver, tracker, agent_id)
+
+    # In-container exec probe, fired only when the provider is reachable (no
+    # surfaced error) and the passive layer will not already answer: either the
+    # host is observed RUNNING, or its state is not trustworthy yet (a stale
+    # pre-onset snapshot, or a dead/stalled discovery producer whose freshness
+    # gate can never open). A fresh, trusted non-RUNNING state (e.g. STOPPED, or
+    # a transitional STOPPING) is left to the classifier rather than execced, so
+    # an outage never pays a doomed provider round-trip. The exec
+    # SSHes to the container via ``get_host`` (the connector's ~30s httpx), so it
+    # carries an explicit 30s-class cap; its outcome is the only direct evidence
+    # available when the passive layer is silent, resolving the page to HEALTHY or
+    # a consent-gated HOST_UNRESPONSIVE instead of an indefinite INDETERMINATE. A
     # non-clean outcome leaves ``in_container_stdout`` None.
     in_container_stdout: str | None = None
     probe_timed_out = False
-    if services_agent_id is not None and provider_error_message is None and host_state_enum == HostState.RUNNING:
+    probe_exec_attempted = False
+    if (
+        services_agent_id is not None
+        and provider_error_message is None
+        and (host_state_enum == HostState.RUNNING or not state_is_trustworthy)
+    ):
+        probe_exec_attempted = True
         try:
             in_container_stdout = _run_mngr(
                 concurrency_group,
@@ -483,7 +509,7 @@ def probe_workspace_health(
         host_state_enum = backend_resolver.get_host_state(HostId(display_info.host_id))
         host_state = host_state_enum.value if host_state_enum is not None else ""
     classification_is_trustworthy = is_recovery_classification_trustworthy(backend_resolver, tracker, agent_id)
-    return build_host_health_response(
+    response = build_host_health_response(
         host_state=host_state,
         services_agent_id=services_agent_id,
         in_container_stdout=in_container_stdout,
@@ -493,5 +519,21 @@ def probe_workspace_health(
         provider_error_message=provider_error_message,
         provider_label=provider_label,
         probe_timed_out=probe_timed_out,
+        probe_exec_attempted=probe_exec_attempted,
         classification_is_trustworthy=classification_is_trustworthy,
     )
+    # One line per probe with the classifier's inputs: the tier alone (logged at
+    # the route) cannot explain WHY a verdict fired -- reconstructing a
+    # multi-probe sequence (e.g. unresponsive -> indeterminate -> offline at app
+    # startup) needs the host state, trust, and exec outcome that produced each.
+    logger.info(
+        "Host-health probe inputs for {}: host_state={!r} trusted={} exec_attempted={} timed_out={} provider_error={} -> {}",
+        agent_id,
+        host_state,
+        classification_is_trustworthy,
+        probe_exec_attempted,
+        probe_timed_out,
+        provider_error_message is not None,
+        response.dispatch_tier.value,
+    )
+    return response

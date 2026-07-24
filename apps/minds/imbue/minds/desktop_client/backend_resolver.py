@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -474,7 +475,15 @@ class _LastGoodAgentTopology(FrozenModel):
     out of discovery entirely (the SSH-dead failure mode) -- retain their
     last complete record rather than being clobbered by a partial view. This
     is what lets the system-services fallback survive a discovery loss.
+
+    Unknown fields are ignored rather than rejected: this is a persisted cache
+    read back across app versions, and a file written by a build with an extra
+    field must not void the whole topology (losing the system-services
+    fallback exactly on the first launch after an upgrade).
     """
+
+    # Pydantic merges this with FrozenModel's config, so frozen=True is kept.
+    model_config = ConfigDict(extra="ignore")
 
     agents_by_host: Mapping[str, tuple[_AgentRecord, ...]] = Field(
         default_factory=dict, description="Host id -> the agents last seen on that host with a complete enumeration"
@@ -617,11 +626,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
-    # host_id_str -> a short-lived optimistic state set by a UI lifecycle action,
-    # masking discovery in ``get_host_state`` until discovery agrees or the TTL
-    # elapses. Guarded by _lock. Only ever holds a real RUNNING/STOPPED-style
-    # transition the user just triggered -- never DESTROYED -- so it cannot affect
-    # the DESTROYED-only filtering in ``list_active_workspace_ids``.
+    # host_id_str -> a short-lived optimistic state set by a UI lifecycle action, masking discovery
+    # in ``get_host_state`` until discovery agrees or the TTL elapses. Guarded by _lock. Only ever
+    # holds a real RUNNING/STOPPED-style transition -- never DESTROYED -- so it cannot affect the
+    # DESTROYED-only filtering in ``list_active_workspace_ids``.
     _host_state_override_by_host_id: dict[str, _HostStateOverride] = PrivateAttr(default_factory=dict)
     # agent_id_str -> a short-lived optimistic workspace name set by a UI-initiated
     # rename, masking discovery in ``get_workspace_name`` / ``get_host_name`` until
@@ -735,11 +743,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
         for host_id_str in tuple(self._host_state_override_by_host_id):
             override = self._host_state_override_by_host_id[host_id_str]
             discovery_state = discovery_state_by_host_id.get(host_id_str)
-            if (
-                discovery_state == override.state
-                or (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
-            ):
+            agreed = discovery_state == override.state
+            expired = (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            if agreed or expired:
                 del self._host_state_override_by_host_id[host_id_str]
+                logger.info(
+                    "host-state override for {} dropped by sweep ({}): override={} discovery={} age={:.1f}s",
+                    host_id_str,
+                    "discovery-agreed" if agreed else "ttl-expired",
+                    override.state.value,
+                    discovery_state.value if discovery_state is not None else None,
+                    now - override.set_at_monotonic,
+                )
 
     def _sweep_workspace_name_overrides_locked(self) -> None:
         """Drop name overrides that the current snapshot has confirmed or that have expired.
@@ -980,11 +995,17 @@ class MngrCliBackendResolver(BackendResolverInterface):
             override = self._host_state_override_by_host_id.get(host_id_str)
             if override is None:
                 return discovery_state
-            if (
-                discovery_state == override.state
-                or (time.monotonic() - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
-            ):
+            agreed = discovery_state == override.state
+            expired = (time.monotonic() - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            if agreed or expired:
                 del self._host_state_override_by_host_id[host_id_str]
+                logger.info(
+                    "host-state override for {} dropped in get_host_state ({}): override={} discovery={}",
+                    host_id_str,
+                    "discovery-agreed" if agreed else "ttl-expired",
+                    override.state.value,
+                    discovery_state.value if discovery_state is not None else None,
+                )
                 return discovery_state
             return override.state
 
@@ -994,6 +1015,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._host_state_override_by_host_id[str(host_id)] = _HostStateOverride(
                 state=state, set_at_monotonic=time.monotonic()
             )
+        logger.info("set_host_state_override({}, {})", host_id, state.value)
         self._fire_on_change()
 
     def clear_host_state_override(self, host_id: HostId) -> None:
