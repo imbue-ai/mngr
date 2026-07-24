@@ -1,0 +1,3 @@
+- Registered the new `imbue-mngr-donate` plugin (`mngr donate`) in the plugin catalog as a default-installable DEPENDENT gated on `imbue-mngr-usage`.
+
+- Fixed a crash when listing the local host on newer Apple Silicon Macs (M4/M5). psutil's `cpu_freq()` reports the metric as available but raises when read (Apple changed the private CPU voltage-state data it parses), which surfaced as `Error processing host ...` during `mngr list` and any command built on it -- including `mngr donate`, which then wrongly reported "No Claude usage data". CPU frequency is now read defensively: if psutil can't read it, the frequency is reported as unavailable instead of aborting host discovery.

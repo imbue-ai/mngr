@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -26,6 +27,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.local.instance import read_cpu_freq_ghz
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import make_local_provider
 
@@ -266,6 +268,25 @@ def test_get_host_resources_returns_valid_resources(local_provider: LocalProvide
 
     assert resources.cpu.count >= 1
     assert resources.memory_gb >= 0
+
+
+def test_read_cpu_freq_ghz_converts_mhz_to_ghz() -> None:
+    assert read_cpu_freq_ghz(lambda: SimpleNamespace(current=2400.0)) == pytest.approx(2.4)
+
+
+def test_read_cpu_freq_ghz_returns_none_when_reader_returns_none() -> None:
+    assert read_cpu_freq_ghz(lambda: None) is None
+
+
+# psutil.cpu_freq() can fail in several ways on Apple Silicon (M4/M5 raise a
+# SystemError wrapping psutil's RuntimeError even though has_cpu_freq() is True);
+# none of them must abort host listing, so each maps to a None reading.
+@pytest.mark.parametrize("error_type", [SystemError, RuntimeError, OSError, NotImplementedError])
+def test_read_cpu_freq_ghz_returns_none_when_reader_raises(error_type: type[Exception]) -> None:
+    def raising_reader() -> SimpleNamespace:
+        raise error_type("cpu_freq unavailable on this platform")
+
+    assert read_cpu_freq_ghz(raising_reader) is None
 
 
 def test_host_has_local_connector(local_provider: LocalProviderInstance) -> None:
