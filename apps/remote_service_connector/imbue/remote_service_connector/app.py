@@ -2034,9 +2034,9 @@ _USER_ID_PREFIX_LENGTH = 16
 def derive_user_id_prefix(user_id: str) -> str:
     """The 16-hex prefix of a SuperTokens user id, used to namespace tunnels/leases/buckets.
 
-    Also the ``account_entitlements.username_prefix`` lookup key (the column keeps
-    its legacy name), so every
-    caller must derive it identically -- always go through this helper.
+    Also the ``account_entitlements.username_prefix`` lookup key (the column
+    keeps its legacy name), so every caller must derive it identically --
+    always go through this helper.
     """
     return user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
 
