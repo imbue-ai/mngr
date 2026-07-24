@@ -112,9 +112,22 @@ def test_snapshot_bare_invocation_shows_help(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Running `mngr snapshot` with no args should show help (no default command)."""
-    result = cli_runner.invoke(snapshot, [], obj=plugin_manager)
-    assert "Commands:" in result.output or "Usage:" in result.output
+    """Running `mngr snapshot` with no default command shows the git-style help page.
+
+    A missing required subcommand is a usage error, so the exit code is 2 (not
+    0), and the rich man-page-style help -- including the COMMANDS section that
+    lists the subcommands -- is rendered rather than plain click usage. Must
+    invoke through the root cli group so that _build_help_key produces the
+    qualified key ("snapshot") for metadata resolution.
+    """
+    result = cli_runner.invoke(cli, ["snapshot"])
+    assert result.exit_code == 2
+    assert "NAME" in result.output
+    assert "SYNOPSIS" in result.output
+    # The COMMANDS section surfaces the subcommands on the bare page.
+    assert "COMMANDS" in result.output
+    assert "create" in result.output
+    assert "destroy" in result.output
 
 
 def test_snapshot_unrecognized_subcommand_errors(

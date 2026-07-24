@@ -18,6 +18,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -170,7 +171,7 @@ def _flatten_config(config: dict[str, Any], prefix: str = "") -> list[tuple[str,
     return result
 
 
-@click.group(name="config")
+@click.group(name="config", cls=DefaultCommandGroup)
 @click.option(
     "--scope",
     type=click.Choice(["user", "project", "local"], case_sensitive=False),
@@ -1251,7 +1252,7 @@ def _wizard_claude_config_isolation(
 CommandHelpMetadata(
     key="config",
     one_line_description="Manage mngr configuration",
-    synopsis="mngr [config|cfg] <subcommand> [OPTIONS]",
+    synopsis="mngr [config|cfg] [list|get|set|unset|edit|...] [ARGS]... [OPTIONS]",
     description="""View, edit, and modify mngr configuration settings at the user, project, or
 local level. Much like a simpler version of `git config`, this command allows
 you to manage configuration settings at different scopes.

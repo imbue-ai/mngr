@@ -22,6 +22,7 @@ from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.config import get_config_path
+from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -335,7 +336,7 @@ def _emit_plugin_remove_result(
             assert_never(unreachable)
 
 
-@click.group(name="plugin")
+@click.group(name="plugin", cls=DefaultCommandGroup)
 @add_common_options
 @click.pass_context
 def plugin(ctx: click.Context, **kwargs: Any) -> None:
@@ -821,7 +822,7 @@ def _emit_plugin_toggle_result(
 CommandHelpMetadata(
     key="plugin",
     one_line_description="Manage available and active plugins",
-    synopsis="mngr [plugin|plug] <subcommand> [OPTIONS]",
+    synopsis="mngr [plugin|plug] [list|add|remove|enable|disable|...] [ARGS]... [OPTIONS]",
     description="""Install, remove, view, enable, and disable plugins registered with mngr.
 Plugins provide agent types, provider backends, CLI commands, and lifecycle hooks.""",
     aliases=("plug",),
