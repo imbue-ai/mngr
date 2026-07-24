@@ -1,0 +1,3 @@
+Reorganized the "Backups" section of the workspace Settings page into three clearly labeled subsections and rewrote its buttons, options, and status text in plain language. This is a presentation-only change: no backend or behavioral changes.
+
+Controls are now grouped under "Where your backups are stored", "Backup service verification", and "Fix backup problems" (check-first, then-fix ordering). Several controls were relabeled: "Configure backups..." to "Change storage location", "Apply" to "Save", "Update backup service" to "Update backup software", and "Stop all chats and retry" to "Stop chats and try again", along with plainer provider options and form labels.
