@@ -64,7 +64,7 @@ KEY_OP_TIMEOUT_SECONDS = 90.0
 
 # Tunnel-name convention mirrored from the connector
 # (``apps/remote_service_connector/.../app.py``): every tunnel is named
-# ``<username>--<agent-prefix>``, where ``<agent-prefix>`` is the first 16 hex
+# ``<user_id_prefix>--<agent-prefix>``, where ``<agent-prefix>`` is the first 16 hex
 # chars of the agent UUID (``"agent-"`` prefix stripped). Used only by the
 # ``find_tunnel_for_agent`` back-compat fallback, which enumerates tunnels and
 # matches on this trailing slug when the connector lacks the O(1) by-agent
@@ -583,7 +583,7 @@ class ImbueCloudConnectorClient(MutableModel):
         the unknown route with a generic 404. Clients update independently of
         (and often ahead of) the connector, so a 404 here is treated as "this
         connector is too old" and we transparently fall back to the O(n)
-        ``GET /tunnels`` enumeration, matching on the ``<username>--<agent>``
+        ``GET /tunnels`` enumeration, matching on the ``<user_id_prefix>--<agent>``
         name convention. This keeps sharing working during the rollout window;
         once the connector is redeployed, every call takes the fast path.
         """
@@ -932,7 +932,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return StorageRecheckResult.model_validate(self._check(response, ImbueCloudAccountError))
 
     # ------------------------------------------------------------------
-    # Account admin (email-addressed, MINDS_PAID_ADMIN_KEY authenticated)
+    # Account admin (email-addressed, MINDS_ADMIN_KEY authenticated)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1114,9 +1114,9 @@ class ImbueCloudConnectorClient(MutableModel):
     # Paid lists (admin-key authenticated)
     # ------------------------------------------------------------------
     #
-    # These take the fixed paid-list admin API key (NOT a SuperTokens
+    # These take the fixed admin API key (NOT a SuperTokens
     # session token); the connector authenticates them against
-    # ``MINDS_PAID_ADMIN_KEY`` and rejects user / tunnel tokens.
+    # ``MINDS_ADMIN_KEY`` and rejects user / tunnel tokens.
 
     def _list_paid_entries(
         self, admin_api_key: SecretStr, path: str, value_key: str, paid_only: bool

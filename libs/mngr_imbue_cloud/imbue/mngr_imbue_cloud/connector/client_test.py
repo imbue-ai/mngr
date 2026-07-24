@@ -742,7 +742,7 @@ def test_remove_paid_email_posts_value(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_paid_list_unauthenticated_raises_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"detail": "Invalid paid-list admin API key"})
+        return httpx.Response(401, json={"detail": "Invalid admin API key"})
 
     client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAuthError):

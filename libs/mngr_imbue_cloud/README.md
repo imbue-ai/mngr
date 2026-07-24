@@ -36,7 +36,7 @@ mngr imbue_cloud account show
 mngr imbue_cloud account set-plan ally
 ```
 
-Operators manage individual accounts by email with `mngr imbue_cloud admin account show|set-plan|set-quota` (authenticated by `$MINDS_PAID_ADMIN_KEY`, like `admin paid`). `set-plan` resets the account to the plan's defaults; `set-quota` bumps one entitlement value. `mngr imbue_cloud admin sweep r2 [--email <email>]` runs one R2 storage-quota sweep pass on demand (enforcement, grant settlement, key invariants) instead of waiting for the hourly cron.
+Operators manage individual accounts by email with `mngr imbue_cloud admin account show|set-plan|set-quota` (authenticated by `$MINDS_ADMIN_KEY`, like `admin paid`). `set-plan` resets the account to the plan's defaults; `set-quota` bumps one entitlement value. `mngr imbue_cloud admin sweep r2 [--email <email>]` runs one R2 storage-quota sweep pass on demand (enforcement, grant settlement, key invariants) instead of waiting for the hourly cron.
 
 ## Create an agent on a leased host
 

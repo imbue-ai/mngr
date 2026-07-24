@@ -1,6 +1,6 @@
 """`mngr imbue_cloud admin sweep ...` -- operator-only on-demand connector sweeps.
 
-All commands authenticate with the fixed ``MINDS_PAID_ADMIN_KEY`` API key,
+All commands authenticate with the fixed ``MINDS_ADMIN_KEY`` API key,
 like the paid-list CRUD and account admin commands.
 """
 
@@ -15,7 +15,7 @@ from imbue.mngr_imbue_cloud.cli.paid import resolve_admin_api_key
 
 @click.group(name="sweep")
 def sweep_admin() -> None:
-    """Run connector maintenance sweeps on demand (requires MINDS_PAID_ADMIN_KEY)."""
+    """Run connector maintenance sweeps on demand (requires MINDS_ADMIN_KEY)."""
 
 
 @sweep_admin.command(name="r2")
