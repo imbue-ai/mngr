@@ -2860,7 +2860,10 @@ def test_host_lock_cooperatively_acquires_and_releases(
 def test_build_remote_lock_command_blocking_holds_flock_until_stdin_closes() -> None:
     """The blocking remote lock command must be valid shell, flock the path, and signal acquisition."""
     cmd = _build_remote_lock_command(Path("/mngr/host_lock"), timeout_seconds=None)
-    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    # Feed the script via stdin, not ``-c``: dash ignores ``-n`` (no-exec syntax
+    # check) for ``-c`` scripts and actually runs them, so ``-c`` would execute
+    # the ``mkdir -p`` in the command and fail on a read-only or unprivileged ``/``.
+    assert subprocess.run(["sh", "-n"], input=cmd, text=True, capture_output=True).returncode == 0
     assert "flock 9" in cmd
     assert "/mngr/host_lock" in cmd
     assert _LOCK_ACQUIRED_MARKER in cmd
@@ -2873,7 +2876,10 @@ def test_build_remote_lock_command_blocking_holds_flock_until_stdin_closes() -> 
 def test_build_remote_lock_command_with_timeout_uses_flock_wait() -> None:
     """A bounded remote lock command must use ``flock -w`` and emit the timeout marker."""
     cmd = _build_remote_lock_command(Path("/mngr/host_lock"), timeout_seconds=12.0)
-    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    # Feed the script via stdin, not ``-c``: dash ignores ``-n`` (no-exec syntax
+    # check) for ``-c`` scripts and actually runs them, so ``-c`` would execute
+    # the ``mkdir -p`` in the command and fail on a read-only or unprivileged ``/``.
+    assert subprocess.run(["sh", "-n"], input=cmd, text=True, capture_output=True).returncode == 0
     assert "flock -w 12 9" in cmd
     assert _LOCK_ACQUIRED_MARKER in cmd
     assert _LOCK_TIMED_OUT_MARKER in cmd
