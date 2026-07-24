@@ -57,6 +57,9 @@ from imbue.mngr.primitives import AgentId
 # The hand-written Tailwind v4 source. Holds the :root design tokens (the
 # styleguide cross-checks these) plus the component CSS; compiled to app.min.css.
 _TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "app.css"
+_STYLEGUIDE_CATALOG_TS_PATH = (
+    Path(__file__).resolve().parents[3] / "frontend" / "src" / "views" / "styleguide_catalog.ts"
+)
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -1185,14 +1188,13 @@ def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
     assert button_pos < block_pos < error_pos < debug_pos
 
 
-def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> None:
-    """The styleguide must surface the live ``:root`` tokens and render
-    each catalog widget through its real JinjaX component (so the catalog
-    can't drift silently from the components it documents)."""
-    html = render_dev_styleguide_page()
-    # The accent picker section is a separate runtime variable, not a :root token.
-    assert "--workspace-accent" in html
-    # Each pattern block should be present.
+def test_dev_styleguide_catalog_surfaces_tokens_and_component_widgets() -> None:
+    """The styleguide catalog (client-rendered from styleguide_catalog.ts)
+    surfaces the design tokens and every pattern block, with the component
+    class output already expanded (so the catalog can't drift silently)."""
+    catalog = _STYLEGUIDE_CATALOG_TS_PATH.read_text()
+    # The accent picker section is a separate runtime variable, not a token.
+    assert "--workspace-accent" in catalog
     for header in (
         "Titlebar buttons",
         "Window controls",
@@ -1203,14 +1205,13 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
         "Buttons",
         "Notices",
     ):
-        assert header in html, f"missing pattern: {header}"
-    # The buttons / notices / inputs are rendered through their JinjaX
-    # components (Button, Notice, TextInput); these assertions verify that
-    # the component output (button label, notice copy, input name) actually
-    # reaches the rendered page.
-    assert ">Primary<" in html and ">Danger<" in html
-    assert "All set: action completed." in html
-    assert 'name="styleguide-accent-input"' in html
+        assert header in catalog, f"missing pattern: {header}"
+    # The button / notice / input widgets carry their expanded class output.
+    assert ">Primary<" in catalog and ">Danger<" in catalog
+    assert "All set: action completed." in catalog
+    assert 'name="styleguide-accent-input"' in catalog
+    # The rendered page mounts the catalog.
+    assert "MindsUI.mountStyleguidePage" in render_dev_styleguide_page()
 
 
 _BUNDLE_SCRIPT_TAG: Final[str] = '<script src="/_static/dist/chrome.bundle.js"></script>'
@@ -1335,11 +1336,14 @@ def test_dev_styleguide_smoke_mount_follows_the_boot_island_protocol() -> None:
     )
     assert island_match is not None
     boot_state = json.loads(island_match.group(1))
+    # The smoke section reads its message from the island (StyleguidePage
+    # mounts the smoke component into the catalog's container).
     assert isinstance(boot_state["styleguide_smoke"]["message"], str)
-    assert 'id="styleguide-js-smoke"' in html
     assert html.count(_BUNDLE_SCRIPT_TAG) == 1
-    mount_call = "window.MindsUI.mountStyleguideSmoke(document.getElementById('styleguide-js-smoke'))"
+    mount_call = "window.MindsUI.mountStyleguidePage(document.getElementById('styleguide-root'))"
     assert html.index(_BUNDLE_SCRIPT_TAG) < html.index(mount_call)
+    # The live smoke container lives in the catalog constant.
+    assert 'id="styleguide-js-smoke"' in _STYLEGUIDE_CATALOG_TS_PATH.read_text()
 
 
 def test_dev_styleguide_token_swatches_enumerate_design_tokens() -> None:
@@ -1358,13 +1362,13 @@ def test_dev_styleguide_token_swatches_enumerate_design_tokens() -> None:
     # declaration, so it is not matched.
     declared = set(re.findall(r"(--color-[a-z0-9-]+)\s*:", css))
 
-    html = render_dev_styleguide_page()
-    surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', html))
+    catalog = _STYLEGUIDE_CATALOG_TS_PATH.read_text()
+    surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', catalog))
 
     assert declared == surfaced, (
         f"app.css design tokens {sorted(declared)} but the styleguide "
         f"surfaces {sorted(surfaced)}. Add or remove a "
-        f'`data-token="--<name>"` swatch in templates/pages/DevStyleguide.jinja '
+        f'`data-token="--<name>"` swatch in frontend/src/views/styleguide_catalog.ts '
         f"to match."
     )
 

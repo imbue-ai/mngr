@@ -1781,7 +1781,6 @@ def warm_template_caches() -> None:
         lambda: render_inbox_page(
             chrome_boot_state=_empty_chrome_boot_state(),
             inbox_extras=InboxBootExtras(selected_id="", keep_open=False),
-            is_empty=True,
         ),
     ):
         try:
@@ -1972,13 +1971,16 @@ def render_dev_styleguide_page() -> str:
     """Render the styleguide page (mounted at ``/_dev/styleguide``).
 
     The page is a hand-authored catalog of UI patterns and tokens. When a
-    new ``:root`` token is added to ``static/app.css``, add a swatch
-    in ``templates/pages/DevStyleguide.jinja`` with
+    new ``--color-*`` token is added to ``static/app.css``, add a swatch
+    in ``frontend/src/views/styleguide_catalog.ts`` with
     ``data-token="--<name>"`` on its wrapper -- the ``templates_test.py``
-    ratchet cross-checks the set of declared ``:root`` tokens against the
-    set of ``data-token`` swatches and fails if either side drifts.
+    drift guard cross-checks the declared tokens against the set of
+    ``data-token`` swatches in that catalog and fails if either side drifts.
     """
-    return CATALOG.render("pages.DevStyleguide")
+    return CATALOG.render(
+        "pages.DevStyleguide",
+        boot_state={"styleguide_smoke": {"message": "Mounted by window.MindsUI from the boot-state island."}},
+    )
 
 
 def _build_accounts_boot_extras(

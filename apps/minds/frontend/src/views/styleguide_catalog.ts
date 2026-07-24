@@ -1,0 +1,1252 @@
+// The dev styleguide's static catalog markup, captured verbatim from the
+// former templates/pages/DevStyleguide.jinja render (all JinjaX primitives
+// already expanded to their class output). This is a hand-authored inventory
+// of design tokens + component patterns -- a static document, so it lives as
+// a trusted HTML constant that StyleguidePage renders via m.trust(). The
+// per-token ``data-token`` swatches here are the source of the app.css drift
+// guard (see templates_test.py::test_dev_styleguide_token_swatches...).
+//
+// This is /_dev/styleguide only (never shipped in a user flow); the three
+// live-component sections (#styleguide-js-smoke / -js-primitives /
+// -sidebar-rows) are real mithril mounts placed by StyleguidePage after this
+// static shell renders.
+export const STYLEGUIDE_CATALOG_HTML = `
+  
+  <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-transparent text-primary border border-default hover:bg-fill-hover styleguide-toggle fixed top-4 right-4 z-50 shadow-overlay" id="styleguide-theme-toggle" type="button">Switch to dark</button>
+
+  <div class="max-w-6xl mx-auto px-8 py-8 flex items-start gap-12">
+
+    
+    <nav aria-label="Styleguide sections"
+         class="styleguide-toc sticky top-8 shrink-0 w-48 hidden lg:block max-h-screen overflow-y-auto">
+      <a href="#design-system" class="styleguide-toc-link block type-section text-tertiary hover:text-primary mb-2">Design System</a>
+      <ul class="flex flex-col gap-0.5 mb-6">
+        
+        <li><a href="#type-ramp" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Type ramp</a></li>
+        
+        <li><a href="#text-colors" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Text colors</a></li>
+        
+        <li><a href="#borders" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Borders</a></li>
+        
+        <li><a href="#surfaces" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Surfaces &amp; fills</a></li>
+        
+        <li><a href="#status" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Status / feedback</a></li>
+        
+        <li><a href="#accent" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Accent</a></li>
+        
+        <li><a href="#radius" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Corner radius</a></li>
+        
+        <li><a href="#spacing" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Spacing</a></li>
+        
+        <li><a href="#elevation" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Elevation</a></li>
+        
+        <li><a href="#icons-16" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Icons (16px)</a></li>
+        
+        <li><a href="#icons-12" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Icons (12px)</a></li>
+        
+      </ul>
+      <a href="#patterns" class="styleguide-toc-link block type-section text-tertiary hover:text-primary mb-2">Patterns &amp; Components</a>
+      <ul class="flex flex-col gap-0.5">
+        
+        <li><a href="#color-swatches" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Color swatches</a></li>
+        
+        <li><a href="#titlebar-buttons" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Titlebar buttons</a></li>
+        
+        <li><a href="#notification-badge" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Notification badge</a></li>
+        
+        <li><a href="#window-controls" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Window controls</a></li>
+        
+        <li><a href="#sidebar-items" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Sidebar items</a></li>
+        
+        <li><a href="#accent-spine" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Accent spine</a></li>
+        
+        <li><a href="#form-controls" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Form controls</a></li>
+        
+        <li><a href="#spinner" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Spinner</a></li>
+        
+        <li><a href="#buttons" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Buttons</a></li>
+        
+        <li><a href="#button-sizes" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Button sizes</a></li>
+        
+        <li><a href="#links" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Links</a></li>
+        
+        <li><a href="#button-links" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Link-style buttons</a></li>
+        
+        <li><a href="#notices" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Notices</a></li>
+        
+        <li><a href="#cards" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Cards</a></li>
+        
+        <li><a href="#preset-card" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Preset card</a></li>
+        
+        <li><a href="#page-container" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Page container</a></li>
+        
+        <li><a href="#oauth-icons" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">OAuth icons</a></li>
+        
+        <li><a href="#status-badges" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Status badges</a></li>
+        
+        <li><a href="#section-header" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Section header</a></li>
+        
+        <li><a href="#dialog-close" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Dialog close button</a></li>
+        
+        <li><a href="#modal" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">Modal</a></li>
+        
+        <li><a href="#js-components" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">JS components</a></li>
+        
+      </ul>
+    </nav>
+
+    <main class="flex-1 min-w-0">
+
+      <header class="mb-12">
+        <h1 class="type-heading-lg text-primary">Minds Styleguide</h1>
+        <p class="type-body text-secondary mt-1">
+          Tokens are in
+          <code class="text-primary">apps/minds/imbue/minds/desktop_client/static/app.css</code>.
+        </p>
+      </header>
+
+      
+      <div id="design-system" class="scroll-mt-8 mb-8">
+        <h2 class="type-heading-lg text-primary">Design System</h2>
+        <p class="type-helper text-secondary mt-1">
+          The foundational tokens -- type, color, border, surface, radius,
+          spacing, elevation -- plus the shared icon set.
+        </p>
+      </div>
+
+    
+    <section id="type-ramp" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Type ramp</h2>
+      <p class="type-helper text-secondary mb-4">
+        Six roles, one class each (size + weight + line-height bundled). Sizes
+        reuse Tailwind's steps -- 24 / 18 / 14 / 12 px. Compose with a colour
+        token, e.g. <code>type-label text-primary</code>.
+      </p>
+      <div class="flex flex-col gap-4">
+        <div>
+          <p class="type-heading-lg text-primary">Large heading</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-heading-lg -- 24 / bold</p>
+        </div>
+        <div>
+          <p class="type-heading text-primary">Regular heading</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-heading -- 18 / semibold</p>
+        </div>
+        <div>
+          <p class="type-label text-primary">Label</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-label -- 14 / semibold</p>
+        </div>
+        <div>
+          <p class="type-body text-primary">Body -- the default readable paragraph text on a surface.</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-body -- 14 / regular</p>
+        </div>
+        <div>
+          <p class="type-helper text-primary">Helper -- captions, hints, and metadata sit at this size.</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-helper -- 12 / regular</p>
+        </div>
+        <div>
+          <p class="type-section text-secondary">Section title</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-section -- 12 / semibold / all caps</p>
+        </div>
+      </div>
+    </section>
+
+    
+    <section id="text-colors" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Text color tokens</h2>
+      <p class="type-helper text-secondary mb-4">
+        Semantic, themeable text colors (<code>app.css</code>).
+        <code>text-primary</code> / <code>-secondary</code> / <code>-tertiary</code>
+        for text on the current surface; <code>text-inverse-*</code> for text on
+        an inverted surface. Pure black / white with alpha; values flip
+        light&harr;dark.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        
+        <div>
+          <div class="light rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
+            <div class="flex flex-col gap-2">
+              <div data-token="--color-primary" class="flex items-baseline justify-between gap-3">
+                <span class="text-primary type-label">Primary</span>
+                <code class="text-secondary type-helper font-mono">text-primary</code>
+              </div>
+              <div data-token="--color-secondary" class="flex items-baseline justify-between gap-3">
+                <span class="text-secondary type-label">Secondary</span>
+                <code class="text-secondary type-helper font-mono">text-secondary</code>
+              </div>
+              <div data-token="--color-tertiary" class="flex items-baseline justify-between gap-3">
+                <span class="text-tertiary type-label">Tertiary</span>
+                <code class="text-secondary type-helper font-mono">text-tertiary</code>
+              </div>
+            </div>
+            <div class="rounded-md bg-surface-inverse p-3 flex flex-col gap-2">
+              <div data-token="--color-inverse-primary" class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-primary type-label">Inverse primary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-primary</code>
+              </div>
+              <div data-token="--color-inverse-secondary" class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-secondary type-label">Inverse secondary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-secondary</code>
+              </div>
+              <div data-token="--color-inverse-tertiary" class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-tertiary type-label">Inverse tertiary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-tertiary</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        
+        <div>
+          <div class="dark rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
+            <div class="flex flex-col gap-2">
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-primary type-label">Primary</span>
+                <code class="text-secondary type-helper font-mono">text-primary</code>
+              </div>
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-secondary type-label">Secondary</span>
+                <code class="text-secondary type-helper font-mono">text-secondary</code>
+              </div>
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-tertiary type-label">Tertiary</span>
+                <code class="text-secondary type-helper font-mono">text-tertiary</code>
+              </div>
+            </div>
+            <div class="rounded-md bg-surface-inverse p-3 flex flex-col gap-2">
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-primary type-label">Inverse primary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-primary</code>
+              </div>
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-secondary type-label">Inverse secondary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-secondary</code>
+              </div>
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-tertiary type-label">Inverse tertiary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-tertiary</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-primary / -secondary / -tertiary (+ -inverse-*)</div>
+    </section>
+
+    
+    <section id="borders" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Border tokens</h2>
+      <p class="type-helper text-secondary mb-4">
+        Themeable borders (<code>app.css</code>): <code>border-subtle</code>
+        (faint dividers), <code>border-default</code> (standard card / input
+        border), <code>border-strong</code> (emphasis, the input rest edge),
+        <code>border-stronger</code> (the darker input-hover edge). Black in
+        light, white in dark, same alpha steps.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        
+        <div>
+          <div class="light rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-4 gap-3">
+            <div data-token="--color-subtle" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-subtle"></div>
+              <code class="type-helper font-mono text-secondary">border-subtle</code>
+            </div>
+            <div data-token="--color-default" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-default"></div>
+              <code class="type-helper font-mono text-secondary">border-default</code>
+            </div>
+            <div data-token="--color-strong" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-strong"></div>
+              <code class="type-helper font-mono text-secondary">border-strong</code>
+            </div>
+            <div data-token="--color-stronger" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-stronger"></div>
+              <code class="type-helper font-mono text-secondary">border-stronger</code>
+            </div>
+          </div>
+        </div>
+
+        
+        <div>
+          <div class="dark rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-4 gap-3">
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-subtle"></div>
+              <code class="type-helper font-mono text-secondary">border-subtle</code>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-default"></div>
+              <code class="type-helper font-mono text-secondary">border-default</code>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-strong"></div>
+              <code class="type-helper font-mono text-secondary">border-strong</code>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-stronger"></div>
+              <code class="type-helper font-mono text-secondary">border-stronger</code>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-subtle / -default / -strong / -stronger (border-*)</div>
+    </section>
+
+    
+    <section id="surfaces" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Surface &amp; fill tokens</h2>
+      <p class="type-helper text-secondary mb-4">
+        Surfaces (<code>bg-surface-primary</code> / <code>-inverse</code> /
+        <code>-overlay</code>) are solid backgrounds; primary &amp; inverse
+        mirror (white&harr;black), overlay is the inverse color at 20%. Fills
+        (<code>bg-fill-subtle</code> / <code>-hover</code> / <code>-active</code>)
+        are translucent tints over a surface.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        
+        <div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4">
+            <div class="type-section text-tertiary mb-1.5">Surfaces</div>
+            <div class="grid grid-cols-3 gap-3 mb-4">
+              <div data-token="--color-surface-primary" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-primary border border-default"></div>
+                <code class="type-helper font-mono text-secondary">primary</code>
+              </div>
+              <div data-token="--color-surface-inverse" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-inverse"></div>
+                <code class="type-helper font-mono text-secondary">inverse</code>
+              </div>
+              <div data-token="--color-surface-overlay" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-overlay"></div>
+                <code class="type-helper font-mono text-secondary">overlay</code>
+              </div>
+            </div>
+            <div class="type-section text-tertiary mb-1.5">Fills</div>
+            <div class="grid grid-cols-3 gap-3">
+              <div data-token="--color-fill-subtle" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-subtle border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">subtle</code>
+              </div>
+              <div data-token="--color-fill-hover" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-hover border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">hover</code>
+              </div>
+              <div data-token="--color-fill-active" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-active border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">active</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        
+        <div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4">
+            <div class="type-section text-tertiary mb-1.5">Surfaces</div>
+            <div class="grid grid-cols-3 gap-3 mb-4">
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-primary border border-default"></div>
+                <code class="type-helper font-mono text-secondary">primary</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-inverse"></div>
+                <code class="type-helper font-mono text-secondary">inverse</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-overlay"></div>
+                <code class="type-helper font-mono text-secondary">overlay</code>
+              </div>
+            </div>
+            <div class="type-section text-tertiary mb-1.5">Fills</div>
+            <div class="grid grid-cols-3 gap-3">
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-subtle border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">subtle</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-hover border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">hover</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-active border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">active</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
+    </section>
+
+    
+    <section id="status" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Status / feedback tokens</h2>
+      <p class="type-helper text-secondary mb-4">
+        One hue per semantic (<code>important</code> / <code>success</code>
+        / <code>warning</code> / <code>info</code>). Dark mode lifts each hue to a
+        brighter value (the deep light hues go muddy on black); notice / badge
+        backgrounds use a per-mode surface token (<code>--c-success-surface</code>),
+        faint in light and lifted in dark so the shape stays visible.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        
+        <div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4">
+            <div class="grid grid-cols-4 gap-2 mb-4">
+              <div data-token="--color-important" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="type-helper font-mono text-secondary">important</code></div>
+              <div data-token="--color-success" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="type-helper font-mono text-secondary">success</code></div>
+              <div data-token="--color-warning" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="type-helper font-mono text-secondary">warning</code></div>
+              <div data-token="--color-info" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="type-helper font-mono text-secondary">info</code></div>
+            </div>
+            <div class="flex flex-col gap-2">
+              <div class="rounded-md bg-[var(--c-success-surface)] text-success px-3 py-2 type-body">Success notice (hue + opacity)</div>
+              <div class="rounded-md bg-[var(--c-important-surface)] text-important px-3 py-2 type-body">Error notice (important)</div>
+            </div>
+          </div>
+        </div>
+
+        
+        <div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4">
+            <div class="grid grid-cols-4 gap-2 mb-4">
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="type-helper font-mono text-secondary">important</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="type-helper font-mono text-secondary">success</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="type-helper font-mono text-secondary">warning</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="type-helper font-mono text-secondary">info</code></div>
+            </div>
+            <div class="flex flex-col gap-2">
+              <div class="rounded-md bg-[var(--c-success-surface)] text-success px-3 py-2 type-body">Success notice (hue + opacity)</div>
+              <div class="rounded-md bg-[var(--c-important-surface)] text-important px-3 py-2 type-body">Error notice (important)</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-important / -success / -warning / -info</div>
+    </section>
+
+    
+    <section id="accent" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Accent / interactive token</h2>
+      <p class="type-helper text-secondary mb-4">
+        One <code>accent</code> hue (a WCAG-AA blue), lifted to a brighter blue
+        in dark mode so links and low-opacity tints stay legible on the black
+        surface. Behind links, selected states, focus rings and progress. Solid
+        for selection / progress (<code>bg-accent</code>, <code>border-accent</code>);
+        lighter rings and tints derive via an opacity modifier (e.g.
+        <code>ring-accent/40</code>, <code>bg-accent/15</code>).
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        
+        <div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+            <div class="grid grid-cols-4 gap-2">
+              <div data-token="--color-accent" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="type-helper font-mono text-secondary">accent</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/40"></div><code class="type-helper font-mono text-secondary">/40</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/15"></div><code class="type-helper font-mono text-secondary">/15</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md border border-accent"></div><code class="type-helper font-mono text-secondary">border</code></div>
+            </div>
+            <a href="#" class="text-accent hover:underline type-body">A text link (text-accent)</a>
+            <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
+          </div>
+        </div>
+
+        
+        <div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+            <div class="grid grid-cols-4 gap-2">
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="type-helper font-mono text-secondary">accent</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/40"></div><code class="type-helper font-mono text-secondary">/40</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/15"></div><code class="type-helper font-mono text-secondary">/15</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md border border-accent"></div><code class="type-helper font-mono text-secondary">border</code></div>
+            </div>
+            <a href="#" class="text-accent hover:underline type-body">A text link (text-accent)</a>
+            <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-accent (links, selection, focus rings, progress)</div>
+    </section>
+
+    
+    <section id="radius" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Corner radius</h2>
+      <p class="type-helper text-secondary mb-4">
+        Four steps (4 / 6 / 8 / 16 px) plus <code>rounded-full</code>; each
+        plays one role. <code>rounded-xl</code> (16px) is reserved for the
+        largest surfaces.
+      </p>
+      <div class="grid grid-cols-2 sm:grid-cols-5 gap-4">
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-sm"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-sm (4px)</code>
+          <span class="type-helper text-secondary">subtle accents, tiny badges</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-md"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-md (6px)</code>
+          <span class="type-helper text-secondary">buttons, badges, swatches</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-lg"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-lg (8px)</code>
+          <span class="type-helper text-secondary">inputs, cards, modals, panels, log boxes</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-xl"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-xl (16px)</code>
+          <span class="type-helper text-secondary">reserved -- largest surfaces</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-full"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-full</code>
+          <span class="type-helper text-secondary">pills, dots, spinner outline</span>
+        </div>
+      </div>
+    </section>
+
+    
+    <section id="spacing" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Spacing scale</h2>
+      <p class="type-helper text-secondary mb-4">
+        Standard Tailwind steps (<code>--spacing</code> is the stock
+        <code>0.25rem</code>, so <code>p-1</code> = 4px, <code>p-4</code> = 16px).
+        Padding / margin / gap are limited to ten steps:
+        <code>0.5 / 1 / 1.5 / 2 / 3 / 4 / 6 / 8 / 12 / 16</code>
+        (= 2 / 4 / 6 / 8 / 12 / 16 / 24 / 32 / 48 / 64 px).
+      </p>
+      <div class="flex flex-col gap-2">
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-0.5</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">2px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 2px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-1</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">4px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 4px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-1.5</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">6px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 6px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-2</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">8px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 8px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-3</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">12px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 12px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-4</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">16px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 16px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-6</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">24px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 24px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-8</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">32px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 32px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-12</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">48px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 48px;"></div>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-16</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">64px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: 64px;"></div>
+        </div>
+        
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">Tailwind default spacing; padding / margin / gap held to this subset by a ratchet</div>
+    </section>
+
+    
+    <section id="elevation" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Elevation</h2>
+      <p class="type-helper text-secondary mb-4">
+        Two steps. <code>shadow-raised</code> is the hover lift on interactive
+        cards; <code>shadow-overlay</code> is the soft floating shadow for
+        surfaces above the page -- menus, modals, tooltips.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div class="flex flex-col items-center gap-2">
+          <div class="w-full h-16 rounded-lg bg-surface-primary border border-default shadow-raised"></div>
+          <code class="type-helper font-mono text-secondary">shadow-raised</code>
+          <span class="type-helper text-tertiary">interactive card hover</span>
+        </div>
+        <div class="flex flex-col items-center gap-2">
+          <div class="w-full h-16 rounded-lg bg-surface-primary border border-default shadow-overlay"></div>
+          <code class="type-helper font-mono text-secondary">shadow-overlay</code>
+          <span class="type-helper text-tertiary">menus / modals / tooltips</span>
+        </div>
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --shadow-raised / --shadow-overlay</div>
+    </section>
+
+    
+    <section id="icons-16" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-1">Icons -- 16px (Icon16)</h2>
+      <div class="flex flex-wrap items-start gap-4 text-primary mt-4">
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M13.3337 11.4004C13.6649 11.4006 13.9333 11.6687 13.9333 12C13.9333 12.3313 13.6649 12.5994 13.3337 12.5996H2.66667C2.3353 12.5996 2.06706 12.3314 2.06706 12C2.06706 11.6686 2.3353 11.4004 2.66667 11.4004H13.3337ZM13.3337 7.40039C13.6649 7.40057 13.9333 7.66874 13.9333 8C13.9333 8.33126 13.6649 8.59943 13.3337 8.59961H2.66667C2.3353 8.59961 2.06706 8.33137 2.06706 8C2.06706 7.66863 2.3353 7.40039 2.66667 7.40039H13.3337ZM13.3337 3.40039C13.6649 3.40057 13.9333 3.66874 13.9333 4C13.9333 4.33126 13.6649 4.59943 13.3337 4.59961H2.66667C2.3353 4.59961 2.06706 4.33137 2.06706 4C2.06706 3.66863 2.3353 3.40039 2.66667 3.40039H13.3337Z"/></svg>
+          <code class="type-helper font-mono text-secondary">menu</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M9.40039 9.01301C9.40039 8.99548 9.39316 8.9786 9.38086 8.96613C9.36836 8.95363 9.35069 8.9466 9.33301 8.9466H6.66699C6.64931 8.9466 6.63164 8.95363 6.61914 8.96613C6.60684 8.9786 6.59961 8.99548 6.59961 9.01301V13.7464H9.40039V9.01301ZM10.5996 13.7464H12.667C12.8614 13.7463 13.0481 13.669 13.1855 13.5316C13.323 13.3941 13.4004 13.2074 13.4004 13.013V7.01301C13.4004 6.90648 13.3768 6.80107 13.332 6.70441C13.2871 6.60765 13.2211 6.52132 13.1396 6.45246L13.1367 6.44953L8.47363 2.45246V2.45344C8.34127 2.34157 8.1733 2.27961 8 2.27961C7.8267 2.27961 7.65873 2.34157 7.52637 2.45344L7.52539 2.45246L2.86328 6.44953L2.86035 6.45246C2.77888 6.52132 2.71287 6.60765 2.66797 6.70441C2.62319 6.80107 2.59958 6.90648 2.59961 7.01301V13.013C2.59962 13.2074 2.67703 13.3941 2.81445 13.5316C2.9519 13.669 3.13863 13.7463 3.33301 13.7464H5.40039V9.01301C5.40039 8.67707 5.53394 8.35505 5.77148 8.1175C6.00901 7.88006 6.33113 7.74641 6.66699 7.74641H9.33301C9.66887 7.74641 9.99099 7.88006 10.2285 8.1175C10.4661 8.35505 10.5996 8.67707 10.5996 9.01301V13.7464ZM14.5996 13.013C14.5996 13.5257 14.3966 14.0176 14.0342 14.3802C13.6717 14.7427 13.1796 14.9465 12.667 14.9466H3.33301C2.82037 14.9465 2.32831 14.7427 1.96582 14.3802C1.60335 14.0176 1.4004 13.5257 1.40039 13.013V7.01301C1.40034 6.73181 1.46172 6.45363 1.58008 6.19855C1.69787 5.94487 1.86881 5.71937 2.08203 5.5384L6.74902 1.53937L6.75195 1.53645C7.10089 1.24157 7.54315 1.08039 8 1.08039C8.39979 1.08039 8.78863 1.20339 9.11328 1.43195L9.24805 1.53645L9.25098 1.53937L13.918 5.5384H13.917C14.1305 5.71946 14.302 5.94465 14.4199 6.19855C14.5383 6.45363 14.5997 6.73182 14.5996 7.01301V13.013Z"/></svg>
+          <code class="type-helper font-mono text-secondary">home</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M10.0667 6.66634C10.0666 5.52521 9.14146 4.60011 8.00033 4.59993C6.85905 4.59993 5.93312 5.5251 5.93294 6.66634C5.93294 7.73631 6.7464 8.61703 7.78841 8.72298L8.00033 8.73372L8.21126 8.72298C9.25343 8.61718 10.0667 7.73642 10.0667 6.66634ZM8.00033 9.93294C7.09867 9.93294 6.23364 10.2915 5.59603 10.929C5.02946 11.4956 4.68368 12.2417 4.61361 13.0335C5.58084 13.6855 6.74612 14.0667 8.00033 14.0667C9.25402 14.0667 10.4181 13.6851 11.3851 13.0335C11.315 12.2418 10.9711 11.4956 10.4046 10.929C9.76708 10.2915 8.90194 9.93303 8.00033 9.93294ZM15.2669 8.00033C15.2668 12.0133 12.0133 15.2668 8.00033 15.2669C3.98717 15.2669 0.7339 12.0134 0.733724 8.00033C0.733724 3.98706 3.98706 0.733724 8.00033 0.733724C12.0134 0.7339 15.2669 3.98717 15.2669 8.00033ZM11.2669 6.66634C11.2669 7.69667 10.7885 8.6145 10.0433 9.21322C10.4865 9.43301 10.8958 9.72402 11.2523 10.0804C11.8255 10.6536 12.2307 11.3631 12.4388 12.1322C13.4477 11.0489 14.0666 9.59743 14.0667 8.00033C14.0667 4.64991 11.3507 1.93312 8.00033 1.93294C4.6498 1.93294 1.93294 4.6498 1.93294 8.00033C1.93303 9.59711 2.55134 11.0489 3.5599 12.1322C3.76801 11.363 4.17413 10.6537 4.7474 10.0804C5.10361 9.72422 5.51251 9.43299 5.9554 9.21322C5.21063 8.61448 4.73372 7.69631 4.73372 6.66634C4.7339 4.86236 6.1963 3.39974 8.00033 3.39974C9.8042 3.39992 11.2668 4.86247 11.2669 6.66634Z"/></svg>
+          <code class="type-helper font-mono text-secondary">user</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M14.0667 8.60026H10.9876L9.83236 10.3327C9.72108 10.4996 9.53394 10.6003 9.33333 10.6003H6.66634C6.46585 10.6002 6.27854 10.4995 6.16732 10.3327L5.01302 8.60026H1.93294V11.9997C1.93294 12.194 2.01046 12.3807 2.14779 12.5182C2.28524 12.6557 2.47197 12.733 2.66634 12.7331H13.3333C13.5278 12.7331 13.7144 12.6558 13.8519 12.5182C13.9893 12.3807 14.0667 12.1941 14.0667 11.9997V8.60026ZM4.8265 3.26628C4.69024 3.26644 4.55656 3.30481 4.44076 3.37663C4.32483 3.44853 4.23095 3.55134 4.17025 3.6735V3.67546L2.30404 7.40007H5.33333L5.40755 7.40495C5.57941 7.42637 5.73495 7.52153 5.83236 7.66764L6.98763 9.40007H9.01302L10.1673 7.66764L10.2122 7.60807C10.3253 7.47693 10.4908 7.40016 10.6663 7.40007H13.6956L11.8294 3.6735C11.7687 3.55137 11.6748 3.44851 11.5589 3.37663C11.4721 3.3228 11.3752 3.28822 11.2747 3.27409L11.1732 3.26628H4.8265ZM15.2669 11.9997C15.2669 12.5123 15.063 13.0043 14.7005 13.3669C14.338 13.7294 13.8461 13.9333 13.3333 13.9333H2.66634C2.15371 13.9332 1.66165 13.7294 1.29915 13.3669C0.936787 13.0043 0.733724 12.5123 0.733724 11.9997V7.99967C0.733775 7.90652 0.755492 7.81442 0.797201 7.73112L3.09701 3.13835C3.25708 2.81688 3.5037 2.54637 3.80892 2.3571C4.11454 2.16764 4.46691 2.06725 4.8265 2.06706H11.1732C11.5329 2.06725 11.8861 2.16754 12.1917 2.3571C12.4968 2.54633 12.7426 2.81702 12.9027 3.13835L15.2035 7.73112C15.2452 7.81442 15.2669 7.90652 15.2669 7.99967V11.9997Z"/></svg>
+          <code class="type-helper font-mono text-secondary">inbox</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M11.3999 7.33333C11.3999 6.78522 11.182 6.25997 10.7944 5.87239C10.4069 5.48482 9.88161 5.26692 9.3335 5.26692H6.6665C6.11851 5.26701 5.59306 5.48489 5.20557 5.87239C4.81809 6.25995 4.6001 6.78529 4.6001 7.33333V9.33333C4.6001 10.9972 5.81461 12.392 7.3999 12.6781V7.33333C7.3999 7.00196 7.66912 6.73372 8.00049 6.73372C8.33171 6.7339 8.6001 7.00207 8.6001 7.33333V12.6781C10.1855 12.3921 11.3999 10.9973 11.3999 9.33333V7.33333ZM8.00049 2.59505C7.81121 2.59505 7.62377 2.63399 7.44971 2.70833C7.2939 2.77492 7.15177 2.86952 7.02979 2.98665C7.02299 2.99416 7.01847 3.00382 7.01123 3.01106C7.0015 3.0208 6.98922 3.02753 6.979 3.03645C6.85195 3.17149 6.75323 3.3306 6.68799 3.50423C6.63805 3.63722 6.60807 3.777 6.6001 3.91829V4.0677C6.62221 4.06725 6.64434 4.06673 6.6665 4.06673H9.3335C9.35566 4.06673 9.37779 4.06725 9.3999 4.0677C9.39998 4.0651 9.40076 4.06249 9.40088 4.05989C9.40934 3.87071 9.37955 3.68152 9.31299 3.50423C9.24731 3.32936 9.14639 3.17017 9.01807 3.0345C9.00895 3.02643 8.99848 3.01978 8.98975 3.01106C8.98327 3.00459 8.97828 2.99627 8.97217 2.98958C8.84973 2.87148 8.70797 2.77532 8.55127 2.70833C8.3772 2.63394 8.18978 2.59509 8.00049 2.59505ZM12.6001 8.06673H14.6665C14.9978 8.06673 15.2669 8.33512 15.2671 8.66634C15.2671 8.99771 14.9979 9.26692 14.6665 9.26692H12.6001V9.33333C12.6001 9.87813 12.5033 10.4011 12.3276 10.887C13.6424 11.3151 14.6001 12.5708 14.6001 14.0003C14.5999 14.3314 14.3316 14.5997 14.0005 14.5999C13.6692 14.5999 13.4001 14.3315 13.3999 14.0003C13.3999 13.0271 12.685 12.1757 11.7583 11.9759C10.9239 13.1574 9.5496 13.9328 8.00049 13.9329C6.45118 13.9329 5.07614 13.1575 4.2417 11.9759C3.31511 12.1758 2.6001 13.0272 2.6001 14.0003C2.59992 14.3314 2.3316 14.5998 2.00049 14.5999C1.66923 14.5999 1.40008 14.3315 1.3999 14.0003C1.3999 12.5712 2.35721 11.3155 3.67139 10.887C3.49585 10.4012 3.3999 9.87798 3.3999 9.33333V9.26692H1.3335C1.00213 9.26692 0.733887 8.99771 0.733887 8.66634C0.734063 8.33512 1.00223 8.06673 1.3335 8.06673H3.3999V7.33333C3.3999 7.01981 3.44519 6.71092 3.53174 6.41536C2.30589 5.95989 1.3999 4.75779 1.3999 3.33333C1.3999 3.00196 1.66912 2.73372 2.00049 2.73372C2.33171 2.7339 2.6001 3.00207 2.6001 3.33333C2.6001 4.30039 3.2538 5.09481 4.08252 5.33626C4.16694 5.22702 4.25827 5.12244 4.35693 5.02376C4.65884 4.72185 5.01385 4.48504 5.3999 4.32259V4.08626H5.40088C5.38917 3.74424 5.44361 3.4029 5.56396 3.08235C5.6229 2.92541 5.69722 2.77516 5.78467 2.63313L4.90967 1.75716C4.67535 1.52284 4.67535 1.14382 4.90967 0.909501C5.14398 0.675186 5.52301 0.675186 5.75732 0.909501L6.63428 1.78548C6.74429 1.71754 6.85856 1.65587 6.97803 1.60481C7.30117 1.46675 7.64909 1.39485 8.00049 1.39485C8.35188 1.39489 8.69982 1.46672 9.02295 1.60481C9.14222 1.6558 9.25587 1.71766 9.36572 1.78548L10.2427 0.909501C10.477 0.675186 10.857 0.675186 11.0913 0.909501C11.3252 1.14374 11.3252 1.52291 11.0913 1.75716L10.2144 2.63313C10.3019 2.77531 10.377 2.92523 10.436 3.08235C10.5564 3.40289 10.6118 3.74425 10.6001 4.08626V4.32259C10.9863 4.48504 11.3411 4.72178 11.6431 5.02376C11.7414 5.12211 11.8323 5.22644 11.9165 5.33528C12.7278 5.09243 13.3804 4.30027 13.3804 3.33333C13.3804 3.00201 13.6487 2.73381 13.98 2.73372C14.3114 2.73372 14.5806 3.00196 14.5806 3.33333C14.5806 4.75383 13.6787 5.95588 12.4663 6.41341C12.5533 6.7097 12.6001 7.01896 12.6001 7.33333V8.06673Z"/></svg>
+          <code class="type-helper font-mono text-secondary">bug</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><g transform="translate(0.5 0.5)"><path d="M8.33765 2.50001C8.33765 2.31436 8.26384 2.13617 8.13257 2.00489C8.0013 1.87363 7.82309 1.79981 7.63745 1.79981H7.36206C7.17669 1.79993 6.99907 1.87389 6.86792 2.00489C6.73664 2.13617 6.66284 2.31436 6.66284 2.50001V2.61329C6.66248 2.92882 6.57854 3.23854 6.42065 3.51173C6.263 3.78448 6.03608 4.01019 5.76343 4.16798L5.7644 4.16895L5.49487 4.3252L5.4939 4.32618C5.22026 4.48416 4.90947 4.56739 4.59351 4.56739C4.28352 4.56735 3.97951 4.48625 3.70972 4.33399V4.33497L3.61597 4.28517C3.61069 4.28235 3.60552 4.27936 3.60034 4.27638C3.43989 4.18382 3.24904 4.15837 3.07007 4.20606C2.89093 4.25397 2.73723 4.37177 2.64429 4.53224L2.50757 4.76954C2.41531 4.92995 2.39048 5.12004 2.43823 5.29884C2.47414 5.43311 2.54837 5.553 2.65112 5.64356L2.76343 5.72364L2.79272 5.7422L2.88647 5.8047H2.8855C3.14427 5.9608 3.36037 6.17885 3.51245 6.44044C3.67027 6.71193 3.75466 7.01998 3.75659 7.33399V7.65431L3.75269 7.77247C3.73559 8.04849 3.65566 8.31791 3.51733 8.5586C3.3607 8.83108 3.13439 9.05648 2.86304 9.21485L2.86401 9.21583L2.77026 9.27149L2.76343 9.27638C2.60297 9.36932 2.48613 9.52204 2.43823 9.70118C2.39048 9.87998 2.41531 10.0701 2.50757 10.2305L2.64429 10.4678C2.73723 10.6282 2.89093 10.7461 3.07007 10.794C3.24904 10.8417 3.43989 10.8162 3.60034 10.7236L3.61597 10.7149L3.70972 10.665C3.97941 10.5129 4.28368 10.4327 4.59351 10.4326C4.86998 10.4326 5.14235 10.4964 5.3894 10.6182L5.4939 10.6738L5.49487 10.6748L5.76245 10.8301L5.86304 10.8926C6.09166 11.0455 6.28249 11.2493 6.42065 11.4883C6.57854 11.7615 6.66248 12.0712 6.66284 12.3867V12.5C6.66284 12.6857 6.73664 12.8639 6.86792 12.9951C6.99907 13.1261 7.17669 13.2001 7.36206 13.2002H7.63745C7.82309 13.2002 8.0013 13.1264 8.13257 12.9951C8.26384 12.8639 8.33765 12.6857 8.33765 12.5V12.3867C8.33801 12.0713 8.42105 11.7614 8.57886 11.4883C8.71709 11.2492 8.90868 11.0455 9.13745 10.8926L9.23706 10.8301L9.50464 10.6748L9.50659 10.6738C9.78011 10.516 10.0902 10.4327 10.406 10.4326C10.7158 10.4326 11.0201 10.513 11.2898 10.665L11.3835 10.7149L11.4001 10.7236C11.5607 10.8162 11.7514 10.8418 11.9304 10.794C12.1096 10.7461 12.2623 10.6282 12.3552 10.4678L12.49 10.2295L12.4919 10.2256C12.5846 10.065 12.6102 9.87349 12.5623 9.69435C12.5148 9.51717 12.3998 9.36564 12.2419 9.27247L12.1599 9.2295C12.1545 9.2266 12.1487 9.22282 12.1433 9.21974C11.869 9.06123 11.6411 8.83328 11.4832 8.5586C11.3251 8.28367 11.2427 7.9714 11.2439 7.65431V7.34376C11.243 7.02734 11.3255 6.71579 11.4832 6.44142C11.6397 6.16926 11.8645 5.9425 12.1355 5.78419L12.2292 5.72853L12.2371 5.72364C12.3973 5.63068 12.5144 5.47785 12.5623 5.29884C12.61 5.11979 12.5845 4.92909 12.4919 4.76856V4.76759L12.3552 4.53224C12.2623 4.37177 12.1096 4.25397 11.9304 4.20606C11.7514 4.15823 11.5607 4.18386 11.4001 4.27638C11.3949 4.27942 11.3889 4.2823 11.3835 4.28517L11.3054 4.3252L11.3064 4.32618C11.0328 4.48416 10.722 4.56739 10.406 4.56739C10.0902 4.56735 9.78011 4.48405 9.50659 4.32618L9.50464 4.3252L9.23706 4.16895V4.16993C8.96387 4.01211 8.73675 3.78488 8.57886 3.51173C8.42105 3.23859 8.33801 2.92874 8.33765 2.61329V2.50001ZM8.82495 7.50001C8.82495 6.76823 8.23153 6.17481 7.49976 6.17481C6.76809 6.17495 6.17456 6.76831 6.17456 7.50001C6.17456 8.23171 6.76809 8.82507 7.49976 8.8252C8.23153 8.8252 8.82495 8.23179 8.82495 7.50001ZM9.92456 7.50001C9.92456 8.8393 8.83905 9.92481 7.49976 9.92481C6.16058 9.92468 5.07495 8.83922 5.07495 7.50001C5.07495 6.1608 6.16058 5.07534 7.49976 5.0752C8.83905 5.0752 9.92456 6.16072 9.92456 7.50001ZM9.43726 2.61231L9.44312 2.70313C9.45513 2.79393 9.48488 2.88212 9.53101 2.96192C9.57708 3.0416 9.63913 3.11035 9.71167 3.16603L9.78784 3.21778L9.78882 3.21876L10.0554 3.37403H10.0564C10.1627 3.43533 10.2833 3.46774 10.406 3.46778C10.5289 3.46778 10.6502 3.43547 10.7566 3.37403L10.7722 3.36427L10.866 3.31446C11.2757 3.08362 11.7598 3.02198 12.2146 3.14356C12.6753 3.26674 13.0684 3.56786 13.3074 3.98048L13.4451 4.21778V4.21876C13.6833 4.63172 13.7478 5.12244 13.6248 5.58302C13.5023 6.04104 13.2037 6.43153 12.7947 6.67091L12.7019 6.72755L12.6941 6.73243C12.5873 6.79411 12.4987 6.8833 12.4373 6.99024C12.3758 7.09719 12.343 7.21846 12.3435 7.34181V7.65821C12.343 7.78156 12.3758 7.90283 12.4373 8.00978C12.4987 8.11672 12.5873 8.20591 12.6941 8.26759L12.7712 8.3086L12.7878 8.31739C13.2004 8.55634 13.5015 8.94964 13.6248 9.41017C13.7475 9.86904 13.683 10.3575 13.447 10.7695L13.3103 11.0137L13.3074 11.0195C13.0684 11.4322 12.6753 11.7333 12.2146 11.8565C11.7597 11.9781 11.2758 11.9156 10.866 11.6846L10.7722 11.6358C10.7668 11.6329 10.7619 11.629 10.7566 11.626C10.6502 11.5645 10.5289 11.5322 10.406 11.5322C10.2833 11.5323 10.1627 11.5647 10.0564 11.626L10.0554 11.625L9.78882 11.7813L9.78784 11.7822C9.68156 11.8436 9.59244 11.9319 9.53101 12.0381C9.46964 12.1443 9.43745 12.2651 9.43726 12.3877V12.5C9.43726 12.9774 9.24748 13.4349 8.90991 13.7725C8.57235 14.11 8.11483 14.2998 7.63745 14.2998H7.36206C6.88483 14.2997 6.42706 14.1099 6.0896 13.7725C5.75217 13.4349 5.56226 12.9773 5.56226 12.5V12.3877C5.56207 12.2651 5.52988 12.1443 5.46851 12.0381C5.40708 11.932 5.31885 11.8436 5.21265 11.7822L5.21069 11.7813L4.94409 11.626L4.86108 11.5859C4.77655 11.551 4.68557 11.5322 4.59351 11.5322C4.47081 11.5323 4.35018 11.5647 4.2439 11.626C4.23855 11.6291 4.23274 11.6328 4.22729 11.6358L4.13354 11.6856L4.13257 11.6846C3.72316 11.915 3.24026 11.9778 2.78589 11.8565C2.32532 11.7333 1.93212 11.4321 1.69312 11.0195L1.55542 10.7822L1.55444 10.7813C1.31626 10.3683 1.25172 9.87753 1.37476 9.417C1.49724 8.95896 1.79581 8.56751 2.20483 8.32813L2.29858 8.27247L2.3064 8.26759C2.4132 8.20592 2.50178 8.11671 2.56323 8.00978C2.62462 7.90288 2.6565 7.78148 2.65601 7.65821V7.34083L2.65015 7.25001C2.63778 7.15974 2.60737 7.07245 2.56128 6.99317C2.49994 6.88771 2.41203 6.80032 2.3064 6.73927C2.29617 6.73336 2.28595 6.72629 2.27612 6.71974L2.18237 6.65724V6.65626C1.78541 6.4158 1.49488 6.03226 1.37476 5.58302C1.25172 5.12249 1.31626 4.63168 1.55444 4.21876L1.55542 4.21778L1.69312 3.98048C1.93212 3.56797 2.32532 3.26672 2.78589 3.14356C3.2401 3.02225 3.72325 3.08422 4.13257 3.31446H4.13354L4.22729 3.36427C4.23274 3.36717 4.23855 3.37095 4.2439 3.37403C4.35018 3.43533 4.47081 3.46774 4.59351 3.46778C4.71638 3.46778 4.83768 3.43547 4.94409 3.37403L5.21069 3.21876L5.21265 3.21778C5.31885 3.15646 5.40708 3.06806 5.46851 2.96192C5.51463 2.88214 5.54437 2.79391 5.5564 2.70313L5.56226 2.61231V2.50001C5.56226 2.02272 5.75217 1.56509 6.0896 1.22755C6.42706 0.890087 6.88483 0.700322 7.36206 0.700205H7.63745C8.11483 0.700205 8.57235 0.889999 8.90991 1.22755C9.24748 1.56511 9.43726 2.02262 9.43726 2.50001V2.61231Z"/></g></svg>
+          <code class="type-helper font-mono text-secondary">settings</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M5.57617 3.57617C5.81049 3.34186 6.18951 3.34186 6.42383 3.57617L10.4238 7.57617C10.6581 7.81049 10.6581 8.18951 10.4238 8.42383L6.42383 12.4238C6.18951 12.6581 5.81049 12.6581 5.57617 12.4238C5.34186 12.1895 5.34186 11.8105 5.57617 11.5762L9.15234 8L5.57617 4.42383C5.34186 4.18951 5.34186 3.81049 5.57617 3.57617Z"/></svg>
+          <code class="type-helper font-mono text-secondary">chevron-right</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M9.57617 3.57617C9.81049 3.34186 10.1895 3.34186 10.4238 3.57617C10.6581 3.81049 10.6581 4.18951 10.4238 4.42383L6.84766 8L10.4238 11.5762C10.6581 11.8105 10.6581 12.1895 10.4238 12.4238C10.1895 12.6581 9.81049 12.6581 9.57617 12.4238L5.57617 8.42383C5.34186 8.18951 5.34186 7.81049 5.57617 7.57617L9.57617 3.57617Z"/></svg>
+          <code class="type-helper font-mono text-secondary">chevron-left</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M11.5762 5.57617C11.8105 5.34186 12.1895 5.34186 12.4238 5.57617C12.6581 5.81049 12.6581 6.18951 12.4238 6.42383L8.42383 10.4238C8.18951 10.6581 7.81049 10.6581 7.57617 10.4238L3.57617 6.42383C3.34186 6.18951 3.34186 5.81049 3.57617 5.57617C3.81049 5.34186 4.18951 5.34186 4.42383 5.57617L8 9.15234L11.5762 5.57617Z"/></svg>
+          <code class="type-helper font-mono text-secondary">chevron-down</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M7.66992 5.49902C7.90282 5.34523 8.21879 5.37114 8.42383 5.57617L12.4238 9.57617C12.6581 9.81049 12.6581 10.1895 12.4238 10.4238C12.1895 10.6581 11.8105 10.6581 11.5762 10.4238L8 6.84766L4.42383 10.4238C4.18951 10.6581 3.81049 10.6581 3.57617 10.4238C3.34186 10.1895 3.34186 9.81049 3.57617 9.57617L7.57617 5.57617L7.66992 5.49902Z"/></svg>
+          <code class="type-helper font-mono text-secondary">chevron-up</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><g transform="translate(4.4004 5.9004)"><path d="M6.17574 0.175736C6.41005 -0.0585787 6.78908 -0.0585787 7.02339 0.175736C7.25771 0.410051 7.25771 0.789078 7.02339 1.02339L4.02339 4.02339C3.78908 4.25771 3.41005 4.25771 3.17574 4.02339L0.175736 1.02339C-0.0585787 0.789078 -0.0585787 0.410051 0.175736 0.175736C0.410051 -0.0585787 0.789078 -0.0585787 1.02339 0.175736L3.59956 2.75191L6.17574 0.175736Z"/></g></svg>
+          <code class="type-helper font-mono text-secondary">chevron-down-small</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M7.39974 12.6663V8.59993H3.33333C3.00207 8.59993 2.7339 8.33155 2.73372 8.00033C2.73372 7.66895 3.00196 7.39974 3.33333 7.39974H7.39974V3.33333C7.39974 3.00196 7.66895 2.73372 8.00033 2.73372C8.33155 2.7339 8.59993 3.00207 8.59993 3.33333V7.39974H12.6663C12.9977 7.39974 13.2669 7.66895 13.2669 8.00033C13.2668 8.33155 12.9976 8.59993 12.6663 8.59993H8.59993V12.6663C8.59993 12.9976 8.33155 13.2668 8.00033 13.2669C7.66895 13.2669 7.39974 12.9977 7.39974 12.6663Z"/></svg>
+          <code class="type-helper font-mono text-secondary">plus</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M11.5762 3.57617C11.8105 3.34186 12.1895 3.34186 12.4238 3.57617C12.6581 3.81049 12.6581 4.18951 12.4238 4.42383L8.84766 8L12.4238 11.5762C12.6581 11.8105 12.6581 12.1895 12.4238 12.4238C12.1895 12.6581 11.8105 12.6581 11.5762 12.4238L8 8.84766L4.42383 12.4238C4.18951 12.6581 3.81049 12.6581 3.57617 12.4238C3.34186 12.1895 3.34186 11.8105 3.57617 11.5762L7.15234 8L3.57617 4.42383C3.34186 4.18951 3.34186 3.81049 3.57617 3.57617C3.81049 3.34186 4.18951 3.34186 4.42383 3.57617L8 7.15234L11.5762 3.57617Z"/></svg>
+          <code class="type-helper font-mono text-secondary">close</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M8 1.9502C9.58084 1.9502 11.0933 2.53791 12.2695 3.56641L12.5 3.77832L12.5078 3.78516L12.9502 4.22754V2.5C12.9502 2.19625 13.1962 1.9502 13.5 1.9502C13.8038 1.9502 14.0498 2.19625 14.0498 2.5V5.55567C14.0498 5.7015 13.9918 5.84122 13.8887 5.94434C13.7855 6.04745 13.6458 6.10547 13.5 6.10547H10.4443C10.1407 6.10541 9.89459 5.85934 9.89453 5.55567C9.89453 5.25194 10.1406 5.00592 10.4443 5.00586H12.1729L11.7373 4.57031C10.7307 3.60293 9.39357 3.04981 8 3.04981C7.02109 3.04981 6.06397 3.33999 5.25 3.88379C4.43604 4.42766 3.80142 5.20106 3.42676 6.10547C3.05211 7.00996 2.95451 8.00562 3.14551 8.96582C3.33653 9.92595 3.80778 10.8078 4.5 11.5C5.19222 12.1922 6.07405 12.6635 7.03418 12.8545C7.99439 13.0455 8.99004 12.9479 9.89453 12.5732C10.7989 12.1986 11.5723 11.564 12.1162 10.75C12.66 9.93603 12.9502 8.97892 12.9502 8C12.9502 7.69624 13.1962 7.4502 13.5 7.4502C13.8038 7.4502 14.0498 7.69624 14.0498 8C14.0498 9.19658 13.6951 10.3664 13.0303 11.3613C12.3655 12.3562 11.4209 13.132 10.3154 13.5898C9.20994 14.0478 7.99292 14.167 6.81934 13.9336C5.6459 13.7001 4.5677 13.1243 3.72168 12.2783C2.87567 11.4323 2.2999 10.3541 2.06641 9.18067C1.83297 8.00708 1.95225 6.79006 2.41016 5.68457C2.86805 4.57915 3.64384 3.6345 4.63867 2.96973C5.63359 2.30495 6.80342 1.9502 8 1.9502Z"/></svg>
+          <code class="type-helper font-mono text-secondary">restart</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M12.9331 10.3336C12.9329 10.6648 12.6646 10.9331 12.3335 10.9333C12.0022 10.9333 11.7331 10.6649 11.7329 10.3336V5.1149L4.09033 12.7575C3.85606 12.9916 3.47695 12.9916 3.24268 12.7575C3.00836 12.5232 3.00836 12.1432 3.24268 11.9088L10.8853 4.26627H5.6665C5.33513 4.26627 5.06689 3.99803 5.06689 3.66666C5.06689 3.33529 5.33513 3.06705 5.6665 3.06705H12.3335C12.6647 3.06722 12.9331 3.33539 12.9331 3.66666V10.3336Z"/></svg>
+          <code class="type-helper font-mono text-secondary">arrow-up-right</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M12.8737 3.54004C13.1274 3.28647 13.5388 3.28658 13.7926 3.54004C14.0465 3.79388 14.0465 4.20612 13.7926 4.45996L6.45964 11.793C6.20585 12.0468 5.79454 12.0466 5.54069 11.793L2.20671 8.45996C1.95287 8.20612 1.95287 7.79388 2.20671 7.54004C2.46055 7.2862 2.87279 7.2862 3.12663 7.54004L5.99967 10.4141L12.8737 3.54004Z"/></svg>
+          <code class="type-helper font-mono text-secondary">check</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M4 2.44155C4 2.24722 4.21199 2.1272 4.37862 2.22717L13.6427 7.78563C13.8045 7.88273 13.8045 8.11727 13.6427 8.21437L4.37862 13.7728C4.21199 13.8728 4 13.7528 4 13.5585V2.44155Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <code class="type-helper font-mono text-secondary">play</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M6.06641 3.33366C6.06641 3.29684 6.03682 3.26628 6 3.26628H4.66699C4.63017 3.26628 4.59961 3.29684 4.59961 3.33366V12.6667C4.59961 12.7035 4.63017 12.7331 4.66699 12.7331H6C6.03682 12.7331 6.06641 12.7035 6.06641 12.6667V3.33366ZM11.4004 3.33366C11.4004 3.29684 11.3698 3.26628 11.333 3.26628H10C9.96318 3.26628 9.93359 3.29684 9.93359 3.33366V12.6667C9.93359 12.7035 9.96318 12.7331 10 12.7331H11.333C11.3698 12.7331 11.4004 12.7035 11.4004 12.6667V3.33366ZM7.2666 12.6667C7.2666 13.3662 6.69956 13.9333 6 13.9333H4.66699C3.96743 13.9333 3.40039 13.3662 3.40039 12.6667V3.33366C3.40039 2.6341 3.96743 2.06706 4.66699 2.06706H6C6.69956 2.06706 7.2666 2.6341 7.2666 3.33366V12.6667ZM12.5996 12.6667C12.5996 13.3662 12.0326 13.9333 11.333 13.9333H10C9.30044 13.9333 8.7334 13.3662 8.7334 12.6667V3.33366C8.7334 2.6341 9.30044 2.06706 10 2.06706H11.333C12.0326 2.06706 12.5996 2.6341 12.5996 3.33366V12.6667Z"/></svg>
+          <code class="type-helper font-mono text-secondary">pause</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M14.0635 7.99966C14.0634 7.65288 13.9761 7.31165 13.8096 7.00748C13.643 6.70322 13.4026 6.44532 13.1104 6.25845C12.8977 6.12241 12.7923 5.86805 12.8477 5.62173C12.9241 5.28175 12.9134 4.92811 12.8164 4.59341C12.7194 4.25865 12.5394 3.95315 12.293 3.7067C12.0466 3.46039 11.7418 3.28026 11.4072 3.18326C11.0725 3.08623 10.718 3.07555 10.3779 3.15201C10.1318 3.20716 9.8772 3.10278 9.74121 2.89029C9.55433 2.59801 9.29648 2.35671 8.99219 2.19009C8.68804 2.02368 8.34671 1.93619 8 1.93619C7.65326 1.93621 7.31198 2.02363 7.00781 2.19009C6.70352 2.35671 6.44567 2.59801 6.25879 2.89029C6.12277 3.10272 5.86823 3.2072 5.62207 3.15201C5.28258 3.07593 4.9289 3.08648 4.59473 3.18326C4.26061 3.28008 3.95619 3.46 3.70996 3.70572C3.46375 3.95143 3.28403 4.25562 3.18652 4.58951C3.08903 4.92353 3.07693 5.27716 3.15234 5.61685C3.2071 5.86373 3.10135 6.1183 2.8877 6.25357C2.59317 6.43996 2.35072 6.69824 2.18262 7.00357C2.01462 7.30875 1.92585 7.6513 1.92578 7.99966C1.92578 8.34821 2.01451 8.69141 2.18262 8.99673C2.35072 9.30206 2.59318 9.56035 2.8877 9.74673C3.10132 9.88204 3.20715 10.1366 3.15234 10.3835C3.07695 10.7231 3.08903 11.0768 3.18652 11.4108C3.28405 11.7446 3.46377 12.0489 3.70996 12.2946C3.95614 12.5402 4.26071 12.7192 4.59473 12.8161C4.92889 12.9128 5.2826 12.9244 5.62207 12.8483L5.71484 12.8346C5.93076 12.8206 6.14095 12.9244 6.25977 13.111C6.44641 13.4044 6.70398 13.6468 7.00879 13.8141C7.31355 13.9814 7.65624 14.069 8.00391 14.069C8.35139 14.0689 8.69343 13.9813 8.99805 13.8141C9.30285 13.6468 9.56043 13.4044 9.74707 13.111C9.8826 12.8981 10.1374 12.7926 10.3838 12.8473C10.7233 12.9227 11.0763 12.9115 11.4102 12.8141C11.7442 12.7166 12.0482 12.536 12.2939 12.2897C12.5397 12.0434 12.7196 11.7392 12.8164 11.4049C12.9132 11.0707 12.9238 10.7171 12.8477 10.3776C12.7927 10.1314 12.8978 9.87676 13.1104 9.74088C13.4025 9.55405 13.643 9.29694 13.8096 8.99283C13.9762 8.68854 14.0635 8.34658 14.0635 7.99966ZM9.57617 6.24283C9.81049 6.00851 10.1905 6.00851 10.4248 6.24283C10.6586 6.47704 10.6586 6.85627 10.4248 7.09048L7.75781 9.75748C7.64541 9.86988 7.49294 9.93313 7.33398 9.93326C7.17485 9.93326 7.0217 9.87 6.90918 9.75748L5.57617 8.42447C5.34186 8.19015 5.34186 7.81015 5.57617 7.57584C5.81049 7.3416 6.19052 7.34155 6.4248 7.57584L7.33301 8.48404L9.57617 6.24283ZM15.2637 7.99966C15.2637 8.54802 15.1257 9.08803 14.8623 9.569C14.6638 9.93147 14.3982 10.251 14.082 10.5133C14.1221 10.9241 14.0842 11.3401 13.9688 11.7389C13.8157 12.2671 13.532 12.7481 13.1436 13.1374C12.7552 13.5266 12.2749 13.8113 11.7471 13.9655C11.3485 14.0818 10.9324 14.1209 10.5215 14.0817C10.2591 14.3994 9.93847 14.6664 9.5752 14.8659C9.09365 15.1302 8.55321 15.2691 8.00391 15.2692C7.45443 15.2692 6.91333 15.1303 6.43164 14.8659C6.06857 14.6665 5.74763 14.4001 5.48535 14.0827C5.07519 14.1224 4.65989 14.0846 4.26172 13.9694C3.73342 13.8164 3.25163 13.5317 2.8623 13.1432C2.47319 12.7548 2.18825 12.2745 2.03418 11.7467C1.91793 11.3485 1.87797 10.9327 1.91699 10.5221C1.59847 10.26 1.33101 9.93936 1.13086 9.57584C0.865144 9.09322 0.726562 8.55059 0.726562 7.99966C0.726628 7.44891 0.865246 6.90694 1.13086 6.42447C1.3311 6.06078 1.59829 5.73944 1.91699 5.4772C1.87809 5.06689 1.91803 4.65155 2.03418 4.25357C2.18829 3.72559 2.47298 3.24462 2.8623 2.85611C3.25162 2.46762 3.73343 2.18391 4.26172 2.03091C4.66022 1.91555 5.07583 1.8777 5.48633 1.91763C5.74865 1.60146 6.06918 1.3368 6.43164 1.13834C6.91254 0.87505 7.45174 0.736991 8 0.736969C8.54835 0.736969 9.08836 0.874983 9.56934 1.13834C9.93135 1.33663 10.2516 1.60092 10.5137 1.91666C10.9251 1.87641 11.3418 1.91515 11.7412 2.03091C12.2703 2.18429 12.7521 2.46949 13.1416 2.85904C13.531 3.24856 13.8164 3.73039 13.9697 4.25943C14.0853 4.65856 14.1222 5.07485 14.082 5.48599C14.3984 5.74838 14.6638 6.06868 14.8623 6.4313C15.1256 6.91213 15.2636 7.45149 15.2637 7.99966Z"/></svg>
+          <code class="type-helper font-mono text-secondary">badge-check</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0.737305C8.54829 0.737335 9.08842 0.875348 9.56934 1.13867C9.93125 1.33695 10.2516 1.60132 10.5137 1.91699C10.9251 1.87677 11.3419 1.9155 11.7412 2.03125C12.2702 2.18464 12.7521 2.46988 13.1416 2.85938C13.5309 3.24886 13.8164 3.73082 13.9697 4.25977C14.0853 4.65881 14.1222 5.07528 14.082 5.48633C14.3983 5.74868 14.6638 6.0691 14.8623 6.43164C15.1255 6.9124 15.2636 7.45193 15.2637 8C15.2636 8.54827 15.1256 9.08843 14.8623 9.56934C14.6638 9.93176 14.3982 10.2514 14.082 10.5137C14.122 10.9244 14.0842 11.3405 13.9688 11.7393C13.8157 12.2674 13.532 12.7485 13.1436 13.1377C12.7552 13.5269 12.2748 13.8117 11.7471 13.9658C11.3486 14.0821 10.9323 14.1212 10.5215 14.082C10.2591 14.3997 9.93844 14.6668 9.5752 14.8662C9.09371 15.1305 8.55314 15.2694 8.00391 15.2695C7.45452 15.2695 6.91327 15.1305 6.43164 14.8662C6.06866 14.6669 5.74759 14.4003 5.48535 14.083C5.07527 14.1228 4.65982 14.0849 4.26172 13.9697C3.73352 13.8168 3.25159 13.532 2.8623 13.1436C2.47325 12.7552 2.18827 12.2747 2.03418 11.7471C1.91796 11.3489 1.878 10.933 1.91699 10.5225C1.59855 10.2604 1.331 9.93959 1.13086 9.57617C0.865183 9.09363 0.726603 8.55085 0.726562 8C0.726628 7.44929 0.865285 6.90725 1.13086 6.4248C1.33109 6.06112 1.5983 5.73977 1.91699 5.47754C1.8781 5.06729 1.91807 4.65183 2.03418 4.25391C2.18828 3.72594 2.473 3.24495 2.8623 2.85645C3.25162 2.46795 3.73343 2.18425 4.26172 2.03125C4.66019 1.91591 5.07587 1.87804 5.48633 1.91797C5.74865 1.6018 6.06918 1.33713 6.43164 1.13867C6.91253 0.875399 7.45176 0.737326 8 0.737305ZM10.4248 6.24316C10.1905 6.00885 9.81049 6.00885 9.57617 6.24316L7.33301 8.48438L6.4248 7.57617C6.19052 7.34188 5.81049 7.34194 5.57617 7.57617C5.34192 7.81049 5.34188 8.19051 5.57617 8.4248L6.90918 9.75781C7.02168 9.87019 7.17496 9.93359 7.33398 9.93359C7.49285 9.93342 7.64545 9.87014 7.75781 9.75781L10.4248 7.09082C10.6585 6.85669 10.6583 6.47739 10.4248 6.24316Z"/></svg>
+          <code class="type-helper font-mono text-secondary">badge-check-filled</code>
+        </div>
+      </div>
+      <p class="mt-1 type-helper text-secondary">
+        Icons inherit color from the parent via \`\`currentColor\`\` (most are
+        filled outlines; \`\`play\`\` is stroked; \`\`badge-check-filled\`\` is a solid
+        badge with the check knocked out). Sizes: \`\`sm\`\` (w-3.5), \`\`md\`\` (w-4,
+        default), \`\`lg\`\` (w-5).
+      </p>
+      <div class="mt-0.5 type-helper text-secondary font-mono">Icon16.jinja :: ICONS_16 in templates.py</div>
+    </section>
+
+    <section id="icons-12" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-1">Icons -- 12x12 chrome glyphs (Icon12)</h2>
+      <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex items-start gap-4 text-secondary mt-4">
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><line x1="2" y1="6" x2="10" y2="6"/></svg>
+          <code class="type-helper font-mono text-tertiary">minimize</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
+          <code class="type-helper font-mono text-tertiary">maximize</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
+          <code class="type-helper font-mono text-tertiary">close</code>
+        </div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Icon12.jinja :: ICONS_12 in templates.py (used only inside TitlebarButton variant="control")</div>
+    </section>
+
+      
+      <div id="patterns" class="scroll-mt-8 mt-16 pt-12 border-t border-default mb-8">
+        <h2 class="type-heading-lg text-primary">Patterns &amp; Components</h2>
+        <p class="type-helper text-secondary mt-1">
+          Common chrome and workspace UI patterns, composed from the tokens
+          above. Source files linked under each example.
+        </p>
+      </div>
+
+    
+    <section id="color-swatches" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-2">Color swatches</h2>
+      <div class="flex items-center gap-2" role="radiogroup" aria-label="Color swatch demo, settings size">
+        <button type="button"
+        role="radio"
+        class="color-swatch w-[34px] h-[34px] rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
+        aria-label="confusion"
+        aria-checked="true"
+        data-color="#0b292b"
+        style="background-color: #0b292b;"
+        ></button>
+        <button type="button"
+        role="radio"
+        class="color-swatch w-[34px] h-[34px] rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
+        aria-label="peace"
+        aria-checked="false"
+        data-color="#9fbbd3"
+        style="background-color: #9fbbd3;"
+        ></button>
+        <button type="button"
+        role="radio"
+        class="color-swatch w-[34px] h-[34px] rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
+        aria-label="energy"
+        aria-checked="false"
+        data-color="#cecd0c"
+        style="background-color: #cecd0c;"
+        disabled></button>
+      </div>
+      <div class="flex items-center gap-2 mt-4" role="radiogroup" aria-label="Color swatch demo, create-form size">
+        <button type="button"
+        role="radio"
+        class="color-swatch w-6 h-6 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
+        aria-label="confusion"
+        aria-checked="true"
+        data-color="#0b292b"
+        style="background-color: #0b292b;"
+        ></button>
+        <button type="button"
+        role="radio"
+        class="color-swatch w-6 h-6 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
+        aria-label="peace"
+        aria-checked="false"
+        data-color="#9fbbd3"
+        style="background-color: #9fbbd3;"
+        ></button>
+        <button type="button"
+        role="radio"
+        class="color-swatch w-6 h-6 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
+        aria-label="energy"
+        aria-checked="false"
+        data-color="#cecd0c"
+        style="background-color: #cecd0c;"
+        disabled></button>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; same three per row: first selected via aria-checked, third disabled) + app.css :: .color-swatch</div>
+    </section>
+
+    
+    <section id="titlebar-buttons" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Titlebar buttons (self-theming)</h2>
+      <div class="flex flex-col gap-2">
+        
+        <div class="titlebar-surface rounded-lg overflow-hidden border border-default h-[38px] flex items-center select-none px-1"
+             style="--titlebar-bg: #0b292b; background-color: var(--titlebar-bg);">
+          <div class="flex-1 flex items-center gap-0.5 min-w-0">
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary" title="Workspaces" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M13.3337 11.4004C13.6649 11.4006 13.9333 11.6687 13.9333 12C13.9333 12.3313 13.6649 12.5994 13.3337 12.5996H2.66667C2.3353 12.5996 2.06706 12.3314 2.06706 12C2.06706 11.6686 2.3353 11.4004 2.66667 11.4004H13.3337ZM13.3337 7.40039C13.6649 7.40057 13.9333 7.66874 13.9333 8C13.9333 8.33126 13.6649 8.59943 13.3337 8.59961H2.66667C2.3353 8.59961 2.06706 8.33137 2.06706 8C2.06706 7.66863 2.3353 7.40039 2.66667 7.40039H13.3337ZM13.3337 3.40039C13.6649 3.40057 13.9333 3.66874 13.9333 4C13.9333 4.33126 13.6649 4.59943 13.3337 4.59961H2.66667C2.3353 4.59961 2.06706 4.33137 2.06706 4C2.06706 3.66863 2.3353 3.40039 2.66667 3.40039H13.3337Z"/></svg></button>
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary" title="Home" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M9.40039 9.01301C9.40039 8.99548 9.39316 8.9786 9.38086 8.96613C9.36836 8.95363 9.35069 8.9466 9.33301 8.9466H6.66699C6.64931 8.9466 6.63164 8.95363 6.61914 8.96613C6.60684 8.9786 6.59961 8.99548 6.59961 9.01301V13.7464H9.40039V9.01301ZM10.5996 13.7464H12.667C12.8614 13.7463 13.0481 13.669 13.1855 13.5316C13.323 13.3941 13.4004 13.2074 13.4004 13.013V7.01301C13.4004 6.90648 13.3768 6.80107 13.332 6.70441C13.2871 6.60765 13.2211 6.52132 13.1396 6.45246L13.1367 6.44953L8.47363 2.45246V2.45344C8.34127 2.34157 8.1733 2.27961 8 2.27961C7.8267 2.27961 7.65873 2.34157 7.52637 2.45344L7.52539 2.45246L2.86328 6.44953L2.86035 6.45246C2.77888 6.52132 2.71287 6.60765 2.66797 6.70441C2.62319 6.80107 2.59958 6.90648 2.59961 7.01301V13.013C2.59962 13.2074 2.67703 13.3941 2.81445 13.5316C2.9519 13.669 3.13863 13.7463 3.33301 13.7464H5.40039V9.01301C5.40039 8.67707 5.53394 8.35505 5.77148 8.1175C6.00901 7.88006 6.33113 7.74641 6.66699 7.74641H9.33301C9.66887 7.74641 9.99099 7.88006 10.2285 8.1175C10.4661 8.35505 10.5996 8.67707 10.5996 9.01301V13.7464ZM14.5996 13.013C14.5996 13.5257 14.3966 14.0176 14.0342 14.3802C13.6717 14.7427 13.1796 14.9465 12.667 14.9466H3.33301C2.82037 14.9465 2.32831 14.7427 1.96582 14.3802C1.60335 14.0176 1.4004 13.5257 1.40039 13.013V7.01301C1.40034 6.73181 1.46172 6.45363 1.58008 6.19855C1.69787 5.94487 1.86881 5.71937 2.08203 5.5384L6.74902 1.53937L6.75195 1.53645C7.10089 1.24157 7.54315 1.08039 8 1.08039C8.39979 1.08039 8.78863 1.20339 9.11328 1.43195L9.24805 1.53645L9.25098 1.53937L13.918 5.5384H13.917C14.1305 5.71946 14.302 5.94465 14.4199 6.19855C14.5383 6.45363 14.5997 6.73182 14.5996 7.01301V13.013Z"/></svg></button>
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary" title="Back" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M9.57617 3.57617C9.81049 3.34186 10.1895 3.34186 10.4238 3.57617C10.6581 3.81049 10.6581 4.18951 10.4238 4.42383L6.84766 8L10.4238 11.5762C10.6581 11.8105 10.6581 12.1895 10.4238 12.4238C10.1895 12.6581 9.81049 12.6581 9.57617 12.4238L5.57617 8.42383C5.34186 8.18951 5.34186 7.81049 5.57617 7.57617L9.57617 3.57617Z"/></svg></button>
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary" title="Forward" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M5.57617 3.57617C5.81049 3.34186 6.18951 3.34186 6.42383 3.57617L10.4238 7.57617C10.6581 7.81049 10.6581 8.18951 10.4238 8.42383L6.42383 12.4238C6.18951 12.6581 5.81049 12.6581 5.57617 12.4238C5.34186 12.1895 5.34186 11.8105 5.57617 11.5762L9.15234 8L5.57617 4.42383C5.34186 4.18951 5.34186 3.81049 5.57617 3.57617Z"/></svg></button>
+          </div>
+          <div class="flex-[2] flex items-center justify-center px-2 min-w-0">
+            <span class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
+          </div>
+          <div class="flex-1 flex items-center justify-end min-w-0">
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary gap-[3px]" title="Requests" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M14.0667 8.60026H10.9876L9.83236 10.3327C9.72108 10.4996 9.53394 10.6003 9.33333 10.6003H6.66634C6.46585 10.6002 6.27854 10.4995 6.16732 10.3327L5.01302 8.60026H1.93294V11.9997C1.93294 12.194 2.01046 12.3807 2.14779 12.5182C2.28524 12.6557 2.47197 12.733 2.66634 12.7331H13.3333C13.5278 12.7331 13.7144 12.6558 13.8519 12.5182C13.9893 12.3807 14.0667 12.1941 14.0667 11.9997V8.60026ZM4.8265 3.26628C4.69024 3.26644 4.55656 3.30481 4.44076 3.37663C4.32483 3.44853 4.23095 3.55134 4.17025 3.6735V3.67546L2.30404 7.40007H5.33333L5.40755 7.40495C5.57941 7.42637 5.73495 7.52153 5.83236 7.66764L6.98763 9.40007H9.01302L10.1673 7.66764L10.2122 7.60807C10.3253 7.47693 10.4908 7.40016 10.6663 7.40007H13.6956L11.8294 3.6735C11.7687 3.55137 11.6748 3.44851 11.5589 3.37663C11.4721 3.3228 11.3752 3.28822 11.2747 3.27409L11.1732 3.26628H4.8265ZM15.2669 11.9997C15.2669 12.5123 15.063 13.0043 14.7005 13.3669C14.338 13.7294 13.8461 13.9333 13.3333 13.9333H2.66634C2.15371 13.9332 1.66165 13.7294 1.29915 13.3669C0.936787 13.0043 0.733724 12.5123 0.733724 11.9997V7.99967C0.733775 7.90652 0.755492 7.81442 0.797201 7.73112L3.09701 3.13835C3.25708 2.81688 3.5037 2.54637 3.80892 2.3571C4.11454 2.16764 4.46691 2.06725 4.8265 2.06706H11.1732C11.5329 2.06725 11.8861 2.16754 12.1917 2.3571C12.4968 2.54633 12.7426 2.81702 12.9027 3.13835L15.2035 7.73112C15.2452 7.81442 15.2669 7.90652 15.2669 7.99967V11.9997Z"/></svg></button>
+            <div class="flex">
+              <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary" title="Minimize" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><line x1="2" y1="6" x2="10" y2="6"/></svg></button>
+              <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary" title="Maximize" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg></button>
+              <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary titlebar-btn-danger" title="Close" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg></button>
+            </div>
+          </div>
+        </div>
+        
+        <div class="titlebar-surface rounded-lg overflow-hidden border border-default h-[38px] flex items-center select-none px-1"
+             style="--titlebar-bg: #cecd0c; background-color: var(--titlebar-bg);">
+          <div class="flex-1 flex items-center gap-0.5 min-w-0">
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary" title="Workspaces" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M13.3337 11.4004C13.6649 11.4006 13.9333 11.6687 13.9333 12C13.9333 12.3313 13.6649 12.5994 13.3337 12.5996H2.66667C2.3353 12.5996 2.06706 12.3314 2.06706 12C2.06706 11.6686 2.3353 11.4004 2.66667 11.4004H13.3337ZM13.3337 7.40039C13.6649 7.40057 13.9333 7.66874 13.9333 8C13.9333 8.33126 13.6649 8.59943 13.3337 8.59961H2.66667C2.3353 8.59961 2.06706 8.33137 2.06706 8C2.06706 7.66863 2.3353 7.40039 2.66667 7.40039H13.3337ZM13.3337 3.40039C13.6649 3.40057 13.9333 3.66874 13.9333 4C13.9333 4.33126 13.6649 4.59943 13.3337 4.59961H2.66667C2.3353 4.59961 2.06706 4.33137 2.06706 4C2.06706 3.66863 2.3353 3.40039 2.66667 3.40039H13.3337Z"/></svg></button>
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary" title="Home" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M9.40039 9.01301C9.40039 8.99548 9.39316 8.9786 9.38086 8.96613C9.36836 8.95363 9.35069 8.9466 9.33301 8.9466H6.66699C6.64931 8.9466 6.63164 8.95363 6.61914 8.96613C6.60684 8.9786 6.59961 8.99548 6.59961 9.01301V13.7464H9.40039V9.01301ZM10.5996 13.7464H12.667C12.8614 13.7463 13.0481 13.669 13.1855 13.5316C13.323 13.3941 13.4004 13.2074 13.4004 13.013V7.01301C13.4004 6.90648 13.3768 6.80107 13.332 6.70441C13.2871 6.60765 13.2211 6.52132 13.1396 6.45246L13.1367 6.44953L8.47363 2.45246V2.45344C8.34127 2.34157 8.1733 2.27961 8 2.27961C7.8267 2.27961 7.65873 2.34157 7.52637 2.45344L7.52539 2.45246L2.86328 6.44953L2.86035 6.45246C2.77888 6.52132 2.71287 6.60765 2.66797 6.70441C2.62319 6.80107 2.59958 6.90648 2.59961 7.01301V13.013C2.59962 13.2074 2.67703 13.3941 2.81445 13.5316C2.9519 13.669 3.13863 13.7463 3.33301 13.7464H5.40039V9.01301C5.40039 8.67707 5.53394 8.35505 5.77148 8.1175C6.00901 7.88006 6.33113 7.74641 6.66699 7.74641H9.33301C9.66887 7.74641 9.99099 7.88006 10.2285 8.1175C10.4661 8.35505 10.5996 8.67707 10.5996 9.01301V13.7464ZM14.5996 13.013C14.5996 13.5257 14.3966 14.0176 14.0342 14.3802C13.6717 14.7427 13.1796 14.9465 12.667 14.9466H3.33301C2.82037 14.9465 2.32831 14.7427 1.96582 14.3802C1.60335 14.0176 1.4004 13.5257 1.40039 13.013V7.01301C1.40034 6.73181 1.46172 6.45363 1.58008 6.19855C1.69787 5.94487 1.86881 5.71937 2.08203 5.5384L6.74902 1.53937L6.75195 1.53645C7.10089 1.24157 7.54315 1.08039 8 1.08039C8.39979 1.08039 8.78863 1.20339 9.11328 1.43195L9.24805 1.53645L9.25098 1.53937L13.918 5.5384H13.917C14.1305 5.71946 14.302 5.94465 14.4199 6.19855C14.5383 6.45363 14.5997 6.73182 14.5996 7.01301V13.013Z"/></svg></button>
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary" title="Back" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M9.57617 3.57617C9.81049 3.34186 10.1895 3.34186 10.4238 3.57617C10.6581 3.81049 10.6581 4.18951 10.4238 4.42383L6.84766 8L10.4238 11.5762C10.6581 11.8105 10.6581 12.1895 10.4238 12.4238C10.1895 12.6581 9.81049 12.6581 9.57617 12.4238L5.57617 8.42383C5.34186 8.18951 5.34186 7.81049 5.57617 7.57617L9.57617 3.57617Z"/></svg></button>
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary" title="Forward" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M5.57617 3.57617C5.81049 3.34186 6.18951 3.34186 6.42383 3.57617L10.4238 7.57617C10.6581 7.81049 10.6581 8.18951 10.4238 8.42383L6.42383 12.4238C6.18951 12.6581 5.81049 12.6581 5.57617 12.4238C5.34186 12.1895 5.34186 11.8105 5.57617 11.5762L9.15234 8L5.57617 4.42383C5.34186 4.18951 5.34186 3.81049 5.57617 3.57617Z"/></svg></button>
+          </div>
+          <div class="flex-[2] flex items-center justify-center px-2 min-w-0">
+            <span class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
+          </div>
+          <div class="flex-1 flex items-center justify-end min-w-0">
+            <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary gap-[3px]" title="Requests" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M14.0667 8.60026H10.9876L9.83236 10.3327C9.72108 10.4996 9.53394 10.6003 9.33333 10.6003H6.66634C6.46585 10.6002 6.27854 10.4995 6.16732 10.3327L5.01302 8.60026H1.93294V11.9997C1.93294 12.194 2.01046 12.3807 2.14779 12.5182C2.28524 12.6557 2.47197 12.733 2.66634 12.7331H13.3333C13.5278 12.7331 13.7144 12.6558 13.8519 12.5182C13.9893 12.3807 14.0667 12.1941 14.0667 11.9997V8.60026ZM4.8265 3.26628C4.69024 3.26644 4.55656 3.30481 4.44076 3.37663C4.32483 3.44853 4.23095 3.55134 4.17025 3.6735V3.67546L2.30404 7.40007H5.33333L5.40755 7.40495C5.57941 7.42637 5.73495 7.52153 5.83236 7.66764L6.98763 9.40007H9.01302L10.1673 7.66764L10.2122 7.60807C10.3253 7.47693 10.4908 7.40016 10.6663 7.40007H13.6956L11.8294 3.6735C11.7687 3.55137 11.6748 3.44851 11.5589 3.37663C11.4721 3.3228 11.3752 3.28822 11.2747 3.27409L11.1732 3.26628H4.8265ZM15.2669 11.9997C15.2669 12.5123 15.063 13.0043 14.7005 13.3669C14.338 13.7294 13.8461 13.9333 13.3333 13.9333H2.66634C2.15371 13.9332 1.66165 13.7294 1.29915 13.3669C0.936787 13.0043 0.733724 12.5123 0.733724 11.9997V7.99967C0.733775 7.90652 0.755492 7.81442 0.797201 7.73112L3.09701 3.13835C3.25708 2.81688 3.5037 2.54637 3.80892 2.3571C4.11454 2.16764 4.46691 2.06725 4.8265 2.06706H11.1732C11.5329 2.06725 11.8861 2.16754 12.1917 2.3571C12.4968 2.54633 12.7426 2.81702 12.9027 3.13835L15.2035 7.73112C15.2452 7.81442 15.2669 7.90652 15.2669 7.99967V11.9997Z"/></svg></button>
+            <div class="flex">
+              <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary" title="Minimize" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><line x1="2" y1="6" x2="10" y2="6"/></svg></button>
+              <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary" title="Maximize" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg></button>
+              <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary titlebar-btn-danger" title="Close" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg></button>
+            </div>
+          </div>
+        </div>
+        
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- 1/2/1 flex sections center the title; contrast derived from --titlebar-bg via lch</div>
+    </section>
+
+    
+    <section id="notification-badge" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Notification badge</h2>
+      <div class="flex items-center gap-3">
+        <span class="inline-flex items-center justify-center align-middle min-w-[16px] px-1 py-px rounded-full bg-important text-white type-badge whitespace-nowrap overflow-hidden">4</span>
+        <span class="inline-flex items-center justify-center align-middle min-w-[16px] px-1 py-px rounded-full bg-important text-white type-badge whitespace-nowrap overflow-hidden">12</span>
+        <span class="inline-flex items-center justify-center align-middle min-w-[16px] px-1 py-px rounded-full bg-important text-white type-badge whitespace-nowrap overflow-hidden">99+</span>
+        <span class="inline-block align-middle w-2 h-2 rounded-full bg-important"></span>
+      </div>
+      <p class="mt-2 type-helper text-secondary">
+        Count pill (\`\`min-w-[16px]\`\` keeps a single digit circular; caps at
+        99+) and the bare dot. In the titlebar the count sits inline beside the
+        messages icon (the gap collapses when there are no requests):
+      </p>
+      <div class="mt-2 titlebar-surface rounded-lg overflow-hidden border border-default"
+           style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
+        <div class="h-[38px] flex items-center justify-end px-1">
+          <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent p-1.5 rounded-md text-primary gap-[3px]" title="Requests" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M14.0667 8.60026H10.9876L9.83236 10.3327C9.72108 10.4996 9.53394 10.6003 9.33333 10.6003H6.66634C6.46585 10.6002 6.27854 10.4995 6.16732 10.3327L5.01302 8.60026H1.93294V11.9997C1.93294 12.194 2.01046 12.3807 2.14779 12.5182C2.28524 12.6557 2.47197 12.733 2.66634 12.7331H13.3333C13.5278 12.7331 13.7144 12.6558 13.8519 12.5182C13.9893 12.3807 14.0667 12.1941 14.0667 11.9997V8.60026ZM4.8265 3.26628C4.69024 3.26644 4.55656 3.30481 4.44076 3.37663C4.32483 3.44853 4.23095 3.55134 4.17025 3.6735V3.67546L2.30404 7.40007H5.33333L5.40755 7.40495C5.57941 7.42637 5.73495 7.52153 5.83236 7.66764L6.98763 9.40007H9.01302L10.1673 7.66764L10.2122 7.60807C10.3253 7.47693 10.4908 7.40016 10.6663 7.40007H13.6956L11.8294 3.6735C11.7687 3.55137 11.6748 3.44851 11.5589 3.37663C11.4721 3.3228 11.3752 3.28822 11.2747 3.27409L11.1732 3.26628H4.8265ZM15.2669 11.9997C15.2669 12.5123 15.063 13.0043 14.7005 13.3669C14.338 13.7294 13.8461 13.9333 13.3333 13.9333H2.66634C2.15371 13.9332 1.66165 13.7294 1.29915 13.3669C0.936787 13.0043 0.733724 12.5123 0.733724 11.9997V7.99967C0.733775 7.90652 0.755492 7.81442 0.797201 7.73112L3.09701 3.13835C3.25708 2.81688 3.5037 2.54637 3.80892 2.3571C4.11454 2.16764 4.46691 2.06725 4.8265 2.06706H11.1732C11.5329 2.06725 11.8861 2.16754 12.1917 2.3571C12.4968 2.54633 12.7426 2.81702 12.9027 3.13835L15.2035 7.73112C15.2452 7.81442 15.2669 7.90652 15.2669 7.99967V11.9997Z"/></svg>
+            <span class="inline-flex items-center justify-center align-middle min-w-[16px] px-1 py-px rounded-full bg-important text-white type-badge whitespace-nowrap overflow-hidden">4</span></button>
+        </div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">templates/Badge.jinja (titlebar count: Chrome.jinja :: #requests-badge)</div>
+    </section>
+
+    
+    <section id="window-controls" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Window controls</h2>
+      <div class="titlebar-surface rounded-lg overflow-hidden border border-default"
+           style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
+        <div class="h-[38px] flex items-center justify-end">
+          <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary" title="Minimize" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><line x1="2" y1="6" x2="10" y2="6"/></svg></button>
+          <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary" title="Maximize" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg></button>
+          <button class="inline-flex items-center justify-center cursor-pointer hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent w-9 h-[38px] rounded-none text-primary titlebar-btn-danger" title="Close" type="button"><svg class="w-3 h-3 " viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg></button>
+        </div>
+      </div>
+      <p class="mt-1 type-helper text-secondary">
+        Only rendered on non-mac platforms in real chrome (macOS has native traffic lights).
+      </p>
+      <div class="mt-0.5 type-helper text-secondary font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
+    </section>
+
+    
+    <section id="sidebar-items" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Sidebar items</h2>
+      <div id="styleguide-sidebar-rows"
+           class="dark w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary overflow-hidden"></div>
+      <div class="mt-1 type-helper text-secondary font-mono">frontend/src/views/WorkspaceRow.ts (window.MindsUI.mountStyleguideWorkspaceRows) -- the one row component shared by the workspace menu in both hosts.</div>
+    </section>
+
+    
+    <section id="accent-spine" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Accent spine</h2>
+      <div class="accent-spine relative flex items-center gap-3 bg-surface-primary border border-default rounded-lg px-4 py-3 overflow-hidden">
+        <div class="type-body text-primary">Card with workspace accent stripe on the left edge.</div>
+      </div>
+      <div class="mt-2 flex items-center gap-3">
+        <label for="styleguide-accent-color" class="type-helper text-secondary">accent hex</label>
+        <input id="styleguide-accent-color" type="color" value="#0b292b">
+        <code id="styleguide-accent-value" class="type-helper text-primary"></code>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine reads --workspace-accent from app.css</div>
+    </section>
+
+    
+    <section id="form-controls" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Form controls (TextInput / Select / Textarea)</h2>
+      <div class="flex flex-col gap-3">
+        <input class="w-full leading-tight p-2 type-body border border-strong bg-surface-primary text-primary placeholder:text-tertiary hover:border-stronger focus:border-stronger focus:outline-2 focus:outline-offset-2 focus:outline-accent rounded-md" name="styleguide-accent-input" placeholder="TextInput -- click to focus" type="text" value="">
+        <div class="flex items-center gap-2">
+          <div class="relative w-48">
+  <select class="appearance-none w-full pr-8 leading-tight p-2 type-body border border-strong bg-surface-primary text-primary placeholder:text-tertiary hover:border-stronger focus:border-stronger focus:outline-2 focus:outline-offset-2 focus:outline-accent rounded-md" name="styleguide-select"><option>Option A</option>
+            <option>Option B</option>
+            <option>Option C</option></select>
+  <span class="pointer-events-none absolute inset-y-0 right-2 flex items-center text-secondary">
+    <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M11.5762 5.57617C11.8105 5.34186 12.1895 5.34186 12.4238 5.57617C12.6581 5.81049 12.6581 6.18951 12.4238 6.42383L8.42383 10.4238C8.18951 10.6581 7.81049 10.6581 7.57617 10.4238L3.57617 6.42383C3.34186 6.18951 3.34186 5.81049 3.57617 5.57617C3.81049 5.34186 4.18951 5.34186 4.42383 5.57617L8 9.15234L11.5762 5.57617Z"/></svg>
+  </span>
+</div>
+          <span class="type-helper text-secondary">Select width="w-48"</span>
+        </div>
+        <textarea class="w-full p-2 type-body border border-strong bg-surface-primary text-primary placeholder:text-tertiary hover:border-stronger focus:border-stronger focus:outline-2 focus:outline-offset-2 focus:outline-accent rounded-md" name="styleguide-textarea" rows="3">This is a sample of multi-line text in a textarea. It is long enough to wrap onto a second line, so the leading and padding are easy to judge.</textarea>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (p-2, border-strong -> border-stronger on hover, placeholder-tertiary; focus ring drawn outside via outline-offset, keeping the border). Single-line TextInput / Select add leading-tight; Textarea keeps type-body's 1.5.</div>
+    </section>
+
+
+    
+    <section id="spinner" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Spinner</h2>
+      <div class="flex items-center gap-6">
+        <div class="flex items-center gap-3">
+          <span class="spinner inline-block align-middle w-3.5 h-3.5 border " aria-hidden="true"></span>
+          <span class="spinner inline-block align-middle w-[18px] h-[18px] border-2 " aria-hidden="true"></span>
+          <span class="spinner inline-block align-middle w-8 h-8 border-[3px] " aria-hidden="true"></span>
+        </div>
+        <div class="flex items-center gap-3 pl-6 border-l border-default">
+          <span class="spinner spinner-accent inline-block align-middle w-3.5 h-3.5 border " aria-hidden="true"></span>
+          <span class="spinner spinner-accent inline-block align-middle w-[18px] h-[18px] border-2 " aria-hidden="true"></span>
+          <span class="spinner spinner-accent inline-block align-middle w-8 h-8 border-[3px] " aria-hidden="true"></span>
+        </div>
+        
+        <div class="flex items-center gap-3 pl-6 border-l border-default bg-success text-white rounded-md px-3 py-2">
+          <span class="spinner spinner-inverse inline-block align-middle w-3.5 h-3.5 border " aria-hidden="true"></span>
+          <span class="spinner spinner-inverse inline-block align-middle w-[18px] h-[18px] border-2 " aria-hidden="true"></span>
+          <span class="spinner spinner-inverse inline-block align-middle w-8 h-8 border-[3px] " aria-hidden="true"></span>
+        </div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">app.css :: .spinner (+ .spinner-accent / .spinner-inverse) + Spinner.jinja</div>
+    </section>
+
+    
+    <section id="buttons" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Buttons -- variants</h2>
+      <div class="flex flex-wrap items-center gap-2">
+        <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-80" type="button">Primary</button>
+        <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-transparent text-primary border border-default hover:bg-fill-hover" type="button">Secondary</button>
+        <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-important text-white border border-transparent hover:opacity-90" type="button">Danger</button>
+        <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-success text-white border border-transparent hover:opacity-90" type="button">Success</button>
+        <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-transparent text-primary border border-transparent hover:bg-fill-hover" type="button">Ghost</button>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Button.jinja :: variant=...</div>
+    </section>
+
+    
+    <section id="button-sizes" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Buttons -- sizes</h2>
+      <div class="flex flex-col gap-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-80" type="button">Default (md)</button>
+          <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-3 rounded-md type-label bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-80" type="button">Large (lg, prominent CTA)</button>
+          <button aria-label="Settings" class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent p-1.5 rounded-md type-label bg-transparent text-primary border border-transparent hover:bg-fill-hover" title="Settings" type="button"><svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><g transform="translate(0.5 0.5)"><path d="M8.33765 2.50001C8.33765 2.31436 8.26384 2.13617 8.13257 2.00489C8.0013 1.87363 7.82309 1.79981 7.63745 1.79981H7.36206C7.17669 1.79993 6.99907 1.87389 6.86792 2.00489C6.73664 2.13617 6.66284 2.31436 6.66284 2.50001V2.61329C6.66248 2.92882 6.57854 3.23854 6.42065 3.51173C6.263 3.78448 6.03608 4.01019 5.76343 4.16798L5.7644 4.16895L5.49487 4.3252L5.4939 4.32618C5.22026 4.48416 4.90947 4.56739 4.59351 4.56739C4.28352 4.56735 3.97951 4.48625 3.70972 4.33399V4.33497L3.61597 4.28517C3.61069 4.28235 3.60552 4.27936 3.60034 4.27638C3.43989 4.18382 3.24904 4.15837 3.07007 4.20606C2.89093 4.25397 2.73723 4.37177 2.64429 4.53224L2.50757 4.76954C2.41531 4.92995 2.39048 5.12004 2.43823 5.29884C2.47414 5.43311 2.54837 5.553 2.65112 5.64356L2.76343 5.72364L2.79272 5.7422L2.88647 5.8047H2.8855C3.14427 5.9608 3.36037 6.17885 3.51245 6.44044C3.67027 6.71193 3.75466 7.01998 3.75659 7.33399V7.65431L3.75269 7.77247C3.73559 8.04849 3.65566 8.31791 3.51733 8.5586C3.3607 8.83108 3.13439 9.05648 2.86304 9.21485L2.86401 9.21583L2.77026 9.27149L2.76343 9.27638C2.60297 9.36932 2.48613 9.52204 2.43823 9.70118C2.39048 9.87998 2.41531 10.0701 2.50757 10.2305L2.64429 10.4678C2.73723 10.6282 2.89093 10.7461 3.07007 10.794C3.24904 10.8417 3.43989 10.8162 3.60034 10.7236L3.61597 10.7149L3.70972 10.665C3.97941 10.5129 4.28368 10.4327 4.59351 10.4326C4.86998 10.4326 5.14235 10.4964 5.3894 10.6182L5.4939 10.6738L5.49487 10.6748L5.76245 10.8301L5.86304 10.8926C6.09166 11.0455 6.28249 11.2493 6.42065 11.4883C6.57854 11.7615 6.66248 12.0712 6.66284 12.3867V12.5C6.66284 12.6857 6.73664 12.8639 6.86792 12.9951C6.99907 13.1261 7.17669 13.2001 7.36206 13.2002H7.63745C7.82309 13.2002 8.0013 13.1264 8.13257 12.9951C8.26384 12.8639 8.33765 12.6857 8.33765 12.5V12.3867C8.33801 12.0713 8.42105 11.7614 8.57886 11.4883C8.71709 11.2492 8.90868 11.0455 9.13745 10.8926L9.23706 10.8301L9.50464 10.6748L9.50659 10.6738C9.78011 10.516 10.0902 10.4327 10.406 10.4326C10.7158 10.4326 11.0201 10.513 11.2898 10.665L11.3835 10.7149L11.4001 10.7236C11.5607 10.8162 11.7514 10.8418 11.9304 10.794C12.1096 10.7461 12.2623 10.6282 12.3552 10.4678L12.49 10.2295L12.4919 10.2256C12.5846 10.065 12.6102 9.87349 12.5623 9.69435C12.5148 9.51717 12.3998 9.36564 12.2419 9.27247L12.1599 9.2295C12.1545 9.2266 12.1487 9.22282 12.1433 9.21974C11.869 9.06123 11.6411 8.83328 11.4832 8.5586C11.3251 8.28367 11.2427 7.9714 11.2439 7.65431V7.34376C11.243 7.02734 11.3255 6.71579 11.4832 6.44142C11.6397 6.16926 11.8645 5.9425 12.1355 5.78419L12.2292 5.72853L12.2371 5.72364C12.3973 5.63068 12.5144 5.47785 12.5623 5.29884C12.61 5.11979 12.5845 4.92909 12.4919 4.76856V4.76759L12.3552 4.53224C12.2623 4.37177 12.1096 4.25397 11.9304 4.20606C11.7514 4.15823 11.5607 4.18386 11.4001 4.27638C11.3949 4.27942 11.3889 4.2823 11.3835 4.28517L11.3054 4.3252L11.3064 4.32618C11.0328 4.48416 10.722 4.56739 10.406 4.56739C10.0902 4.56735 9.78011 4.48405 9.50659 4.32618L9.50464 4.3252L9.23706 4.16895V4.16993C8.96387 4.01211 8.73675 3.78488 8.57886 3.51173C8.42105 3.23859 8.33801 2.92874 8.33765 2.61329V2.50001ZM8.82495 7.50001C8.82495 6.76823 8.23153 6.17481 7.49976 6.17481C6.76809 6.17495 6.17456 6.76831 6.17456 7.50001C6.17456 8.23171 6.76809 8.82507 7.49976 8.8252C8.23153 8.8252 8.82495 8.23179 8.82495 7.50001ZM9.92456 7.50001C9.92456 8.8393 8.83905 9.92481 7.49976 9.92481C6.16058 9.92468 5.07495 8.83922 5.07495 7.50001C5.07495 6.1608 6.16058 5.07534 7.49976 5.0752C8.83905 5.0752 9.92456 6.16072 9.92456 7.50001ZM9.43726 2.61231L9.44312 2.70313C9.45513 2.79393 9.48488 2.88212 9.53101 2.96192C9.57708 3.0416 9.63913 3.11035 9.71167 3.16603L9.78784 3.21778L9.78882 3.21876L10.0554 3.37403H10.0564C10.1627 3.43533 10.2833 3.46774 10.406 3.46778C10.5289 3.46778 10.6502 3.43547 10.7566 3.37403L10.7722 3.36427L10.866 3.31446C11.2757 3.08362 11.7598 3.02198 12.2146 3.14356C12.6753 3.26674 13.0684 3.56786 13.3074 3.98048L13.4451 4.21778V4.21876C13.6833 4.63172 13.7478 5.12244 13.6248 5.58302C13.5023 6.04104 13.2037 6.43153 12.7947 6.67091L12.7019 6.72755L12.6941 6.73243C12.5873 6.79411 12.4987 6.8833 12.4373 6.99024C12.3758 7.09719 12.343 7.21846 12.3435 7.34181V7.65821C12.343 7.78156 12.3758 7.90283 12.4373 8.00978C12.4987 8.11672 12.5873 8.20591 12.6941 8.26759L12.7712 8.3086L12.7878 8.31739C13.2004 8.55634 13.5015 8.94964 13.6248 9.41017C13.7475 9.86904 13.683 10.3575 13.447 10.7695L13.3103 11.0137L13.3074 11.0195C13.0684 11.4322 12.6753 11.7333 12.2146 11.8565C11.7597 11.9781 11.2758 11.9156 10.866 11.6846L10.7722 11.6358C10.7668 11.6329 10.7619 11.629 10.7566 11.626C10.6502 11.5645 10.5289 11.5322 10.406 11.5322C10.2833 11.5323 10.1627 11.5647 10.0564 11.626L10.0554 11.625L9.78882 11.7813L9.78784 11.7822C9.68156 11.8436 9.59244 11.9319 9.53101 12.0381C9.46964 12.1443 9.43745 12.2651 9.43726 12.3877V12.5C9.43726 12.9774 9.24748 13.4349 8.90991 13.7725C8.57235 14.11 8.11483 14.2998 7.63745 14.2998H7.36206C6.88483 14.2997 6.42706 14.1099 6.0896 13.7725C5.75217 13.4349 5.56226 12.9773 5.56226 12.5V12.3877C5.56207 12.2651 5.52988 12.1443 5.46851 12.0381C5.40708 11.932 5.31885 11.8436 5.21265 11.7822L5.21069 11.7813L4.94409 11.626L4.86108 11.5859C4.77655 11.551 4.68557 11.5322 4.59351 11.5322C4.47081 11.5323 4.35018 11.5647 4.2439 11.626C4.23855 11.6291 4.23274 11.6328 4.22729 11.6358L4.13354 11.6856L4.13257 11.6846C3.72316 11.915 3.24026 11.9778 2.78589 11.8565C2.32532 11.7333 1.93212 11.4321 1.69312 11.0195L1.55542 10.7822L1.55444 10.7813C1.31626 10.3683 1.25172 9.87753 1.37476 9.417C1.49724 8.95896 1.79581 8.56751 2.20483 8.32813L2.29858 8.27247L2.3064 8.26759C2.4132 8.20592 2.50178 8.11671 2.56323 8.00978C2.62462 7.90288 2.6565 7.78148 2.65601 7.65821V7.34083L2.65015 7.25001C2.63778 7.15974 2.60737 7.07245 2.56128 6.99317C2.49994 6.88771 2.41203 6.80032 2.3064 6.73927C2.29617 6.73336 2.28595 6.72629 2.27612 6.71974L2.18237 6.65724V6.65626C1.78541 6.4158 1.49488 6.03226 1.37476 5.58302C1.25172 5.12249 1.31626 4.63168 1.55444 4.21876L1.55542 4.21778L1.69312 3.98048C1.93212 3.56797 2.32532 3.26672 2.78589 3.14356C3.2401 3.02225 3.72325 3.08422 4.13257 3.31446H4.13354L4.22729 3.36427C4.23274 3.36717 4.23855 3.37095 4.2439 3.37403C4.35018 3.43533 4.47081 3.46774 4.59351 3.46778C4.71638 3.46778 4.83768 3.43547 4.94409 3.37403L5.21069 3.21876L5.21265 3.21778C5.31885 3.15646 5.40708 3.06806 5.46851 2.96192C5.51463 2.88214 5.54437 2.79391 5.5564 2.70313L5.56226 2.61231V2.50001C5.56226 2.02272 5.75217 1.56509 6.0896 1.22755C6.42706 0.890087 6.88483 0.700322 7.36206 0.700205H7.63745C8.11483 0.700205 8.57235 0.889999 8.90991 1.22755C9.24748 1.56511 9.43726 2.02262 9.43726 2.50001V2.61231Z"/></g></svg></button>
+        </div>
+        <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-3 rounded-md type-label bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-80 w-full" type="button">Block (w-full, used for auth CTAs)</button>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Button.jinja :: size=md|lg|icon, block=true</div>
+    </section>
+
+    
+    <section id="links" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Links</h2>
+      <div class="flex flex-wrap items-center gap-4">
+        <a class="text-accent hover:underline" href="#">Back to workspaces</a>
+        <a class="text-accent hover:underline font-semibold" href="#">Sign in</a>
+        <a class="text-accent hover:underline type-helper" href="#">Forgot password</a>
+      </div>
+      <p class="mt-1 type-helper text-secondary">
+        \`\`weight="medium"\`\` is the auth-flow tab-switch / back-link
+        treatment. A smaller role (e.g. \`\`type-helper\`\`) goes through \`\`extra\`\`.
+      </p>
+      <div class="mt-0.5 type-helper text-secondary font-mono">Link.jinja</div>
+    </section>
+
+    
+    <section id="button-links" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Buttons -- link style (via extra=)</h2>
+      <div class="flex flex-wrap items-center gap-4">
+        <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-transparent text-primary border border-transparent hover:bg-fill-hover !p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline" type="button">Configure&hellip;</button>
+        <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-transparent text-primary border border-transparent hover:bg-fill-hover !p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline" type="button">Continue without an account</button>
+      </div>
+      <p class="mt-1 type-helper text-secondary">
+        For text-link toggles use a ghost Button with \`\`extra=&quot;!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline&quot;\`\`. The \`\`!\`\` prefix is load-bearing -- without it the Button base's \`\`type-label\`\` role and the ghost variant's color win, and the toggle reads as a heavy button rather than a link.
+      </p>
+      <div class="mt-0.5 type-helper text-secondary font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
+    </section>
+
+    
+    <section id="notices" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Notices</h2>
+      <div>
+        <div class="px-3 py-2 rounded-md type-body my-2 bg-[var(--c-info-surface)] text-info">
+  Heads up: informational message.
+</div>
+        <div class="px-3 py-2 rounded-md type-body my-2 bg-[var(--c-warning-surface)] text-warning">
+  Careful: something may need attention.
+</div>
+        <div class="px-3 py-2 rounded-md type-body my-2 bg-[var(--c-success-surface)] text-success">
+  All set: action completed.
+</div>
+        <div class="px-3 py-2 rounded-md type-body my-2 bg-[var(--c-important-surface)] text-important">
+  Failed: something went wrong.
+</div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Notice.jinja</div>
+    </section>
+
+    
+    <section id="cards" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Cards</h2>
+      <div class="flex flex-col gap-2">
+        <div class="minds-card p-4"><span class="type-body text-primary">Default block card -- caller arranges children.</span></div>
+        <div class="minds-card flex items-center justify-between gap-1.5 p-4"><span class="font-semibold text-primary">my-service</span>
+          <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-transparent text-primary border border-default hover:bg-fill-hover" type="button">Manage</button></div>
+        <div class="minds-card flex items-center gap-1.5 px-4 py-2"><span class="font-semibold text-primary">provider</span>
+          <span class="type-helper text-secondary">backend</span>
+          <span class="flex-1"></span>
+          <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-transparent text-primary border border-default hover:bg-fill-hover" type="button">Disable</button></div>
+        <a class="minds-card flex items-center gap-1.5 p-4 cursor-pointer hover:border-strong hover:shadow-raised no-underline text-inherit" href="#"><span class="flex-1 font-semibold text-primary">Interactive card (tag=&quot;a&quot;)</span>
+          <span class="type-helper text-secondary">click anywhere</span></a>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Card.jinja :: .minds-card from app.css</div>
+    </section>
+
+    
+    <section id="preset-card" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Preset card</h2>
+      <p class="type-helper text-secondary mb-2">
+        Selectable card used by the create page's "where to run" presets.
+        Selection is driven by \`\`aria-checked\`\` (styled with Tailwind
+        \`\`aria-checked:\`\` variants -- a 1px dashed neutral outline by default, a
+        2px solid accent outline (no fill tint) when selected); the outline grows
+        without shifting layout, eased by \`\`transition-all\`\`. Hover lifts the
+        card up 1px with \`\`shadow-raised\`\`; pressing settles it back down and
+        shrinks it to 0.99. One card per row is checked.
+      </p>
+      <div class="flex gap-4 items-stretch" role="radiogroup" aria-label="Preset card demo">
+        <button aria-checked="true" class="flex flex-col gap-2 p-4 text-left cursor-pointer rounded-lg bg-surface-primary outline-1 outline-dashed outline-strong transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-raised active:translate-y-0 active:scale-[0.99] aria-checked:outline-2 aria-checked:outline-solid aria-checked:outline-accent flex-1" data-preset="demo-a" role="radio" type="button"><span class="type-heading text-primary">Selected</span>
+          <span class="type-body text-secondary">aria-checked="true" -- accent outline, no tint.</span></button>
+        <button aria-checked="false" class="flex flex-col gap-2 p-4 text-left cursor-pointer rounded-lg bg-surface-primary outline-1 outline-dashed outline-strong transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-raised active:translate-y-0 active:scale-[0.99] aria-checked:outline-2 aria-checked:outline-solid aria-checked:outline-accent flex-1" data-preset="demo-b" role="radio" type="button"><span class="type-heading text-primary">Unselected</span>
+          <span class="type-body text-secondary">Dashed outline; lifts with a shadow + scale on hover.</span></button>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">PresetCard.jinja :: Tailwind aria-checked: variants + hover scale/shadow</div>
+    </section>
+
+    
+    <section id="page-container" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Page container</h2>
+      <div class="bg-fill-subtle border border-default rounded-lg">
+        <div class="max-w-[720px] mx-auto px-6 py-12 "><div class="bg-surface-primary border border-default rounded-md p-3 type-body text-primary">
+            Centered, max-width body wrapper used by most page templates.
+          </div></div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">PageContainer.jinja</div>
+    </section>
+
+    
+    <section id="oauth-icons" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">OAuth icons</h2>
+      <div class="flex items-center gap-6">
+        <span class="inline-flex items-center gap-2 type-body text-primary">
+          <svg viewBox="0 0 24 24" class="w-[18px] h-[18px]">
+            <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>
+            <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+            <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+            <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+          </svg> Google
+        </span>
+        <span class="inline-flex items-center gap-2 type-body text-primary">
+          <svg viewBox="0 0 24 24" fill="#333" class="w-[18px] h-[18px]">
+            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+          </svg> GitHub
+        </span>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">frontend/src/views/AuthPages.ts</div>
+    </section>
+
+    
+    <section id="status-badges" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Status badges</h2>
+      <div class="flex flex-wrap items-center gap-3">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary "
+      >Neutral</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-success text-white "
+      >Done</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-important text-white "
+      >Failed</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-[var(--c-warning-surface)] text-warning "
+      >Warning</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-info text-white "
+      >Info</span>
+      </div>
+      <div class="flex flex-wrap items-center gap-3 mt-2">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper bg-fill-subtle text-secondary "
+      >Neutral</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper bg-success text-white "
+      >Done</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper bg-important text-white "
+      >Failed</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper bg-[var(--c-warning-surface)] text-warning "
+      >Warning</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper bg-info text-white "
+      >Info</span>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">StatusBadge.jinja (sm slot badges / xs inline tags)</div>
+    </section>
+
+    
+    <section id="section-header" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Section header</h2>
+      <div>
+        <h2 class="type-label text-secondary mb-3  ">Plain</h2>
+        <p class="type-body text-primary mb-2">Content under the plain header.</p>
+        <h2 class="type-label text-secondary mb-3 mt-8 pt-4 border-t border-default ">With divider</h2>
+        <p class="type-body text-primary">Content under the divider header.</p>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">SectionHeader.jinja</div>
+    </section>
+
+    
+    <section id="dialog-close" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Dialog close button</h2>
+      <div class="relative h-16">
+        <button type="button" aria-label="Close" data-tooltip="Close"
+        
+        onclick="void(0)"
+        class="absolute top-3 right-3 z-10 inline-flex items-center justify-center w-8 h-8 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
+  <svg class="w-4 h-4 " viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true"><path d="M11.5762 3.57617C11.8105 3.34186 12.1895 3.34186 12.4238 3.57617C12.6581 3.81049 12.6581 4.18951 12.4238 4.42383L8.84766 8L12.4238 11.5762C12.6581 11.8105 12.6581 12.1895 12.4238 12.4238C12.1895 12.6581 11.8105 12.6581 11.5762 12.4238L8 8.84766L4.42383 12.4238C4.18951 12.6581 3.81049 12.6581 3.57617 12.4238C3.34186 12.1895 3.34186 11.8105 3.57617 11.5762L7.15234 8L3.57617 4.42383C3.34186 4.18951 3.34186 3.81049 3.57617 3.57617C3.81049 3.34186 4.18951 3.34186 4.42383 3.57617L8 7.15234L11.5762 3.57617Z"/></svg>
+</button>
+        <p class="type-body text-secondary">Top-right X used by overlay dialogs.</p>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">DialogCloseButton.jinja</div>
+    </section>
+
+    
+    <section id="modal" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Modal (inner card preview)</h2>
+      <div class="bg-fill-subtle border border-default rounded-lg p-6 flex items-center justify-center">
+        <div class="bg-surface-primary rounded-lg shadow-overlay border border-default max-w-sm w-full p-6">
+          <h2 class="type-heading text-primary mb-3">Confirm action?</h2>
+          <p class="type-body text-primary mb-4">This is what the inner card of a Modal looks like.</p>
+          <div class="flex justify-end gap-3">
+            <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-transparent text-primary border border-default hover:bg-fill-hover" type="button">Cancel</button>
+            <button class="inline-flex items-center justify-center gap-1.5 leading-tight transition-transform duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent px-4 py-2 rounded-md type-label bg-important text-white border border-transparent hover:opacity-90" type="button">Confirm</button>
+          </div>
+        </div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
+    </section>
+
+    
+    <section id="js-components" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">JS components</h2>
+      <div id="styleguide-js-smoke"></div>
+      <div class="mt-1 type-helper text-secondary font-mono">frontend/src/views/StyleguideSmoke.ts (window.MindsUI.mountStyleguideSmoke)</div>
+      <div id="styleguide-js-primitives" class="mt-3"></div>
+      <div class="mt-1 type-helper text-secondary font-mono">frontend/src/views/{Icon,Badge,Spinner}.ts (window.MindsUI.mountStyleguidePrimitives)</div>
+    </section>
+
+    </main>
+  </div>`;
