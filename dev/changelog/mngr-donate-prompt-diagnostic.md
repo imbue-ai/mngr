@@ -1,0 +1,1 @@
+`uv.lock` updated to record the new `imbue-mngr-donate` -> `imbue-mngr-claude` workspace dependency edge (donate now declares `imbue-mngr-claude` as a runtime dep so its `headless_claude` donation agent resolves under a standalone uv install, not just the `uv run --project` workspace path). No user-visible `dev`-tooling behavior change beyond the lockfile entry.

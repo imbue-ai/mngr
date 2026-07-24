@@ -379,39 +379,59 @@ class HeadlessClaude(ClaudeCoreAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
         return self._get_agent_dir() / "stderr.log"
 
     def _get_extra_error_sources(self) -> list[str]:
-        """Return the stream-json stdout error (if any) and the work-dir diagnostic.
+        """Return the stream-json stdout error (if any) and the prompt-inputs diagnostic.
 
-        The work-dir diagnostic is always appended -- it's cheap to compute
+        The prompt-inputs diagnostic is always appended -- it's cheap to compute
         and most valuable for silent-exit post-mortems (e.g. the
         test_ask_simple_query failure mode, where stdout/stderr are both
         empty because the stream-json error check can't find a result event).
         Listing the .mngr-prompt / .mngr-system-prompt files that the command
         substitution reads helps distinguish "claude never ran because its
         prompt inputs were empty/missing" from "claude ran but produced no
-        output." When a stream-json error *is* present, the work-dir
+        output." When a stream-json error *is* present, the prompt-inputs
         diagnostic still provides useful triage context alongside it.
         """
         sources: list[str] = []
         stdout_error = self._get_stdout_stream_json_error()
         if stdout_error:
             sources.append(stdout_error)
-        sources.append(f"[work-dir]\n{self._get_work_dir_diagnostic()}")
+        sources.append(f"[prompt-inputs]\n{self._get_prompt_inputs_diagnostic()}")
         return sources
 
-    def _get_work_dir_diagnostic(self) -> str:
-        """Summarize the agent's work dir for silent-exit post-mortems.
+    def _get_prompt_inputs_diagnostic(self) -> str:
+        """Summarize the prompt-input files the assembled command reads.
 
-        Lists the .mngr-prompt and .mngr-system-prompt files by existence +
-        char count. Delegates per-file rendering to
+        The headless claude command reads the initial message from
+        ``$MNGR_AGENT_STATE_DIR/.mngr-prompt`` (written by
+        :meth:`stage_initial_message` into the agent's *state* dir) and --
+        for the ``mngr ask`` path only -- the system prompt from
+        ``$MNGR_AGENT_WORK_DIR/.mngr-system-prompt`` (written by ask's
+        ``pre_create_setup`` into the *work* dir). Each file is probed at
+        the path the command actually reads it from, so a post-mortem can
+        distinguish "claude never ran because its prompt inputs were
+        empty/missing" from "claude ran but produced no output."
+
+        The previous implementation listed both files under the work dir,
+        which reported ``.mngr-prompt: does not exist`` *always* -- it is
+        staged in the state dir, never the work dir -- a guaranteed-false
+        headline that sent triage chasing a non-problem while the real
+        cause (auth, a silent claude exit, etc.) sat further down in the
+        error. Delegates per-file rendering to
         :func:`render_file_diagnostic` so the format stays in lockstep with
         BaseHeadlessAgent's state-dir diagnostic.
         """
-        work_dir = self.work_dir
-        lines: list[str] = [f"work_dir: {work_dir}"]
-        for name in (".mngr-prompt", ".mngr-system-prompt"):
-            # show_path=False: the `work_dir:` line already reports the
-            # directory, so per-file lines only need the filename label.
-            lines.append(render_file_diagnostic(self.host, work_dir / name, f"  {name}", show_path=False))
+        lines: list[str] = [
+            render_file_diagnostic(
+                self.host,
+                self._get_agent_dir() / _MNGR_PROMPT_FILE,
+                "  .mngr-prompt (state dir)",
+            ),
+            render_file_diagnostic(
+                self.host,
+                self.work_dir / ".mngr-system-prompt",
+                "  .mngr-system-prompt (work dir)",
+            ),
+        ]
         return "\n".join(lines)
 
     def _get_stdout_stream_json_error(self) -> str | None:
