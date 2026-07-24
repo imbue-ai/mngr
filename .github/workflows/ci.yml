@@ -28,6 +28,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - uses: extractions/setup-just@v2
+      # Binaries the test subset shells out to (the private CI's offload
+      # image bundles these).
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq restic
       # --locked also validates the committed public uv.lock against the tree.
       - run: uv sync --locked --all-packages
       - run: just test-quick "-m 'not tmux and not modal and not docker and not docker_sdk and not unison and not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume and not sdk_live'"
