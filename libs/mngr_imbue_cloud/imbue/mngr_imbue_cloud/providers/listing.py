@@ -15,9 +15,11 @@ def derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
         return HostState.DESTROYED
     container_state = raw.get("container_state")
     if not container_state:
-        # Outer SSH succeeded but produced no state -- treat as crashed
-        # (no info to be more specific).
-        return HostState.CRASHED
+        # Outer SSH succeeded but produced no state -- a degraded
+        # observation, not evidence that the container is down, so
+        # UNKNOWN rather than CRASHED (consumers auto-restart off
+        # CRASHED and must not do so off non-evidence).
+        return HostState.UNKNOWN
     exit_code = raw.get("container_exit_code") or 0
     has_certified_data = bool(raw.get("certified_data"))
     if container_state == "running" and has_certified_data:
@@ -25,7 +27,7 @@ def derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
     if container_state == "running":
         # Container is up but docker exec didn't give us data -- we know
         # the host exists but can't read its state from inside.
-        return HostState.UNAUTHENTICATED
+        return HostState.UNREACHABLE
     state, _note = map_docker_status_to_host_state(container_state, exit_code)
     return state
 
@@ -53,12 +55,11 @@ def map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostSt
 
     Returns ``(state, note)`` where ``note`` is a short human-readable
     diagnostic appended to ``HostDetails.failure_reason``. If the docker
-    container is ``running`` but inner SSH was unreachable we treat that
-    as an authentication problem -- the host is up; we just can't get
-    inside it.
+    container is ``running`` but inner SSH was unreachable we report
+    ``UNREACHABLE`` -- the host is up; we just can't get inside it.
     """
     if status == "running":
-        return HostState.UNAUTHENTICATED, "container is running on outer host but inner SSH was unreachable"
+        return HostState.UNREACHABLE, "container is running on outer host but inner SSH was unreachable"
     if status == "exited":
         if exit_code == 0:
             return HostState.STOPPED, "container exited cleanly"
@@ -69,4 +70,6 @@ def map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostSt
         return HostState.STARTING, f"container in {status} state"
     if status in ("dead", "removing"):
         return HostState.CRASHED, f"container in {status} state"
-    return HostState.CRASHED, f"unrecognized docker status {status!r}"
+    # An unrecognized status is a gap in our mapping, not evidence the
+    # container is down: UNKNOWN, so consumers don't auto-restart off it.
+    return HostState.UNKNOWN, f"could not determine state: unrecognized docker status {status!r}"

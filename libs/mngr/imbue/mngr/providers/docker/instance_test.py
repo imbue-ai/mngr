@@ -868,10 +868,10 @@ def _docker_provider_with_containers(
     return provider
 
 
-def test_connection_error_fallback_state_running_container_is_unauthenticated(
+def test_connection_error_fallback_state_running_container_is_unreachable(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """A running container whose inner sshd died reports UNAUTHENTICATED, not CRASHED.
+    """A running container whose inner sshd died reports UNREACHABLE, not CRASHED.
 
     When agent enumeration fails with a connection error but the docker daemon
     still reports the container as running, the host is up -- we just can't get
@@ -880,7 +880,7 @@ def test_connection_error_fallback_state_running_container_is_unauthenticated(
     the stop step of a host restart and then fail to start the live container.
     """
     provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeStatusContainer("running")])
-    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) == HostState.UNAUTHENTICATED
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) == HostState.UNREACHABLE
 
 
 def test_connection_error_fallback_state_stopped_container_returns_none(

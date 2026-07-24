@@ -144,7 +144,7 @@ def _build_host_details_from_host(
         id=host.id,
         name=host_name,
         provider_name=host_ref.provider_name,
-        state=host.get_state() if not is_authentication_failure else HostState.UNAUTHENTICATED,
+        state=host.get_state() if not is_authentication_failure else HostState.UNREACHABLE,
         image=certified_data.image,
         tags={**certified_data.user_tags},
         boot_time=boot_time,
@@ -613,10 +613,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
         ``CRASHED`` for a shutdown-capable provider with no recorded stop
         reason). A provider that can confirm out-of-band -- without inner SSH --
         that the host is actually still up returns a non-offline state (e.g.
-        ``HostState.UNAUTHENTICATED``) so a live host with a dead inner sshd is
+        ``HostState.UNREACHABLE``) so a live host with a dead inner sshd is
         not misreported as offline. Only consulted for non-authentication
         connection failures, since an authentication failure already maps to
-        ``UNAUTHENTICATED``.
+        ``UNREACHABLE``.
         """
         return None
 
@@ -980,7 +980,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
             # recorded a clean stop. When the connection failure is not an auth
             # failure, give the provider a chance to correct that from an
             # out-of-band signal it has (e.g. docker's daemon reports the
-            # container is still running -> UNAUTHENTICATED), so a live host with
+            # container is still running -> UNREACHABLE), so a live host with
             # a dead inner sshd is not misreported as offline.
             if not is_authentication_failure:
                 fallback_state = self.get_connection_error_fallback_state(host_ref.host_id)

@@ -945,8 +945,10 @@ def test_cached_identity_survives_a_fresh_provider_instance(temp_mngr_ctx: MngrC
     assert agents[0].certified_data.get("stale") is True
 
 
-def test_unauthenticated_pass_reattaches_cached_agents(temp_mngr_ctx: MngrContext) -> None:
-    """An auth rejection (UNAUTHENTICATED) re-attaches cached identity just like UNKNOWN does."""
+def test_outer_auth_rejection_mints_unauthenticated_and_reattaches_cached_agents(temp_mngr_ctx: MngrContext) -> None:
+    """An outer-SSH auth rejection mints UNAUTHENTICATED (not UNREACHABLE: the
+    container was never observed, and a restart routes through the same rejected
+    key) and re-attaches cached identity just like UNKNOWN does."""
     host_id = HostId.generate()
     lease = _make_lease(host_id)
     primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")

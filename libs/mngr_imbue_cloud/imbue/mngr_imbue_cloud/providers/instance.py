@@ -566,14 +566,19 @@ class ImbueCloudProvider(BaseProviderInstance):
             if raw is None:
                 # Outer SSH itself failed; fall back to a lease-only stub
                 # so the host doesn't disappear from `mngr list`. An auth
-                # mismatch means the host answered (it's reachable, our key
-                # is just wrong) -> UNAUTHENTICATED. Any other failure means
-                # we could not observe the host at all -- the box may be
-                # down, or the network path from this client may be broken --
-                # so the state is UNKNOWN, not CRASHED: an unreachable host
-                # is non-evidence about the container, and consumers (e.g.
-                # the minds recovery page) must not read it as a positive
-                # "container is down" verdict.
+                # mismatch means the host answered but rejected this
+                # machine's key -> UNAUTHENTICATED: observation of the container
+                # is impossible and a retry or restart routes through the
+                # same rejected credential, so consumers should treat it as
+                # terminal rather than restart-worthy. (Not UNREACHABLE:
+                # that means the container was observed running with its
+                # inner sshd dead, where a restart is the engineered fix.)
+                # Any other failure means we could not observe the host at
+                # all -- the box may be down, or the network path from this
+                # client may be broken -- so the state is UNKNOWN, not
+                # CRASHED: an unreachable host is non-evidence about the
+                # container, and consumers (e.g. the minds recovery page)
+                # must not read it as a positive "container is down" verdict.
                 fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.UNKNOWN
                 host_ref = DiscoveredHost(
                     host_id=host_id,
