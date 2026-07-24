@@ -2034,9 +2034,8 @@ _USER_ID_PREFIX_LENGTH = 16
 def derive_user_id_prefix(user_id: str) -> str:
     """The 16-hex prefix of a SuperTokens user id, used to namespace tunnels/leases/buckets.
 
-    Also the ``account_entitlements.username_prefix`` lookup key (the column
-    keeps its legacy name), so every caller must derive it identically --
-    always go through this helper.
+    Also the ``account_entitlements.user_id_prefix`` lookup key, so every
+    caller must derive it identically -- always go through this helper.
     """
     return user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
 
@@ -2397,10 +2396,7 @@ _PREEXISTING_ACCOUNT_CUTOFF_EPOCH_MS = 1784592000000
 
 _QUOTA_COLUMNS_SQL = ", ".join(QUOTA_ENTITLEMENT_NAMES)
 _PLAN_COLUMNS_SQL = f"plan_name, {_QUOTA_COLUMNS_SQL}"
-# The DB column for the user-id prefix keeps its legacy name ``username_prefix``
-# (renaming a column needs a migration); Python-side the value is always called
-# ``user_id_prefix``. The row-dict builders below translate between the two.
-_ENTITLEMENT_COLUMNS_SQL = f"user_id, username_prefix, plan_name, {_QUOTA_COLUMNS_SQL}"
+_ENTITLEMENT_COLUMNS_SQL = f"user_id, user_id_prefix, plan_name, {_QUOTA_COLUMNS_SQL}"
 
 
 class AccountEntitlements(PlanEntitlements):
@@ -2494,7 +2490,7 @@ class PostgresEntitlementsStore:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT {_ENTITLEMENT_COLUMNS_SQL} FROM account_entitlements WHERE username_prefix = %s",
+                    f"SELECT {_ENTITLEMENT_COLUMNS_SQL} FROM account_entitlements WHERE user_id_prefix = %s",
                     (user_id_prefix,),
                 )
                 row = cur.fetchone()
@@ -2503,16 +2499,8 @@ class PostgresEntitlementsStore:
         return self._entitlements_row_to_dict(row) if row is not None else None
 
     def insert_entitlements_if_absent(self, row: dict[str, Any]) -> None:
-        # (row key, DB column) pairs -- the user-id prefix row key maps onto
-        # the column's legacy ``username_prefix`` name.
-        key_column_pairs = [
-            ("user_id", "user_id"),
-            ("user_id_prefix", "username_prefix"),
-            ("plan_name", "plan_name"),
-            *((name, name) for name in QUOTA_ENTITLEMENT_NAMES),
-        ]
-        column_names = [column for _key, column in key_column_pairs]
-        placeholders = ", ".join(["%s"] * len(key_column_pairs))
+        column_names = ["user_id", "user_id_prefix", "plan_name", *QUOTA_ENTITLEMENT_NAMES]
+        placeholders = ", ".join(["%s"] * len(column_names))
         conn = _get_pool_db_connection()
         try:
             with conn:
@@ -2520,7 +2508,7 @@ class PostgresEntitlementsStore:
                     cur.execute(
                         f"INSERT INTO account_entitlements ({', '.join(column_names)}) "
                         f"VALUES ({placeholders}) ON CONFLICT (user_id) DO NOTHING",
-                        tuple(row[key] for key, _column in key_column_pairs),
+                        tuple(row[name] for name in column_names),
                     )
         finally:
             conn.close()
@@ -4417,9 +4405,7 @@ _R2_CLEANUP_GRANT_EXPIRY_MINUTES: Final = 60
 _R2_CLEANUP_GRANT_FAILED_BUDGET: Final = 5
 _R2_CLEANUP_GRANT_WINDOW_HOURS: Final = 24
 
-# As with account_entitlements, the DB column keeps the legacy name
-# ``username_prefix`` while the Python-side row key is ``user_id_prefix``.
-_R2_GRANT_COLUMNS = "grant_id, user_id, username_prefix, baseline_bytes, granted_at, expires_at, settled_at, settled_bytes, is_decreased"
+_R2_GRANT_COLUMNS = "grant_id, user_id, user_id_prefix, baseline_bytes, granted_at, expires_at, settled_at, settled_bytes, is_decreased"
 
 
 def _r2_grant_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -4460,7 +4446,7 @@ class PostgresGrantStore:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO r2_cleanup_grants (user_id, username_prefix, baseline_bytes, expires_at) "
+                        "INSERT INTO r2_cleanup_grants (user_id, user_id_prefix, baseline_bytes, expires_at) "
                         f"VALUES (%s, %s, %s, NOW() + make_interval(mins => %s)) RETURNING {_R2_GRANT_COLUMNS}",
                         (user_id, user_id_prefix, baseline_bytes, expiry_minutes),
                     )

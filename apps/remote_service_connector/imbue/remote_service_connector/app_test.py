@@ -4656,21 +4656,28 @@ def test_admin_sweep_endpoint_rejects_supertokens_auth(monkeypatch: pytest.Monke
 
 def test_cleanup_grants_migration_matches_grant_columns() -> None:
     """Guard against the r2_cleanup_grants schema and the store's column list drifting apart."""
-    migration_path = Path(__file__).parent.parent.parent / "migrations" / "015_r2_cleanup_grants.sql"
-    migration_sql = migration_path.read_text().lower()
+    migrations_dir = Path(__file__).parent.parent.parent / "migrations"
+    migration_sql = (migrations_dir / "015_r2_cleanup_grants.sql").read_text().lower()
+    rename_sql = (migrations_dir / "016_rename_username_prefix.sql").read_text().lower()
     assert "create table r2_cleanup_grants" in migration_sql
+    assert "alter table r2_cleanup_grants rename column username_prefix to user_id_prefix" in rename_sql
+    # The effective schema is the create-table migration with the rename applied.
+    effective_sql = migration_sql.replace("username_prefix", "user_id_prefix")
     for column in (name.strip() for name in app_mod._R2_GRANT_COLUMNS.split(",")):
-        assert column in migration_sql, f"grant column {column!r} missing from the migration"
+        assert column in effective_sql, f"grant column {column!r} missing from the migration"
 
 
 def test_plans_migration_declares_all_quota_columns() -> None:
     """Guard against the plans/entitlements schema and QUOTA_ENTITLEMENT_NAMES drifting apart."""
-    migration_path = Path(__file__).parent.parent.parent / "migrations" / "014_plans_entitlements.sql"
-    migration_sql = migration_path.read_text().lower()
+    migrations_dir = Path(__file__).parent.parent.parent / "migrations"
+    migration_sql = (migrations_dir / "014_plans_entitlements.sql").read_text().lower()
+    rename_sql = (migrations_dir / "016_rename_username_prefix.sql").read_text().lower()
     assert "create table plans" in migration_sql
     assert "create table account_entitlements" in migration_sql
-    # The DB column keeps its legacy name; Python-side it is user_id_prefix.
+    # Migration 014 created the column under its old name; 016 renames it to
+    # match the code's user_id_prefix.
     assert "username_prefix" in migration_sql
+    assert "alter table account_entitlements rename column username_prefix to user_id_prefix" in rename_sql
     assert "enforced_access" in migration_sql
     for column in app_mod.QUOTA_ENTITLEMENT_NAMES:
         assert migration_sql.count(column) >= 2, f"quota column {column!r} missing from a table"
