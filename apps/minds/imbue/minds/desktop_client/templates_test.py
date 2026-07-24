@@ -2405,3 +2405,13 @@ def test_render_account_plan_section_degrades_to_unavailable_without_plan_view()
     html = render_account_plan_section(acct_user_id="u-1")
     assert "Plan and usage are unavailable right now" in html
     assert 'data-trim-running="0"' in html
+
+
+def test_render_chrome_page_shows_workspace_switching_loading_bar() -> None:
+    """The wrapper's white loading card carries a 2-second loading bar, so
+    switching workspaces shows progress instead of a blank card while the
+    target loads (the content surface covers the bar the moment it paints)."""
+    html = render_chrome_page()
+    assert "ws-loading-track" in html
+    assert "ws-loading-fill" in html
+    assert "ws-loading-fill 2s" in html

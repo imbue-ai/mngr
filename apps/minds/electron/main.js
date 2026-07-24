@@ -1412,24 +1412,38 @@ function loadLocalIntoChrome(bundle, absolute) {
     && chromeViewHasShell(bundle)
   ) {
     wc.send('swap-local-page', absolute);
-    if (bundle.pendingSwapTimer) clearTimeout(bundle.pendingSwapTimer);
     bundle.pendingSwapUrl = absolute;
-    bundle.pendingSwapTimer = setTimeout(() => {
-      if (
-        bundle.pendingSwapUrl === absolute
-        && !bundle.window.isDestroyed()
-        && bundle.chromeView
-        && !bundle.chromeView.webContents.isDestroyed()
-      ) {
-        console.warn(`[nav] swap not confirmed in time; full-loading ${absolute}`);
-        bundle.chromeView.webContents.loadURL(absolute).catch(() => {});
-      }
-    }, 1500);
+    // Short grace period covering IPC delivery only: the shell acks receipt
+    // (swap-received) and the timer is re-armed with a generous bound there,
+    // so a slow-but-alive swap fetch is never demoted to a full load.
+    armSwapFallbackTimer(bundle, absolute, 1500);
   } else {
     // Load failures surface via onChromeNavigate / the error takeover; the
     // rejected promise alone would just print an unhandled-rejection warning.
     wc.loadURL(absolute).catch(() => {});
   }
+}
+
+// (Re-)arm the lost-swap fallback: if the dispatched swap for ``absolute`` has
+// not been confirmed (onChromeNavigate clears pendingSwapUrl on its pushState
+// commit) within ``delayMs``, full-load the target so a navigation is never
+// silently lost. Armed at dispatch with a short IPC-delivery grace period and
+// re-armed with a generous bound once the shell acks receipt (swap-received) --
+// after the ack, the only losses left are the renderer dying mid-swap (this
+// timer) or the fetch failing (the shell full-navigates itself).
+function armSwapFallbackTimer(bundle, absolute, delayMs) {
+  if (bundle.pendingSwapTimer) clearTimeout(bundle.pendingSwapTimer);
+  bundle.pendingSwapTimer = setTimeout(() => {
+    if (
+      bundle.pendingSwapUrl === absolute
+      && !bundle.window.isDestroyed()
+      && bundle.chromeView
+      && !bundle.chromeView.webContents.isDestroyed()
+    ) {
+      console.warn(`[nav] swap not confirmed in time; full-loading ${absolute}`);
+      bundle.chromeView.webContents.loadURL(absolute).catch(() => {});
+    }
+  }, delayMs);
 }
 
 // The most recent SSE-carried accent color for ``agentId``, or null. Used to
@@ -4442,6 +4456,19 @@ ipcMain.on('shell-ready', (event) => {
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
   if (event.sender !== bundle.chromeView.webContents) return;
   bundle.chromeShellReady = true;
+});
+
+// The shell acked receipt of a dispatched swap (sent before its fetch starts):
+// re-arm the lost-swap fallback with a generous bound so a slow-but-alive swap
+// fetch on a busy backend is not demoted to a full load by the short
+// IPC-delivery grace period. Only honored from the chrome view for the swap
+// currently pending.
+ipcMain.on('swap-received', (event, url) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
+  if (event.sender !== bundle.chromeView.webContents) return;
+  if (bundle.pendingSwapUrl !== url) return;
+  armSwapFallbackTimer(bundle, url, 15000);
 });
 
 // Custom tooltip: a trigger (a titlebar button in the chrome view, or an element
