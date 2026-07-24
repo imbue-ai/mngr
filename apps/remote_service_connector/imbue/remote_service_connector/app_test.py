@@ -1843,7 +1843,7 @@ def _make_pool_quota_test_client(
 ) -> tuple[TestClient, FakePoolBackend, InMemoryEntitlementsStore, FakeLiteLLMBackend]:
     """Create a TestClient with tunnel-auth, pool-backend, and quota fakes installed.
 
-    The returned pool backend is seeded with the stub admin email as paid, so
+    The returned pool backend is seeded with the stub user email as paid, so
     the stub's lazily-created entitlements row resolves to the ally plan by
     default; explorer-plan tests flip the entry via ``backend.add_paid_email``
     or write a row into the entitlements store directly.
@@ -2992,7 +2992,7 @@ def test_destroy_key_not_owned_returns_404(monkeypatch: pytest.MonkeyPatch) -> N
 def test_create_bucket_works_for_unpaid_explorer_account(monkeypatch: pytest.MonkeyPatch) -> None:
     """The old paid gate is gone: an unpaid (explorer) account can create buckets within quota."""
     client, fake, _store = _make_bucket_test_client(monkeypatch)
-    # Install a paid-list backend where the stub admin email is NOT paid.
+    # Install a paid-list backend where the stub user email is NOT paid.
     backend = make_fake_pool_backend()
     backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
     backend.install_on_app_module(app_mod, monkeypatch)
