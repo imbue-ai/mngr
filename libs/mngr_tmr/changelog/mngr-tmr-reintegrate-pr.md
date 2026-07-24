@@ -1,5 +1,0 @@
-TMR reintegration now opens its pull request the same way a normal run does, and the run's PR summary counts failed tests.
-
-Reintegrating a run (re-running the integrator over an already-completed run's outputs) previously had the *workflow* open a minimal PR, while a normal run had the reducer open a rich one. Now the reducer opens the PR in both cases, so a reintegration's PR carries the same mapper status breakdown and escalations table. The reintegration's reducer branch is suffixed with the workflow run id so it always opens a fresh PR rather than colliding with the original run's reducer branch (the two share a run name).
-
-Failed mappers -- those that never produced an outcome file because they failed to launch, timed out, or crashed -- are now represented in the reducer's inputs via a synthesized "errored" outcome. Before this, anything reading the output directory as files rather than orchestrator metadata (the reducer, and thus the PR's status breakdown) was blind to them, so a run with failures reported as if those tests did not exist. They now appear in the failed count.

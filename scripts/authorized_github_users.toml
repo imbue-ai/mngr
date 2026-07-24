@@ -1,7 +1,0 @@
-# GitHub usernames authorized to triage autoclaude issues.
-# Comments from these users determine whether an issue becomes a FIXME
-# or is added to non_issues.md.
-
-authorized_users = [
-    "joshalbrecht",
-]

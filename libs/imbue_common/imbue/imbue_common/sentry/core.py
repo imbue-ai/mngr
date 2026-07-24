@@ -281,7 +281,7 @@ class _SentryEventRateLimiter(MutableModel):
 class ImbueSentryHttpTransport(HttpTransport):
     """The sentry python sdk has pretty lame behavior if the event is too large.
     It'll just drop it, and record stats indicating that an event was dropped.
-    You can see these at `https://generally-intelligent-e3.sentry.io/stats`, category "invalid".
+    You can see these in the Sentry org's stats page, category "invalid".
     But there's no way to recover any information about the dropped event.
 
     We could try to just ensure the events don't violate the size limit, which we try to do,
@@ -494,7 +494,6 @@ def _before_send_wrapper(
     except Exception as e:
         # It is critical that we catch errors here, because this runs inside Sentry's before_send hook.
         # Failing to report the failure means we would see NOTHING about it.
-        # See this PR for the original motivation: https://gitlab.com/generally-intelligent/generally_intelligent/-/merge_requests/5789
         #
         # ``log_error_inside_sentry`` both records the failure in the local app log (so it is never lost)
         # and reports it to Sentry via a minimal event on a cleared scope. It is non-reentrant, so even

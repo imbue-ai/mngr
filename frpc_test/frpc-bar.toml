@@ -1,8 +1,0 @@
-serverAddr = "host.docker.internal"
-serverPort = 7000
-
-[[proxies]]
-name = "bar"
-type = "http"
-localPort = 9002
-customDomains = ["bar.container1.localhost"]

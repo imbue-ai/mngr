@@ -1,3 +1,5 @@
+# Public-mirror variant of the root pyproject: identical to the private one
+# minus coverage flags for packages that do not sync.
 [project]
 name = "imbue"
 version = "0.1.0"
@@ -76,7 +78,6 @@ addopts = [
   "--cov=imbue.resource_guards",
   "--cov=imbue.overlay",
   "--cov=imbue.mngr_claude",
-  "--cov=imbue.mngr_claude_subagent_proxy",
   "--cov=imbue.mngr_opencode",
   "--cov=imbue.mngr_antigravity",
   "--cov=imbue.mngr_codex",
@@ -98,12 +99,8 @@ addopts = [
   "--cov=imbue.mngr_forward",
   "--cov=imbue.mngr_imbue_cloud",
   "--cov=imbue.mngr_lima",
-  "--cov=imbue.mngr_tmr",
-  "--cov=imbue.mngr_mapreduce",
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
-  "--cov=imbue.slack_exporter",
-  "--cov=imbue.remote_service_connector",
   "--cov=imbue.concurrency_group",
   "--cov=imbue.modal_proxy",
   "--cov=imbue.mngr_wait",

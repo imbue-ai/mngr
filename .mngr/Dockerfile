@@ -1,1 +1,0 @@
-../libs/mng/imbue/mng/resources/Dockerfile

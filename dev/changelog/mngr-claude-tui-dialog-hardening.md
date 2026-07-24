@@ -1,1 +1,0 @@
-Added the design doc for the Claude blocking-TUI-dialog hardening work under `blueprint/claude-tui-dialog-hardening/` (the plan for auto-accepting or surfacing interactive selectors like the `/model` confirmation, and the new `mngr message` exit code 7). No behavior change in this project; the implementation lives in `libs/mngr` and `libs/mngr_claude`.

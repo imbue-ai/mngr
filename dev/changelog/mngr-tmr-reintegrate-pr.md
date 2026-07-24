@@ -1,1 +1,0 @@
-The TMR reintegrate workflow (`tmr-reintegrate.yml`) no longer opens the pull request itself. Like the main TMR workflow, it hands the reducer a `GH_TOKEN` (via `--reducer-env`) so the reducer opens the run's PR with the full findings in its body. It passes `--reducer-branch-suffix` set to the workflow run id so each reintegration opens a fresh PR from a distinct branch.

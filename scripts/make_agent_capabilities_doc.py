@@ -446,7 +446,7 @@ Which agent types implement which capabilities, **derived from the code** (the a
 and their plugins), not maintained by hand. `Y` means present; `-` means applicable but
 absent; `n/a` means the capability does not apply to that agent kind (an interactive-only
 capability on a headless agent, or a CLI-specific capability on a bare command runner). See
-`specs/agent-plugin-parity/capability-mixins.md` for the design.
+`libs/mngr/future_specs/capability-mixins.md` for the design.
 """
 
 

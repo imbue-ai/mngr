@@ -1,1 +1,0 @@
-../libs/mngr/imbue/mngr/resources/mngr_log.sh
