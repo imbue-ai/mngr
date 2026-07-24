@@ -1,0 +1,1 @@
+The `.minds/template/supertokens.sh` Vault schema template now declares `MINDS_ADMIN_KEY` as the canonical operator admin key for the connector's admin endpoints (paid lists, account admin, sweeps). The old `MINDS_PAID_ADMIN_KEY` key remains declared as a deprecated fallback while per-tier Vault entries migrate.

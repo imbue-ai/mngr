@@ -1,0 +1,1 @@
+Regenerated the `mngr imbue_cloud` command docs: the `--api-key` option for `admin paid` / `admin account` / `admin sweep` commands now documents `$MINDS_ADMIN_KEY` as the canonical admin API key env var (the deprecated `$MINDS_PAID_ADMIN_KEY` spelling is still accepted as a fallback).

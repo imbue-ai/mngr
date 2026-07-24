@@ -1,0 +1,1 @@
+`minds paid` now reads the operator admin key from the `MINDS_ADMIN_KEY` Vault field (in `<vault_prefix>/supertokens`), falling back to the deprecated `MINDS_PAID_ADMIN_KEY` field with a warning while Vault entries migrate. The key is injected into the `mngr imbue_cloud admin paid` subprocess under both spellings so older installed mngr versions keep working during the migration.
