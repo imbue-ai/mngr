@@ -86,6 +86,7 @@ function isSwappableLocalPath(pathname) {
   return (
     pathname === '/'
     || pathname === '/create'
+    || pathname === '/create/inspiration'
     || pathname === '/settings'
     || pathname === '/accounts'
     || pathname === '/_chrome'

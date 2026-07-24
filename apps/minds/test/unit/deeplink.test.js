@@ -42,7 +42,9 @@ test('git_url only', () => {
     gitUrl: 'https://github.com/imbue-ai/example',
     branch: '',
   });
-  assert.equal(deeplinkTargetPath(url), '/create?git_url=https%3A%2F%2Fgithub.com%2Fimbue-ai%2Fexample');
+  // A repo-carrying link is an Inspiration link: it targets the Create from
+  // Inspiration page rather than the plain create form.
+  assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fgithub.com%2Fimbue-ai%2Fexample');
 });
 
 test('branch only', () => {
@@ -56,7 +58,7 @@ test('both params', () => {
     gitUrl: 'https://github.com/a/b',
     branch: 'v1.2.3',
   });
-  assert.equal(deeplinkTargetPath(url), '/create?git_url=https%3A%2F%2Fgithub.com%2Fa%2Fb&branch=v1.2.3');
+  assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fgithub.com%2Fa%2Fb&branch=v1.2.3');
 });
 
 test('empty-string params behave like absent ones', () => {
@@ -68,7 +70,7 @@ test('git_url containing its own query survives the decode/re-encode round trip'
   // ?token=abc inside the value, percent-encoded by the sender.
   const url = 'minds://create?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc';
   assert.equal(parseDeeplink(url).gitUrl, 'https://host/repo.git?token=abc');
-  assert.equal(deeplinkTargetPath(url), '/create?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc');
+  assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc');
 });
 
 test('branch with slash and space is re-encoded', () => {
@@ -130,7 +132,10 @@ test('allowlist property: output is null or starts with /create', () => {
   ];
   for (const input of inputs) {
     const out = deeplinkTargetPath(input);
-    assert.ok(out === null || out === '/create' || out.startsWith('/create?'), `unexpected: ${out}`);
+    assert.ok(
+      out === null || out === '/create' || out.startsWith('/create?') || out.startsWith('/create/inspiration?'),
+      `unexpected: ${out}`
+    );
   }
 });
 

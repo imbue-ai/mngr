@@ -66,6 +66,7 @@
     return (
       pathname === '/'
       || pathname === '/create'
+      || pathname === '/create/inspiration'
       || pathname === '/settings'
       || pathname === '/accounts'
       || pathname === '/_chrome'
@@ -406,6 +407,7 @@
     // No back arrow on the create form: the titlebar home button is the
     // escape (back to the workspace list / welcome splash).
     if (path === '/create') return { kind: 'page', pageLabel: 'New workspace' };
+    if (path === '/create/inspiration') return { kind: 'page', pageLabel: 'New workspace' };
     if (/^\/creating\//.test(path)) return { kind: 'page', pageLabel: 'New workspace' };
     // Browser-mode full-page fallbacks (Electron shows these as modals).
     if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
