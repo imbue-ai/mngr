@@ -1,0 +1,1 @@
+Switching workspaces now shows a two-second loading bar instead of a blank white card: the bar rides the titlebar wrapper's loading surface (accent-tinted when the workspace's color is known), fills over two seconds and holds near-full for slower loads, and is covered the instant the workspace content paints. Instant flips back to a resident workspace never show it.

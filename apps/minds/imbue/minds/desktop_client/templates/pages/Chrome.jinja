@@ -41,7 +41,42 @@
      Pointer-events:none so it never intercepts clicks. #}
   <div id="content-bg-mirror"
        class="fixed left-[4px] top-[38px] rounded-[12px] bg-surface-primary pointer-events-none"
-       style="width: calc(100% - 8px); height: calc(100% - 42px);"></div>
+       style="width: calc(100% - 8px); height: calc(100% - 42px);">
+    <style>
+      /* Workspace-switching loading bar. It rides the white mirror card, so
+         it is visible exactly while that card is the loading surface -- the
+         content WebContentsView (Electron) / #content-frame iframe (browser)
+         covers it the instant the workspace paints, and instant parked
+         reveals never show it at all. Fills over 2s and holds near-full for
+         slower loads; the element is recreated on every wrapper (re)render
+         (full load or in-place swap), so the animation restarts per switch.
+         Tinted with the workspace accent when one is seeded. */
+      .ws-loading-track {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(320px, 60%);
+        height: 4px;
+        border-radius: 2px;
+        background: var(--c-fill-active);
+        overflow: hidden;
+      }
+      .ws-loading-fill {
+        height: 100%;
+        border-radius: 2px;
+        background: var(--titlebar-bg, var(--c-text-tertiary));
+        transform-origin: left;
+        animation: ws-loading-fill 2s ease-out forwards;
+      }
+      @keyframes ws-loading-fill {
+        from { transform: scaleX(0); }
+        60% { transform: scaleX(0.8); }
+        to { transform: scaleX(0.96); }
+      }
+    </style>
+    <div class="ws-loading-track" role="progressbar" aria-label="Opening workspace"><div class="ws-loading-fill"></div></div>
+  </div>
 
   {# No eager src: chrome.js arms it (data-content-src) in BROWSER mode only.
      In Electron the iframe is hidden and must never load -- an eager src="/"
