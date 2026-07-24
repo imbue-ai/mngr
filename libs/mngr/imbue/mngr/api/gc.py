@@ -23,7 +23,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
-from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import LocalHostNotDestroyableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
@@ -234,10 +233,13 @@ def _gc_single_host_work_dir(
         # otherwise is online
         try:
             orphaned_dirs = _get_orphaned_work_dirs(host=host, provider_name=provider_instance.name)
-        except HostOfflineError:
-            logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
-        except HostAuthenticationError:
-            logger.trace("Skipped work dir GC because host authentication failed", host_id=host.id)
+        except HostConnectionError as e:
+            # A host classified online can be briefly unreachable -- e.g. a lima VM that
+            # limactl reports Running while its guest sshd is still coming up, or a
+            # transient network blip. Skip it this sweep rather than aborting the whole
+            # work-dir GC (matching the machines phase in _gc_single_host). This also
+            # catches the HostOfflineError / HostAuthenticationError subclasses.
+            logger.trace("Skipped work dir GC because host is unreachable: {}", e, host_id=host.id)
         else:
             for work_dir_info in orphaned_dirs:
                 try:
@@ -261,10 +263,10 @@ def _gc_single_host_work_dir(
                 deletable_source_dirs, kept_source_dirs = _get_orphaned_source_dirs(
                     host=host, provider_name=provider_instance.name
                 )
-            except HostOfflineError:
-                logger.trace("Skipped source dir GC because host is offline", host_id=host.id)
-            except HostAuthenticationError:
-                logger.trace("Skipped source dir GC because host authentication failed", host_id=host.id)
+            except HostConnectionError as e:
+                # See the work-dir block above: a briefly-unreachable online host is
+                # skipped, not treated as an abort. Catches the offline/auth subclasses too.
+                logger.trace("Skipped source dir GC because host is unreachable: {}", e, host_id=host.id)
             else:
                 for info in kept_source_dirs:
                     logger.warning(

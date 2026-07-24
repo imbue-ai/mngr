@@ -12,6 +12,7 @@ from imbue.mngr_lima.limactl import _LIMA_SOCKET_PATH_OVERHEAD
 from imbue.mngr_lima.limactl import _UNIX_PATH_MAX
 from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
 from imbue.mngr_lima.limactl import host_name_from_instance_name
+from imbue.mngr_lima.limactl import is_limactl_start_in_flight_for_instance
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_list
@@ -165,3 +166,61 @@ def test_lima_ssh_config() -> None:
     assert config.port == 60022
     assert config.user == "josh"
     assert config.identity_file == Path("/home/josh/.lima/_config/user")
+
+
+_INSTANCE = "mngr-host-0123456789abcdef"
+
+
+def test_start_in_flight_matches_existing_instance_shape() -> None:
+    # limactl_start_existing: `limactl --log-level=info start <name>`
+    argvs = [("limactl", "--log-level=info", "start", _INSTANCE)]
+    assert is_limactl_start_in_flight_for_instance(_INSTANCE, argvs) is True
+
+
+def test_start_in_flight_matches_new_instance_shape() -> None:
+    # limactl_start_new: `limactl --log-level=info start --name=<name> <yaml> [start_args]`
+    argvs = [("limactl", "--log-level=info", "start", f"--name={_INSTANCE}", "/tmp/x.yaml", "--cpus=8")]
+    assert is_limactl_start_in_flight_for_instance(_INSTANCE, argvs) is True
+
+
+def test_start_in_flight_matches_bare_invocation_and_absolute_program_path() -> None:
+    argvs = [("/opt/homebrew/bin/limactl", "start", _INSTANCE)]
+    assert is_limactl_start_in_flight_for_instance(_INSTANCE, argvs) is True
+
+
+def test_start_in_flight_requires_exact_instance_name_not_prefix() -> None:
+    # A start for `mngr-host-0123456789abcdef2` must not be read as booting `_INSTANCE`.
+    argvs = [
+        ("limactl", "--log-level=info", "start", _INSTANCE + "2"),
+        ("limactl", "start", f"--name={_INSTANCE}2", "/tmp/x.yaml"),
+    ]
+    assert is_limactl_start_in_flight_for_instance(_INSTANCE, argvs) is False
+
+
+def test_start_in_flight_ignores_other_limactl_subcommands() -> None:
+    argvs = [
+        ("limactl", "stop", _INSTANCE),
+        ("limactl", "list", "--json"),
+        ("limactl", "--log-level=info", "delete", "--force", _INSTANCE),
+    ]
+    assert is_limactl_start_in_flight_for_instance(_INSTANCE, argvs) is False
+
+
+def test_start_in_flight_ignores_non_limactl_process_mentioning_instance() -> None:
+    # A grep/tail whose args merely contain the instance name is not a `limactl start`.
+    argvs = [("grep", "start", _INSTANCE), ("tail", "-f", f"/var/log/{_INSTANCE}.log")]
+    assert is_limactl_start_in_flight_for_instance(_INSTANCE, argvs) is False
+
+
+def test_start_in_flight_false_for_empty_and_short_argvs() -> None:
+    argvs = [(), ("limactl",), ("limactl", "start")]
+    assert is_limactl_start_in_flight_for_instance(_INSTANCE, argvs) is False
+
+
+def test_start_in_flight_true_when_any_process_in_list_matches() -> None:
+    argvs = [
+        ("limactl", "list", "--json"),
+        ("some-daemon", "--serve"),
+        ("limactl", "--log-level=info", "start", _INSTANCE),
+    ]
+    assert is_limactl_start_in_flight_for_instance(_INSTANCE, argvs) is True

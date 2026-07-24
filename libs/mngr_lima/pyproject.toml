@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr==0.2.17",
+    "psutil>=5.9",
     "pyyaml>=6.0",
 ]
 
@@ -54,6 +55,10 @@ omit = [
   "*/mngr_lima/instance.py",
   "*/mngr_lima/limactl.py",
   "*/mngr_lima/testing.py",
+  # Release-test-only drivers: run a real Lima VM under @pytest.mark.release, which
+  # per-PR CI does not run, so they are structurally uncoverable in the offload gate.
+  "*/mngr_lima/_lima_btrfs_release_helper.py",
+  "*/mngr_lima/_lima_host_start_race_helper.py",
 ]
 
 [tool.coverage.report]
@@ -67,6 +72,9 @@ omit = [
   "*/mngr_lima/instance.py",
   "*/mngr_lima/limactl.py",
   "*/mngr_lima/testing.py",
+  # Release-test-only drivers (see [tool.coverage.run] omit above).
+  "*/mngr_lima/_lima_btrfs_release_helper.py",
+  "*/mngr_lima/_lima_host_start_race_helper.py",
 ]
 
 [tool.inline-snapshot]

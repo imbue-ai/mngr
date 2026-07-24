@@ -207,6 +207,10 @@ omit = [
     # Lima provider requires Lima/QEMU for full integration testing
     "libs/mngr_lima/imbue/mngr_lima/instance.py",
     "libs/mngr_lima/imbue/mngr_lima/limactl.py",
+    # Release-test-only drivers: run a real Lima VM under @pytest.mark.release, which
+    # per-PR CI does not run, so they are structurally uncoverable in the offload gate.
+    "libs/mngr_lima/imbue/mngr_lima/_lima_btrfs_release_helper.py",
+    "libs/mngr_lima/imbue/mngr_lima/_lima_host_start_race_helper.py",
     # Mind deploy modules run on Modal and require infrastructure to test
     "apps/minds/imbue/minds/deploy/cron_runner.py",
     "apps/minds/imbue/minds/deploy/remote_runner.py",

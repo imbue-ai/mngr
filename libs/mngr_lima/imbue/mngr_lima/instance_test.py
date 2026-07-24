@@ -7,9 +7,11 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
+from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -20,6 +22,7 @@ from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.instance import _parse_size_to_gb
 from imbue.mngr_lima.limactl import LimaSshConfig
+from imbue.mngr_lima.limactl import ProcessArgv
 from imbue.mngr_lima.testing import install_fake_limactl
 
 
@@ -69,6 +72,127 @@ def test_discover_hosts_degrades_to_empty_when_limactl_unavailable(
     )
 
     assert lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group) == []
+
+
+def _fake_limactl_reporting_running(instance_name: str) -> str:
+    """Fake limactl sh body: --version passes the min-version check and `list --json` reports one Running instance."""
+    return (
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\n'
+        'if [ "$1" = "list" ]; then\n'
+        f'  echo \'{{"name": "{instance_name}", "status": "Running"}}\'\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def _make_provider_with_lister(
+    mngr_ctx: MngrContext,
+    config: LimaProviderConfig,
+    argvs: list[ProcessArgv],
+) -> LimaProviderInstance:
+    """Build a provider whose process-table scan returns a fixed set of argvs."""
+    return LimaProviderInstance(
+        name=ProviderInstanceName("lima-test"),
+        host_dir=config.host_dir or Path("/mngr"),
+        mngr_ctx=mngr_ctx,
+        config=config,
+        process_argv_lister=lambda: argvs,
+    )
+
+
+def _write_running_host_record(provider: LimaProviderInstance, host_id: HostId, instance_name: str) -> None:
+    """Persist a normal online-capable host record (has config + ssh info) for a running instance."""
+    now = datetime.now(timezone.utc)
+    provider._host_store.write_host_record(
+        HostRecord(
+            certified_host_data=CertifiedHostData(
+                host_id=str(host_id),
+                host_name="booting-host",
+                user_tags={},
+                snapshots=[],
+                created_at=now,
+                updated_at=now,
+            ),
+            ssh_hostname="127.0.0.1",
+            ssh_port=60022,
+            ssh_user="user",
+            ssh_identity_file="/tmp/id",
+            config=LimaHostConfig(
+                instance_name=instance_name,
+                is_host_data_volume_exposed=True,
+                host_data_disk_name=None,
+            ),
+        )
+    )
+
+
+def test_get_host_reports_starting_when_limactl_start_in_flight(
+    temp_mngr_ctx: MngrContext,
+    lima_provider_config: LimaProviderConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lima reports the instance Running mid-boot, but a `limactl start` is still in flight,
+    so get_host returns a not-yet-online host that reports STARTING (routing callers through
+    start_host + wait_for_sshd) instead of an online host that would fail to connect."""
+    host_id = HostId.generate()
+    instance_name = f"{temp_mngr_ctx.config.prefix}{host_id}"
+    install_fake_limactl(tmp_path / "bin", _fake_limactl_reporting_running(instance_name), monkeypatch)
+    provider = _make_provider_with_lister(
+        temp_mngr_ctx,
+        lima_provider_config,
+        [("limactl", "--log-level=info", "start", instance_name)],
+    )
+    _write_running_host_record(provider, host_id, instance_name)
+
+    host = provider.get_host(host_id)
+
+    assert isinstance(host, OfflineHost)
+    assert host.get_state() == HostState.STARTING
+
+
+def test_discover_hosts_reports_starting_when_start_in_flight(
+    temp_mngr_ctx: MngrContext,
+    lima_provider_config: LimaProviderConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Running instance with its `limactl start` (new-instance --name= shape) still in flight
+    is discovered as STARTING rather than RUNNING."""
+    host_id = HostId.generate()
+    instance_name = f"{temp_mngr_ctx.config.prefix}{host_id}"
+    install_fake_limactl(tmp_path / "bin", _fake_limactl_reporting_running(instance_name), monkeypatch)
+    provider = _make_provider_with_lister(
+        temp_mngr_ctx,
+        lima_provider_config,
+        [("limactl", "start", f"--name={instance_name}", "/tmp/x.yaml")],
+    )
+    _write_running_host_record(provider, host_id, instance_name)
+
+    discovered = provider.discover_hosts(temp_mngr_ctx.concurrency_group)
+
+    state_by_host_id = {host.host_id: host.host_state for host in discovered}
+    assert state_by_host_id[host_id] == HostState.STARTING
+
+
+def test_discover_hosts_reports_running_when_no_start_in_flight(
+    temp_mngr_ctx: MngrContext,
+    lima_provider_config: LimaProviderConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Running instance with no `limactl start` in flight is a finished boot: discovered RUNNING."""
+    host_id = HostId.generate()
+    instance_name = f"{temp_mngr_ctx.config.prefix}{host_id}"
+    install_fake_limactl(tmp_path / "bin", _fake_limactl_reporting_running(instance_name), monkeypatch)
+    provider = _make_provider_with_lister(temp_mngr_ctx, lima_provider_config, [])
+    _write_running_host_record(provider, host_id, instance_name)
+
+    discovered = provider.discover_hosts(temp_mngr_ctx.concurrency_group)
+
+    state_by_host_id = {host.host_id: host.host_state for host in discovered}
+    assert state_by_host_id[host_id] == HostState.RUNNING
 
 
 def test_provider_capabilities(lima_provider: LimaProviderInstance) -> None:

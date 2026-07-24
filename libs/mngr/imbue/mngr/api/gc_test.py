@@ -1516,6 +1516,13 @@ class _AuthErroringHost(Host):
         raise HostAuthenticationError("simulated auth error from test")
 
 
+class _ConnectionErroringHost(Host):
+    """Host subclass whose get_certified_data raises the base HostConnectionError (not a subclass)."""
+
+    def get_certified_data(self) -> CertifiedHostData:
+        raise HostConnectionError("simulated connection error from test")
+
+
 def _make_erroring_host(provider: LocalProviderInstance, host_cls: type[Host]) -> Host:
     """Create an instance of host_cls using the local provider's connector and ID."""
     pyinfra_host = provider._create_local_pyinfra_host()
@@ -1568,6 +1575,38 @@ def test_gc_single_host_work_dir_skips_host_auth_error(
 
     provider = _HostOfflineErrorProvider(
         name=ProviderInstanceName("test-auth"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[erroring_host],
+    )
+
+    host_ref = DiscoveredHost(
+        host_id=erroring_host.id,
+        host_name=HostName(erroring_host.get_connector_host_name()),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    result = GcResult()
+    _gc_single_host_work_dir(host_ref, provider, ErrorBehavior.ABORT, False, result)
+
+    assert len(result.work_dirs_destroyed) == 0
+    assert len(result.errors) == 0
+
+
+def test_gc_single_host_work_dir_skips_base_connection_error(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """A host classified online but briefly unreachable -- a base HostConnectionError, e.g. a lima
+    VM that limactl reports Running while its guest sshd is still coming up -- is skipped, not
+    allowed to abort the work-dir sweep. Before the catch was widened to the base error, this
+    escaped the narrow offline/auth except and propagated even under ABORT."""
+    erroring_host = _make_erroring_host(local_provider, _ConnectionErroringHost)
+
+    provider = _HostOfflineErrorProvider(
+        name=ProviderInstanceName("test-conn"),
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
         mock_hosts=[erroring_host],
