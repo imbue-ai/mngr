@@ -17,34 +17,40 @@ _FAST_THRESHOLD: float = 0.05
 
 
 @pytest.mark.parametrize(
-    "reason,status_code,expected",
+    "reason,status_code,is_provider_errored,expected",
     [
-        # Connection-level failure (no HTTP status) enrolls.
-        (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, True),
-        (SystemInterfaceBackendFailureReason.SSE_EOF, None, True),
-        # Infrastructure 5xx: the backend is unreachable / not serving.
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 502, True),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503, True),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 504, True),
+        # Connection-level failure (no HTTP status) enrolls, regardless of provider state.
+        (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, False, True),
+        (SystemInterfaceBackendFailureReason.SSE_EOF, None, False, True),
+        # Infrastructure 5xx: the backend is unreachable / not serving. Enrolls
+        # regardless of provider state (the provider flag only gates UNRESOLVED).
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 502, False, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503, False, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 504, False, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503, True, True),
         # Application errors: the backend is alive and responding, so they
-        # don't enroll -- the background probe adjudicates a wedged backend.
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 500, False),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 404, False),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 401, False),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 400, False),
-        # UNRESOLVED means the forward has no route for the agent at all (a
-        # cold-start warm-up or a genuinely-gone agent); a restart routes through
-        # the forward so it cannot help either way. Never enroll on it -- even
-        # though it carries a None status code that would otherwise enroll.
-        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, False),
+        # don't enroll -- the background probe adjudicates a wedged backend. A
+        # concurrently-errored provider does not change that (only UNRESOLVED cares).
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 500, False, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 500, True, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 404, False, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 401, False, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 400, False, False),
+        # UNRESOLVED (a routeless agent) enrolls only when its provider is errored
+        # in discovery -- a doomed cold load. A healthy provider means a warm-up
+        # whose route will still resolve, so it is left alone despite the None
+        # status code that would otherwise enroll.
+        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, True, True),
+        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, False, False),
     ],
 )
 def test_should_enroll_suspect_for_backend_failure(
     reason: SystemInterfaceBackendFailureReason,
     status_code: int | None,
+    is_provider_errored: bool,
     expected: bool,
 ) -> None:
-    assert should_enroll_suspect_for_backend_failure(reason, status_code) is expected
+    assert should_enroll_suspect_for_backend_failure(reason, status_code, is_provider_errored) is expected
 
 
 def _sleep(seconds: float) -> None:

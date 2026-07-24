@@ -1,0 +1,3 @@
+Opening a workspace that never finished loading no longer sits forever on the "Loading workspace" spinner when its compute provider has become unreachable. When discovery reports the workspace's provider as errored, the app now escalates to the recovery page ("Can't connect to <provider>" with a Retry button and automatic recovery) instead of spinning indefinitely, and returns you to the workspace once the provider recovers.
+
+A still-resolving healthy workspace that is simply slow to warm up is unaffected -- it is only escalated when its provider has actually errored, so a legitimately-slow cold load is not misreported as stuck.

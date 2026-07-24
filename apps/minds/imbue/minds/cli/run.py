@@ -469,11 +469,15 @@ def run(
     system_interface_health_tracker = SystemInterfaceHealthTracker()
 
     # The plugin reports every non-2xx response; minds decides which ones count.
-    # Only connection-level failures and infrastructure 5xx enroll a suspect --
-    # application errors (and UNRESOLVED, a routeless warm-up) are left alone.
+    # Connection-level failures and infrastructure 5xx enroll a suspect;
+    # application errors are left alone. UNRESOLVED (a routeless agent) enrolls
+    # only when its provider is errored in discovery -- a doomed cold load that
+    # will never resolve -- and not a healthy warm-up that still will.
     consumer.add_on_system_interface_backend_failure_callback(
         lambda agent_id, reason, status_code: system_interface_health_tracker.record_failure(agent_id)
-        if should_enroll_suspect_for_backend_failure(reason, status_code)
+        if should_enroll_suspect_for_backend_failure(
+            reason, status_code, is_provider_errored=backend_resolver.is_agent_provider_errored(agent_id)
+        )
         else None
     )
 

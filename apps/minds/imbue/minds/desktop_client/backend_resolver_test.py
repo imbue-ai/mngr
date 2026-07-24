@@ -22,6 +22,7 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
+from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -1318,6 +1319,51 @@ def test_backend_resolver_interface_default_get_agent_display_info_returns_none_
 
     resolver = MinimalResolver()
     assert resolver.get_agent_display_info(_AGENT_A) is None
+
+
+# -- is_agent_provider_errored tests --
+
+
+def _local_provider_error() -> DiscoveryError:
+    return DiscoveryError(
+        type_name="RuntimeError",
+        message="limactl crashed",
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def test_is_agent_provider_errored_true_when_agents_provider_errored() -> None:
+    """A discovered agent whose provider has a surfaced discovery error reports True."""
+    resolver = make_resolver_with_data(agents_json=make_agents_json(_AGENT_A))
+    seed_provider_snapshots(resolver, error_by_provider_name={ProviderInstanceName("local"): _local_provider_error()})
+
+    assert resolver.is_agent_provider_errored(_AGENT_A) is True
+
+
+def test_is_agent_provider_errored_false_when_provider_healthy() -> None:
+    """A discovered agent whose provider has no surfaced error reports False."""
+    resolver = make_resolver_with_data(agents_json=make_agents_json(_AGENT_A))
+
+    assert resolver.is_agent_provider_errored(_AGENT_A) is False
+
+
+def test_is_agent_provider_errored_false_for_unknown_agent() -> None:
+    """An agent absent from the live snapshot has no attributable provider, so False.
+
+    This is the cold-start edge: even with the provider errored, an agent that
+    discovery has not enumerated cannot be tied to that provider.
+    """
+    resolver = make_resolver_with_data(agents_json=make_agents_json(_AGENT_A))
+    seed_provider_snapshots(resolver, error_by_provider_name={ProviderInstanceName("local"): _local_provider_error()})
+
+    assert resolver.is_agent_provider_errored(_AGENT_B) is False
+
+
+def test_is_agent_provider_errored_default_false_for_static_resolver() -> None:
+    """Resolvers without provider state (the interface default) never report an error."""
+    resolver = StaticBackendResolver(url_by_agent_and_service={str(_AGENT_A): {"web": "http://127.0.0.1:9100"}})
+
+    assert resolver.is_agent_provider_errored(_AGENT_A) is False
 
 
 # -- workspace name override (optimistic rename) tests ----------------

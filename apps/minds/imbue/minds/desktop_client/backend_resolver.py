@@ -249,6 +249,17 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return {}
 
+    def is_agent_provider_errored(self, agent_id: AgentId) -> bool:
+        """Whether ``agent_id``'s provider has a surfaced discovery error.
+
+        Joins the agent's provider name to :meth:`get_provider_errors`. Default
+        implementation returns False (resolvers without provider state never
+        report errors); ``MngrCliBackendResolver`` overrides it. Gates recovery
+        enrollment for a routeless (UNRESOLVED) agent: only a doomed load under an
+        errored provider escalates, not a still-resolving warm-up.
+        """
+        return False
+
     def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
         """Return ``(last_event_at, aggregate_last_snapshot_at)`` from discovery.
 
@@ -921,6 +932,22 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return errored providers keyed by provider name."""
         with self._lock:
             return dict(self._error_by_provider_name)
+
+    def is_agent_provider_errored(self, agent_id: AgentId) -> bool:
+        """Whether ``agent_id``'s provider has a surfaced discovery error.
+
+        A single cheap in-memory join under the lock: find the agent's provider in
+        the current snapshot, then test membership in the per-provider error map.
+        Returns False when the agent is absent from the snapshot -- its provider is
+        unknown, so no error can be attributed to it (mirroring the recovery page,
+        which likewise can only classify providers it can resolve for the agent).
+        """
+        with self._lock:
+            provider_name = next(
+                (agent.provider_name for agent in self._agents_result.discovered_agents if agent.agent_id == agent_id),
+                None,
+            )
+            return provider_name is not None and provider_name in self._error_by_provider_name
 
     def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
         """Return ``(last_event_at, aggregate_last_snapshot_at)`` for the providers panel.
