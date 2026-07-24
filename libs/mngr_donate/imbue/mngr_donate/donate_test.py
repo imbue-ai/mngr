@@ -132,7 +132,7 @@ def test_window_without_derivable_elapsed_yields_zero_pace_and_no_spare() -> Non
 
 def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() -> None:
     argv = build_create_argv("donate-extra-quota-bio", "/host/donate-skills/document-review")
-    assert argv[:10] == (
+    assert argv == (
         "mngr",
         "create",
         "donate-extra-quota-bio",
@@ -142,10 +142,12 @@ def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() ->
         # Force shared config so claude uses/refreshes the real keychain token.
         "-S",
         "agent_types.headless_claude.isolate_local_config_dir=false",
+        # Forward the OAuth token into the agent env (mngr create sanitizes it
+        # otherwise -- the headless agent would fail "Not logged in").
+        "--pass-env",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "--message",
         build_donation_message("/host/donate-skills/document-review"),
-    )
-    assert argv[10:] == (
         "--",
         "--output-format",
         "stream-json",

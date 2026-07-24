@@ -98,3 +98,80 @@ safe default for scheduled runs (bump the ref to adopt updates after review).
 - **Logs.** Each run's full event stream is tee'd to `<host_dir>/donate-logs/<agent>-<ts>.jsonl`,
   and scheduled runs also append to `<host_dir>/donate-logs/schedule.log`, so a run survives the
   agent's auto-destroy for later inspection.
+
+## Running this fork alongside an existing `mngr` install
+
+This branch (`mngr/donate-auth-fix`) carries the `--pass-env CLAUDE_CODE_OAUTH_TOKEN`
+fix for the headless donation agent. If you already have `mngr` installed (from
+PyPI or another checkout) and want to run *this* fork's `mngr donate` without
+disturbing your existing install, run it explicitly with `uv run --project`
+pointed at this checkout -- no PATH changes or symlink juggling needed.
+
+```bash
+# 1. Install mngr normally (if you haven't) -- the standard PyPI build:
+uv tool install imbue-mngr
+
+# 2. Clone this fork and sync its workspace (builds an isolated .venv inside it):
+git clone -b mngr/donate-auth-fix <this-repo-url> mngr-donate-auth
+cd mngr-donate-auth
+uv sync --all-packages
+
+# 3. Run this fork's `mngr donate` explicitly, from anywhere, without touching
+#    your global `mngr` (it keeps working for everything else):
+uv run --project /path/to/mngr-donate-auth mngr donate --dry-run
+uv run --project /path/to/mngr-donate-auth mngr donate
+```
+
+Your existing global `mngr` is never modified -- you just never call it for
+donate work. To make this ergonomic, add a shell function to your rc file:
+
+```bash
+# ~/.zshrc or ~/.bashrc
+mngr_donate() {
+  uv run --project /path/to/mngr-donate-auth mngr "$@"
+}
+```
+
+Then:
+
+```bash
+mngr_donate donate --dry-run
+mngr_donate donate --start        # if you've done the keychain setup above
+mngr_donate plugin list          # should list both 'donate' and 'usage'
+```
+
+### Why not `mngr donate --start` (launchd)?
+
+`--start` writes a launchd plist whose `ProgramArguments[0]` is the `mngr`
+executable in this fork's `.venv/bin/mngr` -- a stable path -- so it keeps
+working across reboots. But the plist only injects `PATH` into the launchd
+env, **not** `CLAUDE_CODE_OAUTH_TOKEN`. So `--start` only authenticates when
+the token is in the macOS **keychain** (the one-time `security
+add-generic-password` setup above), which donate reads via `security
+find-generic-password`. If you keep the token in an env file (e.g. sourced
+from your shell rc) instead of the keychain, launchd ticks would have no
+token and fail "Not logged in" -- in that case run a manual loop in a tmux
+that sources your env file instead:
+
+```bash
+# In a tmux, from inside the fork checkout:
+source ~/path/to/your-env-file.sh   # exports CLAUDE_CODE_OAUTH_TOKEN
+while true; do
+  uv run --project . mngr donate
+  sleep 600
+done
+```
+
+### Verify which `mngr` you're running
+
+```bash
+uv run --project /path/to/mngr-donate-auth mngr plugin list   # should list donate
+uv run --project /path/to/mngr-donate-auth mngr donate --help
+```
+
+If `donate` is missing, you're running the wrong checkout. Confirm with:
+
+```bash
+which mngr                          # what a bare `mngr` resolves to
+readlink ~/.local/bin/mngr          # where the symlink points (if any)
+```
