@@ -15,6 +15,7 @@ of the minds env CLI's mngr invocations.
 """
 
 import os
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -63,15 +64,15 @@ def _resolve_connector_url() -> str:
     return str(load_client_config(Path(config_path)).connector_url)
 
 
-def _resolve_admin_key(env_name: str) -> str:
-    """Read the activated tier's admin API key from ``<vault_prefix>/supertokens``.
+def admin_key_from_supertokens_secret(secret: Mapping[str, str], vault_prefix: str) -> str:
+    """Pick the admin API key out of a tier's ``<vault_prefix>/supertokens`` secret.
 
     Prefers the ``MINDS_ADMIN_KEY`` field, falling back (with a warning) to the
     deprecated ``MINDS_PAID_ADMIN_KEY`` spelling while Vault entries migrate.
+    ``vault_prefix`` is only used in the warning / error messages. Split out of
+    :func:`_resolve_admin_key` so the fallback contract is unit-testable
+    without a Vault read.
     """
-    tier = tier_for_env_name(env_name)
-    vault_prefix = str(load_deploy_config(tier).vault_path_prefix).rstrip("/")
-    secret = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"))
     admin_key = secret.get(_ADMIN_KEY_VAULT_FIELD, "")
     if admin_key:
         return admin_key
@@ -88,6 +89,18 @@ def _resolve_admin_key(env_name: str) -> str:
         f"Vault entry {vault_prefix}/supertokens is missing {_ADMIN_KEY_VAULT_FIELD!r}; "
         "the admin API is not enabled for this tier (add the key and redeploy)."
     )
+
+
+def _resolve_admin_key(env_name: str) -> str:
+    """Read the activated tier's admin API key from ``<vault_prefix>/supertokens``.
+
+    Prefers the ``MINDS_ADMIN_KEY`` field, falling back (with a warning) to the
+    deprecated ``MINDS_PAID_ADMIN_KEY`` spelling while Vault entries migrate.
+    """
+    tier = tier_for_env_name(env_name)
+    vault_prefix = str(load_deploy_config(tier).vault_path_prefix).rstrip("/")
+    secret = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"))
+    return admin_key_from_supertokens_secret(secret, vault_prefix)
 
 
 def _run_admin_paid_email(verb_args: Sequence[str]) -> None:
