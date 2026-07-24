@@ -10,6 +10,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](https://github.com/imbue-ai/mngr/blob/main/./LICENSE)
 [![Open Issues](https://img.shields.io/github/issues/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr/issues)
 
+> This repository is the public mirror of Imbue's development repository: every
+> change to the open-source code is exported here automatically, with the
+> original author on each commit. Issues and pull requests are welcome here.
+
 `mngr` is a Unix-style tool for managing coding agents.
 
 Seamlessly scale from a single local Claude to 100s of agents across remote hosts, containers, and sandboxes.
