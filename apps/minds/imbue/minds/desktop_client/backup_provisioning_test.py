@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.backup_provisioning import _create_or_reuse_buck
 from imbue.minds.desktop_client.backup_provisioning import _is_bucket_already_exists_error
 from imbue.minds.desktop_client.backup_provisioning import _repository_url_for_bucket
 from imbue.minds.desktop_client.backup_provisioning import _resolve_repository_and_backend_env
+from imbue.minds.desktop_client.backup_provisioning import build_backup_exec_argv
 from imbue.minds.desktop_client.backup_provisioning import build_canonical_env_content
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.backup_provisioning import generate_workspace_password
@@ -27,6 +28,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketKeyMaterial
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import BackupProvider
+from imbue.mngr.primitives import AgentId
 
 _ENDPOINT = "https://acct.r2.cloudflarestorage.com"
 
@@ -207,3 +209,14 @@ def test_resolve_api_key_requires_repository() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="AWS_ACCESS_KEY_ID=k\n")
     with pytest.raises(BackupProvisioningError):
         _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
+
+
+def test_backup_exec_argv_never_starts_a_stopped_host() -> None:
+    """Every backup-stack exec -- verification check, env injection, update
+    scripts -- must pass --no-start: ``mngr exec`` auto-starts the host by
+    default, and the periodic backup checker was observed cold-booting a
+    stopped container it believed online off a stale RUNNING snapshot.
+    """
+    argv = build_backup_exec_argv(AgentId.generate(), "echo hi")
+    assert argv[1] == "exec"
+    assert "--no-start" in argv

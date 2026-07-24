@@ -134,7 +134,7 @@ def test_failure_run_wall_onset_is_recorded_then_cleared() -> None:
     assert before <= onset <= after
 
     # A restart supersedes the run, clearing the onset.
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
     assert tracker.get_failure_run_started_wall_at(aid) is None
 
 
@@ -234,7 +234,7 @@ def test_probe_failure_does_not_disturb_restarting_agent() -> None:
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
     tracker.record_probe_failure(aid)
     _sleep(_FAST_THRESHOLD + 0.02)
     tracker.record_probe_failure(aid)
@@ -253,7 +253,7 @@ def test_mark_restarting_clears_pending_failure_run() -> None:
 
     tracker.record_failure(aid)
     tracker.record_probe_failure(aid)
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
     tracker.record_probe_success(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
 
@@ -266,7 +266,7 @@ def test_mark_restarting_clears_pending_failure_run() -> None:
 def test_success_clears_restarting() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
     tracker.record_probe_success(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
 
@@ -278,7 +278,7 @@ def test_mark_stuck_rolls_back_restarting_and_fires_callback() -> None:
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
     assert tracker.get_health(aid) == AgentHealth.RESTARTING
     tracker.mark_stuck(aid)
     assert tracker.get_health(aid) == AgentHealth.STUCK
@@ -304,7 +304,7 @@ def test_mark_restart_failed_sets_state_and_carries_error() -> None:
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
     tracker.mark_restart_failed(aid, "mngr start exited 1")
 
     assert tracker.get_health(aid) == AgentHealth.RESTART_FAILED
@@ -344,7 +344,7 @@ def test_mark_restarting_clears_prior_restart_error() -> None:
     aid = AgentId.generate()
 
     tracker.mark_restart_failed(aid, "old failure")
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
 
     assert tracker.get_health(aid) == AgentHealth.RESTARTING
     assert tracker.get_last_restart_error(aid) is None
@@ -353,6 +353,39 @@ def test_mark_restarting_clears_prior_restart_error() -> None:
 def test_get_last_restart_error_is_none_for_untracked_agent() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     assert tracker.get_last_restart_error(AgentId.generate()) is None
+
+
+def test_get_restart_is_start_only_reflects_flavor_and_is_scoped_to_restarting() -> None:
+    """The restart flavor is readable only while RESTARTING and survives a deduped claim.
+
+    The recovery page renders "Restarting your workspace" vs "Loading workspace"
+    off this flavor. A full manual bounce (``start_only=False``) must not be
+    rewritten by a deduped later start-only request, and the flavor must not leak
+    out of the restart (a subsequent HEALTHY reads None again).
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+
+    # Untracked / non-restarting agents report no flavor.
+    assert tracker.get_restart_is_start_only(aid) is None
+
+    # A full manual bounce wins the claim and records its flavor.
+    assert tracker.mark_restarting(aid, start_only=False) is True
+    assert tracker.get_restart_is_start_only(aid) is False
+
+    # A deduped later request (returns False) must not rewrite the flavor of the
+    # restart already in flight -- the first winner's worker is the one running.
+    assert tracker.mark_restarting(aid, start_only=True) is False
+    assert tracker.get_restart_is_start_only(aid) is False
+
+    # Scoped to RESTARTING: once recovered the flavor reads None again.
+    tracker.record_probe_success(aid)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert tracker.get_restart_is_start_only(aid) is None
+
+    # A start-only entry dispatch records True.
+    assert tracker.mark_restarting(aid, start_only=True) is True
+    assert tracker.get_restart_is_start_only(aid) is True
 
 
 def test_remove_on_change_callback() -> None:
@@ -367,7 +400,7 @@ def test_remove_on_change_callback() -> None:
     tracker.remove_on_change_callback(cb)
     tracker.remove_on_change_callback(cb)
 
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
     assert seen == []
 
 
@@ -376,7 +409,7 @@ def test_snapshot_all_omits_healthy_and_suspect_agents() -> None:
     a1 = AgentId.generate()
     a2 = AgentId.generate()
 
-    tracker.mark_restarting(a1)
+    tracker.mark_restarting(a1, start_only=False)
     # a2 is suspect (enrolled by an envelope) but still HEALTHY.
     tracker.record_failure(a2)
 
@@ -402,7 +435,7 @@ def test_snapshot_probe_targets_includes_suspect_stuck_and_restart_failed() -> N
     tracker.record_failure(suspect)
     tracker.mark_stuck(stuck)
     tracker.mark_restart_failed(restart_failed, "boom")
-    tracker.mark_restarting(restarting)
+    tracker.mark_restarting(restarting, start_only=False)
     tracker.record_failure(recovered)
     tracker.record_probe_success(recovered)
 
@@ -421,7 +454,7 @@ def test_snapshot_probe_targets_excludes_restarting_agents() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
 
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
 
     assert aid not in tracker.snapshot_probe_targets()
     # ...and even a prior failure envelope (which would normally enroll the
@@ -516,5 +549,5 @@ def test_callback_exception_does_not_break_subsequent_callbacks() -> None:
     tracker.add_on_change_callback(bad_cb)
     tracker.add_on_change_callback(good_cb)
 
-    tracker.mark_restarting(aid)
+    tracker.mark_restarting(aid, start_only=False)
     assert seen == [AgentHealth.RESTARTING]

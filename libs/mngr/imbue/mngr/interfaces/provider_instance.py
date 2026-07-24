@@ -613,10 +613,11 @@ class ProviderInstanceInterface(MutableModel, ABC):
         ``CRASHED`` for a shutdown-capable provider with no recorded stop
         reason). A provider that can confirm out-of-band -- without inner SSH --
         that the host is actually still up returns a non-offline state (e.g.
-        ``HostState.UNAUTHENTICATED``) so a live host with a dead inner sshd is
+        ``HostState.UNKNOWN``) so a live host with a dead inner sshd is
         not misreported as offline. Only consulted for non-authentication
-        connection failures, since an authentication failure already maps to
-        ``UNAUTHENTICATED``.
+        connection failures, since an authentication failure (a rejected
+        credential or an unverifiable host key -- conditions a restart cannot
+        fix) already maps to ``UNAUTHENTICATED``.
         """
         return None
 
@@ -980,8 +981,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
             # recorded a clean stop. When the connection failure is not an auth
             # failure, give the provider a chance to correct that from an
             # out-of-band signal it has (e.g. docker's daemon reports the
-            # container is still running -> UNAUTHENTICATED), so a live host with
-            # a dead inner sshd is not misreported as offline.
+            # container is still running -> UNKNOWN rather than CRASHED), so a
+            # live host with a dead inner sshd is not misreported as offline.
             if not is_authentication_failure:
                 fallback_state = self.get_connection_error_fallback_state(host_ref.host_id)
                 if fallback_state is not None:

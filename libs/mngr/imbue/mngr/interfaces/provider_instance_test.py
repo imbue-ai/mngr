@@ -13,6 +13,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.test_utils import poll_until
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -278,9 +279,9 @@ def test_connection_error_fallback_applies_provider_state_override(
 
     Mirrors a docker container that is still running but whose inner sshd has
     died: the connection-error fallback must report the provider's override
-    (UNAUTHENTICATED) on both the host and every agent's nested host, not the
-    default offline-derived CRASHED that would make minds skip a host restart's
-    stop step.
+    (UNKNOWN -- observed up but unreadable) on both the host and every agent's
+    nested host, not the default offline-derived CRASHED that would make minds
+    skip a host restart's stop step.
     """
     online_host = _make_mock_online_host(host_id)
     online_host.get_agents.side_effect = HostConnectionError("Error reading SSH protocol banner")
@@ -288,7 +289,43 @@ def test_connection_error_fallback_applies_provider_state_override(
     offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
     provider.mock_hosts = [online_host, offline_host]
     provider.mock_offline_hosts = {str(host_id): offline_host}
-    provider.mock_connection_error_fallback_state = HostState.UNAUTHENTICATED
+    provider.mock_connection_error_fallback_state = HostState.UNKNOWN
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+    )
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider.name)
+
+    host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
+
+    assert host_details.state == HostState.UNKNOWN
+    assert len(agent_details_list) == 1
+    assert agent_details_list[0].host.state == HostState.UNKNOWN
+
+
+def test_authentication_failure_reports_unauthenticated(
+    host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """An inner-SSH authentication failure reports UNAUTHENTICATED, not an offline or UNKNOWN state.
+
+    A HostAuthenticationError means our credential was rejected or the host's
+    sshd could not be verified against known_hosts -- conditions a host restart
+    cannot fix (it routes through the same rejected credential and does not touch
+    our known_hosts). So it is terminal (UNAUTHENTICATED), distinct from the
+    non-auth "up but unreadable" fallback (UNKNOWN) and taken regardless of any
+    provider fallback-state override.
+    """
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.side_effect = HostAuthenticationError("Authentication failed when connecting to host")
+
+    offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
+    provider.mock_hosts = [online_host, offline_host]
+    provider.mock_offline_hosts = {str(host_id): offline_host}
+    # Even if the provider offers an out-of-band override, the auth path takes
+    # precedence -- an auth failure is terminal, not a restart-worthy override.
+    provider.mock_connection_error_fallback_state = HostState.UNKNOWN
 
     host_ref = DiscoveredHost(
         host_id=host_id,

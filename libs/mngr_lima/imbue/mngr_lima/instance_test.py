@@ -10,6 +10,7 @@ from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -69,6 +70,52 @@ def test_discover_hosts_degrades_to_empty_when_limactl_unavailable(
     )
 
     assert lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group) == []
+
+
+def test_discover_hosts_maps_unknown_status_to_unknown_and_broken_to_crashed(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """limactl's "Unknown" status means it could not determine the VM's state, so it
+    surfaces as UNKNOWN (non-evidence that consumers must not auto-restart off),
+    while "Broken" is limactl positively reporting breakage -> CRASHED."""
+    prefix = lima_provider.mngr_ctx.config.prefix
+    unknown_host_id = HostId.generate()
+    broken_host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    for host_id, name in ((unknown_host_id, "unknown-host"), (broken_host_id, "broken-host")):
+        lima_provider._host_store.write_host_record(
+            HostRecord(
+                certified_host_data=CertifiedHostData(
+                    host_id=str(host_id),
+                    host_name=name,
+                    user_tags={},
+                    snapshots=[],
+                    created_at=now,
+                    updated_at=now,
+                ),
+                config=LimaHostConfig(
+                    instance_name=f"{prefix}{host_id}",
+                    is_host_data_volume_exposed=False,
+                    host_data_disk_name=f"{prefix}{host_id}-data",
+                ),
+            )
+        )
+    bin_dir = tmp_path / "bin"
+    install_fake_limactl(
+        bin_dir,
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\n'
+        f'echo \'{{"name": "{prefix}{unknown_host_id}", "status": "Unknown"}}\'\n'
+        f'echo \'{{"name": "{prefix}{broken_host_id}", "status": "Broken"}}\'\n',
+        monkeypatch,
+    )
+
+    discovered = lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group)
+
+    states_by_id = {host.host_id: host.host_state for host in discovered}
+    assert states_by_id[unknown_host_id] == HostState.UNKNOWN
+    assert states_by_id[broken_host_id] == HostState.CRASHED
 
 
 def test_provider_capabilities(lima_provider: LimaProviderInstance) -> None:

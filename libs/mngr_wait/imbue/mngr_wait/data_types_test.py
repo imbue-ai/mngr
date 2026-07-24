@@ -28,7 +28,6 @@ def test_default_agent_states_include_host_terminal_states() -> None:
     assert "CRASHED" in states
     assert "FAILED" in states
     assert "DESTROYED" in states
-    assert "UNAUTHENTICATED" in states
     assert "PAUSED" in states
 
 
@@ -43,7 +42,6 @@ def test_default_host_states_include_terminal_states() -> None:
     assert "CRASHED" in states
     assert "FAILED" in states
     assert "DESTROYED" in states
-    assert "UNAUTHENTICATED" in states
     assert "PAUSED" in states
 
 
@@ -52,6 +50,10 @@ def test_default_host_states_exclude_running_and_transient() -> None:
     assert "RUNNING" not in states
     assert "BUILDING" not in states
     assert "STARTING" not in states
+    # "could not observe" states are non-terminal: a wait keeps polling rather
+    # than settling on non-evidence about the host.
+    assert "UNKNOWN" not in states
+    assert "UNAUTHENTICATED" not in states
     assert "STOPPING" not in states
 
 

@@ -34,6 +34,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import get_short_random_string
 
@@ -254,7 +255,8 @@ def test_exec_command_on_agents_nonexistent_agent(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Test exec_command_on_agents with a nonexistent agent raises AgentNotFoundError."""
-    with pytest.raises(AgentNotFoundError):
+    # The not-found path logs a discovery-summary warning by design.
+    with allow_warnings(match="Agent lookup failed"), pytest.raises(AgentNotFoundError):
         exec_command_on_agents(
             mngr_ctx=temp_mngr_ctx,
             addresses=[parse_agent_address("nonexistent-agent-82716")],

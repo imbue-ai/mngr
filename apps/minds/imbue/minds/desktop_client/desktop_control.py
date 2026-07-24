@@ -133,6 +133,12 @@ def stop_workspace_hosts(
                 host_ids.append(HostId(info.host_id))
             except ValueError:
                 logger.warning("Could not resolve a host id for host stop on {}", aid)
+    logger.info(
+        "Quit-time bulk host stop: requested={} resolved services_agents={} host_ids={}",
+        list(requested_ids),
+        [str(a) for a in services_agent_ids],
+        [str(h) for h in host_ids],
+    )
     if services_agent_ids:
         env = dict(os.environ)
         env["MNGR_HOST_DIR"] = str(mngr_host_dir)
@@ -142,6 +148,7 @@ def stop_workspace_hosts(
         except MngrCommandError as exc:
             logger.warning("Bulk host stop failed for {}: {}", list(requested_ids), exc)
         else:
+            logger.info("Quit-time bulk host stop succeeded; marking STOPPED: {}", [str(h) for h in host_ids])
             for host_id in host_ids:
                 backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
     requested_set = set(requested_ids)

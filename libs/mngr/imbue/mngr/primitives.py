@@ -246,6 +246,11 @@ class HostState(UpperCaseStrEnum):
 
     BUILDING = auto()
     STARTING = auto()
+    # The host is up per the provider's liveness read. This does NOT assert that we connected to the
+    # host's inner sshd or otherwise observed it from the inside: a provider that reads liveness
+    # out-of-band (docker from the daemon's container status, imbue_cloud from an outer-host
+    # `docker exec`) reports RUNNING with no inner-SSH round-trip. A path that *attempts* the inside
+    # and cannot get in reports UNKNOWN, not RUNNING (see below).
     RUNNING = auto()
     STOPPING = auto()
     STOPPED = auto()
@@ -253,11 +258,23 @@ class HostState(UpperCaseStrEnum):
     CRASHED = auto()
     FAILED = auto()
     DESTROYED = auto()
+    # Our access credential was rejected, or the host's sshd could not be verified, when connecting:
+    # observation of the workspace is impossible and retrying/restarting through the same path cannot
+    # help. Two producers: imbue_cloud's outer SSH rejecting this machine's key (a restart routes
+    # through the same rejected key), and the generic provider SSH into the workspace host raising a
+    # rejected-credential or unverifiable-host-key error (a restart touches neither our known_hosts
+    # nor a rejected key). Consumers should treat it as terminal rather than restart-worthy. Distinct
+    # from UNKNOWN (could not observe -- including a host observed up but not readable from the
+    # inside -- where a restart may well help).
     UNAUTHENTICATED = auto()
-    # The host could not be observed during the most recent discovery attempt, so its actual state
-    # is unknown: either the provider that owns it could not be accessed (emitted by AgentObserver
-    # when its provider errored), or the provider was reachable but could not reach this specific
-    # host (e.g. imbue_cloud's lease-only fallback when a leased host's outer SSH is unreachable).
+    # The host could not be observed well enough to determine its actual state, so mngr does not claim
+    # to know what is wrong. Several conditions collapse here: the provider that owns it could not be
+    # accessed (emitted by AgentObserver when its provider errored); the provider was reachable but
+    # could not reach this specific host (e.g. imbue_cloud's lease-only fallback when a leased host's
+    # outer SSH is unreachable); or the host was observed up but we could not read it from the inside
+    # (a running container whose inner sshd/exec did not answer, or an inner-SSH connection error).
+    # A restart may or may not help; consumers treat it as non-evidence rather than a positive up/down
+    # verdict, list it by default, and never GC off it.
     # Distinct from None on HostDetails.state (which means "not observed / not applicable").
     UNKNOWN = auto()
 

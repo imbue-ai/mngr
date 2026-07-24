@@ -1862,19 +1862,20 @@ kill -TERM 1
         return self._create_host_from_host_record(host_record)
 
     def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
-        """Report a still-running container as UNAUTHENTICATED rather than CRASHED.
+        """Report a still-running-but-unreadable container as UNKNOWN rather than CRASHED.
 
         The docker daemon is ground truth for container lifecycle and is
         reachable without inner SSH. When agent enumeration fails with a
         connection error (e.g. the inner sshd died -- "Error reading SSH
         protocol banner") but the daemon still reports the container as running,
-        the host is up; we just cannot get inside it. Reporting
-        ``HostState.UNAUTHENTICATED`` keeps consumers such as minds' recovery
-        flow from misclassifying a live container as offline and skipping the
-        stop step of a host restart. This deliberately follows the convention
-        ``mngr_imbue_cloud`` established for the identical condition (a running
-        container whose inner SSH is unreachable; see
-        ``map_docker_status_to_host_state``), reached here by a different route:
+        the host is up but we cannot read it from the inside, so mngr does not
+        claim to know its state: ``HostState.UNKNOWN``. That keeps consumers such
+        as minds' recovery flow from misclassifying a live container as offline
+        (CRASHED) and skipping the stop step of a host restart, without asserting
+        a positive "up" verdict off a read we could not complete. This follows
+        the convention ``mngr_imbue_cloud`` uses for the identical condition (a
+        running container whose inner SSH is unreachable; see
+        ``derive_host_state_from_raw``), reached here by a different route:
         imbue_cloud reads container state out-of-band on its own listing path,
         whereas docker stays on the generic offline fallback and corrects the
         state through this hook. Returns ``None`` (default offline derivation)
@@ -1885,7 +1886,7 @@ kill -TERM 1
         try:
             container = self._find_container_by_host_id(host_id)
             if container is not None and self._is_container_running(container):
-                return HostState.UNAUTHENTICATED
+                return HostState.UNKNOWN
         except (
             docker.errors.DockerException,
             requests.exceptions.ConnectionError,

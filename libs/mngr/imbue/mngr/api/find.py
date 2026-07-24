@@ -508,6 +508,20 @@ def _find_agents_by_identifiers_or_state(
         unmatched_identifiers = set(agent_identifiers) - matched_identifiers
         if unmatched_identifiers:
             unmatched_list = ", ".join(sorted(str(i) for i in unmatched_identifiers))
+            # Name what discovery DID return before failing: "not found" can be
+            # a discovery gap (a provider whose record reads failed reports its
+            # hosts/agents as absent) rather than a truly-absent agent, and this
+            # summary is what tells the two apart after the fact.
+            discovered_summary = (
+                "; ".join(
+                    f"{host_ref.provider_name}/{host_ref.host_name} ({host_ref.host_id}, "
+                    f"state={host_ref.host_state.value if host_ref.host_state is not None else 'unknown'}): "
+                    f"{len(agent_refs)} agent(s)"
+                    for host_ref, agent_refs in sorted(agents_by_host.items(), key=lambda kv: str(kv[0].host_id))
+                )
+                or "no hosts"
+            )
+            logger.warning("Agent lookup failed for {}; discovery returned: {}", unmatched_list, discovered_summary)
             raise AgentNotFoundError(f"No agent(s) found matching: {unmatched_list}")
 
     if not filter_all or target_state is None:

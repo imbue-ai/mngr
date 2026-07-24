@@ -688,6 +688,37 @@ def test_find_replay_offset_returns_min_of_per_provider_latest(temp_config: Mngr
     assert find_discovery_snapshot_replay_offset(events_path) == local_offset
 
 
+def test_find_replay_offset_reaches_back_to_last_non_errored_snapshot(tmp_path: Path) -> None:
+    """An errored latest snapshot does not shrink the window past the provider's last healthy one.
+
+    An errored snapshot carries no membership (its read failed), so a replay
+    window starting there reconstructs the provider as empty for the whole
+    outage. The window must reach the provider's latest non-errored snapshot.
+    """
+    events_path = tmp_path / "events.jsonl"
+    old_agent = (
+        '{"timestamp":"2026-01-01T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-old",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    healthy = (
+        '{"timestamp":"2026-01-02T00:00:01Z","type":"DISCOVERY_PROVIDER","event_id":"evt-ok",'
+        '"source":"mngr/discovery","provider_name":"docker","agents":[],"hosts":[],'
+        '"discovery_started_at":"2026-01-02T00:00:00Z","discovery_finished_at":"2026-01-02T00:00:01Z"}'
+    )
+    errored = (
+        '{"timestamp":"2026-01-03T00:00:01Z","type":"DISCOVERY_PROVIDER","event_id":"evt-err",'
+        '"source":"mngr/discovery","provider_name":"docker","agents":[],"hosts":[],'
+        '"error":{"type_name":"ProviderUnavailableError","message":"state container stopped","provider_name":"docker"},'
+        '"discovery_started_at":"2026-01-03T00:00:00Z","discovery_finished_at":"2026-01-03T00:00:01Z"}'
+    )
+    prefix = f"{old_agent}\n"
+    events_path.write_text(f"{prefix}{healthy}\n{errored}\n")
+
+    # The first event at or after the healthy snapshot's discovery_started_at is
+    # the healthy snapshot's own line.
+    assert find_discovery_snapshot_replay_offset(events_path) == len(prefix.encode("utf-8"))
+
+
 def test_find_replay_offset_warns_on_mid_file_corruption(tmp_path: Path) -> None:
     events_path = tmp_path / "events.jsonl"
     # A leading agent event, then a valid per-provider snapshot, then a corrupt line.
@@ -1312,6 +1343,97 @@ def test_replay_does_not_resurrect_agent_destroyed_during_snapshot_span(temp_mng
 
     resolved = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["doomed-raced-agent"])
     assert resolved is None
+
+
+def _provider_snapshot_event_at(
+    provider_name: str,
+    agents: tuple[DiscoveredAgent, ...],
+    at: datetime,
+    error: DiscoveryError | None = None,
+) -> ProviderDiscoverySnapshotEvent:
+    """Build a per-provider snapshot whose envelope timestamp equals its discovery span."""
+    return ProviderDiscoverySnapshotEvent(
+        timestamp=_iso_at(at),
+        event_id=EventId(generate_log_event_id()),
+        source=DISCOVERY_EVENT_SOURCE,
+        provider_name=ProviderInstanceName(provider_name),
+        agents=agents,
+        hosts=(),
+        error=error,
+        discovery_started_at=at,
+        discovery_finished_at=at,
+    )
+
+
+def _docker_unavailable_error() -> DiscoveryError:
+    return DiscoveryError(
+        type_name="ProviderUnavailableError",
+        message="Provider 'docker' is not available: Docker state container is stopped",
+        provider_name=ProviderInstanceName("docker"),
+    )
+
+
+def test_replay_retains_provider_agents_across_errored_snapshots(temp_mngr_ctx: MngrContext) -> None:
+    """Errored snapshots (agents unread) must not erase a provider's known agents from resolution.
+
+    While a provider is down (e.g. the docker state container is stopped), its
+    snapshots carry an error and no agents. Per the event contract, absence from
+    an errored snapshot means "unread", not "gone" -- forgetting the agents makes
+    resolution fall back to a full all-provider scan, which can stall for a minute
+    on an unrelated unreachable provider.
+    """
+    config = temp_mngr_ctx.config
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("outage-agent"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    # Another provider's older snapshot holds the replay window open far enough
+    # to include docker's healthy snapshot below, isolating the retention rule
+    # from the window rule.
+    append_discovery_event(config, _provider_snapshot_event_at("modal", (), base))
+    append_discovery_event(config, _provider_snapshot_event_at("docker", (agent,), base + timedelta(minutes=1)))
+    for minutes in (2, 3):
+        append_discovery_event(
+            config,
+            _provider_snapshot_event_at(
+                "docker", (), base + timedelta(minutes=minutes), error=_docker_unavailable_error()
+            ),
+        )
+
+    assert resolve_provider_names_for_identifiers(temp_mngr_ctx, [str(agent.agent_id)]) == ("docker",)
+
+
+def test_replay_window_reaches_last_healthy_snapshot_when_provider_is_errored(temp_mngr_ctx: MngrContext) -> None:
+    """Resolution reaches back past an errored tail to the provider's last agent-carrying snapshot.
+
+    A window derived from each provider's *latest* snapshot starts at the errored
+    one -- which carries no agents -- so the provider's membership would be
+    unrecoverable for as long as the outage lasts. The window must instead reach
+    the provider's latest non-errored snapshot.
+    """
+    config = temp_mngr_ctx.config
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("outage-window-agent"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    append_discovery_event(config, _provider_snapshot_event_at("docker", (agent,), base))
+    for minutes in (1, 2):
+        append_discovery_event(
+            config,
+            _provider_snapshot_event_at(
+                "docker", (), base + timedelta(minutes=minutes), error=_docker_unavailable_error()
+            ),
+        )
+
+    assert resolve_provider_names_for_identifiers(temp_mngr_ctx, [str(agent.agent_id)]) == ("docker",)
 
 
 def _live_discovery_fallback(mngr_ctx: MngrContext, identifiers: Sequence[str]) -> list[DiscoveredAgent]:

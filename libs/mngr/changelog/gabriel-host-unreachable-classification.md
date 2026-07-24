@@ -1,0 +1,7 @@
+Disambiguated the overloaded `HostState.UNAUTHENTICATED` so consumers can distinguish two conditions that need opposite handling, without adding a new host state:
+
+`UNAUTHENTICATED` now means our access credential was rejected, or the host's sshd could not be verified, at an access boundary -- conditions a restart cannot fix, so it is terminal rather than restart-worthy. Two producers: imbue_cloud's outer SSH refusing this machine's key (a restart routes through the same rejected key), and the generic provider SSH into the workspace host raising a rejected-credential or unverifiable-host-key error (a restart touches neither our known_hosts nor a rejected key).
+
+Every "we couldn't read the host" condition that a restart *might* fix now maps to `UNKNOWN` rather than `CRASHED`: a running container whose inner sshd/exec did not answer (a non-auth connection failure), and any degraded or unrecognized provider observation. mngr does not claim to know what is wrong with such a host -- `UNKNOWN` is non-evidence, so consumers that auto-restart off `CRASHED` (e.g. the minds recovery page) do not do so, and the host is neither hidden by `mngr list --active` nor garbage-collected. Resolves the provider-vocabulary deferral flagged in PR #2247.
+
+`HostState.RUNNING`'s contract is now documented explicitly: it is a liveness read that does not assert we reached the host's inner sshd. A provider that reads liveness out-of-band reports `RUNNING`; a path that attempts the inside and cannot get in reports `UNKNOWN`, not `RUNNING`.

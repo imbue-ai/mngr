@@ -12,6 +12,7 @@ import json
 import subprocess
 import threading
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,7 @@ def _provider_snapshot(
     hosts: tuple[DiscoveredHost, ...] = (),
     provider_name: str = "local",
     error: DiscoveryError | None = None,
+    discovery_finished_at: datetime = _DISCOVERY_FINISHED_AT,
 ) -> ProviderDiscoverySnapshotEvent:
     """Build a per-provider discovery snapshot for the ``local`` provider by default."""
     return make_provider_discovery_snapshot_event(
@@ -96,7 +98,7 @@ def _provider_snapshot(
         agents=agents,
         hosts=hosts,
         discovery_started_at=_DISCOVERY_STARTED_AT,
-        discovery_finished_at=_DISCOVERY_FINISHED_AT,
+        discovery_finished_at=discovery_finished_at,
         error=error,
     )
 
@@ -175,10 +177,16 @@ def _attach_fake(consumer: EnvelopeStreamConsumer, fake: _FakeProcess) -> None:
     consumer.attach(cast(subprocess.Popen[bytes], fake))
 
 
+# Anchor test consumers before the canned snapshot timestamps above, so the
+# canned snapshots read as live observations (not a pre-start replay whose
+# provider errors are dropped).
+_CONSUMER_STARTED_AT = datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+
 @pytest.fixture
 def consumer() -> EnvelopeStreamConsumer:
     resolver = MngrCliBackendResolver()
-    return EnvelopeStreamConsumer(resolver=resolver)
+    return EnvelopeStreamConsumer(resolver=resolver, started_at=_CONSUMER_STARTED_AT)
 
 
 # --- envelope dispatch ----------------------------------------------------
@@ -309,6 +317,45 @@ def test_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
     assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
     # A clean snapshot clears the prior error for that provider.
     assert ProviderInstanceName("local") not in consumer.resolver.get_provider_errors()
+
+
+def test_pre_start_snapshot_error_is_dropped_but_topology_merges() -> None:
+    """An errored snapshot from before the consumer started registers no provider error.
+
+    On startup the events-file replay delivers the pre-start backlog, whose last
+    per-provider snapshot often carries a manufactured unavailability error: the
+    detached discovery producer keeps polling while minds is closed, and the
+    quit flow deliberately stops the docker state container, so every gap poll
+    errors with "state container is stopped". That error describes the gap, not
+    the present (minds restarts the state container before discovery consumes),
+    so it must not surface as a current provider error -- while the same
+    snapshot's topology still merges (last-good retention). A snapshot taken
+    after the consumer started registers its error normally.
+    """
+    resolver = MngrCliBackendResolver()
+    # Started AFTER the canned snapshot timestamps: canned snapshots are replay.
+    consumer = EnvelopeStreamConsumer(resolver=resolver, started_at=_DISCOVERY_FINISHED_AT + timedelta(minutes=1))
+    stale_error = DiscoveryError(
+        type_name="ProviderUnavailableError",
+        message="Docker state container is stopped; host records are unreachable",
+        provider_name=ProviderInstanceName("local"),
+    )
+    _dispatch(
+        consumer,
+        _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),), error=stale_error)),
+    )
+    # Topology merged; the pre-start error did not register.
+    assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
+    assert consumer.resolver.get_provider_errors() == {}
+
+    # A fresh (post-start) errored snapshot registers normally.
+    fresh = _provider_snapshot(
+        (_make_agent(_AGENT_ID_1),),
+        error=stale_error,
+        discovery_finished_at=consumer.started_at + timedelta(seconds=30),
+    )
+    _dispatch(consumer, _observe_envelope(fresh))
+    assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
 
 
 # --- observe stream: host ssh info ----------------------------------------
