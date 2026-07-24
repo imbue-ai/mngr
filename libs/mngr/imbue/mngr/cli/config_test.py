@@ -8,6 +8,7 @@ import pytest
 import tomlkit
 from click.testing import CliRunner
 
+from imbue.mngr.cli.config import _apply_config_value
 from imbue.mngr.cli.config import _emit_all_paths
 from imbue.mngr.cli.config import _emit_config_list
 from imbue.mngr.cli.config import _emit_config_set_result
@@ -17,14 +18,23 @@ from imbue.mngr.cli.config import _emit_key_not_found
 from imbue.mngr.cli.config import _emit_single_path
 from imbue.mngr.cli.config import _flatten_config
 from imbue.mngr.cli.config import _format_value_for_display
-from imbue.mngr.cli.config import _get_existing_isolation_setting
+from imbue.mngr.cli.config import _get_nested_optional
 from imbue.mngr.cli.config import _get_nested_value
+from imbue.mngr.cli.config import _read_explicit_setting_across_scopes
+from imbue.mngr.cli.config import _render_setting_value
 from imbue.mngr.cli.config import _unset_nested_value
 from imbue.mngr.cli.config import _wizard_claude_config_isolation
+from imbue.mngr.cli.config import _wizard_default_agent_type
+from imbue.mngr.cli.config import _wizard_docker_volume_isolation
+from imbue.mngr.cli.config import _write_user_scope_setting
 from imbue.mngr.cli.config import config
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.pre_readers import get_project_config_path
+from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.errors import ConfigKeyNotFoundError
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
@@ -714,107 +724,348 @@ def test_emit_all_paths_human_with_error(capsys: pytest.CaptureFixture[str]) -> 
 
 
 # =============================================================================
+# Shared validated write path (_apply_config_value)
+# =============================================================================
+
+
+def test_apply_config_value_writes_valid_value(tmp_path: Path) -> None:
+    """A valid key/value is written to the file through the shared writer."""
+    config_path = tmp_path / "settings.toml"
+    base = parse_config({}, frozenset())
+    _apply_config_value(config_path, "commands.create.type", "command", base_config=base, disabled_plugins=frozenset())
+    assert _read_default_agent_type(config_path) == "command"
+
+
+def test_apply_config_value_rejects_invalid_config_before_writing(tmp_path: Path) -> None:
+    """An invalid resulting config is rejected up front, and nothing is persisted.
+
+    This is what routing the wizard through the same path as `config set` buys:
+    a bad value fails at write time instead of silently breaking the next load.
+    """
+    config_path = tmp_path / "settings.toml"
+    base = parse_config({}, frozenset())
+    with pytest.raises(ConfigParseError):
+        _apply_config_value(
+            config_path, "this_is_not_a_real_config_key", "x", base_config=base, disabled_plugins=frozenset()
+        )
+    assert not config_path.exists()
+
+
+# =============================================================================
 # config wizard: Claude config dir isolation step
 # =============================================================================
 
 
-def _read_isolation_value(config_path: Path) -> object:
-    """Read agent_types.claude.isolate_local_config_dir back from a TOML file."""
-    return _get_existing_isolation_setting(load_config_file_tomlkit(config_path).unwrap())
+def test_render_setting_value_lowercases_bools() -> None:
+    assert _render_setting_value(True) == "true"
+    assert _render_setting_value(False) == "false"
+    assert _render_setting_value("claude") == "claude"
 
 
-def test_get_existing_isolation_setting_reads_value() -> None:
-    raw = {"agent_types": {"claude": {"isolate_local_config_dir": False}}}
-    assert _get_existing_isolation_setting(raw) is False
+def test_get_nested_optional_reads_value() -> None:
+    assert _get_nested_optional({"a": {"b": {"c": 1}}}, "a.b.c") == 1
 
 
-def test_get_existing_isolation_setting_returns_none_when_absent() -> None:
-    assert _get_existing_isolation_setting({}) is None
-    assert _get_existing_isolation_setting({"agent_types": {"claude": {}}}) is None
+def test_get_nested_optional_returns_none_when_absent() -> None:
+    assert _get_nested_optional({}, "a.b") is None
+    assert _get_nested_optional({"a": {}}, "a.b") is None
+    # A non-dict partway through the path is treated as absent, not an error.
+    assert _get_nested_optional({"a": 1}, "a.b") is None
 
 
-def test_wizard_isolation_writes_false_when_user_picks_share(tmp_path: Path) -> None:
-    """Picking "share" (prompt returns False) writes isolate_local_config_dir = false."""
-    config_path = tmp_path / "settings.toml"
-
-    _wizard_claude_config_isolation(
-        config_path,
-        is_claude_registered_fn=lambda: True,
-        is_interactive_fn=lambda: True,
-        prompt_fn=lambda: False,
+def test_wizard_claude_isolation_returns_false_when_user_picks_share() -> None:
+    """Picking "share" (prompt returns False) yields False for the caller to persist."""
+    assert (
+        _wizard_claude_config_isolation(
+            None,
+            is_claude_registered_fn=lambda: True,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: False,
+        )
+        is False
     )
 
-    assert _read_isolation_value(config_path) is False
 
-
-def test_wizard_isolation_writes_true_when_user_picks_isolate(tmp_path: Path) -> None:
-    """Picking "isolate" (prompt returns True) writes isolate_local_config_dir = true."""
-    config_path = tmp_path / "settings.toml"
-
-    _wizard_claude_config_isolation(
-        config_path,
-        is_claude_registered_fn=lambda: True,
-        is_interactive_fn=lambda: True,
-        prompt_fn=lambda: True,
+def test_wizard_claude_isolation_returns_true_when_user_picks_isolate() -> None:
+    """Picking "isolate" (prompt returns True) yields True for the caller to persist."""
+    assert (
+        _wizard_claude_config_isolation(
+            None,
+            is_claude_registered_fn=lambda: True,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: True,
+        )
+        is True
     )
 
-    assert _read_isolation_value(config_path) is True
 
-
-def test_wizard_isolation_skips_when_claude_not_registered(tmp_path: Path) -> None:
-    """When the claude agent type is not registered, the step writes nothing."""
-    config_path = tmp_path / "settings.toml"
-
-    _wizard_claude_config_isolation(
-        config_path,
-        is_claude_registered_fn=lambda: False,
-        is_interactive_fn=lambda: True,
-        prompt_fn=lambda: pytest.fail("prompt must not be called when claude is unregistered"),
+def test_wizard_claude_isolation_returns_none_when_claude_not_registered() -> None:
+    """When the claude agent type is not registered, the step yields None without prompting."""
+    assert (
+        _wizard_claude_config_isolation(
+            None,
+            is_claude_registered_fn=lambda: False,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: pytest.fail("prompt must not be called when claude is unregistered"),
+        )
+        is None
     )
 
-    assert not config_path.exists()
 
-
-def test_wizard_isolation_skips_when_already_set(tmp_path: Path) -> None:
-    """An already-configured value is left untouched and the prompt is not shown."""
-    config_path = tmp_path / "settings.toml"
-    doc = load_config_file_tomlkit(config_path)
-    set_nested_value(doc, "agent_types.claude.isolate_local_config_dir", True)
-    save_config_file(config_path, doc)
-
-    _wizard_claude_config_isolation(
-        config_path,
-        is_claude_registered_fn=lambda: True,
-        is_interactive_fn=lambda: True,
-        prompt_fn=lambda: pytest.fail("prompt must not be called when the setting already exists"),
+def test_wizard_claude_isolation_returns_none_when_already_set() -> None:
+    """An already-configured value yields None without prompting."""
+    assert (
+        _wizard_claude_config_isolation(
+            True,
+            is_claude_registered_fn=lambda: True,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: pytest.fail("prompt must not be called when the setting already exists"),
+        )
+        is None
     )
 
-    assert _read_isolation_value(config_path) is True
 
-
-def test_wizard_isolation_writes_nothing_when_cancelled(tmp_path: Path) -> None:
-    """Cancelling the picker (prompt returns None) leaves the setting unset."""
-    config_path = tmp_path / "settings.toml"
-
-    _wizard_claude_config_isolation(
-        config_path,
-        is_claude_registered_fn=lambda: True,
-        is_interactive_fn=lambda: True,
-        prompt_fn=lambda: None,
+def test_wizard_claude_isolation_returns_none_when_cancelled() -> None:
+    """Cancelling the picker (prompt returns None) yields None."""
+    assert (
+        _wizard_claude_config_isolation(
+            None,
+            is_claude_registered_fn=lambda: True,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: None,
+        )
+        is None
     )
 
-    assert _read_isolation_value(config_path) is None
 
-
-def test_wizard_isolation_non_interactive_prints_hint_without_writing(tmp_path: Path) -> None:
-    """With no interactive terminal, the step prints guidance but writes nothing."""
-    config_path = tmp_path / "settings.toml"
-
-    _wizard_claude_config_isolation(
-        config_path,
-        is_claude_registered_fn=lambda: True,
-        is_interactive_fn=lambda: False,
-        prompt_fn=lambda: pytest.fail("prompt must not be called without an interactive terminal"),
+def test_wizard_claude_isolation_returns_none_when_non_interactive() -> None:
+    """With no interactive terminal, the step prints guidance and yields None."""
+    assert (
+        _wizard_claude_config_isolation(
+            None,
+            is_claude_registered_fn=lambda: True,
+            is_interactive_fn=lambda: False,
+            prompt_fn=lambda: pytest.fail("prompt must not be called without an interactive terminal"),
+        )
+        is None
     )
 
-    assert _read_isolation_value(config_path) is None
+
+# =============================================================================
+# config wizard: default agent type step
+# =============================================================================
+
+
+def _read_default_agent_type(config_path: Path) -> object:
+    """Read commands.create.type back from a TOML file."""
+    raw = load_config_file_tomlkit(config_path).unwrap()
+    return raw.get("commands", {}).get("create", {}).get("type")
+
+
+def test_wizard_default_agent_type_returns_picked_value() -> None:
+    """Picking a type yields it for the caller to persist."""
+    assert (
+        _wizard_default_agent_type(
+            None,
+            ["claude", "command"],
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda _available: "claude",
+        )
+        == "claude"
+    )
+
+
+def test_wizard_default_agent_type_returns_none_when_already_set() -> None:
+    """An already-set effective default yields None without prompting."""
+    assert (
+        _wizard_default_agent_type(
+            "command",
+            ["claude", "command"],
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda _available: pytest.fail("prompt must not be called when already set"),
+        )
+        is None
+    )
+
+
+def test_wizard_default_agent_type_returns_none_when_no_choices() -> None:
+    """With no registered agent types, the step yields None without prompting."""
+    assert (
+        _wizard_default_agent_type(
+            None,
+            [],
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda _available: pytest.fail("prompt must not be called when no types are registered"),
+        )
+        is None
+    )
+
+
+def test_wizard_default_agent_type_returns_none_when_declined() -> None:
+    """Picking "keep no default" (prompt returns None) yields None."""
+    assert (
+        _wizard_default_agent_type(
+            None,
+            ["claude", "command"],
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda _available: None,
+        )
+        is None
+    )
+
+
+def test_wizard_default_agent_type_returns_none_when_non_interactive() -> None:
+    """With no interactive terminal, the step prints guidance and yields None."""
+    assert (
+        _wizard_default_agent_type(
+            None,
+            ["claude"],
+            is_interactive_fn=lambda: False,
+            prompt_fn=lambda _available: pytest.fail("prompt must not be called without an interactive terminal"),
+        )
+        is None
+    )
+
+
+def test_config_wizard_includes_default_agent_type_step(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr config wizard` runs end-to-end and walks the default-agent-type step.
+
+    The unit tests above cover ``_wizard_default_agent_type`` in isolation; this
+    asserts the step is actually wired into the ``config wizard`` command. The
+    test env has no controlling terminal (the placeholder agent type keeps the
+    available list non-empty, so the step reaches its non-interactive branch
+    rather than short-circuiting on "no agent types"), so the step prints its
+    "set it later" guidance instead of launching the picker -- a deterministic
+    signal that the wizard reached it.
+    """
+    result = cli_runner.invoke(config, ["wizard"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    assert "mngr config wizard" in result.output
+    # The default-agent-type step's own guidance line -- unique to that step.
+    assert "mngr config set commands.create.type" in result.output
+
+
+# =============================================================================
+# config wizard: docker host-volume isolation step
+# =============================================================================
+
+
+def test_wizard_docker_isolation_returns_true_when_user_picks_isolate() -> None:
+    """Picking "isolate" (prompt returns True) yields True for the caller to persist."""
+    assert (
+        _wizard_docker_volume_isolation(
+            None,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: True,
+        )
+        is True
+    )
+
+
+def test_wizard_docker_isolation_returns_false_when_user_picks_share() -> None:
+    """Picking "share" (prompt returns False) yields False for the caller to persist."""
+    assert (
+        _wizard_docker_volume_isolation(
+            None,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: False,
+        )
+        is False
+    )
+
+
+def test_wizard_docker_isolation_returns_none_when_already_set() -> None:
+    """An already-configured effective value yields None without prompting."""
+    assert (
+        _wizard_docker_volume_isolation(
+            False,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: pytest.fail("prompt must not be called when the setting already exists"),
+        )
+        is None
+    )
+
+
+def test_wizard_docker_isolation_returns_none_when_cancelled() -> None:
+    """Cancelling the picker (prompt returns None) yields None."""
+    assert (
+        _wizard_docker_volume_isolation(
+            None,
+            is_interactive_fn=lambda: True,
+            prompt_fn=lambda: None,
+        )
+        is None
+    )
+
+
+def test_wizard_docker_isolation_returns_none_when_non_interactive() -> None:
+    """With no interactive terminal, the step prints guidance and yields None."""
+    assert (
+        _wizard_docker_volume_isolation(
+            None,
+            is_interactive_fn=lambda: False,
+            prompt_fn=lambda: pytest.fail("prompt must not be called without an interactive terminal"),
+        )
+        is None
+    )
+
+
+# =============================================================================
+# config wizard: explicit-presence read across scopes, and the write helper
+# =============================================================================
+
+_CLAUDE_ISOLATION_KEY = "agent_types.claude.isolate_local_config_dir"
+
+
+def _write_pytest_config(path: Path, values: dict[str, object]) -> None:
+    """Write a settings file that opts into being read under pytest, plus ``values``.
+
+    ``read_config_layers`` refuses to load a config during a pytest run unless it
+    sets ``is_allowed_in_pytest = true``, so every scope file we stage here must.
+    """
+    doc = load_config_file_tomlkit(path)
+    set_nested_value(doc, "is_allowed_in_pytest", True)
+    for key, value in values.items():
+        set_nested_value(doc, key, value)
+    save_config_file(path, doc)
+
+
+def test_read_explicit_setting_across_scopes_reads_user_scope(tmp_path: Path) -> None:
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    _write_pytest_config(get_user_config_path(profile_dir), {_CLAUDE_ISOLATION_KEY: True})
+
+    assert _read_explicit_setting_across_scopes(_CLAUDE_ISOLATION_KEY, profile_dir, None) is True
+
+
+def test_read_explicit_setting_across_scopes_prefers_higher_precedence_scope(tmp_path: Path) -> None:
+    """A project-scope value (higher precedence) wins over the user-scope value."""
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_pytest_config(get_user_config_path(profile_dir), {_CLAUDE_ISOLATION_KEY: True})
+    _write_pytest_config(get_project_config_path(project_dir), {_CLAUDE_ISOLATION_KEY: False})
+
+    assert _read_explicit_setting_across_scopes(_CLAUDE_ISOLATION_KEY, profile_dir, project_dir) is False
+
+
+def test_read_explicit_setting_across_scopes_returns_none_when_unset(tmp_path: Path) -> None:
+    """With no config file present in any scope, the setting reads as unset."""
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+
+    assert _read_explicit_setting_across_scopes(_CLAUDE_ISOLATION_KEY, profile_dir, None) is None
+
+
+def test_write_user_scope_setting_persists_through_validated_path(tmp_path: Path) -> None:
+    """The write helper routes through the validated writer and persists the value."""
+    config_path = tmp_path / "settings.toml"
+    base = parse_config({}, frozenset())
+
+    _write_user_scope_setting(config_path, base, "commands.create.type", "claude")
+
+    assert _read_default_agent_type(config_path) == "claude"

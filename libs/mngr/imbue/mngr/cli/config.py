@@ -15,6 +15,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -39,10 +40,13 @@ from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.pre_readers import get_local_config_path
 from imbue.mngr.config.pre_readers import get_project_config_path
 from imbue.mngr.config.pre_readers import get_user_config_path
+from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.errors import ConfigNotFoundError
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.model_schema import render_annotation
@@ -121,6 +125,16 @@ def _get_nested_value(data: dict[str, Any], key_path: str) -> Any:
     for key in keys:
         if not isinstance(current, dict) or key not in current:
             raise ConfigKeyNotFoundError(key_path)
+        current = current[key]
+    return current
+
+
+def _get_nested_optional(data: dict[str, Any], key_path: str) -> Any:
+    """Like ``_get_nested_value`` but returns None instead of raising when the key is absent."""
+    current: Any = data
+    for key in key_path.split("."):
+        if not isinstance(current, dict) or key not in current:
+            return None
         current = current[key]
     return current
 
@@ -575,19 +589,12 @@ def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) ->
     scope = ConfigScope((opts.scope or "project").upper())
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
-    # Load existing config
-    doc = load_config_file_tomlkit(config_path)
-
-    # Parse and set the value
+    # Parse the raw CLI string, then set + validate + save through the shared
+    # write path (also used by the config wizard steps).
     parsed_value = parse_scalar_value(value)
-    set_nested_value(doc, key, parsed_value)
-
-    # Validate the resulting config (resolving any ``__extend`` keys already in
-    # the file against the merged context) before saving.
-    _validate_doc_after_set(doc, mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins)
-
-    # Save the config
-    save_config_file(config_path, doc)
+    _apply_config_value(
+        config_path, key, parsed_value, base_config=mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins
+    )
 
     _emit_config_set_result(key, parsed_value, scope, config_path, output_opts)
 
@@ -602,6 +609,26 @@ def _validate_doc_after_set(doc: Any, base_config: MngrConfig, *, disabled_plugi
     raw = dict(doc.unwrap())
     resolved = resolve_extends(base_config, raw)
     parse_config(resolved, disabled_plugins=disabled_plugins)
+
+
+def _apply_config_value(
+    config_path: Path,
+    key: str,
+    value: Any,
+    *,
+    base_config: MngrConfig,
+    disabled_plugins: frozenset[str],
+) -> None:
+    """Set a single key in a config file, validating the result before saving.
+
+    The single validate-then-save write path shared by ``mngr config set`` and
+    the ``mngr config wizard`` steps, so every write is checked against the
+    config schema rather than only failing on the next load.
+    """
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, key, value)
+    _validate_doc_after_set(doc, base_config, disabled_plugins=disabled_plugins)
+    save_config_file(config_path, doc)
 
 
 def _config_merge_op_impl(ctx: click.Context, key: str, value: str, *, op: str, **kwargs: Any) -> None:
@@ -1158,10 +1185,142 @@ def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
     config_path = get_config_path(ConfigScope.USER, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
+    config = mngr_ctx.config
+
+    # Read the "already configured?" state for each step. Two settings can be read
+    # straight from the loaded (merged) config because their defaults already mark
+    # "unset": the create default type has no baked-in default, and docker's
+    # isolate_host_volumes defaults to None. A value there means some scope already
+    # set it (across user/project/local + env/CLI), so we should not re-prompt.
+    create_defaults = config.commands.get("create")
+    raw_agent_type = create_defaults.defaults.get("type") if create_defaults is not None else None
+    current_agent_type = raw_agent_type if isinstance(raw_agent_type, str) else None
+
+    # ``config.providers`` only holds instances a config file explicitly declares, so
+    # the isinstance check is False in exactly two states, both of which correctly mean
+    # "not pinned -> prompt": (1) no ``[providers.docker]`` block anywhere, so ``get``
+    # returns None -- the fresh-install case, where docker is served by the bare-backend
+    # fallback that never lands in ``config.providers``; and (2) an instance *named*
+    # "docker" declared with a non-docker ``backend`` (a different config class), where
+    # ``isolate_host_volumes`` doesn't apply anyway.
+    docker_provider = config.providers.get(ProviderInstanceName("docker"))
+    current_docker_isolation = (
+        docker_provider.isolate_host_volumes if isinstance(docker_provider, DockerProviderConfig) else None
+    )
+
+    # Claude's isolate_local_config_dir has a non-None default, so the merged config
+    # can't reveal whether the user *chose* it. Read explicit presence from the raw
+    # config files instead -- across every scope, so a project/local setting also
+    # suppresses the prompt rather than only the user-scope file.
+    project_config_dir = resolve_project_config_dir(root_name, mngr_ctx.concurrency_group)
+    raw_claude_isolation = _read_explicit_setting_across_scopes(
+        "agent_types.claude.isolate_local_config_dir", mngr_ctx.profile_dir, project_config_dir
+    )
+    current_claude_isolation = raw_claude_isolation if isinstance(raw_claude_isolation, bool) else None
 
     write_human_line("mngr config wizard")
     write_human_line("")
-    _wizard_claude_config_isolation(config_path)
+
+    # Each step decides what (if anything) to set and returns the chosen value, or
+    # None to leave the setting unset. All writing is centralized here so it goes
+    # through the one validate-then-save path (``_apply_config_value``, same as
+    # ``mngr config set``) and the steps stay free of write/config-context concerns.
+    chosen_agent_type = _wizard_default_agent_type(current_agent_type, list_available_agent_types(config))
+    if chosen_agent_type is not None:
+        _write_user_scope_setting(config_path, config, "commands.create.type", chosen_agent_type)
+
+    chosen_claude_isolation = _wizard_claude_config_isolation(current_claude_isolation)
+    if chosen_claude_isolation is not None:
+        _write_user_scope_setting(
+            config_path, config, "agent_types.claude.isolate_local_config_dir", chosen_claude_isolation
+        )
+
+    chosen_docker_isolation = _wizard_docker_volume_isolation(current_docker_isolation)
+    if chosen_docker_isolation is not None:
+        _write_user_scope_setting(
+            config_path, config, "providers.docker.isolate_host_volumes", chosen_docker_isolation
+        )
+
+
+def _render_setting_value(value: Any) -> Any:
+    """Render a setting value for the wizard's confirmation line (bools lowercased to match TOML)."""
+    return str(value).lower() if isinstance(value, bool) else value
+
+
+def _write_user_scope_setting(config_path: Path, base_config: MngrConfig, key: str, value: Any) -> None:
+    """Persist one wizard choice to the user-scope settings file, then confirm.
+
+    Routes through ``_apply_config_value`` -- the same validate-then-save path as
+    ``mngr config set`` -- so an invalid setting fails up front instead of breaking
+    the next config load.
+    """
+    _apply_config_value(
+        config_path, key, value, base_config=base_config, disabled_plugins=base_config.disabled_plugins
+    )
+    write_human_line("Set {} = {} in {}", key, _render_setting_value(value), config_path)
+
+
+# -- Default agent type step --
+
+
+def _prompt_default_agent_type_choice(available: list[str]) -> str | None:
+    """Show a picker of agent types plus a "Keep no default" sentinel.
+
+    Returns the chosen type, or None to keep no default (sentinel row or
+    cancel). Caller must check ``has_interactive_terminal()`` first.
+    """
+    options = [*available, "Keep no default"]
+    idx = run_single_select_picker(
+        options=options,
+        title="mngr config wizard",
+        header_text="Pick a default agent type for 'mngr create':",
+    )
+    if idx is None or idx == len(available):
+        return None
+    return available[idx]
+
+
+def _wizard_default_agent_type(
+    current: str | None,
+    available: list[str],
+    *,
+    # Dependencies are exposed as keyword arguments so tests can substitute
+    # in-memory fakes without monkeypatching module-level callables.
+    is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    prompt_fn: Callable[[list[str]], str | None] = _prompt_default_agent_type_choice,
+) -> str | None:
+    """Prompt for the default agent type for ``mngr create``.
+
+    ``current`` is the already-configured effective default (from the merged
+    config), or None if unset; a value skips the step. ``available`` is the
+    caller-supplied list of selectable agent types (from
+    ``list_available_agent_types``). Returns the chosen type for the caller to
+    persist, or None to leave the setting unset (already configured, no agent
+    types available, no interactive terminal, or the user declined).
+    """
+    if current is not None:
+        write_human_line("Default agent type for 'mngr create' is already set to '{}'; skipping.", current)
+        return None
+
+    if not available:
+        write_human_line("No agent types are registered yet; skipping default agent type.")
+        return None
+
+    if not is_interactive_fn():
+        write_human_line("No interactive terminal; skipping default agent type setup.")
+        write_human_line("To set it later, run:")
+        write_human_line("    mngr config set commands.create.type <name> --scope user")
+        return None
+
+    chosen = prompt_fn(available)
+    if chosen is None:
+        write_human_line("Skipping default agent type.")
+        return None
+
+    return chosen
+
+
+# -- Claude config dir isolation step --
 
 
 def _is_claude_agent_type_registered() -> bool:
@@ -1169,27 +1328,37 @@ def _is_claude_agent_type_registered() -> bool:
     return "claude" in list_registered_agent_types()
 
 
-def _get_existing_isolation_setting(raw: dict[str, Any]) -> bool | None:
-    """Return the user-config value of agent_types.claude.isolate_local_config_dir, or None."""
-    agent_types = raw.get("agent_types")
-    if not isinstance(agent_types, dict):
-        return None
-    claude = agent_types.get("claude")
-    if not isinstance(claude, dict):
-        return None
-    value = claude.get("isolate_local_config_dir")
-    return value if isinstance(value, bool) else None
+def _read_explicit_setting_across_scopes(dotted_key: str, profile_dir: Path, project_config_dir: Path | None) -> Any:
+    """Return the explicitly-configured value of ``dotted_key`` across all config
+    file scopes (user/project/local, highest precedence wins), or None if unset.
+
+    Reads the raw TOML *before* defaults are applied, so a value here means some
+    scope actually set it. This is the read to use for a setting whose merged
+    (effective) value can't reveal an explicit choice because the field has a
+    non-None default -- e.g. the Claude plugin's ``isolate_local_config_dir``.
+    Settings whose default already marks "unset" (None, or an absent key) can just
+    be read off the merged ``MngrConfig`` instead.
+    """
+    result: Any = None
+    for _scope, _path, raw in read_config_layers(profile_dir, project_config_dir):
+        value = _get_nested_optional(raw, dotted_key)
+        if value is not None:
+            result = value
+    return result
 
 
 def _prompt_claude_isolation_choice() -> bool | None:
-    """Show a 2-option picker. Returns True to isolate, False to share, None if cancelled.
+    """Show the isolate/share/leave-unset picker.
 
-    Caller must check ``has_interactive_terminal()`` first.
+    Returns True to isolate, False to share, or None to leave the setting unset
+    (the "decide later" row or a cancel). Caller must check
+    ``has_interactive_terminal()`` first.
     """
     options = [
-        "Yes -- give each agent its own Claude config (mngr won't touch your default Claude config)",
+        "Yes -- each agent gets its own config dir (mngr won't touch your default Claude config)",
         "No -- share your default Claude config "
-        "(mngr may write to it, but this is needed for Claude subscriptions on macOS to keep credentials working)",
+        "(mngr writes to it; needed for credentials with Claude subscriptions on macOS)",
+        "Leave unset -- use the default (isolate); set later with 'mngr config set'",
     ]
     # Default the highlighted option to "No" (share) -- the safer choice that keeps
     # Claude subscription credentials working on macOS.
@@ -1199,13 +1368,13 @@ def _prompt_claude_isolation_choice() -> bool | None:
         header_text="Enable config dir isolation for local Claude agents?",
         initial_focus=1,
     )
-    if idx is None:
+    if idx is None or idx == 2:
         return None
     return idx == 0
 
 
 def _wizard_claude_config_isolation(
-    config_path: Path,
+    current: bool | None,
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables (mirrors
@@ -1213,42 +1382,99 @@ def _wizard_claude_config_isolation(
     is_claude_registered_fn: Callable[[], bool] = _is_claude_agent_type_registered,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
     prompt_fn: Callable[[], bool | None] = _prompt_claude_isolation_choice,
-) -> None:
+) -> bool | None:
     """Prompt whether to isolate the Claude config dir for local agents.
 
     Only runs when the ``claude`` agent type is registered (the mngr Claude
-    plugin is installed); config-dir isolation is meaningless otherwise. Writes
-    ``agent_types.claude.isolate_local_config_dir`` to the user-scope config.
-    Skips silently if the setting is already present in that file.
+    plugin is installed); config-dir isolation is meaningless otherwise.
+    ``current`` is the explicit user-scope value (this field has a non-None
+    default, so effective config can't reveal an explicit choice), or None if
+    unset. Returns the chosen value for the caller to persist, or None to leave
+    the setting unset (plugin not registered, already set, no interactive
+    terminal, or the user declined).
     """
     if not is_claude_registered_fn():
-        return
+        return None
 
-    existing = _load_config_file(config_path)
-    current = _get_existing_isolation_setting(existing)
     if current is not None:
-        write_human_line(
-            "Claude config dir isolation is already set to {} in {}; skipping.",
-            str(current).lower(),
-            config_path,
-        )
-        return
+        write_human_line("Claude config dir isolation is already set to {}; skipping.", str(current).lower())
+        return None
 
     if not is_interactive_fn():
         write_human_line("No interactive terminal; skipping Claude config dir isolation setup.")
         write_human_line("To set it later, run:")
         write_human_line("    mngr config set agent_types.claude.isolate_local_config_dir <true|false> --scope user")
-        return
+        return None
 
     choice = prompt_fn()
     if choice is None:
         write_human_line("Skipping Claude config dir isolation.")
-        return
+        return None
 
-    doc = load_config_file_tomlkit(config_path)
-    set_nested_value(doc, "agent_types.claude.isolate_local_config_dir", choice)
-    save_config_file(config_path, doc)
-    write_human_line("Set agent_types.claude.isolate_local_config_dir = {} in {}", str(choice).lower(), config_path)
+    return choice
+
+
+# -- Docker host-volume isolation step --
+
+
+def _prompt_docker_isolation_choice() -> bool | None:
+    """Show the isolate/share/leave-unset picker.
+
+    Returns True to isolate, False to share, or None to leave the setting unset
+    (the "decide later" row or a cancel). Caller must check
+    ``has_interactive_terminal()`` first.
+    """
+    options = [
+        "Yes -- each host sees only its own host_dir (recommended; needs Docker Engine 25.0+)",
+        "No -- all hosts share one state volume (legacy)",
+        "Leave unset -- stays shared + warning for now; default will flip to 'isolate' later",
+    ]
+    # Default the highlighted option to the recommended "Yes" (isolate).
+    idx = run_single_select_picker(
+        options=options,
+        title="mngr config wizard",
+        header_text="Isolate host volumes for docker hosts?",
+        initial_focus=0,
+    )
+    if idx is None or idx == 2:
+        return None
+    return idx == 0
+
+
+def _wizard_docker_volume_isolation(
+    current: bool | None,
+    *,
+    # Dependencies are exposed as keyword arguments so tests can substitute
+    # in-memory fakes without monkeypatching module-level callables.
+    is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    prompt_fn: Callable[[], bool | None] = _prompt_docker_isolation_choice,
+) -> bool | None:
+    """Prompt whether to isolate host volumes for docker hosts.
+
+    ``current`` is the already-configured effective value (from the merged
+    config), or None if unset; a value skips the step. Returns the chosen value
+    for the caller to persist, opting into the forthcoming default (each host
+    container sees only its own host_dir sub-folder) before it flips and silencing
+    the one-shot deprecation warning a fresh install otherwise hits the first time
+    it uses docker. Returns None to leave the setting unset (already configured, no
+    interactive terminal, or the user declined).
+    """
+    if current is not None:
+        write_human_line("Docker host-volume isolation is already set to {}; skipping.", str(current).lower())
+        return None
+
+    if not is_interactive_fn():
+        write_human_line("No interactive terminal; skipping docker host-volume isolation setup.")
+        write_human_line("To set it later, run:")
+        write_human_line("    mngr config set providers.docker.isolate_host_volumes <true|false> --scope user")
+        return None
+
+    choice = prompt_fn()
+    if choice is None:
+        write_human_line("Skipping docker host-volume isolation.")
+        return None
+
+    return choice
 
 
 # Register help metadata for git-style help formatting
@@ -1468,10 +1694,16 @@ configured, so re-running only prompts for what is still unset. Run
 automatically by the installer.
 
 Steps:
+  Default agent type           The default agent type for `mngr create`
+                               (skipped when no agent types are registered yet).
   Claude config dir isolation  Whether each local Claude agent gets its own
                                config dir (mngr leaves your default Claude
                                config untouched) or shares your default config
-                               (needed for Claude subscriptions on macOS).""",
+                               (needed for Claude subscriptions on macOS).
+  Docker host-volume isolation Whether each docker host sees only its own
+                               host_dir sub-folder (the recommended, forthcoming
+                               default; requires Docker Engine >= 25.0) or shares
+                               one state volume.""",
     examples=(("Run the configuration wizard", "mngr config wizard"),),
     see_also=(("config set", "Set a configuration value directly"),),
 ).register()
