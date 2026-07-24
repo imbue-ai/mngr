@@ -1,7 +1,7 @@
 """`mngr imbue_cloud admin account ...` -- operator-only per-account entitlements management.
 
 Addressed by *email* (the connector resolves the SuperTokens user); all
-commands authenticate with the fixed ``MINDS_PAID_ADMIN_KEY`` API key, like
+commands authenticate with the fixed ``MINDS_ADMIN_KEY`` API key, like
 the paid-list CRUD. ``show`` lazily materializes the account's entitlements
 row; ``set-plan`` resets the row wholesale to the plan's defaults (the way to
 wipe manual bumps -- it deliberately skips the ally eligibility check);
@@ -19,7 +19,7 @@ from imbue.mngr_imbue_cloud.cli.paid import resolve_admin_api_key
 
 @click.group(name="account")
 def account_admin() -> None:
-    """Show / set plans and quotas for a user account (requires MINDS_PAID_ADMIN_KEY)."""
+    """Show / set plans and quotas for a user account (requires MINDS_ADMIN_KEY)."""
 
 
 @account_admin.command(name="show")

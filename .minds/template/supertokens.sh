@@ -31,14 +31,20 @@ export GOOGLE_CLIENT_SECRET=
 export GITHUB_CLIENT_ID=
 export GITHUB_CLIENT_SECRET=
 
-# Fixed API key that authenticates the paid-list admin CRUD endpoints
-# (`/paid/*`) used to manage the `paid_domains` / `paid_emails` tables.
-# Distinct from every other auth path: the connector accepts this key
-# ONLY on `/paid/*` (and rejects SuperTokens / tunnel tokens there), and
-# rejects this key everywhere else. Generate a long random value (e.g.
-# `openssl rand -hex 32`). Leave empty to disable the paid-list admin API
-# on this server. `mngr imbue_cloud admin paid ...` reads the same value
-# from $MINDS_PAID_ADMIN_KEY on the operator's machine.
+# Fixed API key that authenticates the operator admin endpoints: the
+# paid-list CRUD (`/paid/*`), the account admin API (`/admin/accounts/*`),
+# and the on-demand sweeps (`/admin/sweep/*`). Distinct from every other
+# auth path: the connector accepts this key ONLY on those routes (and
+# rejects SuperTokens / tunnel tokens there), and rejects this key
+# everywhere else. Generate a long random value (e.g.
+# `openssl rand -hex 32`). Leave empty to disable the admin API on this
+# server. `mngr imbue_cloud admin ...` reads the same value from
+# $MINDS_ADMIN_KEY on the operator's machine.
+export MINDS_ADMIN_KEY=
+
+# Deprecated spelling of MINDS_ADMIN_KEY (from when the key only guarded
+# the paid-list CRUD). Still accepted by the connector and CLIs while
+# Vault entries migrate; leave empty once MINDS_ADMIN_KEY is set.
 export MINDS_PAID_ADMIN_KEY=
 
 # Optional: how long (seconds) the connector caches a per-email paid-status

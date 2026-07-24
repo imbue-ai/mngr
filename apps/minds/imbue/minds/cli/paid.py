@@ -5,7 +5,8 @@ needs, so the operator never hand-passes them:
 
 * the connector base URL, from the activated tier's ``client.toml`` (the path the env
   activation exports as ``MINDS_CLIENT_CONFIG_PATH``); and
-* the paid-list admin key (``MINDS_PAID_ADMIN_KEY``), from the activated tier's
+* the admin API key (``MINDS_ADMIN_KEY``, with the deprecated ``MINDS_PAID_ADMIN_KEY``
+  spelling still accepted while Vault entries migrate), from the activated tier's
   ``<vault_path_prefix>/supertokens`` Vault entry -- the same value the connector loads
   as a Modal Secret, injected into the subprocess env (never onto the command line).
 
@@ -33,8 +34,12 @@ from imbue.mngr.cli.output_helpers import write_human_line
 
 # Env var the admin paid command reads the key from, and the field it lives under in
 # the tier's supertokens Vault entry (the connector folds it into the same secret).
-_PAID_ADMIN_KEY_ENV_VAR: Final[str] = "MINDS_PAID_ADMIN_KEY"
-_PAID_ADMIN_KEY_VAULT_FIELD: Final[str] = "MINDS_PAID_ADMIN_KEY"
+# The deprecated MINDS_PAID_ADMIN_KEY spelling is still read (and injected) as a
+# fallback while Vault entries and installed mngr versions migrate.
+_ADMIN_KEY_ENV_VAR: Final[str] = "MINDS_ADMIN_KEY"
+_ADMIN_KEY_VAULT_FIELD: Final[str] = "MINDS_ADMIN_KEY"
+_LEGACY_ADMIN_KEY_ENV_VAR: Final[str] = "MINDS_PAID_ADMIN_KEY"
+_LEGACY_ADMIN_KEY_VAULT_FIELD: Final[str] = "MINDS_PAID_ADMIN_KEY"
 _CLIENT_CONFIG_PATH_ENV_VAR: Final[str] = "MINDS_CLIENT_CONFIG_PATH"
 _PAID_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 
@@ -58,18 +63,31 @@ def _resolve_connector_url() -> str:
     return str(load_client_config(Path(config_path)).connector_url)
 
 
-def _resolve_paid_admin_key(env_name: str) -> str:
-    """Read the activated tier's paid-list admin key from ``<vault_prefix>/supertokens``."""
+def _resolve_admin_key(env_name: str) -> str:
+    """Read the activated tier's admin API key from ``<vault_prefix>/supertokens``.
+
+    Prefers the ``MINDS_ADMIN_KEY`` field, falling back (with a warning) to the
+    deprecated ``MINDS_PAID_ADMIN_KEY`` spelling while Vault entries migrate.
+    """
     tier = tier_for_env_name(env_name)
     vault_prefix = str(load_deploy_config(tier).vault_path_prefix).rstrip("/")
     secret = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"))
-    admin_key = secret.get(_PAID_ADMIN_KEY_VAULT_FIELD, "")
-    if not admin_key:
-        raise click.ClickException(
-            f"Vault entry {vault_prefix}/supertokens is missing {_PAID_ADMIN_KEY_VAULT_FIELD!r}; "
-            "the paid-list admin API is not enabled for this tier (add the key and redeploy)."
+    admin_key = secret.get(_ADMIN_KEY_VAULT_FIELD, "")
+    if admin_key:
+        return admin_key
+    legacy_admin_key = secret.get(_LEGACY_ADMIN_KEY_VAULT_FIELD, "")
+    if legacy_admin_key:
+        logger.warning(
+            "Admin API key found under deprecated Vault field {}; rename it to {} in {}/supertokens",
+            _LEGACY_ADMIN_KEY_VAULT_FIELD,
+            _ADMIN_KEY_VAULT_FIELD,
+            vault_prefix,
         )
-    return admin_key
+        return legacy_admin_key
+    raise click.ClickException(
+        f"Vault entry {vault_prefix}/supertokens is missing {_ADMIN_KEY_VAULT_FIELD!r}; "
+        "the admin API is not enabled for this tier (add the key and redeploy)."
+    )
 
 
 def _run_admin_paid_email(verb_args: Sequence[str]) -> None:
@@ -77,21 +95,21 @@ def _run_admin_paid_email(verb_args: Sequence[str]) -> None:
     env_name = require_activated_env_name()
     connector_url = _resolve_connector_url()
     try:
-        admin_key = _resolve_paid_admin_key(env_name)
+        admin_key = _resolve_admin_key(env_name)
     except VaultReadError as exc:
-        raise click.ClickException(
-            f"Could not read the paid-list admin key from Vault for env '{env_name}': {exc}"
-        ) from exc
+        raise click.ClickException(f"Could not read the admin API key from Vault for env '{env_name}': {exc}") from exc
     args = build_admin_paid_email_args(verb_args, connector_url=connector_url)
     full_command = ["mngr", *args]
     logger.info("Running: {}", " ".join(full_command))
     cg = ConcurrencyGroup(name="minds-paid")
     with cg:
+        # Inject the key under both spellings so an older installed mngr (which
+        # only reads the deprecated name) keeps working during the migration.
         result = cg.run_process_to_completion(
             command=full_command,
             timeout=_PAID_COMMAND_TIMEOUT_SECONDS,
             is_checked_after=False,
-            env={**os.environ, _PAID_ADMIN_KEY_ENV_VAR: admin_key},
+            env={**os.environ, _ADMIN_KEY_ENV_VAR: admin_key, _LEGACY_ADMIN_KEY_ENV_VAR: admin_key},
         )
     if result.stdout.strip():
         write_human_line(result.stdout.rstrip())

@@ -21,16 +21,29 @@ def test_paid_subgroups_expose_add_remove_list(subgroup: str) -> None:
 
 
 def test_resolve_admin_api_key_prefers_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", "from-env")
+    monkeypatch.setenv("MINDS_ADMIN_KEY", "from-env")
     assert resolve_admin_api_key("from-flag").get_secret_value() == "from-flag"
 
 
 def test_resolve_admin_api_key_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", "from-env")
+    monkeypatch.setenv("MINDS_ADMIN_KEY", "from-env")
+    assert resolve_admin_api_key(None).get_secret_value() == "from-env"
+
+
+def test_resolve_admin_api_key_accepts_deprecated_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MINDS_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", "from-legacy-env")
+    assert resolve_admin_api_key(None).get_secret_value() == "from-legacy-env"
+
+
+def test_resolve_admin_api_key_prefers_new_env_var_over_deprecated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINDS_ADMIN_KEY", "from-env")
+    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", "from-legacy-env")
     assert resolve_admin_api_key(None).get_secret_value() == "from-env"
 
 
 def test_resolve_admin_api_key_errors_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MINDS_ADMIN_KEY", raising=False)
     monkeypatch.delenv("MINDS_PAID_ADMIN_KEY", raising=False)
     with pytest.raises(SystemExit):
         resolve_admin_api_key(None)
@@ -38,7 +51,7 @@ def test_resolve_admin_api_key_errors_when_missing(monkeypatch: pytest.MonkeyPat
 
 def test_domain_add_requires_connector_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the key set but no connector URL configured, the command fails (no network call)."""
-    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", "k")
+    monkeypatch.setenv("MINDS_ADMIN_KEY", "k")
     monkeypatch.delenv("MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL", raising=False)
     result = CliRunner().invoke(paid, ["domain", "add", "imbue.com"])
     assert result.exit_code != 0

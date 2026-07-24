@@ -69,7 +69,7 @@ values are fine -- the deploy skips them when pushing to Modal).
 - `AUTH_WEBSITE_DOMAIN` (optional): Public base URL embedded in password-reset and email-verification links. Must match the URL Modal assigns to the deployed function. If unset, the app derives `https://{workspace}--remote-service-connector-<env>-fastapi-app.modal.run` (using the hardcoded default workspace in `app.py`), which is only correct for that specific Modal workspace -- set this explicitly for every deploy.
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (optional): override Google OAuth client credentials. Leave blank to inherit from the SuperTokens core's dashboard.
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (optional): override GitHub OAuth client credentials. Leave blank to inherit from the SuperTokens core's dashboard.
-- `MINDS_PAID_ADMIN_KEY` (optional): fixed API key authenticating the paid-list admin CRUD endpoints (`/paid/*`). Distinct from every other auth path -- the connector accepts it ONLY on `/paid/*` and rejects SuperTokens / tunnel tokens there, and rejects this key on every other route. Leave empty to disable the paid-list admin API. The `mngr imbue_cloud admin paid ...` CLI reads the same value from `$MINDS_PAID_ADMIN_KEY`.
+- `MINDS_ADMIN_KEY` (optional): fixed API key authenticating the operator admin endpoints -- the paid-list CRUD (`/paid/*`), the account admin API (`/admin/accounts/*`), and the on-demand sweeps (`/admin/sweep/*`). Distinct from every other auth path -- the connector accepts it ONLY on those routes and rejects SuperTokens / tunnel tokens there, and rejects this key on every other route. Leave empty to disable the admin API. The `mngr imbue_cloud admin ...` CLI reads the same value from `$MINDS_ADMIN_KEY`. The deprecated `MINDS_PAID_ADMIN_KEY` spelling is still accepted (with a warning) while Vault entries and operator environments migrate.
 - `MINDS_PAID_LIST_CACHE_TTL_SECONDS` (optional): how long (seconds) the connector caches a per-email paid-status lookup before re-querying the tables. Unset uses the built-in default (60s); `0` disables caching. Each container caches independently, so a paid-list change propagates within this window.
 
 ### Plans and entitlements (quotas)
@@ -150,7 +150,7 @@ Every resource-granting endpoint checks the caller's entitlements (see "Plans an
 
 ### Paid-list admin API (`/paid/*`)
 
-The paid lists are managed by a separate set of endpoints authenticated by the fixed `MINDS_PAID_ADMIN_KEY` (passed as `Authorization: Bearer <key>`). This key is rejected on all other routes, and SuperTokens / tunnel tokens are rejected here. All operations are idempotent; `list` returns every row with its `is_paid` status by default (`?paid_only=true` filters to active rows):
+The paid lists are managed by a separate set of endpoints authenticated by the fixed `MINDS_ADMIN_KEY` (passed as `Authorization: Bearer <key>`). This key is rejected on all other routes, and SuperTokens / tunnel tokens are rejected here. All operations are idempotent; `list` returns every row with its `is_paid` status by default (`?paid_only=true` filters to active rows):
 
 - `GET /paid/domains` / `GET /paid/emails` -- list rows.
 - `POST /paid/domains/add` / `POST /paid/emails/add` -- body `{"value": "..."}`; add or reactivate.
@@ -231,7 +231,7 @@ Cloudflare's R2 token model has no delete-without-write permission, and restic's
 
 ### Account admin API (`/admin/accounts/*`)
 
-Email-addressed operator management of per-account entitlements, authenticated by the same fixed `MINDS_PAID_ADMIN_KEY` as the paid-list CRUD (and exposed as `mngr imbue_cloud admin account ...`):
+Email-addressed operator management of per-account entitlements, authenticated by the same fixed `MINDS_ADMIN_KEY` as the paid-list CRUD (and exposed as `mngr imbue_cloud admin account ...`):
 
 - `GET /admin/accounts/{email}` -- One account's plan, entitlements, and live usage (lazily creates the row).
 - `POST /admin/accounts/{email}/plan` -- Body `{"plan": "..."}`; always resets to the plan's defaults (the operator's way to wipe manual bumps; skips the ally eligibility check).

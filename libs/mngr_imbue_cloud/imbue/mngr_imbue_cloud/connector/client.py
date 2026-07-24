@@ -932,7 +932,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return StorageRecheckResult.model_validate(self._check(response, ImbueCloudAccountError))
 
     # ------------------------------------------------------------------
-    # Account admin (email-addressed, MINDS_PAID_ADMIN_KEY authenticated)
+    # Account admin (email-addressed, MINDS_ADMIN_KEY authenticated)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1114,9 +1114,9 @@ class ImbueCloudConnectorClient(MutableModel):
     # Paid lists (admin-key authenticated)
     # ------------------------------------------------------------------
     #
-    # These take the fixed paid-list admin API key (NOT a SuperTokens
+    # These take the fixed admin API key (NOT a SuperTokens
     # session token); the connector authenticates them against
-    # ``MINDS_PAID_ADMIN_KEY`` and rejects user / tunnel tokens.
+    # ``MINDS_ADMIN_KEY`` and rejects user / tunnel tokens.
 
     def _list_paid_entries(
         self, admin_api_key: SecretStr, path: str, value_key: str, paid_only: bool

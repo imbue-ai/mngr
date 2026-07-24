@@ -2314,25 +2314,52 @@ def require_ally_eligible(
         )
 
 
-# Env var holding the single fixed API key that authenticates the paid-list
-# CRUD endpoints (``/paid/*``). Distinct from the SuperTokens / tunnel-token
-# auth used by every other route: those routes reject this key, and the
-# ``/paid/*`` routes reject SuperTokens JWTs / tunnel tokens. Folded into the
-# ``supertokens-<env>`` Modal secret (see .minds/template/supertokens.sh).
-_PAID_ADMIN_KEY_ENV = "MINDS_PAID_ADMIN_KEY"
+# Env var holding the single fixed API key that authenticates the operator
+# admin endpoints: the paid-list CRUD (``/paid/*``), the account admin API
+# (``/admin/accounts/*``), and the on-demand sweeps (``/admin/sweep/*``).
+# Distinct from the SuperTokens / tunnel-token auth used by every other
+# route: those routes reject this key, and the admin routes reject
+# SuperTokens JWTs / tunnel tokens. Folded into the ``supertokens-<env>``
+# Modal secret (see .minds/template/supertokens.sh).
+_ADMIN_KEY_ENV = "MINDS_ADMIN_KEY"
+
+# Deprecated spelling of ``_ADMIN_KEY_ENV`` from when the key only guarded the
+# paid-list CRUD. Still accepted (with a warning) while existing Vault entries
+# and operator environments migrate to ``MINDS_ADMIN_KEY``.
+_LEGACY_ADMIN_KEY_ENV = "MINDS_PAID_ADMIN_KEY"
 
 
-def require_paid_admin_key(request: Request) -> None:
-    """Authenticate a paid-list CRUD request against the fixed admin API key.
+def _configured_admin_key() -> str:
+    """The configured admin API key, preferring ``MINDS_ADMIN_KEY``.
 
-    Expects ``Authorization: Bearer <MINDS_PAID_ADMIN_KEY>`` and compares
-    in constant time. Raises ``HTTPException(403)`` when the server has no
-    key configured (the paid-list admin API is disabled), and
-    ``HTTPException(401)`` when credentials are missing or wrong.
+    Falls back to the deprecated ``MINDS_PAID_ADMIN_KEY`` spelling (warning
+    once per lookup) so deployments migrate without a flag day. Returns ""
+    when neither is set (the admin API is disabled).
     """
-    expected = os.environ.get(_PAID_ADMIN_KEY_ENV, "")
+    expected = os.environ.get(_ADMIN_KEY_ENV, "")
+    if expected:
+        return expected
+    legacy = os.environ.get(_LEGACY_ADMIN_KEY_ENV, "")
+    if legacy:
+        logger.warning(
+            "Admin API key found under deprecated env var %s; rename it to %s",
+            _LEGACY_ADMIN_KEY_ENV,
+            _ADMIN_KEY_ENV,
+        )
+    return legacy
+
+
+def require_admin_key(request: Request) -> None:
+    """Authenticate an operator admin request against the fixed admin API key.
+
+    Expects ``Authorization: Bearer <MINDS_ADMIN_KEY>`` and compares
+    in constant time. Raises ``HTTPException(403)`` when the server has no
+    key configured (the admin API is disabled), and ``HTTPException(401)``
+    when credentials are missing or wrong.
+    """
+    expected = _configured_admin_key()
     if not expected:
-        raise HTTPException(status_code=403, detail="Paid-list admin API is not enabled on this server")
+        raise HTTPException(status_code=403, detail="Admin API is not enabled on this server")
     auth_header = request.headers.get("authorization", "")
     if not auth_header.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing Bearer credentials")
@@ -2342,7 +2369,7 @@ def require_paid_admin_key(request: Request) -> None:
     # legitimately carry non-ASCII bytes. Encoding keeps the comparison both
     # total (a malformed key cleanly yields 401, not a 500) and constant-time.
     if not hmac.compare_digest(provided.encode(), expected.encode()):
-        raise HTTPException(status_code=401, detail="Invalid paid-list admin API key")
+        raise HTTPException(status_code=401, detail="Invalid admin API key")
 
 
 # ---------------------------------------------------------------------------
@@ -3885,7 +3912,7 @@ def _deactivate_paid_entry(table: str, value_column: str, value: str) -> None:
 def list_paid_domains(request: Request, paid_only: bool = False) -> list[dict[str, object]]:
     """List paid-domain rows. ``paid_only=true`` filters to currently-active entries."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         rows = _list_paid_entries("paid_domains", "domain", paid_only)
         return [
             PaidDomainInfo(domain=value, is_paid=is_paid, created_at=created_at, updated_at=updated_at).model_dump()
@@ -3897,7 +3924,7 @@ def list_paid_domains(request: Request, paid_only: bool = False) -> list[dict[st
 def add_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
     """Add (or reactivate) a paid domain. Idempotent."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         domain = _normalize_paid_domain(body.value)
         _activate_paid_entry("paid_domains", "domain", domain)
         return {"status": "added", "domain": domain}
@@ -3907,7 +3934,7 @@ def add_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, o
 def remove_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
     """Soft-remove a paid domain (set is_paid=false). Idempotent."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         domain = _normalize_paid_domain(body.value)
         _deactivate_paid_entry("paid_domains", "domain", domain)
         return {"status": "removed", "domain": domain}
@@ -3917,7 +3944,7 @@ def remove_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str
 def list_paid_emails(request: Request, paid_only: bool = False) -> list[dict[str, object]]:
     """List paid-email rows. ``paid_only=true`` filters to currently-active entries."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         rows = _list_paid_entries("paid_emails", "email", paid_only)
         return [
             PaidEmailInfo(email=value, is_paid=is_paid, created_at=created_at, updated_at=updated_at).model_dump()
@@ -3929,7 +3956,7 @@ def list_paid_emails(request: Request, paid_only: bool = False) -> list[dict[str
 def add_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
     """Add (or reactivate) a paid email. Idempotent."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         email = _normalize_paid_email(body.value)
         _activate_paid_entry("paid_emails", "email", email)
         # If this email already has an account, verify it now so the just-granted
@@ -3943,7 +3970,7 @@ def add_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, ob
 def remove_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
     """Soft-remove a paid email (set is_paid=false). Idempotent."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         email = _normalize_paid_email(body.value)
         _deactivate_paid_entry("paid_emails", "email", email)
         return {"status": "removed", "email": email}
@@ -5812,7 +5839,7 @@ def set_account_plan(request: Request, body: SetPlanRequest) -> dict[str, object
 # ---------------------------------------------------------------------------
 # Account admin endpoints (email-addressed, admin-key authenticated)
 #
-# Same fixed-key auth as the paid-list CRUD (``MINDS_PAID_ADMIN_KEY``); the
+# Same fixed-key auth as the paid-list CRUD (``MINDS_ADMIN_KEY``); the
 # operator addresses users by email and the connector resolves the SuperTokens
 # user. ``show`` lazily creates the entitlements row (so a subsequent
 # ``set-quota`` always has a row to update); ``set-plan`` always resets to the
@@ -5842,7 +5869,7 @@ def _admin_ensure_entitlements(email: str) -> AccountEntitlements:
 def admin_get_account(request: Request, email: str) -> dict[str, object]:
     """Operator view of one account: plan, entitlements, and live usage."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         entitlements = _admin_ensure_entitlements(email)
         usage = compute_account_usage(get_ctx().ops, entitlements.username_prefix, entitlements.user_id)
         return AccountInfoResponse(
@@ -5859,7 +5886,7 @@ def admin_get_account(request: Request, email: str) -> dict[str, object]:
 def admin_set_account_plan(request: Request, email: str, body: AdminSetPlanRequest) -> dict[str, object]:
     """Assign a plan to an account, resetting its entitlements to the plan's defaults."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         entitlements = _admin_ensure_entitlements(email)
         new_values = apply_plan_to_account(entitlements.user_id, body.plan)
         return {"plan_name": body.plan, "entitlements": new_values.model_dump()}
@@ -5869,7 +5896,7 @@ def admin_set_account_plan(request: Request, email: str, body: AdminSetPlanReque
 def admin_set_account_quota(request: Request, email: str, body: AdminSetQuotaRequest) -> dict[str, object]:
     """Set a single entitlement value on an account (an operator bump)."""
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         if body.entitlement not in QUOTA_ENTITLEMENT_NAMES:
             raise HTTPException(
                 status_code=400,
@@ -5893,13 +5920,13 @@ def admin_set_account_quota(request: Request, email: str, body: AdminSetQuotaReq
 def admin_run_r2_sweep(request: Request, email: str | None = None) -> dict[str, object]:
     """Run one R2 storage-quota sweep pass on demand (operator tool + deployment tests).
 
-    Authenticated by the fixed operator admin key (``MINDS_PAID_ADMIN_KEY``),
+    Authenticated by the fixed operator admin key (``MINDS_ADMIN_KEY``),
     NOT the SuperTokens auth path. An optional ``email`` query parameter
     scopes the pass to one account (resolved via SuperTokens); without it the
     pass covers every account, exactly like the hourly cron.
     """
     with handle_endpoint_errors():
-        require_paid_admin_key(request)
+        require_admin_key(request)
         only_user_id = _resolve_user_id_by_email(email) if email else None
         counters = run_r2_quota_sweep(
             get_ctx().ops,

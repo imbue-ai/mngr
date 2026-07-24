@@ -999,7 +999,7 @@ mngr imbue_cloud admin paid domain add [OPTIONS] VALUE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin paid domain remove
@@ -1015,7 +1015,7 @@ mngr imbue_cloud admin paid domain remove [OPTIONS] VALUE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin paid domain list
@@ -1032,7 +1032,7 @@ mngr imbue_cloud admin paid domain list [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--paid-only` | boolean | Only show currently-active (is_paid) domains. | `False` |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin paid email
@@ -1058,7 +1058,7 @@ mngr imbue_cloud admin paid email add [OPTIONS] VALUE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin paid email remove
@@ -1074,7 +1074,7 @@ mngr imbue_cloud admin paid email remove [OPTIONS] VALUE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin paid email list
@@ -1091,7 +1091,7 @@ mngr imbue_cloud admin paid email list [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--paid-only` | boolean | Only show currently-active (is_paid) emails. | `False` |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin account
@@ -1117,7 +1117,7 @@ mngr imbue_cloud admin account show [OPTIONS] EMAIL
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin account set-plan
@@ -1133,7 +1133,7 @@ mngr imbue_cloud admin account set-plan [OPTIONS] EMAIL PLAN
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin account set-quota
@@ -1149,7 +1149,7 @@ mngr imbue_cloud admin account set-quota [OPTIONS] EMAIL ENTITLEMENT VALUE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin sweep
@@ -1176,7 +1176,7 @@ mngr imbue_cloud admin sweep r2 [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--email` | text | Scope the pass to one account (full pass when omitted) | None |
-| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
 ## mngr imbue_cloud admin server

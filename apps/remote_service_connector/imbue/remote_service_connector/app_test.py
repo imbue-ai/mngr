@@ -80,7 +80,7 @@ _USER_STUB_TOKEN = "user-stub-jwt"
 _USER_STUB_USERNAME = "testuser"
 _USER_STUB_EMAIL = "testuser@example.com"
 _USER_STUB_USER_ID = "12345678-1234-5678-1234-567812345678"
-_PAID_ADMIN_KEY_TEST_VALUE = "paid-admin-key-secret-9f3a2b"
+_ADMIN_KEY_TEST_VALUE = "admin-key-secret-9f3a2b"
 
 
 def _user_headers() -> dict[str, str]:
@@ -2535,14 +2535,14 @@ def test_route_list_services_is_not_gated_by_paid_list(
 # -- Paid-list CRUD endpoint tests (admin-key authenticated) --
 
 
-def _paid_admin_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {_PAID_ADMIN_KEY_TEST_VALUE}"}
+def _admin_key_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_ADMIN_KEY_TEST_VALUE}"}
 
 
 def _make_paid_crud_test_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, FakePoolBackend]:
-    """Test client with the paid-admin key configured and a fresh paid-list backend."""
+    """Test client with the admin key configured and a fresh paid-list backend."""
     client, backend = _make_pool_test_client(monkeypatch)
-    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
+    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
     return client, backend
 
 
@@ -2553,7 +2553,7 @@ def test_paid_crud_requires_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
     # Wrong key.
     bad = client.get("/paid/domains", headers={"Authorization": "Bearer wrong-key"})
     assert bad.status_code == 401
-    # A SuperTokens admin JWT is NOT accepted on the paid CRUD endpoints.
+    # A SuperTokens user JWT is NOT accepted on the paid CRUD endpoints.
     assert client.get("/paid/domains", headers=_user_headers()).status_code == 401
 
 
@@ -2569,25 +2569,45 @@ def test_paid_crud_rejects_non_ascii_bearer_token_with_401(monkeypatch: pytest.M
 
 def test_paid_crud_returns_403_when_admin_key_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _backend = _make_pool_test_client(monkeypatch)
+    monkeypatch.delenv("MINDS_ADMIN_KEY", raising=False)
     monkeypatch.delenv("MINDS_PAID_ADMIN_KEY", raising=False)
-    resp = client.get("/paid/domains", headers=_paid_admin_headers())
+    resp = client.get("/paid/domains", headers=_admin_key_headers())
     assert resp.status_code == 403
     assert "not enabled" in resp.json()["detail"]
 
 
-def test_paid_admin_key_is_rejected_on_user_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_admin_key_accepted_under_legacy_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deprecated MINDS_PAID_ADMIN_KEY spelling still authenticates during migration."""
+    client, _backend = _make_pool_test_client(monkeypatch)
+    monkeypatch.delenv("MINDS_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
+    resp = client.get("/paid/domains", headers=_admin_key_headers())
+    assert resp.status_code == 200
+
+
+def test_admin_key_prefers_new_env_var_over_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When both env vars are set, only MINDS_ADMIN_KEY authenticates."""
+    client, _backend = _make_pool_test_client(monkeypatch)
+    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
+    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", "legacy-value-not-accepted-4c1d")
+    assert client.get("/paid/domains", headers=_admin_key_headers()).status_code == 200
+    legacy_headers = {"Authorization": "Bearer legacy-value-not-accepted-4c1d"}
+    assert client.get("/paid/domains", headers=legacy_headers).status_code == 401
+
+
+def test_admin_key_is_rejected_on_user_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     """The admin key must not authenticate user-facing routes (e.g. /hosts)."""
     client, _backend = _make_paid_crud_test_client(monkeypatch)
-    resp = client.get("/hosts", headers=_paid_admin_headers())
+    resp = client.get("/hosts", headers=_admin_key_headers())
     assert resp.status_code == 401
 
 
 def test_add_and_list_paid_domain(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _backend = _make_paid_crud_test_client(monkeypatch)
-    add_resp = client.post("/paid/domains/add", json={"value": "Imbue.com"}, headers=_paid_admin_headers())
+    add_resp = client.post("/paid/domains/add", json={"value": "Imbue.com"}, headers=_admin_key_headers())
     assert add_resp.status_code == 200
     assert add_resp.json() == {"status": "added", "domain": "imbue.com"}
-    list_resp = client.get("/paid/domains", headers=_paid_admin_headers())
+    list_resp = client.get("/paid/domains", headers=_admin_key_headers())
     assert list_resp.status_code == 200
     rows = list_resp.json()
     assert [r["domain"] for r in rows] == ["imbue.com"]
@@ -2596,24 +2616,24 @@ def test_add_and_list_paid_domain(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_remove_paid_domain_is_soft_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _backend = _make_paid_crud_test_client(monkeypatch)
-    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
-    remove_resp = client.post("/paid/domains/remove", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_admin_key_headers())
+    remove_resp = client.post("/paid/domains/remove", json={"value": "imbue.com"}, headers=_admin_key_headers())
     assert remove_resp.status_code == 200
     # The row is still present (soft delete), but is_paid is now false.
-    all_rows = client.get("/paid/domains", headers=_paid_admin_headers()).json()
+    all_rows = client.get("/paid/domains", headers=_admin_key_headers()).json()
     assert [(r["domain"], r["is_paid"]) for r in all_rows] == [("imbue.com", False)]
     # paid_only filter hides it.
-    paid_rows = client.get("/paid/domains?paid_only=true", headers=_paid_admin_headers()).json()
+    paid_rows = client.get("/paid/domains?paid_only=true", headers=_admin_key_headers()).json()
     assert paid_rows == []
 
 
 def test_re_adding_soft_removed_domain_reactivates_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _backend = _make_paid_crud_test_client(monkeypatch)
-    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
-    original = client.get("/paid/domains", headers=_paid_admin_headers()).json()[0]
-    client.post("/paid/domains/remove", json={"value": "imbue.com"}, headers=_paid_admin_headers())
-    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
-    reactivated = client.get("/paid/domains", headers=_paid_admin_headers()).json()[0]
+    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_admin_key_headers())
+    original = client.get("/paid/domains", headers=_admin_key_headers()).json()[0]
+    client.post("/paid/domains/remove", json={"value": "imbue.com"}, headers=_admin_key_headers())
+    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_admin_key_headers())
+    reactivated = client.get("/paid/domains", headers=_admin_key_headers()).json()[0]
     assert reactivated["is_paid"] is True
     # created_at is preserved across the remove/re-add cycle.
     assert reactivated["created_at"] == original["created_at"]
@@ -2621,17 +2641,17 @@ def test_re_adding_soft_removed_domain_reactivates_in_place(monkeypatch: pytest.
 
 def test_add_paid_domain_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _backend = _make_paid_crud_test_client(monkeypatch)
-    first = client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
-    second = client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    first = client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_admin_key_headers())
+    second = client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_admin_key_headers())
     assert first.status_code == 200
     assert second.status_code == 200
-    rows = client.get("/paid/domains", headers=_paid_admin_headers()).json()
+    rows = client.get("/paid/domains", headers=_admin_key_headers()).json()
     assert len(rows) == 1
 
 
 def test_remove_absent_paid_email_is_idempotent_success(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _backend = _make_paid_crud_test_client(monkeypatch)
-    resp = client.post("/paid/emails/remove", json={"value": "nobody@nowhere.com"}, headers=_paid_admin_headers())
+    resp = client.post("/paid/emails/remove", json={"value": "nobody@nowhere.com"}, headers=_admin_key_headers())
     assert resp.status_code == 200
     assert resp.json() == {"status": "removed", "email": "nobody@nowhere.com"}
 
@@ -2644,7 +2664,7 @@ def test_add_paid_email_then_ally_plan_selectable(monkeypatch: pytest.MonkeyPatc
     denied = client.post("/account/plan", json={"plan": "ally"}, headers=_user_headers())
     assert denied.status_code == 403
     assert "partner access" in denied.json()["detail"]
-    client.post("/paid/emails/add", json={"value": _USER_STUB_EMAIL}, headers=_paid_admin_headers())
+    client.post("/paid/emails/add", json={"value": _USER_STUB_EMAIL}, headers=_admin_key_headers())
     allowed = client.post("/account/plan", json={"plan": "ally"}, headers=_user_headers())
     assert allowed.status_code == 200
     assert allowed.json()["plan_name"] == "ally"
@@ -2659,7 +2679,7 @@ def test_add_paid_email_verifies_existing_unverified_account(monkeypatch: pytest
     st_backend.sign_up(tenant_id="public", email="waiting@example.com", password="password123")
     assert st_backend.accounts_by_email["waiting@example.com"].is_verified is False
 
-    resp = client.post("/paid/emails/add", json={"value": "waiting@example.com"}, headers=_paid_admin_headers())
+    resp = client.post("/paid/emails/add", json={"value": "waiting@example.com"}, headers=_admin_key_headers())
 
     assert resp.status_code == 200
     assert st_backend.accounts_by_email["waiting@example.com"].is_verified is True
@@ -2671,7 +2691,7 @@ def test_add_paid_email_with_no_existing_account_is_a_noop(monkeypatch: pytest.M
     st_backend = make_fake_supertokens_backend()
     st_backend.install_on_app_module(app_mod, monkeypatch)
 
-    resp = client.post("/paid/emails/add", json={"value": "nobody@example.com"}, headers=_paid_admin_headers())
+    resp = client.post("/paid/emails/add", json={"value": "nobody@example.com"}, headers=_admin_key_headers())
 
     assert resp.status_code == 200
     assert resp.json() == {"status": "added", "email": "nobody@example.com"}
@@ -2687,7 +2707,7 @@ def test_add_paid_email_succeeds_when_supertokens_uninitialized(monkeypatch: pyt
     """
     client, _pool_backend = _make_paid_crud_test_client(monkeypatch)
 
-    resp = client.post("/paid/emails/add", json={"value": "someone@example.com"}, headers=_paid_admin_headers())
+    resp = client.post("/paid/emails/add", json={"value": "someone@example.com"}, headers=_admin_key_headers())
 
     assert resp.status_code == 200
     assert resp.json() == {"status": "added", "email": "someone@example.com"}
@@ -2696,14 +2716,14 @@ def test_add_paid_email_succeeds_when_supertokens_uninitialized(monkeypatch: pyt
 @pytest.mark.parametrize("bad_value", ["", "   ", "has space", "foo@bar.com"])
 def test_add_paid_domain_rejects_invalid(monkeypatch: pytest.MonkeyPatch, bad_value: str) -> None:
     client, _backend = _make_paid_crud_test_client(monkeypatch)
-    resp = client.post("/paid/domains/add", json={"value": bad_value}, headers=_paid_admin_headers())
+    resp = client.post("/paid/domains/add", json={"value": bad_value}, headers=_admin_key_headers())
     assert resp.status_code == 400
 
 
 @pytest.mark.parametrize("bad_value", ["", "no-at-sign", "@nodomain", "local@", "a b@c.com"])
 def test_add_paid_email_rejects_invalid(monkeypatch: pytest.MonkeyPatch, bad_value: str) -> None:
     client, _backend = _make_paid_crud_test_client(monkeypatch)
-    resp = client.post("/paid/emails/add", json={"value": bad_value}, headers=_paid_admin_headers())
+    resp = client.post("/paid/emails/add", json={"value": bad_value}, headers=_admin_key_headers())
     assert resp.status_code == 400
 
 
@@ -3943,7 +3963,7 @@ def _make_account_admin_test_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[TestClient, InMemoryEntitlementsStore, FakeLiteLLMBackend, FakeSuperTokensBackend]:
     client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
-    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
+    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
     st_backend = make_fake_supertokens_backend()
     st_backend.install_on_app_module(app_mod, monkeypatch)
     return client, entitlements_store, litellm, st_backend
@@ -3952,7 +3972,7 @@ def _make_account_admin_test_client(
 def test_admin_get_account_lazily_creates_row(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, _litellm, st_backend = _make_account_admin_test_client(monkeypatch)
     st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
-    resp = client.get("/admin/accounts/somebody@example.com", headers=_paid_admin_headers())
+    resp = client.get("/admin/accounts/somebody@example.com", headers=_admin_key_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["email"] == "somebody@example.com"
@@ -3962,7 +3982,7 @@ def test_admin_get_account_lazily_creates_row(monkeypatch: pytest.MonkeyPatch) -
 
 def test_admin_get_account_unknown_email_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _entitlements_store, _litellm, _st_backend = _make_account_admin_test_client(monkeypatch)
-    resp = client.get("/admin/accounts/nobody@example.com", headers=_paid_admin_headers())
+    resp = client.get("/admin/accounts/nobody@example.com", headers=_admin_key_headers())
     assert resp.status_code == 404
 
 
@@ -3978,10 +3998,10 @@ def test_admin_set_plan_always_resets_to_plan_defaults(monkeypatch: pytest.Monke
     """Admin set-plan resets even for the same plan (the operator's bump-wipe)."""
     client, entitlements_store, litellm, st_backend = _make_account_admin_test_client(monkeypatch)
     st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
-    show = client.get("/admin/accounts/somebody@example.com", headers=_paid_admin_headers()).json()
+    show = client.get("/admin/accounts/somebody@example.com", headers=_admin_key_headers()).json()
     entitlements_store.update_entitlements(show["user_id"], {"max_remote_workspaces": 42})
     resp = client.post(
-        "/admin/accounts/somebody@example.com/plan", json={"plan": "explorer"}, headers=_paid_admin_headers()
+        "/admin/accounts/somebody@example.com/plan", json={"plan": "explorer"}, headers=_admin_key_headers()
     )
     assert resp.status_code == 200
     row = entitlements_store.get_entitlements(show["user_id"])
@@ -3989,7 +4009,7 @@ def test_admin_set_plan_always_resets_to_plan_defaults(monkeypatch: pytest.Monke
     assert row["max_remote_workspaces"] == EXPLORER_PLAN_VALUES["max_remote_workspaces"]
     # Admin set-plan skips the ally eligibility check.
     ally = client.post(
-        "/admin/accounts/somebody@example.com/plan", json={"plan": "ally"}, headers=_paid_admin_headers()
+        "/admin/accounts/somebody@example.com/plan", json={"plan": "ally"}, headers=_admin_key_headers()
     )
     assert ally.status_code == 200
     assert litellm.users_by_id[show["user_id"]]["max_budget"] == ALLY_PLAN_VALUES["monthly_llm_spend_usd"]
@@ -4001,10 +4021,10 @@ def test_admin_set_quota_updates_single_value(monkeypatch: pytest.MonkeyPatch) -
     resp = client.post(
         "/admin/accounts/somebody@example.com/quota",
         json={"entitlement": "max_remote_workspaces", "value": 5},
-        headers=_paid_admin_headers(),
+        headers=_admin_key_headers(),
     )
     assert resp.status_code == 200
-    show = client.get("/admin/accounts/somebody@example.com", headers=_paid_admin_headers()).json()
+    show = client.get("/admin/accounts/somebody@example.com", headers=_admin_key_headers()).json()
     assert show["entitlements"]["max_remote_workspaces"] == 5
     # Other values are untouched.
     assert show["entitlements"]["max_buckets"] == EXPLORER_PLAN_VALUES["max_buckets"]
@@ -4012,7 +4032,7 @@ def test_admin_set_quota_updates_single_value(monkeypatch: pytest.MonkeyPatch) -
     resp = client.post(
         "/admin/accounts/somebody@example.com/quota",
         json={"entitlement": "monthly_llm_spend_usd", "value": 250.5},
-        headers=_paid_admin_headers(),
+        headers=_admin_key_headers(),
     )
     assert resp.status_code == 200
     assert litellm.users_by_id[show["user_id"]]["max_budget"] == 250.5
@@ -4024,19 +4044,19 @@ def test_admin_set_quota_rejects_bad_inputs(monkeypatch: pytest.MonkeyPatch) -> 
     unknown = client.post(
         "/admin/accounts/somebody@example.com/quota",
         json={"entitlement": "max_unicorns", "value": 5},
-        headers=_paid_admin_headers(),
+        headers=_admin_key_headers(),
     )
     assert unknown.status_code == 400
     fractional = client.post(
         "/admin/accounts/somebody@example.com/quota",
         json={"entitlement": "max_remote_workspaces", "value": 1.5},
-        headers=_paid_admin_headers(),
+        headers=_admin_key_headers(),
     )
     assert fractional.status_code == 400
     negative = client.post(
         "/admin/accounts/somebody@example.com/quota",
         json={"entitlement": "max_remote_workspaces", "value": -1},
-        headers=_paid_admin_headers(),
+        headers=_admin_key_headers(),
     )
     assert negative.status_code == 400
 
@@ -4596,7 +4616,7 @@ def test_storage_recheck_standalone_restores_without_grant(monkeypatch: pytest.M
 
 def test_admin_sweep_endpoint_runs_scoped_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
-    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
+    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
     st_backend = make_fake_supertokens_backend()
     st_backend.install_on_app_module(app_mod, monkeypatch)
     st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
@@ -4609,7 +4629,7 @@ def test_admin_sweep_endpoint_runs_scoped_sweep(monkeypatch: pytest.MonkeyPatch)
     store.add_key(str(token["id"]), account_user_id, "sbprefix--data", "readwrite", "default")
     fake.usage_bytes_by_bucket["sbprefix--data"] = 1000
 
-    resp = client.post("/admin/sweep/r2?email=somebody@example.com", headers=_paid_admin_headers())
+    resp = client.post("/admin/sweep/r2?email=somebody@example.com", headers=_admin_key_headers())
     assert resp.status_code == 200
     counters = resp.json()["counters"]
     assert counters["keys_downgraded"] == 1
@@ -4619,7 +4639,7 @@ def test_admin_sweep_endpoint_runs_scoped_sweep(monkeypatch: pytest.MonkeyPatch)
 def test_admin_sweep_endpoint_rejects_supertokens_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """The sweep trigger is operator-key gated; a SuperTokens session must not pass."""
     client, _fake, _store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
-    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
+    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
     resp = client.post("/admin/sweep/r2", headers=_user_headers())
     assert resp.status_code == 401
 

@@ -230,8 +230,10 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
   `AUTH_WEBSITE_DOMAIN`
   (`https://minds-staging--rsc-staging-api.modal.run`),
   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`,
-  `GITHUB_CLIENT_SECRET`, `MINDS_PAID_ADMIN_KEY` (the fixed key for
-  the `/paid/*` admin API; leave empty to disable it),
+  `GITHUB_CLIENT_SECRET`, `MINDS_ADMIN_KEY` (the fixed key for the
+  `/paid/*`, `/admin/accounts/*`, and `/admin/sweep/*` admin APIs; the
+  deprecated `MINDS_PAID_ADMIN_KEY` spelling still works; leave empty
+  to disable them),
   `MINDS_PAID_LIST_CACHE_TTL_SECONDS` (optional; default 60).
 
 Operator-only entries (read by `minds env deploy` on the laptop;
