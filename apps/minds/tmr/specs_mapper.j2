@@ -1,0 +1,42 @@
+{#-
+  Minds variant of the packaged spec-mapper prompt (libs/mngr_tmr's
+  spec_mapper.j2). Unlike the docstring-TMR variant (mapper.j2, a
+  self-contained fork because its delta was subtractive), this variant is
+  purely additive: it extends the packaged template and fills its two
+  block slots, so the mapper contract lives in exactly one place. Passed
+  via --mapper-prompt by the `tmr-specs-minds` justfile recipe.
+-#}
+{% extends "spec_mapper.j2" %}
+
+{% block project_guidance %}
+You are working on the tests for the minds app (`apps/minds/`), the desktop
+client for managing mngr agents. Place each new witnessing test by the
+repo's test taxonomy (see style_guide.md):
+
+- Default to an integration test: a `test_*.py` file in the source package
+  folder, no pytest mark, no live network. Most spec scenarios (HTTP-level
+  authentication flows, redirects, session handling) are drivable this way
+  against the app's server with local fixtures.
+- Use a unit test (`<module>_test.py` next to the module) only when the
+  observable behavior is testable fully in-process (e.g. a pure token
+  validation property).
+- Use `@pytest.mark.release` when the flow genuinely needs the full stack
+  (a real workspace, Docker, a deployed env). Reserve
+  `@pytest.mark.acceptance` for core flows; most slow tests belong in
+  release.
+- Reuse the shared fixtures from the relevant `conftest.py` and helpers
+  from `testing.py` files; read them before writing new setup. Match the
+  surrounding tests' idioms, and never use unittest.mock or
+  monkeypatch.setattr.
+{% endblock %}
+
+{% block infra_blockers %}
+Minds-specific capability limits to recognize (these are shared blockers,
+not things to hack around locally): many minds tests need infrastructure a
+single test cannot stand up -- a Docker daemon and a pre-baked workspace
+snapshot (`minds_snapshot_resume`), a deployed Modal env (`minds_deployment`
+mints its own; `minds_services` needs a shared one), or secrets (an
+`ANTHROPIC_API_KEY`, imbue_cloud login, Modal deploy tokens, litellm keys).
+If a witnessing test would need such setup and it is absent from THIS
+environment, record the blocker instead of faking the behavior.
+{% endblock %}

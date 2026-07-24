@@ -5,11 +5,10 @@ import pluggy
 from imbue.mngr_tmr.plugin import register_cli_commands
 
 
-def test_register_cli_commands_returns_command() -> None:
+def test_register_cli_commands_returns_both_tmr_family_commands() -> None:
     commands = register_cli_commands()
     assert commands is not None
-    assert len(commands) == 1
-    assert commands[0].name == "tmr"
+    assert [command.name for command in commands] == ["tmr", "tmr-specs"]
 
 
 def test_plugin_registers_with_pluggy(plugin_manager: pluggy.PluginManager) -> None:
@@ -20,3 +19,4 @@ def test_plugin_registers_with_pluggy(plugin_manager: pluggy.PluginManager) -> N
             for cmd in result:
                 command_names.append(cmd.name)
     assert "tmr" in command_names
+    assert "tmr-specs" in command_names

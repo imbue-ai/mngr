@@ -249,6 +249,13 @@ tmr-mngr *args:
 tmr-minds *args:
   uv run --project libs/mngr_tmr mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2 {{args}} -- -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
 
+# minds behavioral-spec corpus (`mngr tmr-specs`: one agent per spec file, creating
+# and updating the tests that witness the specs). No testing flags after `--`: spec
+# mappers run the specific witness tests they touch by node id, and host-capability
+# guardrails live in the variant prompt's infra_blockers block.
+tmr-specs-minds *args:
+  uv run --project libs/mngr_tmr mngr tmr-specs --root apps/minds/specs --name tmr-specs-minds --mapper-prompt apps/minds/tmr/specs_mapper.j2 {{args}}
+
 # === minds deployment / services test orchestrator ===
 # Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
 # and apps/minds/deployment_tests/README.md for the full design + usage.

@@ -93,6 +93,7 @@ SECONDARY_COMMANDS = {
     "snapshot",
     "specs",
     "tmr",
+    "tmr-specs",
     "transcript",
     "tutor",
     "robinhood",

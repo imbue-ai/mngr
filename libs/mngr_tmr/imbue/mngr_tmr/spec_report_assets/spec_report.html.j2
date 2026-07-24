@@ -1,0 +1,185 @@
+{#-
+  Top-level template for the spec-TMR HTML report.
+
+  Context variables (built in `spec_report.generate_spec_html_report`):
+
+    rows                    -- list[SpecReportRow]        all renderable rows (for the count)
+    sections                -- list[SectionView]          grouped row views + kind/label/color/anchor
+    toc_links               -- list[TocLinkView]          sidebar entries, one per non-empty section
+    integrator              -- IntegratorResult | None    reduced-branch summary (drives merged-status cells)
+    coverage_rows           -- list[CoverageRowView]      one per reported unit: claimed vs verified coverage
+    spec_escalation_views   -- list[{coordinate, problem_html, proposed_edit_html}]
+    escalation_views        -- list[{title, detail_html}] integrator blockers surfaced to the user
+    normalization_views     -- list[{summary_html}]       suite-wide cleanups the integrator applied
+    corpus_violation_paths  -- tuple[str, ...] | None     egress-gate finding (None: not run; empty: clean)
+    run_commands            -- list[(label, cmd)]         top-of-report command hints
+    css                     -- str                        inlined verbatim (shared report.css)
+-#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Spec Map-Reduce Report</title>
+  <style>
+{{ css|safe }}
+.corpus-violation { border: 2px solid rgb(244, 67, 54); background: rgba(244, 67, 54, 0.08); padding: 12px 16px; margin: 16px 0; }
+.corpus-violation h2 { color: rgb(244, 67, 54); margin-top: 0; }
+.coverage-table td, .coverage-table th { vertical-align: top; }
+.coverage-agree { color: rgb(76, 175, 80); }
+.coverage-disagree { color: rgb(244, 67, 54); font-weight: bold; }
+.coverage-pending { color: rgb(158, 158, 158); }
+.witness-partial { color: rgb(255, 152, 0); }
+  </style>
+</head>
+<body>
+{%- if toc_links %}
+  <div class="toc-sidebar">
+{%- for link in toc_links %}
+    <a href="#{{ link.anchor }}" class="toc-link" style="color: {{ link.color }};">{{ link.label }} ({{ link.count }})</a>
+{%- endfor %}
+    <a href="#coverage-matrix" class="toc-link">Coverage matrix ({{ coverage_rows|length }})</a>
+{%- if spec_escalation_views %}
+    <a href="#spec-escalations" class="toc-link" style="color: rgb(244, 67, 54);">Spec escalations ({{ spec_escalation_views|length }})</a>
+{%- endif %}
+  </div>
+{%- endif %}
+  <div class="main-content">
+    <h1>Spec Map-Reduce Report</h1>
+    <p class="summary">{{ rows|length }} spec-file task(s), {{ coverage_rows|length }} unit(s)</p>
+{%- if run_commands %}
+    <div class="run-commands">
+{%- for label, cmd in run_commands %}
+      <div class="run-cmd"><span class="run-cmd-label">{{ label }}:</span> <code>{{ cmd }}</code></div>
+{%- endfor %}
+    </div>
+{%- endif %}
+{%- if corpus_violation_paths %}
+    <div class="corpus-violation">
+      <h2>Corpus violation: integrated branch NOT published</h2>
+      <p>The reducer's integrated branch touches the read-only behavioral-spec corpus, so its
+         branch event was withheld. The corpus never changes through this pipeline; spec edits
+         may only be proposed via spec escalations. Offending paths:</p>
+      <ul>
+{%- for path in corpus_violation_paths %}
+        <li><code>{{ path }}</code></li>
+{%- endfor %}
+      </ul>
+    </div>
+{%- endif %}
+{%- if spec_escalation_views %}
+    <div class="escalations" id="spec-escalations">
+      <h2 style="color: rgb(244, 67, 54);">Spec escalations ({{ spec_escalation_views|length }})</h2>
+      <p>Mappers judged these spec units wrong. This is the only channel by which the corpus
+         changes: review each proposed edit and apply it by hand if you agree.</p>
+      <ul>
+{%- for esc in spec_escalation_views %}
+        <li><strong><code>{{ esc.coordinate }}</code></strong>
+          <div class="md">{{ esc.problem_html|safe }}</div>
+          <div class="md"><em>Proposed edit:</em> {{ esc.proposed_edit_html|safe }}</div></li>
+{%- endfor %}
+      </ul>
+    </div>
+{%- endif %}
+{%- if escalation_views %}
+    <div class="escalations">
+      <h2 style="color: rgb(244, 67, 54);">Escalations ({{ escalation_views|length }})</h2>
+      <p>These cross-cutting blockers could not be resolved automatically and need your attention:</p>
+      <ul>
+{%- for esc in escalation_views %}
+        <li><strong>{{ esc.title }}</strong><div class="md">{{ esc.detail_html|safe }}</div></li>
+{%- endfor %}
+      </ul>
+    </div>
+{%- endif %}
+{%- if normalization_views %}
+    <div class="normalizations">
+      <h2>Suite normalizations ({{ normalization_views|length }})</h2>
+      <ul>
+{%- for norm in normalization_views %}
+        <li class="md">{{ norm.summary_html|safe }}</li>
+{%- endfor %}
+      </ul>
+    </div>
+{%- endif %}
+{%- for section in sections %}
+    <h2 id="{{ section.anchor }}" style="color: {{ section.color }};">{{ section.label }} ({{ section.rows|length }})</h2>
+{%- if section.kind == "NON_IMPL_FIXES" and integrator and integrator.squashed_commit_hash %}
+    <p class="squashed-hash">Squashed commit: <code>{{ integrator.squashed_commit_hash[:10] }}</code></p>
+{%- endif %}
+    <table>
+      <thead>
+        <tr>
+{%- if section.kind == "RUNNING" %}
+          <th>Spec file</th><th>Agent</th>
+{%- elif section.kind == "CLEAN_PASS" %}
+          <th>Spec file</th><th>Agent</th><th>Branch</th>
+{%- else %}
+          <th>Spec file</th><th>Changes</th><th>Agent</th><th>Branch</th><th>Merged?</th>
+{%- endif %}
+        </tr>
+      </thead>
+      <tbody>
+{%- for row in section.rows %}
+        <tr>
+{%- if section.kind == "RUNNING" %}
+          <td>{{ row.task_id_html|safe }}</td>
+          <td><code>{{ row.agent_name }}</code></td>
+{%- elif section.kind == "CLEAN_PASS" %}
+          <td>{{ row.task_id_html|safe }}</td>
+          <td><code>{{ row.agent_name }}</code></td>
+          <td><code>{{ row.branch_name or "-" }}</code></td>
+{%- else %}
+          <td>{{ row.task_id_html|safe }}</td>
+          <td>{{ row.changes_html|safe }}</td>
+          <td><code>{{ row.agent_name }}</code></td>
+          <td><code>{{ row.branch_name or "-" }}</code></td>
+          <td>{{ row.merged_html|safe }}</td>
+{%- endif %}
+        </tr>
+{%- if row.summary_html and section.kind != "RUNNING" %}
+        <tr class="summary-row"><td colspan="{{ section.col_count }}" class="md summary-cell">{{ row.summary_html|safe }}</td></tr>
+{%- endif %}
+{%- endfor %}
+      </tbody>
+    </table>
+{%- endfor %}
+    <h2 id="coverage-matrix">Coverage matrix ({{ coverage_rows|length }})</h2>
+    <p>Claimed is each mapper's verdict; verified is what <code>mngr specs matrix</code> measured
+       on the integrated tree (blank until the reducer ships its artifact).</p>
+    <table class="coverage-table">
+      <thead>
+        <tr><th>Coordinate</th><th>Spec file</th><th>Claimed</th><th>Verified</th><th>Witnesses</th><th>Blockers</th></tr>
+      </thead>
+      <tbody>
+{%- for cov in coverage_rows %}
+        <tr>
+          <td><code>{{ cov.coordinate }}</code>{% if cov.has_spec_problems %} <span class="coverage-disagree" title="spec escalation">&#9888;</span>{% endif %}</td>
+          <td>{{ cov.task_id_html|safe }}</td>
+          <td>{{ cov.claimed }}</td>
+{%- if cov.verified is none %}
+          <td class="coverage-pending">-</td>
+{%- elif cov.is_agreeing %}
+          <td class="coverage-agree">{{ cov.verified }}</td>
+{%- else %}
+          <td class="coverage-disagree">{{ cov.verified }}</td>
+{%- endif %}
+          <td>
+{%- for witness in cov.witnesses %}
+            <div><code>{{ witness.test }}</code>{% if witness.partial %} <span class="witness-partial">partial: {{ witness.partial }}</span>{% endif %}</div>
+{%- endfor %}
+          </td>
+          <td>
+{%- for blocker in cov.blockers %}
+            <div>{{ blocker }}</div>
+{%- endfor %}
+          </td>
+        </tr>
+{%- if cov.summary_html %}
+        <tr class="summary-row"><td colspan="6" class="md summary-cell">{{ cov.summary_html|safe }}</td></tr>
+{%- endif %}
+{%- endfor %}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
