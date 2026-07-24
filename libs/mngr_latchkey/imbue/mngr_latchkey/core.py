@@ -136,6 +136,17 @@ _ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_RO
 # ``permission_requests.mjs`` files there at gateway-spawn time.
 _GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 
+# Filename of the upstream latchkey CLI's JSON config file, directly under
+# ``LATCHKEY_DIRECTORY``. Latchkey (>= 3.1.0) reads its ``settings`` block --
+# including ``hideBuiltinServices`` -- from here.
+CONFIG_FILENAME: Final[str] = "config.json"
+
+# Built-in latchkey services hidden from agents via
+# ``settings.hideBuiltinServices``. ``notion`` is hidden because agents get
+# confused when latchkey's built-in ``notion`` service appears alongside the
+# separate ``notion-mcp`` integration.
+HIDDEN_BUILTIN_SERVICES: Final[tuple[str, ...]] = ("notion",)
+
 
 class LatchkeyError(Exception):
     """Base exception for all latchkey wrapper failures."""
@@ -551,6 +562,59 @@ def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
         destination = extensions_dir / name
         destination.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
     return extensions_dir
+
+
+def merge_hidden_builtin_services(existing_config_json: str | None) -> str:
+    """Merge :data:`HIDDEN_BUILTIN_SERVICES` into a latchkey ``config.json``.
+
+    Returns the serialized config text with every service in
+    :data:`HIDDEN_BUILTIN_SERVICES` present in ``settings.hideBuiltinServices``,
+    preserving any other content the input config holds (the ``settings``
+    block is read-merged, not clobbered). ``existing_config_json`` is the
+    current config text, or ``None`` when there is no config yet (a fresh
+    config starts from an empty object). Existing hidden entries are kept in
+    order and only the missing ones are appended, so the result is stable
+    across repeated applications. Raises :class:`LatchkeyError` if the input
+    is not a valid JSON object, rather than silently discarding it; callers
+    that read from a file add the file's path to the surfaced error.
+    """
+    if existing_config_json:
+        try:
+            loaded = json.loads(existing_config_json)
+        except json.JSONDecodeError as e:
+            raise LatchkeyError(f"config is not valid JSON: {e}") from e
+        if not isinstance(loaded, dict):
+            raise LatchkeyError(f"config must be a JSON object, got {type(loaded).__name__}")
+        config = loaded
+    else:
+        config = {}
+    settings_value = config.get("settings")
+    settings = settings_value if isinstance(settings_value, dict) else {}
+    hidden_value = settings.get("hideBuiltinServices")
+    hidden = list(hidden_value) if isinstance(hidden_value, list) else []
+    for service in HIDDEN_BUILTIN_SERVICES:
+        if service not in hidden:
+            hidden.append(service)
+    settings["hideBuiltinServices"] = hidden
+    config["settings"] = settings
+    return json.dumps(config, indent=2)
+
+
+def _ensure_hidden_builtin_services(latchkey_directory: Path) -> None:
+    """Ensure ``LATCHKEY_DIRECTORY/config.json`` hides :data:`HIDDEN_BUILTIN_SERVICES`.
+
+    Read-merge-write (via :func:`merge_hidden_builtin_services`) so latchkey's
+    own settings survive. Called before each gateway spawn so a package upgrade
+    keeps the hidden list current even for a directory latchkey created without
+    it.
+    """
+    config_path = latchkey_directory / CONFIG_FILENAME
+    existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
+    try:
+        content = merge_hidden_builtin_services(existing)
+    except LatchkeyError as e:
+        raise LatchkeyError(f"Failed to update latchkey config at {config_path}: {e}") from e
+    config_path.write_text(content, encoding="utf-8")
 
 
 def _log_gateway_output_line(line: str, is_stdout: bool) -> None:
@@ -1469,6 +1533,12 @@ class Latchkey(MutableModel):
         # ``latchkey gateway`` picks them up at startup. Always rewrites
         # so a package upgrade overrides any stale on-disk copy.
         _materialize_bundled_extensions(self.latchkey_directory)
+
+        # Hide latchkey's built-in services that would confuse agents (e.g. the
+        # built-in ``notion`` service alongside the separate ``notion-mcp``
+        # integration) by merging them into ``config.json``'s
+        # ``settings.hideBuiltinServices`` before the gateway reads it.
+        _ensure_hidden_builtin_services(self.latchkey_directory)
 
         # Reuse the previously-bound port when respawning a dead gateway; otherwise
         # allocate a fresh free port for the first spawn.

@@ -37,10 +37,12 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.core import merge_hidden_builtin_services
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
@@ -659,6 +661,30 @@ def _ensure_ram_backed_secrets_dir(host: OuterHostInterface, host_name: str) -> 
         )
 
 
+def _ensure_remote_hidden_builtin_services(host: OuterHostInterface, remote_dir: Path) -> None:
+    """Hide the confusing built-in latchkey services in the VPS gateway's ``config.json``.
+
+    Read-merges :data:`~imbue.mngr_latchkey.core.HIDDEN_BUILTIN_SERVICES` into
+    ``~/.latchkey/config.json``'s ``settings.hideBuiltinServices`` on the VPS
+    (mirroring the desktop-side ``_ensure_hidden_builtin_services``) so an agent
+    talking to the VPS-resident gateway sees the same hidden set as one talking
+    to the desktop gateway. Any other config latchkey wrote on the VPS is
+    preserved. Idempotent. Raises :class:`RemoteGatewayError` if the existing
+    remote config is not a valid JSON object.
+    """
+    config_path = remote_dir / CONFIG_FILENAME
+    existing = host.read_text_file(config_path) if host.path_exists(config_path) else None
+    try:
+        content = merge_hidden_builtin_services(existing)
+    except LatchkeyError as e:
+        raise RemoteGatewayError(
+            f"Failed to update latchkey config at {config_path} on VPS {host.get_name()}: {e}"
+        ) from e
+    # ``is_atomic`` writes to a sibling ``.tmp`` then ``mv``s it into place, so
+    # the gateway never reads a half-written config mid-sync.
+    host.write_file(config_path, content.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
+
+
 def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_file_path: Path) -> str:
     """Build the wrapper script supervisord runs to launch ``latchkey gateway``.
 
@@ -769,6 +795,10 @@ def _ensure_latchkey_gateway_running(
     # Create + verify the RAM-backed secrets dir before writing the key, so we
     # never persist it to a disk filesystem if tmpfs is unexpectedly absent.
     _ensure_ram_backed_secrets_dir(host, host_name)
+
+    # Hide the confusing built-in services (e.g. ``notion``) in the VPS
+    # gateway's config.json so agents see the same set as on the desktop.
+    _ensure_remote_hidden_builtin_services(host, remote_dir)
 
     # Write the two secrets (0600) into tmpfs and the wrapper that reads them.
     host.write_file(key_file_path, encryption_key.encode("utf-8"), mode=_REMOTE_FILE_MODE)

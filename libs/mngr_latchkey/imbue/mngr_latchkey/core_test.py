@@ -23,7 +23,9 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import HIDDEN_BUILTIN_SERVICES
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyBinaryNotFoundError
@@ -35,6 +37,7 @@ from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.core import _log_gateway_output_line
+from imbue.mngr_latchkey.core import merge_hidden_builtin_services
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
@@ -386,6 +389,78 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         workspace_permissions = json.loads(workspace_permissions_path.read_text())
         assert workspace_permissions["path_prefix"] == "/minds-api-proxy/api/v1/workspaces"
         assert isinstance(workspace_permissions["verbs"], list) and len(workspace_permissions["verbs"]) > 0
+        manager.stop_gateway()
+
+
+def test_merge_hidden_builtin_services_creates_config_when_absent() -> None:
+    merged = json.loads(merge_hidden_builtin_services(None))
+    assert merged == {"settings": {"hideBuiltinServices": list(HIDDEN_BUILTIN_SERVICES)}}
+    assert "notion" in merged["settings"]["hideBuiltinServices"]
+
+
+def test_merge_hidden_builtin_services_preserves_other_settings_and_keys() -> None:
+    existing = json.dumps(
+        {
+            "version": 3,
+            "settings": {"someOtherSetting": True, "hideBuiltinServices": ["already-hidden"]},
+        }
+    )
+    merged = json.loads(merge_hidden_builtin_services(existing))
+    # Unrelated top-level keys and unrelated settings are preserved verbatim.
+    assert merged["version"] == 3
+    assert merged["settings"]["someOtherSetting"] is True
+    # Existing hidden entries are kept (in order) and the new ones appended.
+    assert merged["settings"]["hideBuiltinServices"] == ["already-hidden", "notion"]
+
+
+def test_merge_hidden_builtin_services_is_idempotent() -> None:
+    once = merge_hidden_builtin_services(None)
+    twice = merge_hidden_builtin_services(once)
+    assert json.loads(once) == json.loads(twice)
+    # Applying it again does not duplicate the hidden entry.
+    assert json.loads(twice)["settings"]["hideBuiltinServices"] == list(HIDDEN_BUILTIN_SERVICES)
+
+
+def test_merge_hidden_builtin_services_rejects_invalid_json() -> None:
+    with pytest.raises(LatchkeyError, match="not valid JSON"):
+        merge_hidden_builtin_services("{not json")
+
+
+def test_merge_hidden_builtin_services_rejects_non_object_json() -> None:
+    with pytest.raises(LatchkeyError, match="must be a JSON object"):
+        merge_hidden_builtin_services("[1, 2, 3]")
+
+
+def test_start_gateway_hides_builtin_services_in_config(tmp_path: Path) -> None:
+    """The gateway spawn step must merge the hidden built-in services into config.json."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    config_path = tmp_path / CONFIG_FILENAME
+    assert not config_path.exists()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", port)
+        assert config_path.is_file()
+        config = json.loads(config_path.read_text())
+        assert "notion" in config["settings"]["hideBuiltinServices"]
+        manager.stop_gateway()
+
+
+def test_start_gateway_preserves_existing_config_when_hiding_services(tmp_path: Path) -> None:
+    """Spawning the gateway must not clobber pre-existing latchkey config content."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    config_path = tmp_path / CONFIG_FILENAME
+    config_path.write_text(json.dumps({"settings": {"theme": "dark"}, "accounts": {"slack": {}}}))
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", port)
+        config = json.loads(config_path.read_text())
+        assert config["settings"]["theme"] == "dark"
+        assert config["accounts"] == {"slack": {}}
+        assert "notion" in config["settings"]["hideBuiltinServices"]
         manager.stop_gateway()
 
 

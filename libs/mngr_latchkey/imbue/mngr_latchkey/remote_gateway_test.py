@@ -11,6 +11,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
@@ -67,6 +68,9 @@ class _StubOuter(MutableModel):
         description="Canned result returned for every command",
     )
     home: str = Field(default="/root", description="Value returned for the $HOME resolution command")
+    config_json: str | None = Field(
+        default=None, description="Pre-existing ~/.latchkey/config.json content on the VPS (None means absent)"
+    )
     container_name: str = Field(default="mngr-ws", description="Container name returned for the 'docker ps' lookup")
     is_local: bool = Field(default=False, description="Whether this outer host is the local machine")
     recorded: list[_Recorded] = Field(default_factory=list, description="Each command recorded in order")
@@ -92,6 +96,14 @@ class _StubOuter(MutableModel):
         if command.startswith("docker ps"):
             return CommandResult(stdout=f"{self.container_name}\n", stderr="", success=True)
         return self.result
+
+    def path_exists(self, path: Path) -> bool:
+        return path.name == CONFIG_FILENAME and self.config_json is not None
+
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        if path.name == CONFIG_FILENAME and self.config_json is not None:
+            return self.config_json
+        raise FileNotFoundError(str(path))
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
         self.written.append(_WrittenFile(path=str(path), content=content, mode=mode, is_atomic=is_atomic))
@@ -553,6 +565,37 @@ def test_ensure_latchkey_gateway_running_raises_when_secrets_dir_not_ram_backed(
     assert _stub(outer).written == []
 
 
+def _remote_config_text(outer: OuterHostInterface) -> str:
+    """Return the raw ~/.latchkey/config.json text written to the VPS."""
+    return _written_by_path(outer, "/root/.latchkey/config.json").content.decode("utf-8")
+
+
+def test_ensure_latchkey_gateway_running_hides_builtin_services_in_config(tmp_path: Path) -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    # The VPS gateway's config.json hides the same confusing built-in services
+    # as the desktop gateway, so an agent sees the same set either way.
+    config = json.loads(_remote_config_text(outer))
+    assert "notion" in config["settings"]["hideBuiltinServices"]
+
+
+def test_ensure_latchkey_gateway_running_preserves_existing_remote_config(tmp_path: Path) -> None:
+    existing = json.dumps({"settings": {"theme": "dark"}, "accounts": {"slack": {}}})
+    outer = cast(OuterHostInterface, _StubOuter(config_json=existing))
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    config = json.loads(_remote_config_text(outer))
+    # Pre-existing remote config content survives the read-merge-write.
+    assert config["settings"]["theme"] == "dark"
+    assert config["accounts"] == {"slack": {}}
+    assert "notion" in config["settings"]["hideBuiltinServices"]
+
+
+def test_ensure_latchkey_gateway_running_raises_on_invalid_remote_config(tmp_path: Path) -> None:
+    outer = cast(OuterHostInterface, _StubOuter(config_json="{not json"))
+    with pytest.raises(RemoteGatewayError, match=CONFIG_FILENAME):
+        _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+
+
 def _tunnel_conf(outer: OuterHostInterface) -> str:
     """Return the content of the reverse-tunnel supervisord drop-in written to the VPS."""
     return _written_by_path(outer, f"/etc/supervisor/conf.d/{_TUNNEL_PROGRAM_NAME}.conf").content.decode("utf-8")
@@ -679,6 +722,8 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path:
     assert f"[program:{_GATEWAY_PROGRAM_NAME}]" in written
     assert f"[program:{_TUNNEL_PROGRAM_NAME}]" in written
     assert "exec latchkey gateway" in written
+    # The VPS gateway's config.json hides the confusing built-in services.
+    assert "hideBuiltinServices" in written and "notion" in written
     assert "-R 127.0.0.1:" in written
     # The gateway listen password is written to a file, never a command.
     assert "shared-password" not in commands

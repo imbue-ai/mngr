@@ -18,7 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     openssh-server \
     procps \
-    restic \
     ripgrep \
     rsync \
     tini \
@@ -34,6 +33,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # GIT_CONFIG_NOSYSTEM=1 still need a per-test-home .gitconfig, which
 # isolate_home and isolate_git both now provide.
 RUN git config --system --add safe.directory '*'
+
+# restic, pinned to apps/minds/scripts/download-binaries.js's RESTIC_VERSION
+# rather than the distro package. Debian bookworm ships restic 0.14, which is
+# ~10x slower than the pinned build (blowing past per-test timeouts in loaded
+# offload sandboxes, where the timeout kill surfaces as SIGKILL / "exit -9")
+# and predates flags the minds backup code relies on (e.g.
+# --insecure-no-password, added in 0.17). This is the same restic end users get
+# from the bundled binary, so tests exercise production behavior. Keep the
+# version + SHA256s in sync with download-binaries.js. RESTIC_VERSION is set
+# inline (not a Dockerfile ARG) for the same reason OFFLOAD_VERSION is below:
+# mngr_modal ships each instruction as its own dockerfile_commands call, so an
+# ARG here would expand to empty in the RUN.
+RUN export RESTIC_VERSION=0.18.1 && \
+    ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
+    case "$ARCH" in \
+        amd64) RESTIC_SHA256=680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d ;; \
+        arm64) RESTIC_SHA256=87f53fddde38764095e9c058a3b31834052c37e5826d2acf34e18923c006bd45 ;; \
+        *) echo "unsupported arch for restic: $ARCH" >&2 ; exit 1 ;; \
+    esac && \
+    for attempt in 1 2 3 4 5; do \
+        curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+            "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${ARCH}.bz2" \
+            -o /tmp/restic.bz2 && break ; \
+        echo "restic download attempt $attempt failed, retrying in $((attempt * 5))s..." ; \
+        sleep $((attempt * 5)) ; \
+    done && \
+    echo "${RESTIC_SHA256}  /tmp/restic.bz2" | sha256sum -c - && \
+    python3 -c "import bz2, shutil; shutil.copyfileobj(bz2.open('/tmp/restic.bz2', 'rb'), open('/usr/local/bin/restic', 'wb'))" && \
+    rm -f /tmp/restic.bz2 && \
+    chmod 0755 /usr/local/bin/restic && \
+    restic version
 
 # Install ttyd binary from GitHub releases (not available via apt).
 # Retry with backoff because github.com releases intermittently reset the
