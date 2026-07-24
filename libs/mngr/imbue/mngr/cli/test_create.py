@@ -1411,8 +1411,9 @@ def test_cli_create_from_git_url(
     """create --source <git URL> clones the repo and produces an agent with the repo contents.
 
     Uses this project's own public GitHub URL. Network access is required; the
-    assertion is against a long-stable top-level file (CLAUDE.md) so the test
-    does not break on repo layout churn.
+    assertion is against a long-stable top-level file (README.md, which the
+    public mirror's filtering keeps) so the test does not break on repo
+    layout churn.
     """
     agent_name = f"test-git-url-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
@@ -1448,4 +1449,4 @@ def test_cli_create_from_git_url(
         worktree_entries = list(worktrees_dir.iterdir())
         matching_worktrees = [p for p in worktree_entries if p.name.startswith(f"{agent_name}-")]
         assert matching_worktrees, f"Expected a worktree under {worktrees_dir}, got {worktree_entries}"
-        assert (matching_worktrees[0] / "CLAUDE.md").exists()
+        assert (matching_worktrees[0] / "README.md").exists()
