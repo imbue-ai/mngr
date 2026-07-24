@@ -1,0 +1,18 @@
+diff --git a/html/src/components/terminal/xterm/index.ts b/html/src/components/terminal/xterm/index.ts
+index b332154..a1c2d3e 100644
+--- a/html/src/components/terminal/xterm/index.ts
++++ b/html/src/components/terminal/xterm/index.ts
+@@ -260,6 +260,12 @@ export class Xterm {
+     private onSocketOpen() {
+         console.log('[ttyd] websocket connection opened');
+
+         const { textEncoder, terminal, overlayAddon } = this;
++        // On reconnect, re-measure before the size handshake below. Listeners
++        // (including the window-resize -> fit trigger) are disposed on socket
++        // close, so any resize during the disconnect window was lost and
++        // terminal.cols/rows may be stale -- the handshake would then set the
++        // new PTY to the stale size with nothing left to correct it.
++        if (this.opened) this.fitAddon.fit();
+         const msg = JSON.stringify({ AuthToken: this.token, columns: terminal.cols, rows: terminal.rows });
+         this.socket?.send(textEncoder.encode(msg));
+

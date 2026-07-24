@@ -28,6 +28,7 @@ set -euo pipefail
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _RESOURCES_DIR="$_SCRIPT_DIR/../imbue/mngr_ttyd/resources"
 _PATCH="$_SCRIPT_DIR/ttyd_clipboard_provider.patch"
+_RECONNECT_PATCH="$_SCRIPT_DIR/ttyd_reconnect_refit.patch"
 _BUILD_DIR="$(mktemp -d -t ttyd_client_build.XXXXXX)"
 trap 'rm -rf "$_BUILD_DIR"' EXIT
 
@@ -42,6 +43,13 @@ git -C "$_BUILD_DIR/ttyd" checkout "$_TTYD_REF"
 echo "Applying clipboard provider patch ..."
 git -C "$_BUILD_DIR/ttyd" apply "$_PATCH"
 
+# Refit on reconnect: the client disposes its window-resize -> fit listener on
+# every socket close, so a resize during a disconnect window is lost and the
+# reconnect handshake would set the new PTY to the stale size. The patch
+# re-measures (fitAddon.fit()) at reconnect before that handshake.
+echo "Applying reconnect refit patch ..."
+git -C "$_BUILD_DIR/ttyd" apply "$_RECONNECT_PATCH"
+
 echo "Building the html client ..."
 corepack enable
 (cd "$_BUILD_DIR/ttyd/html" && yarn install && yarn build)
@@ -49,6 +57,17 @@ corepack enable
 _BUILT="$_BUILD_DIR/ttyd/html/dist/inline.html"
 if ! grep -q "isSystemSelection" "$_BUILT"; then
     echo "error: built client is missing the clipboard patch" >&2
+    exit 1
+fi
+if ! grep -q "opened&&this.fitAddon.fit()" "$_BUILT"; then
+    echo "error: built client is missing the reconnect refit patch" >&2
+    exit 1
+fi
+# The minds workspace UI (default-workspace-template's system_interface) refits
+# terminal iframes from the host page via the client's exposed window.term.fit;
+# that reach degrades to a silent no-op if the client stops exposing it.
+if ! grep -q "window.term.fit" "$_BUILT"; then
+    echo "error: built client no longer exposes window.term.fit (the minds workspace UI depends on it)" >&2
     exit 1
 fi
 
