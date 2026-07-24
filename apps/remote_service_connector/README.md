@@ -133,7 +133,7 @@ Running `modal deploy` directly without the wrapper defaults to
 All non-`/auth/*` endpoints require a Bearer token:
 
 - **Agent (tunnel token)**: `Authorization: Bearer <tunnel_token>` — scoped to a single tunnel. Can add/remove/list services on that tunnel only; cannot create/delete tunnels or manage auth policies.
-- **User (SuperTokens JWT)**: `Authorization: Bearer <access_token>` — the signed-in user's SuperTokens session. A signed-in user has full authority over their own resources; their username is the first 16 hex chars of the user's SuperTokens user ID (used to namespace tunnels per user).
+- **User (SuperTokens JWT)**: `Authorization: Bearer <access_token>` — the signed-in user's SuperTokens session. A signed-in user has full authority over their own resources; their user-id prefix (the first 16 hex chars of their SuperTokens user ID) namespaces their tunnels, leases, and buckets.
 
 The `/auth/*` endpoints are themselves the authentication flow, so they do not require a token.
 
@@ -166,7 +166,7 @@ When `CLOUDFLARE_ALLOWED_IDPS` is set, Access Applications created for forwarded
 
 - `POST /tunnels` -- Create a tunnel. Body: `{"agent_id": "...", "default_auth_policy": ...}`. Returns tunnel info with token.
 - `GET /tunnels` -- List your tunnels with their configured services.
-- `GET /tunnels/by-agent/{agent_id}` -- Resolve your tunnel for a single agent (O(1)): looks the tunnel up by its exact name (`<username>--<agent-prefix>`) via Cloudflare's server-side name filter plus one config fetch, instead of enumerating every tunnel like `GET /tunnels`. Returns the tunnel info (no token), or HTTP 200 with `null` when no tunnel exists for that agent yet. 404 is reserved for "this connector predates the endpoint" (an unknown route), which lets clients that are newer than the connector fall back to enumerating `GET /tunnels`.
+- `GET /tunnels/by-agent/{agent_id}` -- Resolve your tunnel for a single agent (O(1)): looks the tunnel up by its exact name (`<user_id_prefix>--<agent-prefix>`) via Cloudflare's server-side name filter plus one config fetch, instead of enumerating every tunnel like `GET /tunnels`. Returns the tunnel info (no token), or HTTP 200 with `null` when no tunnel exists for that agent yet. 404 is reserved for "this connector predates the endpoint" (an unknown route), which lets clients that are newer than the connector fall back to enumerating `GET /tunnels`.
 - `DELETE /tunnels/{tunnel_name}` -- Delete a tunnel and all its DNS records, Access Applications, ingress rules, and KV entries.
 - `POST /sharing/enable` -- Enable (or update) sharing for one service in a single call. Body: `{"agent_id": "...", "service_name": "...", "service_url": "...", "auth_policy": {...}}`. Ensures the tunnel (idempotent), adds the service, and applies the Access policy directly to its Access Application (replacing a pre-existing app's policies on re-enable). Returns `{"tunnel": {...with token}, "service": {...}}` so the caller needs no follow-up reads. Enforces the same `max_tunnels` / `max_services_per_tunnel` quotas as the individual endpoints.
 

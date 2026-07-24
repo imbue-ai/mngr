@@ -44,7 +44,7 @@ from imbue.remote_service_connector.app import cf_list_all_pages
 from imbue.remote_service_connector.app import clear_paid_status_cache
 from imbue.remote_service_connector.app import derive_s3_secret_access_key
 from imbue.remote_service_connector.app import extract_service_name
-from imbue.remote_service_connector.app import extract_username_from_tunnel_name
+from imbue.remote_service_connector.app import extract_user_id_prefix_from_tunnel_name
 from imbue.remote_service_connector.app import get_sync_store
 from imbue.remote_service_connector.app import is_email_paid
 from imbue.remote_service_connector.app import is_email_paid_in_db
@@ -77,7 +77,7 @@ from imbue.remote_service_connector.testing import make_fake_tunnel_token
 from imbue.remote_service_connector.testing import noop_enforcement_lock
 
 _USER_STUB_TOKEN = "user-stub-jwt"
-_USER_STUB_USERNAME = "testuser"
+_USER_STUB_USER_ID_PREFIX = "testuser"
 _USER_STUB_EMAIL = "testuser@example.com"
 _USER_STUB_USER_ID = "12345678-1234-5678-1234-567812345678"
 _ADMIN_KEY_TEST_VALUE = "admin-key-secret-9f3a2b"
@@ -122,7 +122,7 @@ def _make_quota_test_client(
     def _stub_supertokens(token: str) -> UserAuth:
         if token != _USER_STUB_TOKEN:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return UserAuth(username=_USER_STUB_USERNAME, email=_USER_STUB_EMAIL)
+        return UserAuth(user_id_prefix=_USER_STUB_USER_ID_PREFIX, email=_USER_STUB_EMAIL)
 
     entitlements_store = make_fake_entitlements_store()
     litellm = make_fake_litellm_backend()
@@ -157,14 +157,14 @@ def _seed_entitlements_row(
     entitlements_store: InMemoryEntitlementsStore,
     plan_name: str = "explorer",
     user_id: str = _USER_STUB_USER_ID,
-    username_prefix: str = _USER_STUB_USERNAME,
+    user_id_prefix: str = _USER_STUB_USER_ID_PREFIX,
     **overrides: float,
 ) -> None:
     """Insert an entitlements row copied from the named launch plan, with per-test quota overrides."""
     entitlements_store.insert_entitlements_if_absent(
         {
             "user_id": user_id,
-            "username_prefix": username_prefix,
+            "user_id_prefix": user_id_prefix,
             "plan_name": plan_name,
             **{**_PLAN_VALUES_BY_NAME[plan_name], **overrides},
         }
@@ -184,8 +184,8 @@ def test_make_tunnel_name_allows_single_hyphen_in_agent_id() -> None:
     assert make_tunnel_name("alice", "agent-abc123") == "alice--abc123"
 
 
-def test_make_tunnel_name_rejects_double_hyphen_in_username() -> None:
-    with pytest.raises(InvalidTunnelComponentError, match="Username"):
+def test_make_tunnel_name_rejects_double_hyphen_in_user_id_prefix() -> None:
+    with pytest.raises(InvalidTunnelComponentError, match="User ID prefix"):
         make_tunnel_name("alice--bob", "agent1")
 
 
@@ -206,8 +206,8 @@ def test_extract_service_name_returns_none_for_non_matching() -> None:
     assert extract_service_name("other.example.com", "agent1", "alice", "example.com") is None
 
 
-def test_extract_username_from_tunnel_name() -> None:
-    assert extract_username_from_tunnel_name("alice--agent1") == "alice"
+def test_extract_user_id_prefix_from_tunnel_name() -> None:
+    assert extract_user_id_prefix_from_tunnel_name("alice--agent1") == "alice"
 
 
 def test_cf_check_raises_on_error() -> None:
@@ -692,17 +692,17 @@ def test_route_malformed_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.status_code == 401
 
 
-def test_route_create_tunnel_too_long_username_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Creating a tunnel whose authenticated username is too long returns 400, not 500."""
-    long_name = "a_very_long_username_exceeds_max"
+def test_route_create_tunnel_too_long_user_id_prefix_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Creating a tunnel whose authenticated user_id_prefix is too long returns 400, not 500."""
+    long_name = "a_very_long_user_id_prefix_here_x"
     client = _make_test_client(monkeypatch)
-    # Override the stub to return an UserAuth with an overly-long username,
+    # Override the stub to return an UserAuth with an overly-long user_id_prefix,
     # simulating a SuperTokens session whose user_id_prefix is longer than the
     # tunnel-naming limit.
     monkeypatch.setattr(
         app_mod,
         "_authenticate_supertokens",
-        lambda _token: UserAuth(username=long_name),
+        lambda _token: UserAuth(user_id_prefix=long_name),
     )
     resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     assert resp.status_code == 400
@@ -710,8 +710,8 @@ def test_route_create_tunnel_too_long_username_returns_400(monkeypatch: pytest.M
 
 def test_tunnel_component_too_long_error_message() -> None:
     with pytest.raises(TunnelComponentTooLongError) as exc_info:
-        raise TunnelComponentTooLongError("Username", "toolong", 5)
-    assert "Username" in str(exc_info.value)
+        raise TunnelComponentTooLongError("User ID prefix", "toolong", 5)
+    assert "User ID prefix" in str(exc_info.value)
     assert "toolong" in str(exc_info.value)
     assert "5" in str(exc_info.value)
 
@@ -736,7 +736,7 @@ class _FakeSession:
 def test_authenticate_supertokens_returns_user_auth_with_user_id_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A valid token returns UserAuth whose username is the first 16 hex chars of the user ID."""
+    """A valid token returns UserAuth whose user_id_prefix is the first 16 hex chars of the user ID."""
     user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
     monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
     result = _authenticate_supertokens(
@@ -745,7 +745,7 @@ def test_authenticate_supertokens_returns_user_auth_with_user_id_prefix(
         email_getter=lambda _user_id: "alice@example.com",
     )
     assert isinstance(result, UserAuth)
-    assert result.username == "a1b2c3d4e5f67890"
+    assert result.user_id_prefix == "a1b2c3d4e5f67890"
     assert result.email == "alice@example.com"
 
 
@@ -1903,7 +1903,7 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     # Verify host was marked as leased and the user-supplied host_name was
     # written to the row.
     assert backend.pool_rows[0].status == "leased"
-    assert backend.pool_rows[0].leased_to_user == _USER_STUB_USERNAME
+    assert backend.pool_rows[0].leased_to_user == _USER_STUB_USER_ID_PREFIX
     assert backend.pool_rows[0].host_name == "my-workspace"
 
 
@@ -2034,7 +2034,9 @@ def test_rename_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None
     """POST /hosts/{id}/rename updates the mutable host_name for the owning user."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000051"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000051"),
+        version="v0.1.0",
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     resp = client.post(
         "/hosts/00000000-0000-0000-0000-000000000051/rename",
@@ -2051,7 +2053,9 @@ def test_rename_host_rejects_invalid_name(monkeypatch: pytest.MonkeyPatch) -> No
     """POST /hosts/{id}/rename rejects a host_name that fails the SafeName regex (422)."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000052"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000052"),
+        version="v0.1.0",
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     original_name = backend.pool_rows[0].host_name
     resp = client.post(
@@ -2094,7 +2098,9 @@ def test_rename_host_404_when_not_leased(monkeypatch: pytest.MonkeyPatch) -> Non
     """POST /hosts/{id}/rename returns 404 when the requester owns the row but it is not leased."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_removing_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000054"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000054"),
+        version="v0.1.0",
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     resp = client.post(
         "/hosts/00000000-0000-0000-0000-000000000054/rename",
@@ -2109,7 +2115,9 @@ def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> Non
     """POST /hosts/{id}/release destroys the slice's lima VM and drops the row."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000042"),
+        version="v0.1.0",
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_user_headers())
     assert resp.status_code == 200
@@ -2125,7 +2133,7 @@ def test_release_host_idempotent_when_already_removing(monkeypatch: pytest.Monke
     backend.add_removing_host(
         host_id=UUID("00000000-0000-0000-0000-000000000077"),
         version="v0.1.0",
-        leased_to_user=_USER_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000077/release", headers=_user_headers())
     assert resp.status_code == 200
@@ -2144,7 +2152,9 @@ def test_release_host_fails_loudly_when_slice_teardown_fails(monkeypatch: pytest
     client, backend = _make_pool_test_client(monkeypatch)
     backend.slice_teardown_should_fail = True
     backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000099"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000099"),
+        version="v0.1.0",
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000099/release", headers=_user_headers())
     assert resp.status_code == 500
@@ -2180,7 +2190,7 @@ def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> Non
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000001"),
         version="v0.1.0",
-        leased_to_user=_USER_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
         agent_id="agent-aaa",
     )
     backend.add_leased_host(
@@ -2192,7 +2202,7 @@ def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> Non
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000003"),
         version="v0.1.0",
-        leased_to_user=_USER_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
         agent_id="agent-ccc",
     )
     resp = client.get("/hosts", headers=_user_headers())
@@ -2375,7 +2385,7 @@ def test_route_lease_host_returns_quota_403_at_workspace_cap(
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"),
         version="v0.1.0",
-        leased_to_user=_USER_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
     resp = client.post(
@@ -2407,7 +2417,7 @@ def test_route_release_host_works_for_unpaid_account(
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"),
         version="v0.1.0",
-        leased_to_user=_USER_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_user_headers())
@@ -2517,7 +2527,7 @@ def test_route_create_tunnel_is_not_gated_by_paid_list(
     backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
     resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     assert resp.status_code == 200
-    assert resp.json()["tunnel_name"] == f"{_USER_STUB_USERNAME}--agent1"
+    assert resp.json()["tunnel_name"] == f"{_USER_STUB_USER_ID_PREFIX}--agent1"
 
 
 def test_route_list_services_is_not_gated_by_paid_list(
@@ -2528,7 +2538,7 @@ def test_route_list_services_is_not_gated_by_paid_list(
     backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
     create_resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     assert create_resp.status_code == 200
-    list_resp = client.get(f"/tunnels/{_USER_STUB_USERNAME}--agent1/services", headers=_user_headers())
+    list_resp = client.get(f"/tunnels/{_USER_STUB_USER_ID_PREFIX}--agent1/services", headers=_user_headers())
     assert list_resp.status_code == 200
 
 
@@ -3447,19 +3457,19 @@ def test_initial_plan_unpaid_email_gets_explorer() -> None:
 
 def test_ensure_account_entitlements_copies_plan_values_and_is_idempotent() -> None:
     store = make_fake_entitlements_store()
-    first = app_mod.ensure_account_entitlements(user_id="user-1", username_prefix="prefix1", email="", store=store)
+    first = app_mod.ensure_account_entitlements(user_id="user-1", user_id_prefix="prefix1", email="", store=store)
     assert first.plan_name == "explorer"
     assert first.max_remote_workspaces == EXPLORER_PLAN_VALUES["max_remote_workspaces"]
     # A manual bump survives a second ensure (lazy creation never overwrites).
     store.update_entitlements("user-1", {"max_remote_workspaces": 7})
-    second = app_mod.ensure_account_entitlements(user_id="user-1", username_prefix="prefix1", email="", store=store)
+    second = app_mod.ensure_account_entitlements(user_id="user-1", user_id_prefix="prefix1", email="", store=store)
     assert second.max_remote_workspaces == 7
 
 
 def test_ensure_account_entitlements_raises_when_plan_not_seeded() -> None:
     store = InMemoryEntitlementsStore()
     with pytest.raises(app_mod.PlanNotFoundError):
-        app_mod.ensure_account_entitlements(user_id="user-1", username_prefix="p", email="", store=store)
+        app_mod.ensure_account_entitlements(user_id="user-1", user_id_prefix="p", email="", store=store)
 
 
 # ---------------------------------------------------------------------------
@@ -3815,7 +3825,7 @@ def test_route_get_account_reports_plan_entitlements_and_usage(monkeypatch: pyte
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"),
         version="v0.1.0",
-        leased_to_user=_USER_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USER_ID_PREFIX,
     )
     client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     litellm.users_by_id[_USER_STUB_USER_ID] = {
@@ -4110,7 +4120,7 @@ def _seed_sweep_row(
     _seed_entitlements_row(
         entitlements_store,
         user_id=user_id,
-        username_prefix=prefix,
+        user_id_prefix=prefix,
         max_total_bucket_bytes=max_total_bucket_bytes,
     )
 
@@ -4622,7 +4632,7 @@ def test_admin_sweep_endpoint_runs_scoped_sweep(monkeypatch: pytest.MonkeyPatch)
     st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
     account_user_id = st_backend.accounts_by_email["somebody@example.com"].user_id
     _seed_entitlements_row(
-        entitlements_store, user_id=account_user_id, username_prefix="sbprefix", max_total_bucket_bytes=100
+        entitlements_store, user_id=account_user_id, user_id_prefix="sbprefix", max_total_bucket_bytes=100
     )
     fake.buckets["sbprefix--data"] = {"name": "sbprefix--data"}
     token = fake.create_bucket_token("sbprefix--data", "readwrite", "mngr-r2:sbprefix--data:default")
@@ -4659,6 +4669,7 @@ def test_plans_migration_declares_all_quota_columns() -> None:
     migration_sql = migration_path.read_text().lower()
     assert "create table plans" in migration_sql
     assert "create table account_entitlements" in migration_sql
+    # The DB column keeps its legacy name; Python-side it is user_id_prefix.
     assert "username_prefix" in migration_sql
     assert "enforced_access" in migration_sql
     for column in app_mod.QUOTA_ENTITLEMENT_NAMES:

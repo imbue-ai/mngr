@@ -200,10 +200,10 @@ class TunnelNotFoundError(KeyError):
 
 
 class TunnelOwnershipError(PermissionError):
-    def __init__(self, tunnel_name: str, username: str) -> None:
+    def __init__(self, tunnel_name: str, user_id_prefix: str) -> None:
         self.tunnel_name = tunnel_name
-        self.username = username
-        super().__init__(f"User '{username}' does not own tunnel '{tunnel_name}'")
+        self.user_id_prefix = user_id_prefix
+        super().__init__(f"User '{user_id_prefix}' does not own tunnel '{tunnel_name}'")
 
 
 class ServiceNotFoundError(KeyError):
@@ -294,10 +294,10 @@ class R2BucketNotEmptyError(RuntimeError):
 class R2BucketOwnershipError(PermissionError):
     """Raised when a bucket name does not carry the caller's ownership prefix."""
 
-    def __init__(self, bucket_name: str, username: str) -> None:
+    def __init__(self, bucket_name: str, user_id_prefix: str) -> None:
         self.bucket_name = bucket_name
-        self.username = username
-        super().__init__(f"User '{username}' does not own bucket '{bucket_name}'")
+        self.user_id_prefix = user_id_prefix
+        super().__init__(f"User '{user_id_prefix}' does not own bucket '{bucket_name}'")
 
 
 class QuotaExceededError(RuntimeError):
@@ -447,7 +447,7 @@ class ServiceTokenInfo(BaseModel):
 
 
 class UserAuth(BaseModel):
-    username: str
+    user_id_prefix: str
     # Verified email associated with the SuperTokens user, looked up at auth
     # time so that paid-feature endpoints (host pool, LiteLLM keys) can gate
     # access against the ``paid_emails`` / ``paid_domains`` tables. ``None``
@@ -1272,7 +1272,7 @@ def cf_kv_ensure_namespace(client: httpx.Client, account_id: str, title: str) ->
 # ---------------------------------------------------------------------------
 
 
-_MAX_USERNAME_LENGTH = 22
+_MAX_USER_ID_PREFIX_LENGTH = 22
 _MAX_SERVICE_NAME_LENGTH = 21
 _AGENT_ID_PREFIX_LENGTH = 16
 
@@ -1287,11 +1287,11 @@ def truncate_agent_id(agent_id: str) -> str:
     return raw[:_AGENT_ID_PREFIX_LENGTH]
 
 
-def _validate_username(username: str) -> None:
-    if TUNNEL_NAME_SEP in username:
-        raise InvalidTunnelComponentError("Username", username, TUNNEL_NAME_SEP)
-    if len(username) > _MAX_USERNAME_LENGTH:
-        raise TunnelComponentTooLongError("Username", username, _MAX_USERNAME_LENGTH)
+def _validate_user_id_prefix(user_id_prefix: str) -> None:
+    if TUNNEL_NAME_SEP in user_id_prefix:
+        raise InvalidTunnelComponentError("User ID prefix", user_id_prefix, TUNNEL_NAME_SEP)
+    if len(user_id_prefix) > _MAX_USER_ID_PREFIX_LENGTH:
+        raise TunnelComponentTooLongError("User ID prefix", user_id_prefix, _MAX_USER_ID_PREFIX_LENGTH)
 
 
 def _validate_service_name(service_name: str) -> None:
@@ -1301,35 +1301,35 @@ def _validate_service_name(service_name: str) -> None:
         raise TunnelComponentTooLongError("Service name", service_name, _MAX_SERVICE_NAME_LENGTH)
 
 
-def make_tunnel_name(username: str, agent_id: str) -> str:
-    _validate_username(username)
+def make_tunnel_name(user_id_prefix: str, agent_id: str) -> str:
+    _validate_user_id_prefix(user_id_prefix)
     short_id = truncate_agent_id(agent_id)
-    return f"{username}{TUNNEL_NAME_SEP}{short_id}"
+    return f"{user_id_prefix}{TUNNEL_NAME_SEP}{short_id}"
 
 
-def make_hostname(service_name: str, agent_id: str, username: str, domain: str) -> str:
+def make_hostname(service_name: str, agent_id: str, user_id_prefix: str, domain: str) -> str:
     _validate_service_name(service_name)
     short_id = truncate_agent_id(agent_id)
-    return f"{service_name}--{short_id}--{username}.{domain}"
+    return f"{service_name}--{short_id}--{user_id_prefix}.{domain}"
 
 
-def extract_agent_id_prefix(tunnel_name: str, username: str) -> str:
+def extract_agent_id_prefix(tunnel_name: str, user_id_prefix: str) -> str:
     """Extract the truncated agent ID prefix from a tunnel name."""
-    prefix = f"{username}{TUNNEL_NAME_SEP}"
+    prefix = f"{user_id_prefix}{TUNNEL_NAME_SEP}"
     if not tunnel_name.startswith(prefix):
-        raise TunnelOwnershipError(tunnel_name, username)
+        raise TunnelOwnershipError(tunnel_name, user_id_prefix)
     return tunnel_name[len(prefix) :]
 
 
-def extract_service_name(hostname: str, agent_id_prefix: str, username: str, domain: str) -> str | None:
-    expected_suffix = f"--{agent_id_prefix}--{username}.{domain}"
+def extract_service_name(hostname: str, agent_id_prefix: str, user_id_prefix: str, domain: str) -> str | None:
+    expected_suffix = f"--{agent_id_prefix}--{user_id_prefix}.{domain}"
     if not hostname.endswith(expected_suffix):
         return None
     return hostname[: -len(expected_suffix)]
 
 
-def extract_username_from_tunnel_name(tunnel_name: str) -> str:
-    """Extract the username portion from a tunnel name."""
+def extract_user_id_prefix_from_tunnel_name(tunnel_name: str) -> str:
+    """Extract the user-id-prefix portion from a tunnel name."""
     parts = tunnel_name.split(TUNNEL_NAME_SEP, 1)
     return parts[0]
 
@@ -1623,9 +1623,9 @@ class ForwardingCtx:
         self.domain = domain
         self.allowed_idps = allowed_idps
 
-    def verify_ownership(self, tunnel_name: str, username: str) -> None:
-        if not tunnel_name.startswith(f"{username}{TUNNEL_NAME_SEP}"):
-            raise TunnelOwnershipError(tunnel_name, username)
+    def verify_ownership(self, tunnel_name: str, user_id_prefix: str) -> None:
+        if not tunnel_name.startswith(f"{user_id_prefix}{TUNNEL_NAME_SEP}"):
+            raise TunnelOwnershipError(tunnel_name, user_id_prefix)
 
     def get_tunnel_or_raise(self, tunnel_name: str) -> dict[str, Any]:
         tunnel = self.ops.get_tunnel_by_name(tunnel_name)
@@ -1642,19 +1642,19 @@ class ForwardingCtx:
 
     def create_tunnel(
         self,
-        username: str,
+        user_id_prefix: str,
         agent_id: str,
         default_auth_policy: AuthPolicy | None = None,
         # Applied as the tunnel's default policy only when no default is stored
         # yet (idempotent re-creates must not clobber a user-set default).
         fallback_auth_policy: AuthPolicy | None = None,
     ) -> TunnelInfo:
-        name = make_tunnel_name(username, agent_id)
+        name = make_tunnel_name(user_id_prefix, agent_id)
         existing = self.ops.get_tunnel_by_name(name)
         if existing is not None:
             tid = existing["id"]
             token = self.ops.get_tunnel_token(tid)
-            services = self._list_services(tid, name, username)
+            services = self._list_services(tid, name, user_id_prefix)
             # Update the default auth policy if provided (may have been missing
             # from the original creation or may need updating)
             if default_auth_policy is not None:
@@ -1678,8 +1678,8 @@ class ForwardingCtx:
 
         return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=[])
 
-    def list_tunnels(self, username: str) -> list[TunnelInfo]:
-        prefix = f"{username}{TUNNEL_NAME_SEP}"
+    def list_tunnels(self, user_id_prefix: str) -> list[TunnelInfo]:
+        prefix = f"{user_id_prefix}{TUNNEL_NAME_SEP}"
         tunnels = self.ops.list_tunnels(include_prefix=prefix)
         result: list[TunnelInfo] = []
         for t in tunnels:
@@ -1687,15 +1687,15 @@ class ForwardingCtx:
             if not name.startswith(prefix):
                 continue
             tid = t["id"]
-            services = self._list_services(tid, name, username)
+            services = self._list_services(tid, name, user_id_prefix)
             result.append(TunnelInfo(tunnel_name=name, tunnel_id=tid, services=services))
         return result
 
-    def get_tunnel_for_agent(self, username: str, agent_id: str) -> TunnelInfo | None:
+    def get_tunnel_for_agent(self, user_id_prefix: str, agent_id: str) -> TunnelInfo | None:
         """Resolve the caller's tunnel for a single agent in O(1) Cloudflare calls.
 
         minds always knows the exact tunnel name it wants
-        (``<username>--<agent-prefix>``), so this resolves the tunnel via
+        (``<user_id_prefix>--<agent-prefix>``), so this resolves the tunnel via
         Cloudflare's server-side name filter (:func:`cf_get_tunnel_by_name`)
         plus a single config fetch -- 2 Cloudflare calls regardless of how
         many tunnels the account owns. Contrast with :meth:`list_tunnels`,
@@ -1703,16 +1703,16 @@ class ForwardingCtx:
         one's config (O(n) calls). Returns ``None`` when the user has no
         tunnel for the agent yet.
         """
-        name = make_tunnel_name(username, agent_id)
+        name = make_tunnel_name(user_id_prefix, agent_id)
         tunnel = self.ops.get_tunnel_by_name(name)
         if tunnel is None:
             return None
         tid = tunnel["id"]
-        services = self._list_services(tid, name, username)
+        services = self._list_services(tid, name, user_id_prefix)
         return TunnelInfo(tunnel_name=name, tunnel_id=tid, services=services)
 
-    def delete_tunnel(self, tunnel_name: str, username: str) -> None:
-        self.verify_ownership(tunnel_name, username)
+    def delete_tunnel(self, tunnel_name: str, user_id_prefix: str) -> None:
+        self.verify_ownership(tunnel_name, user_id_prefix)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
         config = self.ops.get_tunnel_config(tid)
@@ -1728,7 +1728,7 @@ class ForwardingCtx:
     def add_service(
         self,
         tunnel_name: str,
-        username: str,
+        user_id_prefix: str,
         service_name: str,
         service_url: str,
         # The Access policy applied when the tunnel has no stored default --
@@ -1743,11 +1743,11 @@ class ForwardingCtx:
         # always lands in the same call that brings the service up.
         service_policy: AuthPolicy | None = None,
     ) -> ServiceInfo:
-        self.verify_ownership(tunnel_name, username)
+        self.verify_ownership(tunnel_name, user_id_prefix)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
-        agent_id = extract_agent_id_prefix(tunnel_name, username)
-        hostname = make_hostname(service_name, agent_id, username, self.domain)
+        agent_id = extract_agent_id_prefix(tunnel_name, user_id_prefix)
+        hostname = make_hostname(service_name, agent_id, user_id_prefix, self.domain)
 
         # Resolve the Access policy up front and create the Access Application
         # BEFORE any exposure exists (DNS/ingress). A failure here aborts the
@@ -1829,12 +1829,12 @@ class ForwardingCtx:
 
         return ServiceInfo(service_name=service_name, hostname=hostname, service_url=service_url)
 
-    def remove_service(self, tunnel_name: str, username: str, service_name: str) -> None:
-        self.verify_ownership(tunnel_name, username)
+    def remove_service(self, tunnel_name: str, user_id_prefix: str, service_name: str) -> None:
+        self.verify_ownership(tunnel_name, user_id_prefix)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
-        agent_id = extract_agent_id_prefix(tunnel_name, username)
-        hostname = make_hostname(service_name, agent_id, username, self.domain)
+        agent_id = extract_agent_id_prefix(tunnel_name, user_id_prefix)
+        hostname = make_hostname(service_name, agent_id, user_id_prefix, self.domain)
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         new_rules = [r for r in rules if r.get("hostname") != hostname]
@@ -1855,20 +1855,20 @@ class ForwardingCtx:
         """Set the default auth policy for a tunnel in KV."""
         self.ops.kv_put(tunnel_name, policy.model_dump_json())
 
-    def get_service_auth(self, tunnel_name: str, username: str, service_name: str) -> AuthPolicy | None:
+    def get_service_auth(self, tunnel_name: str, user_id_prefix: str, service_name: str) -> AuthPolicy | None:
         """Get the auth policy for a specific service from its Access Application."""
-        agent_id = extract_agent_id_prefix(tunnel_name, username)
-        hostname = make_hostname(service_name, agent_id, username, self.domain)
+        agent_id = extract_agent_id_prefix(tunnel_name, user_id_prefix)
+        hostname = make_hostname(service_name, agent_id, user_id_prefix, self.domain)
         access_app = self.ops.get_access_app_by_domain(hostname)
         if access_app is None:
             return None
         policies = self.ops.list_access_policies(access_app["id"])
         return cf_policies_to_auth_policy(policies)
 
-    def set_service_auth(self, tunnel_name: str, username: str, service_name: str, policy: AuthPolicy) -> None:
+    def set_service_auth(self, tunnel_name: str, user_id_prefix: str, service_name: str, policy: AuthPolicy) -> None:
         """Set the auth policy for a specific service on its Access Application."""
-        agent_id = extract_agent_id_prefix(tunnel_name, username)
-        hostname = make_hostname(service_name, agent_id, username, self.domain)
+        agent_id = extract_agent_id_prefix(tunnel_name, user_id_prefix)
+        hostname = make_hostname(service_name, agent_id, user_id_prefix, self.domain)
         access_app = self.ops.get_access_app_by_domain(hostname)
         if access_app is None:
             access_app = self.ops.create_access_app(hostname, f"cf-fwd-{service_name}", allowed_idps=self.allowed_idps)
@@ -1880,21 +1880,21 @@ class ForwardingCtx:
         for cf_policy in policy_to_cf_rules(policy):
             self.ops.create_access_policy(access_app["id"], cf_policy)
 
-    def list_services(self, tunnel_name: str, username: str) -> list[ServiceInfo]:
+    def list_services(self, tunnel_name: str, user_id_prefix: str) -> list[ServiceInfo]:
         """List all services on a tunnel."""
-        self.verify_ownership(tunnel_name, username)
+        self.verify_ownership(tunnel_name, user_id_prefix)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
-        return self._list_services(tunnel["id"], tunnel_name, username)
+        return self._list_services(tunnel["id"], tunnel_name, user_id_prefix)
 
-    def _list_services(self, tunnel_id: str, tunnel_name: str, username: str) -> list[ServiceInfo]:
-        agent_id = extract_agent_id_prefix(tunnel_name, username)
+    def _list_services(self, tunnel_id: str, tunnel_name: str, user_id_prefix: str) -> list[ServiceInfo]:
+        agent_id = extract_agent_id_prefix(tunnel_name, user_id_prefix)
         config = self.ops.get_tunnel_config(tunnel_id)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         services: list[ServiceInfo] = []
         for rule in rules:
             hostname = rule.get("hostname", "")
             svc_url = rule.get("service", "")
-            svc_name = extract_service_name(hostname, agent_id, username, self.domain)
+            svc_name = extract_service_name(hostname, agent_id, user_id_prefix, self.domain)
             if svc_name is not None:
                 services.append(ServiceInfo(service_name=svc_name, hostname=hostname, service_url=svc_url))
         return services
@@ -1918,13 +1918,13 @@ class ForwardingCtx:
         except (CloudflareApiError, httpx.HTTPError) as exc:
             logger.warning("Failed to delete KV entry for %s: %s", key, exc)
 
-    def create_service_token(self, tunnel_name: str, username: str, name: str) -> ServiceTokenInfo:
+    def create_service_token(self, tunnel_name: str, user_id_prefix: str, name: str) -> ServiceTokenInfo:
         """Create a Cloudflare Access service token and add it to all existing services on the tunnel.
 
         The service token can be used for programmatic access via
         CF-Access-Client-Id and CF-Access-Client-Secret headers.
         """
-        self.verify_ownership(tunnel_name, username)
+        self.verify_ownership(tunnel_name, user_id_prefix)
         result = self.ops.create_service_token(name)
         token_id = result["id"]
         client_id = result["client_id"]
@@ -1982,7 +1982,7 @@ def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
 
     Supports two Bearer-token auth methods:
     1. Base64-encoded Cloudflare tunnel token (held by the agent, scoped to one tunnel).
-    2. SuperTokens JWT (a signed-in user's session; user_id_prefix is the username).
+    2. SuperTokens JWT (a signed-in user's session, identified by their user-id prefix).
     """
     auth_header = request.headers.get("authorization", "")
 
@@ -2031,10 +2031,11 @@ def _authenticate_tunnel_token(token: str, ops: CloudflareOps) -> TunnelTokenAut
 _USER_ID_PREFIX_LENGTH = 16
 
 
-def derive_username_prefix(user_id: str) -> str:
+def derive_user_id_prefix(user_id: str) -> str:
     """The 16-hex prefix of a SuperTokens user id, used to namespace tunnels/leases/buckets.
 
-    Also the ``account_entitlements.username_prefix`` lookup key, so every
+    Also the ``account_entitlements.username_prefix`` lookup key (the column keeps
+    its legacy name), so every
     caller must derive it identically -- always go through this helper.
     """
     return user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
@@ -2081,7 +2082,7 @@ def _authenticate_supertokens(
     session_getter: Callable[..., Any] = get_session_without_request_response,
     email_getter: Callable[[str], str | None] = _default_email_getter,
 ) -> UserAuth:
-    """Validate a SuperTokens JWT access token. Returns UserAuth with user_id_prefix as username."""
+    """Validate a SuperTokens JWT access token. Returns UserAuth with user_id_prefix as user_id_prefix."""
     connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
     if not connection_uri:
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
@@ -2106,7 +2107,7 @@ def _authenticate_supertokens(
         raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
 
     user_id = session.get_user_id()
-    user_id_prefix = derive_username_prefix(user_id)
+    user_id_prefix = derive_user_id_prefix(user_id)
 
     # Resolve the verified email live from the core rather than trusting the
     # token's cached email-verification claim. That claim is baked into the
@@ -2121,7 +2122,7 @@ def _authenticate_supertokens(
     if email is None:
         raise HTTPException(status_code=401, detail="Email not verified")
 
-    return UserAuth(username=user_id_prefix, email=email)
+    return UserAuth(user_id_prefix=user_id_prefix, email=email)
 
 
 def _get_user_id_from_access_token(token: str) -> str:
@@ -2159,14 +2160,14 @@ def require_user_auth(auth: AuthResult) -> UserAuth:
 
 
 def require_tunnel_access(auth: AuthResult, tunnel_name: str) -> str:
-    """Require access to a specific tunnel. Returns the username.
+    """Require access to a specific tunnel. Returns the user_id_prefix.
     A signed-in user can access any of their own tunnels. A tunnel token can
     only access the one tunnel it belongs to."""
     if isinstance(auth, UserAuth):
-        return auth.username
+        return auth.user_id_prefix
     if auth.tunnel_name != tunnel_name:
         raise HTTPException(status_code=403, detail=f"Token does not grant access to tunnel '{tunnel_name}'")
-    return extract_username_from_tunnel_name(tunnel_name)
+    return extract_user_id_prefix_from_tunnel_name(tunnel_name)
 
 
 # Env var holding the cache TTL (in seconds) for paid-status lookups. The
@@ -2396,6 +2397,9 @@ _PREEXISTING_ACCOUNT_CUTOFF_EPOCH_MS = 1784592000000
 
 _QUOTA_COLUMNS_SQL = ", ".join(QUOTA_ENTITLEMENT_NAMES)
 _PLAN_COLUMNS_SQL = f"plan_name, {_QUOTA_COLUMNS_SQL}"
+# The DB column for the user-id prefix keeps its legacy name ``username_prefix``
+# (renaming a column needs a migration); Python-side the value is always called
+# ``user_id_prefix``. The row-dict builders below translate between the two.
 _ENTITLEMENT_COLUMNS_SQL = f"user_id, username_prefix, plan_name, {_QUOTA_COLUMNS_SQL}"
 
 
@@ -2403,7 +2407,7 @@ class AccountEntitlements(PlanEntitlements):
     """One account's entitlement row: identity fields plus the quota values."""
 
     user_id: str = Field(description="Full SuperTokens user id (row key)")
-    username_prefix: str = Field(description="16-hex user-id prefix used to namespace tunnels/leases/buckets")
+    user_id_prefix: str = Field(description="16-hex user-id prefix used to namespace tunnels/leases/buckets")
     plan_name: str = Field(description="The plan this row was last assigned from")
 
     def quota_values(self) -> PlanEntitlements:
@@ -2433,7 +2437,7 @@ class EntitlementsStore(Protocol):
     def get_plan(self, plan_name: str) -> dict[str, Any] | None: ...
     def list_plans(self) -> list[dict[str, Any]]: ...
     def get_entitlements(self, user_id: str) -> dict[str, Any] | None: ...
-    def get_entitlements_by_prefix(self, username_prefix: str) -> dict[str, Any] | None: ...
+    def get_entitlements_by_prefix(self, user_id_prefix: str) -> dict[str, Any] | None: ...
     def insert_entitlements_if_absent(self, row: dict[str, Any]) -> None: ...
     def update_entitlements(self, user_id: str, values: dict[str, Any]) -> None: ...
 
@@ -2447,7 +2451,7 @@ class PostgresEntitlementsStore:
     def _entitlements_row_to_dict(self, row: tuple[Any, ...]) -> dict[str, Any]:
         return {
             "user_id": row[0],
-            "username_prefix": row[1],
+            "user_id_prefix": row[1],
             "plan_name": row[2],
             **_quota_values_from_row(row, 3),
         }
@@ -2485,13 +2489,13 @@ class PostgresEntitlementsStore:
             conn.close()
         return self._entitlements_row_to_dict(row) if row is not None else None
 
-    def get_entitlements_by_prefix(self, username_prefix: str) -> dict[str, Any] | None:
+    def get_entitlements_by_prefix(self, user_id_prefix: str) -> dict[str, Any] | None:
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT {_ENTITLEMENT_COLUMNS_SQL} FROM account_entitlements WHERE username_prefix = %s",
-                    (username_prefix,),
+                    (user_id_prefix,),
                 )
                 row = cur.fetchone()
         finally:
@@ -2499,8 +2503,16 @@ class PostgresEntitlementsStore:
         return self._entitlements_row_to_dict(row) if row is not None else None
 
     def insert_entitlements_if_absent(self, row: dict[str, Any]) -> None:
-        column_names = ["user_id", "username_prefix", "plan_name", *QUOTA_ENTITLEMENT_NAMES]
-        placeholders = ", ".join(["%s"] * len(column_names))
+        # (row key, DB column) pairs -- the user-id prefix row key maps onto
+        # the column's legacy ``username_prefix`` name.
+        key_column_pairs = [
+            ("user_id", "user_id"),
+            ("user_id_prefix", "username_prefix"),
+            ("plan_name", "plan_name"),
+            *((name, name) for name in QUOTA_ENTITLEMENT_NAMES),
+        ]
+        column_names = [column for _key, column in key_column_pairs]
+        placeholders = ", ".join(["%s"] * len(key_column_pairs))
         conn = _get_pool_db_connection()
         try:
             with conn:
@@ -2508,7 +2520,7 @@ class PostgresEntitlementsStore:
                     cur.execute(
                         f"INSERT INTO account_entitlements ({', '.join(column_names)}) "
                         f"VALUES ({placeholders}) ON CONFLICT (user_id) DO NOTHING",
-                        tuple(row[name] for name in column_names),
+                        tuple(row[key] for key, _column in key_column_pairs),
                     )
         finally:
             conn.close()
@@ -2574,7 +2586,7 @@ def _initial_plan_name_for_user(
 
 def ensure_account_entitlements(
     user_id: str,
-    username_prefix: str,
+    user_id_prefix: str,
     email: str,
     store: "EntitlementsStore | None" = None,
 ) -> AccountEntitlements:
@@ -2596,7 +2608,7 @@ def ensure_account_entitlements(
         raise PlanNotFoundError(plan_name)
     row = {
         "user_id": user_id,
-        "username_prefix": username_prefix,
+        "user_id_prefix": user_id_prefix,
         "plan_name": plan_name,
         **{name: plan[name] for name in QUOTA_ENTITLEMENT_NAMES},
     }
@@ -2611,7 +2623,7 @@ def resolve_entitlements_for_user(request: Request, user: UserAuth) -> AccountEn
     """Resolve (lazily creating) the entitlements row for a user-authenticated request."""
     token = request.headers.get("authorization", "")[7:]
     user_id = _get_user_id_from_access_token(token)
-    return ensure_account_entitlements(user_id=user_id, username_prefix=user.username, email=user.email or "")
+    return ensure_account_entitlements(user_id=user_id, user_id_prefix=user.user_id_prefix, email=user.email or "")
 
 
 def raise_quota_exceeded(entitlement: str, limit: float, current: float, noun: str) -> NoReturn:
@@ -3200,18 +3212,18 @@ def get_version() -> dict[str, str]:
     }
 
 
-def count_user_tunnels(ops: CloudflareOps, username_prefix: str) -> int:
+def count_user_tunnels(ops: CloudflareOps, user_id_prefix: str) -> int:
     """Count the user's tunnels.
 
     Shared by the tunnel quota check (``POST /tunnels``) and the ``/account``
     usage display so the two can never drift.
     """
-    prefix = f"{username_prefix}{TUNNEL_NAME_SEP}"
+    prefix = f"{user_id_prefix}{TUNNEL_NAME_SEP}"
     return len([t for t in ops.list_tunnels(include_prefix=prefix) if t["name"].startswith(prefix)])
 
 
 def enforce_tunnel_quota_for_new_tunnel(
-    ops: CloudflareOps, username: str, tunnel_name: str, entitlements: AccountEntitlements
+    ops: CloudflareOps, user_id_prefix: str, tunnel_name: str, entitlements: AccountEntitlements
 ) -> None:
     """Refuse creating ``tunnel_name`` when it does not exist yet and the account is at ``max_tunnels``.
 
@@ -3222,7 +3234,7 @@ def enforce_tunnel_quota_for_new_tunnel(
     """
     if ops.get_tunnel_by_name(tunnel_name) is not None:
         return
-    current = count_user_tunnels(ops, username)
+    current = count_user_tunnels(ops, user_id_prefix)
     if current >= entitlements.max_tunnels:
         raise_quota_exceeded("max_tunnels", entitlements.max_tunnels, current, "tunnels")
 
@@ -3243,11 +3255,11 @@ def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, obje
         entitlements = resolve_entitlements_for_user(request, user)
         if body.default_auth_policy is not None:
             validate_auth_policy_has_identity(body.default_auth_policy)
-        tunnel_name = make_tunnel_name(user.username, body.agent_id)
-        enforce_tunnel_quota_for_new_tunnel(ctx.ops, user.username, tunnel_name, entitlements)
+        tunnel_name = make_tunnel_name(user.user_id_prefix, body.agent_id)
+        enforce_tunnel_quota_for_new_tunnel(ctx.ops, user.user_id_prefix, tunnel_name, entitlements)
         fallback = owner_email_auth_policy(user.email) if user.email else None
         return ctx.create_tunnel(
-            user.username,
+            user.user_id_prefix,
             body.agent_id,
             default_auth_policy=body.default_auth_policy,
             fallback_auth_policy=fallback,
@@ -3260,7 +3272,7 @@ def list_tunnels(request: Request) -> list[dict[str, object]]:
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
-        return [t.model_dump() for t in get_ctx().list_tunnels(user.username)]
+        return [t.model_dump() for t in get_ctx().list_tunnels(user.user_id_prefix)]
 
 
 @web_app.get("/tunnels/by-agent/{agent_id}")
@@ -3284,7 +3296,7 @@ def get_tunnel_for_agent(request: Request, agent_id: str) -> dict[str, object] |
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
-        tunnel = get_ctx().get_tunnel_for_agent(user.username, agent_id)
+        tunnel = get_ctx().get_tunnel_for_agent(user.user_id_prefix, agent_id)
         return tunnel.model_dump() if tunnel is not None else None
 
 
@@ -3301,7 +3313,7 @@ def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
         try:
-            get_ctx().delete_tunnel(tunnel_name, user.username)
+            get_ctx().delete_tunnel(tunnel_name, user.user_id_prefix)
         except HTTPException as exc:
             if exc.status_code == 404:
                 return {"status": "already_deleted"}
@@ -3321,7 +3333,7 @@ def _service_quota_and_owner_email(request: Request, auth: AuthResult, tunnel_na
     if isinstance(auth, UserAuth):
         entitlements = resolve_entitlements_for_user(request, auth)
         return entitlements.max_services_per_tunnel, auth.email
-    prefix = extract_username_from_tunnel_name(tunnel_name)
+    prefix = extract_user_id_prefix_from_tunnel_name(tunnel_name)
     store = get_entitlements_store()
     row = store.get_entitlements_by_prefix(prefix)
     if row is not None:
@@ -3359,13 +3371,13 @@ def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> 
     with handle_endpoint_errors():
         ctx = get_ctx()
         auth = authenticate_request(request, ctx.ops)
-        username = require_tunnel_access(auth, tunnel_name)
+        user_id_prefix = require_tunnel_access(auth, tunnel_name)
         limit, owner_email = _service_quota_and_owner_email(request, auth, tunnel_name)
-        enforce_service_quota(ctx.list_services(tunnel_name, username), body.service_name, limit)
+        enforce_service_quota(ctx.list_services(tunnel_name, user_id_prefix), body.service_name, limit)
         fallback = owner_email_auth_policy(owner_email) if owner_email else None
         return ctx.add_service(
             tunnel_name,
-            username,
+            user_id_prefix,
             body.service_name,
             body.service_url,
             fallback_policy=fallback,
@@ -3377,8 +3389,8 @@ def remove_service(request: Request, tunnel_name: str, service_name: str) -> dic
     """Remove a service from a tunnel. Works with both user and tunnel-token auth."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        username = require_tunnel_access(auth, tunnel_name)
-        get_ctx().remove_service(tunnel_name, username, service_name)
+        user_id_prefix = require_tunnel_access(auth, tunnel_name)
+        get_ctx().remove_service(tunnel_name, user_id_prefix, service_name)
         return {"status": "deleted"}
 
 
@@ -3387,8 +3399,8 @@ def list_services(request: Request, tunnel_name: str) -> list[dict[str, object]]
     """List services on a tunnel. Works with both user and tunnel-token auth."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        username = require_tunnel_access(auth, tunnel_name)
-        return [s.model_dump() for s in get_ctx().list_services(tunnel_name, username)]
+        user_id_prefix = require_tunnel_access(auth, tunnel_name)
+        return [s.model_dump() for s in get_ctx().list_services(tunnel_name, user_id_prefix)]
 
 
 @web_app.get("/tunnels/{tunnel_name}/auth")
@@ -3420,7 +3432,7 @@ def get_service_auth(request: Request, tunnel_name: str, service_name: str) -> d
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
-        policy = get_ctx().get_service_auth(tunnel_name, user.username, service_name)
+        policy = get_ctx().get_service_auth(tunnel_name, user.user_id_prefix, service_name)
         if policy is None:
             return {"rules": []}
         return policy.model_dump()
@@ -3434,7 +3446,7 @@ def create_service_token_endpoint(
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
-        token = get_ctx().create_service_token(tunnel_name, user.username, body.name)
+        token = get_ctx().create_service_token(tunnel_name, user.user_id_prefix, body.name)
         return token.model_dump()
 
 
@@ -3454,7 +3466,7 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
         validate_auth_policy_has_identity(body)
-        get_ctx().set_service_auth(tunnel_name, user.username, service_name, body)
+        get_ctx().set_service_auth(tunnel_name, user.user_id_prefix, service_name, body)
         return {"status": "updated"}
 
 
@@ -3480,11 +3492,11 @@ def enable_sharing_endpoint(request: Request, body: EnableSharingRequest) -> dic
         user = require_user_auth(auth)
         entitlements = resolve_entitlements_for_user(request, user)
         validate_auth_policy_has_identity(body.auth_policy)
-        tunnel_name = make_tunnel_name(user.username, body.agent_id)
-        enforce_tunnel_quota_for_new_tunnel(ctx.ops, user.username, tunnel_name, entitlements)
+        tunnel_name = make_tunnel_name(user.user_id_prefix, body.agent_id)
+        enforce_tunnel_quota_for_new_tunnel(ctx.ops, user.user_id_prefix, tunnel_name, entitlements)
         fallback = owner_email_auth_policy(user.email) if user.email else None
         tunnel_info = ctx.create_tunnel(
-            user.username,
+            user.user_id_prefix,
             body.agent_id,
             default_auth_policy=None,
             fallback_auth_policy=fallback,
@@ -3494,7 +3506,7 @@ def enable_sharing_endpoint(request: Request, body: EnableSharingRequest) -> dic
         enforce_service_quota(tunnel_info.services, body.service_name, entitlements.max_services_per_tunnel)
         service = ctx.add_service(
             tunnel_name,
-            user.username,
+            user.user_id_prefix,
             body.service_name,
             body.service_url,
             fallback_policy=fallback,
@@ -3529,8 +3541,8 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                     # Serialize this user's leases for the duration of the
                     # transaction, then enforce the workspace quota. The
                     # advisory lock releases automatically at commit/rollback.
-                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (user.username,))
-                    cur.execute(_COUNT_LEASED_HOSTS_SQL, (user.username,))
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (user.user_id_prefix,))
+                    cur.execute(_COUNT_LEASED_HOSTS_SQL, (user.user_id_prefix,))
                     count_row = cur.fetchone()
                     leased_count = int(count_row[0]) if count_row is not None else 0
                     if leased_count >= entitlements.max_remote_workspaces:
@@ -3627,7 +3639,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                     cur.execute(
                         "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, "
                         "leased_at = NOW(), host_name = %s WHERE id = %s",
-                        (user.username, body.host_name, host_db_id),
+                        (user.user_id_prefix, body.host_name, host_db_id),
                     )
         finally:
             conn.close()
@@ -3693,7 +3705,7 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 ) = row
                 # Ownership check first: we don't want to leak a status
                 # signal to other users via the response code.
-                if leased_to_user != user.username:
+                if leased_to_user != user.user_id_prefix:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
                 # Only a leased or already-removing row is eligible for
                 # cleanup; anything else is treated as already released.
@@ -3764,7 +3776,7 @@ def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> 
                     raise HTTPException(status_code=404, detail="No such host")
                 leased_to_user, status = row
                 # Ownership check first, to avoid leaking a status signal.
-                if leased_to_user != user.username:
+                if leased_to_user != user.user_id_prefix:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
                 if status != "leased":
                     raise HTTPException(status_code=404, detail="Host is not currently leased")
@@ -3792,7 +3804,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
                     "host_name, attributes, leased_at, outer_host_public_key, container_host_public_key "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
-                    (user.username,),
+                    (user.user_id_prefix,),
                 )
                 rows = cur.fetchall()
         finally:
@@ -4218,20 +4230,20 @@ def _validate_r2_bucket_name(name: str) -> None:
         raise InvalidR2BucketNameError(name)
 
 
-def bucket_owner_prefix(username: str) -> str:
-    return f"{username}{_R2_BUCKET_NAME_SEP}"
+def bucket_owner_prefix(user_id_prefix: str) -> str:
+    return f"{user_id_prefix}{_R2_BUCKET_NAME_SEP}"
 
 
-def make_bucket_name(username: str, short_name: str) -> str:
+def make_bucket_name(user_id_prefix: str, short_name: str) -> str:
     """Derive the full R2 bucket name from the owner prefix and the user's short name."""
-    name = f"{bucket_owner_prefix(username)}{slugify_r2_name(short_name)}"
+    name = f"{bucket_owner_prefix(user_id_prefix)}{slugify_r2_name(short_name)}"
     _validate_r2_bucket_name(name)
     return name
 
 
-def verify_bucket_ownership(bucket_name: str, username: str) -> None:
-    if not bucket_name.startswith(bucket_owner_prefix(username)):
-        raise R2BucketOwnershipError(bucket_name, username)
+def verify_bucket_ownership(bucket_name: str, user_id_prefix: str) -> None:
+    if not bucket_name.startswith(bucket_owner_prefix(user_id_prefix)):
+        raise R2BucketOwnershipError(bucket_name, user_id_prefix)
 
 
 def r2_s3_endpoint(account_id: str) -> str:
@@ -4405,6 +4417,8 @@ _R2_CLEANUP_GRANT_EXPIRY_MINUTES: Final = 60
 _R2_CLEANUP_GRANT_FAILED_BUDGET: Final = 5
 _R2_CLEANUP_GRANT_WINDOW_HOURS: Final = 24
 
+# As with account_entitlements, the DB column keeps the legacy name
+# ``username_prefix`` while the Python-side row key is ``user_id_prefix``.
 _R2_GRANT_COLUMNS = "grant_id, user_id, username_prefix, baseline_bytes, granted_at, expires_at, settled_at, settled_bytes, is_decreased"
 
 
@@ -4412,7 +4426,7 @@ def _r2_grant_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
     return {
         "grant_id": int(row[0]),
         "user_id": row[1],
-        "username_prefix": row[2],
+        "user_id_prefix": row[2],
         "baseline_bytes": int(row[3]),
         "granted_at": str(row[4]),
         "expires_at": str(row[5]),
@@ -4426,7 +4440,7 @@ class GrantStore(Protocol):
     """Abstraction over the r2_cleanup_grants table so endpoints are unit-testable."""
 
     def create_grant(
-        self, user_id: str, username_prefix: str, baseline_bytes: int, expiry_minutes: int
+        self, user_id: str, user_id_prefix: str, baseline_bytes: int, expiry_minutes: int
     ) -> dict[str, Any]: ...
     def get_active_grant(self, user_id: str) -> dict[str, Any] | None: ...
     def list_unsettled_grants(self, user_id: str) -> list[dict[str, Any]]: ...
@@ -4439,7 +4453,7 @@ class PostgresGrantStore:
     """GrantStore backed by the connector's existing Neon DB (all timestamps are DB NOW())."""
 
     def create_grant(
-        self, user_id: str, username_prefix: str, baseline_bytes: int, expiry_minutes: int
+        self, user_id: str, user_id_prefix: str, baseline_bytes: int, expiry_minutes: int
     ) -> dict[str, Any]:
         conn = _get_pool_db_connection()
         try:
@@ -4448,7 +4462,7 @@ class PostgresGrantStore:
                     cur.execute(
                         "INSERT INTO r2_cleanup_grants (user_id, username_prefix, baseline_bytes, expires_at) "
                         f"VALUES (%s, %s, %s, NOW() + make_interval(mins => %s)) RETURNING {_R2_GRANT_COLUMNS}",
-                        (user_id, username_prefix, baseline_bytes, expiry_minutes),
+                        (user_id, user_id_prefix, baseline_bytes, expiry_minutes),
                     )
                     row = cur.fetchone()
         finally:
@@ -4557,14 +4571,14 @@ def _r2_enforcement_lock(owner_user_id: str) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def _list_owned_buckets(ops: CloudflareOps, username: str) -> list[dict[str, Any]]:
+def _list_owned_buckets(ops: CloudflareOps, user_id_prefix: str) -> list[dict[str, Any]]:
     """List the caller's buckets: R2 name_contains filter, then re-verify the prefix in code."""
-    prefix = bucket_owner_prefix(username)
+    prefix = bucket_owner_prefix(user_id_prefix)
     return [b for b in ops.list_buckets(name_contains=prefix) if str(b.get("name", "")).startswith(prefix)]
 
 
-def _owned_bucket_exists(ops: CloudflareOps, username: str, full_name: str) -> bool:
-    return any(b.get("name") == full_name for b in _list_owned_buckets(ops, username))
+def _owned_bucket_exists(ops: CloudflareOps, user_id_prefix: str, full_name: str) -> bool:
+    return any(b.get("name") == full_name for b in _list_owned_buckets(ops, user_id_prefix))
 
 
 # Bound on simultaneous per-bucket usage REST calls. Reads were previously
@@ -4599,14 +4613,14 @@ def _read_bucket_usage_bytes_concurrently(
         return [future.result() for future in futures]
 
 
-def _measure_live_owner_usage_bytes(ops: CloudflareOps, username_prefix: str) -> int:
+def _measure_live_owner_usage_bytes(ops: CloudflareOps, user_id_prefix: str) -> int:
     """Sum the owner's bucket bytes via the real-time REST usage endpoint.
 
     Raises :class:`CloudflareApiError` / ``httpx.HTTPError`` on any failed
     read -- callers decide whether that fails open (sweep, creation gate) or
     fails the request (grant baseline, recheck).
     """
-    bucket_names = [str(bucket.get("name", "")) for bucket in _list_owned_buckets(ops, username_prefix)]
+    bucket_names = [str(bucket.get("name", "")) for bucket in _list_owned_buckets(ops, user_id_prefix)]
     total_bytes = 0
     for result in _read_bucket_usage_bytes_concurrently(ops, bucket_names):
         if isinstance(result, (CloudflareApiError, httpx.HTTPError)):
@@ -4620,14 +4634,16 @@ def _is_owner_enforced_over_quota(store: KeyStore, owner_user_id: str) -> bool:
     return any(row.get("enforced_access") == "read" for row in store.list_keys(owner_user_id, None))
 
 
-def _check_storage_quota_for_new_bucket(ops: CloudflareOps, username: str, entitlements: AccountEntitlements) -> None:
+def _check_storage_quota_for_new_bucket(
+    ops: CloudflareOps, user_id_prefix: str, entitlements: AccountEntitlements
+) -> None:
     """Refuse bucket creation when the owner's live storage usage is already over quota.
 
     A failed usage read fails open (creation proceeds with a warning),
     consistent with the sweep's missing-data-never-downgrades rule.
     """
     try:
-        live_bytes = _measure_live_owner_usage_bytes(ops, username)
+        live_bytes = _measure_live_owner_usage_bytes(ops, user_id_prefix)
     except (CloudflareApiError, httpx.HTTPError) as exc:
         logger.warning("Skipped the storage-quota check for bucket creation (usage read failed): %s", exc)
         return
@@ -4715,13 +4731,13 @@ def create_bucket_endpoint(request: Request, body: CreateBucketRequest) -> dict[
         entitlements = resolve_entitlements_for_user(request, user)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
-        full_name = make_bucket_name(user.username, body.name)
-        owned = _list_owned_buckets(ops, user.username)
+        full_name = make_bucket_name(user.user_id_prefix, body.name)
+        owned = _list_owned_buckets(ops, user.user_id_prefix)
         if any(b.get("name") == full_name for b in owned):
             raise R2BucketExistsError(full_name)
         if len(owned) >= entitlements.max_buckets:
             raise_quota_exceeded("max_buckets", entitlements.max_buckets, len(owned), "buckets")
-        _check_storage_quota_for_new_bucket(ops, user.username, entitlements)
+        _check_storage_quota_for_new_bucket(ops, user.user_id_prefix, entitlements)
         store = get_key_store()
         ops.create_bucket(full_name)
         material = _mint_and_record_key(
@@ -4750,7 +4766,7 @@ def list_buckets_endpoint(request: Request) -> list[dict[str, object]]:
         endpoint = r2_s3_endpoint(ops.account_id)
         return [
             BucketInfo(bucket_name=str(b["name"]), s3_endpoint=endpoint).model_dump()
-            for b in _list_owned_buckets(ops, user.username)
+            for b in _list_owned_buckets(ops, user.user_id_prefix)
         ]
 
 
@@ -4761,8 +4777,8 @@ def get_bucket_endpoint(request: Request, name: str) -> dict[str, object]:
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
         ops = get_ctx().ops
-        full_name = make_bucket_name(user.username, name)
-        if not _owned_bucket_exists(ops, user.username, full_name):
+        full_name = make_bucket_name(user.user_id_prefix, name)
+        if not _owned_bucket_exists(ops, user.user_id_prefix, full_name):
             raise R2BucketNotFoundError(full_name)
         return BucketInfo(bucket_name=full_name, s3_endpoint=r2_s3_endpoint(ops.account_id)).model_dump()
 
@@ -4775,8 +4791,8 @@ def delete_bucket_endpoint(request: Request, name: str) -> dict[str, str]:
         user = require_user_auth(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
-        full_name = make_bucket_name(user.username, name)
-        verify_bucket_ownership(full_name, user.username)
+        full_name = make_bucket_name(user.user_id_prefix, name)
+        verify_bucket_ownership(full_name, user.user_id_prefix)
         ops.delete_bucket(full_name)
         revoked = get_key_store().delete_keys_for_bucket(owner_user_id, full_name)
         for row in revoked:
@@ -4801,8 +4817,8 @@ def roll_bucket_key_endpoint(request: Request, name: str) -> dict[str, object]:
         user = require_user_auth(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
-        full_name = make_bucket_name(user.username, name)
-        if not _owned_bucket_exists(ops, user.username, full_name):
+        full_name = make_bucket_name(user.user_id_prefix, name)
+        if not _owned_bucket_exists(ops, user.user_id_prefix, full_name):
             raise R2BucketNotFoundError(full_name)
         store = get_key_store()
         rows = store.list_keys(owner_user_id, full_name)
@@ -4840,7 +4856,7 @@ def list_bucket_keys_endpoint(request: Request, name: str) -> list[dict[str, obj
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
-        full_name = make_bucket_name(user.username, name)
+        full_name = make_bucket_name(user.user_id_prefix, name)
         rows = get_key_store().list_keys(owner_user_id, full_name)
         return [_key_info_from_row(row).model_dump() for row in rows]
 
@@ -4916,9 +4932,9 @@ def create_storage_cleanup_grant(request: Request) -> dict[str, object]:
                         current=failed_count,
                         window_hours=_R2_CLEANUP_GRANT_WINDOW_HOURS,
                     )
-                baseline_bytes = _measure_live_owner_usage_bytes(ops, user.username)
+                baseline_bytes = _measure_live_owner_usage_bytes(ops, user.user_id_prefix)
                 active_grant = grant_store.create_grant(
-                    entitlements.user_id, user.username, baseline_bytes, _R2_CLEANUP_GRANT_EXPIRY_MINUTES
+                    entitlements.user_id, user.user_id_prefix, baseline_bytes, _R2_CLEANUP_GRANT_EXPIRY_MINUTES
                 )
             # Restore every still-downgraded key (is_over_quota=False path).
             _enforce_owner_key_access(ops, key_store, rows, False, counters)
@@ -4952,7 +4968,7 @@ def recheck_storage_enforcement(request: Request) -> dict[str, object]:
         grant_store = get_grant_store()
         counters = {"keys_downgraded": 0, "keys_restored": 0, "key_update_failures": 0}
         with _r2_enforcement_lock(entitlements.user_id):
-            live_bytes = _measure_live_owner_usage_bytes(ops, user.username)
+            live_bytes = _measure_live_owner_usage_bytes(ops, user.user_id_prefix)
             is_over_quota = live_bytes > entitlements.max_total_bucket_bytes
             unsettled_grants = grant_store.list_unsettled_grants(entitlements.user_id)
             for grant in unsettled_grants:
@@ -5057,7 +5073,7 @@ def _resolve_owner_storage_limit_bytes(
     if email is None:
         return None
     entitlements = ensure_account_entitlements(
-        user_id=owner_user_id, username_prefix=owner_prefix, email=email, store=entitlements_store
+        user_id=owner_user_id, user_id_prefix=owner_prefix, email=email, store=entitlements_store
     )
     return entitlements.max_total_bucket_bytes
 
@@ -5112,7 +5128,7 @@ def _settle_expired_grants(
         if only_user_id is not None and str(grant["user_id"]) != only_user_id:
             continue
         try:
-            live_bytes = _measure_live_owner_usage_bytes(ops, str(grant["username_prefix"]))
+            live_bytes = _measure_live_owner_usage_bytes(ops, str(grant["user_id_prefix"]))
         except (CloudflareApiError, httpx.HTTPError) as exc:
             logger.error("Sweep failed to settle grant %s (usage read failed): %s", grant["grant_id"], exc)
             counters["grant_settle_failures"] += 1
@@ -5619,7 +5635,7 @@ def put_workspace_record_endpoint(request: Request, host_id: str, body: Workspac
             is_new_active = existing_row is None or existing_row["state"] != WorkspaceRecordState.ACTIVE.value
             if is_new_active:
                 entitlements = ensure_account_entitlements(
-                    user_id=user_id, username_prefix=user.username, email=user.email or ""
+                    user_id=user_id, user_id_prefix=user.user_id_prefix, email=user.email or ""
                 )
                 active_count = sum(1 for r in existing_records if r["state"] == WorkspaceRecordState.ACTIVE.value)
                 if active_count >= entitlements.max_active_synced_workspaces:
@@ -5706,12 +5722,12 @@ def delete_key_bundle_endpoint(request: Request) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _count_leased_hosts(username_prefix: str) -> int:
+def _count_leased_hosts(user_id_prefix: str) -> int:
     """Count the user's current pool-host leases (the remote-workspace usage number)."""
     conn = _get_pool_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(_COUNT_LEASED_HOSTS_SQL, (username_prefix,))
+            cur.execute(_COUNT_LEASED_HOSTS_SQL, (user_id_prefix,))
             row = cur.fetchone()
     finally:
         conn.close()
@@ -5723,13 +5739,13 @@ def _count_active_sync_records(user_id: str) -> int:
     return sum(1 for r in records if r["state"] == WorkspaceRecordState.ACTIVE.value)
 
 
-def _summarize_owner_bucket_usage(ops: CloudflareOps, username_prefix: str) -> tuple[int, int]:
+def _summarize_owner_bucket_usage(ops: CloudflareOps, user_id_prefix: str) -> tuple[int, int]:
     """Return the owner's (bucket_count, total_bytes) from live REST usage reads.
 
     Display-only semantics: a failed read for one bucket logs a warning and
     counts that bucket as zero rather than failing the whole request.
     """
-    bucket_names = [str(bucket.get("name", "")) for bucket in _list_owned_buckets(ops, username_prefix)]
+    bucket_names = [str(bucket.get("name", "")) for bucket in _list_owned_buckets(ops, user_id_prefix)]
     total_bucket_bytes = 0
     for bucket_name, result in zip(
         bucket_names, _read_bucket_usage_bytes_concurrently(ops, bucket_names), strict=True
@@ -5741,7 +5757,7 @@ def _summarize_owner_bucket_usage(ops: CloudflareOps, username_prefix: str) -> t
     return len(bucket_names), total_bucket_bytes
 
 
-def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str) -> AccountUsage:
+def compute_account_usage(ops: CloudflareOps, user_id_prefix: str, user_id: str) -> AccountUsage:
     """Compute the account's live usage numbers, querying the upstream sources concurrently.
 
     The three network-backed sources (Cloudflare tunnel count, per-bucket
@@ -5752,10 +5768,10 @@ def compute_account_usage(ops: CloudflareOps, username_prefix: str, user_id: str
     account's bucket quota, itself read concurrently).
     """
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-        tunnel_count_future = pool.submit(count_user_tunnels, ops, username_prefix)
-        bucket_summary_future = pool.submit(_summarize_owner_bucket_usage, ops, username_prefix)
+        tunnel_count_future = pool.submit(count_user_tunnels, ops, user_id_prefix)
+        bucket_summary_future = pool.submit(_summarize_owner_bucket_usage, ops, user_id_prefix)
         llm_spend_future = pool.submit(get_litellm_user_spend, user_id)
-        leased_host_count = _count_leased_hosts(username_prefix)
+        leased_host_count = _count_leased_hosts(user_id_prefix)
         active_sync_count = _count_active_sync_records(user_id)
         bucket_count, total_bucket_bytes = bucket_summary_future.result()
         spend, reset_at = llm_spend_future.result()
@@ -5786,9 +5802,9 @@ def get_account(request: Request) -> dict[str, object]:
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
         entitlements = ensure_account_entitlements(
-            user_id=user_id, username_prefix=user.username, email=user.email or ""
+            user_id=user_id, user_id_prefix=user.user_id_prefix, email=user.email or ""
         )
-        usage = compute_account_usage(ops, user.username, user_id)
+        usage = compute_account_usage(ops, user.user_id_prefix, user_id)
         return AccountInfoResponse(
             user_id=user_id,
             email=user.email or "",
@@ -5861,8 +5877,8 @@ def _resolve_user_id_by_email(email: str) -> str:
 
 def _admin_ensure_entitlements(email: str) -> AccountEntitlements:
     user_id = _resolve_user_id_by_email(email)
-    username_prefix = derive_username_prefix(user_id)
-    return ensure_account_entitlements(user_id=user_id, username_prefix=username_prefix, email=email)
+    user_id_prefix = derive_user_id_prefix(user_id)
+    return ensure_account_entitlements(user_id=user_id, user_id_prefix=user_id_prefix, email=email)
 
 
 @web_app.get("/admin/accounts/{email}")
@@ -5871,7 +5887,7 @@ def admin_get_account(request: Request, email: str) -> dict[str, object]:
     with handle_endpoint_errors():
         require_admin_key(request)
         entitlements = _admin_ensure_entitlements(email)
-        usage = compute_account_usage(get_ctx().ops, entitlements.username_prefix, entitlements.user_id)
+        usage = compute_account_usage(get_ctx().ops, entitlements.user_id_prefix, entitlements.user_id)
         return AccountInfoResponse(
             user_id=entitlements.user_id,
             email=email.strip().lower(),

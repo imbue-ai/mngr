@@ -1097,9 +1097,9 @@ class FakeCursor:
             self._results = [(True,)]
 
         elif "select count(*) from pool_hosts" in query_lower:
-            username = params[0]
+            user_id_prefix = params[0]
             count = sum(
-                1 for row in self._backend.pool_rows if row.status == "leased" and row.leased_to_user == username
+                1 for row in self._backend.pool_rows if row.status == "leased" and row.leased_to_user == user_id_prefix
             )
             self._results = [(count,)]
 
@@ -1143,11 +1143,11 @@ class FakeCursor:
             # Lease SQL now also writes the user-supplied host_name on the
             # same UPDATE so the friendly name is set atomically with the
             # status flip.
-            username, host_name, host_id = params
+            user_id_prefix, host_name, host_id = params
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
                     row.status = "leased"
-                    row.leased_to_user = username
+                    row.leased_to_user = user_id_prefix
                     row.leased_at = "2026-01-01T00:00:00+00:00"
                     row.host_name = host_name
                     break
@@ -1203,9 +1203,9 @@ class FakeCursor:
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
         ):
             # List endpoint: lookup by user
-            username = params[0]
+            user_id_prefix = params[0]
             for row in self._backend.pool_rows:
-                if row.status == "leased" and row.leased_to_user == username:
+                if row.status == "leased" and row.leased_to_user == user_id_prefix:
                     self._results.append(
                         (
                             row.host_id,
@@ -1830,7 +1830,7 @@ class InMemoryEntitlementsStore:
     def __init__(self) -> None:
         # plan_name -> {plan_name, <quota columns>}
         self.plans_by_name: dict[str, dict[str, Any]] = {}
-        # user_id -> {user_id, username_prefix, plan_name, <quota columns>}
+        # user_id -> {user_id, user_id_prefix, plan_name, <quota columns>}
         self.rows_by_user_id: dict[str, dict[str, Any]] = {}
 
     def seed_plan(self, plan_name: str, values: dict[str, float]) -> None:
@@ -1847,9 +1847,9 @@ class InMemoryEntitlementsStore:
         row = self.rows_by_user_id.get(user_id)
         return dict(row) if row is not None else None
 
-    def get_entitlements_by_prefix(self, username_prefix: str) -> dict[str, Any] | None:
+    def get_entitlements_by_prefix(self, user_id_prefix: str) -> dict[str, Any] | None:
         for row in self.rows_by_user_id.values():
-            if row["username_prefix"] == username_prefix:
+            if row["user_id_prefix"] == user_id_prefix:
                 return dict(row)
         return None
 
@@ -1896,12 +1896,12 @@ class InMemoryGrantStore:
         self._next_grant_id = 1
 
     def create_grant(
-        self, user_id: str, username_prefix: str, baseline_bytes: int, expiry_minutes: int
+        self, user_id: str, user_id_prefix: str, baseline_bytes: int, expiry_minutes: int
     ) -> dict[str, Any]:
         grant = {
             "grant_id": self._next_grant_id,
             "user_id": user_id,
-            "username_prefix": username_prefix,
+            "user_id_prefix": user_id_prefix,
             "baseline_bytes": baseline_bytes,
             "granted_at": self.now_minutes,
             "expires_at": self.now_minutes + expiry_minutes,
