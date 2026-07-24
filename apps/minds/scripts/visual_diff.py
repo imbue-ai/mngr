@@ -88,7 +88,6 @@ from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
-from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -248,8 +247,8 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_create_form(error_message="imbue_cloud requires an account."),
         ),
         Scenario(
-            name="create_lima_subscription",
-            builder=lambda: render_create_form(launch_mode=LaunchMode.LIMA, ai_provider=AIProvider.SUBSCRIPTION),
+            name="create_lima",
+            builder=lambda: render_create_form(launch_mode=LaunchMode.LIMA),
         ),
         Scenario(
             name="create_with_imbue_cloud_backups",

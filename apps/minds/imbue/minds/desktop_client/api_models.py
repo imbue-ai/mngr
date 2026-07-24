@@ -18,7 +18,6 @@ from pydantic import Field
 from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -182,18 +181,12 @@ class CreateWorkspaceRequest(ApiRequestModel):
     branch: str | None = Field(default=None, description="Branch/tag to create from")
     color: str | None = Field(default=None, description="Hex color for the workspace tile")
     launch_mode: LaunchMode | None = Field(default=None, description="Compute provider (default DOCKER)")
-    ai_provider: AIProvider | None = Field(
-        default=None, description="How to obtain Anthropic credentials (default SUBSCRIPTION)"
-    )
     runtime: DockerRuntime | None = Field(
         default=None,
         description="Docker container runtime for DOCKER launch mode (runc vs gVisor's runsc); "
         "defaults to the platform-appropriate value (runc on macOS, runsc on Linux)",
     )
     account_id: str | None = Field(default=None, description="imbue_cloud account id (required for imbue_cloud modes)")
-    anthropic_api_key: str | None = Field(
-        default=None, description="Anthropic API key (required when ai_provider is API_KEY)"
-    )
     region: str | None = Field(default=None, description="Provider region")
     backup_provider: BackupProvider | None = Field(
         default=None, description="Restic backup provider (default CONFIGURE_LATER)"

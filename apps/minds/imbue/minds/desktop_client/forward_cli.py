@@ -359,11 +359,22 @@ class EnvelopeStreamConsumer(MutableModel):
             self._error_log_suppressor.record_provider_snapshot(event)
             # A per-provider snapshot is also a discovery event, so update_providers
             # bumps last_event_at; merge just this provider's state + freshness.
+            # A clean snapshot additionally carries its full host-id set (with the
+            # unknown-state hosts, whose absence proves nothing) so the resolver
+            # can authoritatively prune this provider's vanished hosts from the
+            # last-good topology; an errored snapshot passes None -- its hosts
+            # are unreachable, not absent.
+            clean_snapshot_host_ids: tuple[str, ...] | None = None
+            if event.error is None:
+                clean_snapshot_host_ids = tuple(
+                    {str(host.host_id) for host in event.hosts} | {str(host_id) for host_id in event.unknown_host_ids}
+                )
             self.resolver.update_providers(
                 provider_name=event.provider_name,
                 provider=event.provider,
                 error=event.error,
                 last_snapshot_at=event.discovery_finished_at,
+                clean_snapshot_host_ids=clean_snapshot_host_ids,
             )
         else:
             self._record_incremental_event(event)

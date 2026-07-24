@@ -46,7 +46,7 @@ Authentication is global (one session grants access to all agents). The desktop 
     accepts JSON body with git_url, starts agent creation, returns agent_id and status
 
 `/api/create-agent/{agent_id}/status` route (GET, JSON API, requires auth):
-    returns current creation status (INITIALIZING, CLONING_REPO, CHECKING_OUT_BRANCH, PROVISIONING_AI, CREATING_WORKSPACE, WAITING_FOR_READY, DONE, FAILED) and redirect_url when done
+    returns current creation status (INITIALIZING, CLONING_REPO, CHECKING_OUT_BRANCH, CREATING_WORKSPACE, WAITING_FOR_READY, DONE, FAILED) and redirect_url when done
 
 `/creating/{agent_id}` route (requires auth):
     shows a progress page that polls /api/create-agent/{agent_id}/status
