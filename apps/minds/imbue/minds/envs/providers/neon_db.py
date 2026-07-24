@@ -63,6 +63,15 @@ _LOCKED_RETRY_TOTAL_BUDGET_SECONDS: Final[float] = 120.0
 # minute.
 _PSQL_TIMEOUT_SECONDS: Final[float] = 60.0
 
+# Operator-facing guidance shown when the deploy can't find ``psql``. Shared by the
+# deploy paths that shell out to it. On macOS, Homebrew's libpq is keg-only, so
+# ``brew install libpq`` alone leaves ``psql`` off PATH -- it must be added explicitly.
+PSQL_INSTALL_GUIDANCE: Final[str] = (
+    "Install via `apt install postgresql-client` (Debian/Ubuntu), or on macOS "
+    "`brew install libpq` and add it to PATH (libpq is keg-only): "
+    '`export PATH="$(brew --prefix libpq)/bin:$PATH"`.'
+)
+
 # Default region for new per-env Neon projects. Matches where the
 # dev-tier org already lives; tier-shared projects (staging /
 # production) are operator-managed and not affected by this.
@@ -658,10 +667,7 @@ def wipe_neon_db_schema(dsn: SecretStr, *, parent_cg: ConcurrencyGroup) -> None:
     """
     psql_path = shutil.which("psql")
     if psql_path is None:
-        raise NeonProviderError(
-            "psql binary not on PATH; cannot wipe the Neon schema. Install via "
-            "`apt install postgresql-client` (Debian/Ubuntu) or `brew install libpq` (macOS)."
-        )
+        raise NeonProviderError(f"psql binary not on PATH; cannot wipe the Neon schema. {PSQL_INSTALL_GUIDANCE}")
     command = [
         psql_path,
         dsn.get_secret_value(),

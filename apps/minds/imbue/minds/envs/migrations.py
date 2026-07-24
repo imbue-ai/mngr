@@ -33,6 +33,7 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import info_span
 from imbue.minds.envs.providers.neon_db import NeonProviderError
+from imbue.minds.envs.providers.neon_db import PSQL_INSTALL_GUIDANCE
 
 # psql shellout timeout per migration. Generous enough to absorb a slow
 # Neon cold-start; short enough that a real connectivity failure surfaces
@@ -58,10 +59,7 @@ def _psql_path() -> str:
     """Return the absolute path to ``psql`` or raise with operator-facing guidance."""
     path = shutil.which("psql")
     if path is None:
-        raise MigrationRunnerError(
-            "psql binary not on PATH; cannot run schema migrations. Install via "
-            "`apt install postgresql-client` (Debian/Ubuntu) or `brew install libpq` (macOS)."
-        )
+        raise MigrationRunnerError(f"psql binary not on PATH; cannot run schema migrations. {PSQL_INSTALL_GUIDANCE}")
     return path
 
 

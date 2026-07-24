@@ -4,10 +4,13 @@
 
 from pathlib import Path
 
+import click
+import pytest
 from flask import Flask
 
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.cli.run import _StreamedPermissionRequestHandler
+from imbue.minds.cli.run import _resolve_client_config_path
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
@@ -25,6 +28,39 @@ from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import FakeLatchkey
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
+
+# -- _resolve_client_config_path -------------------------------------------
+
+
+def test_resolve_client_config_path_returns_existing_file(tmp_path: Path) -> None:
+    config = tmp_path / "client.toml"
+    config.write_text("")
+
+    assert _resolve_client_config_path(config) == config
+
+
+def test_resolve_client_config_path_rejects_unset_config() -> None:
+    """No activated env (``None``) is refused with activation guidance, not a stack trace."""
+    with pytest.raises(click.ClickException) as excinfo:
+        _resolve_client_config_path(None)
+    assert "env activate" in str(excinfo.value)
+
+
+def test_resolve_client_config_path_points_undeployed_env_at_deploy(tmp_path: Path) -> None:
+    """A set-but-missing client.toml (an activated-but-never-deployed dev env) points at deploy.
+
+    This is the wedge behind the raw ``Invalid value for '--config-file'`` click
+    error: the desktop client inherits ``MINDS_CLIENT_CONFIG_PATH`` for an env whose
+    ``client.toml`` a successful deploy never wrote.
+    """
+    missing = tmp_path / ".minds-dev-nobody" / "client.toml"
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _resolve_client_config_path(missing)
+    message = str(excinfo.value)
+    assert "minds env deploy" in message
+    assert str(missing) in message
+
 
 # -- _StreamedPermissionRequestHandler -------------------------------------
 
