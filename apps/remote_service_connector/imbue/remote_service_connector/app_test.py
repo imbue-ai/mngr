@@ -18,7 +18,6 @@ from supertokens_python.exceptions import GeneralError as SuperTokensGeneralErro
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
 
 import imbue.remote_service_connector.app as app_mod
-from imbue.remote_service_connector.app import AdminAuth
 from imbue.remote_service_connector.app import AuthPolicy
 from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import ForwardingCtx
@@ -35,6 +34,7 @@ from imbue.remote_service_connector.app import SyncStoreConsistencyError
 from imbue.remote_service_connector.app import TunnelComponentTooLongError
 from imbue.remote_service_connector.app import TunnelNotFoundError
 from imbue.remote_service_connector.app import TunnelOwnershipError
+from imbue.remote_service_connector.app import UserAuth
 from imbue.remote_service_connector.app import _MAX_ENCRYPTED_SECRETS_BYTES
 from imbue.remote_service_connector.app import _MAX_KEY_BUNDLE_FIELD_BYTES
 from imbue.remote_service_connector.app import _authenticate_supertokens
@@ -76,20 +76,20 @@ from imbue.remote_service_connector.testing import make_fake_sync_store
 from imbue.remote_service_connector.testing import make_fake_tunnel_token
 from imbue.remote_service_connector.testing import noop_enforcement_lock
 
-_ADMIN_STUB_TOKEN = "admin-stub-jwt"
-_ADMIN_STUB_USERNAME = "testuser"
-_ADMIN_STUB_EMAIL = "testuser@example.com"
-_ADMIN_STUB_USER_ID = "12345678-1234-5678-1234-567812345678"
+_USER_STUB_TOKEN = "user-stub-jwt"
+_USER_STUB_USERNAME = "testuser"
+_USER_STUB_EMAIL = "testuser@example.com"
+_USER_STUB_USER_ID = "12345678-1234-5678-1234-567812345678"
 _PAID_ADMIN_KEY_TEST_VALUE = "paid-admin-key-secret-9f3a2b"
 
 
-def _admin_headers() -> dict[str, str]:
-    """Return a Bearer header for a fake SuperTokens admin session.
+def _user_headers() -> dict[str, str]:
+    """Return a Bearer header for a fake SuperTokens user session.
 
     Paired with ``_make_test_client`` which stubs ``_authenticate_supertokens``
-    to recognise ``_ADMIN_STUB_TOKEN`` and return a canned ``AdminAuth``.
+    to recognise ``_USER_STUB_TOKEN`` and return a canned ``UserAuth``.
     """
-    return {"Authorization": f"Bearer {_ADMIN_STUB_TOKEN}"}
+    return {"Authorization": f"Bearer {_USER_STUB_TOKEN}"}
 
 
 def _agent_headers(tunnel_id: str) -> dict[str, str]:
@@ -102,9 +102,9 @@ def _make_quota_test_client(
 ) -> tuple[TestClient, InMemoryEntitlementsStore, FakeLiteLLMBackend]:
     """Create a TestClient with the FastAPI app plus every quota-relevant fake.
 
-    Sets up the SuperTokens Bearer auth path so tests calling admin endpoints
-    can authenticate with ``_admin_headers()`` without needing a real JWT.
-    Installs an in-memory paid-list backend seeded with the stub admin email,
+    Sets up the SuperTokens Bearer auth path so tests calling user-authenticated endpoints
+    can authenticate with ``_user_headers()`` without needing a real JWT.
+    Installs an in-memory paid-list backend seeded with the stub user email,
     an entitlements store pre-seeded with the two launch plans (with the stub
     user's SuperTokens ``time_joined`` faked to 0, i.e. pre-cutoff, so the
     stub's lazy plan resolves to ally by default), and a fake LiteLLM admin
@@ -119,10 +119,10 @@ def _make_quota_test_client(
     monkeypatch.setenv("LITELLM_PROXY_URL", "https://fake-litellm.example.com")
     fake_ctx = make_fake_forwarding_ctx()
 
-    def _stub_supertokens(token: str) -> AdminAuth:
-        if token != _ADMIN_STUB_TOKEN:
+    def _stub_supertokens(token: str) -> UserAuth:
+        if token != _USER_STUB_TOKEN:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return AdminAuth(username=_ADMIN_STUB_USERNAME, email=_ADMIN_STUB_EMAIL)
+        return UserAuth(username=_USER_STUB_USERNAME, email=_USER_STUB_EMAIL)
 
     entitlements_store = make_fake_entitlements_store()
     litellm = make_fake_litellm_backend()
@@ -132,14 +132,14 @@ def _make_quota_test_client(
         "get_ctx": lambda: fake_ctx,
         "_authenticate_supertokens": _stub_supertokens,
         "get_entitlements_store": lambda: entitlements_store,
-        "_get_user_id_from_access_token": lambda token: _ADMIN_STUB_USER_ID,
+        "_get_user_id_from_access_token": lambda token: _USER_STUB_USER_ID,
         "_get_user_time_joined_ms": lambda user_id, user_getter=None: 0,
         "_litellm_request": litellm.request,
     }
     for name, fake_impl in quota_fakes.items():
         monkeypatch.setattr(app_mod, name, fake_impl)
     backend = make_fake_pool_backend()
-    backend.add_paid_email(_ADMIN_STUB_EMAIL)
+    backend.add_paid_email(_USER_STUB_EMAIL)
     backend.install_on_app_module(app_mod, monkeypatch)
     return TestClient(web_app), entitlements_store, litellm
 
@@ -156,8 +156,8 @@ _PLAN_VALUES_BY_NAME = {"explorer": EXPLORER_PLAN_VALUES, "ally": ALLY_PLAN_VALU
 def _seed_entitlements_row(
     entitlements_store: InMemoryEntitlementsStore,
     plan_name: str = "explorer",
-    user_id: str = _ADMIN_STUB_USER_ID,
-    username_prefix: str = _ADMIN_STUB_USERNAME,
+    user_id: str = _USER_STUB_USER_ID,
+    username_prefix: str = _USER_STUB_USERNAME,
     **overrides: float,
 ) -> None:
     """Insert an entitlements row copied from the named launch plan, with per-test quota overrides."""
@@ -523,9 +523,9 @@ def test_resolve_tunnel_name_by_id_raises_for_nonexistent() -> None:
         ctx.resolve_tunnel_name_by_id("nonexistent")
 
 
-def test_route_create_tunnel_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_create_tunnel_as_user(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     assert resp.status_code == 200
     data = resp.json()
     assert data["tunnel_name"] == "testuser--agent1"
@@ -534,23 +534,23 @@ def test_route_create_tunnel_admin(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_route_create_tunnel_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     resp = client.post("/tunnels", json={"agent_id": "agent2"}, headers=_agent_headers("tunnel-1"))
     assert resp.status_code == 403
 
 
-def test_route_list_tunnels_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_list_tunnels_as_user(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
-    resp = client.get("/tunnels", headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
+    resp = client.get("/tunnels", headers=_user_headers())
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
 
-def test_route_get_tunnel_for_agent_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_get_tunnel_for_agent_as_user(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
-    resp = client.get("/tunnels/by-agent/agent1", headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
+    resp = client.get("/tunnels/by-agent/agent1", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["tunnel_name"] == "testuser--agent1"
 
@@ -559,25 +559,25 @@ def test_route_get_tunnel_for_agent_returns_null_when_absent(monkeypatch: pytest
     # 200 + null (not 404) so a client can tell "no tunnel" apart from
     # "this connector predates the endpoint" (an unknown-route 404).
     client = _make_test_client(monkeypatch)
-    resp = client.get("/tunnels/by-agent/agent1", headers=_admin_headers())
+    resp = client.get("/tunnels/by-agent/agent1", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json() is None
 
 
 def test_route_get_tunnel_for_agent_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     resp = client.get("/tunnels/by-agent/agent1", headers=_agent_headers("tunnel-1"))
     assert resp.status_code == 403
 
 
-def test_route_add_service_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_add_service_as_user(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     resp = client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 200
     assert resp.json()["service_name"] == "web"
@@ -585,7 +585,7 @@ def test_route_add_service_admin(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_route_add_service_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     resp = client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
@@ -596,8 +596,8 @@ def test_route_add_service_agent(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_route_add_service_agent_wrong_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
-    client.post("/tunnels", json={"agent_id": "agent2"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
+    client.post("/tunnels", json={"agent_id": "agent2"}, headers=_user_headers())
     resp = client.post(
         "/tunnels/testuser--agent2/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
@@ -608,11 +608,11 @@ def test_route_add_service_agent_wrong_tunnel(monkeypatch: pytest.MonkeyPatch) -
 
 def test_route_list_services_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     resp = client.get("/tunnels/testuser--agent1/services", headers=_agent_headers("tunnel-1"))
     assert resp.status_code == 200
@@ -621,11 +621,11 @@ def test_route_list_services_agent(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_route_remove_service_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     resp = client.delete("/tunnels/testuser--agent1/services/web", headers=_agent_headers("tunnel-1"))
     assert resp.status_code == 200
@@ -633,38 +633,38 @@ def test_route_remove_service_agent(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_route_delete_tunnel_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     resp = client.delete("/tunnels/testuser--agent1", headers=_agent_headers("tunnel-1"))
     assert resp.status_code == 403
 
 
-def test_route_set_tunnel_auth_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_set_tunnel_auth_as_user(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     resp = client.put(
         "/tunnels/testuser--agent1/auth",
         json={"rules": [{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}]},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 200
 
 
 def test_route_get_tunnel_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     client.put(
         "/tunnels/testuser--agent1/auth",
         json={"rules": [{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}]},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
-    resp = client.get("/tunnels/testuser--agent1/auth", headers=_admin_headers())
+    resp = client.get("/tunnels/testuser--agent1/auth", headers=_user_headers())
     assert resp.status_code == 200
     assert len(resp.json()["rules"]) == 1
 
 
 def test_route_set_tunnel_auth_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     resp = client.put(
         "/tunnels/testuser--agent1/auth",
         json={"rules": []},
@@ -696,15 +696,15 @@ def test_route_create_tunnel_too_long_username_returns_400(monkeypatch: pytest.M
     """Creating a tunnel whose authenticated username is too long returns 400, not 500."""
     long_name = "a_very_long_username_exceeds_max"
     client = _make_test_client(monkeypatch)
-    # Override the stub to return an AdminAuth with an overly-long username,
+    # Override the stub to return an UserAuth with an overly-long username,
     # simulating a SuperTokens session whose user_id_prefix is longer than the
     # tunnel-naming limit.
     monkeypatch.setattr(
         app_mod,
         "_authenticate_supertokens",
-        lambda _token: AdminAuth(username=long_name),
+        lambda _token: UserAuth(username=long_name),
     )
-    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     assert resp.status_code == 400
 
 
@@ -733,10 +733,10 @@ class _FakeSession:
         return {"st-ev": {"v": self._email_verified, "t": 0}}
 
 
-def test_authenticate_supertokens_returns_admin_auth_with_user_id_prefix(
+def test_authenticate_supertokens_returns_user_auth_with_user_id_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A valid token returns AdminAuth whose username is the first 16 hex chars of the user ID."""
+    """A valid token returns UserAuth whose username is the first 16 hex chars of the user ID."""
     user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
     monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
     result = _authenticate_supertokens(
@@ -744,7 +744,7 @@ def test_authenticate_supertokens_returns_admin_auth_with_user_id_prefix(
         session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
         email_getter=lambda _user_id: "alice@example.com",
     )
-    assert isinstance(result, AdminAuth)
+    assert isinstance(result, UserAuth)
     assert result.username == "a1b2c3d4e5f67890"
     assert result.email == "alice@example.com"
 
@@ -788,7 +788,7 @@ def test_authenticate_supertokens_ignores_stale_unverified_token_claim(
         session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=False),
         email_getter=lambda _user_id: "alice@example.com",
     )
-    assert isinstance(result, AdminAuth)
+    assert isinstance(result, UserAuth)
     assert result.email == "alice@example.com"
 
 
@@ -1695,32 +1695,32 @@ def test_http_ops_service_token_roundtrip() -> None:
 def test_route_get_service_auth_reports_owner_email_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """A service added with no explicit policy carries the owner-email default Access policy."""
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
-    resp = client.get("/tunnels/testuser--agent1/services/web/auth", headers=_admin_headers())
+    resp = client.get("/tunnels/testuser--agent1/services/web/auth", headers=_user_headers())
     assert resp.status_code == 200
     rules = resp.json()["rules"]
     assert len(rules) == 1
-    assert rules[0]["include"] == [{"email": {"email": _ADMIN_STUB_EMAIL}}]
+    assert rules[0]["include"] == [{"email": {"email": _USER_STUB_EMAIL}}]
 
 
-def test_route_set_service_auth_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PUT /tunnels/.../services/.../auth admin path persists the policy."""
+def test_route_set_service_auth_as_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PUT /tunnels/.../services/.../auth user path persists the policy."""
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     resp = client.put(
         "/tunnels/testuser--agent1/services/web/auth",
         json={"rules": [{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}]},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 200
     assert resp.json() == {"status": "updated"}
@@ -1729,33 +1729,33 @@ def test_route_set_service_auth_admin(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_route_get_tunnel_auth_reports_owner_email_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """A tunnel created with no explicit policy gets the owner-email default written to KV."""
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
-    resp = client.get("/tunnels/testuser--agent1/auth", headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
+    resp = client.get("/tunnels/testuser--agent1/auth", headers=_user_headers())
     assert resp.status_code == 200
     rules = resp.json()["rules"]
     assert len(rules) == 1
-    assert rules[0]["include"] == [{"email": {"email": _ADMIN_STUB_EMAIL}}]
+    assert rules[0]["include"] == [{"email": {"email": _USER_STUB_EMAIL}}]
 
 
 def test_route_create_and_list_service_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST/GET /tunnels/.../service-tokens round-trip through ForwardingCtx."""
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     resp = client.post(
         "/tunnels/testuser--agent1/service-tokens",
         json={"name": "my-token"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["name"] == "my-token"
     assert body["client_secret"] is not None
-    resp = client.get("/tunnels/testuser--agent1/service-tokens", headers=_admin_headers())
+    resp = client.get("/tunnels/testuser--agent1/service-tokens", headers=_user_headers())
     assert resp.status_code == 200
     listed = resp.json()
     # FakeCloudflareOps.list_service_tokens returns an empty list by design (it
@@ -1765,9 +1765,9 @@ def test_route_create_and_list_service_tokens(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_route_service_tokens_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Agent Bearer auth can't create service tokens (admin-only)."""
+    """Agent Bearer auth can't create service tokens (they require a signed-in user)."""
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     resp = client.post(
         "/tunnels/testuser--agent1/service-tokens",
         json={"name": "my-token"},
@@ -1776,27 +1776,27 @@ def test_route_service_tokens_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -
     assert resp.status_code == 403
 
 
-def test_route_list_services_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GET /tunnels/.../services admin path lists services."""
+def test_route_list_services_as_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GET /tunnels/.../services user path lists services."""
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
-    resp = client.get("/tunnels/testuser--agent1/services", headers=_admin_headers())
+    resp = client.get("/tunnels/testuser--agent1/services", headers=_user_headers())
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
 
-def test_route_delete_tunnel_admin_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Admin can delete a tunnel they own."""
+def test_route_delete_tunnel_as_user_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A signed-in user can delete a tunnel they own."""
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
-    resp = client.delete("/tunnels/testuser--agent1", headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
+    resp = client.delete("/tunnels/testuser--agent1", headers=_user_headers())
     assert resp.status_code == 200
-    resp = client.get("/tunnels", headers=_admin_headers())
+    resp = client.get("/tunnels", headers=_user_headers())
     assert resp.json() == []
 
 
@@ -1851,7 +1851,7 @@ def _make_pool_quota_test_client(
     client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
     monkeypatch.setenv("POOL_SSH_PRIVATE_KEY", "fake-management-key-pem")
     backend = pool_backend if pool_backend is not None else make_fake_pool_backend()
-    backend.add_paid_email(_ADMIN_STUB_EMAIL)
+    backend.add_paid_email(_USER_STUB_EMAIL)
     backend.install_on_app_module(app_mod, monkeypatch)
     return client, backend, entitlements_store, litellm
 
@@ -1881,7 +1881,7 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
             "host_name": "my-workspace",
             "attributes": {"version": "v0.1.0"},
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -1903,7 +1903,7 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     # Verify host was marked as leased and the user-supplied host_name was
     # written to the row.
     assert backend.pool_rows[0].status == "leased"
-    assert backend.pool_rows[0].leased_to_user == _ADMIN_STUB_USERNAME
+    assert backend.pool_rows[0].leased_to_user == _USER_STUB_USERNAME
     assert backend.pool_rows[0].host_name == "my-workspace"
 
 
@@ -1923,7 +1923,7 @@ def test_lease_host_fails_closed_when_host_keys_missing(monkeypatch: pytest.Monk
             "host_name": "my-workspace",
             "attributes": {"version": "v0.1.0"},
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 503
     assert "host-key backfill" in resp.json()["detail"]
@@ -1942,7 +1942,7 @@ def test_lease_host_returns_503_when_pool_empty(monkeypatch: pytest.MonkeyPatch)
             "host_name": "my-workspace",
             "attributes": {"version": "v0.1.0"},
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 503
     assert "No pre-created agents" in resp.json()["detail"]
@@ -1959,7 +1959,7 @@ def test_lease_host_returns_503_when_version_mismatch(monkeypatch: pytest.Monkey
             "host_name": "my-workspace",
             "attributes": {"version": "v0.1.0"},
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 503
     assert "No pre-created agents" in resp.json()["detail"]
@@ -1983,7 +1983,7 @@ def test_lease_host_hard_region_filters_out_other_regions(monkeypatch: pytest.Mo
             "attributes": {"version": "v0.1.0"},
             "region": "US-EAST-VA",
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 503
     assert backend.pool_rows[0].status == "available"
@@ -2005,7 +2005,7 @@ def test_lease_host_hard_region_leases_matching_host(monkeypatch: pytest.MonkeyP
             "attributes": {"version": "v0.1.0"},
             "region": "US-EAST-VA",
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 200
     assert backend.pool_rows[0].status == "leased"
@@ -2022,7 +2022,7 @@ def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -
             "host_name": "bad.name",
             "attributes": {"version": "v0.1.0"},
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 422
     # The available row stays available since validation rejected the request
@@ -2034,12 +2034,12 @@ def test_rename_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None
     """POST /hosts/{id}/rename updates the mutable host_name for the owning user."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000051"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000051"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
     )
     resp = client.post(
         "/hosts/00000000-0000-0000-0000-000000000051/rename",
         json={"host_name": "renamed-host"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -2051,13 +2051,13 @@ def test_rename_host_rejects_invalid_name(monkeypatch: pytest.MonkeyPatch) -> No
     """POST /hosts/{id}/rename rejects a host_name that fails the SafeName regex (422)."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000052"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000052"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
     )
     original_name = backend.pool_rows[0].host_name
     resp = client.post(
         "/hosts/00000000-0000-0000-0000-000000000052/rename",
         json={"host_name": "bad.name"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 422
     # The name is unchanged since validation rejected the request before the UPDATE.
@@ -2070,7 +2070,7 @@ def test_rename_host_404_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = client.post(
         "/hosts/00000000-0000-0000-0000-0000000000ff/rename",
         json={"host_name": "whatever"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 404
 
@@ -2084,7 +2084,7 @@ def test_rename_host_403_for_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = client.post(
         "/hosts/00000000-0000-0000-0000-000000000053/rename",
         json={"host_name": "renamed-host"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 403
     assert backend.pool_rows[0].host_name != "renamed-host"
@@ -2094,12 +2094,12 @@ def test_rename_host_404_when_not_leased(monkeypatch: pytest.MonkeyPatch) -> Non
     """POST /hosts/{id}/rename returns 404 when the requester owns the row but it is not leased."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_removing_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000054"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000054"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
     )
     resp = client.post(
         "/hosts/00000000-0000-0000-0000-000000000054/rename",
         json={"host_name": "renamed-host"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 404
     assert backend.pool_rows[0].host_name != "renamed-host"
@@ -2109,9 +2109,9 @@ def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> Non
     """POST /hosts/{id}/release destroys the slice's lima VM and drops the row."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
     )
-    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["status"] == "released"
     # Row fully cleaned up (deleted) after the slice VM teardown ran.
@@ -2125,9 +2125,9 @@ def test_release_host_idempotent_when_already_removing(monkeypatch: pytest.Monke
     backend.add_removing_host(
         host_id=UUID("00000000-0000-0000-0000-000000000077"),
         version="v0.1.0",
-        leased_to_user=_ADMIN_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USERNAME,
     )
-    resp = client.post("/hosts/00000000-0000-0000-0000-000000000077/release", headers=_admin_headers())
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000077/release", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["status"] == "released"
     assert backend.pool_rows == []
@@ -2144,9 +2144,9 @@ def test_release_host_fails_loudly_when_slice_teardown_fails(monkeypatch: pytest
     client, backend = _make_pool_test_client(monkeypatch)
     backend.slice_teardown_should_fail = True
     backend.add_leased_host(
-        host_id=UUID("00000000-0000-0000-0000-000000000099"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+        host_id=UUID("00000000-0000-0000-0000-000000000099"), version="v0.1.0", leased_to_user=_USER_STUB_USERNAME
     )
-    resp = client.post("/hosts/00000000-0000-0000-0000-000000000099/release", headers=_admin_headers())
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000099/release", headers=_user_headers())
     assert resp.status_code == 500
     # The row is NOT deleted; it stays 'removing' so the teardown is retryable.
     assert len(backend.pool_rows) == 1
@@ -2159,7 +2159,7 @@ def test_release_host_returns_403_for_non_owner(monkeypatch: pytest.MonkeyPatch)
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user="other-user"
     )
-    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_user_headers())
     assert resp.status_code == 403
     assert "do not own" in resp.json()["detail"]
     # Verify the host was not released
@@ -2169,7 +2169,7 @@ def test_release_host_returns_403_for_non_owner(monkeypatch: pytest.MonkeyPatch)
 def test_release_host_unknown_returns_already_released(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /hosts/{id}/release on a missing row returns 200 already_released (idempotent)."""
     client, _backend = _make_pool_test_client(monkeypatch)
-    resp = client.post("/hosts/00000000-0000-0000-0000-000000000999/release", headers=_admin_headers())
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000999/release", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["status"] == "already_released"
 
@@ -2180,7 +2180,7 @@ def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> Non
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000001"),
         version="v0.1.0",
-        leased_to_user=_ADMIN_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USERNAME,
         agent_id="agent-aaa",
     )
     backend.add_leased_host(
@@ -2192,10 +2192,10 @@ def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> Non
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000003"),
         version="v0.1.0",
-        leased_to_user=_ADMIN_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USERNAME,
         agent_id="agent-ccc",
     )
-    resp = client.get("/hosts", headers=_admin_headers())
+    resp = client.get("/hosts", headers=_user_headers())
     assert resp.status_code == 200
     hosts = resp.json()
     assert len(hosts) == 2
@@ -2348,7 +2348,7 @@ def test_route_lease_host_succeeds_for_unpaid_explorer_account(
     """An unpaid account resolves to the explorer plan and can still lease (quota permitting)."""
     client, backend, entitlements_store, _litellm = _make_pool_quota_test_client(monkeypatch)
     backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
     resp = client.post(
         "/hosts/lease",
         json={
@@ -2356,12 +2356,12 @@ def test_route_lease_host_succeeds_for_unpaid_explorer_account(
             "host_name": "my-workspace",
             "attributes": {"version": "v0.1.0"},
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 200
     assert backend.pool_rows[0].status == "leased"
     # The lazily-created row is on explorer (unpaid email).
-    row = entitlements_store.get_entitlements(_ADMIN_STUB_USER_ID)
+    row = entitlements_store.get_entitlements(_USER_STUB_USER_ID)
     assert row is not None
     assert row["plan_name"] == "explorer"
 
@@ -2375,7 +2375,7 @@ def test_route_lease_host_returns_quota_403_at_workspace_cap(
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"),
         version="v0.1.0",
-        leased_to_user=_ADMIN_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USERNAME,
     )
     backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
     resp = client.post(
@@ -2385,7 +2385,7 @@ def test_route_lease_host_returns_quota_403_at_workspace_cap(
             "host_name": "my-workspace",
             "attributes": {"version": "v0.1.0"},
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 403
     detail = resp.json()["detail"]
@@ -2407,10 +2407,10 @@ def test_route_release_host_works_for_unpaid_account(
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"),
         version="v0.1.0",
-        leased_to_user=_ADMIN_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USERNAME,
     )
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_user_headers())
     assert resp.status_code == 200
     assert backend.pool_rows == []
 
@@ -2419,8 +2419,8 @@ def test_route_list_hosts_works_for_unpaid_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, backend = _make_pool_test_client(monkeypatch)
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    resp = client.get("/hosts", headers=_admin_headers())
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
+    resp = client.get("/hosts", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -2434,8 +2434,8 @@ def test_route_create_litellm_key_refused_for_zero_budget_plan(
     structured quota detail plus the subscription guidance.
     """
     client, backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    resp = client.post("/keys/create", json={}, headers=_admin_headers())
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
+    resp = client.post("/keys/create", json={}, headers=_user_headers())
     assert resp.status_code == 403
     detail = resp.json()["detail"]
     assert detail["code"] == "quota_exceeded"
@@ -2449,13 +2449,13 @@ def test_route_create_litellm_key_upserts_user_budget(
 ) -> None:
     """Minting a key first pushes the account's monthly budget to LiteLLM as a user budget."""
     client, _backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
-    resp = client.post("/keys/create", json={"key_alias": "my-agent"}, headers=_admin_headers())
+    resp = client.post("/keys/create", json={"key_alias": "my-agent"}, headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["key"].startswith("sk-fake-")
-    user = litellm.users_by_id[_ADMIN_STUB_USER_ID]
+    user = litellm.users_by_id[_USER_STUB_USER_ID]
     assert user["max_budget"] == ALLY_PLAN_VALUES["monthly_llm_spend_usd"]
     assert user["budget_duration"] == "1mo"
-    assert litellm.generated_keys[0]["user_id"] == _ADMIN_STUB_USER_ID
+    assert litellm.generated_keys[0]["user_id"] == _USER_STUB_USER_ID
 
 
 def test_route_create_litellm_key_fails_when_budget_push_fails(
@@ -2464,7 +2464,7 @@ def test_route_create_litellm_key_fails_when_budget_push_fails(
     """A LiteLLM outage during the budget upsert fails the mint (no key is created)."""
     client, _backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
     litellm.fail_user_writes = True
-    resp = client.post("/keys/create", json={}, headers=_admin_headers())
+    resp = client.post("/keys/create", json={}, headers=_user_headers())
     assert resp.status_code == 500
     assert litellm.generated_keys == []
 
@@ -2474,8 +2474,8 @@ def test_route_list_litellm_keys_works_for_unpaid_account(
 ) -> None:
     """Listing keys needs no quota -- an unpaid (explorer) account gets its (empty) list."""
     client, backend, _entitlements_store, _litellm = _make_pool_quota_test_client(monkeypatch)
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    resp = client.get("/keys", headers=_admin_headers())
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
+    resp = client.get("/keys", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -2485,12 +2485,12 @@ def test_route_get_litellm_key_enforces_ownership(
 ) -> None:
     """Key info is only served to the key's owner."""
     client, _backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
-    created = client.post("/keys/create", json={}, headers=_admin_headers()).json()
-    owned = client.get(f"/keys/{created['key']}", headers=_admin_headers())
+    created = client.post("/keys/create", json={}, headers=_user_headers()).json()
+    owned = client.get(f"/keys/{created['key']}", headers=_user_headers())
     assert owned.status_code == 200
-    assert owned.json()["user_id"] == _ADMIN_STUB_USER_ID
+    assert owned.json()["user_id"] == _USER_STUB_USER_ID
     litellm.keys_by_id[created["key"]]["user_id"] = "someone-else"
-    foreign = client.get(f"/keys/{created['key']}", headers=_admin_headers())
+    foreign = client.get(f"/keys/{created['key']}", headers=_user_headers())
     assert foreign.status_code == 403
 
 
@@ -2499,11 +2499,11 @@ def test_route_update_and_delete_litellm_key_work_without_paid_gate(
 ) -> None:
     """Budget update + delete only require ownership, not any plan gate."""
     client, _backend, _entitlements_store, litellm = _make_pool_quota_test_client(monkeypatch)
-    created = client.post("/keys/create", json={}, headers=_admin_headers()).json()
-    resp = client.put(f"/keys/{created['key']}/budget", json={"max_budget": 5.0}, headers=_admin_headers())
+    created = client.post("/keys/create", json={}, headers=_user_headers()).json()
+    resp = client.put(f"/keys/{created['key']}/budget", json={"max_budget": 5.0}, headers=_user_headers())
     assert resp.status_code == 200
     assert litellm.keys_by_id[created["key"]]["max_budget"] == 5.0
-    resp = client.delete(f"/keys/{created['key']}", headers=_admin_headers())
+    resp = client.delete(f"/keys/{created['key']}", headers=_user_headers())
     assert resp.status_code == 200
     assert created["key"] not in litellm.keys_by_id
 
@@ -2514,10 +2514,10 @@ def test_route_create_tunnel_is_not_gated_by_paid_list(
     """Cloudflare forwarding (`/tunnels/*`) must work even when the user is not paid."""
     client, backend = _make_pool_test_client(monkeypatch)
     # Not-paid: the tunnel route should be unaffected by the paid gate.
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
+    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     assert resp.status_code == 200
-    assert resp.json()["tunnel_name"] == f"{_ADMIN_STUB_USERNAME}--agent1"
+    assert resp.json()["tunnel_name"] == f"{_USER_STUB_USERNAME}--agent1"
 
 
 def test_route_list_services_is_not_gated_by_paid_list(
@@ -2525,10 +2525,10 @@ def test_route_list_services_is_not_gated_by_paid_list(
 ) -> None:
     """Tunnel services routes work for any verified email regardless of paid status."""
     client, backend = _make_pool_test_client(monkeypatch)
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    create_resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
+    create_resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     assert create_resp.status_code == 200
-    list_resp = client.get(f"/tunnels/{_ADMIN_STUB_USERNAME}--agent1/services", headers=_admin_headers())
+    list_resp = client.get(f"/tunnels/{_USER_STUB_USERNAME}--agent1/services", headers=_user_headers())
     assert list_resp.status_code == 200
 
 
@@ -2554,7 +2554,7 @@ def test_paid_crud_requires_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
     bad = client.get("/paid/domains", headers={"Authorization": "Bearer wrong-key"})
     assert bad.status_code == 401
     # A SuperTokens admin JWT is NOT accepted on the paid CRUD endpoints.
-    assert client.get("/paid/domains", headers=_admin_headers()).status_code == 401
+    assert client.get("/paid/domains", headers=_user_headers()).status_code == 401
 
 
 def test_paid_crud_rejects_non_ascii_bearer_token_with_401(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2640,12 +2640,12 @@ def test_add_paid_email_then_ally_plan_selectable(monkeypatch: pytest.MonkeyPatc
     """End-to-end: adding a paid email via CRUD makes the ally plan selectable."""
     client, backend = _make_paid_crud_test_client(monkeypatch)
     # Start from a clean slate where the stub email is not paid.
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
-    denied = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
+    denied = client.post("/account/plan", json={"plan": "ally"}, headers=_user_headers())
     assert denied.status_code == 403
     assert "partner access" in denied.json()["detail"]
-    client.post("/paid/emails/add", json={"value": _ADMIN_STUB_EMAIL}, headers=_paid_admin_headers())
-    allowed = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    client.post("/paid/emails/add", json={"value": _USER_STUB_EMAIL}, headers=_paid_admin_headers())
+    allowed = client.post("/account/plan", json={"plan": "ally"}, headers=_user_headers())
     assert allowed.status_code == 200
     assert allowed.json()["plan_name"] == "ally"
 
@@ -2779,7 +2779,7 @@ def test_derive_s3_secret_matches_sha256() -> None:
 
 def test_create_bucket_returns_bucket_and_default_key(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store = _make_bucket_test_client(monkeypatch)
-    resp = client.post("/buckets", json={"name": "my-data"}, headers=_admin_headers())
+    resp = client.post("/buckets", json={"name": "my-data"}, headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["bucket"]["bucket_name"] == "testuser--my-data"
@@ -2793,37 +2793,37 @@ def test_create_bucket_returns_bucket_and_default_key(monkeypatch: pytest.Monkey
     # Bucket actually created in the fake.
     assert "testuser--my-data" in fake.buckets
     # Key metadata recorded; the secret/token value is NOT persisted.
-    rows = store.list_keys(_ADMIN_STUB_USER_ID, None)
+    rows = store.list_keys(_USER_STUB_USER_ID, None)
     assert len(rows) == 1
     assert rows[0]["access_key_id"] == access_key_id
     assert "secret_access_key" not in rows[0]
     assert "value" not in rows[0]
-    assert rows[0]["owner_user_id"] == _ADMIN_STUB_USER_ID
+    assert rows[0]["owner_user_id"] == _USER_STUB_USER_ID
 
 
 def test_create_bucket_with_read_access(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store = _make_bucket_test_client(monkeypatch)
-    resp = client.post("/buckets", json={"name": "ro", "access": "read"}, headers=_admin_headers())
+    resp = client.post("/buckets", json={"name": "ro", "access": "read"}, headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["key"]["access"] == "read"
 
 
 def test_create_bucket_invalid_access_returns_422(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    resp = client.post("/buckets", json={"name": "x", "access": "write"}, headers=_admin_headers())
+    resp = client.post("/buckets", json={"name": "x", "access": "write"}, headers=_user_headers())
     assert resp.status_code == 422
 
 
 def test_create_bucket_invalid_name_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    resp = client.post("/buckets", json={"name": "!!!"}, headers=_admin_headers())
+    resp = client.post("/buckets", json={"name": "!!!"}, headers=_user_headers())
     assert resp.status_code == 400
 
 
 def test_create_bucket_duplicate_returns_409(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    assert client.post("/buckets", json={"name": "dup"}, headers=_admin_headers()).status_code == 200
-    resp = client.post("/buckets", json={"name": "dup"}, headers=_admin_headers())
+    assert client.post("/buckets", json={"name": "dup"}, headers=_user_headers()).status_code == 200
+    resp = client.post("/buckets", json={"name": "dup"}, headers=_user_headers())
     assert resp.status_code == 409
 
 
@@ -2831,8 +2831,8 @@ def test_create_bucket_at_quota_returns_403(monkeypatch: pytest.MonkeyPatch) -> 
     """Bucket creation past the account's max_buckets entitlement is refused."""
     client, fake, _store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_buckets=1)
-    assert client.post("/buckets", json={"name": "first"}, headers=_admin_headers()).status_code == 200
-    resp = client.post("/buckets", json={"name": "one-more"}, headers=_admin_headers())
+    assert client.post("/buckets", json={"name": "first"}, headers=_user_headers()).status_code == 200
+    resp = client.post("/buckets", json={"name": "one-more"}, headers=_user_headers())
     assert resp.status_code == 403
     detail = resp.json()["detail"]
     assert detail["code"] == "quota_exceeded"
@@ -2842,13 +2842,13 @@ def test_create_bucket_at_quota_returns_403(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_list_buckets_returns_only_owned(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, _store = _make_bucket_test_client(monkeypatch)
-    client.post("/buckets", json={"name": "a"}, headers=_admin_headers())
-    client.post("/buckets", json={"name": "b"}, headers=_admin_headers())
+    client.post("/buckets", json={"name": "a"}, headers=_user_headers())
+    client.post("/buckets", json={"name": "b"}, headers=_user_headers())
     # A bucket owned by someone else, plus a crafted name that merely *contains*
     # the prefix -- the in-code startswith re-check must exclude it.
     fake.buckets["otheruser--secret"] = {"name": "otheruser--secret"}
     fake.buckets["evil-testuser--x"] = {"name": "evil-testuser--x"}
-    resp = client.get("/buckets", headers=_admin_headers())
+    resp = client.get("/buckets", headers=_user_headers())
     assert resp.status_code == 200
     names = sorted(b["bucket_name"] for b in resp.json())
     assert names == ["testuser--a", "testuser--b"]
@@ -2856,62 +2856,62 @@ def test_list_buckets_returns_only_owned(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_get_bucket_info(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
-    resp = client.get("/buckets/data", headers=_admin_headers())
+    client.post("/buckets", json={"name": "data"}, headers=_user_headers())
+    resp = client.get("/buckets/data", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["bucket_name"] == "testuser--data"
 
 
 def test_get_bucket_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    resp = client.get("/buckets/missing", headers=_admin_headers())
+    resp = client.get("/buckets/missing", headers=_user_headers())
     assert resp.status_code == 404
 
 
 def test_destroy_bucket_non_empty_returns_409(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, _store = _make_bucket_test_client(monkeypatch)
-    client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
+    client.post("/buckets", json={"name": "data"}, headers=_user_headers())
     fake.bucket_objects["testuser--data"].append("obj1")
-    resp = client.delete("/buckets/data", headers=_admin_headers())
+    resp = client.delete("/buckets/data", headers=_user_headers())
     assert resp.status_code == 409
     assert "testuser--data" in fake.buckets
 
 
 def test_destroy_bucket_empty_cascades_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store = _make_bucket_test_client(monkeypatch)
-    client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
+    client.post("/buckets", json={"name": "data"}, headers=_user_headers())
     # A legacy second key (pre-single-key model) must be cascaded too.
     extra = fake.create_bucket_token("testuser--data", "read", "mngr-r2:testuser--data:extra")
-    store.add_key(str(extra["id"]), _ADMIN_STUB_USER_ID, "testuser--data", "read", "extra")
-    assert len(store.list_keys(_ADMIN_STUB_USER_ID, None)) == 2
+    store.add_key(str(extra["id"]), _USER_STUB_USER_ID, "testuser--data", "read", "extra")
+    assert len(store.list_keys(_USER_STUB_USER_ID, None)) == 2
     assert len(fake.account_tokens) == 2
-    resp = client.delete("/buckets/data", headers=_admin_headers())
+    resp = client.delete("/buckets/data", headers=_user_headers())
     assert resp.status_code == 200
     assert "testuser--data" not in fake.buckets
-    assert store.list_keys(_ADMIN_STUB_USER_ID, None) == []
+    assert store.list_keys(_USER_STUB_USER_ID, None) == []
     assert fake.account_tokens == {}
 
 
 def test_roll_key_returns_same_access_key_id_with_fresh_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rolling keeps the Access Key ID (and token policies) while re-deriving the secret."""
     client, _fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
-    created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
+    created = client.post("/buckets", json={"name": "data"}, headers=_user_headers()).json()
     original_key = created["key"]
-    resp = client.post("/buckets/data/roll-key", headers=_admin_headers())
+    resp = client.post("/buckets/data/roll-key", headers=_user_headers())
     assert resp.status_code == 200
     rolled = resp.json()
     assert rolled["access_key_id"] == original_key["access_key_id"]
     assert rolled["secret_access_key"] != original_key["secret_access_key"]
     # Still exactly one recorded key for the bucket.
-    assert len(store.list_keys(_ADMIN_STUB_USER_ID, "testuser--data")) == 1
+    assert len(store.list_keys(_USER_STUB_USER_ID, "testuser--data")) == 1
 
 
 def test_roll_key_reports_enforced_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
     """A key downgraded by the storage sweep reports read access through a roll (no bypass)."""
     client, _fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
-    created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
+    created = client.post("/buckets", json={"name": "data"}, headers=_user_headers()).json()
     store.set_enforced_access(created["key"]["access_key_id"], "read")
-    resp = client.post("/buckets/data/roll-key", headers=_admin_headers())
+    resp = client.post("/buckets/data/roll-key", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["access"] == "read"
 
@@ -2919,26 +2919,26 @@ def test_roll_key_reports_enforced_downgrade(monkeypatch: pytest.MonkeyPatch) ->
 def test_roll_key_mints_fresh_key_when_none_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rolling a bucket with no recorded key (e.g. after a revoke) mints one."""
     client, _fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
-    created = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
-    client.delete(f"/bucket-keys/{created['key']['access_key_id']}", headers=_admin_headers())
-    assert store.list_keys(_ADMIN_STUB_USER_ID, "testuser--data") == []
-    resp = client.post("/buckets/data/roll-key", headers=_admin_headers())
+    created = client.post("/buckets", json={"name": "data"}, headers=_user_headers()).json()
+    client.delete(f"/bucket-keys/{created['key']['access_key_id']}", headers=_user_headers())
+    assert store.list_keys(_USER_STUB_USER_ID, "testuser--data") == []
+    resp = client.post("/buckets/data/roll-key", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["access"] == "readwrite"
-    assert len(store.list_keys(_ADMIN_STUB_USER_ID, "testuser--data")) == 1
+    assert len(store.list_keys(_USER_STUB_USER_ID, "testuser--data")) == 1
 
 
 def test_roll_key_for_missing_bucket_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    resp = client.post("/buckets/nope/roll-key", headers=_admin_headers())
+    resp = client.post("/buckets/nope/roll-key", headers=_user_headers())
     assert resp.status_code == 404
 
 
 def test_destroy_key(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store = _make_bucket_test_client(monkeypatch)
-    create = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
+    create = client.post("/buckets", json={"name": "data"}, headers=_user_headers()).json()
     access_key_id = create["key"]["access_key_id"]
-    resp = client.delete(f"/bucket-keys/{access_key_id}", headers=_admin_headers())
+    resp = client.delete(f"/bucket-keys/{access_key_id}", headers=_user_headers())
     assert resp.status_code == 200
     assert access_key_id not in fake.account_tokens
     assert store.get_key(access_key_id) is None
@@ -2946,14 +2946,14 @@ def test_destroy_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_destroy_key_unknown_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    resp = client.delete("/bucket-keys/does-not-exist", headers=_admin_headers())
+    resp = client.delete("/bucket-keys/does-not-exist", headers=_user_headers())
     assert resp.status_code == 404
 
 
 def test_destroy_key_not_owned_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, store = _make_bucket_test_client(monkeypatch)
     store.add_key("akid-other", "some-other-user", "other--bucket", "readwrite", "x")
-    resp = client.delete("/bucket-keys/akid-other", headers=_admin_headers())
+    resp = client.delete("/bucket-keys/akid-other", headers=_user_headers())
     assert resp.status_code == 404
     # The other user's row is untouched.
     assert store.get_key("akid-other") is not None
@@ -2964,9 +2964,9 @@ def test_create_bucket_works_for_unpaid_explorer_account(monkeypatch: pytest.Mon
     client, fake, _store = _make_bucket_test_client(monkeypatch)
     # Install a paid-list backend where the stub admin email is NOT paid.
     backend = make_fake_pool_backend()
-    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
+    backend.add_paid_email(_USER_STUB_EMAIL, is_paid=False)
     backend.install_on_app_module(app_mod, monkeypatch)
-    resp = client.post("/buckets", json={"name": "x"}, headers=_admin_headers())
+    resp = client.post("/buckets", json={"name": "x"}, headers=_user_headers())
     assert resp.status_code == 200
     assert "testuser--x" in fake.buckets
 
@@ -3021,7 +3021,7 @@ def _make_sync_test_client(
     """
     client = _make_test_client(monkeypatch)
     store = make_fake_sync_store()
-    caller = {"user_id": _ADMIN_STUB_USER_ID}
+    caller = {"user_id": _USER_STUB_USER_ID}
     sync_fakes: dict[str, object] = {
         "get_sync_store": lambda: store,
         "_get_user_id_from_access_token": lambda token: caller["user_id"],
@@ -3060,12 +3060,12 @@ def test_put_and_list_workspace_records_round_trips(monkeypatch: pytest.MonkeyPa
     put_resp = client.put(
         "/sync/records/host-aaa111",
         json=_sync_record_body(encrypted_secrets=secrets_b64),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert put_resp.status_code == 200
     assert put_resp.json()["revision"] == 1
 
-    list_resp = client.get("/sync/records", headers=_admin_headers())
+    list_resp = client.get("/sync/records", headers=_user_headers())
     assert list_resp.status_code == 200
     records = list_resp.json()["records"]
     assert len(records) == 1
@@ -3078,21 +3078,21 @@ def test_put_and_list_workspace_records_round_trips(monkeypatch: pytest.MonkeyPa
 
 def test_put_workspace_record_rejects_mismatched_path_host_id(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, _caller = _make_sync_test_client(monkeypatch)
-    resp = client.put("/sync/records/host-other", json=_sync_record_body(), headers=_admin_headers())
+    resp = client.put("/sync/records/host-other", json=_sync_record_body(), headers=_user_headers())
     assert resp.status_code == 400
 
 
 def test_put_workspace_record_cas_conflict_returns_409_with_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, _caller = _make_sync_test_client(monkeypatch)
     assert (
-        client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers()).status_code == 200
+        client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_user_headers()).status_code == 200
     )
 
-    stale = client.put("/sync/records/host-aaa111", json=_sync_record_body(revision=1), headers=_admin_headers())
+    stale = client.put("/sync/records/host-aaa111", json=_sync_record_body(revision=1), headers=_user_headers())
     assert stale.status_code == 409
     assert stale.json()["detail"]["stored"]["revision"] == 1
 
-    fresh = client.put("/sync/records/host-aaa111", json=_sync_record_body(revision=2), headers=_admin_headers())
+    fresh = client.put("/sync/records/host-aaa111", json=_sync_record_body(revision=2), headers=_user_headers())
     assert fresh.status_code == 200
     assert fresh.json()["revision"] == 2
 
@@ -3100,23 +3100,23 @@ def test_put_workspace_record_cas_conflict_returns_409_with_stored_row(monkeypat
 def test_second_active_record_for_same_agent_id_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, _caller = _make_sync_test_client(monkeypatch)
     assert (
-        client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers()).status_code == 200
+        client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_user_headers()).status_code == 200
     )
 
     conflicting = client.put(
         "/sync/records/host-ccc333",
         json=_sync_record_body(host_id="host-ccc333"),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert conflicting.status_code == 409
 
     # Tombstoning the first row frees the agent_id for a restored workspace.
     tombstone = _sync_record_body(revision=2, state="destroyed")
-    assert client.put("/sync/records/host-aaa111", json=tombstone, headers=_admin_headers()).status_code == 200
+    assert client.put("/sync/records/host-aaa111", json=tombstone, headers=_user_headers()).status_code == 200
     restored = client.put(
         "/sync/records/host-ccc333",
         json=_sync_record_body(host_id="host-ccc333"),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert restored.status_code == 200
 
@@ -3127,14 +3127,14 @@ def test_scrub_secrets_strips_blobs_but_keeps_metadata(monkeypatch: pytest.Monke
     client.put(
         "/sync/records/host-aaa111",
         json=_sync_record_body(encrypted_secrets=secrets_b64),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
 
-    scrub = client.post("/sync/scrub-secrets", headers=_admin_headers())
+    scrub = client.post("/sync/scrub-secrets", headers=_user_headers())
     assert scrub.status_code == 200
     assert scrub.json()["scrubbed"] == 1
 
-    records = client.get("/sync/records", headers=_admin_headers()).json()["records"]
+    records = client.get("/sync/records", headers=_user_headers()).json()["records"]
     assert records[0]["encrypted_secrets"] is None
     assert records[0]["display_name"] == "my workspace"
 
@@ -3144,7 +3144,7 @@ def test_put_workspace_record_rejects_invalid_base64_secrets(monkeypatch: pytest
     resp = client.put(
         "/sync/records/host-aaa111",
         json=_sync_record_body(encrypted_secrets="not-base64!!!"),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 400
 
@@ -3155,7 +3155,7 @@ def test_put_workspace_record_rejects_oversized_secrets(monkeypatch: pytest.Monk
     resp = client.put(
         "/sync/records/host-aaa111",
         json=_sync_record_body(encrypted_secrets=oversized),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 400
 
@@ -3167,10 +3167,10 @@ def test_put_workspace_record_accepts_empty_provider_kind(monkeypatch: pytest.Mo
     body = _sync_record_body()
     body["provider_kind"] = ""
 
-    resp = client.put("/sync/records/host-aaa111", json=body, headers=_admin_headers())
+    resp = client.put("/sync/records/host-aaa111", json=body, headers=_user_headers())
 
     assert resp.status_code == 200
-    records = client.get("/sync/records", headers=_admin_headers()).json()["records"]
+    records = client.get("/sync/records", headers=_user_headers()).json()["records"]
     assert records[0]["provider_kind"] == ""
 
 
@@ -3179,12 +3179,12 @@ def test_put_workspace_record_rejects_unknown_state(monkeypatch: pytest.MonkeyPa
     resp = client.put(
         "/sync/records/host-aaa111",
         json=_sync_record_body(state="bogus"),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 422
 
 
-def test_sync_records_require_admin_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sync_records_require_user_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, _caller = _make_sync_test_client(monkeypatch)
     resp = client.get("/sync/records", headers={"Authorization": "Bearer wrong-token"})
     assert resp.status_code == 401
@@ -3192,17 +3192,17 @@ def test_sync_records_require_admin_auth(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_sync_records_are_isolated_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
     client, store, caller = _make_sync_test_client(monkeypatch)
-    client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers())
+    client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_user_headers())
 
     caller["user_id"] = "other-user-id"
-    other_list = client.get("/sync/records", headers=_admin_headers())
+    other_list = client.get("/sync/records", headers=_user_headers())
     assert other_list.json()["records"] == []
     assert len(store.records_by_key) == 1
 
 
 def test_key_bundle_round_trip_and_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, _caller = _make_sync_test_client(monkeypatch)
-    assert client.get("/sync/bundle", headers=_admin_headers()).status_code == 404
+    assert client.get("/sync/bundle", headers=_user_headers()).status_code == 404
 
     body = {
         "kdf_salt": base64.b64encode(b"0123456789abcdef").decode("ascii"),
@@ -3212,16 +3212,16 @@ def test_key_bundle_round_trip_and_delete(monkeypatch: pytest.MonkeyPatch) -> No
         "wrapped_dek": base64.b64encode(b"wrapped-dek-bytes").decode("ascii"),
         "key_epoch": 1,
     }
-    assert client.put("/sync/bundle", json=body, headers=_admin_headers()).status_code == 200
+    assert client.put("/sync/bundle", json=body, headers=_user_headers()).status_code == 200
 
-    fetched = client.get("/sync/bundle", headers=_admin_headers())
+    fetched = client.get("/sync/bundle", headers=_user_headers())
     assert fetched.status_code == 200
     assert fetched.json()["wrapped_dek"] == body["wrapped_dek"]
     assert fetched.json()["kdf_salt"] == body["kdf_salt"]
     assert fetched.json()["key_epoch"] == 1
 
-    assert client.delete("/sync/bundle", headers=_admin_headers()).status_code == 200
-    assert client.get("/sync/bundle", headers=_admin_headers()).status_code == 404
+    assert client.delete("/sync/bundle", headers=_user_headers()).status_code == 200
+    assert client.get("/sync/bundle", headers=_user_headers()).status_code == 404
 
 
 def test_key_bundle_rejects_oversized_wrapped_dek(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3234,18 +3234,18 @@ def test_key_bundle_rejects_oversized_wrapped_dek(monkeypatch: pytest.MonkeyPatc
         "wrapped_dek": base64.b64encode(b"x" * (_MAX_KEY_BUNDLE_FIELD_BYTES + 1)).decode("ascii"),
         "key_epoch": 1,
     }
-    assert client.put("/sync/bundle", json=body, headers=_admin_headers()).status_code == 400
+    assert client.put("/sync/bundle", json=body, headers=_user_headers()).status_code == 400
 
 
 def test_delete_workspace_record_removes_row(monkeypatch: pytest.MonkeyPatch) -> None:
     client, store, _caller = _make_sync_test_client(monkeypatch)
-    client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers())
+    client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_user_headers())
 
-    resp = client.delete("/sync/records/host-aaa111", headers=_admin_headers())
+    resp = client.delete("/sync/records/host-aaa111", headers=_user_headers())
     assert resp.status_code == 200
-    assert client.get("/sync/records", headers=_admin_headers()).json()["records"] == []
+    assert client.get("/sync/records", headers=_user_headers()).json()["records"] == []
     # Idempotent: deleting again still succeeds.
-    assert client.delete("/sync/records/host-aaa111", headers=_admin_headers()).status_code == 200
+    assert client.delete("/sync/records/host-aaa111", headers=_user_headers()).status_code == 200
     assert len(store.records_by_key) == 0
 
 
@@ -3450,30 +3450,30 @@ def test_ensure_account_entitlements_raises_when_plan_not_seeded() -> None:
 def test_route_create_tunnel_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_tunnels=1)
-    assert client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).status_code == 200
-    resp = client.post("/tunnels", json={"agent_id": "agent2"}, headers=_admin_headers())
+    assert client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers()).status_code == 200
+    resp = client.post("/tunnels", json={"agent_id": "agent2"}, headers=_user_headers())
     assert resp.status_code == 403
     detail = resp.json()["detail"]
     assert detail["code"] == "quota_exceeded"
     assert detail["entitlement"] == "max_tunnels"
     # Idempotent re-create of the existing tunnel is always allowed at the cap.
-    assert client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).status_code == 200
+    assert client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers()).status_code == 200
 
 
 def test_route_add_service_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_services_per_tunnel=1)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     first = client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert first.status_code == 200
     second = client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "api", "service_url": "http://localhost:9090"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert second.status_code == 403
     assert second.json()["detail"]["entitlement"] == "max_services_per_tunnel"
@@ -3481,7 +3481,7 @@ def test_route_add_service_returns_quota_403_at_cap(monkeypatch: pytest.MonkeyPa
     re_add = client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:9191"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert re_add.status_code == 200
 
@@ -3535,7 +3535,7 @@ def test_route_enable_sharing_creates_tunnel_service_and_policy_in_one_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
-    resp = client.post("/sharing/enable", json=_enable_sharing_body(), headers=_admin_headers())
+    resp = client.post("/sharing/enable", json=_enable_sharing_body(), headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["tunnel"]["tunnel_name"] == "testuser--agent1"
@@ -3543,27 +3543,23 @@ def test_route_enable_sharing_creates_tunnel_service_and_policy_in_one_call(
     assert body["service"]["service_name"] == "web"
     assert body["service"]["hostname"]
     # The requested policy landed on the service's Access Application.
-    auth = client.get("/tunnels/testuser--agent1/services/web/auth", headers=_admin_headers()).json()
+    auth = client.get("/tunnels/testuser--agent1/services/web/auth", headers=_user_headers()).json()
     assert "guest@y.com" in json.dumps(auth)
 
 
 def test_route_enable_sharing_re_enable_replaces_the_service_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     assert (
-        client.post(
-            "/sharing/enable", json=_enable_sharing_body(email="a@x.com"), headers=_admin_headers()
-        ).status_code
+        client.post("/sharing/enable", json=_enable_sharing_body(email="a@x.com"), headers=_user_headers()).status_code
         == 200
     )
     assert (
-        client.post(
-            "/sharing/enable", json=_enable_sharing_body(email="b@y.com"), headers=_admin_headers()
-        ).status_code
+        client.post("/sharing/enable", json=_enable_sharing_body(email="b@y.com"), headers=_user_headers()).status_code
         == 200
     )
-    services = client.get("/tunnels/testuser--agent1/services", headers=_admin_headers()).json()
+    services = client.get("/tunnels/testuser--agent1/services", headers=_user_headers()).json()
     assert len(services) == 1
-    auth = json.dumps(client.get("/tunnels/testuser--agent1/services/web/auth", headers=_admin_headers()).json())
+    auth = json.dumps(client.get("/tunnels/testuser--agent1/services/web/auth", headers=_user_headers()).json())
     assert "b@y.com" in auth
     assert "a@x.com" not in auth
 
@@ -3571,8 +3567,8 @@ def test_route_enable_sharing_re_enable_replaces_the_service_policy(monkeypatch:
 def test_route_enable_sharing_enforces_tunnel_quota(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_tunnels=1)
-    client.post("/tunnels", json={"agent_id": "other"}, headers=_admin_headers())
-    resp = client.post("/sharing/enable", json=_enable_sharing_body(), headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "other"}, headers=_user_headers())
+    resp = client.post("/sharing/enable", json=_enable_sharing_body(), headers=_user_headers())
     assert resp.status_code == 403
     assert resp.json()["detail"]["entitlement"] == "max_tunnels"
 
@@ -3582,28 +3578,24 @@ def test_route_enable_sharing_enforces_service_quota_but_allows_re_enable(
 ) -> None:
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_services_per_tunnel=1)
-    assert (
-        client.post("/sharing/enable", json=_enable_sharing_body("web"), headers=_admin_headers()).status_code == 200
-    )
-    blocked = client.post("/sharing/enable", json=_enable_sharing_body("api"), headers=_admin_headers())
+    assert client.post("/sharing/enable", json=_enable_sharing_body("web"), headers=_user_headers()).status_code == 200
+    blocked = client.post("/sharing/enable", json=_enable_sharing_body("api"), headers=_user_headers())
     assert blocked.status_code == 403
     assert blocked.json()["detail"]["entitlement"] == "max_services_per_tunnel"
-    assert (
-        client.post("/sharing/enable", json=_enable_sharing_body("web"), headers=_admin_headers()).status_code == 200
-    )
+    assert client.post("/sharing/enable", json=_enable_sharing_body("web"), headers=_user_headers()).status_code == 200
 
 
 def test_route_enable_sharing_rejects_identityless_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     body = _enable_sharing_body()
     body["auth_policy"] = {"rules": []}
-    resp = client.post("/sharing/enable", json=body, headers=_admin_headers())
+    resp = client.post("/sharing/enable", json=body, headers=_user_headers())
     assert resp.status_code == 400
 
 
-def test_route_enable_sharing_requires_admin_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_enable_sharing_requires_user_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
-    created = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).json()
+    created = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers()).json()
     resp = client.post("/sharing/enable", json=_enable_sharing_body(), headers=_agent_headers(created["tunnel_id"]))
     assert resp.status_code == 403
 
@@ -3612,7 +3604,7 @@ def test_route_add_service_agent_auth_respects_owner_quota_by_prefix(monkeypatch
     """Agent (tunnel-token) auth resolves the owner's quota via the tunnel-name prefix."""
     client, entitlements_store, _litellm = _make_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_services_per_tunnel=1)
-    created = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers()).json()
+    created = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers()).json()
     agent = _agent_headers(created["tunnel_id"])
     first = client.post(
         "/tunnels/testuser--agent1/services",
@@ -3634,7 +3626,7 @@ def test_route_create_tunnel_rejects_identity_less_default_policy(monkeypatch: p
     resp = client.post(
         "/tunnels",
         json={"agent_id": "agent1", "default_auth_policy": {"rules": []}},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 400
     resp = client.post(
@@ -3643,36 +3635,36 @@ def test_route_create_tunnel_rejects_identity_less_default_policy(monkeypatch: p
             "agent_id": "agent1",
             "default_auth_policy": {"rules": [{"action": "allow", "include": [{"everyone": {}}]}]},
         },
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 400
 
 
 def test_route_set_tunnel_auth_rejects_identity_less_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
-    empty = client.put("/tunnels/testuser--agent1/auth", json={"rules": []}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
+    empty = client.put("/tunnels/testuser--agent1/auth", json={"rules": []}, headers=_user_headers())
     assert empty.status_code == 400
     everyone = client.put(
         "/tunnels/testuser--agent1/auth",
         json={"rules": [{"action": "allow", "include": [{"everyone": {}}]}]},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert everyone.status_code == 400
 
 
 def test_route_set_service_auth_rejects_identity_less_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
     client.post(
         "/tunnels/testuser--agent1/services",
         json={"service_name": "web", "service_url": "http://localhost:8080"},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     resp = client.put(
         "/tunnels/testuser--agent1/services/web/auth",
         json={"rules": [{"action": "allow", "include": []}]},
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert resp.status_code == 400
 
@@ -3765,11 +3757,11 @@ def test_sync_put_active_record_refused_at_quota(monkeypatch: pytest.MonkeyPatch
     client, _store, entitlements_store = _make_sync_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_active_synced_workspaces=1)
     first = client.put(
-        "/sync/records/host-1", json=_sync_record_body(host_id="host-1", agent_id="agent-1"), headers=_admin_headers()
+        "/sync/records/host-1", json=_sync_record_body(host_id="host-1", agent_id="agent-1"), headers=_user_headers()
     )
     assert first.status_code == 200
     second = client.put(
-        "/sync/records/host-2", json=_sync_record_body(host_id="host-2", agent_id="agent-2"), headers=_admin_headers()
+        "/sync/records/host-2", json=_sync_record_body(host_id="host-2", agent_id="agent-2"), headers=_user_headers()
     )
     assert second.status_code == 403
     assert second.json()["detail"]["entitlement"] == "max_active_synced_workspaces"
@@ -3777,18 +3769,18 @@ def test_sync_put_active_record_refused_at_quota(monkeypatch: pytest.MonkeyPatch
     update = client.put(
         "/sync/records/host-1",
         json=_sync_record_body(host_id="host-1", agent_id="agent-1", revision=2),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert update.status_code == 200
     # Tombstoning is always allowed, and frees quota for a new active record.
     tombstone = client.put(
         "/sync/records/host-1",
         json=_sync_record_body(host_id="host-1", agent_id="agent-1", revision=3, state="destroyed"),
-        headers=_admin_headers(),
+        headers=_user_headers(),
     )
     assert tombstone.status_code == 200
     third = client.put(
-        "/sync/records/host-2", json=_sync_record_body(host_id="host-2", agent_id="agent-2"), headers=_admin_headers()
+        "/sync/records/host-2", json=_sync_record_body(host_id="host-2", agent_id="agent-2"), headers=_user_headers()
     )
     assert third.status_code == 200
 
@@ -3803,20 +3795,20 @@ def test_route_get_account_reports_plan_entitlements_and_usage(monkeypatch: pyte
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"),
         version="v0.1.0",
-        leased_to_user=_ADMIN_STUB_USERNAME,
+        leased_to_user=_USER_STUB_USERNAME,
     )
-    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
-    litellm.users_by_id[_ADMIN_STUB_USER_ID] = {
-        "user_id": _ADMIN_STUB_USER_ID,
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_user_headers())
+    litellm.users_by_id[_USER_STUB_USER_ID] = {
+        "user_id": _USER_STUB_USER_ID,
         "spend": 12.5,
         "max_budget": 1000.0,
         "budget_reset_at": "2026-08-01T00:00:00Z",
     }
-    resp = client.get("/account", headers=_admin_headers())
+    resp = client.get("/account", headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
-    assert body["user_id"] == _ADMIN_STUB_USER_ID
-    assert body["email"] == _ADMIN_STUB_EMAIL
+    assert body["user_id"] == _USER_STUB_USER_ID
+    assert body["email"] == _USER_STUB_EMAIL
     # Stub email is paid-listed + pre-cutoff, so the lazily-created plan is ally.
     assert body["plan_name"] == "ally"
     assert body["entitlements"]["max_remote_workspaces"] == ALLY_PLAN_VALUES["max_remote_workspaces"]
@@ -3893,7 +3885,7 @@ def test_measure_live_owner_usage_bytes_raises_when_any_read_fails() -> None:
 def test_route_set_account_plan_same_plan_is_noop_preserving_bumps(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "ally", max_remote_workspaces=42)
-    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["entitlements"]["max_remote_workspaces"] == 42
     # No LiteLLM push on a no-op.
@@ -3903,19 +3895,19 @@ def test_route_set_account_plan_same_plan_is_noop_preserving_bumps(monkeypatch: 
 def test_route_set_account_plan_switch_overwrites_wholesale(monkeypatch: pytest.MonkeyPatch) -> None:
     client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer", max_remote_workspaces=42)
-    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["plan_name"] == "ally"
     # The manual bump is wiped: values reset wholesale to the plan defaults.
     assert body["entitlements"]["max_remote_workspaces"] == ALLY_PLAN_VALUES["max_remote_workspaces"]
     # The new monthly budget is pushed to LiteLLM.
-    assert litellm.users_by_id[_ADMIN_STUB_USER_ID]["max_budget"] == ALLY_PLAN_VALUES["monthly_llm_spend_usd"]
+    assert litellm.users_by_id[_USER_STUB_USER_ID]["max_budget"] == ALLY_PLAN_VALUES["monthly_llm_spend_usd"]
 
 
 def test_route_set_account_plan_unknown_plan_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
-    resp = client.post("/account/plan", json={"plan": "platinum"}, headers=_admin_headers())
+    resp = client.post("/account/plan", json={"plan": "platinum"}, headers=_user_headers())
     assert resp.status_code == 400
 
 
@@ -3924,9 +3916,9 @@ def test_route_set_account_plan_litellm_failure_aborts_switch(monkeypatch: pytes
     client, entitlements_store, litellm = _make_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, "explorer")
     litellm.fail_user_writes = True
-    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_admin_headers())
+    resp = client.post("/account/plan", json={"plan": "ally"}, headers=_user_headers())
     assert resp.status_code == 500
-    row = entitlements_store.get_entitlements(_ADMIN_STUB_USER_ID)
+    row = entitlements_store.get_entitlements(_USER_STUB_USER_ID)
     assert row is not None
     assert row["plan_name"] == "explorer"
 
@@ -3978,7 +3970,7 @@ def test_admin_account_endpoints_reject_missing_admin_key(monkeypatch: pytest.Mo
     client, _entitlements_store, _litellm, st_backend = _make_account_admin_test_client(monkeypatch)
     st_backend.sign_up(tenant_id="public", email="somebody@example.com", password="password123")
     # A SuperTokens session token is rejected on the admin-key routes.
-    resp = client.get("/admin/accounts/somebody@example.com", headers=_admin_headers())
+    resp = client.get("/admin/accounts/somebody@example.com", headers=_user_headers())
     assert resp.status_code == 401
 
 
@@ -4434,9 +4426,9 @@ def _downgrade_key(fake: FakeCloudflareOps, store: InMemoryKeyStore, access_key_
 def test_create_bucket_over_storage_quota_returns_403(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, _store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
-    assert client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).status_code == 200
+    assert client.post("/buckets", json={"name": "a"}, headers=_user_headers()).status_code == 200
     fake.usage_bytes_by_bucket["testuser--a"] = 1000
-    resp = client.post("/buckets", json={"name": "b"}, headers=_admin_headers())
+    resp = client.post("/buckets", json={"name": "b"}, headers=_user_headers())
     assert resp.status_code == 403
     detail = resp.json()["detail"]
     assert detail["code"] == "quota_exceeded"
@@ -4447,19 +4439,19 @@ def test_create_bucket_storage_check_fails_open_on_usage_read_error(monkeypatch:
     """An unreadable usage number never blocks creation (missing data never denies)."""
     client, fake, _store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
-    assert client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).status_code == 200
+    assert client.post("/buckets", json={"name": "a"}, headers=_user_headers()).status_code == 200
     fake.usage_bytes_by_bucket["testuser--a"] = 1000
     fake.fail_bucket_usage_reads = True
-    resp = client.post("/buckets", json={"name": "b"}, headers=_admin_headers())
+    resp = client.post("/buckets", json={"name": "b"}, headers=_user_headers())
     assert resp.status_code == 200
 
 
 def test_create_bucket_while_enforced_mints_read_only_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fresh mint must not hand a writable key to an owner the sweep already downgraded."""
     client, fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
-    first = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    first = client.post("/buckets", json={"name": "a"}, headers=_user_headers()).json()
     _downgrade_key(fake, store, first["key"]["access_key_id"])
-    resp = client.post("/buckets", json={"name": "b"}, headers=_admin_headers())
+    resp = client.post("/buckets", json={"name": "b"}, headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["key"]["access"] == "read"
@@ -4473,21 +4465,21 @@ def test_create_bucket_while_enforced_mints_read_only_key(monkeypatch: pytest.Mo
 
 def test_roll_key_fresh_mint_respects_enforcement(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
-    first = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
-    second = client.post("/buckets", json={"name": "b"}, headers=_admin_headers()).json()
+    first = client.post("/buckets", json={"name": "a"}, headers=_user_headers()).json()
+    second = client.post("/buckets", json={"name": "b"}, headers=_user_headers()).json()
     _downgrade_key(fake, store, first["key"]["access_key_id"])
     # Revoke b's key so roll-key has to mint a fresh one.
-    revoke = client.delete(f"/bucket-keys/{second['key']['access_key_id']}", headers=_admin_headers())
+    revoke = client.delete(f"/bucket-keys/{second['key']['access_key_id']}", headers=_user_headers())
     assert revoke.status_code == 200
-    rolled = client.post("/buckets/b/roll-key", headers=_admin_headers())
+    rolled = client.post("/buckets/b/roll-key", headers=_user_headers())
     assert rolled.status_code == 200
     assert rolled.json()["access"] == "read"
 
 
 def test_cleanup_grant_not_needed_when_nothing_downgraded(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store, _entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
-    assert client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).status_code == 200
-    resp = client.post("/account/storage-cleanup-grant", headers=_admin_headers())
+    assert client.post("/buckets", json={"name": "a"}, headers=_user_headers()).status_code == 200
+    resp = client.post("/account/storage-cleanup-grant", headers=_user_headers())
     assert resp.status_code == 200
     assert resp.json()["status"] == "not_needed"
     assert grant_store.grants_by_id == {}
@@ -4496,12 +4488,12 @@ def test_cleanup_grant_not_needed_when_nothing_downgraded(monkeypatch: pytest.Mo
 def test_cleanup_grant_restores_keys_and_records_grant(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store, entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
-    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    created = client.post("/buckets", json={"name": "a"}, headers=_user_headers()).json()
     key_id = created["key"]["access_key_id"]
     fake.usage_bytes_by_bucket["testuser--a"] = 1000
     _downgrade_key(fake, store, key_id)
 
-    resp = client.post("/account/storage-cleanup-grant", headers=_admin_headers())
+    resp = client.post("/account/storage-cleanup-grant", headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "granted"
@@ -4514,7 +4506,7 @@ def test_cleanup_grant_restores_keys_and_records_grant(monkeypatch: pytest.Monke
     assert len(grant_store.grants_by_id) == 1
 
     # Idempotent while active: no second grant row is minted.
-    again = client.post("/account/storage-cleanup-grant", headers=_admin_headers())
+    again = client.post("/account/storage-cleanup-grant", headers=_user_headers())
     assert again.status_code == 200
     assert again.json()["status"] == "granted"
     assert len(grant_store.grants_by_id) == 1
@@ -4523,13 +4515,13 @@ def test_cleanup_grant_restores_keys_and_records_grant(monkeypatch: pytest.Monke
 def test_cleanup_grant_budget_exhausted_returns_403(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store, entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
-    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    created = client.post("/buckets", json={"name": "a"}, headers=_user_headers()).json()
     _downgrade_key(fake, store, created["key"]["access_key_id"])
     # Burn the failed-grant budget: five grants settled without any decrease.
     for _ in range(5):
-        burned = grant_store.create_grant(_ADMIN_STUB_USER_ID, "testuser", 1000, 60)
+        burned = grant_store.create_grant(_USER_STUB_USER_ID, "testuser", 1000, 60)
         grant_store.settle_grant(int(burned["grant_id"]), 1000, False)
-    resp = client.post("/account/storage-cleanup-grant", headers=_admin_headers())
+    resp = client.post("/account/storage-cleanup-grant", headers=_user_headers())
     assert resp.status_code == 403
     detail = resp.json()["detail"]
     assert detail["code"] == "cleanup_grant_budget_exhausted"
@@ -4540,15 +4532,15 @@ def test_cleanup_grant_budget_exhausted_returns_403(monkeypatch: pytest.MonkeyPa
 def test_storage_recheck_settles_grant_success_and_keeps_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake, store, entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
-    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    created = client.post("/buckets", json={"name": "a"}, headers=_user_headers()).json()
     key_id = created["key"]["access_key_id"]
     fake.usage_bytes_by_bucket["testuser--a"] = 1000
     _downgrade_key(fake, store, key_id)
-    assert client.post("/account/storage-cleanup-grant", headers=_admin_headers()).status_code == 200
+    assert client.post("/account/storage-cleanup-grant", headers=_user_headers()).status_code == 200
     # The client prunes: usage drops under both the baseline and the limit.
     fake.usage_bytes_by_bucket["testuser--a"] = 40
 
-    resp = client.post("/account/storage-recheck", headers=_admin_headers())
+    resp = client.post("/account/storage-recheck", headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["usage_bytes"] == 40
@@ -4557,7 +4549,7 @@ def test_storage_recheck_settles_grant_success_and_keeps_keys(monkeypatch: pytes
     assert fake.account_tokens[key_id]["access"] == "readwrite"
     settled = list(grant_store.grants_by_id.values())[0]
     assert settled["is_decreased"] is True
-    assert grant_store.count_failed_grants_in_window(_ADMIN_STUB_USER_ID, 24) == 0
+    assert grant_store.count_failed_grants_in_window(_USER_STUB_USER_ID, 24) == 0
 
 
 def test_storage_recheck_redowngrades_and_burns_budget_when_usage_did_not_drop(
@@ -4565,31 +4557,31 @@ def test_storage_recheck_redowngrades_and_burns_budget_when_usage_did_not_drop(
 ) -> None:
     client, fake, store, entitlements_store, grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
-    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    created = client.post("/buckets", json={"name": "a"}, headers=_user_headers()).json()
     key_id = created["key"]["access_key_id"]
     fake.usage_bytes_by_bucket["testuser--a"] = 1000
     _downgrade_key(fake, store, key_id)
-    assert client.post("/account/storage-cleanup-grant", headers=_admin_headers()).status_code == 200
+    assert client.post("/account/storage-cleanup-grant", headers=_user_headers()).status_code == 200
 
-    resp = client.post("/account/storage-recheck", headers=_admin_headers())
+    resp = client.post("/account/storage-recheck", headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["is_over_quota"] is True
     assert body["is_grant_settled"] is True
     assert fake.account_tokens[key_id]["access"] == "read"
-    assert grant_store.count_failed_grants_in_window(_ADMIN_STUB_USER_ID, 24) == 1
+    assert grant_store.count_failed_grants_in_window(_USER_STUB_USER_ID, 24) == 1
 
 
 def test_storage_recheck_standalone_restores_without_grant(monkeypatch: pytest.MonkeyPatch) -> None:
     """A user who freed space any other way gets restored immediately, no grant involved."""
     client, fake, store, entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     _seed_entitlements_row(entitlements_store, max_total_bucket_bytes=100)
-    created = client.post("/buckets", json={"name": "a"}, headers=_admin_headers()).json()
+    created = client.post("/buckets", json={"name": "a"}, headers=_user_headers()).json()
     key_id = created["key"]["access_key_id"]
     _downgrade_key(fake, store, key_id)
     fake.usage_bytes_by_bucket["testuser--a"] = 40
 
-    resp = client.post("/account/storage-recheck", headers=_admin_headers())
+    resp = client.post("/account/storage-recheck", headers=_user_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["is_grant_settled"] is False
@@ -4628,7 +4620,7 @@ def test_admin_sweep_endpoint_rejects_supertokens_auth(monkeypatch: pytest.Monke
     """The sweep trigger is operator-key gated; a SuperTokens session must not pass."""
     client, _fake, _store, _entitlements_store, _grant_store = _make_bucket_quota_test_client(monkeypatch)
     monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
-    resp = client.post("/admin/sweep/r2", headers=_admin_headers())
+    resp = client.post("/admin/sweep/r2", headers=_user_headers())
     assert resp.status_code == 401
 
 

@@ -446,7 +446,7 @@ class ServiceTokenInfo(BaseModel):
     name: str = Field(description="Token name")
 
 
-class AdminAuth(BaseModel):
+class UserAuth(BaseModel):
     username: str
     # Verified email associated with the SuperTokens user, looked up at auth
     # time so that paid-feature endpoints (host pool, LiteLLM keys) can gate
@@ -456,12 +456,12 @@ class AdminAuth(BaseModel):
     email: str | None = None
 
 
-class AgentAuth(BaseModel):
+class TunnelTokenAuth(BaseModel):
     tunnel_id: str
     tunnel_name: str
 
 
-AuthResult = AdminAuth | AgentAuth
+AuthResult = UserAuth | TunnelTokenAuth
 
 
 # -- Host pool models --
@@ -1978,11 +1978,11 @@ class ForwardingCtx:
 
 
 def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
-    """Authenticate a request. Returns AdminAuth or AgentAuth.
+    """Authenticate a request. Returns UserAuth or TunnelTokenAuth.
 
     Supports two Bearer-token auth methods:
-    1. Base64-encoded Cloudflare tunnel token (agent auth, scoped to one tunnel).
-    2. SuperTokens JWT (user auth, treated as admin; user_id_prefix is the username).
+    1. Base64-encoded Cloudflare tunnel token (held by the agent, scoped to one tunnel).
+    2. SuperTokens JWT (a signed-in user's session; user_id_prefix is the username).
     """
     auth_header = request.headers.get("authorization", "")
 
@@ -1991,16 +1991,16 @@ def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
 
     token = auth_header[7:]
     # Try tunnel token first.
-    agent_exc: HTTPException | None = None
+    tunnel_token_exc: HTTPException | None = None
     try:
-        return _authenticate_agent(token, ops)
+        return _authenticate_tunnel_token(token, ops)
     except HTTPException as exc:
-        agent_exc = exc
+        tunnel_token_exc = exc
     # Only try SuperTokens JWT if it is configured; otherwise preserve the
-    # original agent auth error so callers receive a meaningful message.
+    # original tunnel-token auth error so callers receive a meaningful message.
     if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
-        assert agent_exc is not None
-        raise agent_exc
+        assert tunnel_token_exc is not None
+        raise tunnel_token_exc
     # If SuperTokens also fails, raise the SuperTokens error since the
     # token is clearly a JWT (not a base64 tunnel token).
     try:
@@ -2009,8 +2009,8 @@ def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
         raise st_exc from None
 
 
-def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
-    """Validate a tunnel token. Returns AgentAuth with tunnel_id and tunnel_name."""
+def _authenticate_tunnel_token(token: str, ops: CloudflareOps) -> TunnelTokenAuth:
+    """Validate a tunnel token. Returns TunnelTokenAuth with tunnel_id and tunnel_name."""
     try:
         decoded = base64.b64decode(token).decode("utf-8")
         token_data = json.loads(decoded)
@@ -2025,7 +2025,7 @@ def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
     if tunnel is None:
         raise HTTPException(status_code=401, detail="Invalid tunnel token: tunnel not found")
 
-    return AgentAuth(tunnel_id=tunnel_id, tunnel_name=tunnel["name"])
+    return TunnelTokenAuth(tunnel_id=tunnel_id, tunnel_name=tunnel["name"])
 
 
 _USER_ID_PREFIX_LENGTH = 16
@@ -2080,8 +2080,8 @@ def _authenticate_supertokens(
     token: str,
     session_getter: Callable[..., Any] = get_session_without_request_response,
     email_getter: Callable[[str], str | None] = _default_email_getter,
-) -> AdminAuth:
-    """Validate a SuperTokens JWT access token. Returns AdminAuth with user_id_prefix as username."""
+) -> UserAuth:
+    """Validate a SuperTokens JWT access token. Returns UserAuth with user_id_prefix as username."""
     connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
     if not connection_uri:
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
@@ -2121,7 +2121,7 @@ def _authenticate_supertokens(
     if email is None:
         raise HTTPException(status_code=401, detail="Email not verified")
 
-    return AdminAuth(username=user_id_prefix, email=email)
+    return UserAuth(username=user_id_prefix, email=email)
 
 
 def _get_user_id_from_access_token(token: str) -> str:
@@ -2151,17 +2151,18 @@ def _get_user_id_from_access_token(token: str) -> str:
     return session.get_user_id()
 
 
-def require_admin(auth: AuthResult) -> AdminAuth:
-    """Require admin auth. Raises 403 if agent auth."""
-    if isinstance(auth, AgentAuth):
-        raise HTTPException(status_code=403, detail="This operation requires admin credentials")
+def require_user_auth(auth: AuthResult) -> UserAuth:
+    """Require a signed-in user session. Raises 403 for tunnel-token callers."""
+    if isinstance(auth, TunnelTokenAuth):
+        raise HTTPException(status_code=403, detail="This operation requires a signed-in user session")
     return auth
 
 
 def require_tunnel_access(auth: AuthResult, tunnel_name: str) -> str:
     """Require access to a specific tunnel. Returns the username.
-    Admin can access any tunnel. Agent can only access their own tunnel."""
-    if isinstance(auth, AdminAuth):
+    A signed-in user can access any of their own tunnels. A tunnel token can
+    only access the one tunnel it belongs to."""
+    if isinstance(auth, UserAuth):
         return auth.username
     if auth.tunnel_name != tunnel_name:
         raise HTTPException(status_code=403, detail=f"Token does not grant access to tunnel '{tunnel_name}'")
@@ -2579,11 +2580,11 @@ def ensure_account_entitlements(
     return AccountEntitlements(**stored)
 
 
-def resolve_entitlements_for_admin(request: Request, admin: AdminAuth) -> AccountEntitlements:
-    """Resolve (lazily creating) the entitlements row for an admin-authenticated request."""
+def resolve_entitlements_for_user(request: Request, user: UserAuth) -> AccountEntitlements:
+    """Resolve (lazily creating) the entitlements row for a user-authenticated request."""
     token = request.headers.get("authorization", "")[7:]
     user_id = _get_user_id_from_access_token(token)
-    return ensure_account_entitlements(user_id=user_id, username_prefix=admin.username, email=admin.email or "")
+    return ensure_account_entitlements(user_id=user_id, username_prefix=user.username, email=user.email or "")
 
 
 def raise_quota_exceeded(entitlement: str, limit: float, current: float, noun: str) -> NoReturn:
@@ -3211,15 +3212,15 @@ def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, obje
     with handle_endpoint_errors():
         ctx = get_ctx()
         auth = authenticate_request(request, ctx.ops)
-        admin = require_admin(auth)
-        entitlements = resolve_entitlements_for_admin(request, admin)
+        user = require_user_auth(auth)
+        entitlements = resolve_entitlements_for_user(request, user)
         if body.default_auth_policy is not None:
             validate_auth_policy_has_identity(body.default_auth_policy)
-        tunnel_name = make_tunnel_name(admin.username, body.agent_id)
-        enforce_tunnel_quota_for_new_tunnel(ctx.ops, admin.username, tunnel_name, entitlements)
-        fallback = owner_email_auth_policy(admin.email) if admin.email else None
+        tunnel_name = make_tunnel_name(user.username, body.agent_id)
+        enforce_tunnel_quota_for_new_tunnel(ctx.ops, user.username, tunnel_name, entitlements)
+        fallback = owner_email_auth_policy(user.email) if user.email else None
         return ctx.create_tunnel(
-            admin.username,
+            user.username,
             body.agent_id,
             default_auth_policy=body.default_auth_policy,
             fallback_auth_policy=fallback,
@@ -3231,8 +3232,8 @@ def list_tunnels(request: Request) -> list[dict[str, object]]:
     """List all tunnels belonging to the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        return [t.model_dump() for t in get_ctx().list_tunnels(admin.username)]
+        user = require_user_auth(auth)
+        return [t.model_dump() for t in get_ctx().list_tunnels(user.username)]
 
 
 @web_app.get("/tunnels/by-agent/{agent_id}")
@@ -3255,8 +3256,8 @@ def get_tunnel_for_agent(request: Request, agent_id: str) -> dict[str, object] |
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        tunnel = get_ctx().get_tunnel_for_agent(admin.username, agent_id)
+        user = require_user_auth(auth)
+        tunnel = get_ctx().get_tunnel_for_agent(user.username, agent_id)
         return tunnel.model_dump() if tunnel is not None else None
 
 
@@ -3271,9 +3272,9 @@ def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         try:
-            get_ctx().delete_tunnel(tunnel_name, admin.username)
+            get_ctx().delete_tunnel(tunnel_name, user.username)
         except HTTPException as exc:
             if exc.status_code == 404:
                 return {"status": "already_deleted"}
@@ -3284,14 +3285,14 @@ def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
 def _service_quota_and_owner_email(request: Request, auth: AuthResult, tunnel_name: str) -> tuple[int, str | None]:
     """Resolve the services-per-tunnel limit and the owner's email for either auth kind.
 
-    Admin auth resolves (lazily creating) the caller's entitlements row and
-    uses their verified email. Agent auth only knows the tunnel-name prefix:
-    it reads the row by prefix (created earlier, at admin-authed tunnel
+    User auth resolves (lazily creating) the caller's entitlements row and
+    uses their verified email. Tunnel-token auth only knows the tunnel-name
+    prefix: it reads the row by prefix (created earlier, at user-authed tunnel
     creation) and looks the owner's email up from SuperTokens; a missing row
     falls back to the explorer plan's limit with no derivable owner email.
     """
-    if isinstance(auth, AdminAuth):
-        entitlements = resolve_entitlements_for_admin(request, auth)
+    if isinstance(auth, UserAuth):
+        entitlements = resolve_entitlements_for_user(request, auth)
         return entitlements.max_services_per_tunnel, auth.email
     prefix = extract_username_from_tunnel_name(tunnel_name)
     store = get_entitlements_store()
@@ -3320,7 +3321,7 @@ def enforce_service_quota(existing_services: list[ServiceInfo], service_name: st
 
 @web_app.post("/tunnels/{tunnel_name}/services")
 def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> dict[str, object]:
-    """Add a service to a tunnel. Works with both admin and agent auth.
+    """Add a service to a tunnel. Works with both user and tunnel-token auth.
 
     Enforces the services-per-tunnel quota (re-adding an existing service is
     always allowed) and guarantees the service comes up behind a Cloudflare
@@ -3346,7 +3347,7 @@ def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> 
 
 @web_app.delete("/tunnels/{tunnel_name}/services/{service_name}")
 def remove_service(request: Request, tunnel_name: str, service_name: str) -> dict[str, str]:
-    """Remove a service from a tunnel. Works with both admin and agent auth."""
+    """Remove a service from a tunnel. Works with both user and tunnel-token auth."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         username = require_tunnel_access(auth, tunnel_name)
@@ -3356,7 +3357,7 @@ def remove_service(request: Request, tunnel_name: str, service_name: str) -> dic
 
 @web_app.get("/tunnels/{tunnel_name}/services")
 def list_services(request: Request, tunnel_name: str) -> list[dict[str, object]]:
-    """List services on a tunnel. Works with both admin and agent auth."""
+    """List services on a tunnel. Works with both user and tunnel-token auth."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         username = require_tunnel_access(auth, tunnel_name)
@@ -3368,7 +3369,7 @@ def get_tunnel_auth(request: Request, tunnel_name: str) -> dict[str, object]:
     """Get the default auth policy for a tunnel."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         policy = get_ctx().get_tunnel_auth(tunnel_name)
         if policy is None:
             return {"rules": []}
@@ -3380,7 +3381,7 @@ def set_tunnel_auth(request: Request, tunnel_name: str, body: AuthPolicy) -> dic
     """Set the default auth policy for a tunnel. Identity-less policies are rejected."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         validate_auth_policy_has_identity(body)
         get_ctx().set_tunnel_auth(tunnel_name, body)
         return {"status": "updated"}
@@ -3391,8 +3392,8 @@ def get_service_auth(request: Request, tunnel_name: str, service_name: str) -> d
     """Get the auth policy for a specific service."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        policy = get_ctx().get_service_auth(tunnel_name, admin.username, service_name)
+        user = require_user_auth(auth)
+        policy = get_ctx().get_service_auth(tunnel_name, user.username, service_name)
         if policy is None:
             return {"rules": []}
         return policy.model_dump()
@@ -3405,8 +3406,8 @@ def create_service_token_endpoint(
     """Create a service token for programmatic access to this tunnel's services."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        token = get_ctx().create_service_token(tunnel_name, admin.username, body.name)
+        user = require_user_auth(auth)
+        token = get_ctx().create_service_token(tunnel_name, user.username, body.name)
         return token.model_dump()
 
 
@@ -3415,7 +3416,7 @@ def list_service_tokens_endpoint(request: Request, tunnel_name: str) -> list[dic
     """List service tokens. Note: secrets are not returned."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         return [t.model_dump() for t in get_ctx().list_service_tokens()]
 
 
@@ -3424,9 +3425,9 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
     """Set the auth policy for a specific service. Identity-less policies are rejected."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         validate_auth_policy_has_identity(body)
-        get_ctx().set_service_auth(tunnel_name, admin.username, service_name, body)
+        get_ctx().set_service_auth(tunnel_name, user.username, service_name, body)
         return {"status": "updated"}
 
 
@@ -3449,14 +3450,14 @@ def enable_sharing_endpoint(request: Request, body: EnableSharingRequest) -> dic
     with handle_endpoint_errors():
         ctx = get_ctx()
         auth = authenticate_request(request, ctx.ops)
-        admin = require_admin(auth)
-        entitlements = resolve_entitlements_for_admin(request, admin)
+        user = require_user_auth(auth)
+        entitlements = resolve_entitlements_for_user(request, user)
         validate_auth_policy_has_identity(body.auth_policy)
-        tunnel_name = make_tunnel_name(admin.username, body.agent_id)
-        enforce_tunnel_quota_for_new_tunnel(ctx.ops, admin.username, tunnel_name, entitlements)
-        fallback = owner_email_auth_policy(admin.email) if admin.email else None
+        tunnel_name = make_tunnel_name(user.username, body.agent_id)
+        enforce_tunnel_quota_for_new_tunnel(ctx.ops, user.username, tunnel_name, entitlements)
+        fallback = owner_email_auth_policy(user.email) if user.email else None
         tunnel_info = ctx.create_tunnel(
-            admin.username,
+            user.username,
             body.agent_id,
             default_auth_policy=None,
             fallback_auth_policy=fallback,
@@ -3466,7 +3467,7 @@ def enable_sharing_endpoint(request: Request, body: EnableSharingRequest) -> dic
         enforce_service_quota(tunnel_info.services, body.service_name, entitlements.max_services_per_tunnel)
         service = ctx.add_service(
             tunnel_name,
-            admin.username,
+            user.username,
             body.service_name,
             body.service_url,
             fallback_policy=fallback,
@@ -3492,8 +3493,8 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        entitlements = resolve_entitlements_for_admin(request, admin)
+        user = require_user_auth(auth)
+        entitlements = resolve_entitlements_for_user(request, user)
         conn = _get_pool_db_connection()
         try:
             with conn:
@@ -3501,8 +3502,8 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                     # Serialize this user's leases for the duration of the
                     # transaction, then enforce the workspace quota. The
                     # advisory lock releases automatically at commit/rollback.
-                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (admin.username,))
-                    cur.execute(_COUNT_LEASED_HOSTS_SQL, (admin.username,))
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (user.username,))
+                    cur.execute(_COUNT_LEASED_HOSTS_SQL, (user.username,))
                     count_row = cur.fetchone()
                     leased_count = int(count_row[0]) if count_row is not None else 0
                     if leased_count >= entitlements.max_remote_workspaces:
@@ -3599,7 +3600,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                     cur.execute(
                         "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, "
                         "leased_at = NOW(), host_name = %s WHERE id = %s",
-                        (admin.username, body.host_name, host_db_id),
+                        (user.username, body.host_name, host_db_id),
                     )
         finally:
             conn.close()
@@ -3639,7 +3640,7 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
@@ -3665,7 +3666,7 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 ) = row
                 # Ownership check first: we don't want to leak a status
                 # signal to other users via the response code.
-                if leased_to_user != admin.username:
+                if leased_to_user != user.username:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
                 # Only a leased or already-removing row is eligible for
                 # cleanup; anything else is treated as already released.
@@ -3723,7 +3724,7 @@ def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> 
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
@@ -3736,7 +3737,7 @@ def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> 
                     raise HTTPException(status_code=404, detail="No such host")
                 leased_to_user, status = row
                 # Ownership check first, to avoid leaking a status signal.
-                if leased_to_user != admin.username:
+                if leased_to_user != user.username:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
                 if status != "leased":
                     raise HTTPException(status_code=404, detail="Host is not currently leased")
@@ -3755,7 +3756,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
     """List all hosts currently leased by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         conn = _get_pool_db_connection()
         try:
             with conn.cursor() as cur:
@@ -3764,7 +3765,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
                     "host_name, attributes, leased_at, outer_host_public_key, container_host_public_key "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
-                    (admin.username,),
+                    (user.username,),
                 )
                 rows = cur.fetchall()
         finally:
@@ -4016,8 +4017,8 @@ def create_litellm_key(request: Request, body: CreateKeyRequest) -> dict[str, ob
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        entitlements = resolve_entitlements_for_admin(request, admin)
+        user = require_user_auth(auth)
+        entitlements = resolve_entitlements_for_user(request, user)
         if entitlements.monthly_llm_spend_usd <= 0:
             raise QuotaExceededError(
                 entitlement="monthly_llm_spend_usd",
@@ -4056,7 +4057,7 @@ def list_litellm_keys(request: Request) -> list[dict[str, object]]:
     """List all LiteLLM virtual keys owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -4098,7 +4099,7 @@ def get_litellm_key_info(request: Request, key_id: str) -> dict[str, object]:
     """Get info (including spend and budget) for a specific LiteLLM key."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -4125,7 +4126,7 @@ def update_litellm_key_budget(request: Request, key_id: str, body: UpdateBudgetR
     """Update the budget for a LiteLLM key owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -4151,7 +4152,7 @@ def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
     """Delete a LiteLLM key owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -4683,17 +4684,17 @@ def create_bucket_endpoint(request: Request, body: CreateBucketRequest) -> dict[
     """Create an R2 bucket for the caller and mint its single key (returned inline)."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        entitlements = resolve_entitlements_for_admin(request, admin)
+        user = require_user_auth(auth)
+        entitlements = resolve_entitlements_for_user(request, user)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
-        full_name = make_bucket_name(admin.username, body.name)
-        owned = _list_owned_buckets(ops, admin.username)
+        full_name = make_bucket_name(user.username, body.name)
+        owned = _list_owned_buckets(ops, user.username)
         if any(b.get("name") == full_name for b in owned):
             raise R2BucketExistsError(full_name)
         if len(owned) >= entitlements.max_buckets:
             raise_quota_exceeded("max_buckets", entitlements.max_buckets, len(owned), "buckets")
-        _check_storage_quota_for_new_bucket(ops, admin.username, entitlements)
+        _check_storage_quota_for_new_bucket(ops, user.username, entitlements)
         store = get_key_store()
         ops.create_bucket(full_name)
         material = _mint_and_record_key(
@@ -4717,12 +4718,12 @@ def list_buckets_endpoint(request: Request) -> list[dict[str, object]]:
     """List all R2 buckets owned by the caller."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         ops = get_ctx().ops
         endpoint = r2_s3_endpoint(ops.account_id)
         return [
             BucketInfo(bucket_name=str(b["name"]), s3_endpoint=endpoint).model_dump()
-            for b in _list_owned_buckets(ops, admin.username)
+            for b in _list_owned_buckets(ops, user.username)
         ]
 
 
@@ -4731,10 +4732,10 @@ def get_bucket_endpoint(request: Request, name: str) -> dict[str, object]:
     """Return metadata for one of the caller's buckets (keys come from the keys endpoints)."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         ops = get_ctx().ops
-        full_name = make_bucket_name(admin.username, name)
-        if not _owned_bucket_exists(ops, admin.username, full_name):
+        full_name = make_bucket_name(user.username, name)
+        if not _owned_bucket_exists(ops, user.username, full_name):
             raise R2BucketNotFoundError(full_name)
         return BucketInfo(bucket_name=full_name, s3_endpoint=r2_s3_endpoint(ops.account_id)).model_dump()
 
@@ -4744,11 +4745,11 @@ def delete_bucket_endpoint(request: Request, name: str) -> dict[str, str]:
     """Destroy one of the caller's buckets (refuses non-empty) and cascade-revoke its keys."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
-        full_name = make_bucket_name(admin.username, name)
-        verify_bucket_ownership(full_name, admin.username)
+        full_name = make_bucket_name(user.username, name)
+        verify_bucket_ownership(full_name, user.username)
         ops.delete_bucket(full_name)
         revoked = get_key_store().delete_keys_for_bucket(owner_user_id, full_name)
         for row in revoked:
@@ -4770,11 +4771,11 @@ def roll_bucket_key_endpoint(request: Request, name: str) -> dict[str, object]:
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
-        full_name = make_bucket_name(admin.username, name)
-        if not _owned_bucket_exists(ops, admin.username, full_name):
+        full_name = make_bucket_name(user.username, name)
+        if not _owned_bucket_exists(ops, user.username, full_name):
             raise R2BucketNotFoundError(full_name)
         store = get_key_store()
         rows = store.list_keys(owner_user_id, full_name)
@@ -4810,9 +4811,9 @@ def list_bucket_keys_endpoint(request: Request, name: str) -> list[dict[str, obj
     """List the caller's keys scoped to one bucket."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
-        full_name = make_bucket_name(admin.username, name)
+        full_name = make_bucket_name(user.username, name)
         rows = get_key_store().list_keys(owner_user_id, full_name)
         return [_key_info_from_row(row).model_dump() for row in rows]
 
@@ -4822,7 +4823,7 @@ def list_all_bucket_keys_endpoint(request: Request) -> list[dict[str, object]]:
     """List all of the caller's bucket keys across every bucket."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         rows = get_key_store().list_keys(owner_user_id, None)
         return [_key_info_from_row(row).model_dump() for row in rows]
@@ -4833,7 +4834,7 @@ def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str
     """Revoke one of the caller's bucket keys (by Access Key ID) and drop its DB row."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        require_admin(auth)
+        require_user_auth(auth)
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         store = get_key_store()
         row = store.get_key(access_key_id)
@@ -4865,8 +4866,8 @@ def create_storage_cleanup_grant(request: Request) -> dict[str, object]:
     with handle_endpoint_errors():
         ops = get_ctx().ops
         auth = authenticate_request(request, ops)
-        admin = require_admin(auth)
-        entitlements = resolve_entitlements_for_admin(request, admin)
+        user = require_user_auth(auth)
+        entitlements = resolve_entitlements_for_user(request, user)
         key_store = get_key_store()
         grant_store = get_grant_store()
         counters = {"keys_downgraded": 0, "keys_restored": 0, "key_update_failures": 0}
@@ -4888,9 +4889,9 @@ def create_storage_cleanup_grant(request: Request) -> dict[str, object]:
                         current=failed_count,
                         window_hours=_R2_CLEANUP_GRANT_WINDOW_HOURS,
                     )
-                baseline_bytes = _measure_live_owner_usage_bytes(ops, admin.username)
+                baseline_bytes = _measure_live_owner_usage_bytes(ops, user.username)
                 active_grant = grant_store.create_grant(
-                    entitlements.user_id, admin.username, baseline_bytes, _R2_CLEANUP_GRANT_EXPIRY_MINUTES
+                    entitlements.user_id, user.username, baseline_bytes, _R2_CLEANUP_GRANT_EXPIRY_MINUTES
                 )
             # Restore every still-downgraded key (is_over_quota=False path).
             _enforce_owner_key_access(ops, key_store, rows, False, counters)
@@ -4918,13 +4919,13 @@ def recheck_storage_enforcement(request: Request) -> dict[str, object]:
     with handle_endpoint_errors():
         ops = get_ctx().ops
         auth = authenticate_request(request, ops)
-        admin = require_admin(auth)
-        entitlements = resolve_entitlements_for_admin(request, admin)
+        user = require_user_auth(auth)
+        entitlements = resolve_entitlements_for_user(request, user)
         key_store = get_key_store()
         grant_store = get_grant_store()
         counters = {"keys_downgraded": 0, "keys_restored": 0, "key_update_failures": 0}
         with _r2_enforcement_lock(entitlements.user_id):
-            live_bytes = _measure_live_owner_usage_bytes(ops, admin.username)
+            live_bytes = _measure_live_owner_usage_bytes(ops, user.username)
             is_over_quota = live_bytes > entitlements.max_total_bucket_bytes
             unsettled_grants = grant_store.list_unsettled_grants(entitlements.user_id)
             for grant in unsettled_grants:
@@ -5202,7 +5203,7 @@ def run_r2_quota_sweep(
 # blob the server can never read. Writes are compare-and-swap on a per-row
 # revision counter. The account key bundle holds the argon2id inputs and the
 # password-wrapped data-encryption key (also opaque). All endpoints require
-# admin (SuperTokens) auth but are NOT paid-gated -- sync is a free feature.
+# user (SuperTokens) auth but are NOT paid-gated -- sync is a free feature.
 # ---------------------------------------------------------------------------
 
 
@@ -5551,11 +5552,11 @@ def _decode_size_capped_base64(field_name: str, encoded: str, max_bytes: int) ->
     return decoded
 
 
-def _sync_caller(request: Request) -> tuple[AdminAuth, str]:
-    """Authenticate a sync endpoint call; returns (admin auth, full user_id)."""
+def _sync_caller(request: Request) -> tuple[UserAuth, str]:
+    """Authenticate a sync endpoint call; returns (user auth, full user_id)."""
     auth = authenticate_request(request, get_ctx().ops)
-    admin = require_admin(auth)
-    return admin, _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+    user = require_user_auth(auth)
+    return user, _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
 
 
 def _sync_caller_user_id(request: Request) -> str:
@@ -5582,7 +5583,7 @@ def put_workspace_record_endpoint(request: Request, host_id: str, body: Workspac
     tombstoning are always allowed.
     """
     with handle_endpoint_errors():
-        admin, user_id = _sync_caller(request)
+        user, user_id = _sync_caller(request)
         if body.host_id != host_id:
             raise HTTPException(status_code=400, detail="host_id in the path and body must match")
         if body.state == WorkspaceRecordState.ACTIVE:
@@ -5591,7 +5592,7 @@ def put_workspace_record_endpoint(request: Request, host_id: str, body: Workspac
             is_new_active = existing_row is None or existing_row["state"] != WorkspaceRecordState.ACTIVE.value
             if is_new_active:
                 entitlements = ensure_account_entitlements(
-                    user_id=user_id, username_prefix=admin.username, email=admin.email or ""
+                    user_id=user_id, username_prefix=user.username, email=user.email or ""
                 )
                 active_count = sum(1 for r in existing_records if r["state"] == WorkspaceRecordState.ACTIVE.value)
                 if active_count >= entitlements.max_active_synced_workspaces:
@@ -5754,16 +5755,16 @@ def get_account(request: Request) -> dict[str, object]:
     with handle_endpoint_errors():
         ops = get_ctx().ops
         auth = authenticate_request(request, ops)
-        admin = require_admin(auth)
+        user = require_user_auth(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
         entitlements = ensure_account_entitlements(
-            user_id=user_id, username_prefix=admin.username, email=admin.email or ""
+            user_id=user_id, username_prefix=user.username, email=user.email or ""
         )
-        usage = compute_account_usage(ops, admin.username, user_id)
+        usage = compute_account_usage(ops, user.username, user_id)
         return AccountInfoResponse(
             user_id=user_id,
-            email=admin.email or "",
+            email=user.email or "",
             plan_name=entitlements.plan_name,
             entitlements=entitlements.quota_values(),
             usage=usage,
@@ -5798,12 +5799,12 @@ def set_account_plan(request: Request, body: SetPlanRequest) -> dict[str, object
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
-        entitlements = resolve_entitlements_for_admin(request, admin)
+        user = require_user_auth(auth)
+        entitlements = resolve_entitlements_for_user(request, user)
         if body.plan == entitlements.plan_name:
             return {"plan_name": entitlements.plan_name, "entitlements": entitlements.quota_values().model_dump()}
         if body.plan == _PLAN_ALLY:
-            require_ally_eligible(admin.email)
+            require_ally_eligible(user.email)
         new_values = apply_plan_to_account(entitlements.user_id, body.plan)
         return {"plan_name": body.plan, "entitlements": new_values.model_dump()}
 

@@ -195,9 +195,9 @@ def collect_live_owner_prefixes(credentials: SuperTokensCoreCredentials) -> froz
 def bucket_owner_prefix_for_user(user_id: str) -> str:
     """Derive a user's bucket-owner prefix exactly as the connector does.
 
-    The connector authenticates a SuperTokens JWT into an ``AdminAuth`` whose
-    ``username`` is the hyphen-stripped first 16 characters of the user id,
-    and names buckets ``<username>--<slug>``.
+    The connector authenticates a SuperTokens JWT into a ``UserAuth`` whose
+    ``user_id_prefix`` is the hyphen-stripped first 16 characters of the user
+    id, and names buckets ``<user_id_prefix>--<slug>``.
     """
     return user_id.replace("-", "")[:16]
 

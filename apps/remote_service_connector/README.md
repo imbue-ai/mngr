@@ -133,17 +133,17 @@ Running `modal deploy` directly without the wrapper defaults to
 All non-`/auth/*` endpoints require a Bearer token:
 
 - **Agent (tunnel token)**: `Authorization: Bearer <tunnel_token>` — scoped to a single tunnel. Can add/remove/list services on that tunnel only; cannot create/delete tunnels or manage auth policies.
-- **User (SuperTokens JWT)**: `Authorization: Bearer <access_token>` — the signed-in user's SuperTokens session. Treated as an "admin" auth whose username is the first 16 hex chars of the user's SuperTokens user ID (used to namespace tunnels per user).
+- **User (SuperTokens JWT)**: `Authorization: Bearer <access_token>` — the signed-in user's SuperTokens session. A signed-in user has full authority over their own resources; their username is the first 16 hex chars of the user's SuperTokens user ID (used to namespace tunnels per user).
 
 The `/auth/*` endpoints are themselves the authentication flow, so they do not require a token.
 
 ### Quota enforcement
 
-Every resource-granting endpoint checks the caller's entitlements (see "Plans and entitlements" above) on top of admin auth:
+Every resource-granting endpoint checks the caller's entitlements (see "Plans and entitlements" above) on top of user auth:
 
 - `POST /hosts/lease` -- `max_remote_workspaces` (strict: a per-user advisory lock serializes concurrent leases; stopped workspaces still hold their lease and count).
 - `POST /tunnels` -- `max_tunnels` (idempotent re-creates of an existing tunnel are always allowed).
-- `POST /tunnels/{name}/services` -- `max_services_per_tunnel` (re-adding an existing service is always allowed; enforced under both admin and agent auth).
+- `POST /tunnels/{name}/services` -- `max_services_per_tunnel` (re-adding an existing service is always allowed; enforced under both user and tunnel-token auth).
 - `POST /buckets` -- `max_buckets`, plus `max_total_bucket_bytes` against live REST-measured usage (an account already over its storage quota cannot create new buckets; an unreadable usage number fails open). New keys minted while the owner is enforced-over-quota (bucket creation and roll-key's fresh mint) come out read-only with the downgrade recorded, so a fresh mint can never bypass the sweep.
 - `POST /keys/create` -- refused outright when `monthly_llm_spend_usd` is 0 (e.g. the explorer plan); otherwise the account's LiteLLM user-level budget is upserted before minting, so LiteLLM caps aggregate spend across all the account's keys.
 - `PUT /sync/records/{host_id}` -- `max_active_synced_workspaces` when the push would create a new ACTIVE record.
@@ -162,7 +162,7 @@ When `CLOUDFLARE_ALLOWED_IDPS` is set, Access Applications created for forwarded
 
 ## API
 
-### Tunnels (admin only)
+### Tunnels (signed-in user only)
 
 - `POST /tunnels` -- Create a tunnel. Body: `{"agent_id": "...", "default_auth_policy": ...}`. Returns tunnel info with token.
 - `GET /tunnels` -- List your tunnels with their configured services.
@@ -170,13 +170,13 @@ When `CLOUDFLARE_ALLOWED_IDPS` is set, Access Applications created for forwarded
 - `DELETE /tunnels/{tunnel_name}` -- Delete a tunnel and all its DNS records, Access Applications, ingress rules, and KV entries.
 - `POST /sharing/enable` -- Enable (or update) sharing for one service in a single call. Body: `{"agent_id": "...", "service_name": "...", "service_url": "...", "auth_policy": {...}}`. Ensures the tunnel (idempotent), adds the service, and applies the Access policy directly to its Access Application (replacing a pre-existing app's policies on re-enable). Returns `{"tunnel": {...with token}, "service": {...}}` so the caller needs no follow-up reads. Enforces the same `max_tunnels` / `max_services_per_tunnel` quotas as the individual endpoints.
 
-### Services (admin or agent)
+### Services (user or tunnel token)
 
 - `POST /tunnels/{tunnel_name}/services` -- Add a service. Body: `{"service_name": "...", "service_url": "http://localhost:8080"}`.
 - `GET /tunnels/{tunnel_name}/services` -- List services on a tunnel.
 - `DELETE /tunnels/{tunnel_name}/services/{service_name}` -- Remove a service, its DNS record, and its Access Application.
 
-### Auth policies (admin only)
+### Auth policies (signed-in user only)
 
 - `GET /tunnels/{tunnel_name}/auth` -- Get the default auth policy for a tunnel (stored in Workers KV).
 - `PUT /tunnels/{tunnel_name}/auth` -- Set the default auth policy for a tunnel. New services inherit this policy.
@@ -190,7 +190,7 @@ Every forwarded service gets a Cloudflare Access Application, unconditionally:
 - Auth-policy writes reject policies with no identity constraint (every rule must name emails, email domains, an IdP login method, or a group). Access service tokens remain supported via the dedicated service-token endpoints.
 - Per-service overrides replace the inherited policy entirely.
 
-### Buckets (admin only)
+### Buckets (signed-in user only)
 
 R2 buckets give an account remote object storage. Each bucket is isolated (one per host the user makes); isolation is per-bucket, not per-prefix. Buckets are named `<user_id_prefix>--<slug>` where `user_id_prefix` is the caller's 16-hex SuperTokens prefix; the server re-checks that prefix in code (not just via the R2 `name_contains` filter) so a crafted name cannot grant cross-user access. Each bucket has exactly **one** key; the hourly sweep revokes any extras (newest wins).
 
@@ -224,7 +224,7 @@ Cloudflare's R2 token model has no delete-without-write permission, and restic's
 - A grant settles as *successful* when usage decreased at all versus its baseline. Only unsuccessful grants count against a rolling budget (5 settled-without-decrease grants per 24 hours; a 403 with `code: cleanup_grant_budget_exhausted` past that), so genuine cleanup is unlimited while write-under-cover-of-cleanup abuse is bounded to roughly one sweep interval of writes per burned grant.
 - Grants expire after 60 minutes; the sweep settles expired grants as the fallback when the client never rechecked, and skips enforcement for accounts whose grant is still active (a prune transiently *increases* usage while it repacks).
 
-### Account (admin only)
+### Account (signed-in user only)
 
 - `GET /account` -- The caller's plan, entitlement values, live usage, and the available plan names. Lazily creates the entitlements row on first touch.
 - `POST /account/plan` -- Switch plans. Body: `{"plan": "..."}`. Resets the account's entitlements wholesale to the plan's defaults; re-selecting the current plan is a no-op (idempotent retries never wipe operator-granted bumps). Switching to "ally" requires a paid-listed email (403 with the reason otherwise).

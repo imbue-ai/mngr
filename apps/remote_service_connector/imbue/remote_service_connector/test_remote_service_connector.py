@@ -35,7 +35,7 @@ def _skip_if_missing_env() -> None:
         pytest.skip(f"Missing env vars: {', '.join(missing)}")
 
 
-def _admin_headers() -> dict[str, str]:
+def _user_headers() -> dict[str, str]:
     creds = json.loads(os.environ["USER_CREDENTIALS"])
     username = next(iter(creds))
     password = creds[username]
@@ -43,7 +43,7 @@ def _admin_headers() -> dict[str, str]:
     return {"Authorization": f"Basic {encoded}"}
 
 
-def _admin_username() -> str:
+def _user_credentials_username() -> str:
     creds = json.loads(os.environ["USER_CREDENTIALS"])
     return next(iter(creds))
 
@@ -56,8 +56,8 @@ def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
     Creating a tunnel returns the expected ``username--agent_id`` name and a non-null token.
     Tunnel-level and service-level Access auth policies, once set, are read back with the
     expected rules, and adding a service actually provisions a Cloudflare Access Application
-    with at least one policy. Admin credentials can create/configure tunnels and services;
-    a tunnel's own bearer token (agent auth) can add, list, and remove services on that
+    with at least one policy. User credentials can create/configure tunnels and services;
+    a tunnel's own bearer token (tunnel-token auth) can add, list, and remove services on that
     tunnel but is rejected (403) from creating tunnels, deleting the tunnel, or changing
     tunnel-level auth. Deleting the tunnel succeeds and removes it from the listing,
     confirming cascading cleanup. Each assertion would fail if the corresponding route,
@@ -76,11 +76,11 @@ def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_module, "get_ctx", lambda: ctx)
 
     client = TestClient(web_app)
-    admin = _admin_headers()
-    username = _admin_username()
+    user_headers = _user_headers()
+    username = _user_credentials_username()
     tunnel_name = f"{username}--{agent_id}"
 
-    resp = client.post("/tunnels", json={"agent_id": agent_id}, headers=admin)
+    resp = client.post("/tunnels", json={"agent_id": agent_id}, headers=user_headers)
     assert resp.status_code == 200, f"Create tunnel failed: {resp.text}"
     tunnel_data = resp.json()
     assert tunnel_data["tunnel_name"] == tunnel_name
@@ -91,17 +91,17 @@ def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
 
     try:
         policy = {"rules": [{"action": "allow", "include": [{"email": {"email": "test@example.com"}}]}]}
-        resp = client.put(f"/tunnels/{tunnel_name}/auth", json=policy, headers=admin)
+        resp = client.put(f"/tunnels/{tunnel_name}/auth", json=policy, headers=user_headers)
         assert resp.status_code == 200, f"Set tunnel auth failed: {resp.text}"
 
-        resp = client.get(f"/tunnels/{tunnel_name}/auth", headers=admin)
+        resp = client.get(f"/tunnels/{tunnel_name}/auth", headers=user_headers)
         assert resp.status_code == 200
         assert len(resp.json()["rules"]) == 1
 
         resp = client.post(
             f"/tunnels/{tunnel_name}/services",
             json={"service_name": f"svc1-{suffix}", "service_url": "http://localhost:8080"},
-            headers=admin,
+            headers=user_headers,
         )
         assert resp.status_code == 200, f"Add service failed: {resp.text}"
         svc1_hostname = resp.json()["hostname"]
@@ -115,7 +115,7 @@ def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
         resp = client.put(
             f"/tunnels/{tunnel_name}/services/svc1-{suffix}/auth",
             json=override_policy,
-            headers=admin,
+            headers=user_headers,
         )
         assert resp.status_code == 200, f"Set service auth failed: {resp.text}"
 
@@ -144,10 +144,10 @@ def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
         assert resp.status_code == 403
 
     finally:
-        resp = client.delete(f"/tunnels/{tunnel_name}", headers=admin)
+        resp = client.delete(f"/tunnels/{tunnel_name}", headers=user_headers)
         assert resp.status_code == 200, f"Delete tunnel failed: {resp.text}"
 
-        resp = client.get("/tunnels", headers=admin)
+        resp = client.get("/tunnels", headers=user_headers)
         tunnel_names = [t["tunnel_name"] for t in resp.json()]
         assert tunnel_name not in tunnel_names
 
