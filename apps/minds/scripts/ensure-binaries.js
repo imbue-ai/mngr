@@ -24,7 +24,14 @@ const REQUIRED = [
   path.join(RESOURCES, 'uv', 'uv'),
   path.join(RESOURCES, 'git', 'bin', 'git'),
   path.join(RESOURCES, 'lima', 'bin', 'limactl'),
-  path.join(RESOURCES, 'desync', 'desync'),
+  // The dispatch curl the latchkey gateway runs as LATCHKEY_CURL. Only
+  // fetched on platforms datalib builds it for (macOS arm64, Linux x86_64);
+  // on others downloadLatchkeyCurl no-ops and this path stays absent, so
+  // guard membership on the platform to avoid a perpetual re-download loop.
+  ...((process.platform === 'darwin' && process.arch === 'arm64') ||
+  (process.platform === 'linux' && process.arch === 'x64')
+    ? [path.join(RESOURCES, 'curl', 'latchkey-curl-dispatch')]
+    : []),
 ];
 
 // Requiring a path the downloader deliberately skips would leave it missing forever

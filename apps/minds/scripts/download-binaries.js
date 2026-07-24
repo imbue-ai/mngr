@@ -34,6 +34,19 @@ const GIT_MANIFEST_PATH = path.join(__dirname, 'git-manifest.json');
 // Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
 
+// datalib "curl" distribution: the dispatch curl + the Chrome-impersonating
+// curl it fronts (see the `curl-<triple>.tar.gz` release asset).
+// The latchkey gateway runs the dispatch curl as its LATCHKEY_CURL so marked
+// requests get Chrome TLS impersonation. Only macOS arm64 and Linux x86_64
+// (glibc) are bundled -- datalib publishes no x86_64-apple-darwin, and there
+// is no impersonation on Windows.
+//
+// When bumping DATALIB_CURL_VERSION, update the `curl-*` hashes in
+// EXPECTED_SHA256 to match (the tarball filename is version-less, so the
+// old hash would otherwise be checked against the new bytes and fail).
+const DATALIB_REPO = 'imbue-ai/datalib';
+const DATALIB_CURL_VERSION = 'v0.22.0';
+
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
  *
@@ -62,6 +75,10 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_darwin_amd64.tar.gz':   'ab029448074428dc757d2235109dd557e9f34e4865052432a6ea7c431f0a5a19',
   'desync_1.0.3_linux_amd64.tar.gz':    'ad4dd9e91b57eef8627d2038df09281d7f38dca02eeca0e66592b54087619953',
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
+  // From the datalib release named by DATALIB_CURL_VERSION
+  // (`curl-<triple>.tar.gz.sha256`).
+  'curl-aarch64-apple-darwin.tar.gz':      '6d03bed2b15005766df8af3362dc6489690552718b4f4f77644dc80e09a6d0b9',
+  'curl-x86_64-unknown-linux-gnu.tar.gz':  '6f881600d3d56d7033c7e12906bc3146e233bcdd14b458061e52f7111cf7a9eb',
 };
 
 const MAX_REDIRECTS = 5;
@@ -108,6 +125,29 @@ function getDesyncDownloadUrl({ platform, arch }) {
     throw new Error(`Unsupported desync arch: ${arch}`);
   }
   return `https://github.com/folbricht/desync/releases/download/v${DESYNC_VERSION}/desync_${DESYNC_VERSION}_${platform}_${goArch}.tar.gz`;
+}
+
+/**
+ * Map the current platform/arch to the datalib "curl" release tarball, or
+ * null when datalib publishes no build for it (macOS x86_64, Windows). The
+ * tarball filename is version-less (stable `releases/download/<tag>/<file>`
+ * URLs); the inner dir carries the version.
+ */
+function getLatchkeyCurlDownloadInfo({ platform, arch }) {
+  let triple = null;
+  if (platform === 'darwin' && arch === 'aarch64') {
+    triple = 'aarch64-apple-darwin';
+  } else if (platform === 'linux' && arch === 'x86_64') {
+    triple = 'x86_64-unknown-linux-gnu';
+  }
+  if (triple === null) {
+    return null;
+  }
+  const filename = `curl-${triple}.tar.gz`;
+  return {
+    filename,
+    url: `https://github.com/${DATALIB_REPO}/releases/download/${DATALIB_CURL_VERSION}/${filename}`,
+  };
 }
 
 /**
@@ -326,6 +366,48 @@ const GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH = {
   'linux/x86_64': 'linux-x64',
   'linux/aarch64': 'linux-arm64',
 };
+
+/**
+ * Bundle the datalib dispatch curl + Chrome-impersonating curl into
+ * `<resourcesDir>/curl/`. The latchkey gateway runs the dispatch curl as
+ * its LATCHKEY_CURL (wired in electron/backend.js).
+ *
+ * No-op with a warning -- rather than a hard failure -- when the platform
+ * has no datalib build (macOS x86_64, Windows); in that case latchkey keeps
+ * using the system curl. On a supported platform this behaves like the
+ * other bundled binaries: hard-fail on a download error or SHA mismatch.
+ */
+async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
+  const info = getLatchkeyCurlDownloadInfo({ platform, arch });
+  if (info === null) {
+    console.log(`[download-binaries] No datalib curl build for ${platform}/${arch}; skipping (latchkey uses system curl).`);
+    return;
+  }
+
+  const curlDir = path.join(resourcesDir, 'curl');
+  if (fs.existsSync(curlDir)) fs.rmSync(curlDir, { recursive: true });
+  fs.mkdirSync(curlDir, { recursive: true });
+
+  console.log(`[download-binaries] Downloading latchkey curl from ${info.url}...`);
+  const archive = await download(info.url);
+  verifyChecksum(archive, info.filename);
+
+  const tarPath = path.join(curlDir, 'curl.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  // The tarball is `curl-<version>-<triple>/<two binaries>`;
+  // strip the single inner dir so the binaries land directly in curlDir.
+  execSync(`tar xzf "${tarPath}" -C "${curlDir}" --strip-components=1`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  for (const name of ['latchkey-curl-dispatch', 'latchkey-curl-impersonate']) {
+    const binPath = path.join(curlDir, name);
+    if (!fs.existsSync(binPath)) {
+      throw new Error(`${name} not found at ${binPath} after extraction`);
+    }
+    fs.chmodSync(binPath, 0o755);
+  }
+  console.log(`[download-binaries] latchkey curl (dispatch + impersonator) installed in ${curlDir}`);
+}
 
 /**
  * Write resources/git/NOTICE recording the provenance and licenses of the
@@ -716,6 +798,7 @@ async function downloadBinaries(resourcesDir) {
     downloadGit(resourcesDir, { platform, arch }),
     downloadRestic(resourcesDir, { platform, arch }),
     downloadDesync(resourcesDir, { platform, arch }),
+    downloadLatchkeyCurl(resourcesDir, { platform, arch }),
   ]);
 
   console.log('[download-binaries] Done.');
@@ -735,6 +818,7 @@ beforeInstall.downloadGit = downloadGit;
 beforeInstall.downloadUv = downloadUv;
 beforeInstall.downloadRestic = downloadRestic;
 beforeInstall.downloadDesync = downloadDesync;
+beforeInstall.downloadLatchkeyCurl = downloadLatchkeyCurl;
 beforeInstall.download = download;
 beforeInstall.convertGitPayloadSymlinksToShims = convertGitPayloadSymlinksToShims;
 beforeInstall.measureTreeAsArchived = measureTreeAsArchived;

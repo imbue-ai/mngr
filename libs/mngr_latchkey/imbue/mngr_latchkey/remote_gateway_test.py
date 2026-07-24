@@ -14,10 +14,13 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
+from imbue.mngr_latchkey.remote_gateway import DATALIB_CURL_VERSION
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
+from imbue.mngr_latchkey.remote_gateway import _CURL_DISPATCH_PATH
+from imbue.mngr_latchkey.remote_gateway import _CURL_IMPERSONATE_PATH
 from imbue.mngr_latchkey.remote_gateway import _GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote_gateway import _MINIMUM_NODE_MAJOR_VERSION
 from imbue.mngr_latchkey.remote_gateway import _TUNNEL_PROGRAM_NAME
@@ -158,6 +161,28 @@ def test_ensure_latchkey_installed_gates_each_component_behind_a_presence_check(
     # POSIX sh compatibility: must not rely on bash-only pipefail.
     assert "pipefail" not in command
     assert command.startswith("set -e")
+
+
+def test_ensure_latchkey_installed_installs_impersonating_curl() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_installed(outer)
+    command = _stub(outer).recorded[0].command
+    # Fetches the datalib curl tarball for the VPS arch from the pinned
+    # release, verifies it against the published .sha256, and installs both
+    # the dispatch curl and the impersonator it fronts.
+    assert f"releases/download/{DATALIB_CURL_VERSION}/" in command
+    assert "curl-${_ci_triple}.tar.gz" in command
+    assert "sha256sum -c" in command
+    assert "tar -xzf" in command and "--strip-components=1" in command
+    assert f'install -m 0755 "${{_ci_tmp}}/{_CURL_DISPATCH_PATH.rsplit("/", 1)[1]}" "{_CURL_DISPATCH_PATH}"' in command
+    assert (
+        f'install -m 0755 "${{_ci_tmp}}/{_CURL_IMPERSONATE_PATH.rsplit("/", 1)[1]}" "{_CURL_IMPERSONATE_PATH}"'
+        in command
+    )
+    # Installed only when missing (idempotent) and fail-loud like the other
+    # components -- no best-effort warning fallback that swallows failures.
+    assert f"if [ ! -x {_CURL_DISPATCH_PATH} ]; then" in command
+    assert "latchkey will use system curl" not in command
 
 
 def test_ensure_latchkey_installed_uses_generous_install_timeout() -> None:
@@ -438,6 +463,14 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_
     assert 'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(cat ' in run_script
     assert "export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD" in run_script
     assert "shared-password" not in run_script
+    # Routes latchkey through the bundled dispatch curl -- but only when both
+    # binaries are present, so a host without the impersonating curl installed
+    # (fetch failed / older release) falls back to system curl unchanged.
+    # Unconditional export -- provisioning guarantees the dispatch curl is
+    # installed. The dispatch curl finds the impersonator as a sibling, so no
+    # second env var is exported.
+    assert f"export LATCHKEY_CURL={_CURL_DISPATCH_PATH}" in run_script
+    assert "FRANKWEILER_IMPERSONATE_CURL" not in run_script
     # The wrapper refuses to launch a keyless gateway when its tmpfs secrets are
     # gone (e.g. wiped by a reboot).
     assert "exit 1" in run_script

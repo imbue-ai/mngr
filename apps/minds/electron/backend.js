@@ -23,6 +23,29 @@ for (const stream of [process.stdout, process.stderr]) {
 
 let backendProcess = null;
 
+/**
+ * Env var that points the latchkey gateway at the bundled "dispatch curl".
+ * Set on the minds backend process so it flows -- via ``dict(os.environ)``
+ * inheritance -- to the minds process's own latchkey calls, the detached
+ * ``mngr latchkey forward`` supervisor, and the gateway subprocess it
+ * spawns.
+ *
+ * ``LATCHKEY_CURL`` is read by the upstream latchkey CLI. The dispatch
+ * curl finds the impersonator binary as a sibling in the same
+ * ``resources/curl/`` dir (download-binaries.js installs both or neither),
+ * so no extra env var is needed. Returns ``{}`` when the dispatch curl
+ * isn't bundled (a platform datalib doesn't build) so latchkey falls back
+ * to the system curl -- never point ``LATCHKEY_CURL`` at a nonexistent
+ * file, which would break every credential check.
+ */
+function latchkeyCurlEnv() {
+  const dispatch = paths.getLatchkeyCurlDispatchPath();
+  if (!fs.existsSync(dispatch)) {
+    return {};
+  }
+  return { LATCHKEY_CURL: dispatch };
+}
+
 // Backend stdout JSONL event fields that carry secrets and must be masked
 // before the raw line is written to minds.log (which is uploaded with bug
 // reports). Keyed by event type; each value lists the fields to redact.
@@ -304,6 +327,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_RESTIC_BINARY: paths.getResticPath(),
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
+          ...latchkeyCurlEnv(),
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -373,6 +397,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           VIRTUAL_ENV: paths.getVenvDir(),
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
+          ...latchkeyCurlEnv(),
         };
       }
 
