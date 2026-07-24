@@ -332,6 +332,33 @@ html {
 html.no-scrollbar-gutter {
   scrollbar-gutter: auto;
 }
+/*
+ * Local pages (Settings, Home, ...) scroll inside #local-page-scroll -- a
+ * container pinned below the fixed 38px titlebar (see ChromeShell.jinja) --
+ * so the DOCUMENT never scrolls and the titlebar never shares an edge with a
+ * scrollbar or shifts with gutter differences between pages. Style the
+ * container's scrollbar (Chromium-specific, which every minds surface is) to
+ * a slim token-colored thumb; the transparent track plus the container's
+ * stable gutter keep page content from shifting sideways between scrolling
+ * and non-scrolling pages while showing nothing when there is no overflow.
+ */
+#local-page-scroll::-webkit-scrollbar {
+  width: 10px;
+  background: transparent;
+}
+#local-page-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+#local-page-scroll::-webkit-scrollbar-thumb {
+  background: var(--c-border-default);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+#local-page-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--c-text-tertiary);
+  background-clip: padding-box;
+}
 
 .accent-spine::before {
   content: '';
