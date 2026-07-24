@@ -6,7 +6,7 @@ user, who -- being created after the feature-ship cutoff with a non-paid-listed
 email -- must land on the explorer plan.
 
 The lease *cap* itself (403 at max_remote_workspaces) is unit-tested only: the
-ci env's pool has no baked hosts and the test fixtures have no paid-admin key
+ci env's pool has no baked hosts and the test fixtures have no admin key
 to lower a quota to zero, so the cap cannot be reached here. The lease test
 below still proves the quota check-then-lease path works against the real DB
 (including the per-user advisory lock).
@@ -42,7 +42,7 @@ def _auth_header(user: VerifiedUserHandle) -> dict[str, str]:
 def _set_storage_limit_bytes(env: SharedEnvHandle, user_id: str, value: int) -> None:
     """Write the user's max_total_bucket_bytes entitlement directly in the env's DB.
 
-    The deployment-test fixtures carry no paid-admin key, so over-quota
+    The deployment-test fixtures carry no admin API key, so over-quota
     states are induced through the pool DSN instead of the admin API. A
     limit of ``-1`` makes even an empty account measurably over quota.
     """
