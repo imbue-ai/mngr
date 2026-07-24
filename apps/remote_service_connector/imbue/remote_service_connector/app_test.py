@@ -696,7 +696,7 @@ def test_route_create_tunnel_too_long_user_id_prefix_returns_400(monkeypatch: py
     """Creating a tunnel whose authenticated user_id_prefix is too long returns 400, not 500."""
     long_name = "a_very_long_user_id_prefix_here_x"
     client = _make_test_client(monkeypatch)
-    # Override the stub to return an UserAuth with an overly-long user_id_prefix,
+    # Override the stub to return a UserAuth with an overly-long user_id_prefix,
     # simulating a SuperTokens session whose user_id_prefix is longer than the
     # tunnel-naming limit.
     monkeypatch.setattr(
