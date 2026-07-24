@@ -2082,7 +2082,7 @@ def _authenticate_supertokens(
     session_getter: Callable[..., Any] = get_session_without_request_response,
     email_getter: Callable[[str], str | None] = _default_email_getter,
 ) -> UserAuth:
-    """Validate a SuperTokens JWT access token. Returns UserAuth with user_id_prefix as user_id_prefix."""
+    """Validate a SuperTokens JWT access token. Returns UserAuth carrying the derived user-id prefix and verified email."""
     connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
     if not connection_uri:
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
