@@ -2434,6 +2434,11 @@ dependencies = [
     { name = "websockets" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "imbue-mngr-specs" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "click" },
@@ -2453,6 +2458,9 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "websockets", specifier = ">=13" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "imbue-mngr-specs", editable = "libs/mngr_specs" }]
 
 [[package]]
 name = "imbue-mngr-gcp"
