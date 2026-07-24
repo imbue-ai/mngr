@@ -23,6 +23,10 @@ from scripts.changelog_projects import pyproject_projects
 
 _REPO_ROOT = Path(__file__).parent
 
+# The public mirror carries only the open-source subset; ratchets over private
+# ops assets apply only in the source-of-truth repo (identified by mirror/).
+_IS_SOURCE_OF_TRUTH = (_REPO_ROOT / "mirror").exists()
+
 # Projects that are excluded from ratchet requirements (scheduled for deletion).
 # Keep in sync with EXCLUDED_RATCHET_PROJECTS in scripts/sync_common_ratchets.py
 # (verified by test_excluded_projects_in_sync in scripts/sync_common_ratchets_test.py).
@@ -597,6 +601,7 @@ def test_every_project_with_tests_has_coverage_config() -> None:
 # --- Meta: ensure every project has the changelog layout files ---
 
 
+@pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="the synthetic dev project is absent on the public mirror")
 def test_every_project_has_changelog_layout() -> None:
     """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
     has the full changelog layout: ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``,
@@ -741,6 +746,7 @@ def test_top_level_coverage_omit_covers_subproject_omits() -> None:
 # --- Meta: offload CI config performance invariants ---
 
 
+@pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="offload configs are absent on the public mirror")
 def test_offload_configs_suppress_per_batch_coverage_reports() -> None:
     """Guard the offload CI coverage-report invariant established in MIND-142.
 
