@@ -53,6 +53,7 @@ class StartCliOptions(CommonCliOptions):
     connect_command: str | None
     restart: bool
     no_resume: bool
+    resume_message: str | None
     dry_run: bool
     # Planned features (not yet implemented)
     host: tuple[HostAddress, ...]
@@ -84,9 +85,14 @@ def _output_result(started_agents: Sequence[str], output_opts: OutputOptions, *,
             assert_never(unreachable)
 
 
-def _send_resume_message_if_configured(agent: AgentInterface, output_opts: OutputOptions) -> None:
+def _send_resume_message_if_configured(
+    agent: AgentInterface,
+    output_opts: OutputOptions,
+    # Overrides the agent's stored resume message for this invocation when set.
+    resume_message_override: str | None,
+) -> None:
     """Send the resume message to an agent if one is configured."""
-    resume_message = agent.get_resume_message()
+    resume_message = resume_message_override if resume_message_override is not None else agent.get_resume_message()
     if resume_message is None:
         return
 
@@ -140,6 +146,11 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
     help="Skip sending the resume message after starting.",
 )
 @optgroup.option(
+    "--resume-message",
+    help="Message to send after starting, overriding any resume message stored on the agent. "
+    "Cannot be combined with --no-resume.",
+)
+@optgroup.option(
     "--dry-run",
     is_flag=True,
     help="Show what would be started without actually starting anything",
@@ -179,6 +190,9 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
 
     if opts.connect and len(agent_addresses) > 1:
         raise click.UsageError("--connect can only be used with a single agent")
+
+    if opts.resume_message is not None and opts.no_resume:
+        raise click.UsageError("--resume-message cannot be combined with --no-resume")
 
     _start_agents(agent_addresses, mngr_ctx, output_opts, opts)
 
@@ -252,7 +266,7 @@ def _start_agents(
             for agent in online_host.get_agents():
                 if agent.id == match.agent_id:
                     if send_resume:
-                        _send_resume_message_if_configured(agent, output_opts)
+                        _send_resume_message_if_configured(agent, output_opts, opts.resume_message)
 
                     # Track for potential connect
                     if opts.connect:
@@ -301,7 +315,7 @@ def _maybe_connect(
 CommandHelpMetadata(
     key="start",
     one_line_description="Start stopped agent(s)",
-    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect] [--dry-run]",
+    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--resume-message <TEXT>] [--connect] [--dry-run]",
     description="""For remote hosts, this restores from the most recent snapshot and starts
 the container/instance. For local agents, this starts the agent's tmux
 session.
@@ -311,6 +325,8 @@ the host starts.
 
 Use --restart to stop any running agents first, ensuring a clean start.
 Use --no-resume to skip sending the resume message after starting.
+Use --resume-message to send a specific message after starting, overriding
+any resume message stored on the agent (cannot be combined with --no-resume).
 
 Use '-' in place of agent names to read them from stdin, one per line.
 

@@ -1,0 +1,7 @@
+Add the `blueprint/workspace-claude-auth-settings-env/` plan: move workspace Claude auth off mngr host env vars into the shared `CLAUDE_CONFIG_DIR/settings.json` env block, make the in-workspace login modal the sole auth surface, remove the AI provider from the workspace create route, upgrade the auth-change restart to cover worker agents with "please continue" messaging, and add a manual migration script for existing workspaces.
+
+Add the `blueprint/subscription-login-fast-path/` plan: make browser sign-in (`claude auth login --claudeai`, credentials-based, no agent restart) the primary subscription path again, demote the setup-token flow to a "Get a long-lived token" option, restore Anthropic Console OAuth, drop the pre-restart credential validation probe, and handle auth-type switches by clearing the managed settings-env keys and restarting agents.
+
+The `just minds-test-electron` recipe now targets the renamed Electron e2e test (`test_create_workspace_and_sign_in_via_modal_then_chat_via_electron`), which signs in through the workspace's Claude modal instead of the removed create-form `api_key` path.
+
+The `test-offload-acceptance` / `test-offload-release` recipes now tolerate the `modal environment create` self-race (a client retry after a server-side success surfaced as "environment already exists" and failed the whole CI job): a failed create is accepted iff the freshly-named environment verifiably exists.

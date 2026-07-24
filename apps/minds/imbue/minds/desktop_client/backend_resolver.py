@@ -455,14 +455,23 @@ def parse_service_log_records(text: str) -> list[ServiceLogRecord | ServiceDereg
 class _AgentRecord(FrozenModel):
     """The minimal agent-topology fields needed to resolve the system-services agent.
 
-    A trimmed projection of ``DiscoveredAgent`` (id, host, name) -- the only
-    fields ``get_system_services_agent_id`` consults. Kept small so the
-    persisted last-good snapshot carries no more than the fallback needs.
+    A trimmed projection of ``DiscoveredAgent`` (id, host, name, provider) --
+    the fields ``get_system_services_agent_id`` consults plus the provider
+    attribution that lets a clean provider snapshot authoritatively prune
+    remembered hosts it no longer reports. Kept small so the persisted
+    last-good snapshot carries no more than the fallback needs.
+
+    ``provider_name`` is required: a persisted file from before it existed
+    fails validation on load and the topology resets empty (see
+    ``_read_last_good_agent_topology``), which is the intended migration --
+    unattributed records could never be pruned by a clean snapshot, and any
+    real workspace re-enters the topology on its next discovery.
     """
 
     agent_id: AgentId = Field(description="The agent's id")
     host_id: HostId = Field(description="The id of the host the agent runs on")
     agent_name: AgentName = Field(description="The agent's name (the system-services agent is constant-named)")
+    provider_name: ProviderInstanceName = Field(description="The provider instance managing the agent's host")
 
 
 class _LastGoodAgentTopology(FrozenModel):
@@ -483,7 +492,12 @@ class _LastGoodAgentTopology(FrozenModel):
 
 def _to_agent_record(agent: DiscoveredAgent) -> _AgentRecord:
     """Trim a ``DiscoveredAgent`` down to the topology fields the fallback needs."""
-    return _AgentRecord(agent_id=agent.agent_id, host_id=agent.host_id, agent_name=agent.agent_name)
+    return _AgentRecord(
+        agent_id=agent.agent_id,
+        host_id=agent.host_id,
+        agent_name=agent.agent_name,
+        provider_name=agent.provider_name,
+    )
 
 
 def _find_system_services_agent(records: Iterable[_AgentRecord], workspace_agent_id: AgentId) -> AgentId | None:
@@ -702,10 +716,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
         the on-disk topology (if configured). Hosts with an incomplete view --
         or absent from the snapshot entirely (transient discovery loss) --
         keep their last complete record; that is the entire point of the
-        topology. A host observed in a terminal ``DESTROYED`` state is the sole
-        exception: it is pruned from the topology (and never re-added), so a
-        workspace the user destroyed stops counting as restorable -- but only
-        on that explicit DESTROYED observation, never on mere absence.
+        topology. A host observed in a terminal ``DESTROYED`` state is pruned
+        from the topology (and never re-added), so a workspace the user
+        destroyed stops counting as restorable. (Absence from a *clean
+        per-provider snapshot* also prunes, via :meth:`update_providers`.)
         """
         path = self.last_good_agents_path
         topology_to_write: _LastGoodAgentTopology | None = None
@@ -776,11 +790,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
         A host observed in a terminal ``HostState.DESTROYED`` state is instead
         dropped from the topology (and skipped by the add path, so a lingering
         destroyed host that is still enumerated during the provider's
-        destroyed-host persistence window does not thrash it back in). This is
-        the ONLY removal path: a host that is merely absent from the snapshot is
-        deliberately retained, because declining to drop on absence -- and
-        removing only on a positive DESTROYED observation -- is the entire point
-        of the last-good fallback (a transient discovery loss must not erase it).
+        destroyed-host persistence window does not thrash it back in). A host
+        that is merely absent from this (aggregated) snapshot is deliberately
+        retained -- a transient discovery loss must not erase it; the other
+        removal path is ``_prune_last_good_for_clean_snapshot_locked``, where a
+        clean per-provider snapshot authoritatively drops its provider's
+        vanished hosts.
 
         Returns True if any host record changed (so the caller persists).
         """
@@ -812,6 +827,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         provider: DiscoveredProvider | None,
         error: DiscoveryError | None,
         last_snapshot_at: datetime,
+        clean_snapshot_host_ids: tuple[str, ...] | None = None,
     ) -> None:
         """Merge one provider's discovery snapshot into provider state. Thread-safe.
 
@@ -826,7 +842,17 @@ class MngrCliBackendResolver(BackendResolverInterface):
         ``_last_event_at`` is bumped to the latest snapshot time since a snapshot is
         also a discovery event. Incremental events update ``_last_event_at`` only,
         via :meth:`record_discovery_event_received`.
+
+        ``clean_snapshot_host_ids`` is the full host-id set an error-free
+        snapshot reported for this provider (unknown-state hosts included by
+        the caller). A clean snapshot is authoritative for its provider, so any
+        remembered last-good host attributed to this provider and absent from
+        the set is positively gone and pruned (and the pruned topology
+        persisted). Callers MUST pass None for an errored snapshot -- the
+        provider's hosts are unreachable, not absent.
         """
+        path = self.last_good_agents_path
+        topology_to_write: _LastGoodAgentTopology | None = None
         with self._lock:
             if provider is not None:
                 self._provider_by_name[provider_name] = provider
@@ -837,7 +863,47 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._last_snapshot_at_by_provider[provider_name] = last_snapshot_at
             if self._last_event_at is None or last_snapshot_at > self._last_event_at:
                 self._last_event_at = last_snapshot_at
+            if (
+                error is None
+                and clean_snapshot_host_ids is not None
+                and self._prune_last_good_for_clean_snapshot_locked(provider_name, clean_snapshot_host_ids)
+                and path is not None
+            ):
+                topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
+        if path is not None and topology_to_write is not None:
+            _write_last_good_agent_topology(path, topology_to_write)
         self._fire_on_change()
+
+    def _prune_last_good_for_clean_snapshot_locked(
+        self, provider_name: ProviderInstanceName, snapshot_host_ids: tuple[str, ...]
+    ) -> bool:
+        """Drop remembered last-good hosts a clean provider snapshot no longer reports.
+
+        An error-free snapshot enumerates everything its provider manages, so a
+        remembered host attributed to that provider and absent from it is
+        positively gone (destroyed or reaped while this client was not
+        watching), not merely un-enumerated -- unlike absence from an errored
+        or partial view, which never reaches this path. This complements the
+        DESTROYED-observation prune in ``_merge_last_good_topology_locked``,
+        covering hosts that vanish without this client ever seeing a DESTROYED
+        state. Hosts of other providers are untouched. Must hold ``self._lock``.
+
+        Returns True if any host record was removed (so the caller persists).
+        """
+        present = set(snapshot_host_ids)
+        changed = False
+        for host_id_str in tuple(self._last_good_agents_by_host):
+            if host_id_str in present:
+                continue
+            records = self._last_good_agents_by_host[host_id_str]
+            if not any(record.provider_name == provider_name for record in records):
+                continue
+            del self._last_good_agents_by_host[host_id_str]
+            changed = True
+            logger.info(
+                "Pruned last-good host {}: absent from a clean {} discovery snapshot", host_id_str, provider_name
+            )
+        return changed
 
     def record_discovery_event_received(self, event_at: datetime) -> None:
         """Bump ``_last_event_at`` for an incremental (non-snapshot) discovery event."""

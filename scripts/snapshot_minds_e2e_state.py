@@ -397,6 +397,15 @@ def _build_snapshot_image(staged_repo: Path, default_workspace_template_worktree
         # chain still fails the build if either install fails. This overlaps the
         # two installs' network/IO instead of summing them (~max(uv, pnpm)).
         #
+        # pnpm install is wrapped in a bounded retry (3 attempts, linear
+        # backoff) because it runs every dependency's postinstall, and
+        # electron's postinstall streams the ~100MB electron binary from
+        # GitHub's release CDN. That transfer occasionally aborts mid-stream
+        # ("ReadError: The server aborted pending request") and @electron/get
+        # does not retry a streamed-body abort, so a single network blip would
+        # otherwise fail the whole image build. Re-running pnpm install only
+        # re-runs the postinstalls that did not complete, so a retry is cheap.
+        #
         # ensure-binaries + build:css then run (both need what pnpm install
         # provides), mirroring `pnpm start`'s prestart hook, which the e2e
         # runner never triggers because it runs the app straight from source.
@@ -416,7 +425,13 @@ def _build_snapshot_image(staged_repo: Path, default_workspace_template_worktree
         # from offload's chosen workdir.
         .run_commands(
             "( cd /code/mngr && uv sync --all-packages ) & UV_PID=$!; "
-            "( cd /code/mngr/apps/minds && pnpm install --frozen-lockfile ) & PNPM_PID=$!; "
+            "( cd /code/mngr/apps/minds && "
+            "for attempt in 1 2 3; do "
+            "pnpm install --frozen-lockfile && break; "
+            'if [ $attempt -ge 3 ]; then echo "pnpm install: all 3 attempts failed" >&2; exit 1; fi; '
+            'echo "pnpm install attempt $attempt failed; retrying in $((attempt * 10))s..." >&2; '
+            "sleep $((attempt * 10)); "
+            "done ) & PNPM_PID=$!; "
             "wait $UV_PID && wait $PNPM_PID && "
             "( cd /code/mngr/apps/minds && node scripts/ensure-binaries.js && pnpm run build:css ) && "
             "ln -s /code/mngr /app",

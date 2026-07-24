@@ -47,8 +47,11 @@ def test_prevent_time_sleep() -> None:
     # window after the swap), and ``deployment_tests/test_deploy_rollback.py::
     # _poll_for_deploy_id`` (polling /version after a forced auto-
     # rollback to confirm the rolled-back version is the one actually
-    # serving traffic; same Modal swap-window justification).
-    rc.check_time_sleep(_DIR, snapshot(9))
+    # serving traffic; same Modal swap-window justification), and
+    # ``deployment_tests/test_litellm_via_workspace.py::_await_key_spend``
+    # (polling the env's litellm Postgres spend table until the proxy's
+    # asynchronous spend flush lands -- no event-driven alternative).
+    rc.check_time_sleep(_DIR, snapshot(10))
 
 
 def test_prevent_global_keyword() -> None:
@@ -361,10 +364,10 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    # One of the inline functions is the ``record_loss`` helper nested in the
-    # ported Sentry HTTP transport's ``_send_request`` (it closes over the
-    # envelope being sent). The recorded count reflects the actual finder count
-    # for the current tree.
+    # The remaining inline functions are closures that capture the local state they were
+    # defined next to: the SSE generator and its watch callbacks plus the unhandled-exception
+    # hook in app.py, a thread target in api_v1.py, the signal handler in server.py, the WSGI
+    # app in webdav.py, and the ``record_loss`` helper in the ported Sentry HTTP transport.
     rc.check_inline_functions(_DIR, snapshot(7))
 
 

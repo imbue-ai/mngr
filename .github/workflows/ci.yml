@@ -460,6 +460,34 @@ jobs:
         # Electron/Playwright/Xvfb toolchain instead of a dedicated cold job.
         run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release and not minds_snapshot_resume'
 
+  # Bundled-git acceptance test on a GitHub-hosted macOS runner: offload
+  # proves the linux-x64 payload from a networkless sandbox; this job proves
+  # the darwin-arm64 payload the mac app ships, downloading the asset live.
+  test-minds-bundled-git-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      # Node is preinstalled on GitHub's macOS runners (the test shells out to it).
+      - name: Run bundled-git acceptance test
+        run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 570 --no-cov --cov-fail-under=0 -v --tb=short apps/minds/test_bundled_git.py
+
   # Build a fresh minds-workspace Modal snapshot image, then run the
   # `minds_snapshot_resume` suite against it. Two jobs so the expensive
   # vm_runtime image build (Docker-in-Docker + Electron workspace

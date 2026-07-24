@@ -111,7 +111,35 @@ class E2EFailure(Exception):
 # --- knobs (override via env) ---
 
 MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Minds.app/Contents/MacOS/Minds"))
-MINDS_HOME = Path(os.environ.get("HOME", "/Users/macrunner")) / ".minds"
+
+
+def _bundled_root_name() -> str:
+    """The MINDS_ROOT_NAME baked into the app under test, which names its data root.
+
+    A staging / dev build writes to ``~/.minds-<env>``, not ``~/.minds``. Reading the
+    build's own root_name keeps this harness pointed at the app's real data root
+    instead of a stale one left behind by some other build.
+    """
+    override = os.environ.get("MINDS_ROOT_NAME")
+    if override:
+        return override
+    root_name_file = (
+        MINDS_APP_PATH.parent.parent
+        / "Resources"
+        / "pyproject"
+        / "imbue"
+        / "minds"
+        / "config"
+        / "envs"
+        / "_bundled"
+        / "root_name"
+    )
+    if root_name_file.exists():
+        return root_name_file.read_text().strip()
+    return "minds"
+
+
+MINDS_HOME = Path(os.environ.get("HOME", "/Users/macrunner")) / f".{_bundled_root_name()}"
 EVENTS_LOG = MINDS_HOME / "logs" / "minds-events.jsonl"
 ONE_TIME_CODES = MINDS_HOME / "auth" / "one_time_codes.json"
 SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-msg-screenshots"))
@@ -574,12 +602,12 @@ def wait_backend_url(since_offset: int = 0) -> str:
             with EVENTS_LOG.open("rb") as f:
                 f.seek(since_offset)
                 data = f.read().decode("utf-8", errors="replace")
-            for line in data.splitlines():
-                m = pattern.search(line)
-                if m:
-                    url = m.group(1).replace("localhost", "127.0.0.1")
-                    base = url.split("/login")[0]
-                    return base
+            # Take the LAST match, not the first: a data root that already holds an
+            # earlier run's log would otherwise hand back that run's dead port.
+            matches = [m for line in data.splitlines() if (m := pattern.search(line))]
+            if matches:
+                url = matches[-1].group(1).replace("localhost", "127.0.0.1")
+                return url.split("/login")[0]
         time.sleep(2)
     raise E2EFailure(f"no backend login URL after {LAUNCH_BACKEND_TIMEOUT}s (since_offset={since_offset})")
 
@@ -733,6 +761,31 @@ class _WorkspaceResult(BaseModel):
     total_create_s: float = 0.0
 
 
+def _sign_in_via_claude_modal(win: Page, *, api_key: str, label: str) -> None:
+    """Drive the workspace's Claude sign-in modal through the API-key path.
+
+    A freshly created workspace has no AI credentials, so the modal opens on
+    its own (the load-time status check) -- the designed first-boot step.
+    Signing in writes the key into the shared Claude settings env block and
+    restarts the workspace's claude agents, so the success state can take a
+    couple of minutes to appear. Selectors mirror
+    ``test_snapshot_resume._sign_in_with_api_key_via_modal``.
+    """
+    logger.info("[{}] waiting for the Claude sign-in modal to auto-appear", label)
+    win.wait_for_selector(".claude-login-modal", timeout=120_000)
+    win.click(".claude-login-alts-toggle")
+    win.click('button.claude-login-alt:has-text("Use an API key")')
+    win.wait_for_selector("#claude-login-api-key-input", timeout=10_000)
+    win.fill("#claude-login-api-key-input", api_key)
+    logger.info("[{}] submitting the API key through the modal", label)
+    win.click('button:has-text("Save & finish")')
+    # Applying credentials restarts the claude agents before reporting success.
+    win.wait_for_selector(".claude-login-status-icon--success", timeout=300_000)
+    win.click('button:has-text("Done")')
+    win.wait_for_selector(".claude-login-overlay", state="detached", timeout=10_000)
+    logger.info("[{}] signed in via the modal", label)
+
+
 def _create_workspace_and_first_message(
     ctx: BrowserContext,
     win: Page,
@@ -748,9 +801,11 @@ def _create_workspace_and_first_message(
 
     Steps: navigate to /create, fill the form for `host_name`, submit,
     poll /api/v1/workspaces/operations/create/<id> until DONE, follow the
-    redirect_url to the agent chat URL on `win`, send FIRST_PROMPT,
-    wait for a >=2-occurrence reply of FIRST_EXPECT. Snaps each
-    milestone with names from `snaps`.
+    redirect_url to the agent chat URL on `win`, sign in through the
+    workspace's Claude modal (API_KEY mode only -- the create flow injects
+    no AI credentials, so the workspace boots unauthenticated), send
+    FIRST_PROMPT, wait for a >=2-occurrence reply of FIRST_EXPECT. Snaps
+    each milestone with names from `snaps`.
 
     The same `win` Page is reused across calls; for a second workspace
     the caller passes the (now-W1-chat-URL) `win` in, and this function
@@ -763,19 +818,17 @@ def _create_workspace_and_first_message(
     """
     win.goto(origin + "/create")
     win.wait_for_selector("#create-form", timeout=10_000)
-    # Signed out (no Imbue account): pick the "local" preset first so the AI /
-    # backup providers are the non-cloud set. Otherwise the form defaults to the
+    # Signed out (no Imbue account): pick the "local" preset first so the
+    # backup provider is the non-cloud set. Otherwise the form defaults to the
     # Imbue Cloud providers, and submitting a cloud provider with no account
-    # opens the sign-in modal instead of creating. The explicit launch_mode /
-    # ai_provider selections below override the preset's compute / AI choices.
+    # opens the sign-in modal instead of creating. The explicit launch_mode
+    # selection below overrides the preset's compute choice. There is no
+    # AI-provider or API-key field anymore: the workspace boots
+    # unauthenticated and signs in through its own Claude modal afterwards.
     win.click('[data-preset="local"]')
     win.click("#toggle-advanced")
     win.wait_for_selector("#advanced-view:not(.hidden)", timeout=5_000)
     win.select_option("#launch_mode", value="LIMA")
-    win.select_option("#ai_provider", value=ai_provider)
-    if ai_provider == "API_KEY":
-        win.wait_for_selector("#api-key-row:not(.hidden)", timeout=5_000)
-        win.fill("#anthropic_api_key", anthropic_key)
     win.fill("#host_name", host_name)
     with win.expect_navigation(url=re.compile(r"/creating/[a-z0-9-]+")):
         win.click("#create-submit")
@@ -896,6 +949,14 @@ def _create_workspace_and_first_message(
         )
     logger.info("[{}] agent DONE; chat URL={}", label, win.url)
     snap_page(win, snaps.done)
+
+    # The create flow injects no AI credentials, so a fresh workspace boots
+    # unauthenticated and its Claude sign-in modal auto-appears on the chat
+    # page (the load-time status check). In API_KEY mode, sign in through the
+    # modal before the first message; in SUBSCRIPTION mode the synced Claude
+    # credentials keep the workspace authenticated and no modal appears.
+    if ai_provider == "API_KEY":
+        _sign_in_via_claude_modal(win, api_key=anthropic_key, label=label)
 
     inp = win.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
     inp.fill(FIRST_PROMPT)
@@ -1127,9 +1188,10 @@ def run_e2e() -> int:
                 logger.info("dismissed error-reporting consent screen")
 
         # 4-6. Create agent via UI click and drive to first message. Mirrors
-        # what a user does (Configure panel, launch_mode/ai_provider/api_key
-        # fields, host_name fill, submit, poll until DONE, navigate to chat,
-        # send FIRST_PROMPT, wait for >=2 occurrences of FIRST_EXPECT in body).
+        # what a user does (Configure panel, launch_mode field, host_name fill,
+        # submit, poll until DONE, navigate to chat, sign in through the
+        # workspace's Claude modal in API_KEY mode, send FIRST_PROMPT, wait
+        # for >=2 occurrences of FIRST_EXPECT in body).
         # See _create_workspace_and_first_message for the exact step list.
         ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()
         if ai_provider not in ("API_KEY", "SUBSCRIPTION"):

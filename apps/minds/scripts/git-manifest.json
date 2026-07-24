@@ -1,0 +1,32 @@
+{
+  "comment": "Pinned dugite-native git payload for the minds desktop app. Asset names embed a dugite-native commit short-SHA, so record them verbatim. Update via the runbook in apps/minds/docs/desktop-app.md; design: specs/minds-managed-git/concise.md.",
+  "dugiteNativeTag": "v2.53.0-3",
+  "gitVersion": "2.53.0",
+  "targets": {
+    "darwin-arm64": {
+      "asset": "dugite-native-v2.53.0-f49d009-macOS-arm64.tar.gz",
+      "sha256": "e561cfc80c755e6f3e938653e81efcd025c9827a5b76dd42778b1159b3fab437",
+      "shipped": true
+    },
+    "darwin-x64": {
+      "asset": "dugite-native-v2.53.0-f49d009-macOS-x64.tar.gz",
+      "sha256": "caf27c36b8834969550535bcd5e58186f970e080d1e175e76d9c1de3aac409ed",
+      "shipped": false
+    },
+    "linux-x64": {
+      "asset": "dugite-native-v2.53.0-f49d009-ubuntu-x64.tar.gz",
+      "sha256": "b3a85433c8dfde76d21b90938ad2f971653deff4340b1b4d347258c63250eafc",
+      "shipped": true
+    },
+    "linux-arm64": {
+      "asset": "dugite-native-v2.53.0-f49d009-ubuntu-arm64.tar.gz",
+      "sha256": "d562ad433ed0dc1907f44a92fc701597bc577c48d07fe69ee7adddfee836ef4c",
+      "shipped": false
+    },
+    "win32-x64": {
+      "asset": "dugite-native-v2.53.0-f49d009-windows-x64.tar.gz",
+      "sha256": "f843a87a693bfdabed83b8492bca59db6f64d1168c74d23e2c8dfb7388a97142",
+      "shipped": false
+    }
+  }
+}

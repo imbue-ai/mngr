@@ -50,7 +50,6 @@ from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
-from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -107,11 +106,9 @@ class _RecordingAgentCreator(AgentCreator):
         display_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.DOCKER,
-        ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
-        anthropic_api_key: str = "",
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -124,11 +121,9 @@ class _RecordingAgentCreator(AgentCreator):
             "display_name": display_name,
             "branch": branch,
             "launch_mode": launch_mode,
-            "ai_provider": ai_provider,
             "account_email": account_email,
             "branch_or_tag": branch_or_tag,
             "region": region,
-            "anthropic_api_key": anthropic_api_key,
             "color": color,
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
@@ -580,6 +575,7 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
             "branch": "main",
             "color": "#0b292b",
             "launch_mode": "DOCKER",
+            # A stale ai_provider from an old client is silently ignored.
             "ai_provider": "SUBSCRIPTION",
             "backup_provider": "CONFIGURE_LATER",
             "runtime": "RUNSC",
@@ -596,13 +592,14 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
 
 
-def test_create_workspace_requires_api_key_for_api_key_provider(
+def test_create_workspace_ignores_stale_ai_provider_field(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    # An API_KEY ai_provider without an anthropic_api_key must fail validation
-    # up front (400).
+    # The AI provider moved into the workspace's own sign-in modal. A stale
+    # client still sending ai_provider (even a value that used to require an
+    # API key) must be accepted -- the field is silently ignored.
     client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
 
     response = client.post(
@@ -611,8 +608,7 @@ def test_create_workspace_requires_api_key_for_api_key_provider(
         json={"git_url": "https://example/repo", "ai_provider": "API_KEY"},
     )
 
-    assert response.status_code == 400
-    assert json.loads(response.data)["field"] == "anthropic_api_key"
+    assert response.status_code == 202
 
 
 def test_create_workspace_rejects_invalid_backup_provider(

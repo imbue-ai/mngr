@@ -935,8 +935,12 @@
       </div>
     {% else %}
       {% if is_discovering %}
-        <div class="flex items-center justify-center min-h-[80vh]">
+        {# Discovery may never surface the remembered workspaces (e.g. stale
+           last-good entries for hosts that are gone for good), so this state
+           must not be a dead end: always offer Create alongside the spinner. #}
+        <div class="flex flex-col items-center justify-center min-h-[80vh] gap-6">
           <p class="text-tertiary text-center">Discovering agents...</p>
+          <ButtonLink href="/create" variant="primary">Create</ButtonLink>
         </div>
         <script>
           (function () {

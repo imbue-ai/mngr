@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect] [--dry-run]
+mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--resume-message <TEXT>] [--connect] [--dry-run]
 ```
 
 Start stopped agent(s).
@@ -20,6 +20,8 @@ the host starts.
 
 Use --restart to stop any running agents first, ensuring a clean start.
 Use --no-resume to skip sending the resume message after starting.
+Use --resume-message to send a specific message after starting, overriding
+any resume message stored on the agent (cannot be combined with --no-resume).
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -49,6 +51,7 @@ mngr start [OPTIONS] [AGENTS]...
 | ---- | ---- | ----------- | ------- |
 | `--restart` | boolean | Stop the agent first if it is already running, ensuring a clean start. | `False` |
 | `--no-resume` | boolean | Skip sending the resume message after starting. | `False` |
+| `--resume-message` | text | Message to send after starting, overriding any resume message stored on the agent. Cannot be combined with --no-resume. | None |
 | `--dry-run` | boolean | Show what would be started without actually starting anything | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after starting (only valid for single agent) | `False` |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |

@@ -13,12 +13,17 @@ For each (version, arch) it:
   3. signs the manifest with ``minisign`` (detached), and
   4. uploads the new chunks + index + manifest + signature to R2.
 
-Upload backends:
-  * ``s3`` (default, recommended for production): boto3 against R2's S3 API.
-    Reads ``R2_ACCOUNT_ID`` / ``R2_ACCESS_KEY_ID`` / ``R2_SECRET_ACCESS_KEY``.
-  * ``cloudflare-api``: the Cloudflare REST object API using
-    ``CLOUDFLARE_API_TOKEN`` + ``CLOUDFLARE_ACCOUNT_ID``. Handy when you only
-    have an account API token (no S3 keys).
+Uploads go to R2's S3 API via boto3, reading ``R2_ACCOUNT_ID`` /
+``R2_ACCESS_KEY_ID`` / ``R2_SECRET_ACCESS_KEY``.
+
+Cloudflare's REST object API is deliberately not an option here. It is governed
+by the global api.cloudflare.com rate limit of 1200 requests per 5 minutes, and
+a single image is ~65,000 chunks: even uploading flat out, one publish cannot
+finish inside that budget and starts returning 429 partway through. The S3 API
+has no such limit. If you only hold an account API token, derive S3 credentials
+from it rather than reaching for the REST API -- for an account-owned R2 token,
+the access key id is the token's id and the secret is the SHA-256 of the token
+value.
 
 Content-addressed chunks are skipped when already present, so re-publishing a
 near-identical image only uploads the changed chunks.
@@ -32,13 +37,15 @@ import sys
 import tempfile
 from abc import ABC
 from abc import abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from datetime import datetime
 from datetime import timezone
+from http import HTTPStatus
 from pathlib import Path
 
 import boto3
 import click
-import httpx
 from botocore.client import Config
 
 _MANIFEST_PREFIX = "manifests"
@@ -48,6 +55,9 @@ _ROOT_MANIFEST_FILENAME = "root.json"
 _SIGNATURE_SUFFIX = ".minisig"
 _SCHEMA_VERSION = 1
 _VALID_ARCHES = ("aarch64", "x86_64")
+# A multi-GB image is tens of thousands of small objects; serial upload takes hours.
+_UPLOAD_CONCURRENCY = 64
+_UPLOAD_PROGRESS_INTERVAL = 2000
 
 
 class ObjectStore(ABC):
@@ -73,16 +83,27 @@ class S3ObjectStore(ObjectStore):
             endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
-            config=Config(signature_version="s3v4", retries={"max_attempts": 5, "mode": "standard"}),
+            config=Config(
+                signature_version="s3v4",
+                retries={"max_attempts": 5, "mode": "standard"},
+                # botocore's default pool is 10, which would throttle the upload fan-out.
+                max_pool_connections=_UPLOAD_CONCURRENCY,
+            ),
             region_name="auto",
         )
 
     def exists(self, key: str) -> bool:
+        # Only a genuine 404 means absent. Catching every ClientError would read a
+        # 403 or a throttle as "not there", so a token that cannot HEAD would report
+        # an empty store and re-upload all 65k chunks on every publish, silently
+        # destroying the skip-what-is-present property that makes a republish cheap.
         try:
             self._client.head_object(Bucket=self._bucket, Key=key)
-            return True
-        except self._client.exceptions.ClientError:
-            return False
+        except self._client.exceptions.ClientError as error:
+            if error.response["ResponseMetadata"]["HTTPStatusCode"] == HTTPStatus.NOT_FOUND:
+                return False
+            raise
+        return True
 
     def put(self, key: str, data: bytes, content_type: str) -> None:
         self._client.put_object(Bucket=self._bucket, Key=key, Body=data, ContentType=content_type)
@@ -97,39 +118,6 @@ class S3ObjectStore(ObjectStore):
         except self._client.exceptions.NoSuchKey:
             return None
         return response["Body"].read()
-
-
-class CloudflareApiObjectStore(ObjectStore):
-    """Cloudflare REST object API using an account API token (no S3 keys needed)."""
-
-    def __init__(self, account_id: str, api_token: str, bucket: str) -> None:
-        self._base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/r2/buckets/{bucket}/objects"
-        self._headers = {"Authorization": f"Bearer {api_token}"}
-
-    def exists(self, key: str) -> bool:
-        response = httpx.head(f"{self._base}/{key}", headers=self._headers, timeout=30.0)
-        if response.status_code == httpx.codes.NOT_FOUND:
-            return False
-        # Fail loud on auth/5xx rather than treating them as "absent", which would
-        # skip a chunk that never gets uploaded.
-        response.raise_for_status()
-        return True
-
-    def put(self, key: str, data: bytes, content_type: str) -> None:
-        response = httpx.put(
-            f"{self._base}/{key}",
-            headers={**self._headers, "Content-Type": content_type},
-            content=data,
-            timeout=120.0,
-        )
-        response.raise_for_status()
-
-    def get_optional(self, key: str) -> bytes | None:
-        response = httpx.get(f"{self._base}/{key}", headers=self._headers, timeout=60.0)
-        if response.status_code == httpx.codes.NOT_FOUND:
-            return None
-        response.raise_for_status()
-        return response.content
 
 
 def _sha256_file(path: Path) -> str:
@@ -149,17 +137,35 @@ def _chunk_image(raw_image: Path, work_dir: Path) -> tuple[Path, Path]:
     return store_dir, index_path
 
 
+def _upload_one_chunk(chunk_path: Path, store_dir: Path, store: ObjectStore) -> bool:
+    """Upload one chunk unless it is already present; return whether it was uploaded."""
+    key = f"{_STORE_PREFIX}/{chunk_path.relative_to(store_dir).as_posix()}"
+    if store.exists(key):
+        return False
+    store.put(key, chunk_path.read_bytes(), "application/octet-stream")
+    return True
+
+
 def _upload_store(store_dir: Path, store: ObjectStore) -> int:
-    """Upload chunk files that are not already present; return the count uploaded."""
+    """Upload chunk files that are not already present; return the count uploaded.
+
+    A multi-GB image chunks into tens of thousands of small objects, and each one
+    costs a round trip to probe plus another to upload. Serially that is hours;
+    the work is embarrassingly parallel, so fan it out. Any chunk that fails
+    propagates: a silently missing chunk publishes an image that cannot be
+    reassembled.
+    """
+    chunk_paths = [path for path in sorted(store_dir.rglob("*")) if path.is_file()]
     uploaded = 0
-    for chunk_path in sorted(store_dir.rglob("*")):
-        if not chunk_path.is_file():
-            continue
-        key = f"{_STORE_PREFIX}/{chunk_path.relative_to(store_dir).as_posix()}"
-        if store.exists(key):
-            continue
-        store.put(key, chunk_path.read_bytes(), "application/octet-stream")
-        uploaded += 1
+    done = 0
+    with ThreadPoolExecutor(max_workers=_UPLOAD_CONCURRENCY) as pool:
+        futures = {pool.submit(_upload_one_chunk, path, store_dir, store): path for path in chunk_paths}
+        for future in as_completed(futures):
+            if future.result():
+                uploaded += 1
+            done += 1
+            if done % _UPLOAD_PROGRESS_INTERVAL == 0 or done == len(chunk_paths):
+                print(f"  {done}/{len(chunk_paths)} chunks ({uploaded} uploaded, {done - uploaded} already present)")
     return uploaded
 
 
@@ -194,18 +200,11 @@ def _sign_manifest(manifest_bytes: bytes, secret_key_file: Path) -> bytes:
         return signature_path.read_bytes()
 
 
-def _build_store(uploader: str, bucket: str) -> ObjectStore:
-    if uploader == "s3":
-        account_id = os.environ["R2_ACCOUNT_ID"]
-        return S3ObjectStore(
-            account_id=account_id,
-            access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-            secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-            bucket=bucket,
-        )
-    return CloudflareApiObjectStore(
-        account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"],
-        api_token=os.environ["CLOUDFLARE_API_TOKEN"],
+def _build_store(bucket: str) -> ObjectStore:
+    return S3ObjectStore(
+        account_id=os.environ["R2_ACCOUNT_ID"],
+        access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+        secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
         bucket=bucket,
     )
 
@@ -221,12 +220,9 @@ def _build_store(uploader: str, bucket: str) -> ObjectStore:
     type=click.Path(exists=True, path_type=Path),
     help="minisign secret key (use an unencrypted -W key for non-interactive signing)",
 )
-@click.option("--uploader", type=click.Choice(["s3", "cloudflare-api"]), default="s3", help="Upload backend")
 @click.option("--work-dir", type=click.Path(path_type=Path), default=None, help="Scratch dir for chunking")
-def main(
-    version: str, arch: str, raw_image: Path, bucket: str, secret_key_file: Path, uploader: str, work_dir: Path | None
-) -> None:
-    store = _build_store(uploader, bucket)
+def main(version: str, arch: str, raw_image: Path, bucket: str, secret_key_file: Path, work_dir: Path | None) -> None:
+    store = _build_store(bucket)
     with tempfile.TemporaryDirectory() as default_work:
         resolved_work_dir = work_dir if work_dir is not None else Path(default_work)
         resolved_work_dir.mkdir(parents=True, exist_ok=True)
@@ -250,12 +246,14 @@ def main(
         manifest = _merge_manifest(store, version, entry)
         manifest_bytes = json.dumps(manifest).encode()
         signature_bytes = _sign_manifest(manifest_bytes, secret_key_file)
-        store.put(f"{_MANIFEST_PREFIX}/{version}/{_ROOT_MANIFEST_FILENAME}", manifest_bytes, "application/json")
-        store.put(
-            f"{_MANIFEST_PREFIX}/{version}/{_ROOT_MANIFEST_FILENAME}{_SIGNATURE_SUFFIX}",
-            signature_bytes,
-            "application/octet-stream",
-        )
+        # The manifest is the commit point: a client reads it, then verifies it against
+        # the detached signature. Upload the signature first so no client can observe a
+        # manifest whose signature is still missing (first publish) or still the previous
+        # image's (republish) -- either mismatch is a hard verification failure, whereas an
+        # absent manifest is just VERSION_UNAVAILABLE and falls back to building in-VM.
+        manifest_key = f"{_MANIFEST_PREFIX}/{version}/{_ROOT_MANIFEST_FILENAME}"
+        store.put(f"{manifest_key}{_SIGNATURE_SUFFIX}", signature_bytes, "application/octet-stream")
+        store.put(manifest_key, manifest_bytes, "application/json")
         click.echo(f"Published {version} / {arch} (manifest entries: {len(manifest['entries'])}).")
 
 

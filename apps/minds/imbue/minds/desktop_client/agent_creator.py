@@ -50,7 +50,6 @@ from imbue.minds.desktop_client.backup_provisioning import configure_backups_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -62,7 +61,6 @@ from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.lima_image.primitives import get_current_image_arch
-from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
@@ -207,15 +205,13 @@ class AgentCreationStatus(UpperCaseStrEnum):
     status and emits a SSE event each time it changes so the UI spinner
     caption stays in sync with what the backend is actually doing.
     Conditional phases (``CHECKING_OUT_BRANCH`` only if a branch was
-    given, ``PROVISIONING_AI`` only for ``IMBUE_CLOUD`` AI provider) are
-    skipped when they don't apply -- the status simply jumps to the next
-    applicable phase.
+    given) are skipped when they don't apply -- the status simply jumps to
+    the next applicable phase.
     """
 
     INITIALIZING = auto()
     CLONING_REPO = auto()
     CHECKING_OUT_BRANCH = auto()
-    PROVISIONING_AI = auto()
     CREATING_WORKSPACE = auto()
     WAITING_FOR_READY = auto()
     DONE = auto()
@@ -695,12 +691,46 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 
-# How long a gated Lima create blocks waiting for the prefetched image to become
-# ready before surfacing a retryable error. Generous because a cold first-run
-# download of a multi-GB image can take a while; the background prefetch usually
-# wins this race long before a user clicks create.
-_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 1800.0
+# How long a gated Lima create blocks waiting for the prefetched image before giving up
+# on it and building the workspace in-VM instead. A cold download of the real image
+# measures ~6 minutes, so this leaves generous headroom for a slower link while bounding
+# the case where the download is not slow but stuck: past this, building in-VM (~5 min)
+# gets the user a workspace sooner than continuing to wait. The download keeps running,
+# so the next create still gets the fast path.
+_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 600.0
 _PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
+
+# Only log the download's progress once it has moved this much, so a 1s poll does not
+# flood the create log with near-identical lines.
+_PREBAKED_IMAGE_PROGRESS_LOG_STEP_BYTES: Final[int] = 500 * 1000 * 1000
+
+
+class _PrebakedImageProgressReporter(MutableModel):
+    """Reports how much of the pre-baked image has downloaded into the create log.
+
+    A create blocked on the image would otherwise show nothing at all: desync draws its
+    progress bar only on a tty, so a packaged app sees no output from the download.
+    """
+
+    log_line: Callable[[str], None] = Field(frozen=True, description="Sink for one create-log line")
+    last_logged_bytes: int = Field(
+        default=0, description="Bytes reported by the last line, so a per-second poll does not flood the log"
+    )
+
+    def __call__(self, fetched_bytes: int) -> None:
+        if fetched_bytes - self.last_logged_bytes < _PREBAKED_IMAGE_PROGRESS_LOG_STEP_BYTES:
+            return
+        self.last_logged_bytes = fetched_bytes
+        self.log_line(f"[minds] Downloading pre-baked Lima image... {fetched_bytes / 1e9:.1f} GB")
+
+
+class _PrebakedImageFallbackReporter(MutableModel):
+    """Tells the create log why the workspace is being built in-VM rather than from the image."""
+
+    log_line: Callable[[str], None] = Field(frozen=True, description="Sink for one create-log line")
+
+    def __call__(self, reason: str) -> None:
+        self.log_line(f"[minds] Building the workspace in the VM (slower): {reason}.")
 
 
 def provider_instance_name_for_launch(
@@ -761,7 +791,7 @@ def _build_mngr_create_command(
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
-    prebaked_lima_image_qcow2_path: Path | None = None,
+    prebaked_lima_image_raw_path: Path | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -933,13 +963,11 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
-            # When the caller resolved a ready pre-baked image (issue 2306),
-            # point Lima at the local qcow2 via the provider's existing per-arch
-            # image-url override, so the VM boots the baked toolchain instead of
-            # building it. No provider code change is needed to consume it.
-            if prebaked_lima_image_qcow2_path is not None:
+            # Point Lima at the baked raw image via the provider's existing per-arch
+            # image-url override, so the VM boots the baked toolchain instead of building it.
+            if prebaked_lima_image_raw_path is not None:
                 mngr_command.extend(
-                    prebaked_image_mngr_setting_args(get_current_image_arch(), prebaked_lima_image_qcow2_path)
+                    prebaked_image_mngr_setting_args(get_current_image_arch(), prebaked_lima_image_raw_path)
                 )
         case LaunchMode.VULTR:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
@@ -1153,14 +1181,12 @@ def run_mngr_create(
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
     region: str | None = None,
-    anthropic_api_key: str | None = None,
-    anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
-    prebaked_lima_image_qcow2_path: Path | None = None,
+    prebaked_lima_image_raw_path: Path | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -1173,10 +1199,9 @@ def run_mngr_create(
     pool host has its own pre-baked ``.mngr/`` and the local repo is
     irrelevant.
 
-    ``anthropic_api_key`` / ``anthropic_base_url`` are placed into the
-    subprocess env (not argv) so they don't show up in ``ps`` output; the DEFAULT_WORKSPACE_TEMPLATE
-    template's own ``pass_(host_)env`` declarations cause mngr to forward them
-    onto the host as appropriate.
+    No Anthropic credentials are involved at create time: workspace Claude
+    auth lives in the env block of the shared CLAUDE_CONFIG_DIR settings.json,
+    written by the in-workspace sign-in modal after the workspace boots.
 
     Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical
     ids are parsed out of the ``"event": "created"`` JSONL line that
@@ -1201,21 +1226,8 @@ def run_mngr_create(
         docker_runtime=docker_runtime,
         original_minds_version=original_minds_version,
         original_branch=original_branch,
-        prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
+        prebaked_lima_image_raw_path=prebaked_lima_image_raw_path,
     )
-
-    # Build the subprocess env from the parent's env + any secrets we inject
-    # for the matching ``--pass-(host-)env`` flag to forward. Mutating
-    # ``os.environ`` directly would leak the user's secrets into the desktop
-    # client's other subprocesses, so we keep the override scoped to this
-    # invocation.
-    subprocess_env: dict[str, str] | None = None
-    if anthropic_api_key is not None or anthropic_base_url is not None:
-        subprocess_env = dict(os.environ)
-        if anthropic_api_key is not None:
-            subprocess_env["ANTHROPIC_API_KEY"] = anthropic_api_key
-        if anthropic_base_url is not None:
-            subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
 
     # The command carries the latchkey gateway password + permissions-override
     # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
@@ -1233,7 +1245,7 @@ def run_mngr_create(
             cwd=workspace_dir,
             is_checked_after=False,
             on_output=capture,
-            env=subprocess_env,
+            env=None,
             # Name the reader thread with the redacted command so the gateway
             # password + JWT never reach the JSONL log's ``thread_name`` (nor any
             # ProcessError message); the real command is still what executes.
@@ -1332,15 +1344,13 @@ class _MngrCreateAttemptParams(FrozenModel):
     repo_source: str | None
     branch_or_tag: str | None
     region: str | None
-    anthropic_api_key: str | None
-    anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
     docker_runtime: DockerRuntime
     original_minds_version: str | None
     original_branch: str | None
-    # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
-    prebaked_lima_image_qcow2_path: Path | None = None
+    # Resolved ready pre-baked Lima raw image path, or None to build in-VM.
+    prebaked_lima_image_raw_path: Path | None = None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1372,13 +1382,11 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # (-b --vultr-region=), and AWS (-b --aws-region=); the command builder
         # ignores it for DOCKER/LIMA.
         region=(params.region or None),
-        anthropic_api_key=params.anthropic_api_key,
-        anthropic_base_url=params.anthropic_base_url,
         color=params.color,
         docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
-        prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
+        prebaked_lima_image_raw_path=params.prebaked_lima_image_raw_path,
         parent_cg=params.parent_cg,
     )
 
@@ -1468,9 +1476,9 @@ class AgentCreator(MutableModel):
         default=None,
         frozen=True,
         description=(
-            "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
-            "default workspace (Lima + default workspace template repo + current release tag), the create gates on "
-            "the verified image and points Lima at it; None disables the path."
+            "Pre-baked Lima image create gate. When set and the create matches the default "
+            "workspace (Lima + default workspace template repo + current release tag), the create "
+            "gates on the verified image and points Lima at it; None disables the path."
         ),
     )
     mngr_forward_port: int = Field(
@@ -1565,11 +1573,9 @@ class AgentCreator(MutableModel):
         display_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.DOCKER,
-        ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
-        anthropic_api_key: str = "",
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -1578,17 +1584,12 @@ class AgentCreator(MutableModel):
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
-        ``ai_provider`` controls how the agent obtains its Anthropic
-        credentials, decoupled from the compute provider:
-
-        - ``IMBUE_CLOUD`` -- mint a LiteLLM virtual key against
-          ``account_email`` and inject ``ANTHROPIC_API_KEY`` /
-          ``ANTHROPIC_BASE_URL`` so the agent talks to LiteLLM. Requires
-          an account.
-        - ``API_KEY`` -- inject ``anthropic_api_key`` directly so the agent
-          talks to the official Anthropic API.
-        - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
-          interactively in the workspace.
+        No AI credentials are chosen or injected at create time: the
+        workspace boots unauthenticated and its in-UI sign-in modal is the
+        sole auth surface (subscription setup-token, Imbue LiteLLM key, or
+        raw API key -- all written into the shared Claude settings env).
+        ``account_email`` still selects the imbue_cloud account for compute
+        leasing and backups.
 
         ``docker_runtime`` selects the container runtime for
         ``LaunchMode.DOCKER`` (runc vs gVisor's runsc); it is ignored by every
@@ -1649,11 +1650,9 @@ class AgentCreator(MutableModel):
                 effective_branch,
                 log_queue,
                 launch_mode,
-                ai_provider,
                 account_email,
                 branch_or_tag,
                 region,
-                anthropic_api_key,
                 on_created,
                 backup_request,
                 color,
@@ -1714,11 +1713,9 @@ class AgentCreator(MutableModel):
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
-        ai_provider: AIProvider,
         account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
-        anthropic_api_key: str = "",
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -1727,12 +1724,9 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
-        For ``ai_provider == IMBUE_CLOUD``, mints a LiteLLM key (via the
-        plugin CLI) and forwards ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL``
-        onto the host via the subprocess env + matching
-        ``--pass-(host-)env`` flags. For ``API_KEY``, forwards the
-        user-supplied key as ``ANTHROPIC_API_KEY``. For ``SUBSCRIPTION``,
-        injects neither.
+        No Anthropic credentials are minted or injected here: the workspace
+        boots unauthenticated and the in-workspace sign-in modal writes the
+        credentials into the shared Claude settings env after first boot.
 
         For ``LaunchMode.IMBUE_CLOUD``, the plugin's provider backend
         handles the lease + SSH bootstrap inside ``create_host``; the
@@ -1871,45 +1865,6 @@ class AgentCreator(MutableModel):
                             parent_cg=self.root_concurrency_group,
                         )
 
-                # Resolve the Anthropic credentials according to the AI
-                # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;
-                # API_KEY uses the user-supplied key directly; SUBSCRIPTION
-                # injects nothing so the agent prompts the user to log in.
-                effective_anthropic_api_key: str | None = None
-                effective_anthropic_base_url: str | None = None
-                match ai_provider:
-                    case AIProvider.IMBUE_CLOUD:
-                        if self.imbue_cloud_cli is None:
-                            raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
-                        if not account_email:
-                            raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
-                        with self._lock:
-                            self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
-                        log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
-                        try:
-                            # No host_name metadata: the key is minted before the
-                            # host exists (so no host id is available), and the host
-                            # name is mutable, so it would only go stale on rename.
-                            key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
-                                account=account_email,
-                                alias=None,
-                                max_budget=100.0,
-                                budget_duration="1d",
-                            )
-                        except ImbueCloudCliError as exc:
-                            raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
-                        log_queue.put("[minds] LiteLLM key minted.")
-                        effective_anthropic_api_key = key_material.key.get_secret_value()
-                        effective_anthropic_base_url = str(key_material.base_url)
-                    case AIProvider.API_KEY:
-                        if not anthropic_api_key:
-                            raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
-                        effective_anthropic_api_key = anthropic_api_key
-                    case AIProvider.SUBSCRIPTION:
-                        pass
-                    case _ as unreachable:
-                        assert_never(unreachable)
-
                 with self._lock:
                     self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
 
@@ -1949,24 +1904,29 @@ class AgentCreator(MutableModel):
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
-                # Pre-baked Lima image gate (issue 2306): for the default
-                # workspace (Lima + default workspace template repo + current release tag) wait on
-                # the prefetched, verified image and point Lima at it. Returns None
-                # (build in-VM) for any non-default create or unpublished version;
-                # raises a retryable error if a published image can't be readied.
-                prebaked_lima_image_qcow2_path: Path | None = None
+                # Returns None (build in-VM) for any non-default create, an unpublished
+                # version, or a download that stalled or ran out the wait; raises a retryable
+                # error only when a published image failed to fetch or verify.
+                prebaked_lima_image_raw_path: Path | None = None
                 if self.lima_image_gate is not None:
-                    if launch_mode is LaunchMode.LIMA:
+                    is_lima = launch_mode is LaunchMode.LIMA
+                    if is_lima:
                         log_queue.put("[minds] Checking for a pre-baked Lima image...")
-                    prebaked_lima_image_qcow2_path = self.lima_image_gate.resolve_qcow2_for_create(
-                        is_lima_launch_mode=launch_mode is LaunchMode.LIMA,
+                    prebaked_lima_image_raw_path = self.lima_image_gate.resolve_image_for_create(
+                        is_lima_launch_mode=is_lima,
                         repo_url=repo_source or "",
                         branch_or_tag=branch_or_tag,
                         environ=os.environ,
                         wait_timeout_seconds=_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS,
                         poll_interval_seconds=_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS,
+                        on_download_progress=_PrebakedImageProgressReporter(log_line=log_queue.put),
+                        # Only a Lima create was ever going to use the image, so only it is owed
+                        # an explanation for building the workspace the slow way instead.
+                        on_fallback_to_in_vm=_PrebakedImageFallbackReporter(log_line=log_queue.put)
+                        if is_lima
+                        else None,
                     )
-                    if prebaked_lima_image_qcow2_path is not None:
+                    if prebaked_lima_image_raw_path is not None:
                         log_queue.put("[minds] Using pre-baked Lima image (fast create).")
 
                 # ``fast_mode`` is the only knob that varies between the fast-
@@ -1983,14 +1943,12 @@ class AgentCreator(MutableModel):
                     repo_source=repo_source,
                     branch_or_tag=branch_or_tag,
                     region=region,
-                    anthropic_api_key=effective_anthropic_api_key,
-                    anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                     color=color,
                     docker_runtime=docker_runtime,
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
-                    prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
+                    prebaked_lima_image_raw_path=prebaked_lima_image_raw_path,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:

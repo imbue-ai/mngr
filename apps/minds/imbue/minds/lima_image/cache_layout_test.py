@@ -30,7 +30,7 @@ def test_current_pointer_round_trips_through_json() -> None:
     pointer = LimaImageCurrentPointer(
         minds_version=_VERSION,
         arch=ImageArch.AARCH64,
-        qcow2_path=Path("/data/lima-images/versions/minds-v0.3.4/AARCH64/image.qcow2"),
+        raw_path=Path("/data/lima-images/versions/minds-v0.3.4/AARCH64/image.raw"),
         index_path=Path("/data/lima-images/versions/minds-v0.3.4/AARCH64/image.caibx"),
     )
     restored = LimaImageCurrentPointer.model_validate_json(pointer.model_dump_json())

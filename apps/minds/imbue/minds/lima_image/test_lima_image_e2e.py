@@ -1,4 +1,4 @@
-"""End-to-end integration test of the lima image cache against the real desync / minisign / qemu-img binaries.
+"""End-to-end integration test of the lima image cache against the real desync / minisign binaries.
 
 Builds a fixture chunk store + signed manifest, serves it over a local HTTP
 server, and drives ``ensure_current_lima_image`` with the real implementations.
@@ -30,6 +30,7 @@ from imbue.minds.lima_image.data_types import LimaImageSource
 from imbue.minds.lima_image.data_types import ROOT_MANIFEST_SCHEMA_VERSION
 from imbue.minds.lima_image.data_types import RootManifest
 from imbue.minds.lima_image.desync import DesyncImageChunkStore
+from imbue.minds.lima_image.desync import _get_desync_binary
 from imbue.minds.lima_image.ensure import ensure_current_lima_image
 from imbue.minds.lima_image.manifest_fetcher import HttpxManifestFetcher
 from imbue.minds.lima_image.minisign_verify import PythonMinisignSignatureVerifier
@@ -37,14 +38,19 @@ from imbue.minds.lima_image.primitives import ImageArch
 from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import Sha256Hex
 from imbue.minds.lima_image.progress import FileLimaImageProgressSink
-from imbue.minds.lima_image.qemu_converter import QemuImageFormatConverter
 
-_REQUIRED_BINARIES = ("desync", "minisign", "qemu-img")
+# Resolved exactly as the runtime resolves it, so a dev tree whose ``resources/`` is
+# staged exercises the binary that actually ships (the session conftest points
+# MINDS_DESYNC_BINARY at it) and needs it on neither PATH nor Homebrew.
+# minisign has no bundled counterpart: it signs the fixture manifest here, which is
+# the publisher's job, not the app's -- the app verifies with PythonMinisignSignatureVerifier.
+_DESYNC = _get_desync_binary()
+_REQUIRED_BINARIES = (_DESYNC, "minisign")
 _ARCH = ImageArch.X86_64
 
 pytestmark = pytest.mark.skipif(
     any(shutil.which(name) is None for name in _REQUIRED_BINARIES),
-    reason=f"requires {', '.join(_REQUIRED_BINARIES)} on PATH",
+    reason=f"requires {', '.join(_REQUIRED_BINARIES)}",
 )
 
 
@@ -66,7 +72,7 @@ def _publish_image(origin_dir: Path, version: MindsImageVersion, raw_image: Path
     index_path = origin_dir / "indexes" / str(version) / f"{_ARCH.value}.caibx"
     index_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["desync", "make", "-s", str(store_dir), str(index_path), str(raw_image)],
+        [_DESYNC, "make", "-s", str(store_dir), str(index_path), str(raw_image)],
         check=True,
         capture_output=True,
     )
@@ -143,7 +149,6 @@ def _ensure(cg: ConcurrencyGroup, base_url: str, public_key: str, version: Minds
         fetcher=HttpxManifestFetcher(),
         verifier=PythonMinisignSignatureVerifier(),
         chunk_store=DesyncImageChunkStore(concurrency_group=cg),
-        converter=QemuImageFormatConverter(concurrency_group=cg),
         progress_sink=FileLimaImageProgressSink(state_file=LimaImageCacheLayout(cache_dir=cache_dir).state_file),
     )
 
@@ -164,14 +169,12 @@ def test_base_download_and_upgrade_end_to_end(
     _publish_image(origin_dir, v1, raw_v1)
     _publish_image(origin_dir, v2, raw_v2)
 
-    # Base install: assemble v1 from the real chunk store and verify the qcow2 is valid.
+    # Base install: assemble v1 from the real chunk store. What lands is the raw image
+    # Lima consumes, byte-identical to what was published -- there is no conversion step.
     result_v1 = _ensure(concurrency_group, base_url, public_key, v1, cache_dir)
     assert result_v1.status is LimaImagePrefetchStatus.READY
-    assert result_v1.qcow2_path is not None and result_v1.qcow2_path.exists()
-    info = subprocess.run(
-        ["qemu-img", "info", "--output=json", str(result_v1.qcow2_path)], check=True, capture_output=True, text=True
-    )
-    assert '"format": "qcow2"' in info.stdout
+    assert result_v1.raw_path is not None and result_v1.raw_path.exists()
+    assert result_v1.raw_path.read_bytes() == raw_v1.read_bytes()
 
     # Idempotent re-run is a no-op fast path.
     assert _ensure(concurrency_group, base_url, public_key, v1, cache_dir).status is LimaImagePrefetchStatus.READY
@@ -180,7 +183,7 @@ def test_base_download_and_upgrade_end_to_end(
     result_v2 = _ensure(concurrency_group, base_url, public_key, v2, cache_dir)
     assert result_v2.status is LimaImagePrefetchStatus.READY
     layout = LimaImageCacheLayout(cache_dir=cache_dir)
-    assert layout.qcow2_path(v2, _ARCH).exists()
+    assert layout.raw_path(v2, _ARCH).read_bytes() == raw_v2.read_bytes()
     assert not layout.version_dir(v1, _ARCH).exists()
 
 

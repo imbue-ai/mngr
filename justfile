@@ -76,7 +76,15 @@ test-offload-acceptance args="":
     # between create and the next line still cleans up; '|| true' on delete
     # absorbs the not-found case if the env is already gone.
     trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
-    uv run modal environment create "$SHARED_ENV"
+    # `modal environment create` is not idempotent and its client retries: a
+    # transient API error after a server-side success surfaces as "Can not
+    # create an environment with the same name ... as an existing one" for the
+    # env our own first attempt just created (the uuid suffix makes any other
+    # collision impossible). Tolerate exactly that self-race by accepting a
+    # failed create iff the env verifiably exists. `--json` is required: the
+    # default table output truncates long names with an ellipsis when piped,
+    # while the JSON output always carries the full quoted name.
+    uv run modal environment create "$SHARED_ENV" || uv run modal environment list --json | grep -F "\"$SHARED_ENV\"" >/dev/null
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
@@ -101,7 +109,8 @@ test-offload-release args="":
     # See `test-offload-acceptance` for the full rationale.
     SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
     trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
-    uv run modal environment create "$SHARED_ENV"
+    # Tolerate the create self-race; see `test-offload-acceptance` for why.
+    uv run modal environment create "$SHARED_ENV" || uv run modal environment list --json | grep -F "\"$SHARED_ENV\"" >/dev/null
 
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml run --trace \
@@ -283,13 +292,14 @@ minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
 
 # End-to-end acceptance test that drives the real Electron minds app to create
-# a local Docker workspace from default-workspace-template using the manual
-# `api_key` AI provider, then sends a chat message and asserts the agent replies.
+# a local Docker workspace from default-workspace-template (which boots with no
+# AI credentials), signs in through the workspace's own Claude sign-in modal
+# with a raw API key, then sends a chat message and asserts the agent replies.
 # Wraps the invocation with `xvfb-run` so it works on headless Linux. macOS users
 # with a real display can run the underlying pytest directly without xvfb-run.
 # Requires apps/minds/node_modules/ (`cd apps/minds && pnpm install`) and a real
-# ANTHROPIC_API_KEY exported (the api_key path calls the official Anthropic API;
-# the test skips without it). Depends on `minds-css` because the test launches
+# ANTHROPIC_API_KEY exported (the key is typed into the modal and talks to the
+# official Anthropic API; the test skips without it). Depends on `minds-css` because the test launches
 # `electron main.js` directly (not via `pnpm start`), so nothing else compiles
 # the gitignored stylesheet. The test lives in the snapshot-resume suite (it
 # runs in CI in the snapshot offload stage, reusing that image's warm Electron
@@ -299,7 +309,7 @@ minds-test-deployment-only *tests:
 # operator worktree is already present, mirroring the CI snapshot bake.
 minds-test-electron *args: minds-css
   uv run python -c 'from imbue.minds.desktop_client.default_workspace_template_worktree import materialize_paired_default_workspace_template_worktree; materialize_paired_default_workspace_template_worktree()'
-  xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
+  xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_workspace_and_sign_in_via_modal_then_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Drive the FULL Electron workspace lifecycle end-to-end (create local Docker
 # workspace -> send a chat message + await reply -> open a terminal -> navigate

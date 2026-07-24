@@ -35,6 +35,14 @@ function getGitBinDir() {
   return path.dirname(getGitPath());
 }
 
+/**
+ * Root of the bundled git payload (``resources/git``), whose subdirs back the
+ * git environment contract backend.js exports (see specs/minds-managed-git/concise.md).
+ */
+function getGitRootDir() {
+  return path.dirname(getGitBinDir());
+}
+
 function getLimaPath() {
   return path.join(getResourcesDir(), 'lima', 'bin', 'limactl');
 }
@@ -234,6 +242,7 @@ module.exports = {
   getUvBinDir,
   getGitPath,
   getGitBinDir,
+  getGitRootDir,
   getLimaPath,
   getLimaBinDir,
   getDesyncPath,

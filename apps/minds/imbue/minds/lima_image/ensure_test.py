@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.errors import LimaImageVerificationError
 from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
+from imbue.minds.lima_image.cache_layout import LimaImageCurrentPointer
 from imbue.minds.lima_image.cache_layout import index_url
 from imbue.minds.lima_image.cache_layout import manifest_signature_url
 from imbue.minds.lima_image.cache_layout import manifest_url
@@ -18,7 +20,6 @@ from imbue.minds.lima_image.data_types import ROOT_MANIFEST_SCHEMA_VERSION
 from imbue.minds.lima_image.data_types import RootManifest
 from imbue.minds.lima_image.ensure import ensure_current_lima_image
 from imbue.minds.lima_image.mock_lima_image_test import AcceptingSignatureVerifier
-from imbue.minds.lima_image.mock_lima_image_test import CopyingImageFormatConverter
 from imbue.minds.lima_image.mock_lima_image_test import FixedRawChunkStore
 from imbue.minds.lima_image.mock_lima_image_test import InMemoryManifestFetcher
 from imbue.minds.lima_image.mock_lima_image_test import RecordingProgressSink
@@ -89,7 +90,6 @@ def _run(
         fetcher=fetcher,
         verifier=verifier,
         chunk_store=chunk_store,
-        converter=CopyingImageFormatConverter(),
         progress_sink=sink,
     )
 
@@ -105,8 +105,8 @@ def test_base_download_assembles_verifies_and_installs(tmp_path: Path) -> None:
     result = _run(fetcher, chunk_store, AcceptingSignatureVerifier(), sink, version=version, cache_dir=tmp_path)
 
     assert result.status is LimaImagePrefetchStatus.READY
-    assert result.qcow2_path is not None
-    assert result.qcow2_path.read_bytes() == raw
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == raw
     layout = LimaImageCacheLayout(cache_dir=tmp_path)
     assert layout.current_pointer_file.exists()
     # Phases are reported in order and end READY.
@@ -114,11 +114,12 @@ def test_base_download_assembles_verifies_and_installs(tmp_path: Path) -> None:
     assert statuses[0] is LimaImagePrefetchStatus.FETCHING_MANIFEST
     assert LimaImagePrefetchStatus.DOWNLOADING in statuses
     assert LimaImagePrefetchStatus.VERIFYING in statuses
-    assert LimaImagePrefetchStatus.CONVERTING in statuses
     assert statuses[-1] is LimaImagePrefetchStatus.READY
 
 
-def test_second_call_is_a_no_network_fast_path(tmp_path: Path) -> None:
+def test_an_unreachable_origin_still_serves_the_installed_image(tmp_path: Path) -> None:
+    # The image is already assembled and verified, so an origin we cannot reach must not
+    # take the app offline: it keeps working, it just cannot learn about a newer image.
     version = MindsImageVersion("minds-v9.9.2")
     raw = b"content" * 50
     fetcher = InMemoryManifestFetcher()
@@ -133,13 +134,121 @@ def test_second_call_is_a_no_network_fast_path(tmp_path: Path) -> None:
         cache_dir=tmp_path,
     )
 
-    # Drop every published object: a second call must still succeed from local state.
     fetcher.objects_by_url.clear()
     sink2 = RecordingProgressSink()
     result = _run(fetcher, chunk_store, AcceptingSignatureVerifier(), sink2, version=version, cache_dir=tmp_path)
 
     assert result.status is LimaImagePrefetchStatus.READY
-    assert [state.status for state in sink2.states] == [LimaImagePrefetchStatus.READY]
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == raw
+    # It consults the manifest (that is what catches a replaced image), but having failed
+    # to get one it neither re-downloads nor discards what it has.
+    statuses = [state.status for state in sink2.states]
+    assert statuses == [LimaImagePrefetchStatus.FETCHING_MANIFEST, LimaImagePrefetchStatus.READY]
+
+
+def test_an_image_republished_under_the_same_version_is_re_fetched(tmp_path: Path) -> None:
+    # The whole point of recording the verified hash: the cache keys on (version, arch),
+    # so without comparing bytes against the signed manifest a version republished with a
+    # corrected image would be ignored forever and every client would boot the old one.
+    version = MindsImageVersion("minds-v9.9.6")
+    stale_raw = b"the-broken-image" * 40
+    fixed_raw = b"the-corrected-image" * 40
+    fetcher = InMemoryManifestFetcher()
+    chunk_store = FixedRawChunkStore()
+
+    _publish(fetcher, chunk_store, version=version, raw_bytes=stale_raw)
+    first = _run(
+        fetcher,
+        chunk_store,
+        AcceptingSignatureVerifier(),
+        RecordingProgressSink(),
+        version=version,
+        cache_dir=tmp_path,
+    )
+    assert first.raw_path is not None
+    assert first.raw_path.read_bytes() == stale_raw
+
+    # Same version, different bytes -- the signed manifest now names a different hash.
+    _publish(fetcher, chunk_store, version=version, raw_bytes=fixed_raw)
+    sink2 = RecordingProgressSink()
+    result = _run(fetcher, chunk_store, AcceptingSignatureVerifier(), sink2, version=version, cache_dir=tmp_path)
+
+    assert result.status is LimaImagePrefetchStatus.READY
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == fixed_raw, "the republished image must replace the stale one"
+    assert LimaImagePrefetchStatus.DOWNLOADING in [state.status for state in sink2.states]
+
+
+def test_a_truncated_installed_image_is_re_fetched(tmp_path: Path) -> None:
+    # The installed image is trusted via the hash recorded when it was verified, not
+    # re-hashed every launch, so the size is what catches a file that lost bytes after
+    # we wrote it (an interrupted write, a full disk) rather than being replaced.
+    version = MindsImageVersion("minds-v9.9.7")
+    raw = b"good-image" * 60
+    fetcher = InMemoryManifestFetcher()
+    chunk_store = FixedRawChunkStore()
+    _publish(fetcher, chunk_store, version=version, raw_bytes=raw)
+    first = _run(
+        fetcher,
+        chunk_store,
+        AcceptingSignatureVerifier(),
+        RecordingProgressSink(),
+        version=version,
+        cache_dir=tmp_path,
+    )
+    assert first.raw_path is not None
+
+    first.raw_path.write_bytes(raw[: len(raw) // 2])
+    result = _run(
+        fetcher,
+        chunk_store,
+        AcceptingSignatureVerifier(),
+        RecordingProgressSink(),
+        version=version,
+        cache_dir=tmp_path,
+    )
+
+    assert result.status is LimaImagePrefetchStatus.READY
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == raw, "a truncated image must be re-fetched, not booted"
+
+
+def test_a_pointer_written_before_the_hash_existed_is_hashed_once_and_adopted(tmp_path: Path) -> None:
+    # A pointer from a build that did not record the hash names an image that is still the
+    # right one; re-downloading it would cost the user multiple GB. Hash it once, keep it,
+    # and write the hash down so the next run does not have to hash it again.
+    version = MindsImageVersion("minds-v9.9.8")
+    raw = b"already-installed" * 50
+    fetcher = InMemoryManifestFetcher()
+    chunk_store = FixedRawChunkStore()
+    _publish(fetcher, chunk_store, version=version, raw_bytes=raw)
+    _run(
+        fetcher,
+        chunk_store,
+        AcceptingSignatureVerifier(),
+        RecordingProgressSink(),
+        version=version,
+        cache_dir=tmp_path,
+    )
+
+    # Rewrite the pointer as the older build wrote it: no raw_image_sha256 key at all.
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    legacy_fields = json.loads(layout.current_pointer_file.read_text())
+    del legacy_fields["raw_image_sha256"]
+    layout.current_pointer_file.write_text(json.dumps(legacy_fields))
+
+    sink2 = RecordingProgressSink()
+    result = _run(fetcher, chunk_store, AcceptingSignatureVerifier(), sink2, version=version, cache_dir=tmp_path)
+
+    assert result.status is LimaImagePrefetchStatus.READY
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == raw
+    assert LimaImagePrefetchStatus.DOWNLOADING not in [state.status for state in sink2.states], (
+        "the installed image is the one the manifest names, so it must not be re-downloaded"
+    )
+    adopted = LimaImageCurrentPointer.model_validate_json(layout.current_pointer_file.read_text())
+    assert adopted.raw_image_sha256 == _sha256(raw), "the hash it was checked against must be recorded"
 
 
 def test_missing_manifest_reports_version_unavailable(tmp_path: Path) -> None:
@@ -227,9 +336,10 @@ def test_assembled_hash_mismatch_raises_verification_error(tmp_path: Path) -> No
 def test_upgrade_seeds_from_prior_and_prunes_old_version(tmp_path: Path) -> None:
     v1 = MindsImageVersion("minds-v9.9.7")
     v2 = MindsImageVersion("minds-v9.9.8")
+    raw_v1 = b"image-one" * 100
     fetcher = InMemoryManifestFetcher()
     chunk_store = FixedRawChunkStore()
-    _publish(fetcher, chunk_store, version=v1, raw_bytes=b"image-one" * 100)
+    _publish(fetcher, chunk_store, version=v1, raw_bytes=raw_v1)
     _publish(fetcher, chunk_store, version=v2, raw_bytes=b"image-two" * 100)
 
     _run(fetcher, chunk_store, AcceptingSignatureVerifier(), RecordingProgressSink(), version=v1, cache_dir=tmp_path)
@@ -238,9 +348,38 @@ def test_upgrade_seeds_from_prior_and_prunes_old_version(tmp_path: Path) -> None
     )
 
     assert result.status is LimaImagePrefetchStatus.READY
-    # Seeding fired for the v2 assembly (the prior qcow2 was offered as a seed).
-    assert f"{v2}-{_ARCH.value}.caibx" in chunk_store.seed_index_names_seen
+    # The v1 image is the seed *in place*: it must still be readable during the v2
+    # assembly, so it can only be pruned afterwards.
+    assert chunk_store.seed_blob_bytes_by_index_name[f"{v2}-{_ARCH.value}.caibx"] == raw_v1
     # Retention: the old version directory is gone, only v2 remains.
     layout = LimaImageCacheLayout(cache_dir=tmp_path)
     assert not layout.version_dir(v1, _ARCH).exists()
     assert layout.version_dir(v2, _ARCH).exists()
+
+
+def test_failed_upgrade_leaves_the_current_image_intact(tmp_path: Path) -> None:
+    v1 = MindsImageVersion("minds-v9.9.9")
+    v2 = MindsImageVersion("minds-v9.10.0")
+    raw_v1 = b"image-one" * 100
+    fetcher = InMemoryManifestFetcher()
+    chunk_store = FixedRawChunkStore()
+    _publish(fetcher, chunk_store, version=v1, raw_bytes=raw_v1)
+    _publish(fetcher, chunk_store, version=v2, raw_bytes=b"image-two" * 100)
+    _run(fetcher, chunk_store, AcceptingSignatureVerifier(), RecordingProgressSink(), version=v1, cache_dir=tmp_path)
+
+    # Corrupt v2's assembled bytes so the upgrade fails the post-extract hash check --
+    # the failure path that runs after v1 has been handed to the extractor as the seed.
+    chunk_store.raw_bytes_by_index_name[f"{v2}-{_ARCH.value}.caibx"] = b"corrupt"
+    with pytest.raises(LimaImageVerificationError):
+        _run(
+            fetcher, chunk_store, AcceptingSignatureVerifier(), RecordingProgressSink(), version=v2, cache_dir=tmp_path
+        )
+
+    # The seed was the live v1 image, so a failed upgrade must not have consumed it: v1 is
+    # still on disk, still current, and still the image a create would be pointed at.
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assert layout.raw_path(v1, _ARCH).read_bytes() == raw_v1
+    assert layout.index_path(v1, _ARCH).exists()
+    pointer = LimaImageCurrentPointer.model_validate_json(layout.current_pointer_file.read_text())
+    assert pointer.minds_version == v1
+    assert pointer.raw_path == layout.raw_path(v1, _ARCH)

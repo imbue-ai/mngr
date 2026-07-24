@@ -69,6 +69,7 @@ from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_disabled
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_prefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
+from imbue.minds.desktop_client.lima_image_prefetch import resolve_release_tag_commit
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
@@ -503,10 +504,9 @@ def run(
     # readiness probe can use the same preauth cookie the plugin accepts and
     # Electron pre-sets, and after ``wait_for_listening`` so it has the
     # plugin's actual bound port.
-    # Start the pre-baked Lima image prefetch as early as possible (issue 2306):
-    # a background worker keeps the current release's verified image present so a
-    # later Lima create can boot it instead of building the toolchain in-VM. Only
-    # active when this env configures an image source and the kill switch is unset.
+    # A background worker keeps the current release's verified image present so a later
+    # Lima create can boot it instead of building the toolchain in-VM. Only active when
+    # this env configures an image source and the kill switch is unset.
     lima_image_source = make_lima_image_source(client_env_config)
     lima_image_gate: LimaImageCreateGate | None = None
     if lima_image_source is not None and not is_lima_image_cache_disabled(os.environ):
@@ -524,9 +524,16 @@ def run(
             # (gated creates fall back / surface a retryable error on their own).
             is_checked=False,
         )
+        # A create may pin the release tag's commit rather than name the tag (CI does,
+        # for reproducibility). Resolve it once so those creates still take the fast path.
         lima_image_gate = LimaImageCreateGate(
             prefetcher=lima_image_prefetcher,
             current_release_tag=FALLBACK_BRANCH,
+            current_release_commit=resolve_release_tag_commit(
+                repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
+                release_tag=FALLBACK_BRANCH,
+                concurrency_group=root_concurrency_group,
+            ),
             default_repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
             is_dev_loop=is_local_workspace_defaults_opt_in(),
         )

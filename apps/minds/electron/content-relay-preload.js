@@ -28,6 +28,10 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 // help URL the main process builds. The main process re-validates.
 const AGENT_ID_PATTERN = /^agent-[a-f0-9]{1,64}$/i;
 
+// Workspace host ids are server-issued (`host-<hex>`). Same conservative-shape
+// rationale as above; the main process re-validates.
+const HOST_ID_PATTERN = /^host-[a-f0-9]{1,64}$/i;
+
 // The one outbound (main -> page) message: Cmd+W pressed while this view
 // displays a workspace. Re-posted into the page as an ordinary window message
 // so the system interface can close its active dockview tab. Outbound is safe
@@ -68,6 +72,24 @@ window.addEventListener('message', (event) => {
   // URL, so a foreign page can't smuggle a navigation target through this channel.
   if (data.type === 'minds:reload-crashed-view') {
     ipcRenderer.send('reload-crashed-view');
+    return;
+  }
+  // The workspace's Claude sign-in modal ("Sign in with Imbue") asks the shell
+  // to open the desktop client's AI-key mint page for this workspace. The mint
+  // page lives on the minds backend, whose origin (a random per-run port) only
+  // the main process knows -- the workspace page cannot build the URL itself.
+  // ``hostId`` may be empty (the workspace could not read its own host id); the
+  // mint page then renders an explanation instead of the mint button. The ack
+  // posted back tells the page it is running inside the desktop app; with no
+  // relay (plain browser / share tunnel) no ack arrives and the modal falls
+  // back to explaining that the desktop app is required.
+  if (data.type === 'minds:open-ai-keys-page') {
+    const hostId = data.hostId;
+    if (hostId !== undefined && hostId !== '' && (typeof hostId !== 'string' || !HOST_ID_PATTERN.test(hostId))) {
+      return;
+    }
+    ipcRenderer.send('open-ai-keys', typeof hostId === 'string' ? hostId : '');
+    window.postMessage({ type: 'minds:open-ai-keys-ack' }, '*');
     return;
   }
 });

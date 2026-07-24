@@ -10,6 +10,7 @@ from imbue.minds.lima_image.primitives import MANIFEST_OBJECT_PREFIX
 from imbue.minds.lima_image.primitives import MINISIGN_SIGNATURE_SUFFIX
 from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import ROOT_MANIFEST_FILENAME
+from imbue.minds.lima_image.primitives import Sha256Hex
 
 
 class LimaImageCurrentPointer(FrozenModel):
@@ -17,8 +18,16 @@ class LimaImageCurrentPointer(FrozenModel):
 
     minds_version: MindsImageVersion = Field(description="The release tag of the current image")
     arch: ImageArch = Field(description="The architecture of the current image")
-    qcow2_path: Path = Field(description="Absolute path to the current qcow2")
+    raw_path: Path = Field(description="Absolute path to the current raw image")
     index_path: Path = Field(description="Absolute path to the current image's desync index, kept for seeding")
+    raw_image_sha256: Sha256Hex | None = Field(
+        default=None,
+        description=(
+            "SHA-256 the raw image was verified against when installed, so a later run can tell whether it still "
+            "matches the published manifest without re-hashing multiple GB. None in pointers written before this "
+            "field existed; those are re-hashed once and rewritten with it."
+        ),
+    )
 
 
 class LimaImageCacheLayout(FrozenModel):
@@ -41,7 +50,7 @@ class LimaImageCacheLayout(FrozenModel):
 
     @property
     def tmp_dir(self) -> Path:
-        """Scratch space for in-flight raw assembly / conversion."""
+        """Scratch space for in-flight raw assembly."""
         return self.cache_dir / "tmp"
 
     @property
@@ -51,11 +60,19 @@ class LimaImageCacheLayout(FrozenModel):
     def version_dir(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
         return self.versions_dir / str(minds_version) / arch.value
 
-    def qcow2_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
-        return self.version_dir(minds_version, arch) / "image.qcow2"
+    def raw_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
+        return self.version_dir(minds_version, arch) / "image.raw"
 
     def index_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
         return self.version_dir(minds_version, arch) / "image.caibx"
+
+    def assembling_raw_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
+        """The raw image desync is still writing, before it is installed under ``raw_path``.
+
+        Its allocated size is the only progress signal a download offers: desync draws a
+        progress bar on a tty and emits nothing otherwise, so a packaged app sees no output.
+        """
+        return self.tmp_dir / f"{minds_version}-{arch.value}.raw"
 
 
 def manifest_url(base_url: str, minds_version: MindsImageVersion) -> str:

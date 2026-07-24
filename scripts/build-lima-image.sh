@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Build a pre-baked Lima VM image for one architecture, using Lima itself (issue 2306).
+# Build a pre-baked Lima VM image for one architecture, using Lima itself.
 #
 # Baking *with* Lima (rather than a separate Packer/QEMU pipeline) means the image
 # is produced by the same virtualizer that consumes it -- `vz` on Apple Silicon,
 # accelerated QEMU on Linux -- so the artifact is guaranteed Lima-bootable and the
-# macOS build host needs no extra QEMU/Packer toolchain. Emits both a qcow2 (the
-# Lima format) and a raw image (what scripts/lima_image/publish.py chunks -- qcow2
-# metadata churn would amplify desync deltas, so we chunk raw).
+# macOS build host needs no extra QEMU/Packer toolchain.
+#
+# The raw image is the deliverable: it is what scripts/lima_image/publish.py chunks
+# (qcow2 metadata churn would amplify desync deltas) and what Lima boots. The qcow2
+# is the flatten step's intermediate, kept as an artifact for boot-testing a bake
+# locally.
 #
 # Run one arch per native host (amd64 on a Linux/KVM host, arm64 on an
 # Apple-Silicon Mac). Then publish with scripts/lima_image/publish.py.
@@ -25,7 +28,11 @@ DEFAULT_WORKSPACE_TEMPLATE_REF=""
 DEFAULT_WORKSPACE_TEMPLATE_REPO="https://github.com/imbue-ai/default-workspace-template.git"
 CPUS=4
 MEMORY=8
-DISK=40
+# Must not exceed the disk size the default-workspace-template lima create template passes
+# (start_arg --disk=20): Lima grows a smaller image up to the instance size
+# but fatals on shrink ("disk shrinking is not supported"), so a bigger baked
+# image breaks every default fast-path create.
+DISK=20
 KEEP=0
 
 while [[ $# -gt 0 ]]; do
@@ -61,6 +68,31 @@ else
   DEBIAN_URL="https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2"
 fi
 
+# Fail before the bake, not during it. qemu-img is only needed by the final flatten,
+# so a missing one would otherwise surface after the toolchain build -- the long pole.
+MISSING=""
+for tool in limactl qemu-img; do
+  command -v "$tool" >/dev/null 2>&1 || MISSING="$MISSING $tool"
+done
+# Lima drives vz on macOS but qemu on Linux, where it boots the guest via UEFI: that
+# needs the arch's system emulator plus EDK2 firmware and the virtio option ROMs,
+# none of which come with qemu-utils. Missing firmware/ROMs fail inside limactl
+# ("could not find firmware for ...", "failed to find romfile"), so name the packages
+# here rather than leave the operator to decode that.
+if [ "$(uname -s)" = "Linux" ]; then
+  command -v "qemu-system-$LIMA_ARCH" >/dev/null 2>&1 || MISSING="$MISSING qemu-system-$LIMA_ARCH"
+fi
+if [ -n "$MISSING" ]; then
+  echo "ERROR: missing required tool(s):$MISSING" >&2
+  echo "  macOS: brew install lima qemu" >&2
+  if [ "$LIMA_ARCH" = "aarch64" ]; then
+    echo "  Debian/Ubuntu: apt install lima qemu-system-arm qemu-utils qemu-efi-aarch64 ipxe-qemu" >&2
+  else
+    echo "  Debian/Ubuntu: apt install lima qemu-system-x86 qemu-utils ovmf ipxe-qemu" >&2
+  fi
+  exit 1
+fi
+
 INSTANCE="mngr-lima-bake-$ARCH_TAG"
 OUTPUT_DIR="$LIMA_IMAGE_DIR/output-$ARCH_TAG"
 QCOW2_OUT="$OUTPUT_DIR/mngr-lima-$ARCH_TAG.qcow2"
@@ -70,9 +102,23 @@ mkdir -p "$OUTPUT_DIR"
 # Lima's per-instance state dir (honor LIMA_HOME, as limactl itself does).
 LIMA_INSTANCE_DIR="${LIMA_HOME:-$HOME/.lima}/$INSTANCE"
 
-TMP_YAML=""
+TMP_DIR=""
+# Lima puts its ssh socket under LIMA_HOME/<instance>/, and a UNIX socket path must
+# fit in 104 bytes. macOS mktemp -d hands out /var/folders/... paths that blow that
+# on their own, so give both temp dirs an explicit short template under /tmp. An
+# explicit template is also the only form BSD and GNU mktemp agree on: BSD's -t
+# takes a bare prefix and appends its own suffix, so `-t foo-XXXXXX.yaml` keeps the
+# X's literal there while GNU substitutes them.
+TMP_DIR="$(mktemp -d /tmp/mlb-XXXXXX)"
+TMP_YAML="$TMP_DIR/bake.yaml"
+PROBE_INSTANCE="probe"
+PROBE_LIMA_HOME=""
 cleanup() {
-  [ -n "$TMP_YAML" ] && rm -f "$TMP_YAML"
+  if [ -n "$PROBE_LIMA_HOME" ]; then
+    LIMA_HOME="$PROBE_LIMA_HOME" limactl delete -f "$PROBE_INSTANCE" >/dev/null 2>&1 || true
+    rm -rf "$PROBE_LIMA_HOME"
+  fi
+  rm -rf "$TMP_DIR"
   if [ "$KEEP" = "1" ]; then
     echo "(--keep) leaving Lima instance '$INSTANCE' in place"
   else
@@ -89,7 +135,6 @@ limactl delete -f "$INSTANCE" >/dev/null 2>&1 || true
 # Minimal Lima config: just the Debian base sized for the toolchain build. We run
 # the bake via `limactl shell` (below) rather than a Lima `provision:` block so the
 # bake script stays a normal file we can lint/version independently.
-TMP_YAML="$(mktemp -t mngr-lima-bake-XXXXXX.yaml)"
 cat > "$TMP_YAML" <<EOF
 images:
   - location: "$DEBIAN_URL"
@@ -113,6 +158,13 @@ for attempt in $(seq 1 "$START_ATTEMPTS"); do
     break
   fi
   echo "WARN: 'limactl start' failed (attempt $attempt/$START_ATTEMPTS); cleaning up + retrying" >&2
+  # limactl's own stdout says only "exiting, status=..."; the reason lives in
+  # ha.stderr.log, which the delete below takes with it.
+  if [ -f "$LIMA_INSTANCE_DIR/ha.stderr.log" ]; then
+    echo "----- last lines of $LIMA_INSTANCE_DIR/ha.stderr.log -----" >&2
+    tail -5 "$LIMA_INSTANCE_DIR/ha.stderr.log" >&2 || true
+    echo "----------------------------------------------------------" >&2
+  fi
   limactl delete -f "$INSTANCE" >/dev/null 2>&1 || true
   [ "$attempt" -lt "$START_ATTEMPTS" ] && sleep $((attempt * 10))
 done
@@ -120,13 +172,12 @@ if [ "$start_ok" != "1" ]; then
   echo "ERROR: 'limactl start' failed after $START_ATTEMPTS attempts" >&2
   exit 1
 fi
-rm -f "$TMP_YAML"; TMP_YAML=""
 
 echo "==> Copying the bake provisioner into the VM"
 limactl copy "$LIMA_IMAGE_DIR/bake_provision.sh" "$INSTANCE:/tmp/bake_provision.sh"
 
 echo "==> Running the DEFAULT_WORKSPACE_TEMPLATE toolchain bake inside the VM (this is the long pole)"
-limactl shell --workdir / "$INSTANCE" sudo env \
+limactl shell --workdir / "$INSTANCE" sudo env MNGR_LIMA_BAKE=1 \
   DEFAULT_WORKSPACE_TEMPLATE_REPO_URL="$DEFAULT_WORKSPACE_TEMPLATE_REPO" DEFAULT_WORKSPACE_TEMPLATE_REF="$DEFAULT_WORKSPACE_TEMPLATE_REF" bash /tmp/bake_provision.sh
 
 echo "==> Stopping the VM for a consistent disk"
@@ -152,6 +203,39 @@ echo "==> Flattening the Lima disk ($DISK_FILE) to a standalone qcow2 + raw"
 qemu-img convert -O qcow2 "$DISK_FILE" "$QCOW2_OUT"
 qemu-img convert -f qcow2 -O raw "$QCOW2_OUT" "$RAW_OUT"
 
+# Boot the finished image as a user that does not exist in it, at the uid macOS
+# gives its first account. Lima derives the guest user's name and uid from the
+# booting host's account, so an image that kept any human user collides
+# ("useradd: UID 501 is not unique"), leaves no user holding Lima's SSH key, and
+# hangs forever on the ssh requirement -- on every machine except the baker's.
+# The bake asserts this internally; boot it here too, because the internal check
+# cannot prove the image is bootable by a stranger.
+PROBE_LIMA_HOME="$(mktemp -d /tmp/mlp-XXXXXX)"
+PROBE_YAML="$PROBE_LIMA_HOME/probe.yaml"
+cat > "$PROBE_YAML" <<EOF
+images:
+  - location: "$RAW_OUT"
+    arch: "$LIMA_ARCH"
+cpus: 2
+memory: "4GiB"
+disk: "${DISK}GiB"
+mounts: []
+user:
+  name: "limaprobe"
+  uid: 501
+  home: "/home/limaprobe.linux"
+ssh:
+  loadDotSSHPubKeys: false
+EOF
+echo "==> Verifying the image boots for a host user it has never seen (limaprobe, uid 501)"
+if LIMA_HOME="$PROBE_LIMA_HOME" limactl start --name="$PROBE_INSTANCE" --tty=false "$PROBE_YAML"; then
+  echo "==> Boot probe passed: the image is not tied to this machine's account"
+else
+  echo "ERROR: the baked image did not boot for a foreign host user." >&2
+  echo "       It is host-specific and would hang on ssh for every other machine." >&2
+  exit 1
+fi
+
 echo ""
 echo "Build complete:"
 echo "  qcow2: $QCOW2_OUT"
@@ -160,4 +244,4 @@ echo ""
 echo "Publish with:"
 echo "  uv run python scripts/lima_image/publish.py \\"
 echo "    --version $DEFAULT_WORKSPACE_TEMPLATE_REF --arch $ARCH_TAG --raw-image $RAW_OUT \\"
-echo "    --bucket <r2-bucket> --secret-key-file <minisign.key> --uploader s3"
+echo "    --bucket <r2-bucket> --secret-key-file <minisign.key>"
