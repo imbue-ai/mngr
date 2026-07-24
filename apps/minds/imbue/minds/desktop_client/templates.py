@@ -715,22 +715,17 @@ def render_creating_page(
 
 
 @pure
-def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> str:
-    """Render the first-launch error-reporting consent screen.
+def render_consent_page() -> str:
+    """Render the first-launch error-reporting notice screen.
 
-    The two checkbox states seed the form; "Include logs" is only revealed once "Report unexpected
-    errors" is enabled (handled client-side).
+    Informational only: during the alpha, unexpected errors (with logs) are always reported to Imbue
+    and there is no opt-out, so the screen just informs the user and offers an acknowledge button.
     """
-    return CATALOG.render(
-        "pages.Consent",
-        report_unexpected_errors=report_unexpected_errors,
-        include_logs=include_logs,
-    )
+    return CATALOG.render("pages.Consent")
 
 
 @pure
 def render_help_page(
-    include_logs_setting: bool,
     workspace_agent_id: str,
     assist_available: bool = False,
     description: str = "",
@@ -739,21 +734,20 @@ def render_help_page(
 ) -> str:
     """Render the get-help modal page (report a bug + optional agent help).
 
-    ``include_logs_setting`` is the persistent include-logs preference: when on, logs are always
-    attached and the form hides its one-off "include logs" checkbox. ``workspace_agent_id`` is the
-    workspace the help flow was opened from ("" on a general screen), enabling workspace-scoped options.
-    ``assist_available`` enables the "have an agent help" option; it is set only when the workspace is
-    reachable/healthy enough to host an ``/assist`` chat (an unreachable workspace's chat couldn't be
-    seen or used), so it is distinct from ``workspace_agent_id``, which still scopes a bug report to a
-    stuck workspace. ``description`` pre-fills the report textarea -- non-empty when an in-workspace
-    ``/assist`` agent asked the app to open the modal with its diagnosis already written in.
-    ``is_agent_report`` is set for that agent-escalation flow: the modal then frames the pre-filled
-    report as the agent's submission (titled with ``workspace_name``, when known) and hides the mode
-    choice, since a report is already underway.
+    Recent logs are always attached to a submitted report (the form has no one-off logs checkbox).
+    ``workspace_agent_id`` is the workspace the help flow was opened from ("" on a general screen),
+    enabling workspace-scoped options. ``assist_available`` enables the "have an agent help" option; it
+    is set only when the workspace is reachable/healthy enough to host an ``/assist`` chat (an
+    unreachable workspace's chat couldn't be seen or used), so it is distinct from
+    ``workspace_agent_id``, which still scopes a bug report to a stuck workspace. ``description``
+    pre-fills the report textarea -- non-empty when an in-workspace ``/assist`` agent asked the app to
+    open the modal with its diagnosis already written in. ``is_agent_report`` is set for that
+    agent-escalation flow: the modal then frames the pre-filled report as the agent's submission
+    (titled with ``workspace_name``, when known) and hides the mode choice, since a report is already
+    underway.
     """
     return CATALOG.render(
         "pages.Help",
-        include_logs_setting=include_logs_setting,
         workspace_agent_id=workspace_agent_id,
         assist_available=assist_available,
         description=description,
@@ -1798,7 +1792,7 @@ def warm_template_caches() -> None:
         render_chrome_page,
         render_sidebar_page,
         render_overlay_host_page,
-        lambda: render_help_page(include_logs_setting=False, workspace_agent_id=""),
+        lambda: render_help_page(workspace_agent_id=""),
         lambda: render_inbox_page(cards=()),
     ):
         try:
@@ -2015,13 +2009,12 @@ def render_account_plan_section(
 
 @pure
 def render_settings_page(
-    report_unexpected_errors: bool = False,
-    include_error_logs: bool = False,
     services_overview: Sequence[object] | None = None,
     file_sharing_grants: Sequence[object] | None = None,
     workspace_delegation_grants: Sequence[object] | None = None,
     permissions_unavailable: bool = False,
     is_master_password_set: bool = False,
+    report_unexpected_errors: bool = True,
 ) -> str:
     """Render the app-level settings page (the browser-mode fallback for the settings modal).
 
@@ -2029,7 +2022,9 @@ def render_settings_page(
     Workspace delegation, Error reporting, Master password) as a full page;
     Electron shows the same sections in the centered settings modal instead
     (:func:`render_settings_modal_page`). All are per-machine / app-level
-    settings -- the app, not any single workspace, owns permissions.
+    settings -- the app, not any single workspace, owns permissions. The
+    error-reporting section offers a per-machine opt-out toggle (seeded from
+    ``report_unexpected_errors``).
 
     ``services_overview`` / ``file_sharing_grants`` /
     ``workspace_delegation_grants`` are the permission-overview models (see
@@ -2038,32 +2033,29 @@ def render_settings_page(
     ``accounts``, which the Connectors panel lists above the per-workspace
     grants (with "+ Add account" and per-account "Disconnect" actions).
     ``permissions_unavailable`` is True when the latchkey gateway could not be
-    reached to read grants. ``report_unexpected_errors`` / ``include_error_logs``
-    seed the per-machine error-reporting toggles; ``is_master_password_set``
-    feeds the sync master-password section's helper copy (whether any signed-in
-    account already has a non-empty sync master password).
+    reached to read grants. ``is_master_password_set`` feeds the sync
+    master-password section's helper copy (whether any signed-in account already
+    has a non-empty sync master password).
     """
     return CATALOG.render(
         "pages.Settings",
-        report_unexpected_errors=report_unexpected_errors,
-        include_error_logs=include_error_logs,
         services_overview=list(services_overview or []),
         file_sharing_grants=list(file_sharing_grants or []),
         workspace_delegation_grants=list(workspace_delegation_grants or []),
         permissions_unavailable=permissions_unavailable,
         is_master_password_set=is_master_password_set,
+        report_unexpected_errors=report_unexpected_errors,
     )
 
 
 @pure
 def render_settings_modal_page(
-    report_unexpected_errors: bool = False,
-    include_error_logs: bool = False,
     services_overview: Sequence[object] | None = None,
     file_sharing_grants: Sequence[object] | None = None,
     workspace_delegation_grants: Sequence[object] | None = None,
     permissions_unavailable: bool = False,
     is_master_password_set: bool = False,
+    report_unexpected_errors: bool = True,
 ) -> str:
     """Render the centered "Minds Settings" modal page (``GET /settings/modal``).
 
@@ -2073,13 +2065,12 @@ def render_settings_modal_page(
     """
     return CATALOG.render(
         "pages.SettingsModal",
-        report_unexpected_errors=report_unexpected_errors,
-        include_error_logs=include_error_logs,
         services_overview=list(services_overview or []),
         file_sharing_grants=list(file_sharing_grants or []),
         workspace_delegation_grants=list(workspace_delegation_grants or []),
         permissions_unavailable=permissions_unavailable,
         is_master_password_set=is_master_password_set,
+        report_unexpected_errors=report_unexpected_errors,
     )
 
 

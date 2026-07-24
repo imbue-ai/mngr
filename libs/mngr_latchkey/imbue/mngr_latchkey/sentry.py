@@ -24,9 +24,9 @@ _FORWARD_SENTRY_SERVICE_NAME = "mngr-latchkey-forward"
 #
 # These describe the (mostly static) *infrastructure*: which project to report to and how
 # the build is tagged. They are snapshotted into the daemon's environment when it is
-# spawned. The *consent* settings -- whether to actually report, and whether to attach
-# logs -- live instead in the consent file at ``MNGR_LATCHKEY_SENTRY_CONSENT_FILE`` so the
-# embedder can toggle them on a running daemon (the gates read the file live, per event).
+# spawned. The *consent* setting -- whether to report at all (log/traceback attachments ride
+# along with reports) -- lives instead in the consent file at ``MNGR_LATCHKEY_SENTRY_CONSENT_FILE``
+# so the embedder can toggle it on a running daemon (the gate reads the file live, per event).
 MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR = "MNGR_LATCHKEY_SENTRY_DSN"
 MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR = "MNGR_LATCHKEY_SENTRY_ENVIRONMENT"
 # The S3 bucket to upload log/traceback attachments to. Empty / unset means there is no bucket
@@ -39,7 +39,7 @@ MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR = "MNGR_LATCHKEY_SENTRY_GIT_SHA"
 MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR = "MNGR_LATCHKEY_SENTRY_USER_ID"
 # Path to the JSON consent file the embedder writes (and rewrites whenever the user toggles
 # consent). The daemon reads it live on every event, so a grant/revoke takes effect without
-# respawning the daemon. Absent/unreadable file -> reporting and log inclusion both off.
+# respawning the daemon. Absent/unreadable file -> reporting (and its log attachments) off.
 MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR = "MNGR_LATCHKEY_SENTRY_CONSENT_FILE"
 
 # The ``mngr latchkey forward`` process writes its structured loguru log to
@@ -75,18 +75,20 @@ _FORWARD_LOG_ATTACHMENT_GROUPS = (
 
 
 class ForwardSentryConsent(FrozenModel):
-    """The user-consent toggles that live-gate the daemon's Sentry reporting.
+    """The user-consent toggle that live-gates the daemon's Sentry reporting.
 
-    Mirrors the minds backend's ``report_unexpected_errors`` / ``include_error_logs`` user settings.
+    Mirrors the minds backend's ``report_unexpected_errors`` user setting: a single flag that gates
+    both whether automatic reports are sent and whether their log/traceback attachments are uploaded.
     The embedder writes this as JSON to the consent file; the daemon reads it live on every event.
     Shared as the serialization contract between the embedder (writer) and the daemon (reader).
     """
 
-    report_unexpected_errors: bool = Field(description="Whether automatic error reports may be sent.")
-    include_error_logs: bool = Field(description="Whether log/traceback attachments may be uploaded.")
+    report_unexpected_errors: bool = Field(
+        description="Whether automatic error reports (with their log/traceback attachments) may be sent."
+    )
 
 
-_NO_CONSENT = ForwardSentryConsent(report_unexpected_errors=False, include_error_logs=False)
+_NO_CONSENT = ForwardSentryConsent(report_unexpected_errors=False)
 
 
 def read_forward_sentry_consent(consent_file_path: Path | None) -> ForwardSentryConsent:
@@ -185,9 +187,9 @@ def setup_forward_sentry(log_folder: Path) -> None:
     called *after* the command's loguru sinks are set up so Sentry layers on top.
 
     Sentry always initializes when configured; what it actually *sends* is gated live by the consent
-    file the embedder maintains, exactly mirroring how the minds backend gates its own Sentry on live
-    user settings. So a grant/revoke by the user reaches this detached daemon on the next event,
-    without respawning it. With no consent file (or an unreadable one), both gates default to off.
+    file the embedder maintains, exactly mirroring how the minds backend gates its own Sentry on the
+    live user setting. So a grant/revoke by the user reaches this detached daemon on the next event,
+    without respawning it. With no consent file (or an unreadable one), the gate defaults to off.
     """
     config = resolve_forward_sentry_config()
     if config is None:
@@ -206,7 +208,6 @@ def setup_forward_sentry(log_folder: Path) -> None:
         # beyond Sentry's default integrations.
         integrations=[],
         is_error_reporting_enabled=lambda: read_forward_sentry_consent(consent_file_path).report_unexpected_errors,
-        is_log_inclusion_enabled=lambda: read_forward_sentry_consent(consent_file_path).include_error_logs,
         s3_attachment_bucket=config.s3_attachment_bucket,
         # The daemon reverse-tunnels the gateway into every agent via paramiko; its transport thread
         # logs ``Error reading SSH protocol banner`` (and similar) at ERROR whenever a target goes

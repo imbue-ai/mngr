@@ -114,17 +114,13 @@ def test_consent_file_round_trips_minds_settings_to_the_daemon_reader(tmp_path: 
     # and rewriting it must change the next read -- this is the mechanism that propagates a grant/revoke
     # to the running daemon without respawning it.
     consent_path = latchkey_forward_sentry_consent_path(tmp_path)
-    write_latchkey_forward_sentry_consent(consent_path, is_error_reporting_enabled=True, is_log_inclusion_enabled=True)
+    write_latchkey_forward_sentry_consent(consent_path, is_error_reporting_enabled=True)
     granted = read_forward_sentry_consent(consent_path)
     assert granted.report_unexpected_errors is True
-    assert granted.include_error_logs is True
 
-    write_latchkey_forward_sentry_consent(
-        consent_path, is_error_reporting_enabled=False, is_log_inclusion_enabled=False
-    )
+    write_latchkey_forward_sentry_consent(consent_path, is_error_reporting_enabled=False)
     revoked = read_forward_sentry_consent(consent_path)
     assert revoked.report_unexpected_errors is False
-    assert revoked.include_error_logs is False
 
 
 def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path: Path) -> None:

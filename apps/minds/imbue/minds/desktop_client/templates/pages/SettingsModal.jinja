@@ -1,4 +1,4 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
+{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false, report_unexpected_errors=true #}
 {#
   Centered "Minds Settings" modal page, hosted in the desktop client's shared
   modal WebContentsView (the same overlay layer as the sign-in modal) so it
@@ -41,13 +41,12 @@
       <h1 class="type-heading-lg text-primary mb-8 shrink-0">Settings</h1>
       <div class="flex-1 min-h-0 overflow-y-auto">
         <AppSettingsSections
-          :report_unexpected_errors="report_unexpected_errors"
-          :include_error_logs="include_error_logs"
           :services_overview="services_overview"
           :file_sharing_grants="file_sharing_grants"
           :workspace_delegation_grants="workspace_delegation_grants"
           :permissions_unavailable="permissions_unavailable"
-          :is_master_password_set="is_master_password_set" />
+          :is_master_password_set="is_master_password_set"
+          :report_unexpected_errors="report_unexpected_errors" />
       </div>
     </div>
   </div>

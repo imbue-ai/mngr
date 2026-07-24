@@ -199,16 +199,14 @@ def latchkey_forward_sentry_consent_path(data_dir: Path) -> Path:
 def write_latchkey_forward_sentry_consent(
     consent_file_path: Path,
     is_error_reporting_enabled: bool,
-    is_log_inclusion_enabled: bool,
 ) -> None:
-    """Atomically write the daemon's live consent file from minds' current consent settings.
+    """Atomically write the daemon's live consent file from minds' current consent setting.
 
-    Called at startup and on every consent change so the detached daemon's live gates reflect the
-    user's ``report_unexpected_errors`` / ``include_error_logs`` choices promptly.
+    Called at startup and on every consent change so the detached daemon's live gate reflects the
+    user's ``report_unexpected_errors`` choice promptly.
     """
     consent = ForwardSentryConsent(
         report_unexpected_errors=is_error_reporting_enabled,
-        include_error_logs=is_log_inclusion_enabled,
     )
     consent_file_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = consent_file_path.with_suffix(".json.tmp")
@@ -291,7 +289,6 @@ def setup_sentry(
     log_folder: Path,
     anonymous_user_id: str,
     is_error_reporting_enabled: Callable[[], bool],
-    is_log_inclusion_enabled: Callable[[], bool],
     latchkey_plugin_data_dir: Path,
     discovery_events_dir: Path,
 ) -> None:
@@ -308,7 +305,6 @@ def setup_sentry(
         + _external_log_attachment_groups(latchkey_plugin_data_dir, discovery_events_dir),
         integrations=[FlaskIntegration()],
         is_error_reporting_enabled=is_error_reporting_enabled,
-        is_log_inclusion_enabled=is_log_inclusion_enabled,
         s3_attachment_bucket=_s3_attachment_bucket_for_environment(environment),
         # paramiko/pyinfra log handled SSH connection-failure noise at ERROR via stdlib logging; the
         # minds backend brokers cross-workspace reverse tunnels through the same paramiko machinery,

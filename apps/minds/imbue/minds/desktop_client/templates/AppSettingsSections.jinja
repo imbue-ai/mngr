@@ -1,4 +1,4 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
+{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false, report_unexpected_errors=true #}
 {#
   The app-level ("Minds") settings, shared verbatim between the centered
   settings modal (pages.SettingsModal, the Electron overlay surface) and the
@@ -7,9 +7,8 @@
   (like the /settings page has always had). Interactivity lives in
   /_static/app_settings.js, which binds by the ids / classes below (the
   ``data-settings-nav`` buttons + ``data-settings-panel`` sections for the
-  nav switching, plus the error-reporting toggles, revoke dialogs, and the
-  master-password change flow), so this component must appear at most once
-  per page.
+  nav switching, plus the revoke dialogs and the master-password change flow),
+  so this component must appear at most once per page.
 
   Sections (grouped Permissions / Other):
     - Connectors: predefined-service grants held across all active workspaces.
@@ -21,7 +20,8 @@
       the service's grants from every workspace.
     - Local files: file-sharing (WebDAV) grants per workspace.
     - Workspaces: cross-workspace-management (delegation) grants.
-    - Error reporting: the per-machine error-reporting toggles.
+    - Error reporting: the per-machine opt-out toggle for automatic error
+      reporting (seeded from ``report_unexpected_errors``).
     - Master password: the sync master-password change flow (rewraps each
       signed-in account's sync key).
 
@@ -240,27 +240,28 @@
       {% endif %}
     </section>
 
-    {# -- Error reporting -- #}
+    {# -- Error reporting (per-machine opt-out; single flag gating auto-sends
+       and their log attachments). Wired by app_settings.js, which POSTs the
+       toggle to /_chrome/error-reporting. -- #}
     <section data-settings-panel="error-reporting" class="hidden">
       <h2 class="type-heading-lg text-primary mb-2">Error reporting</h2>
       <p class="type-body text-secondary mb-3">Applies to this device, regardless of which account is signed in.</p>
       <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
         <span>
           <span class="type-body text-primary font-semibold">Report unexpected errors</span>
-          <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
+          <span class="block type-helper text-tertiary">Automatically send a report to Imbue, along with
+            recent logs, when something goes wrong -- so we can find and fix problems quickly.</span>
         </span>
         <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
                {% if report_unexpected_errors %}checked{% endif %}>
       </label>
-      <label id="include-logs-row"
-             class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
-        <span>
-          <span class="type-body text-primary font-semibold">Include logs</span>
-          <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
-        </span>
-        <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
-               {% if include_error_logs %}checked{% endif %}>
-      </label>
+      <p class="type-helper text-tertiary mt-3 mb-2">
+        Reports include diagnostic details about the error and your setup, which may identify you
+        (for example, your signed-in account email).
+      </p>
+      <p class="type-helper text-tertiary">
+        Imbue will never look into your workspaces without your consent.
+      </p>
     </section>
 
     {# -- Master password: the sync master-password change flow. Rewraps each

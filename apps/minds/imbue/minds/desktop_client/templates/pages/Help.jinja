@@ -1,4 +1,4 @@
-{#def include_logs_setting=false, workspace_agent_id="", assist_available=false, description="", is_agent_report=false, workspace_name="" #}
+{#def workspace_agent_id="", assist_available=false, description="", is_agent_report=false, workspace_name="" #}
 {#
   Get-help modal page. Loaded into the shared modal overlay view in Electron (and
   into the content frame as a fallback in browser mode), so the body is transparent
@@ -14,27 +14,25 @@
   sends a manually-tagged Sentry report; the response carries the Sentry ``event_id``
   (or null when Sentry is inactive), shown in the confirmation so the user can quote
   it. The report diagnostics are hidden in agent mode (the agent gathers its own
-  context). ``include_logs_setting``
-  is the persistent include-logs preference: when on, logs are always attached and the
-  one-off checkbox is hidden. ``workspace_agent_id`` scopes the optional workspace
+  context). Recent logs are always attached to a submitted report (there is no logs
+  checkbox). ``workspace_agent_id`` scopes the workspace
   details to the workspace the help flow was opened from. ``description`` pre-fills the
   report textarea -- non-empty when an in-workspace ``/assist`` agent asked the app to
   open this modal with its diagnosis already written in.
 
-  The diagnostics checkboxes are shown at the top level (not under a disclosure) and
-  are "sticky": their checked state persists in localStorage across reports.
+  The diagnostics checkbox is shown at the top level (not under a disclosure) and
+  is "sticky": its checked state persists in localStorage across reports.
 #}
 {% set _scripts %}
 <script>
   (function () {
     var WORKSPACE_AGENT_ID = {{ workspace_agent_id | tojson }};
-    var INCLUDE_LOGS_SETTING = {{ 'true' if include_logs_setting else 'false' }};
 
     // Sticky checkbox state: persist each box's checked value across reports so a user
     // who files several reports does not have to re-tick the same diagnostics each time.
     // Keyed by element id; the description text is intentionally NOT persisted.
     var STICKY_PREFIX = "minds.help.";
-    var STICKY_IDS = ["help-include-logs", "help-app-diagnostics", "help-workspace-details", "help-remote-access"];
+    var STICKY_IDS = ["help-remote-access"];
 
     function restoreSticky(box) {
       var stored = window.localStorage.getItem(STICKY_PREFIX + box.id);
@@ -49,7 +47,7 @@
     }
     STICKY_IDS.forEach(function (id) {
       var box = document.getElementById(id);
-      if (!box) return;  // not rendered (e.g. include-logs hidden, or no workspace)
+      if (!box) return;  // defensively skip any sticky id that isn't in the DOM
       try { restoreSticky(box); } catch (e) { /* ignore unreadable localStorage */ }
       box.addEventListener("change", function () { persistSticky(box); });
     });
@@ -154,13 +152,8 @@
         submitAgentHelp(description);
         return;
       }
-      var logsBox = document.getElementById("help-include-logs");
-      var workspaceBox = document.getElementById("help-workspace-details");
       var payload = {
         description: description,
-        include_logs: INCLUDE_LOGS_SETTING || (logsBox ? logsBox.checked : false),
-        include_app_diagnostics: document.getElementById("help-app-diagnostics").checked,
-        include_workspace_details: workspaceBox ? workspaceBox.checked : false,
         remote_access: document.getElementById("help-remote-access").checked,
         workspace_agent_id: WORKSPACE_AGENT_ID,
       };
@@ -294,29 +287,17 @@
 
         {# Report-only options. Hidden in agent-help mode, where the agent gathers its own context. #}
         <div id="help-report-options">
-          <p class="type-label text-secondary mt-4 mb-2">Include with the report</p>
-          <div class="flex flex-col gap-2">
-            {% if not include_logs_setting %}
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" id="help-include-logs" class="shrink-0">
-              <span class="type-body text-primary">Logs</span>
-            </label>
-            {% endif %}
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" id="help-app-diagnostics" class="shrink-0">
-              <span class="type-body text-primary">App diagnostics (versions, accounts, workspaces, system)</span>
-            </label>
-            {% if workspace_agent_id %}
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" id="help-workspace-details" class="shrink-0">
-              <span class="type-body text-primary">Details about the current workspace</span>
-            </label>
-            {% endif %}
+          <div class="flex flex-col gap-2 mt-4">
             <label class="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" id="help-remote-access" class="shrink-0">
               <span class="type-body text-primary">Allow Imbue to request remote access to help debug</span>
             </label>
           </div>
+          <p class="type-helper text-tertiary mt-3">
+            Recent logs and app diagnostics (app version, signed-in accounts, your list of workspaces,
+            details of the workspace you're reporting from, and system info) are always attached to help
+            us diagnose the problem. Imbue will never look into your workspaces without your consent.
+          </p>
         </div>
 
         <Button variant="primary" block id="help-submit" extra="mt-4">Send report</Button>
