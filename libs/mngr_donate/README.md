@@ -90,8 +90,11 @@ safe default for scheduled runs (bump the ref to adopt updates after review).
 
 ## Notes
 
-- **Run it from a trusted git repo.** The donation agent is created from the current
-  directory; `--start` bakes that directory (and your `PATH`) into the LaunchAgent.
+- **Run it from anywhere.** The donation agent sources from the skill checkout
+  (a pinned clone under the mngr host dir), not your current directory, so
+  `mngr donate` works from a non-git cwd (home, `/tmp`, a non-mngr project).
+  `--start` bakes your `PATH` (and, as the cwd at install time, a working
+  directory for the LaunchAgent) into the LaunchAgent.
 - **It needs usage data.** Spare capacity is judged from the account-level snapshot, which is
   populated by mngr-managed Claude agents. With none recorded recently, `donate` reports
   "can't tell" and skips rather than guessing.
