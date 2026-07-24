@@ -256,6 +256,7 @@
 
 # TMR output directories (reports + test outputs)
 **/tmr_*/
+**/tmr-specs-*_*/
 **/tmr-report/
 
 # Active session marker file (used to detect interrupted sessions)
