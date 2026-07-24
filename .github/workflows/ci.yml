@@ -31,3 +31,7 @@ jobs:
       # --locked also validates the committed public uv.lock against the tree.
       - run: uv sync --locked --all-packages
       - run: just test-quick "-m 'not tmux and not modal and not docker and not docker_sdk and not unison and not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume and not sdk_live'"
+        env:
+          # Match the job timeout so the pytest global duration guard does not
+          # fail a passing-but-slow run.
+          PYTEST_MAX_DURATION_SECONDS: "2400"
