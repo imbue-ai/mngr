@@ -36,6 +36,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
+from imbue.minds.mngr_settings.data_types import CloudAccountRecord
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
@@ -518,7 +519,7 @@ def render_create_form(
     error_message: str = "",
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
-    cloud_accounts: Sequence[Mapping[str, str]] | None = None,
+    cloud_accounts: Sequence[CloudAccountRecord] | None = None,
     byok_clouds_enabled: bool = False,
     selected_preset: str | None = None,
     start_advanced: bool = False,
@@ -622,7 +623,7 @@ def render_create_form(
             key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
-        cloud_accounts=[dict(account) for account in (cloud_accounts or [])],
+        cloud_accounts=[account.model_dump() for account in (cloud_accounts or [])],
         byok_clouds_enabled=byok_clouds_enabled,
         # Machine-size picker options per compute mode, and the curated
         # placement lists for the BYOK-only modes (GCP zones / Azure regions) --

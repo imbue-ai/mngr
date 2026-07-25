@@ -1,6 +1,6 @@
 # Architecture
 
-The local desktop client is a FastAPI app that handles authentication and traffic forwarding. It is the gateway through which users access all their workspaces.
+The local desktop client is a Flask app that handles authentication and traffic forwarding. It is the gateway through which users access all their workspaces.
 
 > For UI / template work (JinjaX components, the primitive catalog,
 > visual-diff workflow, JinjaX gotchas), see

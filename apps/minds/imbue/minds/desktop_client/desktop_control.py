@@ -15,7 +15,7 @@ from pathlib import Path
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.bootstrap import set_provider_is_enabled
+from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.mngr_settings.enablement import set_provider_is_enabled
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -72,7 +73,7 @@ def set_provider_enabled(
         active = list_active_workspaces_for_provider(backend_resolver, provider_name)
         if active:
             raise ProviderHasActiveWorkspacesError(provider_name, active)
-    changed = set_provider_is_enabled(provider_name, is_enabled)
+    changed = set_provider_is_enabled(provider_name, is_enabled, root=MindsRoot.from_environment())
     # Only bounce when the settings file actually changed -- a no-op toggle should
     # not trigger a SIGHUP and a full mngr observe restart.
     if changed:

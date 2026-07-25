@@ -26,7 +26,7 @@ from pathlib import Path
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import env_name_from_root_name
-from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.bootstrap import is_env_activated
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
@@ -137,7 +137,7 @@ def active_env_name_or_none() -> str | None:
     by ``minds env deploy`` / ``destroy`` to refuse without explicit
     activation.
     """
-    if not is_minds_root_name_set_to_active_env():
+    if not is_env_activated():
         return None
     return env_name_from_root_name(os.environ[MINDS_ROOT_NAME_ENV_VAR])
 

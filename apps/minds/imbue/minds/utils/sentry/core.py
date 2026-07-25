@@ -13,7 +13,7 @@ from imbue.imbue_common.sentry.core import setup_sentry as _setup_sentry
 from imbue.imbue_common.sentry.core import submit_manual_bug_report as submit_manual_bug_report
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
 from imbue.minds.bootstrap import env_name_from_root_name
-from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.bootstrap import is_env_activated
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
@@ -157,9 +157,7 @@ def resolve_sentry_environment() -> SentryDeployEnvironment:
     ci-*, or no activated env) falls back to ``development``. Shared by the
     backend and the frontend so both report under the same environment.
     """
-    activated_env_name = (
-        env_name_from_root_name(resolve_minds_root_name()) if is_minds_root_name_set_to_active_env() else None
-    )
+    activated_env_name = env_name_from_root_name(resolve_minds_root_name()) if is_env_activated() else None
     return sentry_deploy_environment_from_minds_env_name(activated_env_name)
 
 

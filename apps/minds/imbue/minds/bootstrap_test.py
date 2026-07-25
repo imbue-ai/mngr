@@ -1,6 +1,5 @@
 import os
 import re
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -9,19 +8,14 @@ from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
-from imbue.minds.bootstrap import _ensure_mngr_settings
 from imbue.minds.bootstrap import apply_bootstrap
 from imbue.minds.bootstrap import env_name_from_root_name
-from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
-from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.bootstrap import is_env_activated
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
-from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
-from imbue.minds.bootstrap import set_provider_is_enabled
-from imbue.minds.testing import stub_mngr_host_dir
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,59 +48,54 @@ def test_accepts_minds_staging(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resolve_minds_root_name() == "minds-staging"
 
 
-def test_legacy_devminds_value_falls_back_with_warning(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stale `MINDS_ROOT_NAME=devminds` parent shell shouldn't break us.
+def test_legacy_devminds_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale `MINDS_ROOT_NAME=devminds` parent shell fails loudly.
 
-    Per the per-env-data-roots refactor: values that don't match the
-    `minds(-<env-name>)?` pattern are silently treated as unset and the
-    caller falls back to production (~/.minds/). The Python warning
-    surfaces in logs so the operator notices.
+    Values that don't match `minds(-<env-name>)?` used to be coerced to production, which silently pointed tooling at production data; now they raise with the unset-then-activate fix.
     """
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "devminds")
-    # No SystemExit -- just fall back to the default.
-    assert resolve_minds_root_name() == DEFAULT_MINDS_ROOT_NAME
+    with pytest.raises(BootstrapError, match="unset MINDS_ROOT_NAME"):
+        resolve_minds_root_name()
 
 
-def test_legacy_value_with_spaces_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_value_with_spaces_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "Has Spaces")
-    assert resolve_minds_root_name() == DEFAULT_MINDS_ROOT_NAME
+    with pytest.raises(BootstrapError):
+        resolve_minds_root_name()
 
 
-def test_path_with_dot_dot_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_path_with_dot_dot_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "../evil")
-    # ../evil cannot match `minds(-<env-name>)?` -- treated as unset.
-    assert resolve_minds_root_name() == DEFAULT_MINDS_ROOT_NAME
+    with pytest.raises(BootstrapError):
+        resolve_minds_root_name()
 
 
 def test_is_active_when_set_to_valid_value(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-josh-3")
-    assert is_minds_root_name_set_to_active_env() is True
+    assert is_env_activated() is True
 
 
 def test_is_active_when_set_to_production(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds")
-    assert is_minds_root_name_set_to_active_env() is True
+    assert is_env_activated() is True
 
 
 def test_is_active_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    assert is_minds_root_name_set_to_active_env() is False
+    assert is_env_activated() is False
 
 
-def test_is_active_false_for_legacy_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stale shell with `MINDS_ROOT_NAME=devminds` is NOT activated.
-
-    `minds env deploy` / `destroy` use this distinction to refuse safely
-    even when the bootstrap fallback would still produce a usable host_dir.
-    """
+def test_is_active_raises_for_legacy_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale shell with `MINDS_ROOT_NAME=devminds` fails loudly rather than reading as unactivated."""
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "devminds")
-    assert is_minds_root_name_set_to_active_env() is False
+    with pytest.raises(BootstrapError):
+        is_env_activated()
 
 
 def test_env_name_from_root_name_production() -> None:
@@ -204,19 +193,14 @@ def test_apply_bootstrap_unset_does_not_write_mngr_vars(monkeypatch: pytest.Monk
     assert "MNGR_PREFIX" not in os.environ
 
 
-def test_apply_bootstrap_invalid_value_still_writes_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stale `MINDS_ROOT_NAME=devminds` shell still gets consistent MNGR_* vars.
-
-    The bootstrap resolves to the production default and exports the
-    derived vars so downstream mngr calls have *some* consistent
-    host_dir to point at instead of half-honoring the bad value.
-    """
+def test_apply_bootstrap_invalid_value_raises_and_leaves_vars_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale `MINDS_ROOT_NAME=devminds` shell fails loudly instead of exporting production paths."""
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "devminds")
     monkeypatch.setenv("MNGR_HOST_DIR", "/custom/host/dir")
-    apply_bootstrap()
-    assert os.environ["MNGR_HOST_DIR"] == str(Path.home() / ".minds" / "mngr")
-    assert os.environ["MNGR_PREFIX"] == "minds-"
+    with pytest.raises(BootstrapError):
+        apply_bootstrap()
+    assert os.environ["MNGR_HOST_DIR"] == "/custom/host/dir"
 
 
 def test_minds_root_name_pattern_canonical_examples() -> None:
@@ -248,318 +232,3 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-a") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-a") is None
-
-
-_FAKE_CONNECTOR_URL = "https://test--rsc-api.modal.run"
-
-
-def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    changed = set_imbue_cloud_provider_for_account(
-        "alice@example.com",
-        connector_url=_FAKE_CONNECTOR_URL,
-        root_name="minds-dev-tname",
-    )
-    assert changed is True
-    parsed = tomllib.loads(settings_path.read_text())
-    block = parsed["providers"]["imbue_cloud_alice-example-com"]
-    assert block == {
-        "backend": "imbue_cloud",
-        "account": "alice@example.com",
-        "connector_url": _FAKE_CONNECTOR_URL,
-        "is_enabled": True,
-        # Runsc + hardening args so the slow (rebuild) path runs under gVisor.
-        "docker_runtime": "runsc",
-        "install_gvisor_runtime": True,
-        "default_start_args": ["--workdir=/", "--security-opt=no-new-privileges"],
-    }
-
-
-def test_set_provider_is_enabled_flips_is_enabled_on_existing_block(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    set_imbue_cloud_provider_for_account(
-        "alice@example.com",
-        connector_url=_FAKE_CONNECTOR_URL,
-        root_name="minds-dev-tname",
-    )
-
-    changed = set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
-    assert changed is True
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is False
-
-    # Idempotent: setting to the same value is a no-op.
-    assert set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname") is False
-
-    # Re-enabling flips the bit back.
-    assert set_provider_is_enabled("imbue_cloud_alice-example-com", True, root_name="minds-dev-tname") is True
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is True
-
-
-def test_set_provider_is_enabled_creates_override_block_for_missing_provider(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """When [providers.<name>] doesn't exist in minds' settings, it's created with just is_enabled."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-
-    changed = set_provider_is_enabled("docker", False, root_name="minds-dev-tname")
-    assert changed is True
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["docker"] == {"is_enabled": False}
-
-    # Now re-enable: same block is updated.
-    changed = set_provider_is_enabled("docker", True, root_name="minds-dev-tname")
-    assert changed is True
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["docker"] == {"is_enabled": True}
-
-
-def test_set_provider_is_enabled_creates_settings_file_when_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """If minds' active settings file does not yet exist, it is created."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    # Make sure no file exists yet
-    if settings_path.exists():
-        settings_path.unlink()
-
-    changed = set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
-    assert changed is True
-    assert settings_path.exists()
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["modal"] == {"is_enabled": False}
-
-
-def test_set_force_enable_re_enables_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    set_imbue_cloud_provider_for_account(
-        "alice@example.com",
-        connector_url=_FAKE_CONNECTOR_URL,
-        root_name="minds-dev-tname",
-    )
-    set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
-
-    changed = set_imbue_cloud_provider_for_account(
-        "alice@example.com",
-        connector_url=_FAKE_CONNECTOR_URL,
-        root_name="minds-dev-tname",
-        force_enable=True,
-    )
-    assert changed is True
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is True
-
-
-def test_set_preserve_does_not_re_enable_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The bootstrap reconcile path must leave a previously disabled
-    provider (e.g. from the providers panel toggle) disabled -- only an
-    explicit signin event force-enables.
-    """
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    set_imbue_cloud_provider_for_account(
-        "alice@example.com",
-        connector_url=_FAKE_CONNECTOR_URL,
-        root_name="minds-dev-tname",
-    )
-    set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
-
-    changed = set_imbue_cloud_provider_for_account(
-        "alice@example.com",
-        connector_url=_FAKE_CONNECTOR_URL,
-        root_name="minds-dev-tname",
-        force_enable=False,
-    )
-    assert changed is False
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is False
-
-
-def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """``_ensure_mngr_settings`` must suppress the default ``[providers.imbue_cloud]``
-    instance so ``get_all_provider_instances`` doesn't auto-create one alongside
-    the per-account ``imbue_cloud_<slug>`` entries.
-    """
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    _ensure_mngr_settings("minds-dev-tname")
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
-    assert parsed["plugins"]["recursive"]["enabled"] is False
-
-
-def test_ensure_mngr_settings_keeps_default_aws_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The region-less default ``[providers.aws]`` stays suppressed.
-
-    Otherwise ``get_all_provider_instances`` auto-creates it and its discovery
-    fails every ``mngr list`` cycle ("credentials not configured"); the usable
-    AWS providers are the bring-your-own-key ``byok-aws-<slug>`` account blocks.
-    """
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    _ensure_mngr_settings("minds-dev-tname")
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["aws"] == {"backend": "aws", "is_enabled": False}
-
-
-def test_ensure_mngr_settings_removes_legacy_ambient_aws_region_blocks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Ambient ``aws-<region>`` blocks written by earlier builds are actively
-    deleted at boot (the machine-credential AWS path was removed from minds;
-    ``byok-aws-<slug>`` accounts are the only AWS path). BYOK blocks survive."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    settings_path.write_text(
-        '[providers.aws-us-east-1]\nbackend = "aws"\ndefault_region = "us-east-1"\n\n'
-        '[providers.byok-aws-mine]\nbackend = "aws"\ndefault_region = "us-east-1"\n'
-    )
-    _ensure_mngr_settings("minds-dev-tname")
-    parsed = tomllib.loads(settings_path.read_text())
-    assert "aws-us-east-1" not in parsed["providers"]
-    assert "byok-aws-mine" in parsed["providers"]
-
-
-def test_ensure_mngr_settings_returns_whether_file_was_modified(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The first write returns True (callers should bounce ``mngr observe``);
-    a repeat call on an already-shaped file returns False."""
-    stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    assert _ensure_mngr_settings("minds-dev-tname") is True
-    assert _ensure_mngr_settings("minds-dev-tname") is False
-
-
-def test_ensure_mngr_settings_leaves_panel_disabled_modal_alone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A panel-toggled ``is_enabled = false`` on ``[providers.modal]`` is a valid desired
-    shape: it neither triggers a rewrite nor gets reset back to enabled."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    _ensure_mngr_settings("minds-dev-tname")
-    set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
-
-    assert _ensure_mngr_settings("minds-dev-tname") is False
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["modal"]["is_enabled"] is False
-    assert parsed["providers"]["modal"]["mode"] == "DIRECT"
-    assert parsed["providers"]["modal"]["is_persistent"] is True
-
-
-def test_ensure_mngr_settings_preserves_modal_is_enabled_on_rewrite(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """When something else forces a rewrite, a panel-toggled modal Disable is carried
-    over while the minds-controlled fields are re-pinned."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    _ensure_mngr_settings("minds-dev-tname")
-    set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
-
-    # Force the rewrite path: a stale extra aws-* block makes the desired-shape
-    # check fail, so every minds-controlled block is re-pinned.
-    with settings_path.open("a") as f:
-        f.write('\n[providers.aws-eu-central-9]\nbackend = "aws"\n')
-
-    assert _ensure_mngr_settings("minds-dev-tname") is True
-    parsed = tomllib.loads(settings_path.read_text())
-    modal_block = parsed["providers"]["modal"]
-    assert modal_block["is_enabled"] is False
-    assert modal_block["mode"] == "DIRECT"
-    assert modal_block["is_persistent"] is True
-
-
-def test_ensure_mngr_settings_pins_modal_fields_around_legacy_panel_only_block(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A legacy ``[providers.modal]`` holding only a panel-written ``is_enabled = false``
-    (from before the Modal-Direct block existed) gets the pinned fields added while the
-    user's Disable is preserved."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    settings_path.write_text("[providers.modal]\nis_enabled = false\n")
-
-    assert _ensure_mngr_settings("minds-dev-tname") is True
-    parsed = tomllib.loads(settings_path.read_text())
-    modal_block = parsed["providers"]["modal"]
-    assert modal_block["is_enabled"] is False
-    assert modal_block["mode"] == "DIRECT"
-    assert modal_block["is_persistent"] is True
-
-
-def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Regression: a first signin on a fresh ``MINDS_ROOT_NAME`` must land
-    both the per-account block AND the default-disabled
-    ``[providers.imbue_cloud]`` suppression block.
-
-    Without the suppression block, ``mngr observe`` auto-creates a phantom
-    default ``imbue_cloud`` instance with no ``connector_url``, which
-    raises ``MissingConnectorUrlError`` on every discovery cycle and
-    breaks ``mngr create`` against the env. ``apply_bootstrap``'s call
-    to ``_ensure_mngr_settings`` no-ops on a fresh env (the mngr profile
-    dir doesn't exist yet at startup), so ``set_imbue_cloud_provider_for_account``
-    has to ensure it as part of writing the per-account block.
-    """
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
-    set_imbue_cloud_provider_for_account(
-        "josh@imbue.com",
-        connector_url=_FAKE_CONNECTOR_URL,
-        root_name="minds-staging",
-    )
-    parsed = tomllib.loads(settings_path.read_text())
-    # The per-account block lands as before.
-    assert parsed["providers"]["imbue_cloud_josh-imbue-com"]["connector_url"] == _FAKE_CONNECTOR_URL
-    # AND the suppression block + recursive-disable land in the same pass.
-    assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
-    assert parsed["plugins"]["recursive"]["enabled"] is False
-
-
-def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_resignin(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """An already-signed-in user whose settings.toml is missing the
-    suppression block (because the original signin happened on a build
-    that didn't write it) gets the block back on the next signin event,
-    even when the per-account block itself is unchanged and the function
-    short-circuits its per-account write path.
-    """
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
-    # Pre-seed: a per-account block exists but the suppression block is missing
-    # (mirrors the on-disk state of a staging env that signed in before the
-    # fix landed).
-    settings_path.write_text(
-        "[providers.imbue_cloud_josh-imbue-com]\n"
-        'backend = "imbue_cloud"\n'
-        'account = "josh@imbue.com"\n'
-        f'connector_url = "{_FAKE_CONNECTOR_URL}"\n'
-        "is_enabled = true\n"
-        'docker_runtime = "runsc"\n'
-        "install_gvisor_runtime = true\n"
-        'default_start_args = ["--workdir=/", "--security-opt=no-new-privileges"]\n'
-    )
-
-    changed = set_imbue_cloud_provider_for_account(
-        "josh@imbue.com",
-        connector_url=_FAKE_CONNECTOR_URL,
-        root_name="minds-staging",
-    )
-    # The per-account write itself is a no-op (existing block already matches),
-    # but the file is still modified because the suppression block lands -- and
-    # that modification is reported so the caller bounces ``mngr observe``.
-    assert changed is True
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
-    assert parsed["plugins"]["recursive"]["enabled"] is False
-
-
-def test_is_bring_your_own_cloud_enabled_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Off by default (env absent), on only for the exact "1" value -- the feature
-    # ships dark behind FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS.
-    monkeypatch.delenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", raising=False)
-    assert is_bring_your_own_cloud_enabled() is False
-    monkeypatch.setenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", "1")
-    assert is_bring_your_own_cloud_enabled() is True
-    for off_value in ("0", "", "true", "yes"):
-        monkeypatch.setenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", off_value)
-        assert is_bring_your_own_cloud_enabled() is False

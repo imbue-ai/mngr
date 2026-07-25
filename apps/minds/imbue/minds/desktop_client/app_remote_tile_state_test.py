@@ -11,7 +11,6 @@ from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
-from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import _compute_cloud_tile_state
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -21,6 +20,7 @@ from imbue.minds.desktop_client.dek_store import ensure_dek
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
+from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import ProviderInstanceName
 

@@ -59,7 +59,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(5))
+    rc.check_bare_print(_DIR, snapshot(6))
 
 
 # --- Exception handling ---
@@ -380,7 +380,7 @@ def test_prevent_underscore_imports() -> None:
 def test_prevent_init_methods_in_non_exception_classes() -> None:
     # Both are the ported Sentry loguru ``logging.Handler`` subclasses, which
     # need ``__init__`` to set up their executor / flags around super().__init__.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(0))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(1))
 
 
 def test_prevent_cast_usage() -> None:

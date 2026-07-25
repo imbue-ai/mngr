@@ -7,6 +7,7 @@ from typing import Self
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.bootstrap import DYNAMIC_ENV_NAME_PATTERN
 from imbue.minds.errors import MindError
 
 
@@ -61,11 +62,10 @@ DYNAMIC_ENV_PREFIXES: Final[tuple[str, ...]] = ("dev", "ci")
 # everywhere it surfaces (mngr prefix, env root dir, Cloudflare tunnel
 # tag, Modal env name, etc). The pattern is enforced strictly so a typo
 # can't accidentally land state in a place that won't be cleaned up by
-# ``minds env destroy``. The user portion's max length (34) is chosen
-# so the total ``<tier>-<user>`` name is at most :data:`MAX_DEV_ENV_NAME_LENGTH`.
-_DEV_ENV_USER_PORTION_PATTERN: Final[str] = r"[a-z0-9][a-z0-9_-]{0,34}[a-z0-9]"
-_DYNAMIC_TIER_PATTERN: Final[str] = "|".join(DYNAMIC_ENV_PREFIXES)
-DEV_ENV_NAME_PATTERN: Final[str] = rf"(?:{_DYNAMIC_TIER_PATTERN})-{_DEV_ENV_USER_PORTION_PATTERN}"
+# ``minds env destroy``. The shape itself is defined once, in the bootstrap
+# module (which also embeds it in MINDS_ROOT_NAME_PATTERN); this is just
+# the same pattern under the env-layer name.
+DEV_ENV_NAME_PATTERN: Final[str] = DYNAMIC_ENV_NAME_PATTERN
 
 # Reserved tier names that bypass the ``<tier>-`` prefix requirement.
 # Mirrors the reserved set in :mod:`imbue.minds.cli.env`. Kept here so
@@ -83,7 +83,7 @@ class DevEnvName(NonEmptyStr):
     """Name of a dynamic env (``dev-`` or ``ci-``), or one of the reserved tier names.
 
     Dynamic envs must start with one of :data:`DYNAMIC_ENV_PREFIXES`
-    followed by ``-`` and a 2-35 char suffix of lowercase alphanumerics
+    followed by ``-`` and a 2-36 char suffix of lowercase alphanumerics
     / ``-`` / ``_`` (no leading or trailing punctuation). The name flows
     into Modal environment names, Neon DB names, SuperTokens app names,
     OVH IAM tags, and filesystem paths under ``~/.minds-<name>/``, so we

@@ -25,8 +25,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
-from imbue.minds.bootstrap import unset_imbue_cloud_provider_for_account
+from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -44,6 +43,8 @@ from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
 from imbue.minds.desktop_client.templates_auth import render_signin_modal_page
+from imbue.minds.mngr_settings.imbue_cloud_accounts import set_imbue_cloud_provider_for_account
+from imbue.minds.mngr_settings.imbue_cloud_accounts import unset_imbue_cloud_provider_for_account
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -240,6 +241,7 @@ def _store_session_from_auth_result(
     if set_imbue_cloud_provider_for_account(
         result.user.email,
         connector_url=connector_url,
+        root=MindsRoot.from_environment(),
         force_enable=True,
     ):
         _bounce_forward_observe()
@@ -401,7 +403,9 @@ def signout_user_via_plugin(user_id: str) -> None:
         logger.warning("No mirrored account for user {}; skipping plugin signout", user_id[:8])
     session_store.invalidate_identity_cache()
     _kick_sync_scheduler()
-    if signed_out_email and unset_imbue_cloud_provider_for_account(signed_out_email):
+    if signed_out_email and unset_imbue_cloud_provider_for_account(
+        signed_out_email, root=MindsRoot.from_environment()
+    ):
         _bounce_forward_observe()
 
 
@@ -679,6 +683,7 @@ def _mirror_oauth_signin_result(
     if set_imbue_cloud_provider_for_account(
         str(result.email),
         connector_url=connector_url,
+        root=MindsRoot.from_environment(),
         force_enable=True,
     ):
         bounce_latchkey_forward_supervisor(latchkey_forward_supervisor)

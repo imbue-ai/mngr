@@ -46,10 +46,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import BootstrapError
-from imbue.minds.bootstrap import delete_cloud_account_provider
-from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
-from imbue.minds.bootstrap import list_cloud_account_providers
-from imbue.minds.bootstrap import set_cloud_account_provider
+from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import backup_update as backup_update_module
@@ -156,6 +153,11 @@ from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.mngr_settings.byok_accounts import delete_cloud_account_provider
+from imbue.minds.mngr_settings.byok_accounts import is_bring_your_own_cloud_enabled
+from imbue.minds.mngr_settings.byok_accounts import list_cloud_account_providers
+from imbue.minds.mngr_settings.byok_accounts import set_cloud_account_provider
+from imbue.minds.mngr_settings.data_types import CloudAccountRecord
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
@@ -668,12 +670,15 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     if cloud_account:
         # A bring-your-own-key account must exist and match the submitted launch
         # mode's backend, else the create would target a nonexistent provider.
-        matching = next((a for a in list_cloud_account_providers() if a["name"] == cloud_account), None)
+        matching = next(
+            (a for a in list_cloud_account_providers(root=MindsRoot.from_environment()) if a.name == cloud_account),
+            None,
+        )
         if matching is None:
             return _json_field_error(f"Unknown cloud account {cloud_account!r}.", "cloud_account")
-        if matching["backend"] != launch_mode.value.lower():
+        if matching.backend != launch_mode.value.lower():
             return _json_field_error(
-                f"Cloud account {matching['alias']!r} is a {matching['backend']} account; "
+                f"Cloud account {matching.alias!r} is a {matching.backend} account; "
                 f"it cannot be used with launch_mode {launch_mode.value}.",
                 "cloud_account",
             )
@@ -747,7 +752,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         # is region-locked, so honoring a different submitted value would orphan
         # the entry's existing workspaces. The pin always rules; the form shows
         # it as a static note. A different placement = another account entry.
-        region = matching["region"]
+        region = matching.region
     else:
         region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
     on_created = build_create_on_created_callback(
@@ -2056,14 +2061,14 @@ def _handle_patch_provider(provider_name: str) -> ProviderToggleResponse | Respo
     return ProviderToggleResponse(provider_name=provider_name, enabled=enabled, changed=changed)
 
 
-def _cloud_account_summary(account: dict[str, str]) -> CloudAccountSummary:
-    """Build the wire model for one bootstrap-layer cloud account dict."""
+def _cloud_account_summary(account: CloudAccountRecord) -> CloudAccountSummary:
+    """Build the wire model for one settings-layer cloud account record."""
     return CloudAccountSummary(
-        name=account["name"],
-        alias=account["alias"],
-        backend=account["backend"],
-        region=account["region"],
-        identifier=account["identifier"],
+        name=account.name,
+        alias=account.alias,
+        backend=account.backend,
+        region=account.region,
+        identifier=account.identifier,
     )
 
 
@@ -2133,7 +2138,9 @@ def _handle_create_cloud_account() -> CloudAccountSummary | Response:
         return _json_field_error(f"Backend {backend!r} is not supported (aws, gcp, azure).", "backend")
 
     try:
-        provider_name = set_cloud_account_provider(alias, backend, credentials, region)
+        provider_name = set_cloud_account_provider(
+            alias, backend, credentials, region, root=MindsRoot.from_environment()
+        )
     except BootstrapError as exc:
         return _json_field_error(str(exc), "alias")
 
@@ -2150,10 +2157,12 @@ def _handle_create_cloud_account() -> CloudAccountSummary | Response:
         # Roll back: a failed prepare means unusable credentials/permissions;
         # keeping the block would make every `mngr list` fan out to it.
         # The exception text already carries the prepare output tail.
-        delete_cloud_account_provider(provider_name)
+        delete_cloud_account_provider(provider_name, root=MindsRoot.from_environment())
         return _json_error(f"Account setup failed: {exc}", 502)
 
-    matching = next((a for a in list_cloud_account_providers() if a["name"] == provider_name), None)
+    matching = next(
+        (a for a in list_cloud_account_providers(root=MindsRoot.from_environment()) if a.name == provider_name), None
+    )
     if matching is None:
         return _json_error("Account was prepared but could not be read back.", 500)
     # The discovery daemon (`mngr observe`) read the settings file at launch, so
@@ -2182,7 +2191,7 @@ def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
             "destroy them before removing the account.",
             409,
         )
-    if not delete_cloud_account_provider(account_name):
+    if not delete_cloud_account_provider(account_name, root=MindsRoot.from_environment()):
         return _json_error(f"Unknown cloud account {account_name!r}.", 404)
     # Restart discovery so it stops fanning out to the removed provider.
     bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)

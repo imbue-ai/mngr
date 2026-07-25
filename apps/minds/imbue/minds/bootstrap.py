@@ -1,110 +1,80 @@
 """Translate MINDS_ROOT_NAME into MNGR_HOST_DIR and MNGR_PREFIX.
 
-This must run before any ``imbue.mngr.*`` module is imported, because mngr reads
-``MNGR_HOST_DIR`` and ``MNGR_PREFIX`` during its own module-level initialization
-(plugin manager construction, config discovery, etc.).
+This must run before any ``imbue.mngr.*`` module is imported, because mngr reads ``MNGR_HOST_DIR`` and ``MNGR_PREFIX`` during its own module-level initialization (plugin manager construction, config discovery, etc.).
 
-Kept intentionally minimal -- only stdlib and loguru -- so it stays cheap to
-import and cannot accidentally pull in mngr before translation happens.
+Kept intentionally minimal -- stdlib only -- so it stays cheap to import and cannot accidentally pull in mngr before translation happens.
+The settings-file machinery that shares this constraint lives in :mod:`imbue.minds.mngr_settings`.
 """
 
-import json
 import os
 import re
-import shutil
-import tomllib
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
-import tomlkit
-from loguru import logger
-from tomlkit.items import Table
-
-from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
-from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
-
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
-# Names that are not legal env-name suffixes. Today this is just the prefix
-# string itself, because ``minds-`` with an empty suffix would round-trip
-# to the production path (``~/.minds-/`` is nonsensical) and we'd rather
-# fail loudly than silently coerce.
 _MINDS_PREFIX: Final[str] = "minds"
-# Legal env-name suffixes after ``minds-``. Mirrors the rules in
-# :mod:`imbue.minds.envs.primitives` and the reserved tier names in
-# :mod:`imbue.minds.cli.env`:
+# Legal env-name suffixes after ``minds-``.
+# Mirrors the rules in :mod:`imbue.minds.envs.primitives` and the reserved tier names in :mod:`imbue.minds.cli.env`:
 #
 #   * ``staging`` -- the reserved staging tier name.
-#   * ``dev-<rest>`` / ``ci-<rest>`` -- any dynamic env (developer dev
-#     env or CI ephemeral env, respectively). Together they mirror
-#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN`; kept
-#     inlined here so this module stays free of ``imbue.mngr.*`` /
-#     pydantic imports (see module docstring).
+#   * ``dev-<rest>`` / ``ci-<rest>`` -- any dynamic env (developer dev env or CI ephemeral env, respectively).
+#     :data:`DYNAMIC_ENV_NAME_PATTERN` is the single source of this shape; ``imbue.minds.envs.primitives`` imports it as ``DEV_ENV_NAME_PATTERN``.
 #
-# Production has no suffix (``minds`` alone). Anything that does not
-# fit this pattern is treated as ``unset`` by ``resolve_minds_root_name``
-# and falls back to production with a warning.
+# Production has no suffix (``minds`` alone).
+# Anything set but not matching this pattern makes ``resolve_minds_root_name`` raise.
 _STAGING_SUFFIX_PATTERN: Final[str] = r"staging"
-_DYNAMIC_SUFFIX_PATTERN: Final[str] = r"(?:dev|ci)-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
-_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DYNAMIC_SUFFIX_PATTERN})"
-# The full set of legal MINDS_ROOT_NAME values is ``minds`` (production),
-# ``minds-staging``, ``minds-dev-<rest>``, or ``minds-ci-<rest>``.
+# The user portion's max length (34 between the two anchor characters) keeps the total ``<tier>-<user>`` name within ``MAX_DEV_ENV_NAME_LENGTH`` (40).
+DYNAMIC_ENV_NAME_PATTERN: Final[str] = r"(?:dev|ci)-[a-z0-9][a-z0-9_-]{0,34}[a-z0-9]"
+_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{DYNAMIC_ENV_NAME_PATTERN})"
+# The full set of legal MINDS_ROOT_NAME values is ``minds`` (production), ``minds-staging``, ``minds-dev-<rest>``, or ``minds-ci-<rest>``.
 MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
+
+
+class BootstrapError(ValueError):
+    """Raised when the minds bootstrap layer can't compute a derived value.
+
+    Defined here instead of in ``minds.errors`` because this module has to stay free of any ``imbue.mngr.*`` / ``click`` imports (see the module docstring).
+    """
 
 
 def resolve_minds_root_name() -> str:
     """Read MINDS_ROOT_NAME from the environment or return the default.
 
-    Validates the value against :data:`MINDS_ROOT_NAME_PATTERN`. When the
-    env var is unset, returns :data:`DEFAULT_MINDS_ROOT_NAME` (production).
-    When the env var holds a value that does not match the pattern (e.g.
-    a stale ``devminds`` left in a parent shell from before the
-    per-env-root refactor), logs a warning and returns the default --
-    callers that genuinely need an activated env check explicitly via
-    :func:`is_minds_root_name_set_to_active_env` instead.
+    When the env var is unset, returns :data:`DEFAULT_MINDS_ROOT_NAME` (production).
+    When the env var is set to a value that does not match :data:`MINDS_ROOT_NAME_PATTERN` (e.g. a stale ``devminds`` left in a parent shell from before the per-env-root refactor), raises ``BootstrapError`` -- silently coercing to production would point tooling at production data the user did not ask for.
 
-    Validation is duplicated here (instead of going through a pydantic
-    primitive) so this module never has to import pydantic/mngr.
+    Validation is duplicated here (instead of going through a pydantic primitive) so this module never has to import pydantic/mngr.
     """
     value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR)
     if value is None:
         return DEFAULT_MINDS_ROOT_NAME
     if not re.fullmatch(MINDS_ROOT_NAME_PATTERN, value):
-        logger.warning(
-            "{}={!r} does not match {!r}; ignoring and falling back to {!r}. "
-            'Run `eval "$(minds env activate <name>)"` to activate a valid env.',
-            MINDS_ROOT_NAME_ENV_VAR,
-            value,
-            MINDS_ROOT_NAME_PATTERN,
-            DEFAULT_MINDS_ROOT_NAME,
+        raise BootstrapError(
+            f"{MINDS_ROOT_NAME_ENV_VAR}={value!r} does not match {MINDS_ROOT_NAME_PATTERN!r}. "
+            f'Run `unset {MINDS_ROOT_NAME_ENV_VAR}`, then `eval "$(minds env activate <name>)"` '
+            "to activate a valid env."
         )
-        return DEFAULT_MINDS_ROOT_NAME
     return value
 
 
-def is_minds_root_name_set_to_active_env() -> bool:
-    """Return True iff ``MINDS_ROOT_NAME`` is explicitly set to a valid value.
+def is_env_activated() -> bool:
+    """Return whether ``MINDS_ROOT_NAME`` is set in the environment.
 
-    Used by ``minds env deploy/destroy`` and ``minds run`` to refuse when
-    no env has been activated. Distinguishes "operator forgot to activate"
-    (unset / invalid -> False) from "operator activated production"
-    (``MINDS_ROOT_NAME=minds`` -> True). Treats values that don't match
-    :data:`MINDS_ROOT_NAME_PATTERN` as "not activated" because they get
-    silently overridden by :func:`resolve_minds_root_name`.
+    Used by ``minds env deploy/destroy`` and ``minds run`` to refuse when no env has been activated; ``MINDS_ROOT_NAME=minds`` counts as an explicit activation of production.
+    Raises ``BootstrapError`` (via :func:`resolve_minds_root_name`) when the value is set but invalid.
     """
-    value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR)
-    if value is None:
+    if os.environ.get(MINDS_ROOT_NAME_ENV_VAR) is None:
         return False
-    return re.fullmatch(MINDS_ROOT_NAME_PATTERN, value) is not None
+    resolve_minds_root_name()
+    return True
 
 
 def env_name_from_root_name(root_name: str) -> str:
     """Return the env name for a given ``MINDS_ROOT_NAME``.
 
-    ``minds`` -> ``production``; ``minds-<name>`` -> ``<name>``. Raises
-    ``BootstrapError`` for any other value -- callers should validate via
-    :func:`resolve_minds_root_name` first.
+    ``minds`` -> ``production``; ``minds-<name>`` -> ``<name>``.
+    Raises ``BootstrapError`` for any other value -- callers should validate via :func:`resolve_minds_root_name` first.
     """
     if root_name == DEFAULT_MINDS_ROOT_NAME:
         return "production"
@@ -119,9 +89,8 @@ def env_name_from_root_name(root_name: str) -> str:
 def root_name_for_env_name(env_name: str) -> str:
     """Return the ``MINDS_ROOT_NAME`` value for a given env name.
 
-    ``production`` -> ``minds``; anything else -> ``minds-<name>``. The
-    env name is not re-validated here; callers should validate via
-    :class:`imbue.minds.envs.primitives.DevEnvName` first.
+    ``production`` -> ``minds``; anything else -> ``minds-<name>``.
+    The env name is not re-validated here; callers should validate via :class:`imbue.minds.envs.primitives.DevEnvName` first.
     """
     if env_name == "production":
         return DEFAULT_MINDS_ROOT_NAME
@@ -143,923 +112,62 @@ def mngr_prefix_for(root_name: str) -> str:
     return "{}-".format(root_name)
 
 
-def _existing_is_enabled(providers_section: Table, provider_name: str) -> bool | None:
-    """Return a provider block's panel-toggled ``is_enabled`` if present and boolean, else None.
+class MindsRoot:
+    """The resolved identity of the active minds env: the root name and its derived paths.
 
-    ``is_enabled`` is the one user-owned field in the minds-written provider
-    blocks (the providers panel's Disable toggle writes it), so rewrites carry
-    an existing boolean value over rather than re-pinning it.
+    A plain immutable class (not pydantic) so the pre-mngr-import layers can construct and pass it.
+    Resolve once per process entry point and pass explicitly to the ``mngr_settings`` functions.
     """
-    block = providers_section.get(provider_name)
-    if not isinstance(block, Mapping):
-        return None
-    is_enabled = block.get("is_enabled")
-    return is_enabled if isinstance(is_enabled, bool) else None
 
+    def __init__(self, root_name: str) -> None:
+        self._root_name = root_name
 
-def _ensure_mngr_settings(root_name: str) -> bool:
-    """Ensure the mngr settings.toml has minds-side overrides configured.
+    @classmethod
+    def from_environment(cls) -> "MindsRoot":
+        return cls(resolve_minds_root_name())
 
-    Returns ``True`` when the settings file was actually (re)written -- the
-    provider set visible to a running ``mngr observe`` changed, so callers
-    that hold a supervisor handle should bounce the observe child (mirroring
-    ``set_imbue_cloud_provider_for_account``'s return contract).
+    @property
+    def root_name(self) -> str:
+        return self._root_name
 
-    Disables the ``recursive`` plugin for every ``mngr`` subprocess minds
-    spawns. ``mngr_recursive``'s ``on_host_created`` hook injects the
-    calling user's local ``~/.claude/`` and ``~/.mngr/`` deploy files
-    into the workspace, which contradicts the contract that the repo
-    (whatever git URL/branch the user picked) is the full definition
-    of the workspace. minds runs inside its own ``MNGR_HOST_DIR``
-    profile, so flipping the plugin off here only affects
-    minds-spawned subprocesses; CLI-side mngr usage from other
-    host_dirs is unaffected.
+    @property
+    def data_dir(self) -> Path:
+        return minds_data_dir_for(self._root_name)
 
-    The TOML key under ``[plugins]`` must match the pluggy entry-point
-    name (``recursive``), not the package name (``mngr_recursive``).
-    ``mngr/libs/mngr/imbue/mngr/config/pre_readers.py`` reads section
-    names verbatim and ``pm.set_blocked`` matches by the exact
-    registered name.
+    @property
+    def mngr_host_dir(self) -> Path:
+        return mngr_host_dir_for(self._root_name)
 
-    Also tears down any vestige of the older "leased-host SSH dance":
-    a previous version of minds wrote a ``[providers.ssh]`` block here
-    pointing at a ``dynamic_hosts.toml`` populated by the lease flow.
-    The imbue_cloud provider plugin owns that path now (it talks to
-    the connector service directly, not through an SSH-provider side
-    channel), so the SSH provider block + dynamic_hosts.toml are pure
-    leak: stale entries in dynamic_hosts.toml caused ``mngr list``
-    discovery to time out trying to ssh-connect to long-destroyed VPS
-    IPs. We remove the section here so ``mngr list`` only fans out to
-    real providers, and delete the stale data file (and its associated
-    leased-host SSH key dir) so even direct readers see a clean slate.
+    @property
+    def mngr_prefix(self) -> str:
+        return mngr_prefix_for(self._root_name)
 
-    Skips silently when mngr hasn't been initialized in this host_dir
-    yet (no ``config.toml`` / no profile dir) -- there's nothing to
-    write to.
-    """
-    mngr_host_dir = mngr_host_dir_for(root_name)
-    root_config_path = mngr_host_dir / "config.toml"
-    if not root_config_path.exists():
-        return False
-    root_config = tomllib.loads(root_config_path.read_text())
-    profile_id = root_config.get("profile")
-    if not profile_id:
-        return False
-    settings_dir = mngr_host_dir / "profiles" / profile_id
-    if not settings_dir.exists():
-        return False
-    settings_path = settings_dir / "settings.toml"
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, MindsRoot) and other._root_name == self._root_name
 
-    if settings_path.exists():
-        existing = tomllib.loads(settings_path.read_text())
-        providers = existing.get("providers", {})
-        plugins = existing.get("plugins", {})
-        recursive_plugin = plugins.get("recursive", {})
-        default_imbue_cloud = providers.get(_IMBUE_CLOUD_BACKEND_NAME, {})
-        default_aws = providers.get(_AWS_BACKEND_NAME, {})
-        default_gcp = providers.get(_GCP_BACKEND_NAME, {})
-        default_azure = providers.get(_AZURE_BACKEND_NAME, {})
-        modal_provider = providers.get(_MODAL_PROVIDER_NAME, {})
-        if (
-            recursive_plugin.get("enabled") is False
-            and "ssh" not in providers
-            and default_imbue_cloud.get("backend") == _IMBUE_CLOUD_BACKEND_NAME
-            and default_imbue_cloud.get("is_enabled") is False
-            and default_aws.get("backend") == _AWS_BACKEND_NAME
-            and default_aws.get("is_enabled") is False
-            and default_gcp.get("backend") == _GCP_BACKEND_NAME
-            and default_gcp.get("is_enabled") is False
-            and default_azure.get("backend") == _AZURE_BACKEND_NAME
-            and default_azure.get("is_enabled") is False
-            and not any(name.startswith(_AWS_PROVIDER_NAME_PREFIX) for name in providers)
-            # The Modal (Direct) block must already be present AND persistent,
-            # else fall through and rewrite it. The is_persistent check matters:
-            # an older build wrote is_persistent=false, which makes Modal create
-            # an ephemeral app that nukes the sandbox the moment `mngr create`
-            # exits -- this catches + overwrites that stale value. is_enabled is
-            # deliberately NOT checked: it is the user-owned field (the providers
-            # panel's Disable toggle writes it), so a disabled block is a valid
-            # desired shape, not drift to correct.
-            and modal_provider.get("mode") == _MODAL_MODE_DIRECT
-            and modal_provider.get("is_persistent") is True
-        ):
-            # Already in the desired shape -- recursive disabled, no stale
-            # ssh provider section, default imbue_cloud + aws instances
-            # suppressed -- no need to rewrite + fsync.
-            _cleanup_legacy_dynamic_hosts(root_name)
-            return False
-        doc = tomlkit.loads(settings_path.read_text())
-    else:
-        doc = tomlkit.document()
+    def __hash__(self) -> int:
+        return hash(self._root_name)
 
-    providers_section = doc.setdefault("providers", tomlkit.table())
-
-    # Remove the legacy ``[providers.ssh]`` block, if present, so ``mngr list``
-    # discovery doesn't fan out to that provider's stale dynamic_hosts entries.
-    if "ssh" in providers_section:
-        del providers_section["ssh"]
-
-    # Suppress the default ``[providers.imbue_cloud]`` instance that
-    # ``get_all_provider_instances`` would otherwise auto-create from the
-    # registered backend name. Per-account ``[providers.imbue_cloud_<slug>]``
-    # entries (written on signin) carry the actual session keypairs and
-    # known_hosts; the un-suffixed default would race them and emit
-    # spurious "No host key in known_hosts" warnings on the same lease.
-    default_block = tomlkit.table()
-    default_block["backend"] = _IMBUE_CLOUD_BACKEND_NAME
-    default_block["is_enabled"] = False
-    providers_section[_IMBUE_CLOUD_BACKEND_NAME] = default_block
-
-    # Suppress the default ``[providers.aws]`` instance for the same reason: the
-    # registered ``aws`` backend would otherwise auto-create a region-less
-    # provider whose discovery fails every ``mngr list`` cycle ("credentials not
-    # configured" -- it has no default_region), logging a spurious warning. The
-    # usable providers are the per-region ``aws-<region>`` blocks below. This is
-    # written unconditionally (even with no AWS credentials), since the no-creds
-    # case is exactly when the region-less default would log on every cycle.
-    default_aws_block = tomlkit.table()
-    default_aws_block["backend"] = _AWS_BACKEND_NAME
-    default_aws_block["is_enabled"] = False
-    providers_section[_AWS_BACKEND_NAME] = default_aws_block
-
-    # Suppress the default ``[providers.gcp]`` / ``[providers.azure]`` instances
-    # for the same reason: their registered backends would auto-create
-    # credential-less default providers whose discovery fails every ``mngr
-    # list`` cycle. The usable instances are the bring-your-own-key
-    # ``byok-gcp-<slug>`` / ``byok-azure-<slug>`` account blocks.
-    for backend_name in (_GCP_BACKEND_NAME, _AZURE_BACKEND_NAME):
-        suppressed_block = tomlkit.table()
-        suppressed_block["backend"] = backend_name
-        suppressed_block["is_enabled"] = False
-        providers_section[backend_name] = suppressed_block
-
-    # Write one ``[providers.aws-<region>]`` block per configured region, so
-    # ``mngr create @host.aws-<region>`` and ``mngr list`` discovery both
-    # resolve the region-specific provider. Written whether or not AWS
-    # credentials exist: a credential-less region errors visibly in discovery
-    # (and the providers panel) instead of being silently absent.
-    # Remove any ambient ``[providers.aws-<region>]`` blocks earlier builds
-    # wrote (the machine-credential AWS path was a prototype; bring-your-own-key
-    # ``byok-aws-<slug>`` accounts are now the only AWS path in minds). Same
-    # legacy-cleanup shape as the ssh-provider removal above. mngr CLI users'
-    # own settings are unaffected -- this is minds' profile settings file.
-    for name in tuple(providers_section):
-        if name.startswith(_AWS_PROVIDER_NAME_PREFIX):
-            del providers_section[name]
-
-    # ``[providers.modal]`` (DIRECT) for the "Modal (1-day ephemeral) - Direct"
-    # compute option. Always written; uses the local Modal token at create time.
-    # As with the AWS blocks, a panel-toggled ``is_enabled`` is carried over
-    # rather than re-pinned, so a user's Disable survives the rewrite.
-    existing_modal_is_enabled = _existing_is_enabled(providers_section, _MODAL_PROVIDER_NAME)
-    providers_section[_MODAL_PROVIDER_NAME] = _build_modal_provider_block(
-        is_enabled=True if existing_modal_is_enabled is None else existing_modal_is_enabled,
-    )
-
-    plugins_section = doc.setdefault("plugins", tomlkit.table())
-    recursive_block = tomlkit.table()
-    recursive_block["enabled"] = False
-    plugins_section["recursive"] = recursive_block
-
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = settings_path.with_suffix(".tmp")
-    tmp_path.write_text(tomlkit.dumps(doc))
-    tmp_path.rename(settings_path)
-    logger.debug("Updated mngr settings at {} with minds-side overrides", settings_path)
-    _cleanup_legacy_dynamic_hosts(root_name)
-    return True
-
-
-def _cleanup_legacy_dynamic_hosts(root_name: str) -> None:
-    """Remove the stale ``ssh/dynamic_hosts.toml`` file + ``ssh/keys/leased_host/`` dir.
-
-    Both are vestigial: the imbue_cloud provider replaces the leased-host
-    SSH-provider mechanism entirely, but minds installations from before
-    that refactor still have these files lying around. The
-    ``dynamic_hosts.toml`` file in particular contains entries pointing
-    at long-destroyed VPS IPs, and any code path that reads it would
-    block on TCP timeouts. Best-effort: log + continue on any FS error.
-    """
-    data_dir = minds_data_dir_for(root_name)
-    legacy_paths = (
-        data_dir / "ssh" / "dynamic_hosts.toml",
-        data_dir / "ssh" / "keys" / "leased_host",
-    )
-    for path in legacy_paths:
-        if not path.exists():
-            continue
-        try:
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-        except OSError as e:
-            logger.warning("Could not remove legacy minds-leased-host artifact {}: {}", path, e)
-        else:
-            logger.info("Removed legacy minds-leased-host artifact {}", path)
+    def __repr__(self) -> str:
+        return f"MindsRoot({self._root_name!r})"
 
 
 def apply_bootstrap() -> None:
     """Set MNGR_HOST_DIR and MNGR_PREFIX in os.environ from MINDS_ROOT_NAME.
 
-    Must be called before any ``imbue.mngr.*`` module is imported. When
-    ``MINDS_ROOT_NAME`` is set to a valid value (matching
-    :data:`MINDS_ROOT_NAME_PATTERN`), the derived ``MNGR_HOST_DIR`` /
-    ``MNGR_PREFIX`` values unconditionally override any pre-existing
-    values -- otherwise an inherited ``MNGR_HOST_DIR`` from a parent
-    process (e.g. a Claude Code agent's tmux env) would silently win and
-    minds would read a different mngr settings.toml than the bootstrap
-    wrote to.
+    Must be called before any ``imbue.mngr.*`` module is imported.
+    When ``MINDS_ROOT_NAME`` is set to a valid value, the derived ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` values unconditionally override any pre-existing values -- otherwise an inherited ``MNGR_HOST_DIR`` from a parent process (e.g. a Claude Code agent's tmux env) would silently win and minds would read a different mngr settings.toml than the bootstrap wrote to.
 
-    When ``MINDS_ROOT_NAME`` is unset, this function leaves
-    ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` untouched -- the per-env-root
-    refactor moved env activation to an explicit ``minds env activate``
-    step, so an unactivated shell has nothing to seed. Callers that need
-    an activated env refuse explicitly (e.g. ``minds run``,
-    ``minds env deploy``); callers that only need the production data
-    dir (``~/.minds/``) handle that themselves via
-    :func:`mngr_host_dir_for` + :data:`DEFAULT_MINDS_ROOT_NAME`.
+    When ``MINDS_ROOT_NAME`` is unset, leaves ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` untouched -- env activation is an explicit ``minds env activate`` step, so an unactivated shell has nothing to seed.
+    Production-only entry points (the bundled Electron build) always set both ``MINDS_ROOT_NAME`` and the derived vars before invoking us, so an unset value here genuinely means "the user has not activated any env yet".
 
-    When ``MINDS_ROOT_NAME`` is set to a value that does not match
-    :data:`MINDS_ROOT_NAME_PATTERN` (e.g. a stale ``devminds`` shell
-    from before the refactor), :func:`resolve_minds_root_name` logs a
-    warning and returns the default -- we then export the default's
-    derived ``MNGR_*`` vars so downstream mngr calls have *some*
-    consistent host_dir to point at instead of half-honoring the bad
-    value.
+    When ``MINDS_ROOT_NAME`` is set to an invalid value, raises ``BootstrapError`` (via :func:`resolve_minds_root_name`); ``main.py`` turns that into a clean one-line error.
 
-    Also reconciles the imbue_cloud provider entries in mngr's
-    settings.toml against the persistent session list so a user with a
-    still-valid SuperTokens cookie always has a usable
-    ``[providers.imbue_cloud_<slug>]`` block for ``mngr create`` --
-    previously the entry was only written by a fresh signin event, so
-    any drift (older bootstrap bug, manual edit, deleted-then-recreated
-    settings.toml, etc.) left the user able to sign in but unable to
-    create a workspace until they explicitly signed out and back in.
+    The companion settings reconciliation (which must also precede any mngr import) lives in :func:`imbue.minds.mngr_settings.reconcile.ensure_mngr_settings_before_mngr_import`.
     """
     raw_value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR)
     if raw_value is None:
-        # Unactivated shell: leave MNGR_* alone. The ``mngr`` CLI's own
-        # defaults will land it on ``~/.mngr/`` if nothing's pre-set;
-        # production-only minds entry points (the bundled Electron build)
-        # always set both ``MINDS_ROOT_NAME`` and the derived vars before
-        # invoking us, so an unset value here genuinely means "the user
-        # has not activated any env yet".
         return
     root_name = resolve_minds_root_name()
     os.environ["MNGR_HOST_DIR"] = str(mngr_host_dir_for(root_name))
     os.environ["MNGR_PREFIX"] = mngr_prefix_for(root_name)
-    _ensure_mngr_settings(root_name)
-    # Provider reconciliation moved out of apply_bootstrap because it now
-    # requires the per-env connector URL; callers (i.e. `minds run`) invoke
-    # `reconcile_imbue_cloud_providers_from_sessions(connector_url)` after
-    # loading the client config.
-
-
-def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_name: str | None = None) -> bool:
-    """Re-register ``[providers.imbue_cloud_<slug>]`` for every active session.
-
-    Returns ``True`` when any settings write happened (the minds-side
-    overrides, or a per-account block), so a caller not already restarting
-    the observe process can bounce it. ``minds run`` restarts the latchkey
-    forward supervisor unconditionally right after this call, so it does not
-    need the flag today.
-
-    The mngr_imbue_cloud plugin owns the SuperTokens session list -- emails
-    live in ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``,
-    which mngr writes on every signin/signup/oauth and on signout. The
-    mngr-side provider-instance registration in settings.toml isn't
-    persistent the same way -- it's only written by the signin *event*,
-    which doesn't fire on cookie-resumed startups. So it's possible (and
-    was observed) for the on-disk state to drift to "user is signed in
-    per the plugin, but settings.toml has no
-    ``[providers.imbue_cloud_<email-slug>]`` block", at which point
-    ``mngr create my-agent@<host>.imbue_cloud_<slug>`` fails with
-    ``Unknown provider backend``.
-
-    Walking the plugin's ``accounts.json`` on every minds startup and
-    ensuring each email has a registered provider entry costs essentially
-    nothing (``set_imbue_cloud_provider_for_account`` is a no-op when the
-    entry already matches) and makes the bootstrap idempotent over
-    arbitrary settings.toml drift.
-
-    No-op when the accounts file doesn't exist yet (fresh install with no
-    signins).
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    # Same rationale as in ``set_imbue_cloud_provider_for_account``: the
-    # startup ``apply_bootstrap`` call no-ops on a freshly-created
-    # MINDS_ROOT_NAME (mngr profile dir doesn't exist yet). Re-run here
-    # so existing users who never re-signin still get the suppression
-    # block on their next minds startup.
-    is_modified = _ensure_mngr_settings(root_name)
-    accounts_path = _imbue_cloud_accounts_path(root_name)
-    if accounts_path is None or not accounts_path.is_file():
-        return is_modified
-    try:
-        raw = accounts_path.read_text()
-    except OSError as e:
-        logger.warning("Could not read imbue_cloud accounts index {}: {}", accounts_path, e)
-        return is_modified
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning("Malformed imbue_cloud accounts index {}: {}", accounts_path, e)
-        return is_modified
-    entries = data.get("entries") if isinstance(data, dict) else None
-    if not isinstance(entries, list):
-        return is_modified
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        email = entry.get("email")
-        if not isinstance(email, str) or not email:
-            continue
-        try:
-            # Reconcile only fills in missing blocks; it must not re-enable a
-            # provider that the user previously disabled via the providers
-            # panel. Re-enable happens only on an explicit signin event.
-            is_account_modified = set_imbue_cloud_provider_for_account(
-                email,
-                connector_url=connector_url,
-                root_name=root_name,
-                force_enable=False,
-            )
-            is_modified = is_modified or is_account_modified
-        except BootstrapError as e:
-            # Bad email format (e.g. ``""``) -- log and keep going so a
-            # single corrupt session entry doesn't block reconciliation
-            # for the others.
-            logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
-    return is_modified
-
-
-def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
-    """Return ``<mngr_host_dir>/profiles/<active-profile>``, or None if unresolved.
-
-    The active profile id lives in ``<mngr_host_dir>/config.toml`` under the
-    ``profile`` key and each profile's state lives at
-    ``<mngr_host_dir>/profiles/<profile>/``. Returns None when mngr hasn't been
-    initialized in this host_dir yet (no ``config.toml`` / no ``profile`` key) or
-    when the config can't be read. Resolution is inlined here (rather than imported
-    from mngr) so bootstrap stays free of any ``imbue.mngr.*`` import.
-    """
-    config_path = mngr_host_dir / "config.toml"
-    if not config_path.is_file():
-        return None
-    try:
-        config_data = tomllib.loads(config_path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as e:
-        logger.warning("Could not read mngr config {}: {}", config_path, e)
-        return None
-    profile_id = config_data.get("profile")
-    if not isinstance(profile_id, str) or not profile_id:
-        return None
-    return mngr_host_dir / "profiles" / profile_id
-
-
-def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
-    """Return the path to the plugin's ``accounts.json``, or None if no profile is set.
-
-    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` /
-    ``get_active_profile_dir``: the active profile id lives in
-    ``<host_dir>/config.toml`` and the accounts index lives at
-    ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
-    Inlined here so bootstrap stays free of the ``imbue.mngr_imbue_cloud``
-    import (which transitively pulls in mngr).
-    """
-    profile_dir = read_active_profile_dir(mngr_host_dir_for(root_name))
-    if profile_dir is None:
-        return None
-    return profile_dir / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
-
-
-_IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
-
-# Runtime knobs written into each per-account ``[providers.imbue_cloud_<slug>]``
-# block so the imbue_cloud slow (rebuild) path runs the agent container under
-# gVisor with the runsc hardening args. These mirror the default-workspace-template
-# ``[providers.ovh]`` bake settings; ``ImbueCloudProviderConfig`` (which extends
-# ``VpsProviderConfig``) forwards them onto the delegated vps_docker
-# provider, and ``install_gvisor_runtime`` also drives the slow path's SSH
-# host-setup so a leased host that lacks runsc has it installed before the
-# container is rebuilt under it.
-_IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
-_IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
-_IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
-
-# Backend name + container-hardening knobs written into each bring-your-own-key
-# ``[providers.byok-aws-<slug>]`` account block (the only AWS path in minds).
-# The gVisor/runsc settings mirror the default-workspace-template ``[providers.ovh]``
-# / ``[providers.vultr]`` bake settings so the EC2 outer host runs the agent in a
-# runsc-hardened container; the matching ``docker run`` start args live in the
-# template ``[create_templates.aws]``.
-_AWS_BACKEND_NAME: Final[str] = "aws"
-_GCP_BACKEND_NAME: Final[str] = "gcp"
-_AZURE_BACKEND_NAME: Final[str] = "azure"
-_AWS_DOCKER_RUNTIME: Final[str] = "runsc"
-_AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
-_AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
-
-# The single ``[providers.modal]`` instance for "Modal (1-day ephemeral)" (DIRECT
-# mode): the local machine authenticates to Modal with its own token
-# (``modal token new``). Written unconditionally at startup so the option works
-# as soon as a token exists; if none is present the provider just reports
-# unavailable during discovery. Sizing (2 CPU / 4 GB) and the 24h sandbox timeout
-# come from the ModalProviderConfig defaults; only ``is_persistent`` is forced.
-_MODAL_BACKEND_NAME: Final[str] = "modal"
-_MODAL_PROVIDER_NAME: Final[str] = "modal"
-_MODAL_MODE_DIRECT: Final[str] = "DIRECT"
-
-
-def _build_modal_provider_block(is_enabled: bool) -> Table:
-    """Build the ``[providers.modal]`` block (DIRECT mode).
-
-    ``is_persistent=True`` is set EXPLICITLY (not inherited): each ``mngr create``
-    is a one-shot subprocess, and a non-persistent (ephemeral) Modal app would
-    terminate the sandbox the instant that subprocess exits. Setting it explicitly
-    also lets the idempotency check below detect (and overwrite) a stale
-    ``is_persistent = false`` left by an older build. Sizing + 24h sandbox timeout
-    come from the ModalProviderConfig defaults. ``is_enabled`` is the user-owned
-    field: callers pass the existing value (or True for a fresh block) so a
-    panel-toggled Disable is never reset by a rewrite.
-    """
-    block = tomlkit.table()
-    block["backend"] = _MODAL_BACKEND_NAME
-    block["mode"] = _MODAL_MODE_DIRECT
-    block["is_enabled"] = is_enabled
-    block["is_persistent"] = True
-    return block
-
-
-# EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
-# 2 GB) is too small for the full default-workspace-template build (uv sync + npm
-# ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).
-_AWS_DEFAULT_INSTANCE_TYPE: Final[str] = "t3.large"
-# Mount /run as a tmpfs in the AWS workspace container. mngr_aws leaves the
-# container rootfs (and thus /run) on gVisor's gofer-backed 9p filesystem, which
-# returns EOPNOTSUPP for os.link() of a socket inode. supervisord installs its
-# control socket via a hard link (bind a temp socket, then os.link it into place
-# at /var/run/supervisor.sock); on AWS that link fails, supervisord misreads it
-# as a stale socket and loops forever ("Unlinking stale socket") without ever
-# starting system_interface / the browser service -- so the workspace reports
-# "unresponsive". A tmpfs /run supports the hard link (verified: os.link of a
-# socket succeeds on a tmpfs but fails on the gofer rootfs), so the control
-# socket comes up. The ovh/vultr/imbue_cloud paths already get a tmpfs /run via
-# their host setup, which is why this only bites AWS.
-_AWS_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--tmpfs", "/run")
-
-
-class BootstrapError(ValueError):
-    """Raised when minds bootstrap can't compute a derived value (e.g. a slug from an empty email).
-
-    Defined locally instead of importing ``minds.errors`` because this
-    module has to stay free of any ``imbue.mngr.*`` / ``click`` imports
-    (see the module docstring).
-    """
-
-
-def _slugify_imbue_cloud_account(email: str) -> str:
-    """Mirror the plugin's ``slugify_account``.
-
-    Inlined so this module stays mngr-free (it has to be importable before
-    ``imbue.mngr`` is on sys.path).
-    """
-    lowered = email.strip().lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
-    if not slug:
-        raise BootstrapError(f"Cannot slugify imbue_cloud account email: {email!r}")
-    return slug
-
-
-def imbue_cloud_provider_name_for_account(email: str) -> str:
-    """Return the provider instance name minds writes for ``email``."""
-    return f"imbue_cloud_{_slugify_imbue_cloud_account(email)}"
-
-
-def _resolve_active_settings_path(root_name: str) -> Path | None:
-    """Locate the active mngr settings.toml under the minds host_dir.
-
-    Returns ``None`` if mngr hasn't been initialized in this host_dir yet
-    (e.g. minds was just installed and no command has materialized
-    ``config.toml`` / a profile dir). Callers should treat ``None`` as
-    "skip silently" since there's nothing useful to write yet.
-    """
-    settings_dir = read_active_profile_dir(mngr_host_dir_for(root_name))
-    if settings_dir is None or not settings_dir.exists():
-        return None
-    return settings_dir / "settings.toml"
-
-
-def _atomic_write_settings(settings_path: Path, doc: tomlkit.TOMLDocument) -> None:
-    """Write ``doc`` to ``settings_path`` via a tmp-file + rename.
-
-    Atomic so a concurrent reader never sees a half-written file.
-    """
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = settings_path.with_suffix(".tmp")
-    tmp_path.write_text(tomlkit.dumps(doc))
-    tmp_path.rename(settings_path)
-
-
-def set_imbue_cloud_provider_for_account(
-    email: str,
-    *,
-    connector_url: str,
-    root_name: str | None = None,
-    force_enable: bool = True,
-) -> bool:
-    """Register ``[providers.imbue_cloud_<slug>]`` in mngr's settings.toml.
-
-    Called by minds when a SuperTokens session for ``email`` is created
-    (signin/signup/oauth-success) and from the bootstrap reconcile. Idempotent:
-    a no-op if an equivalent entry already exists.
-
-    ``connector_url`` is the URL of the ``remote_service_connector`` the
-    provider should talk to. It is written into the provider block as
-    ``connector_url`` so the ``mngr_imbue_cloud`` plugin no longer needs a
-    baked-in default. Callers (i.e. ``minds run``) source this from the
-    loaded ``ClientEnvConfig``.
-
-    When ``force_enable`` is True (signin events), ``is_enabled`` is set to
-    True even if the block was previously disabled (e.g. via the providers
-    panel's Disable button). When False (bootstrap reconcile on a returning
-    user), any pre-existing ``is_enabled`` value is preserved so an account
-    the user previously disabled stays disabled until they sign in again.
-
-    Returns ``True`` when the file was modified, so callers know whether
-    to bounce ``mngr observe`` (the running process needs a restart to
-    see the new provider instance).
-
-    Always (re-)runs :func:`_ensure_mngr_settings` before touching the
-    per-account block. ``apply_bootstrap`` calls ``_ensure_mngr_settings``
-    at minds-startup, but for a freshly-created ``MINDS_ROOT_NAME`` the
-    mngr profile dir doesn't exist yet at that point, so the call
-    silently no-ops. By the time a signin fires this function, mngr has
-    been initialized (the in-process ``mngr forward`` subprocess does
-    that), so the second call lands the suppression block + recursive-
-    disable that the first call missed. Without this, the auto-created
-    default ``[providers.imbue_cloud]`` instance trips every
-    ``mngr observe`` cycle with ``MissingConnectorUrlError`` and the
-    first ``mngr create`` against this env fails outright.
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    # Fold the minds-side-overrides write into the returned "modified" flag: if
-    # this call (rather than the startup bootstrap) is what first landed the
-    # suppression/AWS blocks, the observe process needs a bounce for them too.
-    is_settings_modified = _ensure_mngr_settings(root_name)
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None:
-        return is_settings_modified
-    provider_name = imbue_cloud_provider_name_for_account(email)
-    if settings_path.exists():
-        doc = tomlkit.loads(settings_path.read_text())
-    else:
-        doc = tomlkit.document()
-    providers = doc.setdefault("providers", tomlkit.table())
-    existing = providers.get(provider_name)
-    existing_is_enabled = existing.get("is_enabled") if isinstance(existing, dict) else None
-    desired_is_enabled = True if force_enable else existing_is_enabled
-    if (
-        isinstance(existing, dict)
-        and existing.get("backend") == _IMBUE_CLOUD_BACKEND_NAME
-        and existing.get("account") == email
-        and existing.get("connector_url") == connector_url
-        and existing_is_enabled == desired_is_enabled
-        and existing.get("docker_runtime") == _IMBUE_CLOUD_DOCKER_RUNTIME
-        and existing.get("install_gvisor_runtime") == _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
-        and existing.get("default_start_args") == list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
-    ):
-        return is_settings_modified
-    new_block = tomlkit.table()
-    new_block["backend"] = _IMBUE_CLOUD_BACKEND_NAME
-    new_block["account"] = email
-    new_block["connector_url"] = connector_url
-    if desired_is_enabled is not None:
-        new_block["is_enabled"] = desired_is_enabled
-    # Run the rebuilt agent container under gVisor with the runsc hardening args
-    # (see the module constants above).
-    new_block["docker_runtime"] = _IMBUE_CLOUD_DOCKER_RUNTIME
-    new_block["install_gvisor_runtime"] = _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
-    new_block["default_start_args"] = list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
-    providers[provider_name] = new_block
-    _atomic_write_settings(settings_path, doc)
-    logger.info("imbue_cloud provider {} registered in {}", provider_name, settings_path)
-    return True
-
-
-def is_imbue_cloud_provider_enabled_for_account(email: str, *, root_name: str | None = None) -> bool:
-    """Return whether ``[providers.imbue_cloud_<slug>]`` is currently enabled.
-
-    Reads the ``is_enabled`` field from the active mngr settings.toml so
-    the desktop UI can render "Signed out" on a chip whose provider the
-    user disabled via the providers panel. Treats a missing entry or a
-    missing ``is_enabled`` field as enabled (per mngr's default), and
-    returns True when the settings file can't be located so the UI never
-    erroneously claims an account is signed out before the bootstrap
-    has finished writing the block.
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None or not settings_path.exists():
-        return True
-    try:
-        provider_name = imbue_cloud_provider_name_for_account(email)
-    except BootstrapError:
-        return True
-    parsed = tomllib.loads(settings_path.read_text())
-    providers = parsed.get("providers")
-    if not isinstance(providers, dict):
-        return True
-    block = providers.get(provider_name)
-    if not isinstance(block, dict):
-        return True
-    is_enabled = block.get("is_enabled", True)
-    return bool(is_enabled)
-
-
-def list_disabled_provider_names(*, root_name: str | None = None) -> list[str]:
-    """Return provider names that minds' active settings file marks ``is_enabled = false``.
-
-    Used by the providers panel to enumerate the disabled set (which discovery
-    skips and so are absent from the per-provider discovery snapshots). Reads only
-    minds' active settings file -- providers defined only in mngr's own
-    settings.toml with is_enabled=false are not surfaced here. Returns an
-    empty list when the file does not exist yet (fresh install).
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None or not settings_path.exists():
-        return []
-    parsed = tomllib.loads(settings_path.read_text())
-    providers = parsed.get("providers")
-    if not isinstance(providers, dict):
-        return []
-    disabled: list[str] = []
-    for name, block in providers.items():
-        if isinstance(block, dict) and block.get("is_enabled") is False:
-            disabled.append(name)
-    return sorted(disabled)
-
-
-def set_provider_is_enabled(provider_name: str, is_enabled: bool, *, root_name: str | None = None) -> bool:
-    """Set ``is_enabled`` for the named provider in minds' active settings file.
-
-    Generic over any provider name -- used by minds' providers panel toggle to
-    let the user disable an errored provider (silencing its noise) or re-enable
-    a previously-disabled one. Always writes to minds' active settings file.
-    If ``[providers.<provider_name>]`` does not exist there, creates it with
-    just ``is_enabled = <is_enabled>`` as an override on top of mngr's merged
-    config. Enable writes ``is_enabled = true`` explicitly (symmetric with
-    Disable).
-
-    Idempotent: returns ``True`` only when the file was actually modified.
-    Returns ``False`` (and does nothing) when the minds root is not yet set up
-    (no active settings file path can be resolved).
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None:
-        return False
-    if settings_path.exists():
-        doc = tomlkit.loads(settings_path.read_text())
-    else:
-        doc = tomlkit.document()
-    providers = doc.get("providers")
-    if not isinstance(providers, dict):
-        providers = tomlkit.table()
-        doc["providers"] = providers
-    existing = providers.get(provider_name)
-    if not isinstance(existing, dict):
-        # Block doesn't exist yet -- create it with just is_enabled.
-        new_block = tomlkit.table()
-        new_block["is_enabled"] = is_enabled
-        providers[provider_name] = new_block
-        _atomic_write_settings(settings_path, doc)
-        logger.info("Created provider block for {} with is_enabled={} in {}", provider_name, is_enabled, settings_path)
-        return True
-    if existing.get("is_enabled") == is_enabled:
-        return False
-    existing["is_enabled"] = is_enabled
-    _atomic_write_settings(settings_path, doc)
-    logger.info("Set provider {} is_enabled={} in {}", provider_name, is_enabled, settings_path)
-    return True
-
-
-def unset_imbue_cloud_provider_for_account(email: str, *, root_name: str | None = None) -> bool:
-    """Remove ``[providers.imbue_cloud_<slug>]`` from mngr's settings.toml.
-
-    Called by minds on signout. Idempotent: a no-op if no such entry
-    exists. Returns ``True`` when the file was modified.
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None or not settings_path.exists():
-        return False
-    provider_name = imbue_cloud_provider_name_for_account(email)
-    doc = tomlkit.loads(settings_path.read_text())
-    providers = doc.get("providers")
-    if not isinstance(providers, dict) or provider_name not in providers:
-        return False
-    del providers[provider_name]
-    _atomic_write_settings(settings_path, doc)
-    logger.info("imbue_cloud provider {} removed from {}", provider_name, settings_path)
-    return True
-
-
-# -- Bring-your-own-key cloud accounts (pasted credentials) --
-#
-# A "cloud account" is one ``[providers.byok-<backend>-<slug>]`` block in the
-# active settings.toml, holding the user's pasted credentials plus the same
-# hardening knobs the ambient per-region blocks get. The ``byok-`` prefix keeps
-# these outside the boot reconciler's ``aws-*`` legacy cleanup (which deletes
-# that prefix on every boot), so accounts survive restarts. The display name is
-# derived from the block-name slug; no separate alias store exists
-# (``ProviderInstanceConfig`` forbids unknown fields on the block itself).
-_BYOK_PROVIDER_NAME_PREFIX: Final[str] = "byok-"
-_BYOK_SUPPORTED_BACKENDS: Final[tuple[str, ...]] = ("aws", "gcp", "azure")
-
-# The bring-your-own-key cloud-accounts feature ships dark: the create-page UI
-# and the account routes stay hidden until this env var is ``"1"``. It is set by
-# the Electron shell (``env`` block in ``electron/backend.js``) for opted-in
-# builds, or exported ambiently for dev -- mirroring how ``SKIP_AUTH`` is read.
-_BYOK_CLOUDS_FEATURE_FLAG_ENV: Final[str] = "FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS"
-
-
-def is_bring_your_own_cloud_enabled() -> bool:
-    """Whether the bring-your-own-key cloud-accounts feature is turned on (off by default)."""
-    return os.getenv(_BYOK_CLOUDS_FEATURE_FLAG_ENV, "0") == "1"
-
-
-def _slugify_cloud_account_alias(alias: str) -> str:
-    """Slugify an alias for use in the provider block name; raises on an empty result."""
-    slug = re.sub(r"[^a-z0-9]+", "-", alias.strip().lower()).strip("-")
-    if not slug:
-        raise BootstrapError(f"Alias {alias!r} contains no usable characters")
-    return slug
-
-
-def cloud_account_provider_name(backend: str, alias: str) -> str:
-    """Return the provider block name for a new cloud account (``byok-<backend>-<slug>``)."""
-    return f"{_BYOK_PROVIDER_NAME_PREFIX}{backend}-{_slugify_cloud_account_alias(alias)}"
-
-
-def set_cloud_account_provider(
-    alias: str,
-    backend: str,
-    credentials: Mapping[str, str],
-    region: str,
-    *,
-    root_name: str | None = None,
-) -> str:
-    """Register a bring-your-own-key cloud account as ``[providers.byok-<backend>-<slug>]``.
-
-    ``credentials`` are the backend's pasted-credential config fields verbatim
-    (AWS: ``aws_access_key_id`` / ``aws_secret_access_key`` / optionally
-    ``aws_session_token``); they land as plaintext TOML the same way the
-    imbue_cloud session store persists its secrets (0600-class local files).
-    The block also pins the minds workspace shape (instance type + gVisor
-    hardening) exactly like the ambient ``aws-<region>`` blocks. Returns the
-    block name (the mngr provider-instance name creates target).
-
-    Raises ``BootstrapError`` for an unsupported backend, an unusable alias, a
-    duplicate account name, or an uninitialized mngr profile.
-    """
-    if backend not in _BYOK_SUPPORTED_BACKENDS:
-        raise BootstrapError(f"Unsupported cloud account backend {backend!r} (supported: {_BYOK_SUPPORTED_BACKENDS})")
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    _ensure_mngr_settings(root_name)
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None:
-        raise BootstrapError("mngr is not initialized yet; cannot register a cloud account")
-    provider_name = cloud_account_provider_name(backend, alias)
-    doc = tomlkit.loads(settings_path.read_text()) if settings_path.exists() else tomlkit.document()
-    providers = doc.setdefault("providers", tomlkit.table())
-    if provider_name in providers:
-        raise BootstrapError(f"A cloud account named {alias!r} already exists ({provider_name})")
-    block = tomlkit.table()
-    block["backend"] = backend
-    # Per-backend placement + shape. AWS keeps the gVisor hardening knobs the
-    # ambient ``aws-<region>`` blocks get; GCP / Azure run the providers'
-    # default docker runtime (the FCT gcp/azure templates' hardening args are
-    # runtime-agnostic). GCE is zonal, so the GCP "region" value is a zone.
-    if backend == "aws":
-        block["default_region"] = region
-        block["default_instance_type"] = _AWS_DEFAULT_INSTANCE_TYPE
-        block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
-        block["docker_runtime"] = _AWS_DOCKER_RUNTIME
-        block["default_start_args"] = list(_AWS_DEFAULT_START_ARGS)
-    elif backend == "gcp":
-        block["default_zone"] = region
-        block["default_machine_type"] = DEFAULT_GCP_MACHINE_TYPE
-    else:
-        block["default_region"] = region
-        block["default_vm_size"] = DEFAULT_AZURE_VM_SIZE
-        # Azure's scaffolding (resource group / vnet / NSG) is region-locked, so
-        # each account entry is pinned to its region for life and gets its OWN
-        # resource group (named per entry + region). A user who wants another
-        # region adds another entry (same keys) -- the per-entry group names let
-        # them coexist with no cross-region conflicts.
-        block["resource_group"] = f"{provider_name}-{region}"
-    for key, value in credentials.items():
-        if value:
-            block[key] = value
-    providers[provider_name] = block
-    _atomic_write_settings(settings_path, doc)
-    logger.info("Cloud account {} ({}) registered in {}", provider_name, backend, settings_path)
-    return provider_name
-
-
-def list_cloud_account_providers(*, root_name: str | None = None) -> list[dict[str, str]]:
-    """List registered cloud accounts: ``{name, alias, backend, region, identifier}`` each.
-
-    ``identifier`` is a masked, display-safe hint of which credential the
-    account holds (e.g. ``AKIA…F5X2``); never the secret. Returns ``[]`` when
-    mngr isn't initialized yet or no accounts exist.
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None or not settings_path.exists():
-        return []
-    parsed = tomllib.loads(settings_path.read_text())
-    providers = parsed.get("providers")
-    if not isinstance(providers, dict):
-        return []
-    accounts: list[dict[str, str]] = []
-    for raw_name, raw_block in sorted(providers.items()):
-        # ``isinstance(providers, dict)`` narrows only to dict[object, object];
-        # re-establish str keys / dict blocks for the type checker (tomllib
-        # guarantees str keys at runtime).
-        name = str(raw_name)
-        if not name.startswith(_BYOK_PROVIDER_NAME_PREFIX) or not isinstance(raw_block, dict):
-            continue
-        block: dict[str, object] = {str(key): value for key, value in raw_block.items()}
-        accounts.append(
-            {
-                "name": name,
-                # Display name = the slug of the user's chosen alias (the part
-                # after ``byok-<backend>-``); no separate alias store exists.
-                "alias": name.split("-", 2)[2] if name.count("-") >= 2 else name,
-                "backend": str(block.get("backend", "")),
-                # GCE is zonal: the GCP block pins default_zone, not default_region.
-                "region": str(block.get("default_region") or block.get("default_zone") or ""),
-                "identifier": _cloud_account_identifier(block),
-            }
-        )
-    return accounts
-
-
-def _cloud_account_identifier(block: Mapping[str, object]) -> str:
-    """Masked, display-safe credential hint per backend; never a secret.
-
-    AWS: the access key id masked to its ends. GCP: the service account email
-    embedded in the pasted key JSON (an identifier, not a secret). Azure: the
-    service principal's client id (a plain identifier).
-    """
-    backend = str(block.get("backend", ""))
-    if backend == "aws":
-        key_id = str(block.get("aws_access_key_id", ""))
-        return f"{key_id[:4]}…{key_id[-4:]}" if len(key_id) >= 12 else key_id
-    if backend == "gcp":
-        try:
-            key_info = json.loads(str(block.get("service_account_key_json", "")))
-        except json.JSONDecodeError as e:
-            logger.warning("Cloud account block holds unparseable service_account_key_json: {}", e)
-            return ""
-        return str(key_info.get("client_email", "")) if isinstance(key_info, dict) else ""
-    if backend == "azure":
-        return str(block.get("client_id", ""))
-    return ""
-
-
-def delete_cloud_account_provider(provider_name: str, *, root_name: str | None = None) -> bool:
-    """Remove a cloud account block (and its alias) from minds' settings.
-
-    Only deletes ``byok-*`` blocks -- never the ambient/reconciled providers.
-    Cloud-side resources (security group, state bucket) are deliberately left
-    in place; ``mngr <backend> cleanup`` is the explicit teardown for those.
-    Returns ``True`` when the file was modified.
-    """
-    if not provider_name.startswith(_BYOK_PROVIDER_NAME_PREFIX):
-        return False
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None or not settings_path.exists():
-        return False
-    doc = tomlkit.loads(settings_path.read_text())
-    providers = doc.get("providers")
-    if not isinstance(providers, dict) or provider_name not in providers:
-        return False
-    del providers[provider_name]
-    _atomic_write_settings(settings_path, doc)
-    logger.info("Cloud account {} removed from {}", provider_name, settings_path)
-    return True

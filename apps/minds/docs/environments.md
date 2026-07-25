@@ -38,11 +38,12 @@ dev envs) the per-env `client.toml` + chmod-0600 `secrets.toml`. Two
 envs activated in parallel shells never see each other's state.
 
 `MINDS_ROOT_NAME` must match the regex `minds(-<env-name>)?` where
-`<env-name>` is the same shape as `DevEnvName`
-(`[a-z0-9][a-z0-9_-]{0,38}[a-z0-9]`). Legacy values (e.g. a stale
-`MINDS_ROOT_NAME=devminds` from before the per-env-data-roots refactor)
-are silently treated as unset and the bootstrap falls back to the
-production root with a warning -- the operator can clean up via
+`<env-name>` is `staging` or a dynamic env name of the same shape as
+`DevEnvName` (`(dev|ci)-[a-z0-9][a-z0-9_-]{0,34}[a-z0-9]`). Values that
+are set but do not match (e.g. a stale `MINDS_ROOT_NAME=devminds` from
+before the per-env-data-roots refactor) make every `minds` command fail
+with a one-line error; run `unset MINDS_ROOT_NAME` and then re-activate
+a valid env. Leftover legacy data can be cleaned up via
 `rm -rf ~/.devminds/` when convenient.
 
 ## Activation is the central UX

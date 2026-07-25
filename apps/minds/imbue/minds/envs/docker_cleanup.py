@@ -30,11 +30,11 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
-from imbue.minds.bootstrap import read_active_profile_dir
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
+from imbue.minds.mngr_settings.profile_paths import read_active_profile_dir
 
 # Mirrors imbue.mngr.config.data_types.USER_ID_FILENAME. Inlined so this
 # module stays free of any imbue.mngr import; see the module docstring.

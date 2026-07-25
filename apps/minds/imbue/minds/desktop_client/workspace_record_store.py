@@ -42,7 +42,6 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.imbue_common.secret_wrapping import decrypt_secrets
 from imbue.imbue_common.secret_wrapping import encrypt_secrets
-from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import dek_store
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -53,6 +52,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.errors import WorkspaceSyncError
+from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName

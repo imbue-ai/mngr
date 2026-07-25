@@ -29,11 +29,7 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
-from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
-from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
-from imbue.minds.bootstrap import list_cloud_account_providers
-from imbue.minds.bootstrap import list_disabled_provider_names
+from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
@@ -150,6 +146,11 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceSyncError
+from imbue.minds.mngr_settings.byok_accounts import is_bring_your_own_cloud_enabled
+from imbue.minds.mngr_settings.byok_accounts import list_cloud_account_providers
+from imbue.minds.mngr_settings.enablement import list_disabled_provider_names
+from imbue.minds.mngr_settings.imbue_cloud_accounts import is_imbue_cloud_provider_enabled_for_account
+from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -877,7 +878,7 @@ def _compute_cloud_tile_state(
     - ``"unreachable"``: a healthy snapshot newer than the key lacks the host
       (the lease expired/was released, or the key does not grant access).
     """
-    if not is_imbue_cloud_provider_enabled_for_account(account_email):
+    if not is_imbue_cloud_provider_enabled_for_account(account_email, root=MindsRoot.from_environment()):
         return "", None
     error_detail = record_store.ssh_material_errors().get(record.agent_id)
     if error_detail is not None:
@@ -1097,7 +1098,7 @@ def _handle_landing_page() -> Response:
         default_account_id=default_account_id or "",
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
-        cloud_accounts=list_cloud_account_providers(),
+        cloud_accounts=list_cloud_account_providers(root=MindsRoot.from_environment()),
         byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
         # A deep-link that pre-fills a repo/branch wants those advanced fields
         # visible; otherwise start on the simple preset cards.
@@ -1186,7 +1187,7 @@ def _handle_create_page() -> Response:
         default_account_id=default_account_id or "",
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
-        cloud_accounts=list_cloud_account_providers(),
+        cloud_accounts=list_cloud_account_providers(root=MindsRoot.from_environment()),
         byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
         # A deep-link that pre-fills a repo/branch wants those advanced fields
         # visible; otherwise start on the simple preset cards.
@@ -1751,7 +1752,7 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
         }
     providers = backend_resolver.list_providers()
     errored = backend_resolver.get_provider_errors()
-    disabled_names = list_disabled_provider_names()
+    disabled_names = list_disabled_provider_names(root=MindsRoot.from_environment())
     last_event_at, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
 
     # Active (non-destroyed) workspace count per provider, for the panel's
@@ -2125,7 +2126,10 @@ def _handle_accounts_page(plan_error: str | None = None) -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     enabled_by_user_id = {
-        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
+        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(
+            str(account.email), root=MindsRoot.from_environment()
+        )
+        for account in accounts
     }
     html = render_accounts_page(
         accounts=accounts,
@@ -2422,7 +2426,10 @@ def _handle_accounts_modal() -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     enabled_by_user_id = {
-        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
+        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(
+            str(account.email), root=MindsRoot.from_environment()
+        )
+        for account in accounts
     }
     html = render_accounts_modal_page(
         accounts=accounts,

@@ -33,8 +33,8 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.bootstrap import minds_data_dir_for
-from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
@@ -93,6 +93,7 @@ from imbue.minds.desktop_client.workspace_record_store import read_device_id
 from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import start_active_env_state_container
+from imbue.minds.mngr_settings.imbue_cloud_accounts import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
@@ -255,7 +256,7 @@ def run(
     # Its "settings modified" return is deliberately unused: the latchkey
     # forward supervisor is restarted unconditionally below, so any provider-set
     # change written here is picked up by the fresh observe process.
-    reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
+    reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root=MindsRoot(root_name))
 
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
