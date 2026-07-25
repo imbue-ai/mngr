@@ -679,6 +679,51 @@ def dismiss_consent_if_present(page: Page, *, timeout: float = 8_000) -> bool:
     return False
 
 
+def _loopback_key(url: str) -> tuple[int | None, str]:
+    """(port, path) for a loopback URL -- the parts that identify the page.
+
+    The host is deliberately dropped: pages use ``localhost`` while
+    ``wait_backend_url`` reports ``127.0.0.1``, so the two spellings of the same
+    address are not comparable as strings.
+    """
+    parts = urllib.parse.urlsplit(url)
+    return (parts.port, parts.path.rstrip("/") or "/")
+
+
+def wait_for_live_url(page: Page, expected: str, *, timeout: float = 30.0) -> None:
+    """Wait until `page` is actually on `expected`, read from the document.
+
+    Not ``page.wait_for_url``: that matches against Playwright's cached URL,
+    which main-process navigations do not reliably update (see ``live_url``), so
+    it can time out on a page that arrived long ago.
+
+    Compared by (port, path), because the two spellings of loopback are not
+    interchangeable as strings: pages use ``localhost`` while
+    ``wait_backend_url`` reports ``127.0.0.1``.
+    """
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _loopback_key(live_url(page)) == _loopback_key(expected):
+            return
+        _sleep(0.25)
+    raise E2EFailure(f"page never reached {expected!r}; live url is {live_url(page)!r}")
+
+
+def click_in_chrome(chrome: Page, selector: str, *, timeout: float = 30_000) -> None:
+    """Click `selector` on the chrome view without depending on its geometry.
+
+    main.js collapses the chrome view to the titlebar strip while a workspace is
+    displayed, so its page can lay out with no usable bounding box. Playwright's
+    ordinary click then never satisfies its actionability wait -- the element is
+    present and correct, but has nothing to hit-test against. Dispatching the
+    event drives the same handler the user's click would.
+    """
+    target = chrome.locator(selector).first
+    target.wait_for(state="attached", timeout=timeout)
+    target.dispatch_event("click")
+
+
 def all_pages(ctx: BrowserContext) -> list[Page]:
     return list(ctx.pages)
 
@@ -821,17 +866,9 @@ def open_workspace_via_tile(
     # The consent screen can be up on a freshly-navigated home page, and it
     # covers the tiles entirely.
     dismiss_consent_if_present(chrome, timeout=3_000)
-    tile = chrome.locator(f'text="{host_name}"').first
-    # ``attached`` for the same reason the both-tiles check uses it: the chrome
-    # view can be collapsed to the titlebar strip while a workspace is displayed,
-    # leaving its page without a usable bounding box. That also rules out
-    # ordinary clicking -- Playwright's actionability wait (and
-    # scroll_into_view_if_needed) require geometry the collapsed view cannot
-    # provide. Dispatch the click event directly: what this step exercises is the
-    # tile's handler -- /goto/<agent_id>/ through the navigate-content bridge --
-    # not the pixel position it was clicked at.
-    tile.wait_for(state="attached", timeout=10_000)
-    tile.dispatch_event("click")
+    # What this step exercises is the tile's handler -- /goto/<agent_id>/ through
+    # the navigate-content bridge -- not the pixel it was clicked at.
+    click_in_chrome(chrome, f'text="{host_name}"', timeout=10_000)
     return wait_for_chat_window(ctx, label=label, timeout=60.0, host=host)
 
 
@@ -1650,7 +1687,9 @@ def run_e2e() -> int:
             # load can miss it and then spend the whole budget waiting for tiles
             # the dialog is covering.
             tiles_deadline = time.time() + 60
-            while True:
+            tiles_exc: PlaywrightError | None = None
+            tiles_found = False
+            while not tiles_found and time.time() < tiles_deadline:
                 dismiss_consent_if_present(win, timeout=2_000)
                 try:
                     for tile_name in (HOST_NAME, HOST_NAME_2):
@@ -1662,17 +1701,18 @@ def run_e2e() -> int:
                         # an exact-text element per host name, which the titlebar
                         # breadcrumb cannot satisfy for both.
                         win.locator(f'text="{tile_name}"').first.wait_for(state="attached", timeout=5_000)
-                    break
-                except Exception as tiles_exc:
-                    if time.time() >= tiles_deadline:
-                        snap_page(win, "99-home-tiles-missing")
-                        body = ""
-                        with contextlib.suppress(Exception):
-                            body = win.evaluate("document.body.innerText")[:400]
-                        raise E2EFailure(
-                            f"home page never showed both tiles ({HOST_NAME!r}, {HOST_NAME_2!r}); "
-                            f"url={live_url(win)!r} body={body!r}"
-                        ) from tiles_exc
+                    tiles_found = True
+                except PlaywrightError as exc:
+                    tiles_exc = exc
+            if not tiles_found:
+                snap_page(win, "99-home-tiles-missing")
+                body = ""
+                with contextlib.suppress(Exception):
+                    body = win.evaluate("document.body.innerText")[:400]
+                raise E2EFailure(
+                    f"home page never showed both tiles ({HOST_NAME!r}, {HOST_NAME_2!r}); "
+                    f"url={live_url(win)!r} body={body!r}"
+                ) from tiles_exc
             snap_page(win, "17-home-both-tiles")
             logger.info("home page shows both tiles: {} and {}", HOST_NAME, HOST_NAME_2)
 
@@ -1750,14 +1790,14 @@ def run_e2e() -> int:
             win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
             snap_page(win, "18-w2-settings-page")
 
-            # Iter 14 (Back to workspaces link): real users navigate back from
-            # settings via the top-level link without ever opening the
-            # destroy modal. The template renders it as ``&larr; Back to
-            # workspaces`` (a left-arrow glyph + the phrase), so an exact
-            # text= match for the phrase alone won't find it. Match by
-            # href= on the wrapping Link instead.
-            win.click('a[href="/"]:has-text("Back to workspaces")')
-            win.wait_for_url(origin + "/", timeout=10_000)
+            # Iter 14 (navigate back from settings): real users leave the
+            # workspace settings screen without ever opening the destroy modal.
+            # They do it through the titlebar's Home crumb -- WorkspaceSettings
+            # has no in-page "Back to workspaces" link; that lived on the
+            # app-level Settings page and was dropped from the workspace one
+            # when the breadcrumb titlebar took over navigation (64e92ec9a7).
+            click_in_chrome(win, "#home-btn")
+            wait_for_live_url(win, origin + "/", timeout=10.0)
             snap_page(win, "18a-back-to-workspaces-from-settings")
             win.goto(origin + f"/workspace/{w2_agent_id}/settings")
             win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
@@ -1765,10 +1805,10 @@ def run_e2e() -> int:
             # Iter 12 (Cancel modal): real users click Destroy by accident or
             # change their mind. Verify the Cancel button dismisses the modal
             # without firing any destroy call, leaving W2 alive.
-            win.click("#destroy-btn")
+            click_in_chrome(win, "#destroy-btn")
             win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
             snap_page(win, "18b-w2-destroy-modal-opened")
-            win.click("#destroy-cancel-btn")
+            click_in_chrome(win, "#destroy-cancel-btn")
             win.wait_for_selector("#destroy-confirm-btn", state="hidden", timeout=5_000)
             snap_page(win, "18b2-w2-cancelled-modal-dismissed")
             # The settings page should still render the destroy button
@@ -1776,13 +1816,13 @@ def run_e2e() -> int:
             win.wait_for_selector("#destroy-btn", state="visible", timeout=5_000)
 
             # Now do the real destroy: reopen modal, click Confirm.
-            win.click("#destroy-btn")
+            click_in_chrome(win, "#destroy-btn")
             win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
             snap_page(win, "18b3-w2-destroy-modal-reopened")
-            win.click("#destroy-confirm-btn")
+            click_in_chrome(win, "#destroy-confirm-btn")
             # The confirm handler POSTs /api/v1/workspaces/<id>/destroy then
             # redirects to /; wait for the navigation, then snap the in-flight state.
-            win.wait_for_url(origin + "/", timeout=30_000)
+            wait_for_live_url(win, origin + "/", timeout=30.0)
             snap_page(win, "18c-w2-destroy-initiated")
 
             # Poll /api/v1/workspaces/operations/destroy/<id> until the host is actually gone

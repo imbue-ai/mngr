@@ -19,3 +19,9 @@ The tile checks wait for the element to be attached rather than geometrically vi
 The workspace-tile click is dispatched as a DOM event rather than a synthetic mouse click. The collapsed chrome view gives its page no usable bounding box, so Playwright's actionability wait can never be satisfied there. The step exercises the tile's handler -- `/goto/<agent_id>/` through the navigate-content bridge -- which the dispatched event drives exactly the same way.
 
 The macos-launch smoke test reads page URLs from the live document too. It hit the same stale-bookkeeping failure as the Python harness -- `No content window settled on a backend URL ... observed: ["about:blank","about:blank",".../shell.html"]` -- while the app was up and on `/welcome`. It had been passing on the right side of a race rather than on correctness.
+
+Every chrome-view click goes through one geometry-independent helper. The collapsed chrome view (a titlebar strip while a workspace is displayed) leaves its page without a usable bounding box, so Playwright's ordinary click never satisfies its actionability wait even though the element is present and correct. The workspace tile, the settings "Back to workspaces" link, and the destroy/confirm/cancel buttons all dispatch the event instead, driving the same handlers a user's click would.
+
+The e2e leaves workspace settings through the titlebar Home crumb. It was clicking an in-page "Back to workspaces" link that WorkspaceSettings does not have -- that link lives on the app-level Settings page, and the workspace one lost it when the breadcrumb titlebar took over navigation. The test had been asserting on an affordance that no longer existed.
+
+Navigation waits read the live document instead of `page.wait_for_url`. That API matches against Playwright's cached URL -- the same bookkeeping main-process navigations fail to update -- so it could time out on a page that had already arrived.
