@@ -43,6 +43,36 @@ function shouldWriteSessionState({ computedWindowCount, persistedWindowCount }) 
 }
 
 /**
+ * True when two persisted window entries describe the SAME saved window -- same
+ * content url and the same geometry (position, size, and display).
+ *
+ * Why this exists: at cold start the initial window is positioned from
+ * ``savedState.windows[0]`` BEFORE the backend is ready, and then the restore
+ * path (once the backend is up) picks the first *restorable* entry -- the saved
+ * windows whose workspaces still exist, filtered from the same list. When that
+ * entry is the one the window was already positioned at, re-applying its bounds
+ * is redundant AND snaps the window back over any move the user made while the
+ * loading screen was up. main.js uses this to skip that redundant re-apply,
+ * re-applying only when the restored entry is a DIFFERENT saved window (the MRU
+ * window's workspace was filtered out, so a never-positioned entry takes its
+ * place). A by-value comparison keeps this correct regardless of whether the
+ * restorable list preserves the original entry objects by reference.
+ *
+ * @param {object|undefined} a  A persisted window entry ({ url, x, y, width, height, displayId }).
+ * @param {object|undefined} b  Another persisted window entry.
+ * @returns {boolean} true if both are present and describe the same saved window.
+ */
+function isSameSavedWindow(a, b) {
+  if (!a || !b) return false;
+  return a.url === b.url
+    && a.x === b.x
+    && a.y === b.y
+    && a.width === b.width
+    && a.height === b.height
+    && a.displayId === b.displayId;
+}
+
+/**
  * Create a trailing-throttle scheduler that coalesces a burst of ``schedule()``
  * calls into at most one ``save()`` per ``delayMs``.
  *
@@ -99,4 +129,4 @@ function createDebouncedSaver({ save, delayMs, setTimer, clearTimer }) {
   return { schedule, flush, cancel, isPending };
 }
 
-module.exports = { shouldWriteSessionState, createDebouncedSaver };
+module.exports = { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow };

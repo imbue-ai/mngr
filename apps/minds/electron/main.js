@@ -21,7 +21,7 @@ const {
   isSwappableLocalPath,
   SURFACE_CONTENT,
 } = require('./surface-routing');
-const { shouldWriteSessionState, createDebouncedSaver } = require('./session-persistence');
+const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
 
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
 // main-process failures BEFORE anything else runs, so startup output (including
@@ -4042,7 +4042,16 @@ async function startBackendWithRetry() {
         // routed to its surface (agent -> content view, local -> chrome view), so
         // no separately-persisted accent is needed.
         const [first, ...rest] = restorable;
-        restoreWindowBounds(initialBundle, first);
+        // onReady already applied savedState.windows[0]'s bounds to the initial
+        // window, before the loading screen rendered. Re-applying them here would
+        // snap the window back over any move the user made while it was still
+        // loading (during loading the shell has no persistable content URL, so
+        // scheduleSessionSave is a no-op and the move survives ONLY if we don't
+        // clobber it). Re-apply only when the entry we're restoring into the
+        // initial window is a DIFFERENT saved window than the one onReady
+        // positioned it at -- i.e. the MRU window's workspace was filtered out, so
+        // ``first`` is a later entry whose saved position was never applied.
+        if (!isSameSavedWindow(first, savedState.windows[0])) restoreWindowBounds(initialBundle, first);
         navigateBundle(initialBundle, toRestoredContentUrl(first));
         // Open the lesser-MRU windows without stealing focus, so the
         // MRU-zero window (already focused as initialBundle) stays focused
@@ -4864,6 +4873,15 @@ async function runQuitSequence() {
 
   updateQuittingStatus('Closing…');
   await shutdown();
+  // Capture the final window geometry one last time before the windows tear
+  // down. The authoritative save above ran *before* the quitting takeover, and
+  // scheduleSessionSave() is suppressed once isShuttingDown is set, so any
+  // window the user dragged while the quitting / stopping-minds screen was up
+  // (both keep the windows alive and movable) would otherwise be lost.
+  // shutdown() only tears down the backend process -- every window is still
+  // alive and readable here -- and the empty-clobber guard inside
+  // saveSessionState still protects against a racing teardown.
+  if (bundles.size > 0) saveSessionState();
   app.quit();
 }
 

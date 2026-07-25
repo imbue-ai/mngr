@@ -11,7 +11,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { shouldWriteSessionState, createDebouncedSaver } = require('../../electron/session-persistence');
+const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('../../electron/session-persistence');
 
 // A deterministic stand-in for setTimeout/clearTimeout: records armed
 // callbacks by id and fires them on demand, so debounce timing is exercised
@@ -56,6 +56,39 @@ test('shouldWriteSessionState rejects an empty snapshot over a non-empty file (t
   // The bug: a save computed an empty list while windows were being torn down
   // by a non-graceful quit, and it would have zeroed a good file. Skip it.
   assert.equal(shouldWriteSessionState({ computedWindowCount: 0, persistedWindowCount: 2 }), false);
+});
+
+test('isSameSavedWindow matches identical entries by value, not identity', () => {
+  // The restore path uses this to skip re-applying the initial window's bounds
+  // when the entry being restored is the same saved window onReady already
+  // positioned it at. It must match by value so it survives a future refactor
+  // that rebuilds the restorable list into fresh objects (the previous
+  // reference-equality check would silently break and re-introduce the bug).
+  const a = { url: '/goto/agent-1/', x: 10, y: 20, width: 800, height: 600, displayId: 1 };
+  const b = { url: '/goto/agent-1/', x: 10, y: 20, width: 800, height: 600, displayId: 1 };
+  assert.equal(isSameSavedWindow(a, b), true, 'distinct objects with equal fields are the same saved window');
+  assert.equal(isSameSavedWindow(a, a), true, 'an entry equals itself');
+});
+
+test('isSameSavedWindow distinguishes entries that differ in url or geometry', () => {
+  const base = { url: '/goto/agent-1/', x: 10, y: 20, width: 800, height: 600, displayId: 1 };
+  // A differing url is a different saved window even at the same geometry (the
+  // MRU workspace was filtered out and a different one now takes its place).
+  assert.equal(isSameSavedWindow(base, { ...base, url: '/goto/agent-2/' }), false, 'different url');
+  assert.equal(isSameSavedWindow(base, { ...base, x: 11 }), false, 'different x');
+  assert.equal(isSameSavedWindow(base, { ...base, y: 21 }), false, 'different y');
+  assert.equal(isSameSavedWindow(base, { ...base, width: 801 }), false, 'different width');
+  assert.equal(isSameSavedWindow(base, { ...base, height: 601 }), false, 'different height');
+  assert.equal(isSameSavedWindow(base, { ...base, displayId: 2 }), false, 'different display');
+});
+
+test('isSameSavedWindow treats a missing entry as not-the-same', () => {
+  // The first save (or first restorable entry) may be absent; never claim a
+  // match against undefined, so the caller falls back to applying bounds.
+  const entry = { url: '/', x: 0, y: 0, width: 1200, height: 800, displayId: 1 };
+  assert.equal(isSameSavedWindow(entry, undefined), false);
+  assert.equal(isSameSavedWindow(undefined, entry), false);
+  assert.equal(isSameSavedWindow(undefined, undefined), false);
 });
 
 test('createDebouncedSaver coalesces a burst into a single save', () => {
