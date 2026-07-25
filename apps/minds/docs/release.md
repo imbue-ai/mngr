@@ -116,7 +116,7 @@ This is the long pole — fire it as soon as the DEFAULT_WORKSPACE_TEMPLATE bran
 ```bash
 GREEN_MNGR_SHA=<mngr release-branch HEAD: main + the bump commit>   # carried through to steps 6-8
 cd "$MNGR"
-gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
+gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr-internal \
   -r <mngr-release-branch> -f commit_sha="$GREEN_MNGR_SHA" -f template_ref=<default-workspace-template-release-branch>
 ```
 
@@ -161,7 +161,7 @@ GREEN_MNGR_SHA=<the SHA from step 4>
 git -C "$DEFAULT_WORKSPACE_TEMPLATE" fetch origin --quiet; DEFAULT_WORKSPACE_TEMPLATE_SHA=$(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse origin/main)   # vendor/mngr == archive $GREEN_MNGR_SHA (verified in step 6)
 
 git -C "$MNGR" tag -a "$VERSION" "$GREEN_MNGR_SHA" -m "minds $VERSION: mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) / DEFAULT_WORKSPACE_TEMPLATE $(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse --short $DEFAULT_WORKSPACE_TEMPLATE_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
-git -C "$MNGR" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/mngr.git refs/tags/"$VERSION"
+git -C "$MNGR" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/mngr-internal.git refs/tags/"$VERSION"
 
 git -C "$DEFAULT_WORKSPACE_TEMPLATE" tag -a "$VERSION" "$DEFAULT_WORKSPACE_TEMPLATE_SHA" -m "minds $VERSION: DEFAULT_WORKSPACE_TEMPLATE $(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse --short $DEFAULT_WORKSPACE_TEMPLATE_SHA) / mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
 git -C "$DEFAULT_WORKSPACE_TEMPLATE" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/default-workspace-template.git refs/tags/"$VERSION"
@@ -175,7 +175,7 @@ Both refs = the tag, exercising the binary's baked `FALLBACK_BRANCH` end to end.
 
 ```bash
 cd "$MNGR"; VERSION=minds-v0.3.1
-gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
+gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr-internal \
   -r main -f commit_sha="$VERSION" -f template_ref="$VERSION"
 ```
 

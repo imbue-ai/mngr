@@ -33,16 +33,31 @@ const DEFAULT_APP_PATH = '/Applications/Minds.app/Contents/MacOS/Minds';
 const _BACKEND_ORIGIN_RE = /^http:\/\/localhost:\d+(?:\/|$)/;
 const _CHROME_PATH_RE = /^http:\/\/localhost:\d+\/_chrome(?:\/|$|\?)/;
 
+// The URL of the document currently in `page`, read from the document.
+//
+// `page.url()` is Playwright's own bookkeeping, updated from the CDP navigation
+// events its session receives. main.js drives these WebContentsViews from the
+// Electron MAIN process (`webContents.loadURL` / `loadFile`), and such a commit
+// does not reliably reach an attached client: a view can sit on `/welcome`
+// while Playwright still reports the `shell.html` it saw at attach time, for the
+// rest of the run. The session stays healthy -- evaluating in the live document
+// reports the real URL.
+async function liveUrl(page) {
+  try {
+    return await page.evaluate(() => location.href);
+  } catch {
+    return page.url();
+  }
+}
+
 async function pickContentWindow(app, { timeoutMs = 60 * 1000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = [];
   while (Date.now() < deadline) {
-    last = app.windows().map((p) => p.url());
-    const hit = app.windows().find((p) => {
-      const u = p.url();
-      return _BACKEND_ORIGIN_RE.test(u) && !_CHROME_PATH_RE.test(u);
-    });
-    if (hit) return hit;
+    const wins = app.windows();
+    last = await Promise.all(wins.map(liveUrl));
+    const idx = last.findIndex((u) => _BACKEND_ORIGIN_RE.test(u) && !_CHROME_PATH_RE.test(u));
+    if (idx !== -1) return wins[idx];
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error(
