@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
+from azure.identity import ClientSecretCredential
 from azure.identity import DefaultAzureCredential
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.polling import poll_for_value
@@ -129,6 +131,12 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
 
     ``subscription_id`` is a plain, non-secret identifier -- not credential
     material -- and is the only required field.
+
+    Exception: when ``client_id`` + ``tenant_id`` + ``client_secret`` are set
+    (the Minds bring-your-own-account paste flow), a service-principal
+    ``ClientSecretCredential`` is built from them and used instead of
+    ``DefaultAzureCredential``. Mirrors the OVH/Vultr providers holding
+    ``SecretStr`` key material.
     """
 
     backend: ProviderBackendName = Field(
@@ -203,6 +211,22 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
             "up the access it needs. Set False to turn it off."
         ),
     )
+    client_id: str | None = Field(
+        default=None,
+        description=(
+            "Service-principal (app registration) client id. When set together with tenant_id and "
+            "client_secret, a ClientSecretCredential is used instead of DefaultAzureCredential. Used "
+            "by the Minds bring-your-own-account paste flow. A plain identifier, not a secret."
+        ),
+    )
+    tenant_id: str | None = Field(
+        default=None,
+        description="Service-principal Entra tenant id. See client_id. A plain identifier, not a secret.",
+    )
+    client_secret: SecretStr | None = Field(
+        default=None,
+        description="Service-principal client secret. Only used when client_id + tenant_id are also set.",
+    )
 
     def get_credential(self) -> Any:
         """Return a ``DefaultAzureCredential`` for the management clients.
@@ -218,7 +242,17 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         no-credentials check here -- the gating is on ``subscription_id``
         presence (see ``get_subscription_id``), and an unauthenticated
         environment surfaces as an API error on the first real call.
+
+        When ``client_id`` + ``tenant_id`` + ``client_secret`` are all set (the
+        paste flow), a service-principal ``ClientSecretCredential`` is returned
+        instead, so no ambient ``az login`` / env service principal is needed.
         """
+        if self.client_id and self.tenant_id and self.client_secret:
+            return ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret.get_secret_value(),
+            )
         return DefaultAzureCredential()
 
     def get_subscription_id(self) -> str:

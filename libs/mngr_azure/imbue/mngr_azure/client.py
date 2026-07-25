@@ -151,7 +151,11 @@ class LinuxHostname(NonEmptyStr):
 
 
 # How long to wait for a resource-provider registration to flip to "Registered".
-_PROVIDER_REGISTRATION_TIMEOUT_SECONDS: Final[float] = 180.0
+# A brand-new subscription's first-ever registration routinely takes 5-15
+# minutes (Azure initializes the provider across regions); 180s timed out on
+# real fresh subscriptions, and the registration is one-time-per-subscription,
+# so a generous cap costs nothing on every later run.
+_PROVIDER_REGISTRATION_TIMEOUT_SECONDS: Final[float] = 900.0
 _PROVIDER_REGISTRATION_POLL_SECONDS: Final[float] = 3.0
 
 # Minimum age before an unattached NIC / public IP is eligible for reclaim by GC.

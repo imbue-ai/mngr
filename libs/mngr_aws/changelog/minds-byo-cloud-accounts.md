@@ -1,0 +1,1 @@
+- `AwsProviderConfig` gained optional pasted-credential fields (`aws_access_key_id` / `aws_secret_access_key` / `aws_session_token`, `SecretStr`, mirroring the OVH/Vultr pattern). When set they are passed directly to `boto3.Session`, taking precedence over the ambient credential chain (which remains the unchanged default). Used by the Minds bring-your-own-account paste flow.

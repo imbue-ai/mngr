@@ -37,7 +37,19 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import BackupProvider
+from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
+from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
+from imbue.minds.primitives import CONFIGURED_AZURE_REGIONS
+from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
+from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
+from imbue.minds.primitives import CONFIGURED_GCP_ZONES
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
+from imbue.minds.primitives import DEFAULT_AWS_REGION
+from imbue.minds.primitives import DEFAULT_AZURE_REGION
+from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
+from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
+from imbue.minds.primitives import DEFAULT_GCP_ZONE
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -506,6 +518,8 @@ def render_create_form(
     error_message: str = "",
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
+    cloud_accounts: Sequence[Mapping[str, str]] | None = None,
+    byok_clouds_enabled: bool = False,
     selected_preset: str | None = None,
     start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
@@ -608,6 +622,31 @@ def render_create_form(
             key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
+        cloud_accounts=[dict(account) for account in (cloud_accounts or [])],
+        byok_clouds_enabled=byok_clouds_enabled,
+        # Machine-size picker options per compute mode, and the curated
+        # placement lists for the BYOK-only modes (GCP zones / Azure regions) --
+        # merged into the region machinery client-side.
+        instance_types_by_backend={
+            "AWS": [list(pair) for pair in CONFIGURED_AWS_INSTANCE_TYPES],
+            "GCP": [list(pair) for pair in CONFIGURED_GCP_MACHINE_TYPES],
+            "AZURE": [list(pair) for pair in CONFIGURED_AZURE_VM_SIZES],
+        },
+        default_instance_type_by_backend={
+            "AWS": DEFAULT_AWS_INSTANCE_TYPE,
+            "GCP": DEFAULT_GCP_MACHINE_TYPE,
+            "AZURE": DEFAULT_AZURE_VM_SIZE,
+        },
+        byok_region_options={
+            "AWS": list(CONFIGURED_AWS_REGIONS),
+            "GCP": list(CONFIGURED_GCP_ZONES),
+            "AZURE": list(CONFIGURED_AZURE_REGIONS),
+        },
+        byok_region_selected={
+            "AWS": DEFAULT_AWS_REGION,
+            "GCP": DEFAULT_GCP_ZONE,
+            "AZURE": DEFAULT_AZURE_REGION,
+        },
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,
@@ -669,6 +708,8 @@ EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]
     LaunchMode.LIMA: 600.0,
     LaunchMode.VULTR: 300.0,
     LaunchMode.AWS: 300.0,
+    LaunchMode.GCP: 300.0,
+    LaunchMode.AZURE: 300.0,
     LaunchMode.IMBUE_CLOUD: 30.0,
 }
 

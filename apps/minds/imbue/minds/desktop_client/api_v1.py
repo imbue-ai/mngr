@@ -43,6 +43,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.minds.bootstrap import BootstrapError
+from imbue.minds.bootstrap import delete_cloud_account_provider
+from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
+from imbue.minds.bootstrap import list_cloud_account_providers
+from imbue.minds.bootstrap import set_cloud_account_provider
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import backup_update as backup_update_module
@@ -58,6 +63,8 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
+from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
+from imbue.minds.desktop_client.agent_creator import run_mngr_provider_prepare
 from imbue.minds.desktop_client.api_auth import handle_invalid_random_id as _handle_invalid_random_id
 from imbue.minds.desktop_client.api_auth import json_error as _json_error
 from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
@@ -72,6 +79,8 @@ from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
 from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
+from imbue.minds.desktop_client.api_models import CloudAccountCreateRequest
+from imbue.minds.desktop_client.api_models import CloudAccountSummary
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
@@ -123,6 +132,7 @@ from imbue.minds.desktop_client.sharing_handler import get_sharing_status
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import normalize_host_name_slug
@@ -143,6 +153,9 @@ from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import BackupProvider
+from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
+from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
+from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -154,9 +167,11 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
 
-# A blocking lifecycle (start/stop) call shells out to ``mngr`` and waits for
-# the host transition to resolve before returning the final state.
-_LIFECYCLE_TIMEOUT_SECONDS: float = 300.0
+# Cap for a short blocking ``mngr`` command run via ``_run_mngr_blocking``
+# (restart-services, git label read/write) -- quick operations, unlike the host
+# stop/start transition (that path uses ``perform_mind_host_action``'s much
+# larger ``_HOST_STOP_TIMEOUT_SECONDS``, sized for the slow first cloud stop).
+_MNGR_BLOCKING_COMMAND_TIMEOUT_SECONDS: float = 300.0
 
 # SSE event-stream headers (disable proxy/browser buffering so events flush live).
 _SSE_HEADERS: dict[str, str] = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
@@ -201,6 +216,15 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
 
     dispatcher.dispatch(notification_request, agent_display_name)
     return OkResponse(ok=True)
+
+
+# Machine-size allowlists per compute mode (the create form's picker values).
+# Modes absent here have no size knob; a submitted instance_type is dropped.
+_INSTANCE_TYPES_BY_LAUNCH_MODE = {
+    LaunchMode.AWS: {value for value, _ in CONFIGURED_AWS_INSTANCE_TYPES},
+    LaunchMode.GCP: {value for value, _ in CONFIGURED_GCP_MACHINE_TYPES},
+    LaunchMode.AZURE: {value for value, _ in CONFIGURED_AZURE_VM_SIZES},
+}
 
 
 # -- Cross-workspace management routes --
@@ -580,6 +604,36 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
+    instance_type = str(body.get("instance_type", "")).strip()
+    if instance_type:
+        allowed_instance_types = _INSTANCE_TYPES_BY_LAUNCH_MODE.get(launch_mode)
+        if allowed_instance_types is None:
+            # This mode has no machine-size knob; drop a stray submitted value.
+            instance_type = ""
+        elif instance_type not in allowed_instance_types:
+            return _json_field_error(f"Unsupported instance type {instance_type!r}.", "instance_type")
+        else:
+            # A known size for a sized mode: passes through to the create command.
+            pass
+    cloud_account = str(body.get("cloud_account", "")).strip()
+    if launch_mode in (LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
+        # BYOK-only modes (all three clouds): without an account the create
+        # would fail minutes later in the background thread with an opaque
+        # provider error. Ambient machine-credential AWS was removed from minds.
+        return _json_field_error(f"{launch_mode.value} requires a configured cloud account.", "cloud_account")
+    matching = None
+    if cloud_account:
+        # A bring-your-own-key account must exist and match the submitted launch
+        # mode's backend, else the create would target a nonexistent provider.
+        matching = next((a for a in list_cloud_account_providers() if a["name"] == cloud_account), None)
+        if matching is None:
+            return _json_field_error(f"Unknown cloud account {cloud_account!r}.", "cloud_account")
+        if matching["backend"] != launch_mode.value.lower():
+            return _json_field_error(
+                f"Cloud account {matching['alias']!r} is a {matching['backend']} account; "
+                f"it cannot be used with launch_mode {launch_mode.value}.",
+                "cloud_account",
+            )
 
     # The workspace name is chosen automatically unless one was submitted (the
     # advanced view's optional "Name" field): a submitted value, else the next
@@ -644,7 +698,15 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # callback that injects the Cloudflare tunnel token + associates the account
     # and persists the chosen region -- exactly as the create form does.
     minds_config = get_state().minds_config
-    region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
+    if matching is not None:
+        # A BYOK account's placement (region, or GCE zone) is pinned per entry --
+        # AWS/GCP discovery clients are region/zone-bound and Azure's scaffolding
+        # is region-locked, so honoring a different submitted value would orphan
+        # the entry's existing workspaces. The pin always rules; the form shows
+        # it as a static note. A different placement = another account entry.
+        region = matching["region"]
+    else:
+        region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
     on_created = build_create_on_created_callback(
         account_id, minds_config, launch_mode, region, display_name=host_name or resolved_host_name, color=color
     )
@@ -661,6 +723,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         account_email=account_email,
         branch_or_tag=branch_or_tag,
         region=region,
+        cloud_account=cloud_account,
+        instance_type=instance_type,
         on_created=on_created,
         backup_request=backup_request,
         color=color,
@@ -699,7 +763,9 @@ def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[in
     """Run an ``mngr`` command to completion; return ``(returncode, stdout, stderr)``."""
     cg = parent_cg.make_concurrency_group(name="workspace-lifecycle")
     with cg:
-        finished = cg.run_process_to_completion(argv, timeout=_LIFECYCLE_TIMEOUT_SECONDS, is_checked_after=False)
+        finished = cg.run_process_to_completion(
+            argv, timeout=_MNGR_BLOCKING_COMMAND_TIMEOUT_SECONDS, is_checked_after=False
+        )
     returncode = finished.returncode if finished.returncode is not None else 1
     return returncode, finished.stdout, finished.stderr
 
@@ -1819,6 +1885,139 @@ def _handle_patch_provider(provider_name: str) -> ProviderToggleResponse | Respo
     return ProviderToggleResponse(provider_name=provider_name, enabled=enabled, changed=changed)
 
 
+def _cloud_account_summary(account: dict[str, str]) -> CloudAccountSummary:
+    """Build the wire model for one bootstrap-layer cloud account dict."""
+    return CloudAccountSummary(
+        name=account["name"],
+        alias=account["alias"],
+        backend=account["backend"],
+        region=account["region"],
+        identifier=account["identifier"],
+    )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=CloudAccountCreateRequest, resp=json_response_model(CloudAccountSummary))
+def _handle_create_cloud_account() -> CloudAccountSummary | Response:
+    """Register a bring-your-own-key cloud account and run `mngr <backend> prepare` on it.
+
+    Prepare doubles as credential validation: it is the first privileged call
+    against the pasted keys (security group + state bucket). On prepare failure
+    the just-written provider block is rolled back so a bad key never leaves a
+    half-registered account behind; the error body carries the prepare output
+    so the UI can show the cloud's own message.
+    """
+    if not is_bring_your_own_cloud_enabled():
+        return _json_error("Bring-your-own cloud accounts are not enabled.", 403)
+    body = request.get_json(silent=True, force=True) or {}
+    alias = str(body.get("alias", "")).strip()
+    backend = str(body.get("backend", "")).strip().lower()
+    region = str(body.get("region", "")).strip()
+    if backend == "aws":
+        access_key_id = str(body.get("aws_access_key_id", "")).strip()
+        secret_access_key = str(body.get("aws_secret_access_key", "")).strip()
+        if not access_key_id or not secret_access_key:
+            return _json_field_error("An AWS access key id and secret access key are required.", "aws_access_key_id")
+        credentials = {
+            "aws_access_key_id": access_key_id,
+            "aws_secret_access_key": secret_access_key,
+        }
+    elif backend == "gcp":
+        key_json = str(body.get("gcp_service_account_key_json", "")).strip()
+        if not key_json:
+            return _json_field_error("The service-account key JSON is required.", "gcp_service_account_key_json")
+        # Cheap structural check so an obviously-wrong paste (an API key, an
+        # OAuth client blob) fails here rather than mid-prepare.
+        try:
+            key_info = json.loads(key_json)
+        except json.JSONDecodeError as e:
+            logger.warning("Rejected pasted GCP key: not valid JSON: {}", e)
+            return _json_field_error(
+                "That is not valid JSON. Paste the full contents of the downloaded key file.",
+                "gcp_service_account_key_json",
+            )
+        if not isinstance(key_info, dict) or key_info.get("type") != "service_account":
+            return _json_field_error(
+                "That JSON is not a service-account key (expected 'type': 'service_account').",
+                "gcp_service_account_key_json",
+            )
+        credentials = {"service_account_key_json": key_json}
+    elif backend == "azure":
+        subscription_id = str(body.get("azure_subscription_id", "")).strip()
+        tenant_id = str(body.get("azure_tenant_id", "")).strip()
+        client_id = str(body.get("azure_client_id", "")).strip()
+        client_secret = str(body.get("azure_client_secret", "")).strip()
+        if not (subscription_id and tenant_id and client_id and client_secret):
+            return _json_field_error(
+                "Subscription id, tenant id, client id, and client secret are all required.",
+                "azure_subscription_id",
+            )
+        credentials = {
+            "subscription_id": subscription_id,
+            "tenant_id": tenant_id,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+    else:
+        return _json_field_error(f"Backend {backend!r} is not supported (aws, gcp, azure).", "backend")
+
+    try:
+        provider_name = set_cloud_account_provider(alias, backend, credentials, region)
+    except BootstrapError as exc:
+        return _json_field_error(str(exc), "alias")
+
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    parent_cg = agent_creator.root_concurrency_group if agent_creator is not None else None
+    try:
+        if backend == "aws":
+            run_mngr_aws_prepare(region, provider_name=provider_name, parent_cg=parent_cg)
+        else:
+            # gcp/azure prepare read placement + credentials from the account
+            # block itself, so only --provider is passed.
+            run_mngr_provider_prepare(backend, provider_name, parent_cg=parent_cg)
+    except MngrCommandError as exc:
+        # Roll back: a failed prepare means unusable credentials/permissions;
+        # keeping the block would make every `mngr list` fan out to it.
+        # The exception text already carries the prepare output tail.
+        delete_cloud_account_provider(provider_name)
+        return _json_error(f"Account setup failed: {exc}", 502)
+
+    matching = next((a for a in list_cloud_account_providers() if a["name"] == provider_name), None)
+    if matching is None:
+        return _json_error("Account was prepared but could not be read back.", 500)
+    # The discovery daemon (`mngr observe`) read the settings file at launch, so
+    # it cannot see the just-written provider block until restarted -- without
+    # this bounce the new account's workspaces never enter the per-provider
+    # snapshots (no liveness, no Stop/Start controls). Mirrors
+    # desktop_control.set_provider_enabled's bounce-on-change.
+    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
+    return _cloud_account_summary(matching)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(OkResponse))
+def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
+    """Remove a cloud account from minds (keys forgotten; cloud resources kept).
+
+    Refuses (409) while the account still has active workspaces -- deleting the
+    provider block would drop them off discovery with no way to manage them.
+    """
+    if not is_bring_your_own_cloud_enabled():
+        return _json_error("Bring-your-own cloud accounts are not enabled.", 403)
+    active = desktop_control.list_active_workspaces_for_provider(get_state().backend_resolver, account_name)
+    if active:
+        return _json_error(
+            f"Cloud account {account_name!r} still has {len(active)} active workspace(s); "
+            "destroy them before removing the account.",
+            409,
+        )
+    if not delete_cloud_account_provider(account_name):
+        return _json_error(f"Unknown cloud account {account_name!r}.", 404)
+    # Restart discovery so it stops fanning out to the removed provider.
+    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
+    return OkResponse(ok=True)
+
+
 @require_api_or_cookie_auth
 def _handle_running_workspaces() -> Response:
     """Return the shutdown-capable workspaces whose containers are currently running."""
@@ -1857,6 +2056,7 @@ def _handle_host_name_available() -> Response:
         launch_mode = LaunchMode.DOCKER
     account_id = request.args.get("account_id", "").strip()
     region = request.args.get("region", "").strip()
+    cloud_account = request.args.get("cloud_account", "").strip()
 
     # Imbue Cloud is per-account, so its provider instance (``imbue_cloud_<slug>``)
     # is named from the account email; the session store maps user_id -> email.
@@ -1868,7 +2068,10 @@ def _handle_host_name_available() -> Response:
 
     try:
         provider_instance_name = provider_instance_name_for_launch(
-            launch_mode, imbue_cloud_account=account_email or None, region=region or None
+            launch_mode,
+            imbue_cloud_account=account_email or None,
+            region=region or None,
+            cloud_account=cloud_account or None,
         )
     except MngrCommandError:
         # Not enough context to scope (imbue_cloud without an account, or AWS
@@ -2091,6 +2294,14 @@ def create_api_v1_blueprint() -> Blueprint:
 
     # Desktop namespace (cookie-or-bearer; no agent verb, so deny-all at the gateway).
     blueprint.add_url_rule("/desktop/providers/<provider_name>", view_func=_handle_patch_provider, methods=["PATCH"])
+    # Bring-your-own-key cloud accounts (pasted credentials + prepare).
+    blueprint.add_url_rule("/desktop/cloud-accounts", view_func=_handle_create_cloud_account, methods=["POST"])
+    blueprint.add_url_rule(
+        "/desktop/cloud-accounts/<account_name>",
+        view_func=_handle_delete_cloud_account,
+        endpoint="delete_cloud_account",
+        methods=["DELETE"],
+    )
     blueprint.add_url_rule("/desktop/running-workspaces", view_func=_handle_running_workspaces, methods=["GET"])
     blueprint.add_url_rule("/desktop/host-name-available", view_func=_handle_host_name_available, methods=["GET"])
     blueprint.add_url_rule("/desktop/stop-hosts", view_func=_handle_stop_hosts, methods=["POST"])

@@ -24,16 +24,110 @@ from imbue.imbue_common.primitives import NonEmptyStr
 # imports ``mngr``) so the early ``bootstrap`` module can read it without
 # violating its no-mngr-on-import contract.
 CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
+    # Exactly the regions with a pinned AMI in mngr_aws's DEFAULT_AMI_BY_REGION
+    # -- the one hard constraint on this list (a region without an AMI fails at
+    # create). Widen the AMI table first to widen this.
     "us-east-1",
     "us-east-2",
     "us-west-1",
     "us-west-2",
+    "eu-west-1",
+    "eu-central-1",
+    "ap-southeast-1",
+    "ap-northeast-1",
 )
 
 # Hardcoded fallback AWS region for the create form when there is no stored
 # last-used value and IP geolocation has not (yet) resolved. Must be a member
 # of ``CONFIGURED_AWS_REGIONS``.
 DEFAULT_AWS_REGION: Final[str] = "us-east-1"
+
+# EC2 instance types the create form offers, (value, label) pairs. Floor is
+# 4 GB: the forever-claude-template build (uv sync + npm ci/build) is
+# documented to OOM/thrash on 2 GB (see ``_AWS_DEFAULT_INSTANCE_TYPE`` in
+# ``bootstrap``), so nothing smaller is offered. t3.large (8 GB) is the
+# known-good default. Values feed the ``--aws-instance-type=`` build arg.
+CONFIGURED_AWS_INSTANCE_TYPES: Final[tuple[tuple[str, str], ...]] = (
+    ("t3.medium", "t3.medium — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
+    ("t3.large", "t3.large — 2 vCPU / 8 GB (recommended)"),
+    ("t3a.large", "t3a.large — 2 vCPU / 8 GB (AMD; slightly cheaper)"),
+    ("m6i.large", "m6i.large — 2 vCPU / 8 GB (non-burstable)"),
+    ("t3.xlarge", "t3.xlarge — 4 vCPU / 16 GB"),
+    ("m6i.xlarge", "m6i.xlarge — 4 vCPU / 16 GB (non-burstable)"),
+    ("t3.2xlarge", "t3.2xlarge — 8 vCPU / 32 GB"),
+)
+DEFAULT_AWS_INSTANCE_TYPE: Final[str] = "t3.large"
+
+# GCP / Azure analogs of the AWS machine-size list (same 4 GB floor, same
+# 8 GB recommended default). Values feed ``--gcp-machine-type=`` /
+# ``--azure-vm-size=`` build args.
+CONFIGURED_GCP_MACHINE_TYPES: Final[tuple[tuple[str, str], ...]] = (
+    ("e2-medium", "e2-medium — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
+    ("e2-standard-2", "e2-standard-2 — 2 vCPU / 8 GB (recommended)"),
+    ("n2-standard-2", "n2-standard-2 — 2 vCPU / 8 GB (non-shared-core pool)"),
+    ("e2-standard-4", "e2-standard-4 — 4 vCPU / 16 GB"),
+    ("n2-standard-4", "n2-standard-4 — 4 vCPU / 16 GB (non-shared-core pool)"),
+    ("e2-standard-8", "e2-standard-8 — 8 vCPU / 32 GB"),
+)
+DEFAULT_GCP_MACHINE_TYPE: Final[str] = "e2-standard-2"
+# Two families on purpose: new pay-as-you-go subscriptions frequently hit
+# SkuNotAvailable capacity restrictions on the cheap burstable B-series in
+# popular regions; the Dsv5/Dasv5 families draw from different hardware pools
+# and often have capacity where B-series is gated.
+CONFIGURED_AZURE_VM_SIZES: Final[tuple[tuple[str, str], ...]] = (
+    ("Standard_B2s", "Standard_B2s — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
+    ("Standard_B2ms", "Standard_B2ms — 2 vCPU / 8 GB (recommended)"),
+    ("Standard_D2as_v5", "Standard_D2as_v5 — 2 vCPU / 8 GB (AMD; try if B-series is unavailable)"),
+    ("Standard_D2s_v5", "Standard_D2s_v5 — 2 vCPU / 8 GB (Intel; try if B-series is unavailable)"),
+    ("Standard_B4ms", "Standard_B4ms — 4 vCPU / 16 GB"),
+    ("Standard_D4as_v5", "Standard_D4as_v5 — 4 vCPU / 16 GB (AMD)"),
+    ("Standard_B8ms", "Standard_B8ms — 8 vCPU / 32 GB"),
+)
+DEFAULT_AZURE_VM_SIZE: Final[str] = "Standard_B2ms"
+
+# Curated placement choices for bring-your-own-key GCP / Azure accounts (GCE is
+# zonal, so GCP offers zones; Azure offers regions). Small US-centric lists,
+# mirroring CONFIGURED_AWS_REGIONS; the account's pinned default comes first
+# in the create form via the option's data-default-region.
+CONFIGURED_GCP_ZONES: Final[tuple[str, ...]] = (
+    "us-west1-a",
+    "us-central1-a",
+    "us-east1-b",
+    "us-east4-a",
+    "europe-west1-b",
+    "europe-west4-a",
+    "asia-southeast1-a",
+    "asia-northeast1-a",
+    "australia-southeast1-a",
+)
+DEFAULT_GCP_ZONE: Final[str] = "us-west1-a"
+# eastus2 first: new-subscription capacity restrictions bite hardest in the
+# oldest/most popular regions (westus, eastus); eastus2 / centralus /
+# northcentralus / westus3 are the commonly-recommended less-congested US picks,
+# and less-used non-US regions are often the easiest of all for new subs.
+# Offered only in the add-account form: an Azure account entry is pinned to one
+# region for life (its resource group / vnet live there); add another entry for
+# another region.
+CONFIGURED_AZURE_REGIONS: Final[tuple[str, ...]] = (
+    "eastus2",
+    "centralus",
+    "northcentralus",
+    "westus2",
+    "westus3",
+    "westus",
+    "eastus",
+    "canadacentral",
+    "northeurope",
+    "westeurope",
+    "uksouth",
+    "swedencentral",
+    "australiaeast",
+    "southeastasia",
+    "japaneast",
+    "koreacentral",
+    "centralindia",
+)
+DEFAULT_AZURE_REGION: Final[str] = "eastus2"
 
 
 class CreationId(RandomId):
@@ -74,6 +168,12 @@ class LaunchMode(UpperCaseStrEnum):
     # sandboxes are ephemeral (~1 day max), so it is surfaced as "Modal (1-day
     # ephemeral)" and is testing-only.
     MODAL = auto()
+    # GCP / Azure are reachable ONLY through a bring-your-own-key cloud account
+    # (``byok-gcp-<slug>`` / ``byok-azure-<slug>`` provider blocks written by the
+    # accounts modal); the create form does not render them as ambient options,
+    # so no ambient region tables / provider blocks exist for them.
+    GCP = auto()
+    AZURE = auto()
 
 
 class DockerRuntime(UpperCaseStrEnum):

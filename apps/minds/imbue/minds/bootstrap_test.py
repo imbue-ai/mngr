@@ -12,6 +12,7 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import _ensure_mngr_settings
 from imbue.minds.bootstrap import apply_bootstrap
 from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import mngr_host_dir_for
@@ -20,7 +21,6 @@ from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import set_provider_is_enabled
-from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
 from imbue.minds.testing import stub_mngr_host_dir
 
 
@@ -391,81 +391,34 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     assert parsed["plugins"]["recursive"]["enabled"] is False
 
 
-def test_ensure_mngr_settings_keeps_default_aws_disabled_alongside_region_blocks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The region-less default ``[providers.aws]`` stays suppressed alongside the per-region blocks.
+def test_ensure_mngr_settings_keeps_default_aws_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The region-less default ``[providers.aws]`` stays suppressed.
 
     Otherwise ``get_all_provider_instances`` auto-creates it and its discovery
-    fails every ``mngr list`` cycle ("credentials not configured" -- it has no
-    default_region); the usable providers are the per-region blocks.
+    fails every ``mngr list`` cycle ("credentials not configured"); the usable
+    AWS providers are the bring-your-own-key ``byok-aws-<slug>`` account blocks.
     """
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["aws"] == {"backend": "aws", "is_enabled": False}
-    assert [name for name in parsed["providers"] if name.startswith("aws-")]
 
 
-def test_ensure_mngr_settings_always_writes_aws_region_blocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """One ``[providers.aws-<region>]`` block is written per configured region, with no
-    AWS-credentials gate: a credential-less region errors visibly in discovery (and
-    the providers panel) instead of being silently absent."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    _ensure_mngr_settings("minds-dev-tname")
-    parsed = tomllib.loads(settings_path.read_text())
-    providers = parsed["providers"]
-    for region in CONFIGURED_AWS_REGIONS:
-        block = providers[f"aws-{region}"]
-        assert block == {
-            "backend": "aws",
-            "default_region": region,
-            "default_instance_type": "t3.large",
-            "install_gvisor_runtime": True,
-            "docker_runtime": "runsc",
-            "default_start_args": ["--tmpfs", "/run"],
-        }
-
-
-def test_ensure_mngr_settings_removes_unconfigured_aws_region_blocks(
+def test_ensure_mngr_settings_removes_legacy_ambient_aws_region_blocks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A stale ``aws-<region>`` block for a region no longer in ``CONFIGURED_AWS_REGIONS``
-    is pruned on the next rewrite."""
+    """Ambient ``aws-<region>`` blocks written by earlier builds are actively
+    deleted at boot (the machine-credential AWS path was removed from minds;
+    ``byok-aws-<slug>`` accounts are the only AWS path). BYOK blocks survive."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    settings_path.write_text('[providers.aws-eu-central-9]\nbackend = "aws"\ndefault_region = "eu-central-9"\n')
+    settings_path.write_text(
+        '[providers.aws-us-east-1]\nbackend = "aws"\ndefault_region = "us-east-1"\n\n'
+        '[providers.byok-aws-mine]\nbackend = "aws"\ndefault_region = "us-east-1"\n'
+    )
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
-    assert "aws-eu-central-9" not in parsed["providers"]
-    for region in CONFIGURED_AWS_REGIONS:
-        assert f"aws-{region}" in parsed["providers"]
-
-
-def test_ensure_mngr_settings_preserves_aws_region_is_enabled_on_rewrite(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A panel-toggled ``is_enabled = false`` on an ``aws-<region>`` block survives the
-    rewrite that re-pins the minds-controlled fields."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    _ensure_mngr_settings("minds-dev-tname")
-    set_provider_is_enabled(f"aws-{CONFIGURED_AWS_REGIONS[0]}", False, root_name="minds-dev-tname")
-
-    # Force the rewrite path: a stale extra aws-* block makes the desired-shape
-    # check fail, so the blocks are deleted and re-pinned.
-    doc = tomllib.loads(settings_path.read_text())
-    assert doc["providers"][f"aws-{CONFIGURED_AWS_REGIONS[0]}"]["is_enabled"] is False
-    with settings_path.open("a") as f:
-        f.write('\n[providers.aws-eu-central-9]\nbackend = "aws"\n')
-
-    _ensure_mngr_settings("minds-dev-tname")
-    parsed = tomllib.loads(settings_path.read_text())
-    assert "aws-eu-central-9" not in parsed["providers"]
-    disabled_block = parsed["providers"][f"aws-{CONFIGURED_AWS_REGIONS[0]}"]
-    assert disabled_block["is_enabled"] is False
-    assert disabled_block["backend"] == "aws"
-    assert disabled_block["default_instance_type"] == "t3.large"
-    for region in CONFIGURED_AWS_REGIONS[1:]:
-        assert "is_enabled" not in parsed["providers"][f"aws-{region}"]
+    assert "aws-us-east-1" not in parsed["providers"]
+    assert "byok-aws-mine" in parsed["providers"]
 
 
 def test_ensure_mngr_settings_returns_whether_file_was_modified(
@@ -598,3 +551,15 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_is_bring_your_own_cloud_enabled_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Off by default (env absent), on only for the exact "1" value -- the feature
+    # ships dark behind FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS.
+    monkeypatch.delenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", raising=False)
+    assert is_bring_your_own_cloud_enabled() is False
+    monkeypatch.setenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", "1")
+    assert is_bring_your_own_cloud_enabled() is True
+    for off_value in ("0", "", "true", "yes"):
+        monkeypatch.setenv("FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS", off_value)
+        assert is_bring_your_own_cloud_enabled() is False

@@ -113,6 +113,8 @@ class _RecordingAgentCreator(AgentCreator):
         account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
+        cloud_account: str = "",
+        instance_type: str = "",
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -128,6 +130,8 @@ class _RecordingAgentCreator(AgentCreator):
             "account_email": account_email,
             "branch_or_tag": branch_or_tag,
             "region": region,
+            "cloud_account": cloud_account,
+            "instance_type": instance_type,
             "color": color,
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
@@ -2204,3 +2208,24 @@ def test_backup_routes_require_bearer(tmp_path: Path) -> None:
         client.post(f"/api/v1/workspaces/{agent_id}/backup-service/verification", json={"enabled": False}).status_code
         == 401
     )
+
+
+def test_cloud_account_routes_gated_off_by_default(tmp_path: Path) -> None:
+    # The bring-your-own-key cloud feature ships dark: with the flag unset
+    # (default), both account routes are refused (403) even with valid auth and a
+    # well-formed body -- the feature is unreachable by URL, not merely hidden.
+    client = _client_with_workspace(tmp_path, AgentId())
+    create = client.post(
+        "/api/v1/desktop/cloud-accounts",
+        headers=_auth_header(),
+        json={
+            "backend": "aws",
+            "alias": "mine",
+            "region": "us-east-1",
+            "aws_access_key_id": "AKIA",
+            "aws_secret_access_key": "s",
+        },
+    )
+    assert create.status_code == 403
+    delete = client.delete("/api/v1/desktop/cloud-accounts/byok-aws-mine", headers=_auth_header())
+    assert delete.status_code == 403
