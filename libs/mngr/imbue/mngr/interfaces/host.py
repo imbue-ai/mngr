@@ -344,6 +344,9 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
+        # When provided, called with each output line as it arrives (line, is_stdout) so long
+        # commands can stream progress; the full CommandResult is still returned at the end.
+        on_output: Callable[[str, bool], None] | None = None,
     ) -> CommandResult:
         """
         Execute a shell command on this host *that cannot be retried* and return the result.
@@ -351,6 +354,9 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         Prefer to use execute_idempotent_command whenever possible, as it is a much simpler abstraction and more robust.
         This is really here if you *must* do something which cannot be made idempotent.
         It automatically handles making the command idempotent, but it's much slower and more complex.
+
+        When ``on_output`` is provided, output is streamed to it line-by-line as it
+        arrives instead of only being returned at the end.
         """
         ...
 

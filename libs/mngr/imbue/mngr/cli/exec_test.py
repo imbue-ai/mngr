@@ -14,6 +14,8 @@ from imbue.mngr.cli.exec import _emit_json_output
 from imbue.mngr.cli.exec import _emit_jsonl_error
 from imbue.mngr.cli.exec import _emit_jsonl_exec_result
 from imbue.mngr.cli.exec import _emit_output
+from imbue.mngr.cli.exec import _emit_stream_status
+from imbue.mngr.cli.exec import _write_streamed_line
 from imbue.mngr.cli.exec import exec_command
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import OutputFormat
@@ -32,6 +34,7 @@ def test_exec_cli_options_fields() -> None:
         on_error="continue",
         outer=False,
         missing_outer="warn",
+        stream=False,
         output_format="human",
         quiet=False,
         verbose=0,
@@ -48,6 +51,7 @@ def test_exec_cli_options_fields() -> None:
     assert opts.on_error == "continue"
     assert opts.outer is False
     assert opts.missing_outer == "warn"
+    assert opts.stream is False
 
 
 def test_exec_requires_command(
@@ -77,6 +81,35 @@ def test_exec_requires_agent(
     )
     assert result.exit_code != 0
     assert "Must specify at least one agent" in result.output
+
+
+def test_write_streamed_line_routes_stdout_and_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    """--stream's per-line sink writes stdout lines to stdout and stderr lines to stderr."""
+    _write_streamed_line("progress: 50%", True)
+    _write_streamed_line("a warning", False)
+
+    captured = capsys.readouterr()
+    assert "progress: 50%" in captured.out
+    assert "progress: 50%" not in captured.err
+    assert "a warning" in captured.err
+    assert "a warning" not in captured.out
+
+
+def test_emit_stream_status_reports_terminal_status_without_reprinting_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """After --stream already wrote the body, only the per-agent status line is emitted."""
+    ok = ExecResult(agent_name="ok-agent", stdout="already streamed\n", stderr="", success=True)
+    bad = ExecResult(agent_name="broken-agent", stdout="", stderr="", success=False)
+    with capture_loguru(level="ERROR") as log_output:
+        _emit_stream_status(MultiExecResult(successful_results=[ok, bad], failed_agents=[]))
+
+    captured = capsys.readouterr()
+    assert "Command succeeded on agent ok-agent" in captured.out
+    # The already-streamed body must not be reprinted by the status pass.
+    assert "already streamed" not in captured.out
+    # The failed agent's status is logged (loguru -> stderr), not printed to stdout.
+    assert "Command failed on agent broken-agent" in log_output.getvalue()
 
 
 def test_emit_human_output_single_success(capsys: pytest.CaptureFixture[str]) -> None:

@@ -299,8 +299,8 @@ class ActiveRemoteLock(FrozenModel):
 
 class _StreamingOutputAccumulator(MutableModel):
     """Adapter that fits into ``ConcurrencyGroup.run_process_to_completion``'s
-    ``on_output(line, is_stdout)`` shape while exposing the merged-line
-    ``on_line(stripped_line)`` shape used by ``OuterHost.execute_streaming_command``.
+    ``on_output(line, is_stdout)`` shape, forwarding each clean line to a
+    caller ``on_output(line, is_stdout)``.
 
     Also accumulates stdout / stderr text so the caller can build a final
     ``CommandResult``. Lines arrive with their trailing newline; we strip it
@@ -309,13 +309,13 @@ class _StreamingOutputAccumulator(MutableModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    on_line: Callable[[str], None] = Field(description="Callback invoked with each clean line")
+    on_output: Callable[[str, bool], None] = Field(description="Callback invoked with each clean line and its stream")
     stdout_lines: list[str] = Field(default_factory=list, description="Captured stdout lines")
     stderr_lines: list[str] = Field(default_factory=list, description="Captured stderr lines")
 
     def __call__(self, line: str, is_stdout: bool) -> None:
         stripped = line.rstrip("\n")
-        self.on_line(stripped)
+        self.on_output(stripped, is_stdout)
         if is_stdout:
             self.stdout_lines.append(stripped)
         else:
@@ -333,16 +333,16 @@ class _StreamingOutputAccumulator(MutableModel):
 class _SSHStderrState(MutableModel):
     """State for the daemon thread that streams stderr from a paramiko channel.
 
-    The thread reads lines off ``stderr`` until EOF, calls ``on_line`` for each
-    one, and accumulates the raw line list. Errors during reading are swallowed
-    (logged at debug); the stdout reader on the main thread is the source of
-    truth for command failure.
+    The thread reads lines off ``stderr`` until EOF, calls ``on_output`` for
+    each one (with ``is_stdout=False``), and accumulates the raw line list.
+    Errors during reading are swallowed (logged at debug); the stdout reader on
+    the main thread is the source of truth for command failure.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     stderr: Any = Field(repr=False, description="Paramiko channel stderr file-like object")
-    on_line: Callable[[str], None] = Field(description="Callback invoked with each clean line")
+    on_output: Callable[[str, bool], None] = Field(description="Callback invoked with each clean line and its stream")
     lines: list[str] = Field(default_factory=list, description="Captured stderr lines")
 
 
@@ -352,7 +352,7 @@ def _drain_ssh_stderr_into(state: _SSHStderrState) -> None:
         for raw in iter(state.stderr.readline, ""):
             stripped = raw.rstrip("\n")
             state.lines.append(stripped)
-            state.on_line(stripped)
+            state.on_output(stripped, False)
     except (OSError, SSHException, EOFError) as exc:
         logger.debug("stderr reader stopped: {}", exc)
 
@@ -959,8 +959,24 @@ class OuterHost(OuterHostInterface):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
+        on_output: Callable[[str, bool], None] | None = None,
     ) -> CommandResult:
-        """Execute a stateful command (currently delegates to execute_idempotent_command)."""
+        """Execute a stateful command (currently delegates to execute_idempotent_command).
+
+        When ``on_output`` is provided, the command's output is streamed to it
+        line-by-line as it arrives (via the same paramiko read loop as
+        ``execute_streaming_command``) rather than being captured and returned
+        only at the end; the full ``CommandResult`` is still returned. Like that
+        path it may retry on a transient SSH error, so a caller passing
+        ``on_output`` should tolerate the (rare) duplicate line on retry --
+        matching the retry the non-streaming idempotent delegate already does.
+        """
+        if on_output is not None:
+            if user is not None:
+                raise NotImplementedError(
+                    "OuterHost does not support su user; pass an SSH user via the connector instead"
+                )
+            return self._run_streaming_command(command, on_output, env, timeout_seconds, cwd)
         return self.execute_idempotent_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
 
     def execute_streaming_command(
@@ -985,8 +1001,33 @@ class OuterHost(OuterHostInterface):
         should expect duplicate lines on retry. Use this only for commands like
         ``docker build`` where re-running from scratch is safe.
         """
+        # This line-merged public form drops the stdout/stderr distinction the
+        # shared core threads through; adapt it to the 2-arg callback.
+        return self._run_streaming_command(
+            command,
+            lambda line, _is_stdout: on_line(line),
+            env,
+            timeout_seconds,
+            cwd=None,
+        )
+
+    def _run_streaming_command(
+        self,
+        command: str,
+        on_output: Callable[[str, bool], None],
+        env: Mapping[str, str] | None,
+        timeout_seconds: float | None,
+        cwd: Path | None,
+    ) -> CommandResult:
+        """Shared streaming-exec core behind ``execute_streaming_command`` and the
+        streaming ``execute_stateful_command`` path.
+
+        Calls ``on_output(line, is_stdout)`` per line as output arrives and
+        returns the full ``CommandResult``. Treated as idempotent (transient SSH
+        errors retry, so callers may see duplicate lines on retry).
+        """
         if self.is_local:
-            return self._execute_streaming_local(command, on_line, env, timeout_seconds)
+            return self._execute_streaming_local(command, on_output, env, timeout_seconds, cwd)
         with (
             self._notify_on_connection_error(),
             self._translate_ssh_errors(
@@ -995,24 +1036,26 @@ class OuterHost(OuterHostInterface):
                 failed="Could not execute streaming command due to connection error",
             ),
         ):
-            return self._execute_streaming_ssh_with_retry(command, on_line, env, timeout_seconds)
+            return self._execute_streaming_ssh_with_retry(command, on_output, env, timeout_seconds, cwd)
 
     def _execute_streaming_local(
         self,
         command: str,
-        on_line: Callable[[str], None],
+        on_output: Callable[[str, bool], None],
         env: Mapping[str, str] | None,
         timeout_seconds: float | None,
+        cwd: Path | None,
     ) -> CommandResult:
         """Local-process streaming via the concurrency group's on_output callback."""
         full_env: dict[str, str] | None = None
         if env is not None:
             full_env = {**os.environ, **env}
-        accumulator = _StreamingOutputAccumulator(on_line=on_line)
+        accumulator = _StreamingOutputAccumulator(on_output=on_output)
         finished = self.mngr_ctx.concurrency_group.run_process_to_completion(
             ["sh", "-c", command],
             timeout=timeout_seconds,
             is_checked_after=False,
+            cwd=cwd,
             env=full_env,
             on_output=accumulator,
         )
@@ -1026,14 +1069,15 @@ class OuterHost(OuterHostInterface):
     def _execute_streaming_ssh_with_retry(
         self,
         command: str,
-        on_line: Callable[[str], None],
+        on_output: Callable[[str, bool], None],
         env: Mapping[str, str] | None,
         timeout_seconds: float | None,
+        cwd: Path | None,
     ) -> CommandResult:
         """SSH-channel streaming via paramiko's exec_command (bypasses pyinfra's buffering).
 
         Wrapped with the standard transient-SSH-error retry decorator. On retry,
-        ``on_line`` is called again with the new attempt's output.
+        ``on_output`` is called again with the new attempt's output.
         """
         self._ensure_connected()
         self._reverify_lock_if_channel_died()
@@ -1042,8 +1086,11 @@ class OuterHost(OuterHostInterface):
             raise HostConnectionError("No SSH client available for streaming")
 
         # Set env vars via an ``export ... &&`` prefix so they survive compound
-        # commands (paramiko's exec_command env= is unreliable across servers).
+        # commands (paramiko's exec_command env= is unreliable across servers),
+        # then run inside ``cwd`` when one was requested.
         full_command = _prepend_env_exports(command, env)
+        if cwd is not None:
+            full_command = f"cd {shlex.quote(str(cwd))} && {full_command}"
 
         try:
             stdin, stdout, stderr = client.exec_command(
@@ -1059,7 +1106,7 @@ class OuterHost(OuterHostInterface):
         stdin.close()
 
         stdout_lines: list[str] = []
-        stderr_state = _SSHStderrState(stderr=stderr, on_line=on_line)
+        stderr_state = _SSHStderrState(stderr=stderr, on_output=on_output)
         stderr_thread = threading.Thread(target=_drain_ssh_stderr_into, args=(stderr_state,), daemon=True)
         stderr_thread.start()
 
@@ -1067,7 +1114,7 @@ class OuterHost(OuterHostInterface):
             for raw in iter(stdout.readline, ""):
                 stripped = raw.rstrip("\n")
                 stdout_lines.append(stripped)
-                on_line(stripped)
+                on_output(stripped, True)
         except (OSError, SSHException, EOFError) as e:
             logger.debug("stdout reader stopped on error: {}, disconnecting for retry", e)
             self._disconnect_for_retry()

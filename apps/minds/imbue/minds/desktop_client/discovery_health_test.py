@@ -110,6 +110,10 @@ def test_stall_enters_reconnecting_and_bounces_immediately() -> None:
     remediator = _FakeRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
+    # Anchor a same-session event at T0 so the later stall ages from event time
+    # rather than being treated as a pre-watchdog replay artifact.
+    watchdog.evaluate(_T0)
+
     # Last event at T0; now is T0 + 40s -> aged past the 35s threshold.
     clock.advance(40)
     watchdog.evaluate(_T0)
@@ -123,6 +127,10 @@ def test_remediation_bounces_then_restarts_on_growing_backoff_forever() -> None:
     clock = _Clock(_T0)
     remediator = _FakeRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
+
+    # Anchor a same-session event at T0 so the later stall ages from event time
+    # rather than being treated as a pre-watchdog replay artifact.
+    watchdog.evaluate(_T0)
 
     clock.advance(40)
     # First stalled evaluate enters RECONNECTING and bounces.
@@ -158,6 +166,10 @@ def test_failed_restart_does_not_block_and_keeps_retrying() -> None:
     remediator = _FakeRemediator(fail_restart=True)
     watchdog, transitions = _make_watchdog(clock, remediator)
 
+    # Anchor a same-session event at T0 so the later stall ages from event time
+    # rather than being treated as a pre-watchdog replay artifact.
+    watchdog.evaluate(_T0)
+
     clock.advance(40)
     # First stalled evaluate enters RECONNECTING and bounces.
     watchdog.evaluate(_T0)
@@ -183,6 +195,10 @@ def test_recovery_mid_remediation_returns_to_healthy_and_resets() -> None:
     clock = _Clock(_T0)
     remediator = _FakeRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
+
+    # Anchor a same-session event at T0 so the later stall ages from event time
+    # rather than being treated as a pre-watchdog replay artifact.
+    watchdog.evaluate(_T0)
 
     clock.advance(40)
     # Enter RECONNECTING and bounce.
@@ -250,6 +266,10 @@ def test_consumer_death_during_reconnecting_escalates_to_blocked() -> None:
     remediator = _FakeRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
+    # Anchor a same-session event at T0 so the later stall ages from event time
+    # rather than being treated as a pre-watchdog replay artifact.
+    watchdog.evaluate(_T0)
+
     clock.advance(40)
     # Enter RECONNECTING (+ bounce), then a consumer death escalates to BLOCKED.
     watchdog.evaluate(_T0)
@@ -276,6 +296,36 @@ def test_cold_start_has_grace_then_stalls_when_no_first_event() -> None:
     watchdog.evaluate(None)
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
     assert remediator.calls == ["bounce"]
+
+
+def test_replayed_pre_watchdog_events_get_cold_start_grace_instead_of_immediate_stall() -> None:
+    # At startup the consumer replays the previous session's discovery file,
+    # whose snapshots fold in with their original (hours-old) timestamps. A
+    # tick sampled mid-replay must not read that as a stall -- the resulting
+    # bounce once SIGHUP'd the still-booting supervisor to death. Timestamps
+    # predating the watchdog age from its start, like the no-event cold start.
+    clock = _Clock(_T0)
+    remediator = _FakeRemediator()
+    watchdog, transitions = _make_watchdog(clock, remediator)
+
+    stale_replayed = _T0 - timedelta(hours=3)
+    watchdog.evaluate(stale_replayed)
+    assert watchdog.get_health() is DiscoveryHealth.HEALTHY
+    assert remediator.calls == []
+
+    # Still within the grace window: the stale timestamp alone never stalls it.
+    clock.advance(20)
+    watchdog.evaluate(stale_replayed)
+    assert watchdog.get_health() is DiscoveryHealth.HEALTHY
+    assert remediator.calls == []
+
+    # Past the grace window with still nothing from this session, the
+    # cold-start backstop takes over and remediation begins.
+    clock.advance(20)
+    watchdog.evaluate(stale_replayed)
+    assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
+    assert remediator.calls == ["bounce"]
+    assert transitions == [DiscoveryHealth.RECONNECTING]
 
 
 def test_cold_start_that_never_recovers_keeps_retrying_without_blocking() -> None:
@@ -310,6 +360,10 @@ def test_backoff_holds_at_cap_without_overflow_after_many_restarts() -> None:
     clock = _Clock(_T0)
     remediator = _FakeRemediator()
     watchdog, _transitions = _make_watchdog(clock, remediator)
+
+    # Anchor a same-session event at T0 so the stalled evaluate below ages from
+    # event time rather than being treated as a pre-watchdog replay artifact.
+    watchdog.evaluate(_T0)
 
     watchdog._restart_count = 5000
     watchdog._bounce_attempted = True

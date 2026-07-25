@@ -32,6 +32,7 @@ import base64
 import os
 import secrets
 import shlex
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from typing import Final
@@ -155,6 +156,10 @@ def run_mngr_exec_on_agent(
     *,
     parent_cg: ConcurrencyGroup | None,
     timeout_seconds: float = _MNGR_EXEC_TIMEOUT_SECONDS,
+    # Invoked with (line, is_stdout) for each output line as it arrives, so a
+    # long-running command (a restore) can stream live progress into an
+    # operation log.
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> FinishedProcess:
     """Run a single shell command on the agent's host via ``mngr exec``.
 
@@ -164,11 +169,21 @@ def run_mngr_exec_on_agent(
     """
     name = "backup-exec"
     cg = parent_cg.make_concurrency_group(name=name) if parent_cg is not None else ConcurrencyGroup(name=name)
+    # When the caller wants live output, append ``--stream`` so ``mngr exec`` emits
+    # each remote line as it arrives rather than buffering the whole command's
+    # output and printing it only at the end (which made a long restore's
+    # progress appear all at once). ``run_process_to_completion``'s own reader
+    # then fires ``on_output`` per line; callers with no ``on_output`` (env
+    # injection, gate probe, verification) stay on the non-streaming path.
+    argv = build_backup_exec_argv(agent_id, command_str)
+    if on_output is not None:
+        argv = [*argv, "--stream"]
     with cg:
         return cg.run_process_to_completion(
-            command=build_backup_exec_argv(agent_id, command_str),
+            command=argv,
             timeout=timeout_seconds,
             is_checked_after=False,
+            on_output=on_output,
         )
 
 

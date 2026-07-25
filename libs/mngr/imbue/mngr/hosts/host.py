@@ -13,6 +13,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import ClassVar
 from typing import Final
 from typing import Iterator
@@ -723,6 +724,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
+        on_output: Callable[[str, bool], None] | None = None,
     ) -> CommandResult:
         """
         Execute a shell command on this host *that cannot be retried* and return the result.
@@ -730,7 +732,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         Prefer to use execute_idempotent_command whenever possible, as it is a much simpler abstraction and more robust.
         This is really here if you *must* do something which cannot be made idempotent.
         It automatically handles making the command idempotent, but it's much slower and more complex.
+
+        When ``on_output`` is provided, the command's output is streamed to it
+        line-by-line as it arrives (see ``OuterHost.execute_stateful_command``).
         """
+        if on_output is not None:
+            if user is not None:
+                raise NotImplementedError("Host does not support su user; pass an SSH user via the connector instead")
+            return self._run_streaming_command(command, on_output, env, timeout_seconds, cwd)
         # FIXME: actually implement this. It's rather complex:
         #  we need to create a unique lock file, ship the command over, and run an idempotent command that waits for it to be finished
         #  once the command finishes, we can run idempotent commands to fetch the resulting stdout, stderr, and exit code

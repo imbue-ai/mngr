@@ -24,6 +24,7 @@ from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_command_stdout_and_stderr
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.cli.output_helpers import write_stderr_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -49,6 +50,7 @@ class ExecCliOptions(CommonCliOptions):
     on_error: str
     outer: bool
     missing_outer: str
+    stream: bool
 
 
 @click.command(name="exec")
@@ -73,6 +75,17 @@ class ExecCliOptions(CommonCliOptions):
     type=float,
     default=None,
     help="Timeout in seconds for the command",
+)
+@optgroup.option(
+    "--stream/--no-stream",
+    "stream",
+    default=False,
+    show_default=True,
+    help=(
+        "Stream the command's stdout/stderr line-by-line as it runs (for long "
+        "commands) instead of printing all output once it finishes. Human "
+        "output format only; intended for a single agent."
+    ),
 )
 @optgroup.group("General")
 @optgroup.option(
@@ -155,6 +168,29 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
             error_behavior=error_behavior,
             missing_outer=missing_outer,
         )
+        return
+
+    # Stream each output line live as it arrives (for long commands). Human
+    # format only -- interleaving raw lines would corrupt JSON/JSONL/template
+    # output.
+    if opts.stream:
+        if output_opts.output_format != OutputFormat.HUMAN or output_opts.format_template is not None:
+            raise UserInputError("--stream is only supported with the default (human) output format")
+        result = exec_command_on_agents(
+            mngr_ctx=mngr_ctx,
+            addresses=agent_addresses,
+            command=opts.command_arg,
+            is_all=False,
+            cwd=opts.cwd,
+            timeout_seconds=opts.timeout,
+            is_start_desired=opts.start,
+            error_behavior=error_behavior,
+            on_output=_write_streamed_line,
+        )
+        # The output already streamed above; only the terminal status is left.
+        _emit_stream_status(result)
+        if result.failed_agents or any(not r.success for r in result.successful_results):
+            ctx.exit(1)
         return
 
     # For JSONL format, use streaming callbacks
@@ -409,6 +445,29 @@ def _emit_output(result: MultiExecResult, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
+def _write_streamed_line(line: str, is_stdout: bool) -> None:
+    """``on_output`` sink for ``--stream``: write each line live to stdout / stderr.
+
+    Both helpers flush, so a consumer reading this process's stdout pipe (e.g.
+    the minds desktop client tailing a restore) sees each line as it arrives.
+    """
+    if is_stdout:
+        write_human_line("{}", line)
+    else:
+        write_stderr_line(line)
+
+
+def _emit_stream_status(result: MultiExecResult) -> None:
+    """Emit only the terminal per-agent status after ``--stream`` already wrote the output."""
+    for exec_result in result.successful_results:
+        if exec_result.success:
+            write_human_line("Command succeeded on agent {}", exec_result.agent_name)
+        else:
+            logger.error("Command failed on agent {}", exec_result.agent_name)
+    for agent_name, error in result.failed_agents:
+        logger.error("Failed on agent {}: {}", agent_name, error)
+
+
 def _emit_human_output(result: MultiExecResult) -> None:
     """Emit human-readable output for multi-agent exec results."""
     for exec_result in result.successful_results:
@@ -451,7 +510,7 @@ def _emit_json_output(result: MultiExecResult) -> None:
 CommandHelpMetadata(
     key="exec",
     one_line_description="Execute a shell command on one or more agents' hosts",
-    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>] [--[no-]start] [--[no-]outer] [--missing-outer <MODE>]",
+    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--[no-]stream] [--on-error <MODE>] [--[no-]start] [--[no-]outer] [--missing-outer <MODE>]",
     arguments_description=(
         "- `AGENTS`: Name(s) or ID(s) of the agent(s) whose host will run the command\n"
         "- `COMMAND`: Shell command to execute on the agent's host"

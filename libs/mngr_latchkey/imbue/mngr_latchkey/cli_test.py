@@ -11,6 +11,7 @@ shared gateway); we cover the underlying dispatch logic in
 import contextlib
 import hashlib
 import json
+import signal
 import subprocess
 import sys
 import threading
@@ -38,6 +39,7 @@ from imbue.mngr.primitives import PluginName
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_BINARY
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _DEFAULT_LATCHKEY_DIRECTORY
+from imbue.mngr_latchkey.cli import _ignore_sighup_until_handlers_installed
 from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
 from imbue.mngr_latchkey.cli import _run_forward_with_error_reporting
 from imbue.mngr_latchkey.cli import _run_sighup_bounce_watcher
@@ -749,3 +751,18 @@ def test_sighup_bounce_watcher_survives_unexpected_bounce_error() -> None:
         bounce_event.set()
         watcher.join(timeout=5.0)
     assert not watcher.is_alive()
+
+
+def test_startup_sighup_guard_sets_ignore_disposition() -> None:
+    """The startup guard must leave SIGHUP ignored, not at its fatal default.
+
+    The forward record advertises the pid to embedders (which may SIGHUP it via
+    ``LatchkeyForwardSupervisor.bounce``) before the real bounce handler is
+    installed; the guard closes that window by ignoring the signal.
+    """
+    original_handler = signal.getsignal(signal.SIGHUP)
+    try:
+        _ignore_sighup_until_handlers_installed()
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, original_handler)

@@ -200,6 +200,7 @@ class _LocalFakeOuter(OuterHostInterface):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
+        on_output: Callable[[str, bool], None] | None = None,
     ) -> CommandResult:
         raise NotImplementedError("_LocalFakeOuter.execute_stateful_command not used by VpsHostStore")
 

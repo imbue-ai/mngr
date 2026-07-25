@@ -501,6 +501,11 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         max_log_size_mb=_FORWARD_LOG_MAX_SIZE_MB,
     )
 
+    # Must run before the forward record is published (in
+    # ``_run_forward_supervisor``): from that point an embedder may SIGHUP this
+    # pid, and the default disposition would terminate us mid-startup.
+    _ignore_sighup_until_handlers_installed()
+
     # No parent-death watcher: ``LatchkeyForwardSupervisor`` spawns us
     # detached via ``start_new_session=True`` so we survive embedder
     # restarts (the whole point of the supervisor pattern). Polling
@@ -781,6 +786,24 @@ def _run_gateway_health_check_loop(
             update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
         except LatchkeyStoreError as e:
             logger.opt(exception=e).error("Failed to publish respawned gateway port.")
+
+
+def _ignore_sighup_until_handlers_installed() -> None:
+    """Ignore SIGHUP for the forward's startup window, before the real bounce handler exists.
+
+    The forward record advertises this pid to embedders -- which may SIGHUP it
+    via :meth:`LatchkeyForwardSupervisor.bounce` -- well before
+    :func:`_install_signal_handlers` runs at the end of startup, and SIGHUP's
+    default disposition would silently terminate the supervisor mid-startup.
+    Dropping an early SIGHUP is safe: the ``mngr observe`` child it would bounce
+    has not been spawned yet, so startup itself reads the freshest provider
+    state. Best-effort for the same reason as ``_install_signal_handlers``
+    (``signal.signal`` only works from the main thread).
+    """
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    except (ValueError, OSError) as e:
+        logger.debug("Could not ignore SIGHUP during forward startup: {}", e)
 
 
 def _install_signal_handlers(shutdown_event: threading.Event, bounce_event: threading.Event) -> None:

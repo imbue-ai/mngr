@@ -82,7 +82,7 @@ const EXPECTED_SHA256 = {
 };
 
 const MAX_REDIRECTS = 5;
-const DOWNLOAD_RETRIES = 3;
+const DOWNLOAD_RETRIES = 5;
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -172,7 +172,9 @@ function downloadOnce(url, redirectsRemaining = MAX_REDIRECTS) {
       if (res.statusCode !== 200) {
         res.resume();
         const err = new Error(`HTTP ${res.statusCode} for ${url}`);
-        err.permanent = true;
+        // GitHub's release CDN intermittently returns 5xx bursts; only
+        // client errors (4xx) are permanent.
+        err.permanent = res.statusCode < 500;
         reject(err);
         return;
       }

@@ -526,12 +526,15 @@ class LatchkeyForwardSupervisor(MutableModel):
     def bounce(self) -> None:
         """Refresh the supervisor's provider set without dropping the gateway.
 
-        If a live ``mngr latchkey forward`` is running, send it SIGHUP so it
-        bounces only its ``mngr observe`` child (the shared gateway and every
-        reverse tunnel stay up) and reloads the current provider set. If no
-        live supervisor is found -- no record, a dead PID, or a stale record
-        pointing at a stranger -- fall back to :meth:`ensure_running` so the
-        bounce also brings the supervisor up (start-if-down).
+        If a live, fully-started ``mngr latchkey forward`` is running, send it
+        SIGHUP so it bounces only its ``mngr observe`` child (the shared gateway
+        and every reverse tunnel stay up) and reloads the current provider set.
+        If no live supervisor is found -- no record, a dead PID, or a stale
+        record pointing at a stranger -- fall back to :meth:`ensure_running` so
+        the bounce also brings the supervisor up (start-if-down). A live
+        supervisor that is still starting (its record has no gateway port yet)
+        is left alone entirely: its observe child does not exist to be bounced,
+        and startup reads the current provider state anyway.
 
         Used by the minds desktop client on every mid-session change to its
         provider set (provider enable/disable, imbue_cloud account add/remove),
@@ -540,18 +543,29 @@ class LatchkeyForwardSupervisor(MutableModel):
         plugin_dir = self.plugin_data_dir
         with self._lock:
             info = load_forward_info(plugin_dir)
-            live_pid = info.pid if (info is not None and is_forward_info_alive(info)) else None
-        if live_pid is None:
+            live_info = info if (info is not None and is_forward_info_alive(info)) else None
+        if live_info is None:
             logger.info("No live mngr latchkey forward to bounce; ensuring one is running")
             self.ensure_running()
             return
-        logger.info("Bouncing mngr latchkey forward observe via SIGHUP (pid={})", live_pid)
+        if live_info.gateway_port is None:
+            # The record's gateway port is stamped only once startup completes,
+            # and until then a SIGHUP can land before the forward has installed
+            # its bounce handler -- the default disposition would kill it.
+            logger.info(
+                "mngr latchkey forward (pid={}) is still starting; skipping the observe bounce",
+                live_info.pid,
+            )
+            return
+        logger.info("Bouncing mngr latchkey forward observe via SIGHUP (pid={})", live_info.pid)
         try:
-            os.kill(live_pid, signal.SIGHUP)
+            os.kill(live_info.pid, signal.SIGHUP)
         except OSError as e:
             # The supervisor died between the liveness check and the signal.
             # Bring a fresh one up rather than leaving the provider set stale.
-            logger.warning("Failed to SIGHUP mngr latchkey forward pid {}: {}; ensuring one is running", live_pid, e)
+            logger.warning(
+                "Failed to SIGHUP mngr latchkey forward pid {}: {}; ensuring one is running", live_info.pid, e
+            )
             self.ensure_running()
 
     def restart(self) -> LatchkeyForwardInfo:

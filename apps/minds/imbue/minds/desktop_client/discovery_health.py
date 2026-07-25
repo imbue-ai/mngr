@@ -298,15 +298,19 @@ class DiscoveryHealthWatchdog(MutableModel):
     def _is_stalled_locked(self, last_event_at: datetime | None, now: datetime) -> bool:
         """Whether the producer is emitting nothing (must hold ``_lock``).
 
-        With an event on record, staleness is its age past
-        ``stall_threshold_seconds``. With none yet (cold start), it is the time
-        since the watchdog started -- so a normal startup is given the same
-        grace period before the cold-start backstop fires.
+        Only an event from this watchdog's own lifetime counts as producer
+        activity: at startup the ``mngr forward`` consumer replays the previous
+        session's discovery file, whose snapshots fold in with their original
+        (possibly hours-old) timestamps, and a tick sampled mid-replay must not
+        read that as a stall -- that once bounced (SIGHUP'd) the still-booting
+        supervisor to death. An event predating ``_started_at`` -- like no event
+        at all (cold start) -- therefore ages from the watchdog's start, giving
+        a normal startup the full grace period before the backstop fires.
         """
-        if last_event_at is not None:
+        baseline = self._started_at if self._started_at is not None else now
+        if last_event_at is not None and last_event_at >= baseline:
             age = (now - last_event_at).total_seconds()
             return age > self.stall_threshold_seconds
-        baseline = self._started_at if self._started_at is not None else now
         return (now - baseline).total_seconds() > self.stall_threshold_seconds
 
     def _next_remediation_locked(self, now: datetime) -> Callable[[], None] | None:

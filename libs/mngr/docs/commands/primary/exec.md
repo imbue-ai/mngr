@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>] [--[no-]start] [--[no-]outer] [--missing-outer <MODE>]
+mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--cwd <DIR>] [--timeout <SECONDS>] [--[no-]stream] [--on-error <MODE>] [--[no-]start] [--[no-]outer] [--missing-outer <MODE>]
 ```
 
 Execute a shell command on one or more agents' hosts.
@@ -47,6 +47,7 @@ mngr exec [OPTIONS] [AGENTS]... COMMAND
 | ---- | ---- | ----------- | ------- |
 | `--cwd` | text | Working directory for the command (default: agent's work_dir) | None |
 | `--timeout` | float | Timeout in seconds for the command | None |
+| `--stream`, `--no-stream` | boolean | Stream the command's stdout/stderr line-by-line as it runs (for long commands) instead of printing all output once it finishes. Human output format only; intended for a single agent. | `False` |
 
 ## General
 

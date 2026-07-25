@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 import types
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -122,9 +123,21 @@ class FakeHost(MutableModel):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
+        on_output: Callable[[str, bool], None] | None = None,
     ) -> CommandResult:
-        """Execute a stateful command locally."""
-        return self._execute_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+        """Execute a stateful command locally.
+
+        When ``on_output`` is provided, the captured stdout/stderr lines are
+        replayed to it (stdout first, then stderr) so callers relying on the
+        streaming contract still see their per-line callback fire.
+        """
+        result = self._execute_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+        if on_output is not None:
+            for line in result.stdout.splitlines():
+                on_output(line, True)
+            for line in result.stderr.splitlines():
+                on_output(line, False)
+        return result
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file from the local filesystem."""

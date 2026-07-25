@@ -367,6 +367,96 @@ def test_outer_host_streaming_local_streams_stderr(temp_mngr_ctx: MngrContext) -
     assert "to-stderr" in result.stderr
 
 
+def test_outer_host_stateful_streaming_calls_on_output_per_line(temp_mngr_ctx: MngrContext) -> None:
+    """execute_stateful_command with on_output streams each stdout line (is_stdout=True) live."""
+    pyinfra_host = create_local_pyinfra_host()
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    received: list[tuple[str, bool]] = []
+    result = outer.execute_stateful_command(
+        "printf 'one\\ntwo\\nthree\\n'",
+        on_output=lambda line, is_stdout: received.append((line, is_stdout)),
+    )
+    assert result.success
+    assert received == [("one", True), ("two", True), ("three", True)]
+    # The full stdout is still returned in the result for callers that parse it.
+    assert "one" in result.stdout
+    assert "three" in result.stdout
+
+
+def test_outer_host_stateful_streaming_distinguishes_stdout_and_stderr(temp_mngr_ctx: MngrContext) -> None:
+    """The on_output is_stdout flag separates the two streams (defeated by the old buffered path)."""
+    pyinfra_host = create_local_pyinfra_host()
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    received: list[tuple[str, bool]] = []
+    result = outer.execute_stateful_command(
+        "echo to-stdout; echo to-stderr 1>&2",
+        on_output=lambda line, is_stdout: received.append((line, is_stdout)),
+    )
+    assert result.success
+    assert ("to-stdout", True) in received
+    assert ("to-stderr", False) in received
+    assert "to-stdout" in result.stdout
+    assert "to-stderr" in result.stderr
+
+
+def test_outer_host_stateful_streaming_honors_cwd(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The streaming stateful path runs in the requested cwd."""
+    pyinfra_host = create_local_pyinfra_host()
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    received: list[str] = []
+    result = outer.execute_stateful_command(
+        "pwd",
+        cwd=tmp_path,
+        on_output=lambda line, _is_stdout: received.append(line),
+    )
+    assert result.success
+    # Resolve both sides: macOS /tmp is a symlink to /private/tmp, so the shell's
+    # pwd may differ textually from tmp_path without resolving.
+    assert Path(received[0]).resolve() == tmp_path.resolve()
+
+
+def test_outer_host_stateful_streaming_surfaces_failure(temp_mngr_ctx: MngrContext) -> None:
+    """A non-zero exit is reported via CommandResult.success on the streaming path."""
+    pyinfra_host = create_local_pyinfra_host()
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    received: list[str] = []
+    result = outer.execute_stateful_command(
+        "echo before-fail; exit 7",
+        on_output=lambda line, _is_stdout: received.append(line),
+    )
+    assert not result.success
+    assert "before-fail" in received
+
+
+def test_outer_host_stateful_without_on_output_still_returns_result(temp_mngr_ctx: MngrContext) -> None:
+    """Without on_output the stateful path keeps its non-streaming behavior (delegates to idempotent)."""
+    pyinfra_host = create_local_pyinfra_host()
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    result = outer.execute_stateful_command("echo hello-buffered")
+    assert result.success
+    assert "hello-buffered" in result.stdout
+
+
 class _FakePyinfraHostRaisingOnConnect:
     """Minimal pyinfra-host stand-in whose ``connect()`` raises a configured ConnectError.
 

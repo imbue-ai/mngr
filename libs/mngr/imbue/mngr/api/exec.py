@@ -226,6 +226,7 @@ def _execute_on_single_agent(
     on_success: Callable[[ExecResult], None] | None,
     on_error: Callable[[str, str], None] | None,
     error_behavior: ErrorBehavior,
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> bool:
     """Execute a command on a single agent. Returns True if the caller should abort."""
     try:
@@ -249,6 +250,7 @@ def _execute_on_single_agent(
                 prefixed_command,
                 cwd=effective_cwd,
                 timeout_seconds=timeout_seconds,
+                on_output=on_output,
             )
 
         exec_result = ExecResult(
@@ -437,6 +439,9 @@ def exec_command_on_agents(
     on_success: Callable[[ExecResult], None] | None = None,
     # Optional callback invoked on each failure
     on_error: Callable[[str, str], None] | None = None,
+    # Optional callback invoked with each output line (line, is_stdout) as it arrives, so a
+    # long-running command streams live instead of returning all output at the end.
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> MultiExecResult:
     """Execute a shell command on the hosts where multiple agents run.
 
@@ -475,7 +480,16 @@ def exec_command_on_agents(
         # Execute command on each agent on this host
         for match in agent_list:
             is_should_abort = _execute_on_single_agent(
-                online_host, match, command, cwd, timeout_seconds, result, on_success, on_error, error_behavior
+                online_host,
+                match,
+                command,
+                cwd,
+                timeout_seconds,
+                result,
+                on_success,
+                on_error,
+                error_behavior,
+                on_output=on_output,
             )
             if is_should_abort:
                 return result
