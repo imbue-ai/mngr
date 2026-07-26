@@ -95,9 +95,23 @@ _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 # Empirically, reencryption takes around 0.1s.
 _REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
 
-# ``latchkey --version`` is a print-and-exit; 5s is generous slack for
-# Node-runtime startup on cold filesystems.
-_VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
+# ``latchkey --version`` is normally a print-and-exit, but the upstream CLI
+# runs its credential-store data-format migrations before printing anything --
+# e.g. latchkey 3.0's migration to the multiple-accounts format makes
+# per-service network calls on the first invocation after an upgrade. 15s
+# covers Node-runtime startup on cold filesystems plus a typical inline
+# migration.
+_VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 15.0
+
+# Filename of the stamp the *upstream* latchkey CLI keeps at the root of the
+# latchkey directory to record its credential-store data format version.
+# Distinct from this plugin's own ``data-format-version`` stamp, which lives
+# under ``plugin_data_dir`` (see :mod:`imbue.mngr_latchkey.migrations.runner`).
+UPSTREAM_DATA_FORMAT_VERSION_FILENAME: Final[str] = "data-format-version"
+
+# Filename of the upstream CLI's encrypted credential store, directly under
+# the latchkey directory.
+CREDENTIALS_STORE_FILENAME: Final[str] = "credentials.json.enc"
 
 # Minimum version of the upstream ``latchkey`` CLI this package will operate
 # against. Kept in lockstep with the version we install/bundle (see

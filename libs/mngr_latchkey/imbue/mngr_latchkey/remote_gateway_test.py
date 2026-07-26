@@ -14,6 +14,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.remote_gateway import DATALIB_CURL_VERSION
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
@@ -197,6 +198,34 @@ def test_ensure_latchkey_installed_installs_impersonating_curl() -> None:
     assert "latchkey will use system curl" not in command
 
 
+def test_ensure_latchkey_installed_probes_installed_version_without_executing_latchkey() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_installed(outer)
+    command = _stub(outer).recorded[0].command
+    # The probe must read the npm-installed package's package.json, not run the
+    # CLI: since 2.x, ``latchkey --version`` resolves the encryption key (to
+    # run its store migrations) before printing anything, so on a headless VPS
+    # with an existing credential store and no key in the environment it exits
+    # non-zero -- which read as a permanent version mismatch and reinstalled
+    # latchkey on every provisioning pass.
+    assert "latchkey --version" not in command
+    assert '"$(npm root -g)/latchkey/package.json"' in command
+
+
+def test_ensure_latchkey_installed_restarts_gateway_when_version_changed() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_installed(outer)
+    command = _stub(outer).recorded[0].command
+    # A supervisord-managed gateway keeps the old code in memory across an npm
+    # upgrade, so the install branch must bounce it -- tolerating hosts where
+    # the program is not registered yet.
+    restart_line = f"supervisorctl restart {_GATEWAY_PROGRAM_NAME} || true"
+    assert restart_line in command
+    # The restart belongs inside the version-mismatch branch, after the
+    # install itself.
+    assert command.index("npm install -g latchkey@") < command.index(restart_line)
+
+
 def test_ensure_latchkey_installed_uses_generous_install_timeout() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_installed(outer)
@@ -252,6 +281,10 @@ def _make_reencrypt_latchkey_binary(tmp_path: Path) -> Path:
 def _latchkey_with_fake_reencrypt(tmp_path: Path) -> Latchkey:
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
+    # The upstream CLI stamps the store's data-format version on every real
+    # invocation; the fake binary does not, so materialize the stamp the way a
+    # migrated (or fresh) install would have it.
+    (latchkey_directory / UPSTREAM_DATA_FORMAT_VERSION_FILENAME).write_text("2")
     return Latchkey(
         latchkey_directory=latchkey_directory,
         latchkey_binary=str(_make_reencrypt_latchkey_binary(tmp_path)),
@@ -274,13 +307,19 @@ def test_sync_credentials_ships_only_services_the_host_is_granted(tmp_path: Path
     sync_credentials(outer, latchkey, host_id)
 
     written = _stub(outer).written
-    assert len(written) == 1
-    assert written[0].path == "/root/.latchkey/credentials.json.enc"
+    # The data-format stamp ships first, then the store (stamp-first ordering
+    # is what keeps an interrupted sync from leaving a store the VPS gateway
+    # would re-migrate).
+    assert [w.path for w in written] == [
+        "/root/.latchkey/data-format-version",
+        "/root/.latchkey/credentials.json.enc",
+    ]
+    store_write = written[1]
     # Only the granted service's credentials are exported, not the full store.
-    assert json.loads(written[0].content.decode("utf-8"))["services"] == ["slack"]
-    assert written[0].mode == "0600"
+    assert json.loads(store_write.content.decode("utf-8"))["services"] == ["slack"]
+    assert store_write.mode == "0600"
     # Written atomically (tmp + rename) so the remote gateway never reads a partial file.
-    assert written[0].is_atomic is True
+    assert store_write.is_atomic is True
 
 
 def test_sync_credentials_excludes_services_without_stored_credentials(
@@ -299,8 +338,39 @@ def test_sync_credentials_excludes_services_without_stored_credentials(
     sync_credentials(outer, latchkey, host_id)
 
     written = _stub(outer).written
-    assert len(written) == 1
-    assert json.loads(written[0].content.decode("utf-8"))["services"] == ["github"]
+    assert json.loads(written[-1].content.decode("utf-8"))["services"] == ["github"]
+
+
+def test_sync_credentials_ships_local_data_format_stamp_content_verbatim(tmp_path: Path) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    _grant_permissions(latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}]}')
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+
+    sync_credentials(outer, latchkey, host_id)
+
+    stamp_write = _stub(outer).written[0]
+    assert stamp_write.path == "/root/.latchkey/data-format-version"
+    # The desktop's stamp travels verbatim: the synced store is whatever
+    # format the desktop CLI wrote, so the stamp must describe exactly that.
+    assert stamp_write.content == b"2"
+    assert stamp_write.mode == "0600"
+    assert stamp_write.is_atomic is True
+
+
+def test_sync_credentials_raises_without_writing_when_local_data_format_stamp_missing(tmp_path: Path) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    (latchkey.latchkey_directory / UPSTREAM_DATA_FORMAT_VERSION_FILENAME).unlink()
+    host_id = HostId.generate()
+    _grant_permissions(latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}]}')
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+
+    with pytest.raises(RemoteGatewayError, match="data-format stamp"):
+        sync_credentials(outer, latchkey, host_id)
+
+    # The store must not have been shipped either: a store without its stamp
+    # is exactly the combination that gets re-migrated (corrupted) on the VPS.
+    assert _stub(outer).written == []
 
 
 def test_sync_credentials_clears_remote_store_for_deny_all_host(tmp_path: Path) -> None:

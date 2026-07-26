@@ -38,10 +38,12 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
+from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.core import merge_hidden_builtin_services
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
@@ -112,7 +114,7 @@ _SLOW_INSTALL_WARNING_THRESHOLD_SECONDS: Final[float] = 90.0
 # Filename of the upstream latchkey CLI's encrypted credential store, sitting
 # directly under the local ``latchkey_directory`` (the LATCHKEY_DIRECTORY the
 # desktop-side latchkey uses), e.g. ``~/.minds-staging/latchkey/credentials.json.enc``.
-_CREDENTIALS_FILENAME: Final[str] = "credentials.json.enc"
+_CREDENTIALS_FILENAME: Final[str] = CREDENTIALS_STORE_FILENAME
 
 # Name of the latchkey directory on the VPS, under the remote user's home. The
 # remote latchkey CLI runs as that user, so ``$HOME/.latchkey`` is the
@@ -339,9 +341,25 @@ def _build_ensure_installed_script(
             # silently degrading.
             "systemctl enable --now supervisor >/dev/null 2>&1 || true",
             # latchkey CLI, pinned to the exact version. Reinstall whenever the
-            # installed version differs (missing latchkey reports an empty string).
-            f'if [ "$(LATCHKEY_DISABLE_COUNTING=1 latchkey --version 2>/dev/null | sed \'s/^v//\')" != "{latchkey_version}" ]; then',
+            # installed version differs (a missing install probes as an empty
+            # string). The probe reads the globally-installed package's
+            # package.json instead of executing ``latchkey --version``: the CLI
+            # resolves its encryption key (to run its store migrations) before
+            # printing anything, so on a headless VPS with an existing
+            # credential store and no key in the environment ``--version``
+            # exits non-zero -- making a binary-executing probe read as a
+            # permanent mismatch and reinstall on every provisioning pass.
+            # node is guaranteed present by the install/verify steps above.
+            "if [ \"$(node -p 'require(process.argv[1]).version' "
+            f'"$(npm root -g)/latchkey/package.json" 2>/dev/null)" != "{latchkey_version}" ]; then',
             f"  npm install -g latchkey@{latchkey_version}",
+            # A supervisord-managed gateway keeps the old code in memory across
+            # an npm upgrade (``reread``/``update`` only bounce a program whose
+            # *config* changed), so restart it whenever the binary just
+            # changed. ``|| true`` covers hosts where the program is not
+            # registered yet (first provisioning) -- the normal
+            # reread/update/start later in provisioning brings it up.
+            f"  supervisorctl restart {_GATEWAY_PROGRAM_NAME} || true",
             "fi",
         )
     )
@@ -470,6 +488,38 @@ def _remove_remote_credentials(host: OuterHostInterface, remote_path: Path) -> N
         )
 
 
+def _sync_upstream_data_format_stamp(
+    host: OuterHostInterface, latchkey_directory: Path, remote_latchkey_dir: Path
+) -> None:
+    """Copy the desktop's upstream latchkey ``data-format-version`` stamp onto the VPS.
+
+    The VPS gateway runs the upstream CLI's store migrations at startup,
+    against whatever format version its local stamp records. The synced store
+    is always in the format the *desktop* CLI writes, so the desktop's stamp
+    must travel with it: without it, a VPS stamped by an older latchkey (e.g.
+    format 1, pre-multiple-accounts) would "migrate" the already-current
+    synced store at the next gateway start and corrupt its copy. Callers must
+    write the stamp *before* the store, so a sync interrupted between the two
+    writes leaves the benign combination (current stamp + old-format store,
+    merely unreadable until the next sync) rather than the corrupting one.
+
+    The local stamp is guaranteed to exist by now: the ``latchkey auth
+    re-encrypt`` invocation that produced the synced store runs the upstream
+    migrations (and stamps) before doing anything else. A missing or
+    unreadable stamp therefore indicates a real problem and raises
+    :class:`RemoteGatewayError`.
+    """
+    local_stamp_path = latchkey_directory / UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+    try:
+        stamp_content = local_stamp_path.read_text()
+    except OSError as e:
+        raise RemoteGatewayError(
+            f"Failed to read the local latchkey data-format stamp at {local_stamp_path}: {e}"
+        ) from e
+    remote_stamp_path = remote_latchkey_dir / UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+    host.write_file(remote_stamp_path, stamp_content.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
+
+
 def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: HostId) -> None:
     """Ship a host-scoped subset of the local latchkey credentials onto the VPS.
 
@@ -486,6 +536,11 @@ def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: Host
     actually-stored services means a VPS compromise cannot leak
     credentials the agent was never permitted to use.
 
+    The upstream ``data-format-version`` stamp is shipped alongside (and
+    before) the store, so the VPS gateway's startup migrations treat the
+    synced store as already being in the desktop CLI's current format (see
+    :func:`_sync_upstream_data_format_stamp`).
+
     When nothing is left to ship, the remote store is removed instead, since
     ``re-encrypt`` requires at least one service.
 
@@ -494,7 +549,8 @@ def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: Host
     """
     granted = _services_allowed_for_host(latchkey.latchkey_directory, host_id)
     service_names = _services_with_stored_credentials(latchkey, granted)
-    remote_path = _resolve_remote_latchkey_directory(host) / _CREDENTIALS_FILENAME
+    remote_latchkey_dir = _resolve_remote_latchkey_directory(host)
+    remote_path = remote_latchkey_dir / _CREDENTIALS_FILENAME
     if not service_names:
         with log_span(
             "Clearing latchkey credentials on VPS {} (nothing to ship for host {})", host.get_name(), host_id
@@ -511,6 +567,9 @@ def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: Host
             content = subset_path.read_bytes()
         except OSError as e:
             raise RemoteGatewayError(f"Failed to read filtered latchkey credentials at {subset_path}: {e}") from e
+        # Stamp first, then store: the reverse order has a window in which the
+        # VPS gateway would re-migrate (and corrupt) the freshly-synced store.
+        _sync_upstream_data_format_stamp(host, latchkey.latchkey_directory, remote_latchkey_dir)
         with log_span(
             "Syncing {} service(s) of latchkey credentials to VPS {} ({})",
             len(service_names),
