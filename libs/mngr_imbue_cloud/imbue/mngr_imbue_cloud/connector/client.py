@@ -1160,6 +1160,55 @@ class ImbueCloudConnectorClient(MutableModel):
         return self._post_paid_entry(admin_api_key, "/paid/emails/remove", email)
 
 
+def create_litellm_key_rotating_on_exists(
+    client: ImbueCloudConnectorClient,
+    access_token: SecretStr,
+    key_alias: str,
+    max_budget: float | None,
+    budget_duration: str | None,
+    metadata: dict[str, str] | None,
+) -> LiteLLMKeyMaterial:
+    """Create a LiteLLM key, rotating (delete + re-create) when ``key_alias`` is taken.
+
+    LiteLLM enforces globally-unique aliases and never re-reveals a minted
+    secret, so a caller with a deterministic alias (e.g. one key per
+    workspace) would otherwise dead-end forever once the alias exists -- for
+    example after a create whose response was lost in flight. The whole
+    list -> delete -> re-create fallback runs inside this one process, so a
+    caller shelling out to the CLI pays a single process boot for the entire
+    rotation. Rotation invalidates the key previously issued for the alias.
+    """
+    try:
+        return client.create_litellm_key(
+            access_token=access_token,
+            key_alias=key_alias,
+            max_budget=max_budget,
+            budget_duration=budget_duration,
+            metadata=metadata,
+        )
+    except ImbueCloudKeyError as exc:
+        # Substring-matched against LiteLLM's unique-alias rejection; any
+        # other create failure propagates untouched.
+        if f"alias '{key_alias}' already exists" not in str(exc):
+            raise
+        logger.debug("Key alias {} already exists; rotating it", key_alias)
+    existing_keys = client.list_litellm_keys(access_token)
+    matching_tokens = [key.token for key in existing_keys if key.key_alias == key_alias and key.token]
+    if not matching_tokens:
+        raise ImbueCloudKeyError(
+            f"Key alias '{key_alias}' is already taken, but no key with that alias is listable under this account"
+        )
+    for existing_token in matching_tokens:
+        client.delete_litellm_key(access_token, existing_token)
+    return client.create_litellm_key(
+        access_token=access_token,
+        key_alias=key_alias,
+        max_budget=max_budget,
+        budget_duration=budget_duration,
+        metadata=metadata,
+    )
+
+
 def _detail_from_response(response: httpx.Response) -> str:
     """Extract the connector's ``detail`` error message, falling back to the raw body."""
     try:

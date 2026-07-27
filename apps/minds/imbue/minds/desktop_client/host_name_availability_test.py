@@ -10,8 +10,11 @@ import json
 from pathlib import Path
 
 from flask.testing import FlaskClient
+from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -21,7 +24,9 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -182,3 +187,60 @@ def test_availability_endpoint_requires_authentication(tmp_path: Path) -> None:
         "/api/v1/desktop/host-name-available", query_string={"name": "My-Mind", "launch_mode": "DOCKER"}
     )
     assert response.status_code == 401
+
+
+class _FixedInFlightAgentCreator(AgentCreator):
+    """AgentCreator test double reporting fixed in-flight names for one provider."""
+
+    fixed_provider: str = Field(default="", frozen=True)
+    fixed_names: tuple[str, ...] = Field(default=(), frozen=True)
+
+    def live_in_flight_host_names(self, provider_instance_name: str | None = None) -> set[str]:
+        if provider_instance_name is None or provider_instance_name == self.fixed_provider:
+            return {name.casefold() for name in self.fixed_names}
+        return set()
+
+
+def _build_client_with_in_flight_create_attempt(tmp_path: Path, provider: str, names: tuple[str, ...]) -> FlaskClient:
+    cg = ConcurrencyGroup(name="availability-test")
+    cg.__enter__()
+    agent_creator = _FixedInFlightAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds-data"),
+        root_concurrency_group=cg,
+        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        fixed_provider=provider,
+        fixed_names=names,
+    )
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=_resolver_with_sample_workspaces(),
+        http_client=None,
+        paths=WorkspacePaths(data_dir=tmp_path),
+        agent_creator=agent_creator,
+    )
+    client = app.test_client()
+    client.set_cookie(SESSION_COOKIE_NAME, create_session_cookie(signing_key=auth_store.get_signing_key()))
+    return client
+
+
+def test_availability_endpoint_reports_in_flight_create_attempt_name_as_taken(tmp_path: Path) -> None:
+    """A live create attempt's name is taken even though discovery cannot see it yet.
+
+    A cold Lima create is invisible to the discovery snapshot until its agent
+    exists at the very end of a 15+ minute build; without the in-flight set the
+    form would happily approve the same name twice.
+    """
+    client = _build_client_with_in_flight_create_attempt(tmp_path, "lima", ("building-now",))
+    assert _available(client, name="building-now", launch_mode="LIMA") is False
+    assert _available(client, name="Building-Now", launch_mode="LIMA") is False
+    # The in-flight name is provider-scoped: it stays free on docker.
+    assert _available(client, name="building-now", launch_mode="DOCKER") is True
+
+
+def test_availability_endpoint_still_reports_discovery_names_with_creator_wired(tmp_path: Path) -> None:
+    client = _build_client_with_in_flight_create_attempt(tmp_path, "lima", ("building-now",))
+    # Discovery-known names keep working alongside the in-flight set.
+    assert _available(client, name="My-Mind", launch_mode="DOCKER") is False
+    assert _available(client, name="brand-new", launch_mode="LIMA") is True

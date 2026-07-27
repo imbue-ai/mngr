@@ -485,9 +485,27 @@ class HostNameConflictError(ProviderError):
 
     user_help_text = "Choose a different host name, or destroy the existing host first with 'mngr destroy'."
 
-    def __init__(self, provider_name: ProviderInstanceName, name: HostName) -> None:
+    def __init__(
+        self,
+        provider_name: ProviderInstanceName,
+        name: HostName,
+        # Id of the existing host that holds the name, when the provider knows it.
+        conflicting_host_id: HostId | None = None,
+        # Display state of the existing host (e.g. "BUILDING", "STOPPED").
+        conflicting_host_state: str | None = None,
+        # Extra guidance appended to the message (e.g. how to clear an abandoned create).
+        remediation: str | None = None,
+    ) -> None:
         self.name = name
-        super().__init__(provider_name, f"Host name already exists: {name}")
+        self.conflicting_host_id = conflicting_host_id
+        self.conflicting_host_state = conflicting_host_state
+        message = f"Host name already exists: {name}"
+        if conflicting_host_id is not None:
+            state_suffix = f", state: {conflicting_host_state}" if conflicting_host_state is not None else ""
+            message += f" (existing host: {conflicting_host_id}{state_suffix})"
+        if remediation is not None:
+            message += f". {remediation}"
+        super().__init__(provider_name, message)
 
 
 class HostNotRunningError(ProviderError):

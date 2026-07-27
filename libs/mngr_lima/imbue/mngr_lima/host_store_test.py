@@ -222,3 +222,22 @@ def test_lima_host_config_legacy_record_defaults_to_bind_mount(tmp_path: Path) -
     assert loaded.config is not None
     assert loaded.config.is_host_data_volume_exposed is True
     assert loaded.config.host_data_disk_name is None
+
+
+def test_host_record_without_creation_flag_deserializes_as_completed(tmp_path: Path) -> None:
+    """Pre-change on-disk records (no is_creation_in_progress field) load as completed hosts."""
+    raw = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(HostId.generate()),
+            host_name="legacy-host",
+            user_tags={},
+            snapshots=[],
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ),
+    ).model_dump_json(exclude={"is_creation_in_progress"})
+    assert "is_creation_in_progress" not in raw
+
+    record = HostRecord.model_validate_json(raw)
+
+    assert record.is_creation_in_progress is False

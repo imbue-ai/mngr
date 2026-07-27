@@ -74,7 +74,7 @@ class DesktopClientState(MutableModel):
         ),
     )
     agent_creator: AgentCreator | None = Field(
-        default=None, frozen=True, description="In-flight agent creation manager"
+        default=None, frozen=True, description="In-flight agent create attempt manager"
     )
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         default=None, frozen=True, description="imbue_cloud plugin CLI wrapper"

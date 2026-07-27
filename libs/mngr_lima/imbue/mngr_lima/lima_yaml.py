@@ -9,6 +9,7 @@ from loguru import logger
 from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
+from imbue.mngr_lima.constants import lima_host_data_disk_label
 from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
 
 
@@ -321,7 +322,7 @@ fi"""
 
 
 def _build_format_and_mount_data_disk_block(host_data_disk_name: str) -> str:
-    """Return a bash block that formats (if needed) and mounts the Lima btrfs data disk.
+    """Return a bash block that formats (if needed), labels, and mounts the Lima btrfs data disk.
 
     Minimal cloud images (e.g. Debian genericcloud) ship no ``mkfs.btrfs``, so
     Lima's guestagent cannot format the ``format: true`` btrfs additionalDisk at
@@ -330,15 +331,24 @@ def _build_format_and_mount_data_disk_block(host_data_disk_name: str) -> str:
     provisioning script; here we format + mount the disk ourselves at exactly the
     path Lima would have used, so the per-host btrfs subvolume can be created.
 
+    The filesystem label matters: Lima's ``05-lima-disks.sh`` boot script decides
+    "already formatted" by probing ``/dev/disk/by-label/lima-<disk_name>``, and
+    when the label is absent it re-enters its first-time-setup branch on EVERY
+    boot -- re-running ``sfdisk`` against the data disk and failing its
+    ``mkfs.btrfs`` (no ``-f``), which fails ``cloud-final`` and leaves the VM
+    ``degraded`` on every boot. Formatting with the exact label Lima expects
+    (plus the idempotent relabel below for disks formatted before this fix)
+    confines that failure to the first boot, where nothing can preinstall
+    ``btrfs-progs`` ahead of Lima's boot scripts.
+
     Idempotent: a no-op when already mounted, and ``mkfs`` runs only when the
     device is not already btrfs (so re-provisioning and existing snapshot data
     survive). The data disk is identified as the one ``disk``-type block device
     that is not the root disk -- in this mode there is exactly one additional
-    disk. On later boots Lima's guestagent handles the mount itself (``btrfs-progs``
-    now persists in the image's root fs), so this is first-boot setup; the mount
-    path is the same either way.
+    disk.
     """
     lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
+    disk_label = lima_host_data_disk_label(host_data_disk_name)
     return f"""\
 if ! mountpoint -q {lima_mount}; then
     DATA_ROOT_SRC="$(findmnt -no SOURCE /)"
@@ -361,10 +371,16 @@ if ! mountpoint -q {lima_mount}; then
     DATA_PART="$(lsblk -ln -o NAME "/dev/$DATA_DISK" | sed -n '2p')"
     DATA_DEV="/dev/${{DATA_PART:-$DATA_DISK}}"
     if ! blkid -t TYPE=btrfs "$DATA_DEV" >/dev/null 2>&1; then
-        mkfs.btrfs -f "$DATA_DEV"
+        mkfs.btrfs -f -L {disk_label} "$DATA_DEV"
     fi
     mkdir -p {lima_mount}
     mount "$DATA_DEV" {lima_mount}
+fi
+
+# Heal the filesystem label on disks formatted before mngr labeled them, so
+# Lima's label probe stops re-entering its format branch on every boot.
+if [ "$(btrfs filesystem label {lima_mount})" != "{disk_label}" ]; then
+    btrfs filesystem label {lima_mount} {disk_label}
 fi"""
 
 

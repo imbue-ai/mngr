@@ -7,7 +7,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreationFailedError
+from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreateAttemptFailedError
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import _wait_for_workspace_ready_or_failure
 
@@ -137,7 +137,7 @@ def test_wait_raises_with_surfaced_error_on_failure_view() -> None:
         candidate_pages=[_FakeContentPage(urls=[_PENDING_URL])],
         error_message="unknown or invalid runtime name: runsc",
     )
-    with pytest.raises(WorkspaceCreationFailedError) as exc_info:
+    with pytest.raises(WorkspaceCreateAttemptFailedError) as exc_info:
         _wait_for_workspace_ready_or_failure(cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=5)
     # The surfaced error text rides along so the failure is diagnosable.
     assert "runsc" in str(exc_info.value)

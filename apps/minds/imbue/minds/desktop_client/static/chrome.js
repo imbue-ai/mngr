@@ -891,6 +891,13 @@
         row.addEventListener('click', function () {
           // Rows for workspaces on another device are informational only.
           if (w.is_remote) return;
+          // CreateAttempt rows open the create attempt detail page (their id is a
+          // create attempt id, not an agent id).
+          if (w.create_attempt_state) {
+            navigateContent('/creating/' + w.id);
+            closeSidebar();
+            return;
+          }
           selectWorkspace(w.id);
         });
         container.appendChild(row);

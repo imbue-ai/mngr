@@ -16,6 +16,7 @@ from imbue.mngr_imbue_cloud.cli._common import make_connector_client
 from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
+from imbue.mngr_imbue_cloud.connector.client import create_litellm_key_rotating_on_exists
 
 
 @click.group(name="keys")
@@ -39,6 +40,13 @@ def litellm() -> None:
     help="JSON-encoded dict of metadata to attach to the key (e.g. agent_id=...)",
 )
 @click.option("--connector-url", default=None, help="Override connector URL")
+@click.option(
+    "--rotate-on-exists",
+    is_flag=True,
+    default=False,
+    help="When --alias is already taken, delete the existing key and mint a fresh one "
+    "(the whole rotation runs in this single invocation)",
+)
 @handle_imbue_cloud_errors
 def create_key(
     account: str | None,
@@ -47,6 +55,7 @@ def create_key(
     budget_duration: str | None,
     metadata: str | None,
     connector_url: str | None,
+    rotate_on_exists: bool,
 ) -> None:
     """Create a new LiteLLM virtual key. Emits {key, base_url} on stdout."""
     metadata_dict: dict[str, str] | None = None
@@ -59,18 +68,30 @@ def create_key(
         if not isinstance(parsed, dict):
             fail_with_json("--metadata must be a JSON object", error_class="UsageError")
         metadata_dict = {str(k): str(v) for k, v in parsed.items()}
+    if rotate_on_exists and alias is None:
+        fail_with_json("--rotate-on-exists requires --alias", error_class="UsageError")
 
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
-    material = client.create_litellm_key(
-        access_token=token,
-        key_alias=alias,
-        max_budget=max_budget,
-        budget_duration=budget_duration,
-        metadata=metadata_dict,
-    )
+    if rotate_on_exists and alias is not None:
+        material = create_litellm_key_rotating_on_exists(
+            client=client,
+            access_token=token,
+            key_alias=alias,
+            max_budget=max_budget,
+            budget_duration=budget_duration,
+            metadata=metadata_dict,
+        )
+    else:
+        material = client.create_litellm_key(
+            access_token=token,
+            key_alias=alias,
+            max_budget=max_budget,
+            budget_duration=budget_duration,
+            metadata=metadata_dict,
+        )
     emit_json(
         {
             "key": material.key.get_secret_value(),

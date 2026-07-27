@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -16,10 +17,13 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.errors import LimaCommandUnavailableError
+from imbue.mngr_lima.errors import LimaHostCreationError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
+from imbue.mngr_lima.instance import _find_conflicting_host_record
 from imbue.mngr_lima.instance import _parse_size_to_gb
+from imbue.mngr_lima.instance import _record_state_for_conflict_message
 from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.testing import install_fake_limactl
 
@@ -365,3 +369,259 @@ def test_delete_host_removes_keypair_dir(lima_provider: LimaProviderInstance) ->
 
     lima_provider.delete_host(lima_provider._create_offline_host(host_record))
     assert not host_keys_dir.exists()
+
+
+def _write_active_record(
+    provider: LimaProviderInstance,
+    host_name: str,
+    is_creation_in_progress: bool = False,
+    failure_reason: str | None = None,
+    stop_reason: str | None = None,
+) -> HostId:
+    """Write a host record shaped like the given lifecycle situation, returning its id."""
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    provider._host_store.write_host_record(
+        HostRecord(
+            certified_host_data=CertifiedHostData(
+                host_id=str(host_id),
+                host_name=host_name,
+                user_tags={},
+                snapshots=[],
+                failure_reason=failure_reason,
+                stop_reason=stop_reason,
+                created_at=now,
+                updated_at=now,
+            ),
+            config=LimaHostConfig(instance_name=f"mngr-{host_id.get_uuid().hex}") if failure_reason is None else None,
+            is_creation_in_progress=is_creation_in_progress,
+        )
+    )
+    return host_id
+
+
+def test_find_conflicting_host_record_matches_active_and_skips_failed_and_destroyed(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    _write_active_record(lima_provider, "failed-host", failure_reason="limactl start failed")
+    _write_active_record(lima_provider, "destroyed-host", stop_reason=HostState.DESTROYED.value)
+    active_id = _write_active_record(lima_provider, "active-host")
+    records = lima_provider._host_store.list_all_host_records()
+
+    assert _find_conflicting_host_record(HostName("failed-host"), records) is None
+    assert _find_conflicting_host_record(HostName("destroyed-host"), records) is None
+    conflicting = _find_conflicting_host_record(HostName("active-host"), records)
+    assert conflicting is not None
+    assert conflicting.certified_host_data.host_id == str(active_id)
+
+
+def test_record_state_for_conflict_message_distinguishes_building_and_stopped(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    _write_active_record(lima_provider, "building-host", is_creation_in_progress=True)
+    _write_active_record(lima_provider, "stopped-host", stop_reason=HostState.STOPPED.value)
+    records = {r.certified_host_data.host_name: r for r in lima_provider._host_store.list_all_host_records()}
+
+    assert _record_state_for_conflict_message(records["building-host"]) == "BUILDING"
+    assert _record_state_for_conflict_message(records["stopped-host"]) == "STOPPED"
+
+
+def test_create_host_raises_conflict_with_remediation_for_building_reservation(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A name held by an in-flight (or abandoned) create conflicts, and the error
+    tells the user how to clear the abandoned reservation."""
+    monkeypatch.setenv("LIMA_HOME", "/tmp/lima-test-home")
+    reservation_id = _write_active_record(lima_provider, "held-name", is_creation_in_progress=True)
+    bin_dir = tmp_path / "bin"
+    install_fake_limactl(
+        bin_dir,
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\nexit 0\n',
+        monkeypatch,
+    )
+
+    with pytest.raises(HostNameConflictError) as exc_info:
+        lima_provider.create_host(name=HostName("held-name"))
+
+    message = str(exc_info.value)
+    assert str(reservation_id) in message
+    assert "BUILDING" in message
+    assert f"mngr destroy @{reservation_id}" in message
+
+
+def test_create_host_conflicts_with_stopped_host_without_remediation(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIMA_HOME", "/tmp/lima-test-home")
+    _write_active_record(lima_provider, "stopped-name", stop_reason=HostState.STOPPED.value)
+    bin_dir = tmp_path / "bin"
+    install_fake_limactl(
+        bin_dir,
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\nexit 0\n',
+        monkeypatch,
+    )
+
+    with pytest.raises(HostNameConflictError) as exc_info:
+        lima_provider.create_host(name=HostName("stopped-name"))
+
+    message = str(exc_info.value)
+    assert "STOPPED" in message
+    assert "mngr destroy @" not in message
+
+
+def _install_logging_fake_limactl(
+    bin_dir: Path,
+    invocation_log: Path,
+    start_stderr: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install a fake limactl that logs every invocation and fails `start` with the given stderr."""
+    install_fake_limactl(
+        bin_dir,
+        f'echo "$@" >> "{invocation_log}"\n'
+        'case "$*" in\n'
+        '  *--version*) echo "limactl version 2.0.3"; exit 0;;\n'
+        f'  *" start "*) echo "{start_stderr}" >&2; exit 1;;\n'
+        "  *) exit 0;;\n"
+        "esac\n",
+        monkeypatch,
+    )
+
+
+def test_create_host_does_not_retry_permanent_download_failure(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 on the base image fails the create immediately (no retry), tears the
+    instance down, and leaves a FAILED record -- which frees the name for reuse."""
+    monkeypatch.setenv("LIMA_HOME", "/tmp/lima-test-home")
+    invocation_log = tmp_path / "invocations.log"
+    _install_logging_fake_limactl(
+        tmp_path / "bin",
+        invocation_log,
+        "failed to download: unexpected HTTP status Not Found",
+        monkeypatch,
+    )
+
+    with pytest.raises(LimaHostCreationError):
+        lima_provider.create_host(name=HostName("no-image-host"))
+
+    invocations = invocation_log.read_text().splitlines()
+    start_count = sum(1 for line in invocations if " start " in f" {line} ")
+    assert start_count == 1
+    # The reservation was replaced by a FAILED record, so the name is reusable.
+    records = lima_provider._host_store.list_all_host_records()
+    assert _find_conflicting_host_record(HostName("no-image-host"), records) is None
+    failed_records = [r for r in records if r.certified_host_data.host_name == "no-image-host"]
+    assert len(failed_records) == 1
+    assert failed_records[0].certified_host_data.failure_reason is not None
+
+
+def test_create_host_failure_before_limactl_start_frees_reserved_name(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure after the name reservation but before `limactl start` (here: a
+    missing user `--file` Lima YAML) replaces the BUILDING reservation with a
+    FAILED record, so the name stays reusable instead of being stranded."""
+    monkeypatch.setenv("LIMA_HOME", "/tmp/lima-test-home")
+    install_fake_limactl(
+        tmp_path / "bin",
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\nexit 0\n',
+        monkeypatch,
+    )
+
+    with pytest.raises(LimaHostCreationError):
+        lima_provider.create_host(
+            name=HostName("bad-user-file-host"),
+            build_args=("--file", str(tmp_path / "does-not-exist.yaml")),
+        )
+
+    records = lima_provider._host_store.list_all_host_records()
+    assert _find_conflicting_host_record(HostName("bad-user-file-host"), records) is None
+    failed_records = [r for r in records if r.certified_host_data.host_name == "bad-user-file-host"]
+    assert len(failed_records) == 1
+    assert failed_records[0].certified_host_data.failure_reason is not None
+    assert failed_records[0].is_creation_in_progress is False
+
+
+def test_create_host_retries_transient_download_failure_once(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient download failure retries `limactl start` exactly once, deleting
+    the half-created instance between attempts."""
+    monkeypatch.setenv("LIMA_HOME", "/tmp/lima-test-home")
+    invocation_log = tmp_path / "invocations.log"
+    _install_logging_fake_limactl(
+        tmp_path / "bin",
+        invocation_log,
+        "failed to download: net/http: TLS handshake timeout",
+        monkeypatch,
+    )
+
+    with pytest.raises(LimaHostCreationError):
+        lima_provider.create_host(name=HostName("flaky-download-host"))
+
+    invocations = invocation_log.read_text().splitlines()
+    start_lines = [line for line in invocations if " start " in f" {line} "]
+    delete_lines = [line for line in invocations if line.startswith("delete ")]
+    assert len(start_lines) == 2
+    # One delete between the attempts, one from the final failure teardown.
+    assert len(delete_lines) == 2
+
+
+def test_discover_hosts_reports_building_for_reservation_record(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A name-reservation record shows as BUILDING whether or not its VM exists yet,
+    while a destroyed reservation shows as DESTROYED (not BUILDING)."""
+    building_id = _write_active_record(lima_provider, "mid-create-host", is_creation_in_progress=True)
+    destroyed_id = _write_active_record(
+        lima_provider, "dead-create-host", is_creation_in_progress=True, stop_reason=HostState.DESTROYED.value
+    )
+    install_fake_limactl(
+        tmp_path / "bin",
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\nexit 0\n',
+        monkeypatch,
+    )
+
+    discovered = lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group, include_destroyed=True)
+
+    states_by_id = {host.host_id: host.host_state for host in discovered}
+    assert states_by_id[building_id] == HostState.BUILDING
+    assert states_by_id[destroyed_id] == HostState.DESTROYED
+
+
+def test_delete_host_deletes_vm_definition_and_record(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_host removes the Lima VM definition itself (not just records/disk), so
+    gc's offline path cannot strand a VM in `limactl list`."""
+    host_id = _write_active_record(lima_provider, "stranded-host", stop_reason=HostState.STOPPED.value)
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    instance_name = record.config.instance_name
+    invocation_log = tmp_path / "invocations.log"
+    install_fake_limactl(
+        tmp_path / "bin",
+        f'echo "$@" >> "{invocation_log}"\nexit 0\n',
+        monkeypatch,
+    )
+
+    lima_provider.delete_host(lima_provider.to_offline_host(host_id))
+
+    invocations = invocation_log.read_text()
+    assert f"delete --force {instance_name}" in invocations
+    assert lima_provider._host_store.read_host_record(host_id, use_cache=False) is None

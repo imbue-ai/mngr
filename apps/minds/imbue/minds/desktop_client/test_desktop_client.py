@@ -66,7 +66,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
-from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -556,7 +556,7 @@ def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
 
 
 def test_create_page_shows_form(tmp_path: Path) -> None:
-    """GET /create shows the agent creation form."""
+    """GET /create shows the agent create attempt form."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -657,7 +657,7 @@ def _create_test_server_with_agent_creator(
     The ``AgentCreator.root_concurrency_group`` is an ad-hoc group entered for
     the helper and left active for the caller's test duration. These tests only
     exercise HTTP endpoints (status polling, form rendering, etc.) -- they do
-    not actually run agent creation subprocesses against the group, so leaving
+    not actually run agent create attempt subprocesses against the group, so leaving
     it in the ACTIVE state until GC is acceptable here.
     """
     if backend_resolver is None:
@@ -688,7 +688,7 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     """
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
-    agent_id = agent_creator.start_creation("file:///nonexistent-repo")
+    agent_id = agent_creator.start_create_attempt("file:///nonexistent-repo")
 
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
@@ -701,15 +701,15 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
 
 
 def test_creating_page_redirects_to_landing_for_unknown(tmp_path: Path) -> None:
-    """GET /creating/{agent_id} falls back to the landing page for an unknown creation.
+    """GET /creating/{agent_id} falls back to the landing page for an unknown create attempt.
 
-    The creation registry is in-memory, so a ``/creating/<id>`` window that outlives
-    its creation -- reopened after an app restart, or after a failed creation was
+    The create attempt registry is in-memory, so a ``/creating/<id>`` window that outlives
+    its create attempt -- reopened after an app restart, or after a failed create attempt was
     cleaned up -- must redirect rather than dead-end on a bare 404 page.
     """
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.get("/creating/{}".format(CreationId()), follow_redirects=False)
+    response = client.get("/creating/{}".format(CreateAttemptId()), follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/"
 

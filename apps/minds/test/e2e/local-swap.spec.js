@@ -52,7 +52,7 @@ async function bootHarness(page, { startPath = '/' } = {}) {
       script: '<script>window.__createScriptRan = (window.__createScriptRan || 0) + 1;</script>',
     }),
   }));
-  await page.route(`${ORIGIN}/creating/creation-abc`, (r) => r.fulfill({
+  await page.route(`${ORIGIN}/creating/create-attempt-abc`, (r) => r.fulfill({
     contentType: 'text/html',
     body: shellPage({ title: 'Creating', label: 'creating' }),
   }));
@@ -101,7 +101,7 @@ test.describe('local page swap engine (chrome.js contract)', () => {
   });
 
   test('a non-hub CURRENT page never swaps out (full navigation tears it down)', async ({ page }) => {
-    await bootHarness(page, { startPath: '/creating/creation-abc' });
+    await bootHarness(page, { startPath: '/creating/create-attempt-abc' });
     // From the excluded page, a hub navigation must NOT be a swap: chrome.js's
     // canSwapTo requires the current path to be swappable too, so the switcher
     // entry does a full navigation that replaces the document -- proven by the

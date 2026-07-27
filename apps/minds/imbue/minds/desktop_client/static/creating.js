@@ -1,6 +1,6 @@
 // Creating-page flow: the workspace is created in the background, so this
 // page shows a loading screen (progress bar + rotating hints) and redirects
-// into the workspace once creation finishes. Creation status + logs stream
+// into the workspace once the create attempt finishes. Create-attempt status + logs stream
 // over SSE.
 (function () {
   var root = document.getElementById('creating');
@@ -10,12 +10,12 @@
 
   var startTime = (window.performance && performance.now) ? performance.now() : Date.now();
 
-  // Shared creation state, updated by the SSE handler.
-  var creationDone = false;
-  var creationFailed = false;
+  // Shared create attempt state, updated by the SSE handler.
+  var createAttemptDone = false;
+  var createAttemptFailed = false;
   var redirectUrl = null;
-  var creationError = '';
-  var creationErrorKind = '';
+  var createAttemptError = '';
+  var createAttemptErrorKind = '';
 
   // ---- Loading screen: progress bar + rotating hints ----
   var TIPS = [
@@ -28,9 +28,9 @@
   var tipsInterval = null;
 
   function startLoading() {
-    // If creation already failed, never show the in-progress UI -- jump
+    // If the create attempt already failed, never show the in-progress UI -- jump
     // straight to the failure view.
-    if (creationFailed) {
+    if (createAttemptFailed) {
       showFailure();
       return;
     }
@@ -56,7 +56,7 @@
   }
 
   // ---- Failure view ----
-  // Surface a creation failure prominently. Stops the rotating tips and
+  // Surface a create attempt failure prominently. Stops the rotating tips and
   // progress bar, swaps the loading screen's progress sub-view for the
   // failure sub-view, and fills in the error message. Idempotent: safe to
   // call from both the status poll and the SSE 'done' handler.
@@ -70,13 +70,13 @@
     if (progressView) progressView.classList.add('hidden');
     if (failureView) failureView.classList.remove('hidden');
     var msgEl = document.getElementById('error-message');
-    if (msgEl) msgEl.textContent = creationError || 'unknown error';
+    if (msgEl) msgEl.textContent = createAttemptError || 'unknown error';
     // Reveal extra static guidance for recognized failure kinds (a private
     // repo on github.com, or on another git host). The copy lives hidden in
     // the template; the backend only classifies.
     var authHelpId =
-      creationErrorKind === 'GITHUB_AUTH_REQUIRED' ? 'github-auth-help'
-      : creationErrorKind === 'GIT_AUTH_REQUIRED' ? 'git-auth-help'
+      createAttemptErrorKind === 'GITHUB_AUTH_REQUIRED' ? 'github-auth-help'
+      : createAttemptErrorKind === 'GIT_AUTH_REQUIRED' ? 'git-auth-help'
       : null;
     if (authHelpId) {
       var authHelp = document.getElementById(authHelpId);
@@ -89,7 +89,7 @@
   }
 
   // Time-based bar: ease to 80% over the expected duration, then crawl the
-  // last 20% asymptotically. Snaps to 100% once creation is actually done.
+  // last 20% asymptotically. Snaps to 100% once the create attempt is actually done.
   function progressForElapsed(elapsedSeconds) {
     var t = elapsedSeconds;
     var T = expectedDuration > 0 ? expectedDuration : 60;
@@ -99,12 +99,12 @@
 
   function tickProgress() {
     var fill = document.getElementById('bar-fill');
-    if (creationFailed) {
+    if (createAttemptFailed) {
       // showFailure() (called from the poll/SSE handlers) owns the failure
       // UI; just stop advancing the bar.
       return;
     }
-    if (creationDone && redirectUrl) {
+    if (createAttemptDone && redirectUrl) {
       if (fill) fill.style.width = '100%';
       // redirectUrl is the /goto/<agent>/ workspace (agent) URL. On a trusted
       // local page on the chrome surface, hand it to the shell bridge so the new
@@ -134,6 +134,19 @@
     });
   }
 
+  // ---- Dismiss (failure view) ----
+  // Removes the failed create attempt's row from the workspace list right away:
+  // deletes the pending record and the in-memory registry entry, then goes
+  // home. Same shape as the record-backed page's dismiss (create_attempt_record.js).
+  var dismissBtn = document.getElementById('create-attempt-dismiss-btn');
+  if (dismissBtn) {
+    dismissBtn.addEventListener('click', function () {
+      dismissBtn.disabled = true;
+      fetch('/api/v1/workspaces/create-attempts/' + encodeURIComponent(agentId), { method: 'DELETE' })
+        .finally(function () { window.location.href = '/'; });
+    });
+  }
+
   // ---- Status polling (authoritative completion signal) ----
   // The generic v1 operations resource is the source of truth for completion:
   // the SSE 'done' event can be missed on a page reload (the log queue may
@@ -145,16 +158,16 @@
   function applyStatus(data) {
     if (!data) return;
     if (data.status === 'DONE' && data.redirect_url) {
-      creationDone = true;
+      createAttemptDone = true;
       redirectUrl = data.redirect_url;
       if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
     } else if (data.status === 'FAILED') {
-      creationFailed = true;
-      creationError = data.error || 'unknown error';
-      creationErrorKind = data.error_kind || '';
+      createAttemptFailed = true;
+      createAttemptError = data.error || 'unknown error';
+      createAttemptErrorKind = data.error_kind || '';
       showFailure();
       if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
-    } else if (data.status_text && !creationFailed) {
+    } else if (data.status_text && !createAttemptFailed) {
       // Live stage caption (e.g. "Cloning repository...") from the create
       // operation status, restoring the per-stage text the old SSE carried.
       var stageEl = document.getElementById('stage');

@@ -12,6 +12,8 @@ from imbue.mngr.cli.destroy import DestroyCliOptions
 from imbue.mngr.cli.destroy import _DestroyTargets
 from imbue.mngr.cli.destroy import _OfflineHostToDestroy
 from imbue.mngr.cli.destroy import _destroy_emptied_hosts
+from imbue.mngr.cli.destroy import _destroy_single_offline_host
+from imbue.mngr.cli.destroy import _drop_targets_covered_by_explicit_hosts
 from imbue.mngr.cli.destroy import _emit_dry_run_entries
 from imbue.mngr.cli.destroy import _output_result
 from imbue.mngr.cli.destroy import destroy
@@ -20,6 +22,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -140,7 +143,7 @@ def test_destroy_session_cannot_combine_with_agent_names(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
-    assert "Cannot specify --session with agent names" in result.output
+    assert "Cannot specify --session with agent or host names" in result.output
 
 
 # =============================================================================
@@ -151,7 +154,7 @@ def test_destroy_session_cannot_combine_with_agent_names(
 def test_destroy_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in HUMAN format with destroyed agents."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    _output_result([AgentName("agent-a"), AgentName("agent-b")], [], output_opts)
+    _output_result([AgentName("agent-a"), AgentName("agent-b")], [], [], output_opts)
     captured = capsys.readouterr()
     assert "Successfully destroyed 2 agent(s)" in captured.out
 
@@ -159,7 +162,7 @@ def test_destroy_output_result_human_with_agents(capsys: pytest.CaptureFixture[s
 def test_destroy_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    _output_result([AgentName("agent-x")], [], output_opts)
+    _output_result([AgentName("agent-x")], [], [], output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["destroyed_agents"] == ["agent-x"]
@@ -172,7 +175,7 @@ def test_destroy_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
 def test_destroy_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSONL format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    _output_result([AgentName("agent-y")], [], output_opts)
+    _output_result([AgentName("agent-y")], [], [], output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["event"] == "destroy_result"
@@ -182,7 +185,7 @@ def test_destroy_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None
 def test_destroy_output_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result with a format template."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
-    _output_result([AgentName("my-agent")], [], output_opts)
+    _output_result([AgentName("my-agent")], [], [], output_opts)
     captured = capsys.readouterr()
     assert "my-agent" in captured.out
 
@@ -197,7 +200,7 @@ def test_destroy_output_result_json_reports_failures(capsys: pytest.CaptureFixtu
         agent_name=AgentName("agent-z"),
         host_id=host_id,
     )
-    _output_result([AgentName("agent-z")], [failure], output_opts)
+    _output_result([AgentName("agent-z")], [], [failure], output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["failure_count"] == 1
@@ -561,7 +564,7 @@ def test_destroy_dry_run_output_human_lists_agents_and_marks_offline(capsys: pyt
         {"name": "agent-a", "host": "host-1", "offline": "false"},
         {"name": "agent-b", "host": "host-2", "offline": "true"},
     ]
-    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.HUMAN))
+    _emit_dry_run_entries(entries, [], OutputOptions(output_format=OutputFormat.HUMAN))
     captured = capsys.readouterr()
     assert "Would destroy 2 agent(s)" in captured.out
     assert "agent-a@host-1" in captured.out
@@ -573,7 +576,7 @@ def test_destroy_dry_run_output_human_lists_agents_and_marks_offline(capsys: pyt
 def test_destroy_dry_run_output_json_reports_count(capsys: pytest.CaptureFixture[str]) -> None:
     """Dry-run JSON output is machine-readable and flags dry_run=True with a count."""
     entries = [{"name": "agent-x", "host": "host-1", "offline": "false"}]
-    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.JSON))
+    _emit_dry_run_entries(entries, [], OutputOptions(output_format=OutputFormat.JSON))
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["dry_run"] is True
@@ -587,7 +590,7 @@ def test_destroy_dry_run_output_format_template(capsys: pytest.CaptureFixture[st
         {"name": "agent-a", "host": "host-1", "offline": "false"},
         {"name": "agent-b", "host": "host-2", "offline": "true"},
     ]
-    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}"))
+    _emit_dry_run_entries(entries, [], OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}"))
     captured = capsys.readouterr()
     assert "agent-a" in captured.out
     assert "agent-b" in captured.out
@@ -606,3 +609,123 @@ def test_destroy_dry_run_empty_input_is_noop(
         catch_exceptions=True,
     )
     assert result.exit_code == 0
+
+
+# =============================================================================
+# Host-address targeting: `mngr destroy @HOST[.PROVIDER]` / `host-<id>`.
+# =============================================================================
+
+
+def test_destroy_host_address_not_found_errors_without_force(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """A host address that matches nothing is an error without --force."""
+    result = cli_runner.invoke(
+        destroy,
+        ["@no-such-host-b6f2c81a"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "Could not find host" in result.output
+
+
+def test_destroy_host_address_not_found_skipped_with_force(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """With --force, a missing host is reported and skipped (idempotent cleanup scripts)."""
+    result = cli_runner.invoke(
+        destroy,
+        ["@no-such-host-b6f2c81a", "--force"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code == 0
+    assert "Host not found (skipping)" in result.output
+
+
+def test_destroy_local_host_is_refused(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The local host can never be destroyed, even when addressed explicitly."""
+    result = cli_runner.invoke(
+        destroy,
+        ["@localhost", "--force"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "Cannot destroy the local host" in result.output
+
+
+def _stub_host_target(host: _StubOnlineHost, is_explicit: bool = True) -> _OfflineHostToDestroy:
+    # model_construct bypasses pydantic's isinstance validation so the
+    # duck-typed stubs can stand in for the interface types.
+    return _OfflineHostToDestroy.model_construct(
+        host=cast(OnlineHostInterface, host),
+        provider=cast(ProviderInstanceInterface, _RecordingProvider()),
+        agent_names=[],
+        agent_ids=[],
+        is_explicit_host_target=is_explicit,
+    )
+
+
+def test_drop_targets_covered_by_explicit_hosts_removes_overlapping_targets() -> None:
+    """Agent and host targets on an explicitly-targeted host are dropped (the host
+    destruction takes them down); targets on other hosts are untouched."""
+    covered_host = _StubOnlineHost()
+    other_host = _StubOnlineHost()
+    covered_agent = object()
+    other_agent = object()
+    targets = _DestroyTargets.model_construct(
+        online_agents=[
+            (cast(AgentInterface, covered_agent), cast(OnlineHostInterface, covered_host)),
+            (cast(AgentInterface, other_agent), cast(OnlineHostInterface, other_host)),
+        ],
+        offline_hosts=[_stub_host_target(covered_host, is_explicit=False)],
+        online_hosts_with_provider=[
+            (cast(OnlineHostInterface, covered_host), cast(ProviderInstanceInterface, _RecordingProvider())),
+            (cast(OnlineHostInterface, other_host), cast(ProviderInstanceInterface, _RecordingProvider())),
+        ],
+    )
+
+    filtered = _drop_targets_covered_by_explicit_hosts(targets, [_stub_host_target(covered_host)])
+
+    assert [agent for agent, _ in filtered.online_agents] == [other_agent]
+    assert filtered.offline_hosts == []
+    assert [host for host, _ in filtered.online_hosts_with_provider] == [other_host]
+
+
+def test_destroy_single_host_records_explicit_host_destruction(temp_mngr_ctx: MngrContext) -> None:
+    """An explicit host target is destroyed via provider.destroy_host and counted
+    in the destroyed-hosts result (agents ride along)."""
+    host = _StubOnlineHost()
+    provider = _RecordingProvider()
+    target = _OfflineHostToDestroy.model_construct(
+        host=cast(OnlineHostInterface, host),
+        provider=cast(ProviderInstanceInterface, provider),
+        agent_names=[AgentName("rider-agent")],
+        agent_ids=[],
+        is_explicit_host_target=True,
+    )
+    destroyed_agents: list[AgentName] = []
+    destroyed_host_names: list[str] = []
+    failures: list[CleanupFailure] = []
+
+    _destroy_single_offline_host(
+        target,
+        OutputOptions(output_format=OutputFormat.HUMAN),
+        temp_mngr_ctx,
+        threading.Lock(),
+        destroyed_agents,
+        failures,
+        destroyed_host_names,
+    )
+
+    assert provider.destroyed_hosts == [host]
+    assert destroyed_agents == [AgentName("rider-agent")]
+    assert destroyed_host_names == [host.get_name()]
+    assert failures == []

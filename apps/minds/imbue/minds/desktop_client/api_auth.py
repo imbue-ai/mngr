@@ -50,7 +50,7 @@ def json_field_error(message: str, field: str, status_code: int = 400) -> Respon
 def handle_invalid_random_id(error: InvalidRandomIdError) -> Response:
     """Map a malformed workspace/operation id in the URL path to a 400 instead of a 500.
 
-    Every ``/workspaces/<id>`` route constructs an ``AgentId``/``CreationId`` from
+    Every ``/workspaces/<id>`` route constructs an ``AgentId``/``CreateAttemptId`` from
     the raw path param up front; a malformed id raises ``InvalidRandomIdError``
     (a ``ValueError``). Registered blueprint-wide so that surfaces as a clean 400
     rather than an uncaught 500.

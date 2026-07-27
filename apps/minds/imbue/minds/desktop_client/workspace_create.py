@@ -3,7 +3,7 @@
 These were extracted from ``app.py`` so that both the browser-facing create
 routes (in ``app.py``) and the agent-facing ``/api/v1/workspaces`` create
 route (in ``api_v1.py``) can build the same backup request, the same
-post-creation tunnel/account callback, and resolve/persist the same region.
+post-create-attempt tunnel/account callback, and resolve/persist the same region.
 ``api_v1.py`` cannot import ``app.py`` (``app.py`` imports ``api_v1.py``'s
 blueprint factory, which would be a cycle), so this lower-level module is the
 single home both import.
@@ -113,7 +113,7 @@ def persist_region_for_launch_mode(
         logger.debug("Failed to persist region {} for provider {}: {}", region, provider_key, exc)
 
 
-# -- Post-creation tunnel + account-association callback --
+# -- Post-create-attempt tunnel + account-association callback --
 
 
 def _run_tunnel_setup(
@@ -131,7 +131,7 @@ def _run_tunnel_setup(
 
     The plugin owns all tunnel state (token, services, auth policy);
     minds keeps no local cache. ``create_tunnel`` is idempotent on the
-    connector side, so re-injecting on every agent (re)creation just
+    connector side, so re-injecting on every agent (re)create attempt just
     delivers the existing token rather than rotating.
     """
     try:
@@ -188,7 +188,7 @@ class OnCreatedCallback(MutableModel):
     guaranteed canonical.
 
     The tunnel-setup work is scheduled on a detached thread on the root
-    ``ConcurrencyGroup`` so the agent-creation thread can flip status to
+    ``ConcurrencyGroup`` so the agent-create-attempt thread can flip status to
     ``DONE`` without waiting on a multi-second Cloudflare round-trip.
     """
 
@@ -240,7 +240,7 @@ class OnCreatedCallback(MutableModel):
         # the canonical ids. Discovery hasn't seen the workspace yet, so the
         # record starts with just the form metadata; the reconcile's metadata
         # refresh enriches it (provider, secrets) once discovery catches up.
-        # Never let an association hiccup fail the creation itself.
+        # Never let an association hiccup fail the create attempt itself.
         try:
             self.session_store.associate_created_workspace(
                 user_id=self.account_id,
@@ -286,7 +286,7 @@ class OnCreatedCallback(MutableModel):
 
 
 class CreateOnCreatedCallback(MutableModel):
-    """Post-creation hook that runs the tunnel/account callback, then persists the region.
+    """Post-create-attempt hook that runs the tunnel/account callback, then persists the region.
 
     Composing these two effects into one callable (rather than a nested closure
     at each create call site) keeps the shared create orchestration in one place
@@ -318,7 +318,7 @@ def build_create_on_created_callback(
     display_name: str = "",
     color: str | None = None,
 ) -> CreateOnCreatedCallback:
-    """Build the composed post-creation callback (tunnel/account injection + region persistence)."""
+    """Build the composed post-create-attempt callback (tunnel/account injection + region persistence)."""
     return CreateOnCreatedCallback(
         base_callback=build_on_created_callback(
             account_id,
@@ -338,7 +338,7 @@ def build_on_created_callback(
     color: str | None = None,
     is_cloud_row: bool = False,
 ) -> OnCreatedCallback | None:
-    """Build a callback that injects the tunnel token after agent creation.
+    """Build a callback that injects the tunnel token after agent create attempt.
 
     Returns None if no account is selected (nothing to inject).
     """

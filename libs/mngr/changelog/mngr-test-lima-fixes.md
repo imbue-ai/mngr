@@ -1,0 +1,1 @@
+Regenerated the `mngr imbue_cloud` CLI reference (`docs/commands/secondary/imbue_cloud.md`) for the new `keys litellm create --rotate-on-exists` flag (single-invocation key rotation, added in `libs/mngr_imbue_cloud` on this branch) and, via the merged `mngr/deploy-v0-3-9-debug` branch, the `bucket destroy --force` / `-y` options from the destroyed-workspace backup-retention work.

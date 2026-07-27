@@ -18,14 +18,16 @@ agents (deny-all baseline) while still cookie-reachable by the UI.
 Agent identity, when a route needs it, comes from the URL path's
 ``<agent_id>`` parameter -- *not* from the bearer token. The gateway's
 per-host permissions file is what gates which agent ids a given caller
-can talk about: at agent creation time the desktop client narrows the
+can talk about: at agent-create time the desktop client narrows the
 host's permission rule to ``/minds-api-proxy/api/v1/agents/<agent_id>/...``,
 so a request that reaches a route with a given ``<agent_id>`` has
 already been authorized by the gateway as "this is an agent that lives
 on the caller's host".
 """
 
+import itertools
 import json
+import os
 import queue
 import shlex
 import threading
@@ -52,15 +54,17 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import backup_update as backup_update_module
 from imbue.minds.desktop_client import backup_verification
+from imbue.minds.desktop_client import create_attempt_discard
 from imbue.minds.desktop_client import desktop_control
 from imbue.minds.desktop_client import destroying
 from imbue.minds.desktop_client import workspace_settings
 from imbue.minds.desktop_client import workspace_ssh
 from imbue.minds.desktop_client import workspace_ssh_tunnel
 from imbue.minds.desktop_client import workspace_version
-from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES
+from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
@@ -82,6 +86,7 @@ from imbue.minds.desktop_client.api_models import BackupVerificationToggleReques
 from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import CloudAccountCreateRequest
 from imbue.minds.desktop_client.api_models import CloudAccountSummary
+from imbue.minds.desktop_client.api_models import CreateAttemptDiscardStatusResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
@@ -109,6 +114,7 @@ from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_export import BackupExportError
@@ -121,9 +127,13 @@ from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
+from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
+from imbue.minds.desktop_client.labeled_hosts import find_host_by_workspace_id_label
+from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
@@ -156,6 +166,7 @@ from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.errors import WorkspaceNameInUseError
 from imbue.minds.mngr_settings.byok_accounts import delete_cloud_account_provider
 from imbue.minds.mngr_settings.byok_accounts import is_bring_your_own_cloud_enabled
 from imbue.minds.mngr_settings.byok_accounts import list_cloud_account_providers
@@ -165,7 +176,7 @@ from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
 from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
-from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
@@ -186,6 +197,11 @@ _MNGR_BLOCKING_COMMAND_TIMEOUT_SECONDS: float = 300.0
 _SSE_HEADERS: dict[str, str] = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 # Poll cadence for tailing a destroy operation's on-disk log.
 _DESTROY_LOG_POLL_SECONDS: float = 1.0
+
+# ``mngr list --hosts`` runs a live provider discovery to find a dead
+# create attempt's leftover labeled host before a discard; generous like the
+# startup reconcile's equivalent ceiling.
+_CREATE_ATTEMPT_DISCARD_HOST_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 
 
 # -- Notification route --
@@ -785,19 +801,38 @@ def _handle_workspaces_backups_stream() -> Response:
     paths: WorkspacePaths | None = state.api_v1_paths
     if paths is None:
         return _json_error("Backups are not configured", 501)
-    agent_ids = tuple(request.args.getlist("agent_id"))
+    requested_ids = tuple(request.args.getlist("agent_id"))
+    # Partition out params that are not workspace agent ids (the workspace list
+    # also renders create-attempt and remote rows, and a client may batch those
+    # ids in). Each still gets a degraded line -- no requested row is left
+    # unresolved -- and one bad id can no longer fail the entire stream, which
+    # would flip every landing badge to "Backup status unknown".
+    valid_agent_ids: list[str] = []
+    invalid_agent_ids: list[str] = []
     # Resolve create time + materialize any synced-record env on the request
     # thread (get_state is unavailable on the worker threads below).
     created_at_by_agent_id: dict[str, str | None] = {}
-    for agent_id in agent_ids:
-        parsed_id = AgentId(agent_id)
+    for agent_id in requested_ids:
+        try:
+            parsed_id = AgentId(agent_id)
+        except InvalidRandomIdError:
+            invalid_agent_ids.append(agent_id)
+            continue
+        valid_agent_ids.append(agent_id)
         _materialize_env_from_record_if_missing(paths, parsed_id)
         info = state.backend_resolver.get_agent_display_info(parsed_id)
         created_at_by_agent_id[agent_id] = (
             info.create_time.isoformat() if info is not None and info.create_time is not None else None
         )
+    invalid_rows = (
+        json.dumps(_degraded_backup_summary(invalid_id, None, "not a workspace agent id")) + "\n"
+        for invalid_id in invalid_agent_ids
+    )
+    valid_rows = _stream_workspace_backup_summaries(
+        paths, tuple(valid_agent_ids), created_at_by_agent_id, state.root_concurrency_group
+    )
     return make_streaming_response(
-        _stream_workspace_backup_summaries(paths, agent_ids, created_at_by_agent_id, state.root_concurrency_group),
+        itertools.chain(invalid_rows, valid_rows),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -868,13 +903,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     create flow: the optional ``backup_*`` fields (``backup_provider``,
     ``backup_api_key_env``) build the same restic
     setup request, and -- when an ``account_id`` is given -- the same
-    post-creation callback associates the peer with the account and injects a
+    post-create-attempt callback associates the peer with the account and injects a
     Cloudflare tunnel token. Both reuse the shared helpers in
     ``workspace_create`` so the two front doors stay in lockstep.
     """
     agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
-        return _json_error("Agent creation not configured", 501)
+        return _json_error("Agent create attempts are not configured", 501)
 
     # Object shape + ``git_url`` presence/type are enforced by the spectree model;
     # the value-semantic checks below (empty-after-strip, provider rules) stay here.
@@ -944,12 +979,19 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # here rather than as a deferred FAILED status on the creating page.
     backend_resolver = get_state().backend_resolver
     try:
-        resolved_host_name = resolve_create_host_name(host_name, existing_workspace_host_names(backend_resolver))
+        # The auto-namer avoids names held by known workspaces AND by live
+        # in-flight create attempts (across all providers) -- a cold Lima create is
+        # invisible to discovery for many minutes, and without the in-flight
+        # set two quick back-to-back creates would both pick ``workspace-1``.
+        resolved_host_name = resolve_create_host_name(
+            host_name,
+            existing_workspace_host_names(backend_resolver) | agent_creator.live_in_flight_host_names(),
+        )
     except InvalidName as exc:
         return _json_field_error(str(exc), "host_name")
 
     # Mirror the UI's create-form validation so misconfiguration fails fast here
-    # rather than deep in the background creation thread.
+    # rather than deep in the background create attempt thread.
     session_store: MultiAccountSessionStore | None = get_state().session_store
     is_imbue_cloud = launch_mode is LaunchMode.IMBUE_CLOUD
     if is_imbue_cloud and not account_id:
@@ -972,7 +1014,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         )
 
     # Resolve the imbue_cloud account email (the session store maps account_id
-    # -> email) so the background creation can lease a pool host / provision
+    # -> email) so the background create attempt can lease a pool host / provision
     # backups against the right account.
     account_email = ""
     if account_id and session_store is not None:
@@ -996,7 +1038,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
 
     # Resolve the effective region (honoring a valid submitted value, else the
-    # provider default) and, on a successful create, build the post-creation
+    # provider default) and, on a successful create, build the post-create-attempt
     # callback that injects the Cloudflare tunnel token + associates the account
     # and persists the chosen region -- exactly as the create form does.
     minds_config = get_state().minds_config
@@ -1013,27 +1055,34 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         account_id, minds_config, launch_mode, region, display_name=host_name or resolved_host_name, color=color
     )
 
-    creation_id = agent_creator.start_creation(
-        git_url,
-        host_name=resolved_host_name,
-        # The raw, arbitrary name the user typed becomes the display name; the
-        # resolved slug above is the host name. When blank, start_creation falls
-        # the display name back to the slug.
-        display_name=host_name,
-        branch=branch,
-        launch_mode=launch_mode,
-        account_email=account_email,
-        branch_or_tag=branch_or_tag,
-        region=region,
-        cloud_account=cloud_account,
-        instance_type=instance_type,
-        on_created=on_created,
-        backup_request=backup_request,
-        color=color,
-        docker_runtime=docker_runtime,
-        original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
-    )
-    return OperationHandleResponse(operation_id=str(creation_id), kind="create"), 202
+    try:
+        create_attempt_id = agent_creator.start_create_attempt(
+            git_url,
+            host_name=resolved_host_name,
+            # The raw, arbitrary name the user typed becomes the display name; the
+            # resolved slug above is the host name. When blank, start_create_attempt falls
+            # the display name back to the slug.
+            display_name=host_name,
+            branch=branch,
+            launch_mode=launch_mode,
+            account_email=account_email,
+            branch_or_tag=branch_or_tag,
+            region=region,
+            cloud_account=cloud_account,
+            instance_type=instance_type,
+            on_created=on_created,
+            backup_request=backup_request,
+            color=color,
+            docker_runtime=docker_runtime,
+            original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
+            account_id=account_id,
+        )
+    except WorkspaceNameInUseError as exc:
+        # A live in-flight create attempt already holds this name on the same
+        # provider instance. 409 (not 400): the request is well-formed, the
+        # name is just contended right now.
+        return _json_field_error(str(exc), "host_name", status_code=409)
+    return OperationHandleResponse(operation_id=str(create_attempt_id), kind="create"), 202
 
 
 @require_api_or_cookie_auth
@@ -1367,9 +1416,9 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(CreateOperationStatusResponse))
 def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusResponse | Response:
-    """Report the status of a create operation (the id is a ``creation-...`` id)."""
+    """Report the status of a create operation (the id is a ``create-attempt-...`` id)."""
     agent_creator: AgentCreator | None = get_state().agent_creator
-    info = agent_creator.get_creation_info(CreationId(operation_id)) if agent_creator is not None else None
+    info = agent_creator.get_create_attempt_info(CreateAttemptId(operation_id)) if agent_creator is not None else None
     if info is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return CreateOperationStatusResponse(
@@ -1380,7 +1429,7 @@ def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusR
         # repository...", "Failed: ..."), mode-aware. Restores the live caption
         # the old per-stage SSE status frames carried.
         status_text=status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode),
-        is_done=info.status == AgentCreationStatus.DONE,
+        is_done=info.status == AgentCreateAttemptStatus.DONE,
         agent_id=str(info.agent_id) if info.agent_id is not None else None,
         # The absolute ``/goto/<agent>/`` URL the creating page navigates to once
         # the workspace is ready. Built by the creator (it knows the ``mngr
@@ -1855,24 +1904,38 @@ def _sse(payload: dict[str, object]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-def _stream_create_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str]:
-    """Yield SSE frames draining a create operation's in-memory log queue.
+# Emitted at the start of a log replay whose earliest lines the create-attempt-log
+# buffer's cap has dropped, so the reader knows the history is partial.
+_CREATE_ATTEMPT_LOG_TRUNCATION_MARKER: Final[str] = (
+    f"[minds] (earlier output omitted: only the most recent {CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES} log lines are kept)"
+)
 
-    Emits one ``{"log": ...}`` frame per line, a keepalive while idle, and a
-    final ``{"done": true}`` frame when the sentinel arrives. Exits promptly if
-    the desktop client is shutting down.
+
+def _stream_create_operation_logs(log_sink: CreateAttemptLogSink) -> Iterator[str]:
+    """Yield SSE frames replaying, then tailing, a create attempt's log buffer.
+
+    The sink is indexed and replayable, so every stream starts from index 0 --
+    a page re-entering a creating row (or a second window) sees the retained
+    history before the live tail. When the buffer's cap has dropped the
+    earliest lines, a truncation marker frame precedes the replay. Emits one
+    ``{"log": ...}`` frame per line, a keepalive while idle, and a final
+    ``{"done": true}`` frame once the create attempt ends. Exits promptly if the
+    desktop client is shutting down.
     """
     shutdown_event = get_state().shutdown_event
+    from_index = 0
     while not shutdown_event.is_set():
-        try:
-            line = log_queue.get(block=True, timeout=1.0)
-        except queue.Empty:
-            yield ": keepalive\n\n"
-            continue
-        if line == LOG_SENTINEL:
+        chunk = log_sink.read_chunk(from_index, timeout_seconds=1.0)
+        if chunk.is_truncated:
+            yield _sse({"log": _CREATE_ATTEMPT_LOG_TRUNCATION_MARKER})
+        for line in chunk.lines:
+            yield _sse({"log": line})
+        from_index = chunk.next_index
+        if chunk.is_done and not chunk.lines:
             yield _sse({"done": True})
             return
-        yield _sse({"log": line})
+        if not chunk.lines:
+            yield ": keepalive\n\n"
 
 
 def _stream_workspace_operation_logs(
@@ -1941,13 +2004,13 @@ def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> 
 
 @require_api_or_cookie_auth
 def _handle_create_operation_logs(operation_id: str) -> Response:
-    """Stream a create operation's in-memory log queue as server-sent events."""
+    """Stream a create operation's replayable log buffer (history + live tail) as server-sent events."""
     agent_creator: AgentCreator | None = get_state().agent_creator
-    log_queue = agent_creator.get_log_queue(CreationId(operation_id)) if agent_creator is not None else None
-    if log_queue is None:
+    log_sink = agent_creator.get_log_sink(CreateAttemptId(operation_id)) if agent_creator is not None else None
+    if log_sink is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return make_streaming_response(
-        _stream_create_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+        _stream_create_operation_logs(log_sink), media_type="text/event-stream", headers=_SSE_HEADERS
     )
 
 
@@ -2243,6 +2306,208 @@ def _handle_dismiss_destroy_operation(operation_id: str) -> EmptyResponse:
     return EmptyResponse()
 
 
+# -- CreateAttempt-row discard / dismiss routes --
+#
+# These act on pending-create-attempt records (the interrupted / failed rows in the
+# workspace list), keyed by create attempt id. Discard is the interrupted row's
+# "clean up" action: it destroys the create attempt's leftover half-built host (when
+# one exists, found through the workspace-id host label) via a detached
+# subprocess whose output streams to the create attempt detail page -- the same
+# pattern as a workspace destroy -- and deletes the record once the destroy
+# reports DONE. Dismiss is the failed row's cheap path: it just deletes the
+# record (a failed create's host was already torn down by mngr's own
+# create-failure cleanup).
+
+
+def _mngr_env_for_create_attempts() -> dict[str, str]:
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
+    return env
+
+
+def _notify_workspace_list_changed() -> None:
+    """Wake the chrome SSE so a dismissed / discarded row disappears promptly."""
+    backend_resolver = get_state().backend_resolver
+    if isinstance(backend_resolver, MngrCliBackendResolver):
+        backend_resolver.notify_change()
+
+
+def _cleanup_discarded_create_attempt(create_attempt_id: str, paths: WorkspacePaths) -> None:
+    """Delete a discarded create attempt's pending record, in-memory twin, and discard dir."""
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    if agent_creator is not None and agent_creator.pending_create_attempt_store is not None:
+        agent_creator.pending_create_attempt_store.delete_record(create_attempt_id)
+    if agent_creator is not None:
+        agent_creator.forget_create_attempt(CreateAttemptId(create_attempt_id))
+    create_attempt_discard.delete_discard(create_attempt_id, paths)
+    _notify_workspace_list_changed()
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_create_attempt_discard(create_attempt_id: str) -> tuple[OperationHandleResponse, int] | Response:
+    """Discard a dead (interrupted / failed) create attempt; return an operation handle to poll.
+
+    Destroys the create attempt's leftover half-built host when one exists (looked
+    up by the ``workspace-id`` host label on the record's provider), streaming
+    the destroy output at ``/operations/create-attempt-discard/<id>/logs``; a
+    create attempt with no leftover host completes immediately. The pending record
+    is deleted only once the discard reports DONE -- a failed destroy keeps
+    the row (with the error log) so the discard can be retried.
+    """
+    state = get_state()
+    agent_creator: AgentCreator | None = state.agent_creator
+    paths: WorkspacePaths | None = state.api_v1_paths
+    parent_cg = state.root_concurrency_group
+    if (
+        agent_creator is None
+        or agent_creator.pending_create_attempt_store is None
+        or paths is None
+        or parent_cg is None
+    ):
+        return _json_error("CreateAttempt management not configured", 501)
+    record = agent_creator.pending_create_attempt_store.read_record(create_attempt_id)
+    if record is None:
+        return _json_error(f"Unknown create attempt {create_attempt_id}", 404)
+    if create_attempt_id in agent_creator.live_in_flight_create_attempt_ids():
+        return _json_error("This create attempt is still in progress and cannot be discarded.", 409)
+    if record.state is PendingCreateAttemptState.DONE:
+        # A DONE record means the create finished: the workspace's real host
+        # exists (still carrying the workspace-id label), so a discard would
+        # destroy a healthy workspace. The discovery sweep owns DONE records.
+        return _json_error("This create attempt already completed and cannot be discarded.", 409)
+
+    # Idempotent: reuse an already-running discard rather than spawning a second.
+    existing = create_attempt_discard.read_discard(create_attempt_id, paths)
+    if existing is not None and existing.status is create_attempt_discard.CreateAttemptDiscardStatus.RUNNING:
+        return OperationHandleResponse(operation_id=create_attempt_id, kind="create_attempt_discard"), 202
+
+    leftover = None
+    if record.provider_instance_name in WORKSPACE_ID_LABELED_PROVIDER_NAMES:
+        try:
+            hosts = list_provider_hosts(
+                parent_cg,
+                state.mngr_binary,
+                _mngr_env_for_create_attempts(),
+                record.provider_instance_name,
+                timeout_seconds=_CREATE_ATTEMPT_DISCARD_HOST_LIST_TIMEOUT_SECONDS,
+            )
+        except MngrCommandError as e:
+            return _json_error(f"Could not check for a leftover host: {e}", 502)
+        leftover = find_host_by_workspace_id_label(hosts, create_attempt_id)
+    if leftover is None:
+        create_attempt_discard.start_discard_without_host(
+            create_attempt_id, paths, "No leftover host to clean up; removing the record."
+        )
+    else:
+        create_attempt_discard.start_discard_of_host(
+            create_attempt_id,
+            paths,
+            host_id=leftover.id,
+            provider_name=leftover.provider,
+            env=_mngr_env_for_create_attempts(),
+            mngr_binary=state.mngr_binary,
+        )
+    return OperationHandleResponse(operation_id=create_attempt_id, kind="create_attempt_discard"), 202
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(CreateAttemptDiscardStatusResponse))
+def _handle_create_attempt_discard_status(operation_id: str) -> CreateAttemptDiscardStatusResponse | Response:
+    """Report a create attempt discard's status; a DONE observation also finalizes the cleanup.
+
+    Finalization (deleting the pending record, its in-memory twin, and the
+    discard dir) happens on the first status read that sees DONE, so the row
+    disappears exactly when the page learns the discard finished. Later reads
+    of a finalized discard return 404, which the page treats as done.
+    """
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    record = create_attempt_discard.read_discard(operation_id, paths)
+    if record is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    if record.status is create_attempt_discard.CreateAttemptDiscardStatus.DONE:
+        _cleanup_discarded_create_attempt(operation_id, paths)
+    return CreateAttemptDiscardStatusResponse(
+        operation_id=operation_id,
+        kind="create_attempt_discard",
+        status=str(record.status),
+        is_done=record.status is create_attempt_discard.CreateAttemptDiscardStatus.DONE,
+    )
+
+
+def _stream_create_attempt_discard_logs(create_attempt_id: str, paths: WorkspacePaths) -> Iterator[str]:
+    """Yield SSE frames tailing a create attempt discard's on-disk log to completion.
+
+    Same shape as the destroy log stream: replays the log from the start,
+    tails new content, and ends with ``{"done": true, "status": ...}`` once
+    the discard leaves RUNNING (or its record is finalized away).
+    """
+    shutdown_event = get_state().shutdown_event
+    offset = 0
+    while not shutdown_event.is_set():
+        try:
+            content_bytes, offset = create_attempt_discard.read_discard_log_chunk(create_attempt_id, paths, offset)
+        except FileNotFoundError:
+            content_bytes = b""
+        if content_bytes:
+            yield _sse({"log": content_bytes.decode("utf-8", errors="replace")})
+        record = create_attempt_discard.read_discard(create_attempt_id, paths)
+        if record is None:
+            # Finalized (or dismissed) while streaming: the record cleanup ran.
+            yield _sse({"done": True, "status": str(create_attempt_discard.CreateAttemptDiscardStatus.DONE)})
+            return
+        if record.status is not create_attempt_discard.CreateAttemptDiscardStatus.RUNNING:
+            # Flush any final bytes written between the last read and termination.
+            try:
+                tail_bytes, offset = create_attempt_discard.read_discard_log_chunk(create_attempt_id, paths, offset)
+            except FileNotFoundError:
+                tail_bytes = b""
+            if tail_bytes:
+                yield _sse({"log": tail_bytes.decode("utf-8", errors="replace")})
+            yield _sse({"done": True, "status": str(record.status)})
+            return
+        yield ": keepalive\n\n"
+        shutdown_event.wait(timeout=_DESTROY_LOG_POLL_SECONDS)
+
+
+@require_api_or_cookie_auth
+def _handle_create_attempt_discard_logs(operation_id: str) -> Response:
+    """Tail a create attempt discard's on-disk log to completion as server-sent events."""
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    if create_attempt_discard.read_discard(operation_id, paths) is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_create_attempt_discard_logs(operation_id, paths), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(EmptyResponse))
+def _handle_dismiss_create_attempt(create_attempt_id: str) -> EmptyResponse | Response:
+    """Dismiss a dead create attempt row: delete its record without touching any host.
+
+    The failed row's action (a failed create's host was already cleaned up by
+    mngr's own create-failure teardown). Refused for a live create attempt.
+    Idempotent: an unknown id is a no-op 200.
+    """
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    if agent_creator is not None and create_attempt_id in agent_creator.live_in_flight_create_attempt_ids():
+        return _json_error("This create attempt is still in progress and cannot be dismissed.", 409)
+    if agent_creator is not None and agent_creator.pending_create_attempt_store is not None:
+        agent_creator.pending_create_attempt_store.delete_record(create_attempt_id)
+    if agent_creator is not None:
+        agent_creator.forget_create_attempt(CreateAttemptId(create_attempt_id))
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is not None:
+        create_attempt_discard.delete_discard(create_attempt_id, paths)
+    _notify_workspace_list_changed()
+    return EmptyResponse()
+
+
 # -- Sharing sub-resource routes --
 
 
@@ -2531,6 +2796,12 @@ def _handle_host_name_available() -> Response:
         return _json_response({"available": True})
 
     taken = taken_host_names_on_provider(get_state().backend_resolver, provider_instance_name)
+    # Live in-flight create attempts also hold their names: a cold Lima create is
+    # invisible to the discovery snapshot until its agent exists at the very
+    # end of the build, so the form must consult the in-flight set too.
+    agent_creator = get_state().agent_creator
+    if agent_creator is not None:
+        taken |= agent_creator.live_in_flight_host_names(provider_instance_name)
     return _json_response({"available": name.casefold() not in taken})
 
 
@@ -2706,6 +2977,32 @@ def create_api_v1_blueprint() -> Blueprint:
         "/workspaces/operations/backup/<operation_id>/logs",
         view_func=_handle_backup_operation_logs,
         endpoint="backup_operation_logs",
+        methods=["GET"],
+    )
+
+    # CreateAttempt-row actions: discard (interrupted rows -- destroys the leftover
+    # half-built host, then deletes the record) and dismiss (failed rows --
+    # record-only deletion), plus the discard's status/logs operation resource.
+    blueprint.add_url_rule(
+        "/workspaces/create-attempts/<create_attempt_id>/discard",
+        view_func=_handle_create_attempt_discard,
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/create-attempts/<create_attempt_id>",
+        view_func=_handle_dismiss_create_attempt,
+        methods=["DELETE"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/create-attempt-discard/<operation_id>",
+        view_func=_handle_create_attempt_discard_status,
+        endpoint="create_attempt_discard_status",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/create-attempt-discard/<operation_id>/logs",
+        view_func=_handle_create_attempt_discard_logs,
+        endpoint="create_attempt_discard_logs",
         methods=["GET"],
     )
 

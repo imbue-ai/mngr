@@ -83,6 +83,9 @@
     if (!row) return;
     var agentId = row.getAttribute('data-agent-id');
     if (!agentId) return;
+    // A create attempt row's id is a create attempt id, not an agent id: it opens the
+    // create attempt detail page (live progress / interrupted retry / failed error).
+    if (row.getAttribute('data-create-attempt-state')) { navigate('/creating/' + agentId); return; }
     if (target.closest('[data-open-new]')) { openInNewWindow(agentId); return; }
     selectWorkspace(agentId);
   }
@@ -97,6 +100,8 @@
   document.addEventListener('contextmenu', function (e) {
     var row = e.target.closest('.sidebar-item');
     if (!row) return;
+    // CreateAttempt rows have no workspace context menu (their id is a create attempt id).
+    if (row.getAttribute('data-create-attempt-state')) return;
     var agentId = row.getAttribute('data-agent-id');
     if (!agentId) return;
     e.preventDefault();

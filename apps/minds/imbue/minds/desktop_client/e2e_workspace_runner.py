@@ -149,7 +149,7 @@ def find_free_port() -> int:
 
 
 def resolve_default_workspace_template_path() -> Path:
-    """Return the DEFAULT_WORKSPACE_TEMPLATE working tree that workspace-creation tests build from.
+    """Return the DEFAULT_WORKSPACE_TEMPLATE working tree that workspace-create-attempt tests build from.
 
     The tree is produced ahead of time by
     :func:`imbue.minds.desktop_client.default_workspace_template_worktree.materialize_paired_default_workspace_template_worktree`
@@ -600,12 +600,12 @@ def destroy_agent_best_effort(workspace_name: str, config_project_dir: Path | No
         )
 
 
-class WorkspaceCreationFailedError(RuntimeError):
+class WorkspaceCreateAttemptFailedError(RuntimeError):
     """Raised when the Electron create flow surfaces its failure view.
 
     Carries the human-readable text minds rendered into the loading
     screen's ``#error-message`` element (whatever ``mngr create`` reported)
-    so a creation failure fails the run *fast* with the real cause, instead
+    so a create attempt failure fails the run *fast* with the real cause, instead
     of blocking until the full create-form navigation budget elapses. The
     silent-hang this prevents is what turned a one-line "unknown runtime
     'runsc'" docker error into an opaque 10-minute Playwright timeout.
@@ -641,8 +641,8 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
       loader) -- ``creating.js``'s ``showFailure()`` un-hides it once the status
       poll/SSE reports FAILED.
 
-    Polls both rather than only waiting for success, so a creation failure raises
-    ``WorkspaceCreationFailedError`` with the surfaced error text immediately
+    Polls both rather than only waiting for success, so a create attempt failure raises
+    ``WorkspaceCreateAttemptFailedError`` with the surfaced error text immediately
     instead of hanging until ``timeout_seconds`` expires. Returns the workspace
     (content-view) ``Page``; raises ``PlaywrightTimeoutError`` if neither state is
     reached within the budget.
@@ -662,7 +662,9 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
             # the content view now on the agent subdomain.
             failure_is_visible = False
         if failure_is_visible:
-            raise WorkspaceCreationFailedError(f"Workspace creation failed: {_read_failure_message(creating_page)}")
+            raise WorkspaceCreateAttemptFailedError(
+                f"Workspace create attempt failed: {_read_failure_message(creating_page)}"
+            )
         creating_page.wait_for_timeout(_CREATE_OUTCOME_POLL_INTERVAL_MS)
     raise PlaywrightTimeoutError(
         f"Workspace neither became ready nor reported failure within {timeout_seconds}s "
@@ -742,9 +744,9 @@ def _drive_create_flow(
     logger.info("Submitting create form")
     page.click("#create-submit")
 
-    # Submitting starts creation in the background and lands on the
+    # Submitting starts create attempt in the background and lands on the
     # creating/loading page, which streams progress and redirects into
-    # the workspace once creation completes.
+    # the workspace once the create attempt completes.
     page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
     # Race the workspace-ready content page against the create flow's failure
@@ -760,7 +762,7 @@ def _drive_create_flow(
         state="visible",
         timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
     )
-    logger.info("system_interface dockview rendered; workspace creation complete")
+    logger.info("system_interface dockview rendered; workspace create attempt complete")
     return workspace_page
 
 
@@ -913,7 +915,7 @@ def create_workspace_via_electron(
     Retries the Electron launch + CDP attach (with a fresh process + debug port)
     up to ``_ELECTRON_LAUNCH_ATTEMPTS`` times to absorb a wedged Electron CDP
     handshake (a known Electron-in-CI flake); the create flow itself runs once,
-    so a genuine creation failure fails the test immediately.
+    so a genuine create attempt failure fails the test immediately.
 
     Caller contract:
     - ``default_workspace_template_path`` must be a populated DEFAULT_WORKSPACE_TEMPLATE working tree (use
@@ -1071,9 +1073,9 @@ def drive_create_docker_imbue_workspace(
     logger.info("Submitting create form")
     page.click("#create-submit")
 
-    # Submitting starts creation in the background and lands on the
+    # Submitting starts create attempt in the background and lands on the
     # creating/loading page, which streams progress and redirects into
-    # the workspace once creation completes.
+    # the workspace once the create attempt completes.
     page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
     workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)

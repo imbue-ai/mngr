@@ -19,6 +19,7 @@ from tabulate import tabulate
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import build_agent_cel_context
@@ -53,6 +54,7 @@ from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
@@ -137,6 +139,7 @@ class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
     provider: tuple[str, ...]
     stdin: bool
     schema_view: bool
+    hosts_view: bool
     fields: str | None
     header: tuple[str, ...]
     sort: str
@@ -180,6 +183,14 @@ class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
     default=False,
     help="List the fields referenceable in --include/--exclude, --sort, and --fields/--format "
     "(with their types and the contexts they work in), instead of listing agents.",
+)
+@optgroup.option(
+    "--hosts",
+    "hosts_view",
+    is_flag=True,
+    default=False,
+    help="List hosts instead of agents, including agent-less hosts and destroyed-but-persisted "
+    "host records, with each host's labels. Combinable only with --provider and the output format.",
 )
 @optgroup.option(
     "--fields",
@@ -248,6 +259,14 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     if opts.schema_view:
         _reject_schema_conflicts(opts)
         _emit_field_schema(output_opts)
+        return
+
+    # --hosts lists hosts (including agent-less ones) instead of agents. The
+    # agent-selection and agent-output options are meaningless there, so reject
+    # those combinations rather than silently dropping them.
+    if opts.hosts_view:
+        _reject_hosts_view_conflicts(opts)
+        _emit_hosts_view(mngr_ctx, output_opts, opts.provider if opts.provider else None)
         return
 
     # Write the tab completion cache in the background so it doesn't block
@@ -1089,10 +1108,118 @@ def _reject_schema_conflicts(opts: ListCliOptions) -> None:
         "--limit": opts.limit is not None,
         "--ids": opts.ids,
         "--addrs": opts.addrs,
+        "--hosts": opts.hosts_view,
     }
     used = [flag for flag, is_set in conflicting.items() if is_set]
     if used:
         raise click.UsageError(f"--schema lists fields and cannot be combined with: {', '.join(used)}")
+
+
+def _reject_hosts_view_conflicts(opts: ListCliOptions) -> None:
+    """Raise a UsageError if --hosts is combined with an agent-selection or agent-output option.
+
+    The hosts view enumerates hosts, so agent filters and agent-shaped output
+    options do not apply. Only --provider (which providers to query) and the
+    common output-format options are meaningful alongside it. Reject loudly so
+    the user picks one rather than silently ignoring input.
+    """
+    conflicting = {
+        "--include": bool(opts.include),
+        "--exclude": bool(opts.exclude),
+        "--running": opts.running,
+        "--stopped": opts.stopped,
+        "--archived": opts.archived,
+        "--active": opts.active,
+        "--local": opts.local,
+        "--remote": opts.remote,
+        "--project": bool(opts.project),
+        "--label": bool(opts.label),
+        "--host-label": bool(opts.host_label),
+        "--stdin": opts.stdin,
+        "--fields": opts.fields is not None,
+        "--header": bool(opts.header),
+        "--limit": opts.limit is not None,
+        "--ids": opts.ids,
+        "--addrs": opts.addrs,
+    }
+    used = [flag for flag, is_set in conflicting.items() if is_set]
+    if used:
+        raise click.UsageError(f"--hosts lists hosts and cannot be combined with: {', '.join(used)}")
+
+
+def _emit_hosts_view(
+    mngr_ctx: MngrContext, output_opts: OutputOptions, provider_names: tuple[str, ...] | None
+) -> None:
+    """Discover and emit every host (agent-less ones included) with its labels.
+
+    Runs a live provider discovery (destroyed-but-persisted records included so
+    the full inventory is visible), reads each host's labels through its
+    provider, and emits one row per host. A host whose labels cannot be read
+    still gets a row (with empty labels) so a broken tag file never hides the
+    host itself.
+    """
+    agents_by_host, providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=provider_names,
+        agent_identifiers=None,
+        include_destroyed=True,
+        reset_caches=False,
+    )
+    provider_by_name = {str(provider.name): provider for provider in providers}
+
+    host_rows: list[dict[str, Any]] = []
+    sorted_host_items = sorted(
+        agents_by_host.items(), key=lambda item: (str(item[0].provider_name), str(item[0].host_name))
+    )
+    for host_ref, agent_refs in sorted_host_items:
+        provider = provider_by_name.get(str(host_ref.provider_name))
+        labels: dict[str, str] = {}
+        if provider is not None:
+            try:
+                labels = provider.get_host_tags(host_ref.host_id)
+            except MngrError as e:
+                logger.warning("Could not read host labels for {}: {}", host_ref.host_id, e)
+        host_rows.append(
+            {
+                "id": str(host_ref.host_id),
+                "name": str(host_ref.host_name),
+                "provider": str(host_ref.provider_name),
+                "state": host_ref.host_state.value if host_ref.host_state is not None else None,
+                "labels": labels,
+                "agents": [
+                    {"id": str(agent_ref.agent_id), "name": str(agent_ref.agent_name)} for agent_ref in agent_refs
+                ],
+            }
+        )
+
+    if output_opts.format_template is not None:
+        emit_format_template_lines(output_opts.format_template, host_rows)
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            write_json_line({"hosts": host_rows})
+        case OutputFormat.JSONL:
+            for row in host_rows:
+                write_json_line({"event": "host", **row})
+        case OutputFormat.HUMAN:
+            if not host_rows:
+                write_human_line("No hosts found")
+                return
+            headers = ["NAME", "ID", "PROVIDER", "STATE", "LABELS", "AGENTS"]
+            rows = [
+                [
+                    row["name"],
+                    row["id"],
+                    row["provider"],
+                    row["state"] if row["state"] is not None else "",
+                    _format_value_as_string(row["labels"]),
+                    ", ".join(agent["name"] for agent in row["agents"]),
+                ]
+                for row in host_rows
+            ]
+            write_human_line("\n" + tabulate(rows, headers=headers, tablefmt="plain"))
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _emit_field_schema(output_opts: OutputOptions) -> None:
@@ -1196,11 +1323,15 @@ def _render_format_template(template: str, agent: AgentDetails) -> str:
 CommandHelpMetadata(
     key="list",
     one_line_description="List all agents managed by mngr",
-    synopsis="mngr [list|ls] [--stdin] [--schema] [--ids] [--addrs] [--fields FIELDS] [--sort CEL] "
+    synopsis="mngr [list|ls] [--stdin] [--schema] [--hosts] [--ids] [--addrs] [--fields FIELDS] [--sort CEL] "
     "[--include CEL] [--exclude CEL] [--provider PROVIDER] [--running] [--stopped] [--archived] [--active] "
     "[--local] [--remote] [--project PROJECT] [--limit N] [--on-error MODE]",
     description="""Displays agents with their status, host information, and other metadata.
-Supports filtering, sorting, and multiple output formats.""",
+Supports filtering, sorting, and multiple output formats.
+
+With --hosts, lists hosts instead of agents -- including agent-less hosts and
+destroyed-but-persisted host records -- with each host's labels and the agents
+on it. Only --provider and the output-format options combine with --hosts.""",
     aliases=("ls",),
     examples=(
         ("List all agents", "mngr list"),
@@ -1210,6 +1341,7 @@ Supports filtering, sorting, and multiple output formats.""",
         ("List agents with a specific label", "mngr list --label env=prod"),
         ("List agents with a specific host label", "mngr list --host-label env=prod"),
         ("List agents as JSON", "mngr list --format json"),
+        ("List hosts (agent-less ones included) with their labels", "mngr list --hosts --format json"),
         ("Filter with CEL expression", "mngr list --include 'name.contains(\"prod\")'"),
         ("Sort by name descending", "mngr list --sort 'name desc'"),
         ("Sort by multiple fields", "mngr list --sort 'state, name asc, create_time desc'"),

@@ -48,6 +48,18 @@ def lima_host_data_disk_mount_path(disk_name: str) -> str:
     return f"/mnt/lima-{disk_name}"
 
 
+def lima_host_data_disk_label(disk_name: str) -> str:
+    """Return the btrfs filesystem label Lima expects on an additional disk.
+
+    Lima's ``05-lima-disks.sh`` boot script formats ``format: true`` disks with
+    ``-L lima-<disk_name>`` and treats the presence of
+    ``/dev/disk/by-label/lima-<disk_name>`` as "already formatted". mngr's
+    in-guest format applies the same label so later boots take Lima's
+    already-formatted path instead of re-entering first-time setup.
+    """
+    return f"lima-{disk_name}"
+
+
 def lima_host_data_disk_name(host_id: HostId) -> str:
     """Return the Lima `additionalDisks` name for a host's btrfs data volume.
 

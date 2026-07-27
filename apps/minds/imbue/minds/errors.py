@@ -81,6 +81,23 @@ class MindsConfigError(MindError):
     ...
 
 
+class WorkspaceNameInUseError(MindError, ValueError):
+    """Raised when a create targets a workspace name an in-flight create attempt already holds.
+
+    The mngr-side ``HostNameConflictError`` pre-flight only sees hosts that
+    already exist; this guards the window before the provider reserves the
+    name, where two concurrent minds create attempts could otherwise race.
+    """
+
+    ...
+
+
+class PendingCreateAttemptStoreError(MindError):
+    """Raised when a pending-create-attempt record cannot be written or deleted."""
+
+    ...
+
+
 class DeployLifecycleConfigError(MindError, ValueError):
     """Raised when a deploy lifecycle config combination is invalid."""
 

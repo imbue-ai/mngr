@@ -314,6 +314,11 @@ def test_prevent_direct_subprocess() -> None:
         # so the destroy survives a minds-backend exit; same justification as
         # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md.
         "*/desktop_client/destroying.py",
+        # ``create_attempt_discard.py`` is the create-attempt-row twin of ``destroying.py``:
+        # it spawns the same detached ``bash -c '<mngr destroy ...>'`` so the
+        # discard of an interrupted create attempt's half-built host survives a
+        # minds-backend exit. Same justification.
+        "*/desktop_client/create_attempt_discard.py",
         # ``deployment_tests/helpers.py`` is functionally test-helper code
         # (only ever called from `*/deployment_tests/test_*.py`); it shells
         # out to `modal environment list` for a one-shot read-only probe.

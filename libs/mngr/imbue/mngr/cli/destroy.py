@@ -11,17 +11,21 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.data_types import GcResourceTypes
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import filter_all_hosts
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.gc import gc as api_gc
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
+from imbue.mngr.cli.address_params import parse_agent_or_host_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.exit_codes import exit_code_for_failures
@@ -53,6 +57,7 @@ from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -62,14 +67,22 @@ from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class _OfflineHostToDestroy(FrozenModel):
-    """An offline host where all agents are targeted for destruction."""
+    """A host destroyed as a whole: an offline host with all agents targeted, or an explicit host target."""
 
     model_config = {**FrozenModel.model_config, "arbitrary_types_allowed": True}
 
-    host: HostInterface = Field(description="The offline host to destroy")
+    host: HostInterface = Field(description="The host to destroy")
     provider: ProviderInstanceInterface = Field(description="The provider instance for this host")
     agent_names: list[AgentName] = Field(description="Names of agents on this host targeted for destruction")
     agent_ids: list[AgentId] = Field(description="IDs of agents on this host targeted for destruction")
+    is_explicit_host_target: bool = Field(
+        default=False,
+        description=(
+            "True when the user addressed the host itself (`@HOST` / `host-<id>`) "
+            "rather than this being an offline host whose agents were all targeted. "
+            "Controls output wording and the destroyed-hosts result accounting."
+        ),
+    )
 
 
 class _DestroyTargets(FrozenModel):
@@ -206,14 +219,19 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     )
 
     # Validate input. Variadic positional is parsed here (after stdin expansion);
-    # --agent is already typed by Click.
-    expanded_positional = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents))
-    agent_addresses: list[AgentAddress] = expanded_positional + list(opts.agent_list)
+    # --agent is already typed by Click. The positional accepts both agent
+    # addresses and host addresses (`@HOST[.PROVIDER]`, bare `host-<id>`); a
+    # host address targets the host itself and everything on it.
+    parsed_positional = parse_agent_or_host_addresses_or_raise(expand_stdin_placeholder(opts.agents))
+    agent_addresses: list[AgentAddress] = [
+        address for address in parsed_positional if isinstance(address, AgentAddress)
+    ] + list(opts.agent_list)
+    host_addresses: list[HostAddress] = [address for address in parsed_positional if isinstance(address, HostAddress)]
 
     # Handle --session option by extracting agent names from session names
     if opts.sessions:
-        if agent_addresses:
-            raise UserInputError("Cannot specify --session with agent names")
+        if agent_addresses or host_addresses:
+            raise UserInputError("Cannot specify --session with agent or host names")
         for session_name in opts.sessions:
             agent_name = get_agent_name_from_session(session_name, mngr_ctx.config.prefix)
             if agent_name is None:
@@ -223,39 +241,53 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                 )
             agent_addresses.append(parse_agent_addresses_or_raise([agent_name])[0])
 
-    if not agent_addresses:
+    if not agent_addresses and not host_addresses:
         if STDIN_PLACEHOLDER not in opts.agents:
-            raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+            raise UserInputError("Must specify at least one agent or host (use '-' to read from stdin)")
         return
 
     # Find agents to destroy
-    try:
-        targets = _find_agents_to_destroy(
-            addresses=agent_addresses,
-            mngr_ctx=mngr_ctx,
-        )
-    except AgentNotFoundError as e:
-        if opts.force:
-            targets = _DestroyTargets(online_agents=[], offline_hosts=[])
-            _output(f"Error destroying agent(s): {e}", output_opts)
-        else:
-            raise
+    targets = _DestroyTargets(online_agents=[], offline_hosts=[])
+    if agent_addresses:
+        try:
+            targets = _find_agents_to_destroy(
+                addresses=agent_addresses,
+                mngr_ctx=mngr_ctx,
+            )
+        except AgentNotFoundError as e:
+            if opts.force:
+                _output(f"Error destroying agent(s): {e}", output_opts)
+            else:
+                raise
 
-    if not targets.online_agents and not targets.offline_hosts:
+    # Resolve explicit host targets, then drop agent targets that live on an
+    # explicitly-targeted host -- the host destruction takes them down with it.
+    explicit_hosts: list[_OfflineHostToDestroy] = []
+    if host_addresses:
+        explicit_hosts = _find_hosts_to_destroy(
+            host_addresses=host_addresses,
+            mngr_ctx=mngr_ctx,
+            is_missing_tolerated=opts.force,
+            output_opts=output_opts,
+        )
+        targets = _drop_targets_covered_by_explicit_hosts(targets, explicit_hosts)
+
+    if not targets.online_agents and not targets.offline_hosts and not explicit_hosts:
         _output("No agents found to destroy", output_opts)
         return
 
     # Dry-run: report what would be destroyed without touching anything.
     if opts.dry_run:
-        _emit_dry_run_output(targets, output_opts)
+        _emit_dry_run_output(targets, explicit_hosts, output_opts)
         return
 
     # Confirm destruction if not forced
     if not opts.force:
-        _confirm_destruction(targets)
+        _confirm_destruction(targets, explicit_hosts)
 
-    # Destroy all targets (online agents + offline hosts) in parallel
+    # Destroy all targets (online agents + whole hosts) in parallel
     destroyed_agents: list[AgentName] = []
+    destroyed_host_names: list[str] = []
     branches_to_remove: list[tuple[str, Path]] = []
     # Shared accumulator of real cleanup failures (resources left behind). Mutated
     # under ``results_lock`` exactly like ``destroyed_agents``.
@@ -279,16 +311,17 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                     failures,
                 )
             )
-        for offline in targets.offline_hosts:
+        for host_to_destroy in list(targets.offline_hosts) + explicit_hosts:
             futures.append(
                 executor.submit(
                     _destroy_single_offline_host,
-                    offline,
+                    host_to_destroy,
                     output_opts,
                     mngr_ctx,
                     results_lock,
                     destroyed_agents,
                     failures,
+                    destroyed_host_names,
                 )
             )
 
@@ -320,7 +353,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     # not-still-referenced safety predicate, so the destroy command does not
     # touch worktrees inline.  Branch deletion runs after GC so that any
     # worktree GC removes is no longer holding the branch checked out.
-    if opts.gc and destroyed_agents:
+    if opts.gc and (destroyed_agents or destroyed_host_names):
         _run_post_destroy_gc(
             mngr_ctx=mngr_ctx,
             output_opts=output_opts,
@@ -334,8 +367,119 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 
     # Output final result, then exit with a cause-specific code if any real
     # cleanup failures (resources left behind) remain.
-    _output_result(destroyed_agents, failures, output_opts)
+    _output_result(destroyed_agents, destroyed_host_names, failures, output_opts)
     ctx.exit(exit_code_for_failures(failures))
+
+
+def _find_hosts_to_destroy(
+    host_addresses: Sequence[HostAddress],
+    mngr_ctx: MngrContext,
+    # With --force, a host address that matches nothing is reported and skipped
+    # (so cleanup scripts stay idempotent); without it, it is an error.
+    is_missing_tolerated: bool,
+    output_opts: OutputOptions,
+) -> list[_OfflineHostToDestroy]:
+    """Resolve explicit host addresses to whole-host destroy targets.
+
+    Each matched host is destroyed with everything on it. The local host is
+    never destroyable and is rejected outright. Results are deduplicated by
+    host id (the same host may be matched by several addresses).
+    """
+    agents_by_host, _ = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    all_hosts = list(agents_by_host.keys())
+
+    hosts_to_destroy: list[_OfflineHostToDestroy] = []
+    seen_host_ids: set[HostId] = set()
+    for host_address in host_addresses:
+        matches = filter_all_hosts(host_address, all_hosts)
+        if not matches:
+            if is_missing_tolerated:
+                _output(f"Host not found (skipping): {host_address}", output_opts)
+                continue
+            raise UserInputError(f"Could not find host: {host_address}")
+        for host_ref in matches:
+            if host_ref.host_id in seen_host_ids:
+                continue
+            seen_host_ids.add(host_ref.host_id)
+            provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+            host_interface = provider.get_host(host_ref.host_id)
+            if host_interface.is_local:
+                raise UserInputError("Cannot destroy the local host - it is your local computer.")
+            hosts_to_destroy.append(_build_explicit_host_target(host_interface, provider))
+    return hosts_to_destroy
+
+
+def _build_explicit_host_target(
+    host_interface: HostInterface,
+    provider: ProviderInstanceInterface,
+) -> _OfflineHostToDestroy:
+    """Build a whole-host destroy target, listing the agents it will take down.
+
+    The agent listing is informational (confirmation prompt + result
+    accounting): the destruction itself goes through ``provider.destroy_host``,
+    which takes the whole host down regardless. An online host that cannot be
+    queried for agents is still destroyable -- the listing just comes back
+    empty.
+    """
+    agent_names: list[AgentName] = []
+    agent_ids: list[AgentId] = []
+    match host_interface:
+        case OnlineHostInterface() as online_host:
+            try:
+                for agent in online_host.get_agents():
+                    agent_names.append(agent.name)
+                    agent_ids.append(agent.id)
+            except (HostConnectionError, HostAuthenticationError) as e:
+                logger.warning("Could not list agents on host {} before destroying it: {}", host_interface.id, e)
+        case HostInterface():
+            for ref in host_interface.discover_agents():
+                agent_names.append(ref.agent_name)
+                agent_ids.append(ref.agent_id)
+        case _ as unreachable:
+            assert_never(unreachable)
+    return _OfflineHostToDestroy(
+        host=host_interface,
+        provider=provider,
+        agent_names=agent_names,
+        agent_ids=agent_ids,
+        is_explicit_host_target=True,
+    )
+
+
+def _drop_targets_covered_by_explicit_hosts(
+    targets: _DestroyTargets,
+    explicit_hosts: Sequence[_OfflineHostToDestroy],
+) -> _DestroyTargets:
+    """Remove agent/host targets that an explicit host target already covers.
+
+    Destroying the host takes its agents down with it, so destroying them
+    individually first would only race the host teardown.
+    """
+    explicit_host_ids = {explicit.host.id for explicit in explicit_hosts}
+    return targets.model_copy_update(
+        to_update(
+            targets.field_ref().online_agents,
+            [(agent, host) for agent, host in targets.online_agents if host.id not in explicit_host_ids],
+        ),
+        to_update(
+            targets.field_ref().offline_hosts,
+            [offline for offline in targets.offline_hosts if offline.host.id not in explicit_host_ids],
+        ),
+        to_update(
+            targets.field_ref().online_hosts_with_provider,
+            [
+                (host, provider)
+                for host, provider in targets.online_hosts_with_provider
+                if host.id not in explicit_host_ids
+            ],
+        ),
+    )
 
 
 def _find_agents_to_destroy(
@@ -551,11 +695,12 @@ def _destroy_single_offline_host(
     results_lock: threading.Lock,
     destroyed_agents: list[AgentName],
     failures: list[CleanupFailure],
+    destroyed_host_names: list[str],
 ) -> None:
-    """Destroy a single offline host and all its agents. Thread-safe."""
+    """Destroy a single host as a whole (with all its agents). Thread-safe."""
     host_name = offline.host.get_name()
     try:
-        _output(f"Destroying offline host {host_name} with {len(offline.agent_names)} agent(s)...", output_opts)
+        _output(f"Destroying host {host_name} with {len(offline.agent_names)} agent(s)...", output_opts)
         mngr_ctx.pm.hook.on_before_host_destroy(host=offline.host, mngr_ctx=mngr_ctx)
         # destroy_host raises a CleanupFailedGroup carrying the real failures (resources
         # left behind) rather than failing fast; we still acted, so record the agents.
@@ -568,18 +713,22 @@ def _destroy_single_offline_host(
         with results_lock:
             destroyed_agents.extend(offline.agent_names)
             failures.extend(host_failures)
+            if offline.is_explicit_host_target:
+                destroyed_host_names.append(host_name)
         for name in offline.agent_names:
             _output(f"Destroyed agent: {name}@{host_name} (via host destruction)", output_opts)
+        if offline.is_explicit_host_target:
+            _output(f"Destroyed host: {host_name}", output_opts)
 
         # Emit host_destroyed event with all agent IDs
         emit_host_destroyed(mngr_ctx.config, offline.host.id, offline.agent_ids)
     except MngrError as e:
-        _output(f"Error destroying offline host {host_name}: {e}", output_opts)
+        _output(f"Error destroying host {host_name}: {e}", output_opts)
         with results_lock:
             failures.append(
                 CleanupFailure(
                     category=CleanupFailureCategory.PROVIDER_INACCESSIBLE,
-                    message=f"Error destroying offline host {host_name}: {e}",
+                    message=f"Error destroying host {host_name}: {e}",
                     host_id=offline.host.id,
                 )
             )
@@ -619,11 +768,16 @@ def _check_all_agents_targeted_on_offline_host(
             )
 
 
-def _emit_dry_run_output(targets: _DestroyTargets, output_opts: OutputOptions) -> None:
+def _emit_dry_run_output(
+    targets: _DestroyTargets,
+    explicit_hosts: Sequence[_OfflineHostToDestroy],
+    output_opts: OutputOptions,
+) -> None:
     """Report what would be destroyed without destroying anything.
 
     Collects the targeted agents (online and offline) into a flat list of
-    entries and emits them via :func:`_emit_dry_run_entries`.
+    entries and emits them via :func:`_emit_dry_run_entries`, alongside the
+    explicitly-targeted hosts.
     """
     agent_entries: list[dict[str, str]] = []
     for agent, host in targets.online_agents:
@@ -632,21 +786,36 @@ def _emit_dry_run_output(targets: _DestroyTargets, output_opts: OutputOptions) -
         host_name = offline.host.get_name()
         for name in offline.agent_names:
             agent_entries.append({"name": str(name), "host": host_name, "offline": "true"})
-    _emit_dry_run_entries(agent_entries, output_opts)
+    host_entries: list[dict[str, str]] = [
+        {"host": explicit.host.get_name(), "agent_count": str(len(explicit.agent_names))}
+        for explicit in explicit_hosts
+    ]
+    _emit_dry_run_entries(agent_entries, host_entries, output_opts)
 
 
-def _emit_dry_run_entries(agent_entries: Sequence[dict[str, str]], output_opts: OutputOptions) -> None:
-    """Emit dry-run agent entries, honoring the active output format.
+def _emit_dry_run_entries(
+    agent_entries: Sequence[dict[str, str]],
+    host_entries: Sequence[dict[str, str]],
+    output_opts: OutputOptions,
+) -> None:
+    """Emit dry-run agent and host entries, honoring the active output format.
 
     Honors the same output formats as the real destroy result: format
     templates, JSON, JSONL, and human-readable. Offline-host agents are
-    annotated as such in human output.
+    annotated as such in human output. Format templates only cover agent
+    entries (their fields are agent-shaped).
     """
     if output_opts.format_template is not None:
         emit_format_template_lines(output_opts.format_template, agent_entries)
         return
 
-    result_data = {"dry_run": True, "agents": list(agent_entries), "count": len(agent_entries)}
+    result_data = {
+        "dry_run": True,
+        "agents": list(agent_entries),
+        "count": len(agent_entries),
+        "hosts": list(host_entries),
+        "host_count": len(host_entries),
+    }
     match output_opts.output_format:
         case OutputFormat.JSON:
             write_json_line(result_data)
@@ -657,19 +826,38 @@ def _emit_dry_run_entries(agent_entries: Sequence[dict[str, str]], output_opts: 
             for entry in agent_entries:
                 suffix = " (offline)" if entry["offline"] == "true" else ""
                 write_human_line("  - {}@{}{}", entry["name"], entry["host"], suffix)
+            if host_entries:
+                write_human_line("\nWould destroy {} host(s):", len(host_entries))
+                for host_entry in host_entries:
+                    write_human_line("  - {} ({} agent(s))", host_entry["host"], host_entry["agent_count"])
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def _confirm_destruction(targets: _DestroyTargets) -> None:
-    """Prompt user to confirm destruction of agents."""
-    write_human_line("\nThe following agents will be destroyed:")
-    for agent, host in targets.online_agents:
-        write_human_line("  - {}@{}", agent.name, host.get_name())
-    for offline in targets.offline_hosts:
-        host_name = offline.host.get_name()
-        for name in offline.agent_names:
-            write_human_line("  - {}@{} (offline)", name, host_name)
+def _confirm_destruction(
+    targets: _DestroyTargets,
+    explicit_hosts: Sequence[_OfflineHostToDestroy],
+) -> None:
+    """Prompt user to confirm destruction of agents and explicitly-targeted hosts."""
+    if targets.online_agents or targets.offline_hosts:
+        write_human_line("\nThe following agents will be destroyed:")
+        for agent, host in targets.online_agents:
+            write_human_line("  - {}@{}", agent.name, host.get_name())
+        for offline in targets.offline_hosts:
+            host_name = offline.host.get_name()
+            for name in offline.agent_names:
+                write_human_line("  - {}@{} (offline)", name, host_name)
+    if explicit_hosts:
+        write_human_line("\nThe following hosts (and everything on them) will be destroyed:")
+        for explicit in explicit_hosts:
+            agent_suffix = (
+                " ({} agent(s): {})".format(
+                    len(explicit.agent_names), ", ".join(str(name) for name in explicit.agent_names)
+                )
+                if explicit.agent_names
+                else " (no agents)"
+            )
+            write_human_line("  - {}{}", explicit.host.get_name(), agent_suffix)
 
     write_human_line("\nThis action is irreversible!")
 
@@ -685,6 +873,7 @@ def _output(message: str, output_opts: OutputOptions) -> None:
 
 def _output_result(
     destroyed_agents: Sequence[AgentName],
+    destroyed_host_names: Sequence[str],
     failures: Sequence[CleanupFailure],
     output_opts: OutputOptions,
 ) -> None:
@@ -696,6 +885,8 @@ def _output_result(
     result_data = {
         "destroyed_agents": [str(n) for n in destroyed_agents],
         "count": len(destroyed_agents),
+        "destroyed_hosts": list(destroyed_host_names),
+        "destroyed_host_count": len(destroyed_host_names),
         "failures": [failure.model_dump(mode="json") for failure in failures],
         "failure_count": len(failures),
         "exit_code": exit_code_for_failures(failures),
@@ -708,6 +899,8 @@ def _output_result(
         case OutputFormat.HUMAN:
             if destroyed_agents:
                 write_human_line("\nSuccessfully destroyed {} agent(s)", len(destroyed_agents))
+            if destroyed_host_names:
+                write_human_line("Successfully destroyed {} host(s)", len(destroyed_host_names))
             if failures:
                 logger.warning("{} cleanup failure(s) -- resources may remain:", len(failures))
                 for failure in failures:
@@ -862,16 +1055,23 @@ def _run_post_destroy_gc(
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="destroy",
-    one_line_description="Destroy agent(s) and clean up resources",
-    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]",
+    one_line_description="Destroy agent(s) or whole host(s) and clean up resources",
+    synopsis="mngr [destroy|rm] [AGENTS_OR_HOSTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]",
     description="""When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
+
+A host can also be targeted directly with a host address: '@HOST',
+'@HOST.PROVIDER', or a bare host ID ('host-<hex>'). This destroys the host and
+everything on it -- including hosts with no agents at all (e.g. one left behind
+by an abandoned create). The local host can never be destroyed.
 
 Use with caution! This operation is irreversible.
 
 By default, running agents cannot be destroyed. Use --force to stop and destroy
 running agents. The command will prompt for confirmation before destroying
-agents unless --force is specified.
+agents or hosts unless --force is specified. With --force, a host address that
+matches nothing is skipped instead of failing, so cleanup scripts stay
+idempotent.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -880,6 +1080,9 @@ Supports custom format templates via --format. Available fields: name.""",
     examples=(
         ("Destroy an agent by name", "mngr destroy my-agent"),
         ("Destroy multiple agents", "mngr destroy agent1 agent2 agent3"),
+        ("Destroy a whole host (and everything on it)", "mngr destroy @my-host"),
+        ("Destroy a host by ID, e.g. one left by an abandoned create", "mngr destroy host-0123abcd... --force"),
+        ("Destroy a host on a specific provider", "mngr destroy @my-host.lima"),
         ("Destroy all agents", "mngr list --ids | mngr destroy - --force"),
         ("Destroy using --agent flag (repeatable)", "mngr destroy --agent my-agent --agent another-agent"),
         ("Destroy by tmux session name", "mngr destroy --session mngr-my-agent"),

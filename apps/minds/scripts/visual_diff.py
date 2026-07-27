@@ -60,8 +60,8 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import setup_logging
-from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
-from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.templates import render_accounts_modal_page
@@ -89,7 +89,7 @@ from imbue.minds.desktop_client.templates_auth import render_forgot_password_pag
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
 from imbue.minds.primitives import BackupProvider
-from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
@@ -204,9 +204,9 @@ def _build_scenarios() -> list[Scenario]:
         },
     )
 
-    creation_info_running = AgentCreationInfo(
-        creation_id=CreationId("creation-00000000000000000000000000000001"),
-        status=AgentCreationStatus.CREATING_WORKSPACE,
+    create_attempt_info_running = AgentCreateAttemptInfo(
+        create_attempt_id=CreateAttemptId("create-attempt-00000000000000000000000000000001"),
+        status=AgentCreateAttemptStatus.CREATING_WORKSPACE,
         launch_mode=LaunchMode.DOCKER,
     )
 
@@ -262,8 +262,8 @@ def _build_scenarios() -> list[Scenario]:
         Scenario(
             name="creating",
             builder=lambda: render_creating_page(
-                creation_id=CreationId("creation-00000000000000000000000000000001"),
-                info=creation_info_running,
+                create_attempt_id=CreateAttemptId("create-attempt-00000000000000000000000000000001"),
+                info=create_attempt_info_running,
             ),
         ),
         # -- Destroying detail page --------------------------------------

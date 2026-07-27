@@ -463,7 +463,7 @@ def test_session_cannot_combine_with_agent_names(
     )
 
     assert result.exit_code != 0
-    assert "Cannot specify --session with agent names" in result.output
+    assert "Cannot specify --session with agent or host names" in result.output
 
 
 def test_session_fails_with_invalid_prefix(

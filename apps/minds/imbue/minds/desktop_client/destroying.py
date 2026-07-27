@@ -155,7 +155,7 @@ def is_host_still_active(
     return state is not None and state is not HostState.DESTROYED
 
 
-def _is_pid_alive(pid: int) -> bool:
+def is_pid_alive(pid: int) -> bool:
     """Best-effort check whether ``pid`` is still running.
 
     Three cases to handle:
@@ -335,7 +335,7 @@ def read_destroying(
     except (ValueError, OSError) as e:
         logger.warning("Could not parse pid file {} for destroying agent {}: {}", pid_path, agent_id, e)
         return None
-    pid_alive = _is_pid_alive(pid)
+    pid_alive = is_pid_alive(pid)
     if pid_alive:
         status = DestroyingStatus.RUNNING
     elif is_host_still_active:

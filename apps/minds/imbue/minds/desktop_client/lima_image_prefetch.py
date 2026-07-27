@@ -418,7 +418,7 @@ class LimaImageCreateGate(FrozenModel):
     Built at startup (where the release tag + default repo URL + dev-loop signal
     are known) and handed to the ``AgentCreator`` so the create worker can resolve
     a ready image without importing the templates module (which would form a
-    cycle, since templates already pulls ``AgentCreationInfo`` from agent_creator).
+    cycle, since templates already pulls ``AgentCreateAttemptInfo`` from agent_creator).
     """
 
     prefetcher: LimaImagePrefetcher = Field(description="The background image prefetcher")

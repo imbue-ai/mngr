@@ -9,6 +9,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -21,10 +22,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import restic_cli
-from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
-from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.agent_creator import CreationErrorKind
+from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
 from imbue.minds.desktop_client.api_v1 import _drain_backup_summary_rows
 from imbue.minds.desktop_client.api_v1 import _stream_workspace_backup_summaries
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -40,6 +41,7 @@ from imbue.minds.desktop_client.backup_verification_store import set_backup_veri
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
+from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
@@ -58,7 +60,8 @@ from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
-from imbue.minds.primitives import CreationId
+from imbue.minds.errors import WorkspaceNameInUseError
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
@@ -97,17 +100,17 @@ def _auth_header() -> dict[str, str]:
 
 
 class _RecordingAgentCreator(AgentCreator):
-    """An ``AgentCreator`` whose ``start_creation`` records its args instead of spawning.
+    """An ``AgentCreator`` whose ``start_create_attempt`` records its args instead of spawning.
 
-    The real ``start_creation`` launches a background thread that clones the repo
+    The real ``start_create_attempt`` launches a background thread that clones the repo
     and shells out to ``mngr create``; the create-route tests only need to assert
     on what the route *passes* to it (resolved host name, color, ...), so this
-    stub captures the call and returns a fresh ``CreationId`` synchronously.
+    stub captures the call and returns a fresh ``CreateAttemptId`` synchronously.
     """
 
     _last_call: dict[str, object] | None = PrivateAttr(default=None)
 
-    def start_creation(
+    def start_create_attempt(
         self,
         repo_source: str,
         host_name: str = "",
@@ -124,7 +127,8 @@ class _RecordingAgentCreator(AgentCreator):
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
-    ) -> CreationId:
+        account_id: str = "",
+    ) -> CreateAttemptId:
         self._last_call = {
             "repo_source": repo_source,
             "host_name": host_name,
@@ -139,22 +143,23 @@ class _RecordingAgentCreator(AgentCreator):
             "color": color,
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
+            "account_id": account_id,
         }
-        return CreationId()
+        return CreateAttemptId()
 
     @property
     def last_call(self) -> dict[str, object]:
-        assert self._last_call is not None, "start_creation was never called"
+        assert self._last_call is not None, "start_create_attempt was never called"
         return self._last_call
 
 
 class _StatusReportingAgentCreator(_RecordingAgentCreator):
-    """Recording creator that also reports a fixed creation info for status polls."""
+    """Recording creator that also reports a fixed create attempt info for status polls."""
 
-    fixed_info: AgentCreationInfo
+    fixed_info: AgentCreateAttemptInfo
 
-    def get_creation_info(self, creation_id: CreationId) -> AgentCreationInfo | None:
-        return self.fixed_info if creation_id == self.fixed_info.creation_id else None
+    def get_create_attempt_info(self, create_attempt_id: CreateAttemptId) -> AgentCreateAttemptInfo | None:
+        return self.fixed_info if create_attempt_id == self.fixed_info.create_attempt_id else None
 
 
 def _client_with_agent_creator(
@@ -171,9 +176,9 @@ def _client_with_agent_creator(
     The create route returns 501 when no ``AgentCreator`` is configured (before
     any input validation runs), so reaching the validation branches requires a
     creator. The invalid-input tests assert on 400 responses that return before
-    ``start_creation`` is ever called; the happy-path tests pass a
+    ``start_create_attempt`` is ever called; the happy-path tests pass a
     :class:`_RecordingAgentCreator` so the route's call is captured without
-    starting a real background creation (subprocess / network).
+    starting a real background create attempt (subprocess / network).
     """
     if resolver is None:
         resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -551,6 +556,39 @@ def test_workspaces_backups_stream_fans_out_over_the_concurrency_group(
     assert {row["agent_id"] for row in lines} == {str(agent_id), str(other_id)}
 
 
+def test_workspaces_backups_stream_degrades_non_agent_ids_without_failing_the_batch(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # The workspace list also renders create-attempt rows, whose ids are not
+    # agent ids. One of them in the batched request must not 400 the whole
+    # stream (that flipped every landing badge to "Backup status unknown"):
+    # the bad id gets its own degraded line and the real workspace still
+    # resolves normally.
+    agent_id = AgentId()
+    create_attempt_id = f"create-attempt-{uuid4().hex}"
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}}),
+        http_client=None,
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+        mngr_caller=RecordingMngrCaller(),
+        root_concurrency_group=root_concurrency_group,
+    )
+    client = app.test_client()
+
+    response = client.get(
+        f"/api/v1/workspaces/backups?agent_id={agent_id}&agent_id={create_attempt_id}", headers=_auth_header()
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    row_by_id = {row["agent_id"]: row for row in lines}
+    assert set(row_by_id) == {str(agent_id), create_attempt_id}
+    assert row_by_id[str(agent_id)]["error"] is None
+    assert row_by_id[create_attempt_id]["error"] == "not a workspace agent id"
+
+
 def test_workspaces_backups_stream_degrades_unresolved_rows_on_row_timeout() -> None:
     # A wedged worker must not silently end the stream: every requested row
     # still owed a line gets a degraded `error` summary, so the landing page
@@ -772,15 +810,15 @@ def test_create_operation_status_includes_status_text(
 ) -> None:
     # The create-operation status carries a human-readable status_text (the stage
     # caption the creating page renders), derived from status + launch_mode.
-    creation_id = CreationId()
+    create_attempt_id = CreateAttemptId()
     creator = _StatusReportingAgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
-        fixed_info=AgentCreationInfo(
-            creation_id=creation_id,
-            status=AgentCreationStatus.INITIALIZING,
+        fixed_info=AgentCreateAttemptInfo(
+            create_attempt_id=create_attempt_id,
+            status=AgentCreateAttemptStatus.INITIALIZING,
             launch_mode=LaunchMode.DOCKER,
         ),
     )
@@ -788,14 +826,16 @@ def test_create_operation_status_includes_status_text(
         tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
     )
 
-    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/create/{create_attempt_id}", headers=_auth_header())
 
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["kind"] == "create"
-    assert body["status_text"] == status_text_for(str(AgentCreationStatus.INITIALIZING), launch_mode=LaunchMode.DOCKER)
+    assert body["status_text"] == status_text_for(
+        str(AgentCreateAttemptStatus.INITIALIZING), launch_mode=LaunchMode.DOCKER
+    )
     assert body["status_text"]
-    # An in-flight (non-failed) creation carries no failure classification.
+    # An in-flight (non-failed) create attempt carries no failure classification.
     assert body["error_kind"] is None
 
 
@@ -804,29 +844,29 @@ def test_create_operation_status_carries_error_kind_for_classified_failures(
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    # A failed creation whose error was classified (e.g. a private GitHub repo
+    # A failed create attempt whose error was classified (e.g. a private GitHub repo
     # the local git credentials cannot see) reports the machine-readable kind
     # alongside the error message; the creating page gates its static sign-in
     # guidance on it.
-    creation_id = CreationId()
+    create_attempt_id = CreateAttemptId()
     creator = _StatusReportingAgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
-        fixed_info=AgentCreationInfo(
-            creation_id=creation_id,
-            status=AgentCreationStatus.FAILED,
+        fixed_info=AgentCreateAttemptInfo(
+            create_attempt_id=create_attempt_id,
+            status=AgentCreateAttemptStatus.FAILED,
             launch_mode=LaunchMode.DOCKER,
             error="git clone failed:\nfatal: could not read Username for 'https://github.com'",
-            error_kind=CreationErrorKind.GITHUB_AUTH_REQUIRED,
+            error_kind=CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED,
         ),
     )
     client = _client_with_agent_creator(
         tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
     )
 
-    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/create/{create_attempt_id}", headers=_auth_header())
 
     assert response.status_code == 200
     body = json.loads(response.data)
@@ -900,7 +940,7 @@ def test_create_workspace_rejects_invalid_backup_provider(
 ) -> None:
     # A malformed backup_provider is a structural (enum) failure, so spectree
     # rejects it up front with the uniform 422 contract, before any background
-    # creation is started.
+    # create attempt is started.
     client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
 
     response = client.post(
@@ -921,7 +961,7 @@ def test_create_workspace_rejects_imbue_cloud_backup_without_account(
 ) -> None:
     # imbue_cloud *backups* (independent of the compute/AI provider) need an
     # account; without one the shared backup-request builder rejects it with a
-    # 400 that mentions the account, before any background creation starts.
+    # 400 that mentions the account, before any background create attempt starts.
     client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
 
     response = client.post(
@@ -1011,9 +1051,9 @@ def test_start_workspace_does_not_broadcast_workspace_stopped(
 
 def test_operation_status_unknown_create_id_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
-    creation_id = CreationId()
+    create_attempt_id = CreateAttemptId()
 
-    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/create/{create_attempt_id}", headers=_auth_header())
 
     assert response.status_code == 404
 
@@ -1176,9 +1216,9 @@ def test_establish_ssh_passes_command_as_single_mngr_exec_arg(
 
 def test_operation_logs_unknown_create_id_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
-    creation_id = CreationId()
+    create_attempt_id = CreateAttemptId()
 
-    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}/logs", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/create/{create_attempt_id}/logs", headers=_auth_header())
 
     assert response.status_code == 404
 
@@ -1195,7 +1235,7 @@ def test_operation_logs_unknown_destroy_id_returns_404(tmp_path: Path) -> None:
 def test_operation_logs_requires_bearer(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
 
-    response = client.get(f"/api/v1/workspaces/operations/create/{CreationId()}/logs")
+    response = client.get(f"/api/v1/workspaces/operations/create/{CreateAttemptId()}/logs")
 
     assert response.status_code == 401
 
@@ -2752,3 +2792,126 @@ def test_cloud_account_routes_gated_off_by_default(tmp_path: Path) -> None:
     assert create.status_code == 403
     delete = client.delete("/api/v1/desktop/cloud-accounts/byok-aws-mine", headers=_auth_header())
     assert delete.status_code == 403
+
+
+class _NameConflictAgentCreator(_RecordingAgentCreator):
+    """Recording creator whose ``start_create_attempt`` always reports an in-flight name conflict."""
+
+    def start_create_attempt(
+        self,
+        repo_source: str,
+        host_name: str = "",
+        display_name: str = "",
+        branch: str = "",
+        launch_mode: LaunchMode = LaunchMode.DOCKER,
+        account_email: str = "",
+        branch_or_tag: str = "",
+        region: str = "",
+        cloud_account: str = "",
+        instance_type: str = "",
+        on_created: Callable[[AgentId, HostId], None] | None = None,
+        backup_request: BackupSetupRequest | None = None,
+        color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
+        original_minds_version: str = "",
+        account_id: str = "",
+    ) -> CreateAttemptId:
+        raise WorkspaceNameInUseError(
+            "A workspace named 'contended' is already being created. "
+            "Wait for that create attempt to finish or pick a different name."
+        )
+
+
+def test_create_workspace_in_flight_name_conflict_returns_409(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    creator = _NameConflictAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "contended"},
+    )
+
+    assert response.status_code == 409
+    body = json.loads(response.data)
+    assert body["field"] == "host_name"
+    assert "already being created" in body["error"]
+
+
+class _InFlightNamesRecordingCreator(_RecordingAgentCreator):
+    """Recording creator that also reports fixed in-flight names (any provider)."""
+
+    fixed_in_flight_names: tuple[str, ...] = ()
+
+    def live_in_flight_host_names(self, provider_instance_name: str | None = None) -> set[str]:
+        del provider_instance_name
+        return {name.casefold() for name in self.fixed_in_flight_names}
+
+
+def test_create_workspace_auto_namer_avoids_in_flight_names(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # ``workspace-1`` is known to discovery and ``workspace-2`` is held by a
+    # live in-flight create attempt (invisible to discovery); the auto-namer must
+    # skip both and pick ``workspace-3``.
+    existing_id = AgentId()
+    resolver = make_resolver_with_data(
+        make_agents_json(existing_id, labels={"is_primary": "true"}, host_name="workspace-1"),
+    )
+    creator = _InFlightNamesRecordingCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        fixed_in_flight_names=("workspace-2",),
+    )
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, resolver=resolver, agent_creator=creator
+    )
+
+    response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": "https://example/repo"})
+
+    assert response.status_code == 202
+    assert str(creator.last_call["host_name"]) == "workspace-3"
+
+
+def test_create_workspace_threads_account_id_to_start_create_attempt(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # The account id must reach start_create_attempt so the pending-create-attempt record
+    # (the crash-safe association) can carry it.
+    fake_cli = make_fake_imbue_cloud_cli()
+    fake_cli.add_account(user_id="user-77120", email="user-77120@example.com")
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=fake_cli)
+    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(
+        tmp_path,
+        root_concurrency_group,
+        notification_dispatcher,
+        agent_creator=creator,
+        session_store=session_store,
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "with-account", "account_id": "user-77120"},
+    )
+
+    assert response.status_code == 202
+    assert creator.last_call["account_id"] == "user-77120"

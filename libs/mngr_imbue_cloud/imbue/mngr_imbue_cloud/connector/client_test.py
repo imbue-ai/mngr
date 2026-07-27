@@ -10,13 +10,17 @@ import json as _json
 import httpx
 import pytest
 from pydantic import AnyUrl
+from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.client import _auth_policy_to_connector_body
 from imbue.mngr_imbue_cloud.connector.client import _parse_auth_policy
+from imbue.mngr_imbue_cloud.connector.client import create_litellm_key_rotating_on_exists
 from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
+from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyInfo
+from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyMaterial
 from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
@@ -27,6 +31,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
@@ -1068,3 +1073,141 @@ def test_enable_sharing_raises_on_malformed_response(monkeypatch: pytest.MonkeyP
     assert "SECRET-TUNNEL-TOKEN" not in message
     assert "tunnel" in message
     assert "service" in message
+
+
+# ---------------------------------------------------------------------------
+# create_litellm_key_rotating_on_exists
+# ---------------------------------------------------------------------------
+
+
+class _RotationScriptedConnectorClient(ImbueCloudConnectorClient):
+    """Concrete fake for the rotation helper: scripted create failures, canned key list."""
+
+    existing_keys: list[LiteLLMKeyInfo] = Field(default_factory=list)
+    alias_exists_failure_count: int = Field(
+        default=0, description="How many leading creates fail on the unique-alias constraint"
+    )
+    create_call_count: int = Field(default=0, description="Creates attempted so far")
+    list_call_count: int = Field(default=0, description="List calls so far")
+    deleted_key_ids: list[str] = Field(default_factory=list)
+
+    def create_litellm_key(
+        self,
+        access_token: SecretStr,
+        key_alias: str | None,
+        max_budget: float | None,
+        budget_duration: str | None,
+        metadata: dict[str, str] | None,
+    ) -> LiteLLMKeyMaterial:
+        self.create_call_count += 1
+        if self.create_call_count <= self.alias_exists_failure_count:
+            raise ImbueCloudKeyError(
+                f"Key creation failed (400): LiteLLM error: Key with alias '{key_alias}' already exists. "
+                "Unique key aliases across all keys are required."
+            )
+        return LiteLLMKeyMaterial(key=SecretStr("sk-rotated"), base_url=AnyUrl("https://llm.example.com"))
+
+    def list_litellm_keys(self, access_token: SecretStr) -> list[LiteLLMKeyInfo]:
+        self.list_call_count += 1
+        return list(self.existing_keys)
+
+    def delete_litellm_key(self, access_token: SecretStr, key_id: str) -> None:
+        self.deleted_key_ids.append(key_id)
+
+
+def test_rotating_create_deletes_only_the_matching_alias_and_recreates() -> None:
+    client = _RotationScriptedConnectorClient(
+        base_url=AnyUrl("https://example.com"),
+        alias_exists_failure_count=1,
+        existing_keys=[
+            LiteLLMKeyInfo(token="hash-other", key_alias="workspace-host-other"),
+            LiteLLMKeyInfo(token="hash-abc", key_alias="workspace-host-abc"),
+        ],
+    )
+
+    material = create_litellm_key_rotating_on_exists(
+        client=client,
+        access_token=SecretStr("tok"),
+        key_alias="workspace-host-abc",
+        max_budget=100.0,
+        budget_duration="1d",
+        metadata={"workspace_host_id": "host-abc"},
+    )
+
+    assert material.key.get_secret_value() == "sk-rotated"
+    assert client.deleted_key_ids == ["hash-abc"]
+    assert client.create_call_count == 2
+    assert client.list_call_count == 1
+
+
+def test_rotating_create_returns_directly_when_the_alias_is_free() -> None:
+    client = _RotationScriptedConnectorClient(base_url=AnyUrl("https://example.com"))
+
+    material = create_litellm_key_rotating_on_exists(
+        client=client,
+        access_token=SecretStr("tok"),
+        key_alias="workspace-host-abc",
+        max_budget=None,
+        budget_duration=None,
+        metadata=None,
+    )
+
+    assert material.key.get_secret_value() == "sk-rotated"
+    assert client.create_call_count == 1
+    assert client.list_call_count == 0
+    assert client.deleted_key_ids == []
+
+
+class _AlwaysFailingCreateConnectorClient(_RotationScriptedConnectorClient):
+    """Fake whose create always fails with a non-alias error (transport, 5xx, ...)."""
+
+    def create_litellm_key(
+        self,
+        access_token: SecretStr,
+        key_alias: str | None,
+        max_budget: float | None,
+        budget_duration: str | None,
+        metadata: dict[str, str] | None,
+    ) -> LiteLLMKeyMaterial:
+        self.create_call_count += 1
+        raise ImbueCloudKeyError("Key creation HTTP request failed: connection reset")
+
+
+def test_rotating_create_propagates_unrelated_create_errors_without_rotating() -> None:
+    client = _AlwaysFailingCreateConnectorClient(base_url=AnyUrl("https://example.com"))
+
+    with pytest.raises(ImbueCloudKeyError, match="HTTP request failed"):
+        create_litellm_key_rotating_on_exists(
+            client=client,
+            access_token=SecretStr("tok"),
+            key_alias="workspace-host-abc",
+            max_budget=None,
+            budget_duration=None,
+            metadata=None,
+        )
+
+    assert client.list_call_count == 0
+    assert client.deleted_key_ids == []
+
+
+def test_rotating_create_errors_when_no_listable_key_matches_the_alias() -> None:
+    # The alias is taken but not listable under this account (e.g. it belongs
+    # to another account): fail with a clear message, delete nothing.
+    client = _RotationScriptedConnectorClient(
+        base_url=AnyUrl("https://example.com"),
+        alias_exists_failure_count=1,
+        existing_keys=[LiteLLMKeyInfo(token="hash-other", key_alias="workspace-host-other")],
+    )
+
+    with pytest.raises(ImbueCloudKeyError, match="already taken"):
+        create_litellm_key_rotating_on_exists(
+            client=client,
+            access_token=SecretStr("tok"),
+            key_alias="workspace-host-abc",
+            max_budget=None,
+            budget_duration=None,
+            metadata=None,
+        )
+
+    assert client.deleted_key_ids == []
+    assert client.create_call_count == 1

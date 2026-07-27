@@ -1925,3 +1925,108 @@ def test_exit_code_for_list_errors_generic_when_any_non_inaccessible() -> None:
         _provider_error("docker", is_inaccessible=False, short_reason=None, remediation=None),
     ]
     assert _exit_code_for_list_errors(errors) == EXIT_CODE_ERROR
+
+
+# =============================================================================
+# --hosts view
+# =============================================================================
+
+
+def test_list_command_hosts_view_json_lists_agent_less_local_host(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--hosts enumerates hosts (not agents): the agent-less local host gets a row.
+
+    This is the property the agent-scoped list cannot provide -- a host with no
+    agents never appears there -- and the one minds' startup reconcile depends
+    on to see half-built hosts.
+    """
+    result = cli_runner.invoke(
+        list_command,
+        ["--hosts", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    local_rows = [row for row in output["hosts"] if row["provider"] == "local"]
+    assert len(local_rows) == 1
+    row = local_rows[0]
+    assert row["name"] == "localhost"
+    assert row["id"].startswith("host-")
+    assert row["agents"] == []
+    assert row["labels"] == {}
+    assert row["state"] is not None
+
+
+def test_list_command_hosts_view_jsonl_emits_one_host_event_per_row(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    result = cli_runner.invoke(
+        list_command,
+        ["--hosts", "--format", "jsonl"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = [json.loads(line) for line in result.output.strip().splitlines() if line.strip()]
+    local_rows = [row for row in lines if row.get("provider") == "local"]
+    assert len(local_rows) == 1
+    assert local_rows[0]["event"] == "host"
+    assert local_rows[0]["name"] == "localhost"
+
+
+def test_list_command_hosts_view_human_renders_host_table(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    result = cli_runner.invoke(
+        list_command,
+        ["--hosts"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "localhost" in result.output
+    assert "PROVIDER" in result.output
+
+
+def test_list_command_hosts_view_rejects_agent_selection_options(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    result = cli_runner.invoke(
+        list_command,
+        ["--hosts", "--ids"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "--hosts lists hosts and cannot be combined with" in result.output
+    assert "--ids" in result.output
+
+    result_filter = cli_runner.invoke(
+        list_command,
+        ["--hosts", "--running"],
+        obj=plugin_manager,
+    )
+    assert result_filter.exit_code != 0
+    assert "--running" in result_filter.output
+
+
+def test_list_command_schema_rejects_hosts_view(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    result = cli_runner.invoke(
+        list_command,
+        ["--schema", "--hosts"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "--schema lists fields and cannot be combined with" in result.output
+    assert "--hosts" in result.output

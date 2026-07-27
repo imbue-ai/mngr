@@ -1,10 +1,14 @@
+import fcntl
 import json
 import shutil
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
 from pathlib import Path
 from typing import Any
+from typing import Final
+from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 
@@ -12,10 +16,17 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_exception
+from tenacity import stop_after_attempt
+from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -71,6 +82,7 @@ from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_lima.limactl import LimaSshConfig
+from imbue.mngr_lima.limactl import is_transient_lima_download_error
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_delete
 from imbue.mngr_lima.limactl import limactl_disk_create
@@ -106,6 +118,72 @@ def _is_lima_not_found_error(message: str) -> bool:
     """Whether a limactl error message indicates the target resource is already gone."""
     lowered = message.lower()
     return any(marker in lowered for marker in _LIMA_NOT_FOUND_MARKERS)
+
+
+# How many times `limactl start` is attempted for a new VM when the failure is a
+# transient image-download error (2 = one retry), and the pause between attempts.
+_START_NEW_MAX_ATTEMPTS: Final[int] = 2
+_START_NEW_RETRY_WAIT_SECONDS: Final[float] = 2.0
+
+
+def _find_conflicting_host_record(name: HostName, records: Sequence[HostRecord]) -> HostRecord | None:
+    """Return the host record that blocks creating a host with this name, if any.
+
+    FAILED records (failure_reason set) and DESTROYED records do not conflict, so
+    a name can be reused after a failed or destroyed create. Everything else --
+    including BUILDING name reservations from an in-flight (or abandoned) create --
+    holds the name.
+    """
+    for record in records:
+        if record.certified_host_data.host_name != str(name):
+            continue
+        if record.certified_host_data.failure_reason is not None:
+            continue
+        if record.certified_host_data.stop_reason == HostState.DESTROYED.value:
+            continue
+        return record
+    return None
+
+
+def _record_state_for_conflict_message(record: HostRecord) -> str:
+    """Approximate display state of a conflicting record for the error message.
+
+    Derived from the record alone (no limactl round-trip): precise enough to
+    tell the user whether they are colliding with an in-flight/abandoned create
+    (BUILDING) or an existing stopped/live host.
+    """
+    if record.is_creation_in_progress:
+        return HostState.BUILDING.value
+    if record.certified_host_data.stop_reason is not None:
+        return record.certified_host_data.stop_reason
+    return "IN USE"
+
+
+def _is_retryable_start_error(error: BaseException) -> bool:
+    """Whether a failed ``limactl start`` should be retried (transient image download)."""
+    return isinstance(error, LimaCommandError) and is_transient_lima_download_error(error)
+
+
+class _DeleteInstanceBeforeRetry(MutableModel):
+    """tenacity ``before_sleep`` callback that deletes the half-created Lima instance between download-retry attempts."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    cg: ConcurrencyGroup = Field(frozen=True, description="Concurrency group for the limactl delete")
+    instance_name: str = Field(frozen=True, description="Lima instance to delete before the retry")
+
+    def __call__(self, retry_state: RetryCallState) -> None:
+        failure = retry_state.outcome.exception() if retry_state.outcome is not None else None
+        logger.warning(
+            "limactl start failed with a transient image-download error; retrying (attempt {}/{}): {}",
+            retry_state.attempt_number,
+            _START_NEW_MAX_ATTEMPTS,
+            failure,
+        )
+        try:
+            limactl_delete(self.cg, self.instance_name, force=True)
+        except (LimaCommandError, OSError) as cleanup_err:
+            logger.debug("Failed to delete half-created instance {} before retry: {}", self.instance_name, cleanup_err)
 
 
 class LimaProviderInstance(BaseProviderInstance):
@@ -369,6 +447,102 @@ sudo poweroff
         with log_span("Creating shutdown script at {}", script_path):
             host.write_text_file(script_path, script_content, mode="755")
 
+    @contextmanager
+    def _name_reservation_lock(self) -> Iterator[None]:
+        """Hold an exclusive flock while checking-and-reserving a host name.
+
+        Serializes the conflict check + reservation-record write across
+        concurrent creates (in this process or another mngr process on the same
+        machine), so two creates for the same name cannot both pass the check.
+        """
+        lock_path = self._provider_dir / "state" / "name_reservation.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _check_and_reserve_host_name(
+        self,
+        host_id: HostId,
+        name: HostName,
+        tags: Mapping[str, str] | None,
+        config: LimaHostConfig,
+    ) -> None:
+        """Reserve ``name`` by writing a BUILDING host record, or raise on conflict.
+
+        Runs under the name-reservation flock so concurrent creates serialize on
+        the check. The reservation is replaced by the final host record when
+        creation completes, or by a failed-host record (which frees the name) if
+        creation fails; a create killed hard (SIGKILL) leaves the reservation
+        behind, holding the name until `mngr destroy @<host-id>` or gc clears it.
+        """
+        with self._name_reservation_lock():
+            conflicting = _find_conflicting_host_record(name, self._host_store.list_all_host_records())
+            if conflicting is not None:
+                conflicting_id = HostId(conflicting.certified_host_data.host_id)
+                conflicting_state = _record_state_for_conflict_message(conflicting)
+                remediation = (
+                    f"If that create is dead, clear it with 'mngr destroy @{conflicting_id}'"
+                    if conflicting.is_creation_in_progress
+                    else None
+                )
+                raise HostNameConflictError(
+                    self.name,
+                    name,
+                    conflicting_host_id=conflicting_id,
+                    conflicting_host_state=conflicting_state,
+                    remediation=remediation,
+                )
+            now = datetime.now(timezone.utc)
+            reservation_record = HostRecord(
+                certified_host_data=CertifiedHostData(
+                    host_id=str(host_id),
+                    host_name=str(name),
+                    user_tags=dict(tags) if tags else {},
+                    snapshots=[],
+                    created_at=now,
+                    updated_at=now,
+                ),
+                config=config,
+                is_creation_in_progress=True,
+            )
+            self._host_store.write_host_record(reservation_record)
+
+    def _start_new_instance_with_download_retry(
+        self,
+        instance_name: str,
+        yaml_path: Path,
+        start_args: tuple[str, ...],
+    ) -> None:
+        """Run ``limactl start`` for a new VM, retrying once on transient download failures.
+
+        A transient network error while fetching the multi-hundred-MB base image
+        (TLS handshake timeout, connection reset, 5xx, ...) should not kill the
+        whole create. Permanent failures (404/403 -- the image legitimately does
+        not exist) are never retried. The half-created instance is deleted
+        between attempts so the retry starts clean; the pre-created data disk is
+        untouched (a download failure cannot have corrupted it, and the next
+        attempt reuses it).
+        """
+        retryer = Retrying(
+            retry=retry_if_exception(_is_retryable_start_error),
+            stop=stop_after_attempt(_START_NEW_MAX_ATTEMPTS),
+            wait=wait_fixed(_START_NEW_RETRY_WAIT_SECONDS),
+            before_sleep=_DeleteInstanceBeforeRetry(cg=self.mngr_ctx.concurrency_group, instance_name=instance_name),
+            reraise=True,
+        )
+        retryer(
+            limactl_start_new,
+            self.mngr_ctx.concurrency_group,
+            instance_name,
+            yaml_path,
+            start_args=start_args,
+            timeout=self.config.vm_start_timeout_seconds,
+        )
+
     def _save_failed_host_record(
         self,
         host_id: HostId,
@@ -492,67 +666,88 @@ sudo poweroff
         is_host_data_volume_exposed = self.config.is_host_data_volume_exposed
         host_data_disk_name = None if is_host_data_volume_exposed else lima_host_data_disk_name(host_id)
 
-        # Create the persistent volume directory only in bind-mount mode; the
-        # btrfs path has no host-side directory to expose.
-        volume_dir: Path | None
-        if is_host_data_volume_exposed:
-            volume_dir = self._ensure_host_volume_dir(host_id)
-        else:
-            volume_dir = None
-
-        # Generate the sshd host keypair to inject into the VM and record in known_hosts.
-        host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
-
-        # When running the agent as root, materialize the client keypair and pass
-        # its public key into the provisioning script so mngr can ssh in as root.
-        if self.config.is_run_as_root:
-            _root_key_path, root_authorized_public_key = self._root_ssh_keypair()
-        else:
-            root_authorized_public_key = None
-
-        # Generate or load Lima YAML config
-        yaml_path_from_build_args = parse_build_args_for_yaml_path(tuple(build_args or ()))
-        if yaml_path_from_build_args is not None:
-            user_config = load_user_lima_yaml(yaml_path_from_build_args)
-            base_config = generate_default_lima_yaml(
-                volume_host_path=volume_dir,
-                host_dir=str(self.host_dir),
-                config_image_url_aarch64=self.config.default_image_url_aarch64,
-                config_image_url_x86_64=self.config.default_image_url_x86_64,
-                host_private_key_pem=host_private_key_pem,
-                host_public_key_openssh=host_public_key_openssh,
-                host_data_disk_name=host_data_disk_name,
-                host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
-                root_authorized_public_key=root_authorized_public_key,
-            )
-            lima_config = merge_lima_yaml(base_config, user_config)
-        else:
-            image_url = str(image) if image else None
-            lima_config = generate_default_lima_yaml(
-                volume_host_path=volume_dir,
-                host_dir=str(self.host_dir),
-                custom_image_url=image_url,
-                config_image_url_aarch64=self.config.default_image_url_aarch64,
-                config_image_url_x86_64=self.config.default_image_url_x86_64,
-                host_private_key_pem=host_private_key_pem,
-                host_public_key_openssh=host_public_key_openssh,
-                host_data_disk_name=host_data_disk_name,
-                host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
-                root_authorized_public_key=root_authorized_public_key,
-            )
-
-        # Write the YAML config to a temp file
-        yaml_path = write_lima_yaml(lima_config)
-
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
+
+        # Built before the reservation so the reservation record carries the full
+        # Lima config: lifecycle operations against an abandoned create (destroy,
+        # discovery) can then find the instance and disk it may have left behind.
+        lima_config_record = LimaHostConfig(
+            instance_name=instance_name,
+            start_args=effective_start_args,
+            image_url=str(image) if image else None,
+            is_host_data_volume_exposed=is_host_data_volume_exposed,
+            host_data_disk_name=host_data_disk_name,
+            is_run_as_root=self.config.is_run_as_root,
+        )
+
+        # Fail fast on a name conflict and reserve the name with a BUILDING
+        # record, so a concurrent create with the same name conflicts instead of
+        # silently building a second VM under the same host name.
+        self._check_and_reserve_host_name(host_id=host_id, name=name, tags=tags, config=lima_config_record)
 
         # Tracked so the `finally` can tear down a half-built VM + disk on ANY
         # failure -- including ConcurrencyExceptionGroup / ProcessTimeoutError /
         # KeyboardInterrupt, which are not MngrError/OSError and would otherwise
         # escape the `except` below leaving an orphaned, untracked VM behind.
+        # The `try` starts right after the name reservation so ANY creation
+        # failure (e.g. a bad user `--file` Lima YAML) replaces the BUILDING
+        # reservation with a FAILED record, freeing the name for reuse.
         is_creation_successful = False
         failure_reason = "Lima host creation was interrupted by an unexpected error"
+        yaml_path: Path | None = None
         try:
+            # Create the persistent volume directory only in bind-mount mode; the
+            # btrfs path has no host-side directory to expose.
+            volume_dir: Path | None
+            if is_host_data_volume_exposed:
+                volume_dir = self._ensure_host_volume_dir(host_id)
+            else:
+                volume_dir = None
+
+            # Generate the sshd host keypair to inject into the VM and record in known_hosts.
+            host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
+
+            # When running the agent as root, materialize the client keypair and pass
+            # its public key into the provisioning script so mngr can ssh in as root.
+            if self.config.is_run_as_root:
+                _root_key_path, root_authorized_public_key = self._root_ssh_keypair()
+            else:
+                root_authorized_public_key = None
+
+            # Generate or load Lima YAML config
+            yaml_path_from_build_args = parse_build_args_for_yaml_path(tuple(build_args or ()))
+            if yaml_path_from_build_args is not None:
+                user_config = load_user_lima_yaml(yaml_path_from_build_args)
+                base_config = generate_default_lima_yaml(
+                    volume_host_path=volume_dir,
+                    host_dir=str(self.host_dir),
+                    config_image_url_aarch64=self.config.default_image_url_aarch64,
+                    config_image_url_x86_64=self.config.default_image_url_x86_64,
+                    host_private_key_pem=host_private_key_pem,
+                    host_public_key_openssh=host_public_key_openssh,
+                    host_data_disk_name=host_data_disk_name,
+                    host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
+                    root_authorized_public_key=root_authorized_public_key,
+                )
+                lima_config = merge_lima_yaml(base_config, user_config)
+            else:
+                image_url = str(image) if image else None
+                lima_config = generate_default_lima_yaml(
+                    volume_host_path=volume_dir,
+                    host_dir=str(self.host_dir),
+                    custom_image_url=image_url,
+                    config_image_url_aarch64=self.config.default_image_url_aarch64,
+                    config_image_url_x86_64=self.config.default_image_url_x86_64,
+                    host_private_key_pem=host_private_key_pem,
+                    host_public_key_openssh=host_public_key_openssh,
+                    host_data_disk_name=host_data_disk_name,
+                    host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
+                    root_authorized_public_key=root_authorized_public_key,
+                )
+
+            # Write the YAML config to a temp file
+            yaml_path = write_lima_yaml(lima_config)
+
             # Pre-create the Lima-managed additional disk in btrfs mode.
             # `additionalDisks` with `format: true` only auto-formats an
             # already-existing disk; without this pre-create, `limactl start`
@@ -564,13 +759,12 @@ sudo poweroff
                     self.config.host_data_disk_size,
                 )
 
-            # Create and start the Lima instance
-            limactl_start_new(
-                self.mngr_ctx.concurrency_group,
-                instance_name,
-                yaml_path,
+            # Create and start the Lima instance, retrying once if the base-image
+            # download fails transiently.
+            self._start_new_instance_with_download_retry(
+                instance_name=instance_name,
+                yaml_path=yaml_path,
                 start_args=effective_start_args,
-                timeout=self.config.vm_start_timeout_seconds,
             )
 
             # Wait for cloud-init to complete
@@ -591,8 +785,9 @@ sudo poweroff
             failure_reason = str(e)
             raise LimaHostCreationError(self.name, failure_reason) from e
         finally:
-            # Clean up the temporary YAML config file
-            yaml_path.unlink(missing_ok=True)
+            # Clean up the temporary YAML config file (if we got far enough to write it)
+            if yaml_path is not None:
+                yaml_path.unlink(missing_ok=True)
             if not is_creation_successful:
                 logger.error("Lima host creation failed; tearing down {}: {}", instance_name, failure_reason)
                 # Tear down the VM (and the orphaned btrfs additional disk so a
@@ -632,16 +827,6 @@ sudo poweroff
         # Resolve the effective SSH login (root when is_run_as_root, else Lima's user).
         effective_ssh_user, effective_ssh_identity = self._effective_ssh_user_and_identity(
             ssh_config, self.config.is_run_as_root
-        )
-
-        # Build and save host record with resources
-        lima_config_record = LimaHostConfig(
-            instance_name=instance_name,
-            start_args=effective_start_args,
-            image_url=str(image) if image else None,
-            is_host_data_volume_exposed=is_host_data_volume_exposed,
-            host_data_disk_name=host_data_disk_name,
-            is_run_as_root=self.config.is_run_as_root,
         )
 
         # Read configured resources from Lima config
@@ -894,11 +1079,24 @@ sudo poweroff
         host_id = host.id
         logger.info("Deleting Lima host records: {}", host_id)
 
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+
+        # If the VM definition somehow outlived destroy_host (e.g. the host was
+        # only ever STOPPED and gc's offline path is deleting it directly),
+        # remove it now. Without this, deleting the record (and disk below)
+        # would strand the VM in `limactl list` forever with nothing left that
+        # can manage it. Tolerates the VM already being gone.
+        if host_record is not None and host_record.config is not None:
+            try:
+                limactl_delete(self.mngr_ctx.concurrency_group, host_record.config.instance_name, force=True)
+            except (LimaCommandError, OSError) as e:
+                if not _is_lima_not_found_error(str(e)):
+                    logger.warning("Error deleting Lima instance during delete_host: {}", e)
+
         # If the host was created in btrfs mode and its Lima disk somehow
         # outlived destroy_host (e.g. destroy never ran or the disk-delete
         # call previously raised), clean it up as a safety net before we
         # forget about it. Tolerates "not found" via limactl_disk_delete.
-        host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if (
             host_record is not None
             and host_record.config is not None
@@ -1047,8 +1245,20 @@ sudo poweroff
 
             # Determine state
             if record.config is not None:
+                # Always pop the instance so the orphaned-VM accounting below
+                # stays correct even for BUILDING reservations.
                 lima_status = instance_status.pop(record.config.instance_name, None)
-                if lima_status is not None:
+                is_building_reservation = (
+                    record.is_creation_in_progress
+                    and record.certified_host_data.failure_reason is None
+                    and record.certified_host_data.stop_reason != HostState.DESTROYED.value
+                )
+                if is_building_reservation:
+                    # An in-flight (or abandoned) create's name reservation. The
+                    # VM may or may not exist yet; either way the host is still
+                    # being built, not RUNNING/CRASHED.
+                    host_state = HostState.BUILDING
+                elif lima_status is not None:
                     # An unrecognized status is a gap in our mapping, not
                     # evidence of a crash.
                     host_state = _LIMA_STATUS_TO_HOST_STATE.get(lima_status, HostState.UNKNOWN)

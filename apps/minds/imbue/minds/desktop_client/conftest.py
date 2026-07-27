@@ -213,6 +213,7 @@ class RecordingImbueCloudCli(FakeImbueCloudCli):
         max_budget: float | None = None,
         budget_duration: str | None = None,
         metadata: Mapping[str, str] | None = None,
+        is_rotate_on_exists: bool = False,
     ) -> LiteLLMKeyMaterial:
         self.create_calls.append(
             {
@@ -221,6 +222,7 @@ class RecordingImbueCloudCli(FakeImbueCloudCli):
                 "max_budget": max_budget,
                 "budget_duration": budget_duration,
                 "metadata": dict(metadata) if metadata is not None else None,
+                "is_rotate_on_exists": is_rotate_on_exists,
             }
         )
         return LiteLLMKeyMaterial(

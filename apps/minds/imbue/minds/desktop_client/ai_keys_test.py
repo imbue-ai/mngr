@@ -3,11 +3,13 @@
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
 
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.ai_keys import AiKeyMintError
 from imbue.minds.desktop_client.ai_keys import build_credential_blob
 from imbue.minds.desktop_client.ai_keys import mint_workspace_credential_blob
 from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
@@ -130,6 +132,31 @@ def test_mint_workspace_credential_blob_fixes_workspace_identity_on_the_key(tmp_
     assert "ANTHROPIC_BASE_URL=https://litellm.example.com/" in blob
 
 
+def test_mint_requests_single_invocation_rotation(tmp_path: Path) -> None:
+    # The deterministic alias dead-ends repeat mints (LiteLLM unique aliases,
+    # secrets shown once), so the mint must ask the CLI to rotate-on-exists --
+    # and must do it inside the ONE create invocation (each CLI subprocess
+    # pays a multi-second boot; a desktop-side list/delete/create fan-out
+    # quadrupled the wall time under load).
+    cli = RecordingImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+
+    mint_workspace_credential_blob(
+        workspace_host_id="host-abc", account_email="alice@example.com", imbue_cloud_cli=cli
+    )
+
+    assert len(cli.create_calls) == 1
+    assert cli.create_calls[0]["is_rotate_on_exists"] is True
+
+
+def test_mint_wraps_cli_failures_in_aikeyminterror(tmp_path: Path) -> None:
+    cli = _FailingMintImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+
+    with pytest.raises(AiKeyMintError, match="Failed to create the key"):
+        mint_workspace_credential_blob(
+            workspace_host_id="host-abc", account_email="alice@example.com", imbue_cloud_cli=cli
+        )
+
+
 # ---------------------------------------------------------------------------
 # Route tests: GET /settings/ai-keys and POST /settings/ai-keys/mint
 # ---------------------------------------------------------------------------
@@ -146,6 +173,7 @@ class _FailingMintImbueCloudCli(FakeImbueCloudCli):
         max_budget: float | None = None,
         budget_duration: str | None = None,
         metadata: Mapping[str, str] | None = None,
+        is_rotate_on_exists: bool = False,
     ) -> LiteLLMKeyMaterial:
         raise ImbueCloudCliError("keys litellm create: connector unreachable (fake)")
 

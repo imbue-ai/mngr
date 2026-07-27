@@ -91,6 +91,22 @@ def test_host_name_conflict_error_sets_name() -> None:
     assert "already exists" in str(error)
 
 
+def test_host_name_conflict_error_includes_conflicting_host_details_and_remediation() -> None:
+    """The enriched form names the existing host, its state, and the remediation."""
+    host_id = HostId.generate()
+    error = HostNameConflictError(
+        _TEST_PROVIDER,
+        HostName("duplicate"),
+        conflicting_host_id=host_id,
+        conflicting_host_state="BUILDING",
+        remediation=f"If that create is dead, clear it with 'mngr destroy @{host_id}'",
+    )
+    message = str(error)
+    assert str(host_id) in message
+    assert "state: BUILDING" in message
+    assert f"mngr destroy @{host_id}" in message
+
+
 def test_host_not_running_error_includes_state() -> None:
     """HostNotRunningError should include state in message."""
     host_id = HostId.generate()

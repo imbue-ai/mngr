@@ -12,6 +12,7 @@ from imbue.mngr_lima.limactl import _LIMA_SOCKET_PATH_OVERHEAD
 from imbue.mngr_lima.limactl import _UNIX_PATH_MAX
 from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
 from imbue.mngr_lima.limactl import host_name_from_instance_name
+from imbue.mngr_lima.limactl import is_transient_lima_download_error
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_list
@@ -165,3 +166,44 @@ def test_lima_ssh_config() -> None:
     assert config.port == 60022
     assert config.user == "josh"
     assert config.identity_file == Path("/home/josh/.lima/_config/user")
+
+
+def test_is_transient_lima_download_error_retries_tls_handshake_timeout() -> None:
+    error = LimaCommandError(
+        "start",
+        1,
+        'level=fatal msg="failed to download: net/http: TLS handshake timeout"',
+    )
+    assert is_transient_lima_download_error(error) is True
+
+
+def test_is_transient_lima_download_error_retries_connection_reset_and_5xx() -> None:
+    reset_error = LimaCommandError("start", 1, "read tcp: connection reset by peer")
+    server_error = LimaCommandError("start", 1, "unexpected HTTP status 503 Service Unavailable")
+    assert is_transient_lima_download_error(reset_error) is True
+    assert is_transient_lima_download_error(server_error) is True
+
+
+def test_is_transient_lima_download_error_never_retries_not_found() -> None:
+    error = LimaCommandError(
+        "start",
+        1,
+        'level=fatal msg="failed to download: unexpected HTTP status Not Found, body=404"',
+    )
+    assert is_transient_lima_download_error(error) is False
+
+
+def test_is_transient_lima_download_error_permanent_marker_wins_over_transient() -> None:
+    # A 404 that also mentions a timeout in the HTML body must not be retried.
+    error = LimaCommandError("start", 1, "404 Not Found ... TLS handshake timeout earlier")
+    assert is_transient_lima_download_error(error) is False
+
+
+def test_is_transient_lima_download_error_ignores_non_start_commands() -> None:
+    error = LimaCommandError("stop", 1, "TLS handshake timeout")
+    assert is_transient_lima_download_error(error) is False
+
+
+def test_is_transient_lima_download_error_ignores_unrelated_failures() -> None:
+    error = LimaCommandError("start", 1, "field `images` must be set")
+    assert is_transient_lima_download_error(error) is False

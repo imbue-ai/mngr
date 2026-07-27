@@ -175,6 +175,12 @@ class SystemInterfaceHealthTracker(MutableModel):
     _records: dict[str, _AgentRecord] = PrivateAttr(default_factory=dict)
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
     _on_recovery_callbacks: list[OnRecoveryCallback] = PrivateAttr(default_factory=list)
+    # agent_id_str -> time.monotonic() deadline of an initial-create-attempt grace window.
+    # While a create attempt is in flight (and until its readiness window expires), probe
+    # failures must not drive the agent to STUCK: a cold build-in-VM Lima create
+    # legitimately serves 503s for many minutes, and bouncing the user to the
+    # recovery page mid-provisioning is exactly the takeover this suppresses.
+    _create_attempt_grace_deadline_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -212,6 +218,45 @@ class SystemInterfaceHealthTracker(MutableModel):
                 self._on_change_callbacks.remove(callback)
             except ValueError:
                 pass
+
+    # -- CreateAttempt grace ----------------------------------------------------
+
+    def begin_create_attempt_grace(self, agent_id: AgentId, deadline_monotonic: float) -> None:
+        """Suppress probe-failure STUCK transitions for ``agent_id`` until ``deadline_monotonic``.
+
+        Called by the create attempt flow right before its readiness wait, once the
+        canonical agent id is known. While the grace is active, probe failures
+        are ignored outright (no failure run accumulates), so a workspace still
+        provisioning is never driven to STUCK. The grace ends at the deadline
+        (the create attempt's readiness window expiring), on :meth:`end_create_attempt_grace`
+        (the create attempt reaching a terminal status), or on a successful probe --
+        whichever comes first. Applies to initial create attempt only; the start /
+        restart paths never register a grace.
+        """
+        with self._lock:
+            self._create_attempt_grace_deadline_by_agent[str(agent_id)] = deadline_monotonic
+        logger.debug("Began create attempt grace for {} (until monotonic {:.0f})", agent_id, deadline_monotonic)
+
+    def end_create_attempt_grace(self, agent_id: AgentId) -> None:
+        """Drop any create attempt grace for ``agent_id``. Idempotent."""
+        with self._lock:
+            existed = self._create_attempt_grace_deadline_by_agent.pop(str(agent_id), None) is not None
+        if existed:
+            logger.debug("Ended create attempt grace for {}", agent_id)
+
+    def _is_create_attempt_grace_active_locked(self, aid_str: str) -> bool:
+        """Whether an unexpired create attempt grace exists for the agent. Must hold ``self._lock``.
+
+        An expired grace is dropped on observation so the map stays bounded even
+        if the create attempt thread died before calling :meth:`end_create_attempt_grace`.
+        """
+        deadline = self._create_attempt_grace_deadline_by_agent.get(aid_str)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            del self._create_attempt_grace_deadline_by_agent[aid_str]
+            return False
+        return True
 
     # -- State updates ----------------------------------------------------
 
@@ -253,6 +298,13 @@ class SystemInterfaceHealthTracker(MutableModel):
         fire_health: AgentHealth | None = None
         stuck_after_seconds: float | None = None
         with self._lock:
+            # An in-flight create attempt's readiness window suppresses failure
+            # accounting entirely: 503s while the workspace is still
+            # provisioning are expected, not evidence of a wedge. After the
+            # grace expires, the normal stuck-threshold run applies from
+            # scratch, so a genuinely wedged workspace still reaches STUCK.
+            if self._is_create_attempt_grace_active_locked(aid_str):
+                return
             record = self._records.get(aid_str)
             if record is None or record.health != AgentHealth.HEALTHY:
                 return
@@ -284,13 +336,15 @@ class SystemInterfaceHealthTracker(MutableModel):
         scoped to agents that still need attention.
 
         Called by the background probe loop on a 200, and by the restart worker
-        and the creation-time readiness wait, whose own probes are equally
+        and the create-attempt-time readiness wait, whose own probes are equally
         authoritative.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
         prior_health: AgentHealth | None = None
         with self._lock:
+            # A reachable workspace no longer needs its create attempt grace.
+            self._create_attempt_grace_deadline_by_agent.pop(aid_str, None)
             record = self._records.pop(aid_str, None)
             if record is None:
                 return

@@ -1,6 +1,7 @@
 """Unit tests for SystemInterfaceHealthTracker."""
 
 import threading
+import time
 from datetime import datetime
 from datetime import timezone
 
@@ -551,3 +552,72 @@ def test_callback_exception_does_not_break_subsequent_callbacks() -> None:
 
     tracker.mark_restarting(aid, start_only=False)
     assert seen == [AgentHealth.RESTARTING]
+
+
+# ---------------------------------------------------------------------------
+# CreateAttempt grace (initial-create-attempt STUCK suppression)
+# ---------------------------------------------------------------------------
+
+
+def test_create_attempt_grace_suppresses_probe_failures_entirely() -> None:
+    """While a create attempt grace is active, probe failures never drive STUCK.
+
+    A zero stuck-threshold would otherwise flip the agent STUCK on the very
+    first probe failure; with the grace active, no failure run even starts.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.begin_create_attempt_grace(agent_id, time.monotonic() + 60.0)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+    assert agent_id not in tracker.snapshot_all()
+
+
+def test_expired_create_attempt_grace_no_longer_suppresses_stuck() -> None:
+    """Once the grace deadline passes, the normal stuck accounting applies."""
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.begin_create_attempt_grace(agent_id, time.monotonic() - 1.0)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+
+
+def test_end_create_attempt_grace_restores_normal_probe_accounting() -> None:
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.begin_create_attempt_grace(agent_id, time.monotonic() + 60.0)
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+
+    tracker.end_create_attempt_grace(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+
+
+def test_probe_success_clears_create_attempt_grace() -> None:
+    """A reachable workspace drops its grace: later failures count normally."""
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.begin_create_attempt_grace(agent_id, time.monotonic() + 60.0)
+    tracker.record_failure(agent_id)
+    tracker.record_probe_success(agent_id)
+
+    # The grace is gone, so a fresh failure run drives STUCK as usual.
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+
+
+def test_end_create_attempt_grace_is_idempotent_for_unknown_agent() -> None:
+    tracker = SystemInterfaceHealthTracker()
+    tracker.end_create_attempt_grace(AgentId.generate())

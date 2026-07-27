@@ -36,21 +36,30 @@ Authentication is global (one session grants access to all agents). The desktop 
     if you are authenticated:
         if exactly 1 agent is known, redirects directly to that agent
         if 2+ agents are known, shows links to each agent
-        if no agents exist, shows the agent creation form
+        if no agents exist, shows the agent create form
 
 `/create` route (requires auth):
     GET: shows a form to enter a git URL for creating a new workspace
-    POST: accepts form data with git_url, starts agent creation, redirects to /creating/{agent_id}
+    GET with ?retry={create_attempt_id}: pre-fills the form from an interrupted/failed
+        create attempt's pending record (the interrupted row's Retry action); opening
+        the form is non-destructive -- the dead create attempt's leftover host and
+        record are cleaned up only when the new create is submitted
+    POST: accepts form data with git_url, starts a create attempt, redirects to /creating/{agent_id}
 
 `/api/create-agent` route (POST, JSON API, requires auth):
-    accepts JSON body with git_url, starts agent creation, returns agent_id and status
+    accepts JSON body with git_url, starts a create attempt, returns agent_id and status
 
 `/api/create-agent/{agent_id}/status` route (GET, JSON API, requires auth):
-    returns current creation status (INITIALIZING, CLONING_REPO, CHECKING_OUT_BRANCH, CREATING_WORKSPACE, WAITING_FOR_READY, DONE, FAILED) and redirect_url when done
+    returns current create attempt status (INITIALIZING, CLONING_REPO, CHECKING_OUT_BRANCH, CREATING_WORKSPACE, WAITING_FOR_READY, DONE, FAILED) and redirect_url when done
 
 `/creating/{agent_id}` route (requires auth):
-    shows a progress page that polls /api/create-agent/{agent_id}/status
-    auto-redirects to the agent when creation completes
+    shows a progress page that polls the create operation status and streams the
+    create attempt log (the log buffer is replayable, so re-entering the page mid-create
+    replays the history before tailing live)
+    auto-redirects to the agent when the create attempt completes
+    when no live create attempt is tracked but a pending-create-attempt record survives, the
+    page becomes the record-backed detail view: retry + discard for an interrupted
+    create attempt, persisted error + log tail + dismiss for a failed one
 
 `<agent-id>.localhost:PORT/*` (subdomain catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize

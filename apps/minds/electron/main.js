@@ -112,6 +112,15 @@ const CRASHED_PAGE_FILE = path.join(__dirname, 'crashed.html');
 // anchors its message + Reload button to that titlebar-height band.
 const CHROME_CRASHED_PAGE_FILE = path.join(__dirname, 'chrome-crashed.html');
 
+// Retry budget for failed top-level loads in the chrome view. A failed load
+// commits Electron's blank error document over the ENTIRE UI (the chrome view
+// hosts the titlebar and every local page), and the dominant failure mode is
+// transient: ERR_NETWORK_CHANGED from a docker/lima teardown flapping a
+// network interface mid-navigation resolves within moments, so a short
+// escalating pause (delay x attempt) before each retry recovers it invisibly.
+const CHROME_LOAD_MAX_RETRIES = 2;
+const CHROME_LOAD_RETRY_DELAY_MS = 500;
+
 // Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
 // burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
 // re-post the chrome-event multiple times in flight; the inbox shell would
@@ -744,6 +753,16 @@ function createBundle() {
     // chrome-crashed.html strip is showing in the chrome view; cleared when the
     // user clicks Reload (reloadCrashedChromeView) and the chrome reloads /_chrome.
     isChromeCrashed: false,
+    // Chrome view failed-load recovery (the did-fail-load handler).
+    // ``chromeLoadRetryCount`` counts consecutive automatic retries of failed
+    // chrome-surface loads (reset by any successful commit);
+    // ``chromeLoadRetryPendingUrl`` is the URL a scheduled retry will re-load
+    // (nulled when a commit supersedes it); ``chromeLoadFailedUrl`` is the URL
+    // whose retries were exhausted, re-loaded by the error page's Reload button
+    // instead of /_chrome.
+    chromeLoadRetryCount: 0,
+    chromeLoadRetryPendingUrl: null,
+    chromeLoadFailedUrl: null,
     isErrorState: false,
     isLoadingState: true,
     isQuittingState: false,
@@ -810,6 +829,11 @@ function createBundle() {
     // clobber preErrorUrl -- e.g. the quitting screen loads while isErrorState
     // is false -- leaving nothing to restore the window to on a quit backout.
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+    // A successful commit ends any failed-load recovery: scheduled retries are
+    // superseded and the retry budget refills for the next (unrelated) failure.
+    bundle.chromeLoadRetryCount = 0;
+    bundle.chromeLoadRetryPendingUrl = null;
+    bundle.chromeLoadFailedUrl = null;
     console.log(`[nav] chrome view committed (${inPage ? 'in-place' : 'full load'}) ${url}`);
     // Confirm a dispatched in-place swap (its pushState lands here as
     // did-navigate-in-page) so the lost-swap fallback timer stands down.
@@ -912,6 +936,71 @@ function createBundle() {
       chromeView.webContents.loadFile(CHROME_CRASHED_PAGE_FILE).catch((err) => {
         console.error('[chrome-crash] failed to load crash page:', err && err.message);
       });
+    });
+  });
+
+  // A failed top-level load on the chrome surface (ERR_NETWORK_CHANGED when a
+  // docker/lima teardown removes a network interface mid-navigation,
+  // ERR_CONNECTION_REFUSED over a backend hiccup, ...) commits Electron's
+  // blank error document in place of the ENTIRE UI -- the chrome view hosts
+  // the titlebar and every local page -- and nothing else recovers it:
+  // onChromeNavigate only fires for successful commits, and the app-level
+  // error takeover only triggers when the backend process dies. Retry the
+  // load (the dominant causes are transient), then fall back to the local
+  // error page, whose Reload button re-loads the failed URL.
+  chromeView.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    // ERR_ABORTED: the navigation was superseded (another loadURL, a swap
+    // confirmed instead) -- not a failure to recover from.
+    if (errorCode === -3) return;
+    if (isShuttingDown || bundle.window.isDestroyed()) return;
+    // The full-app error takeover owns the chrome view; don't fight it.
+    if (bundle.isErrorState) return;
+    if (bundle.chromeView !== chromeView || chromeView.webContents.isDestroyed()) return;
+    // Only backend-origin loads: a failing local file (shell.html, the crash
+    // page itself) must never enter this retry loop.
+    if (!backendBaseUrl || !validatedURL || !validatedURL.startsWith(backendBaseUrl + '/')) return;
+    if (bundle.chromeLoadRetryCount < CHROME_LOAD_MAX_RETRIES) {
+      bundle.chromeLoadRetryCount += 1;
+      bundle.chromeLoadRetryPendingUrl = validatedURL;
+      const attempt = bundle.chromeLoadRetryCount;
+      console.warn(
+        `[chrome-load-failed] chrome view load failed ` +
+          `(errorCode=${errorCode}, error=${errorDescription || 'unknown'}, url=${validatedURL}); ` +
+          `retrying (${attempt}/${CHROME_LOAD_MAX_RETRIES})`
+      );
+      // Deferred, never synchronous inside a webContents event handler
+      // (electron#19887); the escalating pause also gives a transient network
+      // flap time to settle before the retry.
+      setTimeout(() => {
+        if (isShuttingDown || bundle.window.isDestroyed() || bundle.isErrorState) return;
+        if (bundle.chromeView !== chromeView || chromeView.webContents.isDestroyed()) return;
+        // A commit since then reset the pending URL; a newer in-flight
+        // navigation must not be cancelled by a stale retry.
+        if (bundle.chromeLoadRetryPendingUrl !== validatedURL) return;
+        if (chromeView.webContents.isLoading()) return;
+        chromeView.webContents.loadURL(validatedURL).catch(() => {});
+      }, CHROME_LOAD_RETRY_DELAY_MS * attempt);
+      return;
+    }
+    console.error(
+      `[chrome-load-failed] chrome view load failed after ${CHROME_LOAD_MAX_RETRIES} retries ` +
+        `(errorCode=${errorCode}, error=${errorDescription || 'unknown'}, url=${validatedURL}); ` +
+        `showing the error page`
+    );
+    bundle.chromeLoadFailedUrl = validatedURL;
+    bundle.chromeLoadRetryPendingUrl = null;
+    bundle.isChromeCrashed = true;
+    setImmediate(() => {
+      if (bundle.window.isDestroyed()) return;
+      if (bundle.chromeView !== chromeView || chromeView.webContents.isDestroyed()) return;
+      // A real reload (or a crash) since then superseded this.
+      if (!bundle.isChromeCrashed) return;
+      chromeView.webContents
+        .loadFile(CHROME_CRASHED_PAGE_FILE, { query: { reason: 'load-failed' } })
+        .catch((err) => {
+          console.error('[chrome-load-failed] failed to load error page:', err && err.message);
+        });
     });
   });
 
@@ -2271,6 +2360,19 @@ function reloadCrashedChromeView(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (!bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
   bundle.isChromeCrashed = false;
+  // After a failed LOAD (vs a renderer crash) Reload retries the page the user
+  // was headed to -- /_chrome would strand the window on the bare wrapper when
+  // a local page owns the surface. The manual reload also refills the
+  // automatic retry budget, so a still-failing page cycles back to the error
+  // page rather than silently dead-ending; the user is the loop-breaker.
+  const failedUrl = bundle.chromeLoadFailedUrl;
+  bundle.chromeLoadFailedUrl = null;
+  bundle.chromeLoadRetryCount = 0;
+  bundle.chromeLoadRetryPendingUrl = null;
+  if (failedUrl) {
+    bundle.chromeView.webContents.loadURL(failedUrl).catch(() => {});
+    return;
+  }
   if (backendBaseUrl) {
     bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
   } else {

@@ -32,7 +32,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -44,7 +44,7 @@ from imbue.minds.primitives import CONFIGURED_AZURE_REGIONS
 from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
 from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
 from imbue.minds.primitives import CONFIGURED_GCP_ZONES
-from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
 from imbue.minds.primitives import DEFAULT_AWS_REGION
 from imbue.minds.primitives import DEFAULT_AZURE_REGION
@@ -313,8 +313,15 @@ def render_landing_page(
     extra_account_count: int = 0,
     remote_workspaces: Sequence[RemoteWorkspaceTile] | None = None,
     locked_account_emails: Sequence[str] | None = None,
+    create_attempt_rows: Sequence[Mapping[str, str]] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
+
+    ``create_attempt_rows`` are the in-flight / interrupted / failed create attempts, each
+    a mapping with ``id`` (create attempt id), ``name``, ``accent``, ``state``
+    (``creating`` / ``interrupted`` / ``failed``) and ``provider_label``. They
+    render inline with the workspace rows, badged by state, and link to the
+    create attempt detail page at ``/creating/<id>``.
 
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin
     (e.g. ``"http://localhost:8421"``). Workspace links target
@@ -368,10 +375,11 @@ def render_landing_page(
         agent_providers=agent_providers or {},
         account_email=account_email,
         extra_account_count=extra_account_count,
+        create_attempt_rows=list(create_attempt_rows or []),
     )
 
 
-# Hardcoded fallbacks for the workspace-creation form. Overridable via the
+# Hardcoded fallbacks for the workspace-create-attempt form. Overridable via the
 # MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
 # ``_operator_workspace_default`` for the gating rationale.
 # Public alias: the default-workspace-template repo URL. The pre-baked Lima
@@ -525,8 +533,13 @@ def render_create_form(
     start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
     is_landing_fallback: bool = False,
+    # Pre-selected bring-your-own-key account (its provider block name) and
+    # machine size, used by the retry pre-fill so a BYOK create retries with
+    # the same account + size. Empty selects the ordinary defaults.
+    selected_cloud_account: str = "",
+    selected_instance_type: str = "",
 ) -> str:
-    """Render the agent creation form page.
+    """Render the agent create attempt form page.
 
     The page has two views over one form. The simple view offers two compute
     presets -- ``remote`` (Imbue Cloud) and ``local`` (directly on this
@@ -652,6 +665,8 @@ def render_create_form(
         start_advanced=start_advanced,
         color=color,
         is_landing_fallback=is_landing_fallback,
+        selected_cloud_account=selected_cloud_account,
+        selected_instance_type=selected_instance_type,
     )
 
 
@@ -683,7 +698,7 @@ def status_text_for(
     error: str | None = None,
     launch_mode: LaunchMode = LaunchMode.DOCKER,
 ) -> str:
-    """Resolve the UI caption for an ``AgentCreationStatus`` value.
+    """Resolve the UI caption for an ``AgentCreateAttemptStatus`` value.
 
     ``status`` is the stringified enum value (e.g. ``"CLONING_REPO"``).
     ``error`` is consulted only for the ``FAILED`` case so the caption
@@ -704,7 +719,7 @@ def status_text_for(
 # in a Docker container in the VM), so a cold create is closer to a VPS build
 # than the old run-directly-in-the-VM path -- bump its progress-bar estimate
 # accordingly.
-EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]] = {
+EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]] = {
     LaunchMode.DOCKER: 30.0,
     LaunchMode.LIMA: 600.0,
     LaunchMode.VULTR: 300.0,
@@ -715,25 +730,25 @@ EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]
 }
 
 # Fallback when the launch mode is somehow not in the map above.
-DEFAULT_EXPECTED_CREATION_DURATION_SECONDS: Final[float] = 60.0
+DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS: Final[float] = 60.0
 
 
 @pure
-def expected_creation_duration_seconds(launch_mode: LaunchMode) -> float:
-    """Resolve the per-provider expected creation duration for the progress bar."""
-    return EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE.get(
-        launch_mode, DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
+def expected_create_attempt_duration_seconds(launch_mode: LaunchMode) -> float:
+    """Resolve the per-provider expected create attempt duration for the progress bar."""
+    return EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS_BY_LAUNCH_MODE.get(
+        launch_mode, DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS
     )
 
 
 @pure
 def render_creating_page(
-    creation_id: CreationId,
-    info: AgentCreationInfo,
+    create_attempt_id: CreateAttemptId,
+    info: AgentCreateAttemptInfo,
 ) -> str:
     """Render the progress page shown while an agent is being created.
 
-    The page is keyed by ``creation_id`` (minds-internal in-flight handle)
+    The page is keyed by ``create_attempt_id`` (minds-internal in-flight handle)
     rather than ``agent_id`` because the canonical agent id only comes
     into existence once the inner ``mngr create`` returns -- the page
     needs a stable handle to poll status from the moment the user kicks
@@ -741,18 +756,50 @@ def render_creating_page(
     so SSE/log-streaming endpoints can find the right ``log_queue``.
 
     The launch mode is read off ``info.launch_mode`` --
-    ``AgentCreator.start_creation`` records it before spawning the worker
-    thread, so the ``AgentCreationInfo`` snapshot is the single source of
+    ``AgentCreator.start_create_attempt`` records it before spawning the worker
+    thread, so the ``AgentCreateAttemptInfo`` snapshot is the single source of
     truth for caption resolution (consistent with the SSE status events).
     """
     status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
     return CATALOG.render(
         "pages.Creating",
-        agent_id=creation_id,
+        agent_id=create_attempt_id,
         status_text=status_text,
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
-        expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
+        expected_duration_seconds=expected_create_attempt_duration_seconds(info.launch_mode),
+    )
+
+
+@pure
+def render_create_attempt_record_page(
+    create_attempt_id: str,
+    workspace_name: str,
+    # "interrupted" (an app restart killed the create) or "failed" (the
+    # create attempt failed; the record carries the error + log tail).
+    state: str,
+    error: str | None,
+    error_kind: str | None,
+    log_tail: Sequence[str],
+    provider_label: str,
+) -> str:
+    """Render the record-backed create attempt detail page (interrupted / failed rows).
+
+    Shown at ``/creating/<id>`` when no live create attempt is tracked for the id
+    but a pending-create-attempt record survives: an interrupted row offers retry
+    (the pre-filled create form) + discard (destroy the leftover host, with
+    the destroy output streamed); a failed row shows the persisted error and
+    log tail with a dismiss action.
+    """
+    return CATALOG.render(
+        "pages.CreateAttemptRecord",
+        create_attempt_id=create_attempt_id,
+        workspace_name=workspace_name,
+        state=state,
+        error=error or "",
+        error_kind=error_kind or "",
+        log_tail_text="\n".join(log_tail),
+        provider_label=provider_label,
     )
 
 
@@ -1988,7 +2035,7 @@ def render_overlay_host_page() -> str:
     Every overlay -- the migrated workspace menu / inbox / help / sign-in modals
     (as mount-on-demand iframes, created when opened and destroyed when closed)
     and hover tooltips -- is in-page DOM driven over IPC, so opening an overlay
-    never costs a per-open page load. main.js loads this once at window creation
+    never costs a per-open page load. main.js loads this once at window create attempt
     and keeps it mounted for the window's life.
     """
     return CATALOG.render("pages.OverlayHost")

@@ -149,7 +149,7 @@ def test_streamed_permission_handler_noop_when_inbox_not_initialised(tmp_path: P
 def test_streamed_permission_handler_recovers_missing_host_permissions(tmp_path: Path) -> None:
     """A first request for a host whose canonical permissions file is missing repairs it.
 
-    Reproduces the production failure mode: agent creation's finalize/link step
+    Reproduces the production failure mode: agent create attempt's finalize/link step
     never created ``hosts/<host_id>/latchkey_permissions.json``, but the agent
     is live and files a permission request carrying its opaque handle as the
     ``permissions_target_path``. Surfacing the request must also materialize the
@@ -157,7 +157,7 @@ def test_streamed_permission_handler_recovers_missing_host_permissions(tmp_path:
     eventual approval is visible to the agent.
     """
     latchkey = make_full_fake_latchkey(tmp_path)
-    # Stand up the opaque baseline handle exactly as agent creation does, but
+    # Stand up the opaque baseline handle exactly as agent create attempt does, but
     # deliberately skip the finalize/link step that would create the host file.
     setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
     assert setup.opaque_permissions_path is not None

@@ -130,7 +130,7 @@ CONFIGURED_AZURE_REGIONS: Final[tuple[str, ...]] = (
 DEFAULT_AZURE_REGION: Final[str] = "eastus2"
 
 
-class CreationId(RandomId):
+class CreateAttemptId(RandomId):
     """Minds-internal handle for an in-flight ``mngr create`` invocation.
 
     Returned by ``AgentCreator.create_agent_async`` so the desktop client
@@ -140,11 +140,11 @@ class CreationId(RandomId):
     imbue_cloud lease-adoption forces it to the pool host's pre-baked id
     and pre-generating one minds-side led to confusion + bugs).
 
-    Distinct ``"creation-"`` prefix so it can never accidentally be
+    Distinct ``"create-attempt-"`` prefix so it can never accidentally be
     typed-checked or string-compared against an ``AgentId``.
     """
 
-    PREFIX = "creation"
+    PREFIX = "create-attempt"
 
 
 class OutputFormat(UpperCaseStrEnum):

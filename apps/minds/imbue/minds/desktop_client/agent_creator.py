@@ -1,24 +1,26 @@
-"""Agent creation for the desktop client.
+"""Agent create attempts for the desktop client.
 
 Creates mngr agents from git repositories or local directories. The repo's
 own ``.mngr/settings.toml`` drives all configuration -- no minds.toml,
 vendoring, or parent tracking.
 
-Agent creation runs in background threads so the server remains responsive.
-Callers can poll creation status via get_creation_info() or stream logs
-via get_log_queue().
+Agent create attempts run in background threads so the server remains responsive.
+Callers can poll create attempt status via get_create_attempt_info() or stream logs
+via get_log_sink().
 """
 
 import json
 import os
-import queue
 import re
 import shutil
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping
+from datetime import datetime
+from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
@@ -28,8 +30,10 @@ from urllib.parse import urlunsplit
 
 import httpx
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import SkipValidation
 from tenacity import RetryCallState
 from tenacity import Retrying
 from tenacity import retry_if_exception_type
@@ -50,19 +54,32 @@ from imbue.minds.desktop_client.backup_provisioning import configure_backups_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
+from imbue.minds.desktop_client.labeled_hosts import ListedHost
+from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
+from imbue.minds.desktop_client.labeled_hosts import find_host_by_workspace_id_label
+from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
+from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.pending_create_attempts import FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
+from imbue.minds.desktop_client.pending_create_attempts import WORKSPACE_ID_HOST_LABEL
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.errors import PendingCreateAttemptStoreError
+from imbue.minds.errors import WorkspaceNameInUseError
 from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.primitives import BackupProvider
-from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
@@ -155,7 +172,7 @@ def probe_workspace_through_plugin(
     observed (a 200 means some web server is up and answering on the inner
     port), or ``None`` if the probe failed at the transport layer (connect
     error, mid-stream EOF, read timeout). Shared by ``_wait_for_workspace_ready``
-    (creation flow) and the system-interface-health tracker's background
+    (create attempt flow) and the system-interface-health tracker's background
     probe loop so both paths agree on what "ready" means.
 
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
@@ -191,17 +208,112 @@ OutputCallback = Callable[[str, bool], None]
 
 LOG_SENTINEL: Final[str] = "__DONE__"
 
+# Cap on the replayable in-memory create attempt log. Re-entering a creating row
+# replays this buffer before tailing live lines; older lines beyond the cap
+# are dropped, which a replay surfaces via ``CreateAttemptLogChunk.is_truncated``.
+CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES: Final[int] = 10_000
 
-def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
-    """Create an output callback that puts lines into a queue."""
-    return lambda line, is_stdout: logger.info(line.rstrip("\n")) or log_queue.put(line.rstrip("\n"))
+
+def _new_create_attempt_log_buffer() -> deque[str]:
+    return deque(maxlen=CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES)
 
 
-class AgentCreationStatus(UpperCaseStrEnum):
-    """Status of a background agent creation.
+class CreateAttemptLogChunk(FrozenModel):
+    """One reader's view of a create attempt log: the lines at and after its index."""
+
+    lines: tuple[str, ...] = Field(description="Log lines from the requested index onward (possibly empty)")
+    next_index: int = Field(description="The index to pass to the next read (past the returned lines)")
+    is_done: bool = Field(description="Whether the create attempt has ended (no further lines will ever arrive)")
+    is_truncated: bool = Field(
+        default=False,
+        description="Whether lines between the requested index and the returned ones were dropped by the buffer cap",
+    )
+
+
+class CreateAttemptLogSink(MutableModel):
+    """Per-create-attempt replayable log buffer shared by the producer and any number of SSE readers.
+
+    Lines are stored in a bounded in-memory buffer (the last
+    ``CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES``) and read by absolute line index, so a
+    reader attaching mid-create-attempt -- or re-entering the creating page later --
+    replays the retained history from index 0 and then tails live lines. The
+    buffer also backs the FAILED pending-create-attempt record's log-tail snapshot
+    (``tail_lines``). The buffer is lost on app restart; a restart makes the
+    create attempt interrupted anyway, and interrupted/failed rows read the
+    persisted record's tail instead.
+    """
+
+    buffered_lines: deque[str] = Field(
+        default_factory=_new_create_attempt_log_buffer,
+        frozen=True,
+        description="Bounded buffer of every line put (the log sentinel excluded)",
+    )
+    appended_line_count: int = Field(
+        default=0, description="Total lines ever appended; the buffer holds the most recent of them"
+    )
+    is_done: bool = Field(default=False, description="Whether the create attempt ended (set by the log sentinel)")
+    state_condition: SkipValidation[threading.Condition] = Field(
+        default_factory=threading.Condition,
+        frozen=True,
+        description="Guards the buffer; readers wait on it and every put notifies it",
+    )
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def put(self, line: str) -> None:
+        with self.state_condition:
+            if line == LOG_SENTINEL:
+                self.is_done = True
+            else:
+                self.buffered_lines.append(line)
+                self.appended_line_count = self.appended_line_count + 1
+            self.state_condition.notify_all()
+
+    def _read_available_locked(self, from_index: int) -> CreateAttemptLogChunk:
+        first_index = self.appended_line_count - len(self.buffered_lines)
+        start = max(from_index - first_index, 0)
+        lines = tuple(self.buffered_lines)[start:] if start < len(self.buffered_lines) else ()
+        return CreateAttemptLogChunk(
+            lines=lines,
+            next_index=self.appended_line_count,
+            is_done=self.is_done,
+            is_truncated=from_index < first_index,
+        )
+
+    def read_chunk(self, from_index: int, timeout_seconds: float) -> CreateAttemptLogChunk:
+        """Return the log lines at/after ``from_index``; ``from_index=0`` replays the retained history.
+
+        Blocks up to ``timeout_seconds`` when no new lines are available yet
+        and the create attempt is still running, so a streaming reader can poll
+        without spinning.
+        """
+        with self.state_condition:
+            chunk = self._read_available_locked(from_index)
+            if chunk.lines or chunk.is_done:
+                return chunk
+            self.state_condition.wait(timeout=timeout_seconds)
+            return self._read_available_locked(from_index)
+
+    def tail_lines(self, max_line_count: int) -> tuple[str, ...]:
+        """The most recent ``max_line_count`` buffered lines (the FAILED-record snapshot)."""
+        # Guard the slice: ``[-0:]`` would return the WHOLE buffer, not nothing.
+        if max_line_count <= 0:
+            return ()
+        with self.state_condition:
+            buffered = tuple(self.buffered_lines)
+        return buffered[-max_line_count:]
+
+
+def make_log_callback(log_sink: CreateAttemptLogSink) -> OutputCallback:
+    """Create an output callback that puts lines into a create attempt log sink."""
+    return lambda line, is_stdout: logger.info(line.rstrip("\n")) or log_sink.put(line.rstrip("\n"))
+
+
+class AgentCreateAttemptStatus(UpperCaseStrEnum):
+    """Status of a background agent create attempt.
 
     The non-terminal values correspond to the ordered phases the worker
-    thread walks through; ``_stream_creation_logs`` polls the current
+    thread walks through; ``_stream_create_attempt_logs`` polls the current
     status and emits a SSE event each time it changes so the UI spinner
     caption stays in sync with what the backend is actually doing.
     Conditional phases (``CHECKING_OUT_BRANCH`` only if a branch was
@@ -218,8 +330,8 @@ class AgentCreationStatus(UpperCaseStrEnum):
     FAILED = auto()
 
 
-class CreationErrorKind(UpperCaseStrEnum):
-    """Machine-readable classification of a creation failure.
+class CreateAttemptErrorKind(UpperCaseStrEnum):
+    """Machine-readable classification of a create attempt failure.
 
     Carried alongside the human-readable ``error`` message so the creating
     page can gate extra static guidance on the failure *type* instead of
@@ -244,11 +356,11 @@ class CreationErrorKind(UpperCaseStrEnum):
     GIT_AUTH_REQUIRED = auto()
 
 
-class AgentCreationInfo(FrozenModel):
-    """Snapshot of agent creation state, returned to callers for status polling.
+class AgentCreateAttemptInfo(FrozenModel):
+    """Snapshot of agent create attempt state, returned to callers for status polling.
 
-    The agent creation flow is keyed by ``creation_id`` (a minds-internal
-    handle returned synchronously from :py:meth:`AgentCreator.start_creation`)
+    The agent create attempt flow is keyed by ``create_attempt_id`` (a minds-internal
+    handle returned synchronously from :py:meth:`AgentCreator.start_create_attempt`)
     because the canonical ``AgentId`` is only known *after* the inner
     ``mngr create`` returns -- for imbue_cloud agents the id is dictated
     by the leased pool host's pre-baked agent, not by minds. ``agent_id``
@@ -258,32 +370,39 @@ class AgentCreationInfo(FrozenModel):
     is populated atomically with the ``DONE`` status.
     """
 
-    creation_id: CreationId = Field(description="Minds-internal handle for this in-flight creation")
+    create_attempt_id: CreateAttemptId = Field(description="Minds-internal handle for this in-flight create attempt")
     agent_id: AgentId | None = Field(
         default=None,
         description="Canonical mngr agent id; populated once ``mngr create`` returns, ``None`` while in-flight",
     )
-    status: AgentCreationStatus = Field(description="Current creation status")
+    status: AgentCreateAttemptStatus = Field(description="Current create attempt status")
     launch_mode: LaunchMode = Field(
         description=(
-            "Launch mode for this creation. Carried alongside status so consumers can resolve "
+            "Launch mode for this create attempt. Carried alongside status so consumers can resolve "
             "mode-aware status captions without a separate lookup."
         ),
     )
     host_name: str = Field(
         default="",
         description=(
-            "Resolved workspace/host name for this creation (the form's Name field, or a "
-            "repo-derived fallback). Carried alongside status as creation metadata."
+            "Resolved workspace/host name for this create attempt (the form's Name field, or a "
+            "repo-derived fallback). Carried alongside status as create attempt metadata."
         ),
     )
-    redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
+    provider_instance_name: str = Field(
+        default="",
+        description=(
+            "Provider instance this create attempt targets (the host-name uniqueness scope), or empty when "
+            "it could not be resolved. Lets the create-attempt-rows derivation label rows per provider."
+        ),
+    )
+    redirect_url: str | None = Field(default=None, description="URL to redirect to when the create attempt is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
-    error_kind: CreationErrorKind | None = Field(
+    error_kind: CreateAttemptErrorKind | None = Field(
         default=None,
         description=(
             "Machine-readable classification of the failure, set alongside ``error`` when the "
-            "failure is recognized (see ``classify_creation_error``); ``None`` otherwise"
+            "failure is recognized (see ``classify_create_attempt_error``); ``None`` otherwise"
         ),
     )
 
@@ -344,8 +463,8 @@ def _is_remote_git_source(repo_source: str) -> bool:
     return bool(re.match(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:", repo_source))
 
 
-def classify_creation_error(repo_source: str, error: Exception) -> CreationErrorKind | None:
-    """Classify a creation failure into a ``CreationErrorKind``, when recognizable.
+def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateAttemptErrorKind | None:
+    """Classify a create attempt failure into a ``CreateAttemptErrorKind``, when recognizable.
 
     Recognizes two cases, both for a failed clone (``GitCloneError``) of a
     REMOTE git source -- the likely cause is the same (private/nonexistent,
@@ -366,9 +485,9 @@ def classify_creation_error(repo_source: str, error: Exception) -> CreationError
     if not isinstance(error, GitCloneError):
         return None
     if _is_github_https_url(repo_source):
-        return CreationErrorKind.GITHUB_AUTH_REQUIRED
+        return CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
     if _is_remote_git_source(repo_source):
-        return CreationErrorKind.GIT_AUTH_REQUIRED
+        return CreateAttemptErrorKind.GIT_AUTH_REQUIRED
     return None
 
 
@@ -441,7 +560,7 @@ def _git_noninteractive_env() -> dict[str, str]:
     Git prompts for a username/password on the controlling terminal when a
     remote needs auth and no credential is available -- but the desktop client
     has no terminal for the user to answer on, and when minds is launched from
-    a dev shell the prompt would hang the creation thread forever. With
+    a dev shell the prompt would hang the create attempt thread forever. With
     ``GIT_TERMINAL_PROMPT=0``, cloning a repo this machine lacks credentials
     for fails fast with git's stable "could not read Username ... terminal
     prompts disabled" error instead of hanging. Credential helpers (e.g. the
@@ -700,9 +819,28 @@ _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 _PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 600.0
 _PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 
+# Readiness window for a Lima create with no pre-baked image. Such a create
+# builds the whole workspace inside the VM (setup_system.sh +
+# install_dependencies.sh + build_workspace.sh, serially, at 2 vCPU / 4 GB)
+# before supervisord ever starts the system interface, which routinely takes
+# 15+ minutes cold -- far beyond the standard ``workspace_ready_timeout_seconds``
+# window. Deliberately a hardcoded constant (not a config knob): it only
+# applies to the one create shape whose provisioning time is structural.
+# Docker creates keep the standard window (their build happens before
+# ``mngr create`` returns, so the post-create exposure is small).
+_BUILD_IN_VM_LIMA_READY_TIMEOUT_SECONDS: Final[float] = 900.0
+
 # Only log the download's progress once it has moved this much, so a 1s poll does not
 # flood the create log with near-identical lines.
 _PREBAKED_IMAGE_PROGRESS_LOG_STEP_BYTES: Final[int] = 500 * 1000 * 1000
+
+# Ceilings for the implicit-discard mngr subprocesses that clean up a dead
+# same-name create attempt before a fresh create: ``mngr list --hosts`` runs a live
+# provider discovery, and ``mngr destroy`` tears down a VM. Both are one-shot
+# pre-create work, so the ceilings are generous rather than tight (matching
+# the startup reconcile's).
+_DEAD_CREATE_ATTEMPT_HOST_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
+_DEAD_CREATE_ATTEMPT_HOST_DESTROY_TIMEOUT_SECONDS: Final[float] = 300.0
 
 
 class _PrebakedImageProgressReporter(MutableModel):
@@ -805,6 +943,7 @@ def _build_mngr_create_command(
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_raw_path: Path | None = None,
+    workspace_id_label: str | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -844,6 +983,13 @@ def _build_mngr_create_command(
     when needed and the template-declared forwards pick them up. Keeping the
     forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
     create`` invocations from outside minds too.
+
+    ``workspace_id_label`` is the opaque pending-create-attempt id stamped on the
+    new HOST as a ``workspace-id`` host label (LIMA and DOCKER only -- the
+    callers pass None for the other modes). It is what lets the startup
+    reconcile re-associate a host with its pending-create-attempt record after a
+    crash or quit mid-create; account/display metadata deliberately stays in
+    the local record, never on the host.
 
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
     disable-counting flag) computed by
@@ -964,6 +1110,15 @@ def _build_mngr_create_command(
     # the provider-specific knobs (idle_mode, pass_host_env, build_arg, ...)
     # while runtime-only knobs that vary per-invocation (``--new-host``,
     # ``-b lease_attributes``) stay inline.
+    # The opaque pending-create-attempt id rides on the host as a ``workspace-id``
+    # host label so the startup reconcile can re-attach an orphaned host to its
+    # local pending-create-attempt record. Only the local-VM modes get it (the
+    # callers pass None otherwise): Modal sandboxes self-expire and imbue_cloud
+    # pool hosts have their own reconcile.
+    workspace_id_host_label_args: list[str] = []
+    if workspace_id_label:
+        workspace_id_host_label_args = ["--host-label", f"{WORKSPACE_ID_HOST_LABEL}={workspace_id_label}"]
+
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
@@ -973,9 +1128,11 @@ def _build_mngr_create_command(
                 # default, so RUNC needs no extra template.
                 mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(workspace_id_host_label_args)
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(workspace_id_host_label_args)
             # Point Lima at the baked raw image via the provider's existing per-arch
             # image-url override, so the VM boots the baked toolchain instead of building it.
             if prebaked_lima_image_raw_path is not None:
@@ -1225,6 +1382,7 @@ def run_mngr_create(
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_raw_path: Path | None = None,
+    workspace_id_label: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -1267,6 +1425,7 @@ def run_mngr_create(
         original_minds_version=original_minds_version,
         original_branch=original_branch,
         prebaked_lima_image_raw_path=prebaked_lima_image_raw_path,
+        workspace_id_label=workspace_id_label,
     )
 
     # The command carries the latchkey gateway password + permissions-override
@@ -1337,7 +1496,7 @@ def run_mngr_aws_prepare(
     ``AwsProvider.create_host`` refuses to launch an instance when the security
     group is absent (it looks it up read-only), so minds runs this first for the
     chosen region. Failures -- missing credentials, or a missing group the key
-    cannot create -- raise ``MngrCommandError`` so the creation flow surfaces a
+    cannot create -- raise ``MngrCommandError`` so the create attempt flow surfaces a
     clear message on the creating page rather than a deferred opaque create
     failure.
     """
@@ -1409,7 +1568,7 @@ def _run_mngr_prepare_command(
 
 
 class _MngrCreateAttemptParams(FrozenModel):
-    """Per-creation inputs shared across a ``fast_mode`` retry loop.
+    """Per-create-attempt inputs shared across a ``fast_mode`` retry loop.
 
     Bundles everything ``_attempt_mngr_create`` needs except the ``fast_mode``
     knob, which is the only value that differs between the fast-path and
@@ -1438,6 +1597,9 @@ class _MngrCreateAttemptParams(FrozenModel):
     original_branch: str | None
     # Resolved ready pre-baked Lima raw image path, or None to build in-VM.
     prebaked_lima_image_raw_path: Path | None = None
+    # Opaque pending-create-attempt id stamped on the host as a ``workspace-id``
+    # label (LIMA / DOCKER only), or None for the other modes.
+    workspace_id_label: str | None = None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1476,6 +1638,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
         prebaked_lima_image_raw_path=params.prebaked_lima_image_raw_path,
+        workspace_id_label=params.workspace_id_label,
         parent_cg=params.parent_cg,
     )
 
@@ -1500,8 +1663,8 @@ def _log_backup_attempt(agent_id: AgentId, retry_state: RetryCallState) -> None:
 class AgentCreator(MutableModel):
     """Creates mngr agents in the background from git repositories or local paths.
 
-    Tracks creation status so the desktop client can show progress
-    and redirect users to agents when creation is complete.
+    Tracks create attempt status so the desktop client can show progress
+    and redirect users to agents when the create attempt is complete.
 
     Thread-safe: all status reads/writes are guarded by an internal lock.
     """
@@ -1512,7 +1675,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Port the desktop client is listening on. Used to build the absolute "
-            "http://<agent-id>.localhost:<port>/ redirect URL after agent creation. "
+            "http://<agent-id>.localhost:<port>/ redirect URL after agent create attempt. "
             "The default of 0 is only appropriate for tests that never exercise the "
             "happy-path redirect."
         ),
@@ -1521,7 +1684,7 @@ class AgentCreator(MutableModel):
         default=None,
         frozen=True,
         description=(
-            "Wrapper around `mngr imbue_cloud …`. Used by IMBUE_CLOUD-mode creations to mint "
+            "Wrapper around `mngr imbue_cloud …`. Used by IMBUE_CLOUD-mode create attempts to mint "
             "a LiteLLM virtual key before the standard ``mngr create`` invocation, and by "
             "destruction to release the lease. The lease + SSH bootstrap + agent rename "
             "themselves run inside the plugin's ``ImbueCloudProvider.create_host``, so minds "
@@ -1543,7 +1706,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Latchkey wrapper that owns the shared ``latchkey gateway`` subprocess. When "
-            "provided, agent creation derives the gateway's shared password and a per-host "
+            "provided, agent create attempt derives the gateway's shared password and a per-host "
             "permissions-override JWT, injecting both into the ``mngr create`` env "
             "(``LATCHKEY_GATEWAY_PASSWORD`` so the agent's ``latchkey`` CLI authenticates, "
             "and ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates the "
@@ -1579,6 +1742,17 @@ class AgentCreator(MutableModel):
             "gates on the verified image and points Lima at it; None disables the path."
         ),
     )
+    pending_create_attempt_store: PendingCreateAttemptStore | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Durable pending-create-attempt record store. When set, a record carrying the full create "
+            "request is written before the ``mngr create`` subprocess spawns, updated on the "
+            "terminal states, and (on success) deleted only once discovery confirms the workspace "
+            "-- the crash-safe half of the workspace<->account association. None disables the "
+            "records (appropriate for tests that don't exercise the reconcile)."
+        ),
+    )
     mngr_forward_port: int = Field(
         default=0,
         frozen=True,
@@ -1605,7 +1779,7 @@ class AgentCreator(MutableModel):
             "envelope consumer and the background system-interface-health probe loop. ``_wait_for_workspace_ready`` "
             "calls ``record_probe_success`` on the probe that breaks out of its readiness loop, which clears "
             "the probe-failure run the container's warmup failures have accumulated. Without this call, "
-            "a workspace creation whose ``system-interface`` takes a while to bind ``:8000`` would let the "
+            "a workspace create attempt whose ``system-interface`` takes a while to bind ``:8000`` would let the "
             "background probe loop drive the agent to STUCK and jump the chrome to the recovery page right "
             "after the user lands on the workspace."
         ),
@@ -1647,24 +1821,46 @@ class AgentCreator(MutableModel):
         frozen=True,
         description="Wait between backup-setup retry attempts.",
     )
+    on_create_attempts_changed: Callable[[], None] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Fired whenever the set of visible create attempt rows changes (a create attempt starts, reaches a "
+            "terminal state, or is forgotten). Wired to the backend resolver's notify_change so the "
+            "chrome SSE rebuilds the workspace-list payload without waiting for a discovery tick."
+        ),
+    )
+    mngr_binary: str = Field(
+        default=MNGR_BINARY,
+        frozen=True,
+        description=(
+            "mngr binary the implicit-discard cleanup subprocesses invoke (listing / destroying a "
+            "dead same-name create attempt's leftover host). Tests point this at a fake executable."
+        ),
+    )
 
-    # In-flight creation state is keyed by ``str(CreationId)`` because the
+    # In-flight create attempt state is keyed by ``str(CreateAttemptId)`` because the
     # canonical ``AgentId`` doesn't exist until ``mngr create`` returns.
-    # Once it does, the corresponding ``CreationId`` row in
-    # ``_canonical_agent_ids`` gets populated and ``AgentCreationInfo``
+    # Once it does, the corresponding ``CreateAttemptId`` row in
+    # ``_canonical_agent_ids`` gets populated and ``AgentCreateAttemptInfo``
     # snapshots include the new ``agent_id`` field.
-    _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
+    _statuses: dict[str, AgentCreateAttemptStatus] = PrivateAttr(default_factory=dict)
     _canonical_agent_ids: dict[str, AgentId] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
-    _error_kinds: dict[str, CreationErrorKind] = PrivateAttr(default_factory=dict)
+    _error_kinds: dict[str, CreateAttemptErrorKind] = PrivateAttr(default_factory=dict)
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
-    _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
+    # Provider instance each create attempt targets (the scope of host-name
+    # uniqueness), so in-flight duplicate-name checks match mngr's own
+    # per-provider conflict semantics. Empty string when the instance could
+    # not be resolved (the create will fail downstream with its own error).
+    _provider_instance_names: dict[str, str] = PrivateAttr(default_factory=dict)
+    _log_sinks: dict[str, CreateAttemptLogSink] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
-    def start_creation(
+    def start_create_attempt(
         self,
         repo_source: str,
         host_name: str = "",
@@ -1681,8 +1877,20 @@ class AgentCreator(MutableModel):
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
-    ) -> CreationId:
+        account_id: str = "",
+    ) -> CreateAttemptId:
         """Start creating an agent from a git URL or local path in a background thread.
+
+        Raises ``WorkspaceNameInUseError`` when a live (non-terminal) create attempt
+        on the same provider instance already holds the requested name --
+        mngr's own conflict pre-flight cannot see a create that has not yet
+        reserved its host name, so two concurrent minds create attempts would
+        otherwise race.
+
+        ``account_id`` is the owning account's user id (empty for a private
+        workspace); it is persisted only into the local pending-create-attempt
+        record so the startup reconcile can restore the workspace<->account
+        association after a crash mid-create.
 
         No AI credentials are chosen or injected at create time: the
         workspace boots unauthenticated and its in-UI sign-in modal is the
@@ -1711,14 +1919,17 @@ class AgentCreator(MutableModel):
         pre-generated; for imbue_cloud agents they are the leased pool
         host's pre-baked ids.
 
-        Returns a ``CreationId`` immediately for tracking the in-flight
-        creation. Use ``get_creation_info()`` to poll status (and read
-        ``info.agent_id`` once it's populated) or ``get_log_queue()`` to
-        stream creation logs. The minds-internal ``CreationId`` and the
+        Returns a ``CreateAttemptId`` immediately for tracking the in-flight
+        create attempt. Use ``get_create_attempt_info()`` to poll status (and read
+        ``info.agent_id`` once it's populated) or ``get_log_sink()`` to
+        stream create attempt logs. The minds-internal ``CreateAttemptId`` and the
         canonical ``AgentId`` are different namespaces by design (different
         ``RandomId`` prefixes) so they can never accidentally be swapped.
         """
-        log_queue: queue.Queue[str] = queue.Queue()
+        # The replayable buffer retains the last lines put into it so re-entry
+        # into the creating page replays history and a FAILED pending-create-attempt
+        # record can snapshot the create attempt log's tail.
+        log_sink = CreateAttemptLogSink()
         # ``host_name`` falls back to a repo-derived name when blank so the
         # API path (``POST /api/v1/workspaces``) doesn't need to compute it
         # itself. The form path already requires the field. ``HostName(...)`` is
@@ -1732,23 +1943,73 @@ class AgentCreator(MutableModel):
         effective_display_name = display_name.strip() if display_name.strip() else effective_name
         effective_branch = branch.strip()
 
-        creation_id = CreationId()
+        create_attempt_id = CreateAttemptId()
+
+        # Resolve the provider instance this create targets so the in-flight
+        # duplicate-name guard scopes exactly like mngr's own per-provider
+        # host-name conflict check.
+        try:
+            provider_instance_name = provider_instance_name_for_launch(
+                launch_mode,
+                imbue_cloud_account=account_email or None,
+                region=region or None,
+                cloud_account=cloud_account or None,
+            )
+        except MngrCommandError as e:
+            # Missing account/region context is rejected by the create routes
+            # before reaching here; if a caller slips through anyway, the
+            # background create fails with the same error, so only the
+            # in-flight name guard is skipped.
+            logger.debug("Could not resolve a provider instance for create attempt {}: {}", create_attempt_id, e)
+            provider_instance_name = ""
 
         with self._lock:
-            self._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
-            self._launch_modes[str(creation_id)] = launch_mode
-            self._host_names[str(creation_id)] = effective_name
-            self._log_queues[str(creation_id)] = log_queue
+            # Check-and-register under one lock hold so two concurrent
+            # same-name creates cannot both pass the guard.
+            if provider_instance_name and effective_name.casefold() in self._live_in_flight_names_locked(
+                provider_instance_name
+            ):
+                raise WorkspaceNameInUseError(
+                    f"A workspace named '{effective_name}' is already being created. "
+                    "Wait for that create attempt to finish or pick a different name."
+                )
+            self._statuses[str(create_attempt_id)] = AgentCreateAttemptStatus.INITIALIZING
+            self._launch_modes[str(create_attempt_id)] = launch_mode
+            self._host_names[str(create_attempt_id)] = effective_name
+            self._provider_instance_names[str(create_attempt_id)] = provider_instance_name
+            self._log_sinks[str(create_attempt_id)] = log_sink
+
+        # Persist the pending-create-attempt record BEFORE spawning anything: from
+        # here on, a crash or quit can no longer orphan the create silently.
+        self._write_pending_create_attempt_record(
+            create_attempt_id=create_attempt_id,
+            provider_instance_name=provider_instance_name,
+            repo_source=repo_source,
+            host_name=effective_name,
+            display_name=effective_display_name,
+            branch=effective_branch,
+            launch_mode=launch_mode,
+            account_id=account_id,
+            account_email=account_email,
+            branch_or_tag=branch_or_tag,
+            region=region,
+            cloud_account=cloud_account,
+            instance_type=instance_type,
+            color=color,
+            docker_runtime=docker_runtime,
+            original_minds_version=original_minds_version,
+            backup_request=backup_request,
+        )
 
         thread = threading.Thread(
             target=self._create_agent_background,
             args=(
-                creation_id,
+                create_attempt_id,
                 repo_source,
                 effective_name,
                 effective_display_name,
                 effective_branch,
-                log_queue,
+                log_sink,
                 launch_mode,
                 account_email,
                 branch_or_tag,
@@ -1762,22 +2023,167 @@ class AgentCreator(MutableModel):
                 original_minds_version,
             ),
             daemon=True,
-            name="agent-creator-{}".format(creation_id),
+            name="agent-creator-{}".format(create_attempt_id),
         )
         thread.start()
         with self._lock:
             self._threads.append(thread)
-        return creation_id
+        self._notify_create_attempts_changed()
+        return create_attempt_id
 
     def wait_for_all(self, timeout: float = 10.0) -> None:
-        """Wait for all background creation threads to finish."""
+        """Wait for all background create attempt threads to finish."""
         with self._lock:
             threads = list(self._threads)
         for t in threads:
             t.join(timeout=timeout)
 
-    def get_creation_info(self, creation_id: CreationId) -> AgentCreationInfo | None:
-        """Get the current creation status for an in-flight creation, or None if not tracked.
+    def _live_in_flight_names_locked(self, provider_instance_name: str | None) -> set[str]:
+        """Casefolded host names of live (non-terminal) create attempts. Must hold ``self._lock``.
+
+        ``provider_instance_name`` scopes the result to one provider instance
+        (matching mngr's per-provider host-name uniqueness); ``None`` returns
+        every live create attempt's name (the cross-provider set the ``workspace-N``
+        auto-namer avoids). Terminal (DONE / FAILED) create attempts do not reserve
+        their names: a finished workspace is visible to discovery-based checks
+        and a dead create attempt's name is free to reuse.
+        """
+        names: set[str] = set()
+        for cid_str, status in self._statuses.items():
+            if status in (AgentCreateAttemptStatus.DONE, AgentCreateAttemptStatus.FAILED):
+                continue
+            if provider_instance_name is not None and self._provider_instance_names.get(cid_str) != (
+                provider_instance_name
+            ):
+                continue
+            name = self._host_names.get(cid_str)
+            if name:
+                names.add(name.casefold())
+        return names
+
+    def live_in_flight_host_names(self, provider_instance_name: str | None = None) -> set[str]:
+        """Casefolded host names held by live (non-terminal) create attempts.
+
+        Scoped to ``provider_instance_name`` when given (the create form's
+        availability check), or across all providers when ``None`` (the
+        ``workspace-N`` auto-namer). Thread-safe.
+        """
+        with self._lock:
+            return self._live_in_flight_names_locked(provider_instance_name)
+
+    def live_in_flight_create_attempt_ids(self) -> set[str]:
+        """CreateAttempt ids (as strings) of live (non-terminal) create attempts.
+
+        The startup reconcile consults this so a labeled half-built host whose
+        create is running in THIS process is never mistaken for an orphan.
+        """
+        with self._lock:
+            return {
+                cid_str
+                for cid_str, status in self._statuses.items()
+                if status not in (AgentCreateAttemptStatus.DONE, AgentCreateAttemptStatus.FAILED)
+            }
+
+    def _write_pending_create_attempt_record(
+        self,
+        create_attempt_id: CreateAttemptId,
+        provider_instance_name: str,
+        repo_source: str,
+        host_name: str,
+        display_name: str,
+        branch: str,
+        launch_mode: LaunchMode,
+        account_id: str,
+        account_email: str,
+        branch_or_tag: str,
+        region: str,
+        cloud_account: str,
+        instance_type: str,
+        color: str | None,
+        docker_runtime: DockerRuntime,
+        original_minds_version: str,
+        backup_request: BackupSetupRequest | None,
+    ) -> None:
+        """Write the IN_FLIGHT pending-create-attempt record, downgrading store errors to warnings.
+
+        The record is the crash-safety net, not a precondition: a disk hiccup
+        must not fail an otherwise-valid create, so a write failure only costs
+        that net for this one create attempt.
+        """
+        if self.pending_create_attempt_store is None:
+            return
+        now = datetime.now(timezone.utc)
+        record = PendingCreateAttemptRecord(
+            create_attempt_id=str(create_attempt_id),
+            state=PendingCreateAttemptState.IN_FLIGHT,
+            provider_instance_name=provider_instance_name,
+            created_at=now,
+            updated_at=now,
+            request=PendingCreateAttemptRequest(
+                repo_source=repo_source,
+                host_name=host_name,
+                display_name=display_name,
+                branch=branch,
+                launch_mode=launch_mode,
+                account_id=account_id,
+                account_email=account_email,
+                branch_or_tag=branch_or_tag,
+                region=region,
+                cloud_account=cloud_account,
+                instance_type=instance_type,
+                color=color,
+                docker_runtime=docker_runtime,
+                original_minds_version=original_minds_version,
+                backup_provider=(
+                    backup_request.backup_provider if backup_request is not None else BackupProvider.CONFIGURE_LATER
+                ),
+                backup_api_key_env=(backup_request.api_key_env_text if backup_request is not None else ""),
+            ),
+        )
+        try:
+            self.pending_create_attempt_store.write_record(record)
+        except PendingCreateAttemptStoreError as e:
+            logger.warning("Could not write the pending-create-attempt record for {}: {}", create_attempt_id, e)
+
+    def _mark_pending_create_attempt_done(
+        self, create_attempt_id_str: str, agent_id_str: str, host_id_str: str
+    ) -> None:
+        """Flip the pending record to DONE, downgrading store errors to warnings.
+
+        Same policy as the initial record write: the record is the crash-safety
+        net, not a precondition, so a disk hiccup here must not fail (or hang)
+        a create whose ``mngr create`` already succeeded.
+        """
+        if self.pending_create_attempt_store is None:
+            return
+        try:
+            self.pending_create_attempt_store.mark_done(create_attempt_id_str, agent_id_str, host_id_str)
+        except PendingCreateAttemptStoreError as e:
+            logger.warning(
+                "Could not mark the pending-create-attempt record DONE for {}: {}", create_attempt_id_str, e
+            )
+
+    def _mark_pending_create_attempt_failed(
+        self, create_attempt_id_str: str, error: str, error_kind: str | None, log_tail: tuple[str, ...]
+    ) -> None:
+        """Flip the pending record to FAILED, downgrading store errors to warnings.
+
+        The in-memory FAILED status is already set by the caller; losing the
+        durable failure snapshot only costs the failed row across restarts.
+        """
+        if self.pending_create_attempt_store is None:
+            return
+        try:
+            self.pending_create_attempt_store.mark_failed(
+                create_attempt_id_str, error=error, error_kind=error_kind, log_tail=log_tail
+            )
+        except PendingCreateAttemptStoreError as e:
+            logger.warning(
+                "Could not mark the pending-create-attempt record FAILED for {}: {}", create_attempt_id_str, e
+            )
+
+    def get_create_attempt_info(self, create_attempt_id: CreateAttemptId) -> AgentCreateAttemptInfo | None:
+        """Get the current create attempt status for an in-flight create attempt, or None if not tracked.
 
         ``info.agent_id`` is ``None`` until the inner ``mngr create``
         returns and emits its JSONL ``"event": "created"`` line, after
@@ -1785,35 +2191,76 @@ class AgentCreator(MutableModel):
         is populated atomically with ``DONE``, so the UI doesn't need to
         wait for ``agent_id`` to know where to redirect.
         """
-        cid_str = str(creation_id)
+        cid_str = str(create_attempt_id)
+        with self._lock:
+            if cid_str not in self._statuses:
+                return None
+            return self._build_create_attempt_info_locked(cid_str)
+
+    def _build_create_attempt_info_locked(self, cid_str: str) -> AgentCreateAttemptInfo:
+        """Assemble the info snapshot for a tracked create attempt. Must hold ``self._lock``."""
+        return AgentCreateAttemptInfo(
+            create_attempt_id=CreateAttemptId(cid_str),
+            agent_id=self._canonical_agent_ids.get(cid_str),
+            status=self._statuses[cid_str],
+            launch_mode=self._launch_modes.get(cid_str, LaunchMode.DOCKER),
+            host_name=self._host_names.get(cid_str, ""),
+            provider_instance_name=self._provider_instance_names.get(cid_str, ""),
+            redirect_url=self._redirect_urls.get(cid_str),
+            error=self._errors.get(cid_str),
+            error_kind=self._error_kinds.get(cid_str),
+        )
+
+    def list_create_attempt_infos(self) -> list[AgentCreateAttemptInfo]:
+        """Snapshot every tracked create attempt (live and terminal), for the create-attempt-rows derivation."""
+        with self._lock:
+            return [self._build_create_attempt_info_locked(cid_str) for cid_str in self._statuses]
+
+    def forget_create_attempt(self, create_attempt_id: CreateAttemptId) -> bool:
+        """Drop a TERMINAL create attempt from the in-memory registry (a dismissed row). Returns whether it was dropped.
+
+        Live create attempts are never forgotten -- their background thread still
+        publishes into these maps. A dismissed failed row also deletes its
+        pending record (the caller's job); this only clears the in-memory twin
+        so the row does not linger until the next app restart.
+        """
+        cid_str = str(create_attempt_id)
         with self._lock:
             status = self._statuses.get(cid_str)
-            if status is None:
-                return None
-            return AgentCreationInfo(
-                creation_id=creation_id,
-                agent_id=self._canonical_agent_ids.get(cid_str),
-                status=status,
-                launch_mode=self._launch_modes.get(cid_str, LaunchMode.DOCKER),
-                host_name=self._host_names.get(cid_str, ""),
-                redirect_url=self._redirect_urls.get(cid_str),
-                error=self._errors.get(cid_str),
-                error_kind=self._error_kinds.get(cid_str),
-            )
+            if status not in (AgentCreateAttemptStatus.DONE, AgentCreateAttemptStatus.FAILED):
+                return False
+            for tracked in (
+                self._statuses,
+                self._canonical_agent_ids,
+                self._redirect_urls,
+                self._errors,
+                self._error_kinds,
+                self._launch_modes,
+                self._host_names,
+                self._provider_instance_names,
+                self._log_sinks,
+            ):
+                tracked.pop(cid_str, None)
+        self._notify_create_attempts_changed()
+        return True
 
-    def get_log_queue(self, creation_id: CreationId) -> queue.Queue[str] | None:
-        """Get the log queue for an in-flight creation, or None if not tracked."""
+    def _notify_create_attempts_changed(self) -> None:
+        if self.on_create_attempts_changed is not None:
+            self.on_create_attempts_changed()
+
+    def get_log_sink(self, create_attempt_id: CreateAttemptId) -> CreateAttemptLogSink | None:
+        """Get the replayable log sink for a tracked create attempt, or None if not tracked."""
         with self._lock:
-            return self._log_queues.get(str(creation_id))
+            return self._log_sinks.get(str(create_attempt_id))
 
     def _create_agent_background(
         self,
-        creation_id: CreationId,
+        create_attempt_id: CreateAttemptId,
         repo_source: str,
         host_name: str,
         display_name: str,
         branch: str,
-        log_queue: queue.Queue[str],
+        log_sink: CreateAttemptLogSink,
         launch_mode: LaunchMode,
         account_email: str = "",
         branch_or_tag: str = "",
@@ -1839,13 +2286,13 @@ class AgentCreator(MutableModel):
         which used to fail when the SSH provider had stale dynamic_hosts
         entries).
         """
-        cid_str = str(creation_id)
-        emit_log = make_log_callback(log_queue)
+        cid_str = str(create_attempt_id)
+        emit_log = make_log_callback(log_sink)
         workspace_dir: Path | None = None
         try:
             with log_span(
-                "Creating agent for creation {} from {} (mode: {})",
-                creation_id,
+                "Creating agent for create attempt {} from {} (mode: {})",
+                create_attempt_id,
                 _redact_url_credentials(repo_source),
                 launch_mode,
             ):
@@ -1861,11 +2308,11 @@ class AgentCreator(MutableModel):
                 # modes' (and was hard to keep in sync with the bake's view
                 # of the same config).
                 # Worker thread takes over from the initial ``INITIALIZING``
-                # status that ``start_creation`` set; cloning is the first
+                # status that ``start_create_attempt`` set; cloning is the first
                 # real action. The caption rendered for this status is
                 # launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``.
                 with self._lock:
-                    self._statuses[cid_str] = AgentCreationStatus.CLONING_REPO
+                    self._statuses[cid_str] = AgentCreateAttemptStatus.CLONING_REPO
 
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
@@ -1886,7 +2333,7 @@ class AgentCreator(MutableModel):
                         # packs with "shallow update not allowed". Cloning
                         # deeply avoids both. Local file:// clones are cheap.
                         # Use a stable path based on repo name so Docker layer caching works.
-                        log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
+                        log_sink.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
                         clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
                         if clone_target.exists():
@@ -1919,13 +2366,13 @@ class AgentCreator(MutableModel):
                     else:
                         workspace_dir = resolved_path
                         is_workspace_dir_scratch_clone = False
-                        log_queue.put("[minds] Using local directory: {}".format(workspace_dir))
+                        log_sink.put("[minds] Using local directory: {}".format(workspace_dir))
                 else:
                     repo_name = extract_repo_name(repo_source)
                     clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
-                    log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                    log_sink.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
                     # Clone only the requested branch (non-shallow) when one is
                     # given: cheaper than a full clone, yet keeps the complete
                     # ancestry that the downstream mirror-push into the agent
@@ -1949,8 +2396,8 @@ class AgentCreator(MutableModel):
 
                 if branch:
                     with self._lock:
-                        self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
-                    log_queue.put("[minds] Checking out branch '{}'...".format(branch))
+                        self._statuses[cid_str] = AgentCreateAttemptStatus.CHECKING_OUT_BRANCH
+                    log_sink.put("[minds] Checking out branch '{}'...".format(branch))
                     # Scratch clones were just fetched into, so FETCH_HEAD is the
                     # requested ref; a plain local directory has no such fetch, and
                     # is the user's own checkout whose branch tip must not be reset.
@@ -1970,7 +2417,7 @@ class AgentCreator(MutableModel):
                         )
 
                 with self._lock:
-                    self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
+                    self._statuses[cid_str] = AgentCreateAttemptStatus.CREATING_WORKSPACE
 
                 # Pre-create the shared latchkey gateway password and a
                 # per-host permissions-override JWT before invoking
@@ -1995,7 +2442,7 @@ class AgentCreator(MutableModel):
                 # won't have its own permissions file. The user can
                 # recover by fixing the latchkey installation and
                 # re-creating the agent.
-                latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
+                latchkey_setup = self._prepare_latchkey_or_warn(log_sink)
 
                 # No prepare step here: a bring-your-own-key account's cloud
                 # scaffolding (AWS security group + state bucket, GCP/Azure
@@ -2006,7 +2453,22 @@ class AgentCreator(MutableModel):
                 # no pre-created scaffolding at all.
 
                 parsed_host = HostName(host_name)
-                log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
+                log_sink.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
+
+                # A dead (interrupted / failed) earlier create attempt holding this
+                # same name on this provider is implicitly discarded before the
+                # new create runs: destroy its leftover half-built host (when
+                # one exists) and delete its record -- clean up, then try
+                # making it again. Provider-scoped: a dead row with the same
+                # name on ANOTHER provider neither blocks nor gets destroyed.
+                with self._lock:
+                    provider_instance_name = self._provider_instance_names.get(cid_str, "")
+                self._discard_dead_create_attempts_holding_name(
+                    current_create_attempt_id_str=cid_str,
+                    provider_instance_name=provider_instance_name,
+                    host_name=host_name,
+                    log_sink=log_sink,
+                )
 
                 # Returns None (build in-VM) for any non-default create, an unpublished
                 # version, or a download that stalled or ran out the wait; raises a retryable
@@ -2015,7 +2477,7 @@ class AgentCreator(MutableModel):
                 if self.lima_image_gate is not None:
                     is_lima = launch_mode is LaunchMode.LIMA
                     if is_lima:
-                        log_queue.put("[minds] Checking for a pre-baked Lima image...")
+                        log_sink.put("[minds] Checking for a pre-baked Lima image...")
                     prebaked_lima_image_raw_path = self.lima_image_gate.resolve_image_for_create(
                         is_lima_launch_mode=is_lima,
                         repo_url=repo_source or "",
@@ -2023,19 +2485,19 @@ class AgentCreator(MutableModel):
                         environ=os.environ,
                         wait_timeout_seconds=_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS,
                         poll_interval_seconds=_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS,
-                        on_download_progress=_PrebakedImageProgressReporter(log_line=log_queue.put),
+                        on_download_progress=_PrebakedImageProgressReporter(log_line=log_sink.put),
                         # Only a Lima create was ever going to use the image, so only it is owed
                         # an explanation for building the workspace the slow way instead.
-                        on_fallback_to_in_vm=_PrebakedImageFallbackReporter(log_line=log_queue.put)
+                        on_fallback_to_in_vm=_PrebakedImageFallbackReporter(log_line=log_sink.put)
                         if is_lima
                         else None,
                     )
                     if prebaked_lima_image_raw_path is not None:
-                        log_queue.put("[minds] Using pre-baked Lima image (fast create).")
+                        log_sink.put("[minds] Using pre-baked Lima image (fast create).")
 
                 # ``fast_mode`` is the only knob that varies between the fast-
                 # path and slow-path attempts; bundle the rest of the per-
-                # creation inputs so each attempt takes just it.
+                # create attempt inputs so each attempt takes just it.
                 attempt_params = _MngrCreateAttemptParams(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
@@ -2055,12 +2517,26 @@ class AgentCreator(MutableModel):
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
                     prebaked_lima_image_raw_path=prebaked_lima_image_raw_path,
+                    # The pending-create-attempt id rides on LIMA / DOCKER hosts as a
+                    # ``workspace-id`` host label so the startup reconcile can
+                    # re-attach an orphaned host to its record. Modal is excluded
+                    # (sandboxes self-expire) and imbue_cloud pool hosts have
+                    # their own reconcile.
+                    workspace_id_label=(
+                        str(create_attempt_id) if launch_mode in (LaunchMode.LIMA, LaunchMode.DOCKER) else None
+                    ),
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:
-                    canonical_id, canonical_host_id = self._create_imbue_cloud_with_fallback(attempt_params, log_queue)
+                    canonical_id, canonical_host_id = self._create_imbue_cloud_with_fallback(attempt_params, log_sink)
                 else:
                     canonical_id, canonical_host_id = _attempt_mngr_create(None, attempt_params)
+
+                # Record the canonical ids as soon as they exist: from here a
+                # crash can no longer lose the workspace<->record association.
+                # The DONE record is only deleted once discovery confirms the
+                # workspace (see the resolver sweep in ``cli/run.py``).
+                self._mark_pending_create_attempt_done(cid_str, str(canonical_id), str(canonical_host_id))
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -2073,7 +2549,7 @@ class AgentCreator(MutableModel):
                 # the same permissions file.
                 #
                 # We downgrade ``LatchkeyStoreError`` here to a warning
-                # rather than failing agent creation: the gateway still
+                # rather than failing agent create attempt: the gateway still
                 # has the deny-all baseline at the opaque path (the JWT
                 # already points there), so the agent comes up working.
                 # If the link is never established, the first permission
@@ -2095,13 +2571,13 @@ class AgentCreator(MutableModel):
                             canonical_host_id,
                             link_error,
                         )
-                        log_queue.put(
+                        log_sink.put(
                             "[minds] Warning: could not link latchkey permissions handle to "
                             f"canonical path for host {canonical_host_id}; this will be repaired "
                             f"automatically the first time the agent requests a permission. Reason: {link_error}"
                         )
 
-                log_queue.put("[minds] Agent created successfully.")
+                log_sink.put("[minds] Agent created successfully.")
 
                 # Wait for the agent's system_interface to actually answer 200
                 # through the plugin before publishing the redirect. Without
@@ -2112,8 +2588,30 @@ class AgentCreator(MutableModel):
                 # publish anyway so the user at least lands on the retry
                 # page rather than spinning forever (PR 1471 part 1).
                 with self._lock:
-                    self._statuses[cid_str] = AgentCreationStatus.WAITING_FOR_READY
-                self._wait_for_workspace_ready(canonical_id, log_queue)
+                    self._statuses[cid_str] = AgentCreateAttemptStatus.WAITING_FOR_READY
+                # A Lima create with no pre-baked image builds the workspace
+                # inside the VM, which routinely outlives the standard window;
+                # give it the build-in-VM window instead. While the wait runs,
+                # a create attempt grace suppresses the health tracker's STUCK
+                # takeover -- 503s from a still-provisioning workspace are
+                # expected, and bouncing the user to the recovery page
+                # mid-create is exactly the bug this prevents. The grace ends
+                # when the wait returns (probe success, window expiry, or the
+                # create attempt going terminal), so a genuinely wedged workspace
+                # still reaches STUCK after its window.
+                is_build_in_vm_lima = launch_mode is LaunchMode.LIMA and prebaked_lima_image_raw_path is None
+                ready_timeout_seconds = (
+                    _BUILD_IN_VM_LIMA_READY_TIMEOUT_SECONDS
+                    if is_build_in_vm_lima
+                    else self.workspace_ready_timeout_seconds
+                )
+                self.system_interface_health_tracker.begin_create_attempt_grace(
+                    canonical_id, time.monotonic() + ready_timeout_seconds
+                )
+                try:
+                    self._wait_for_workspace_ready(canonical_id, log_sink, ready_timeout_seconds)
+                finally:
+                    self.system_interface_health_tracker.end_create_attempt_grace(canonical_id)
 
                 # The redirect URL is *absolute* and points at the plugin's
                 # bare origin. ``creating.js`` does
@@ -2132,15 +2630,16 @@ class AgentCreator(MutableModel):
                 # the canonical id.
                 with self._lock:
                     self._canonical_agent_ids[cid_str] = canonical_id
-                    self._statuses[cid_str] = AgentCreationStatus.DONE
+                    self._statuses[cid_str] = AgentCreateAttemptStatus.DONE
                     self._redirect_urls[cid_str] = redirect_url
+                self._notify_create_attempts_changed()
 
                 if on_created is not None:
                     on_created(canonical_id, canonical_host_id)
 
                 # Configure restic backups asynchronously on a detached
                 # thread (mirrors the Cloudflare tunnel-token path): bucket
-                # creation + injection is a multi-second round-trip we don't
+                # create attempt + injection is a multi-second round-trip we don't
                 # want to block the redirect on, and a failure here is
                 # non-fatal to the already-created workspace. Skipped (no
                 # thread spawned) for CONFIGURE_LATER.
@@ -2160,21 +2659,115 @@ class AgentCreator(MutableModel):
                     )
 
         except (GitCloneError, GitOperationError, MngrCommandError, ImbueCloudCliError, ValueError, OSError) as e:
-            logger.opt(exception=e).error("Failed to create agent for creation {}", creation_id)
-            log_queue.put("[minds] ERROR: {}".format(e))
-            error_kind = classify_creation_error(repo_source, e)
+            logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
+            log_sink.put("[minds] ERROR: {}".format(e))
+            error_kind = classify_create_attempt_error(repo_source, e)
             with self._lock:
-                self._statuses[cid_str] = AgentCreationStatus.FAILED
+                self._statuses[cid_str] = AgentCreateAttemptStatus.FAILED
                 self._errors[cid_str] = str(e)
                 if error_kind is not None:
                     self._error_kinds[cid_str] = error_kind
+            # Snapshot the failure (and the create attempt log's tail) into the
+            # pending-create-attempt record so the failed row survives restarts.
+            self._mark_pending_create_attempt_failed(
+                cid_str,
+                error=str(e),
+                error_kind=error_kind.value if error_kind is not None else None,
+                log_tail=log_sink.tail_lines(FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES),
+            )
+            self._notify_create_attempts_changed()
         finally:
-            log_queue.put(LOG_SENTINEL)
+            log_sink.put(LOG_SENTINEL)
+
+    def _discard_dead_create_attempts_holding_name(
+        self,
+        current_create_attempt_id_str: str,
+        provider_instance_name: str,
+        host_name: str,
+        log_sink: CreateAttemptLogSink,
+    ) -> None:
+        """Implicitly discard dead same-name create attempts on this provider before a fresh create.
+
+        A dead create attempt is a pending record that is not DONE and has no live
+        create attempt behind it (interrupted by a restart, or failed). Its leftover
+        half-built host -- found through the ``workspace-id`` host label on the
+        labeled providers -- is destroyed and its record deleted, so the fresh
+        create does not trip mngr's host-name conflict pre-flight. A failed
+        cleanup keeps the record (its row stays for a manual discard) and lets
+        the create proceed to mngr's own conflict error.
+        """
+        if self.pending_create_attempt_store is None or not provider_instance_name:
+            return
+        live_create_attempt_ids = self.live_in_flight_create_attempt_ids()
+        dead_records = [
+            record
+            for record in self.pending_create_attempt_store.list_records()
+            if record.create_attempt_id != current_create_attempt_id_str
+            and record.create_attempt_id not in live_create_attempt_ids
+            and record.state is not PendingCreateAttemptState.DONE
+            and record.provider_instance_name == provider_instance_name
+            and record.request.host_name.casefold() == host_name.casefold()
+        ]
+        if not dead_records:
+            return
+
+        # Only the labeled providers can have a findable leftover host; the
+        # other providers' dead records are deleted record-only.
+        mngr_env = dict(os.environ)
+        leftover_hosts: list[ListedHost] = []
+        if provider_instance_name in WORKSPACE_ID_LABELED_PROVIDER_NAMES:
+            try:
+                leftover_hosts = list_provider_hosts(
+                    self.root_concurrency_group,
+                    self.mngr_binary,
+                    mngr_env,
+                    provider_instance_name,
+                    timeout_seconds=_DEAD_CREATE_ATTEMPT_HOST_LIST_TIMEOUT_SECONDS,
+                )
+            except MngrCommandError as e:
+                logger.warning(
+                    "Could not list {} hosts to discard a dead create attempt: {}", provider_instance_name, e
+                )
+                log_sink.put(
+                    "[minds] Warning: could not check for a leftover host from a previous attempt; "
+                    f"continuing anyway: {e}"
+                )
+                return
+
+        for record in dead_records:
+            leftover = find_host_by_workspace_id_label(leftover_hosts, record.create_attempt_id)
+            if leftover is not None:
+                log_sink.put(
+                    f"[minds] Cleaning up the previous attempt's unfinished host '{leftover.name}' ({leftover.id})..."
+                )
+                destroy_argv = [self.mngr_binary, "destroy", f"@{leftover.id}.{leftover.provider}", "--force"]
+                try:
+                    run_mngr_to_completion(
+                        self.root_concurrency_group,
+                        destroy_argv,
+                        mngr_env,
+                        timeout_seconds=_DEAD_CREATE_ATTEMPT_HOST_DESTROY_TIMEOUT_SECONDS,
+                    )
+                except MngrCommandError as e:
+                    logger.warning(
+                        "Could not destroy leftover host {} for dead create attempt {}: {}",
+                        leftover.id,
+                        record.create_attempt_id,
+                        e,
+                    )
+                    log_sink.put(f"[minds] Warning: could not remove the previous attempt's host {leftover.id}: {e}")
+                    continue
+            self.pending_create_attempt_store.delete_record(record.create_attempt_id)
+            self.forget_create_attempt(CreateAttemptId(record.create_attempt_id))
+            logger.info(
+                "Implicitly discarded dead create attempt {} (name '{}' reused)", record.create_attempt_id, host_name
+            )
+        self._notify_create_attempts_changed()
 
     def _create_imbue_cloud_with_fallback(
         self,
         attempt_params: _MngrCreateAttemptParams,
-        log_queue: queue.Queue[str],
+        log_sink: CreateAttemptLogSink,
     ) -> tuple[AgentId, HostId]:
         """Try the fast (adopt) path, then fall back to the slow (rebuild) path.
 
@@ -2188,14 +2781,14 @@ class AgentCreator(MutableModel):
         from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (full client-side setup). Any other failure
         (including a genuinely empty pool) propagates unchanged.
         """
-        log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
+        log_sink.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
         try:
             return _attempt_mngr_create(_FAST_MODE_REQUIRE, attempt_params)
         except MngrCommandError as exc:
             if exc.error_class != _FAST_PATH_UNAVAILABLE_ERROR_CLASS:
                 raise
             logger.info("imbue_cloud fast path unavailable; retrying with the slow path (full rebuild)")
-            log_queue.put(
+            log_sink.put(
                 "[minds] No matching pre-baked pool host; falling back to slow path (leasing any host "
                 "and rebuilding it). This is slower but always works when the pool has free hosts..."
             )
@@ -2203,7 +2796,7 @@ class AgentCreator(MutableModel):
 
     def _prepare_latchkey_or_warn(
         self,
-        log_queue: queue.Queue[str],
+        log_sink: CreateAttemptLogSink,
     ) -> AgentLatchkeySetup:
         """Run :func:`prepare_agent_latchkey` and downgrade its errors to warnings.
 
@@ -2216,11 +2809,11 @@ class AgentCreator(MutableModel):
             return prepare_agent_latchkey(self.latchkey, is_tunneled=True)
         except LatchkeyError as e:
             logger.warning("Failed to prepare latchkey wiring: {}", e)
-            log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
+            log_sink.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
         except LatchkeyStoreError as e:
             logger.warning("Failed to materialize latchkey permissions handle: {}", e)
-            log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
+            log_sink.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
 
     def _provision_backups(
@@ -2288,7 +2881,7 @@ class AgentCreator(MutableModel):
             )
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:
-        """Build the absolute URL the UI should navigate to after creation.
+        """Build the absolute URL the UI should navigate to after the create attempt.
 
         Always points at the plugin's ``/goto/<agent>/`` route, never minds'
         bare origin -- minds doesn't serve ``/goto/`` and would 404. When
@@ -2300,7 +2893,14 @@ class AgentCreator(MutableModel):
             return f"/goto/{agent_id}/"
         return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
-    def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
+    def _wait_for_workspace_ready(
+        self,
+        agent_id: AgentId,
+        log_sink: CreateAttemptLogSink,
+        # The readiness window for this create: ``workspace_ready_timeout_seconds``
+        # normally, or the longer build-in-VM window for an imageless Lima create.
+        timeout_seconds: float,
+    ) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
         Probes the plugin on loopback (with the agent's ``agent-<hex>.localhost``
@@ -2314,14 +2914,14 @@ class AgentCreator(MutableModel):
         empty preauth, e.g. tests that bypass the plugin) we return immediately.
         On timeout we log + emit to the log queue and let the caller publish
         the redirect anyway -- the user lands on the plugin's auto-refresh
-        retry page, which is better than spinning forever in the creation UI.
+        retry page, which is better than spinning forever in the create attempt UI.
         """
         if self.mngr_forward_port == 0 or not self.mngr_forward_preauth_cookie:
             logger.debug("Workspace readiness probe disabled (port=0 or empty preauth); skipping")
             return
 
-        deadline = time.monotonic() + self.workspace_ready_timeout_seconds
-        log_queue.put("[minds] Waiting for system interface to be ready...")
+        deadline = time.monotonic() + timeout_seconds
+        log_sink.put("[minds] Waiting for system interface to be ready...")
         last_status: int | None = None
         attempt = 0
         with make_workspace_probe_client(
@@ -2341,7 +2941,7 @@ class AgentCreator(MutableModel):
                     last_status = status
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
-                        log_queue.put("[minds] System interface is ready.")
+                        log_sink.put("[minds] System interface is ready.")
                         # Propagate the success into the shared health tracker,
                         # clearing the suspect flag and probe-failure run that
                         # the warmup failures enrolled, so the chrome does not
@@ -2355,10 +2955,10 @@ class AgentCreator(MutableModel):
         logger.warning(
             "Workspace readiness probe for {} timed out after {:.0f}s (last status={}); publishing redirect anyway",
             agent_id,
-            self.workspace_ready_timeout_seconds,
+            timeout_seconds,
             last_status,
         )
-        log_queue.put(
+        log_sink.put(
             "[minds] Warning: workspace did not become ready within "
-            f"{self.workspace_ready_timeout_seconds:.0f}s; you may see a retry page on first load."
+            f"{timeout_seconds:.0f}s; you may see a retry page on first load."
         )

@@ -86,10 +86,20 @@ def mint_workspace_credential_blob(
     account_email: str,
     imbue_cloud_cli: ImbueCloudCli,
 ) -> str:
-    """Mint a LiteLLM key for the workspace and return the paste-ready blob.
+    """Mint (or rotate) the workspace's LiteLLM key and return the paste-ready blob.
 
     The key's alias and metadata carry the workspace host id, fixed
     server-side -- there is deliberately no user-editable naming input.
+
+    The alias is deterministic and LiteLLM enforces unique aliases, so a key
+    minted earlier -- including one whose create response was lost (LiteLLM
+    never re-reveals a secret, and minds deliberately stores none) -- would
+    otherwise dead-end every later mint. ``is_rotate_on_exists`` makes the CLI
+    delete the existing key and mint a fresh one inside its single invocation
+    (each CLI subprocess pays a multi-second boot, so the rotation must not
+    fan out into separate list/delete/create invocations): this button's
+    meaning is "get me working credentials now", so rotation (invalidating any
+    previously issued credentials for this workspace) is the intended semantic.
 
     Raises AiKeyMintError when the plugin CLI rejects the mint.
     """
@@ -100,6 +110,7 @@ def mint_workspace_credential_blob(
             max_budget=_MINT_MAX_BUDGET_DOLLARS,
             budget_duration=_MINT_BUDGET_DURATION,
             metadata={"workspace_host_id": workspace_host_id, "source": "ai-keys-page"},
+            is_rotate_on_exists=True,
         )
     except ImbueCloudCliError as exc:
         raise AiKeyMintError(f"Failed to create the key: {exc}") from exc

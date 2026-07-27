@@ -18,15 +18,19 @@
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId, sizeClass);
 //
-// ``workspace`` is { id, name, accent?, liveness?, is_stale?, backup_warning? }.
+// ``workspace`` is { id, name, accent?, liveness?, is_stale?, backup_warning?,
+// create_attempt_state? }.
 // ``liveness`` (RUNNING / STOPPED / UNKNOWN, present on shutdown-capable local
 // workspaces) renders a status icon on stopped / unknown rows; running rows
-// show nothing. ``withOpenNew`` adds the "open in new window" arrow to rows
-// for OTHER workspaces (Electron only -- browser mode has no multi-window
-// concept and omits it); the current row and remote rows carry no action
-// buttons. ``isCurrent`` marks the row selected (highlighted background).
-// Event wiring (click / context-menu) is the caller's job -- this builds DOM
-// only.
+// show nothing. ``create_attempt_state`` ('creating' / 'interrupted' / 'failed')
+// marks an in-flight create attempt row: it renders a state badge, carries
+// data-create-attempt-state for the caller's click routing (to /creating/<id>),
+// and gets no action buttons. ``withOpenNew`` adds the "open in new window"
+// arrow to rows for OTHER workspaces (Electron only -- browser mode has no
+// multi-window concept and omits it); the current row and remote rows carry
+// no action buttons. ``isCurrent`` marks the row selected (highlighted
+// background). Event wiring (click / context-menu) is the caller's job --
+// this builds DOM only.
 (function () {
   function buildIconButton(title, pathSvg, dataAttr, agentId, sizeClass) {
     var btn = document.createElement('button');
@@ -78,6 +82,14 @@
     return buildIconButton('Open in new window', OPEN_NEW_PATH, 'data-open-new', agentId);
   }
 
+  // CreateAttempt-row badge labels by create_attempt_state. Failed rows read on the
+  // important hue; the other two stay muted.
+  var CREATE_ATTEMPT_BADGE_LABELS = {
+    creating: 'Creating…',
+    interrupted: 'Interrupted',
+    failed: 'Create failed',
+  };
+
   function buildRow(workspace, options) {
     var opts = options || {};
     var isCurrent = !!opts.isCurrent;
@@ -86,6 +98,7 @@
     // No outer margin: row-to-row spacing is the parent container's flex
     // ``gap``, keeping this element positioning-free and composable.
     var isRemote = !!workspace.is_remote;
+    var createAttemptState = typeof workspace.create_attempt_state === 'string' ? workspace.create_attempt_state : null;
     var row = document.createElement('div');
     row.className =
       'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md type-body '
@@ -93,6 +106,7 @@
         ? 'is-remote text-secondary opacity-60 cursor-default'
         : ('cursor-pointer text-primary' + (isCurrent ? ' is-current bg-fill-active' : ' hover:bg-fill-hover')));
     row.setAttribute('data-agent-id', workspace.id);
+    if (createAttemptState) row.setAttribute('data-create-attempt-state', createAttemptState);
 
     var dot = document.createElement('span');
     dot.className = 'sidebar-dot w-2.5 h-2.5 rounded-full shrink-0';
@@ -103,10 +117,20 @@
     label.textContent = workspace.name || workspace.id;
     row.appendChild(label);
 
+    // CreateAttempt rows: a state badge instead of liveness / action affordances.
+    if (createAttemptState) {
+      var createAttemptBadge = document.createElement('span');
+      createAttemptBadge.className =
+        'inline-flex items-center px-1.5 py-0.5 rounded-md type-label bg-fill-subtle shrink-0 '
+        + (createAttemptState === 'failed' ? 'text-important' : 'text-tertiary');
+      createAttemptBadge.textContent = CREATE_ATTEMPT_BADGE_LABELS[createAttemptState] || createAttemptState;
+      row.appendChild(createAttemptBadge);
+    }
+
     // Mind liveness (present on shutdown-capable local workspaces via the SSE
     // ``workspaces`` payload): stopped / unknown minds get a status icon;
     // running minds show nothing.
-    if (!isRemote) {
+    if (!isRemote && !createAttemptState) {
       var statusIcon = buildStatusIcon(workspace.liveness);
       if (statusIcon) row.appendChild(statusIcon);
     }
@@ -146,8 +170,9 @@
 
     // Row action icon, always visible (no hover-reveal): the open-in-new
     // arrow, only on rows for OTHER local workspaces (withOpenNew; Electron
-    // only). The current row and remote rows carry no action buttons.
-    if (withOpenNew && !isCurrent && !isRemote) {
+    // only). The current row, remote rows, and create attempt rows carry no action
+    // buttons.
+    if (withOpenNew && !isCurrent && !isRemote && !createAttemptState) {
       var openNewBtn = buildOpenNewBtn(workspace.id);
       openNewBtn.classList.add('inline-flex');
       row.appendChild(openNewBtn);

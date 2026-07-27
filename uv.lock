@@ -2154,12 +2154,14 @@ source = { editable = "libs/mngr_lima" }
 dependencies = [
     { name = "imbue-mngr" },
     { name = "pyyaml" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "tenacity", specifier = ">=8.0" },
 ]
 
 [[package]]

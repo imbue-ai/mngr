@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, account_email="", extra_account_count=0, remote_workspaces=[], locked_account_emails=[] #}
+{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, account_email="", extra_account_count=0, remote_workspaces=[], locked_account_emails=[], create_attempt_rows=[] #}
 {#
   Landing page: list of accessible workspaces with per-row health and backup
   status. Subscribes to the chrome SSE so the page reloads
@@ -28,6 +28,18 @@
       var separatorIdx = pair.indexOf('=');
       if (separatorIdx < 0) return;
       renderedRemoteStates[pair.slice(0, separatorIdx)] = pair.slice(separatorIdx + 1);
+    });
+    // CreateAttempt rows as rendered ("createAttemptId=state" pairs). The SSE workspaces
+    // entries carry the live states (create_attempt_state on each create attempt entry);
+    // a state flip (creating -> failed, interrupted discarded, ...) reloads so
+    // the badge re-renders. Add/remove is covered by the id diff below, since
+    // create attempt ids ride in the same rendered-ids list.
+    var renderedCreateAttemptStates = {};
+    (rendered.landingCreateAttemptStates || '').split(',').forEach(function (pair) {
+      if (!pair) return;
+      var separatorIdx = pair.indexOf('=');
+      if (separatorIdx < 0) return;
+      renderedCreateAttemptStates[pair.slice(0, separatorIdx)] = pair.slice(separatorIdx + 1);
     });
 
     var healthStatusByAgent = {};
@@ -625,11 +637,18 @@
     // request is aborted on navigation so it never holds a connection open.
     var backupAbortController = null;
     function loadBackupStatus() {
-      if (renderedIds.length === 0) return;
+      // renderedIds also carries create-attempt row ids (for the SSE
+      // drift-detection reload); those rows have no backup badge and their
+      // ids are not agent ids -- one of them in the batch would 400 the
+      // whole request and flip every badge to "Backup status unknown".
+      var backupAgentIds = renderedIds.filter(function (id) {
+        return id.indexOf('agent-') === 0;
+      });
+      if (backupAgentIds.length === 0) return;
       showBackupChecking();
       if (backupAbortController) backupAbortController.abort();
       backupAbortController = new AbortController();
-      var url = '/api/v1/workspaces/backups?' + renderedIds.map(function (id) {
+      var url = '/api/v1/workspaces/backups?' + backupAgentIds.map(function (id) {
         return 'agent_id=' + encodeURIComponent(id);
       }).join('&');
       fetch(url, { signal: backupAbortController.signal }).then(function (response) {
@@ -780,6 +799,22 @@
             return;
           }
         }
+        // CreateAttempt-row state flips (creating -> failed, ...) change no ids,
+        // so diff the per-create-attempt states carried on the workspaces entries.
+        var liveCreateAttemptStates = {};
+        data.workspaces.forEach(function (w) {
+          if (w.create_attempt_state) liveCreateAttemptStates[w.id] = w.create_attempt_state;
+        });
+        var createAttemptDiffers = Object.keys(renderedCreateAttemptStates).some(function (id) {
+          return liveCreateAttemptStates[id] !== renderedCreateAttemptStates[id];
+        }) || Object.keys(liveCreateAttemptStates).some(function (id) {
+          return !(id in renderedCreateAttemptStates);
+        });
+        if (createAttemptDiffers) {
+          es.close();
+          window.dispatchEvent(new Event('minds:refresh-local-page'));
+          return;
+        }
         // Same set of rows: apply each shutdown-capable mind's liveness in place
         // (it rides the workspace entry now, not a separate event).
         data.workspaces.forEach(function (w) {
@@ -857,8 +892,8 @@
 {% endset %}
 <ChromeShell title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
-    {% if agent_ids or remote_workspaces %}
-      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}">
+    {% if agent_ids or remote_workspaces or create_attempt_rows %}
+      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (create_attempt_rows | map(attribute='id') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}" data-landing-create-attempt-states="{% for create_attempt in create_attempt_rows %}{{ create_attempt.id }}={{ create_attempt.state }}{% if not loop.last %},{% endif %}{% endfor %}">
         <h1 class="type-heading text-primary">Workspaces</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
@@ -979,6 +1014,35 @@
               </Button>
             </Card>
           {% endif %}
+        {% endfor %}
+
+        {# In-flight / interrupted / failed create attempts, inline with the
+           workspace rows. Each links to the create attempt detail page at
+           /creating/<id> -- the live progress view for a creating row, the
+           retry/discard view for an interrupted one, and the error/dismiss
+           view for a failed one. #}
+        {% for create_attempt in create_attempt_rows %}
+          {% set create_attempt_accent_style = "--workspace-accent: " ~ create_attempt.accent ~ ";" %}
+          {% set create_attempt_href = "/creating/" ~ create_attempt.id %}
+          <Card tag="a" layout="row" interactive
+                extra="accent-spine relative overflow-hidden"
+                :href="create_attempt_href"
+                :style="create_attempt_accent_style">
+            <span class="flex-1 font-semibold text-secondary pl-1">{{ create_attempt.name }}</span>
+            {% if create_attempt.provider_label %}
+              <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">{{ create_attempt.provider_label }}</span>
+            {% endif %}
+            {% if create_attempt.state == 'creating' %}
+              <StatusBadge extra="gap-2">
+                <Spinner size="sm" />
+                Creating…
+              </StatusBadge>
+            {% elif create_attempt.state == 'interrupted' %}
+              <StatusBadge variant="warn">Interrupted</StatusBadge>
+            {% else %}
+              <StatusBadge variant="error">Create failed</StatusBadge>
+            {% endif %}
+          </Card>
         {% endfor %}
 
         {# Workspaces known only from synced records (hosted on another device,

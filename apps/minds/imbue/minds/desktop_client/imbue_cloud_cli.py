@@ -415,6 +415,10 @@ class ImbueCloudCli(MutableModel):
         max_budget: float | None = None,
         budget_duration: str | None = None,
         metadata: Mapping[str, str] | None = None,
+        # Rotate (delete + re-create) an existing key holding ``alias`` inside
+        # the single CLI invocation, instead of dead-ending on LiteLLM's
+        # unique-alias rejection. Requires ``alias``.
+        is_rotate_on_exists: bool = False,
     ) -> LiteLLMKeyMaterial:
         args: list[str] = ["keys", "litellm", "create", "--account", account]
         if alias is not None:
@@ -425,6 +429,8 @@ class ImbueCloudCli(MutableModel):
             args.extend(["--budget-duration", budget_duration])
         if metadata is not None:
             args.extend(["--metadata", _json.dumps(dict(metadata))])
+        if is_rotate_on_exists:
+            args.append("--rotate-on-exists")
         result = self._run(args, cg_name="imbue-cloud-keys-create", timeout_seconds=_KEY_OP_TIMEOUT_SECONDS)
         body = self._expect_success(result, "keys litellm create")
         return LiteLLMKeyMaterial.model_validate(body)

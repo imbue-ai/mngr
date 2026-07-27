@@ -1,7 +1,7 @@
 {#def agent_id, status_text, expected_duration_seconds #}
 {#
   Progress page shown while an agent is being created. The page is keyed
-  by creation_id (passed as agent_id here -- a minds-internal in-flight
+  by create_attempt_id (passed as agent_id here -- a minds-internal in-flight
   handle) rather than the canonical agent_id, because the canonical id
   only comes into existence once the inner mngr create returns.
   expected_duration_seconds drives the client-side time-based progress
@@ -23,7 +23,7 @@
     {# (progress vs. failure) plus a shared logs/details footer, so the #}
     {# streamed logs stay in one place regardless of which sub-view is showing. #}
     <section class="screen w-full" data-screen="loading">
-      {# Progress sub-view: shown while creation is in flight. #}
+      {# Progress sub-view: shown while the create attempt is in flight. #}
       <div id="progress-view">
         <div class="text-center pt-2 pb-1">
           <div class="type-heading mb-1.5">Setting up your workspace</div>
@@ -34,7 +34,7 @@
         </div>
       </div>
 
-      {# Failure sub-view: revealed by creating.js the moment creation fails. #}
+      {# Failure sub-view: revealed by creating.js the moment the create attempt fails. #}
       <div id="failure-view" class="hidden">
         <div class="text-center pt-2 pb-1">
           <div class="type-heading mb-1.5 text-important">We couldn't set up your workspace</div>
@@ -82,8 +82,12 @@
             this computer, and enter that folder's path in the form instead of the URL.
           </p>
         </div>
+        {# Dismiss deletes the create attempt's pending record and in-memory row #}
+        {# (DELETE /api/v1/workspaces/create-attempts/<id>, wired in creating.js), #}
+        {# so the failed row leaves the workspace list without an app restart. #}
         <div class="flex items-center justify-center gap-2 mt-4">
           <ButtonLink href="/create" variant="primary">Back to setup</ButtonLink>
+          <Button variant="secondary" id="create-attempt-dismiss-btn">Dismiss</Button>
           <ButtonLink href="/" variant="ghost">Home</ButtonLink>
         </div>
       </div>

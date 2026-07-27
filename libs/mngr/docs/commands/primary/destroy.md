@@ -6,19 +6,26 @@
 **Synopsis:**
 
 ```text
-mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]
+mngr [destroy|rm] [AGENTS_OR_HOSTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]
 ```
 
-Destroy agent(s) and clean up resources.
+Destroy agent(s) or whole host(s) and clean up resources.
 
 When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
+
+A host can also be targeted directly with a host address: '@HOST',
+'@HOST.PROVIDER', or a bare host ID ('host-<hex>'). This destroys the host and
+everything on it -- including hosts with no agents at all (e.g. one left behind
+by an abandoned create). The local host can never be destroyed.
 
 Use with caution! This operation is irreversible.
 
 By default, running agents cannot be destroyed. Use --force to stop and destroy
 running agents. The command will prompt for confirmation before destroying
-agents unless --force is specified.
+agents or hosts unless --force is specified. With --force, a host address that
+matches nothing is skipped instead of failing, so cleanup scripts stay
+idempotent.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -90,6 +97,24 @@ $ mngr destroy my-agent
 
 ```bash
 $ mngr destroy agent1 agent2 agent3
+```
+
+**Destroy a whole host (and everything on it)**
+
+```bash
+$ mngr destroy @my-host
+```
+
+**Destroy a host by ID, e.g. one left by an abandoned create**
+
+```bash
+$ mngr destroy host-0123abcd... --force
+```
+
+**Destroy a host on a specific provider**
+
+```bash
+$ mngr destroy @my-host.lima
 ```
 
 **Destroy all agents**

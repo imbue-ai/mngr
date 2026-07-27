@@ -911,7 +911,7 @@ _W2_SNAPS = _SnapPrefixes(
 
 class _WorkspaceResult(BaseModel):
     chat_url: str
-    creation_id: str
+    create_attempt_id: str
     phase_durations: dict[str, float] = Field(default_factory=dict)
     total_create_s: float = 0.0
 
@@ -997,8 +997,8 @@ def _create_workspace_and_first_message(
     m = re.search(r"/creating/([a-z0-9-]+)", chrome.url)
     if not m:
         raise E2EFailure(f"[{label}] expected /creating/<id> after submit, got url={chrome.url}")
-    creation_id = m.group(1)
-    logger.info("[{}] creation_id={}", label, creation_id)
+    create_attempt_id = m.group(1)
+    logger.info("[{}] create_attempt_id={}", label, create_attempt_id)
 
     deadline = time.time() + CREATE_TIMEOUT
     last_status = ""
@@ -1014,7 +1014,7 @@ def _create_workspace_and_first_message(
                     const r = await fetch('/api/v1/workspaces/operations/create/' + id);
                     return {status: r.status, body: await r.text()};
                 }""",
-                creation_id,
+                create_attempt_id,
             )
         except PlaywrightError as exc:
             # Opening the workspace moves the chrome view onto the /_chrome
@@ -1033,20 +1033,20 @@ def _create_workspace_and_first_message(
             if last_status:
                 phase_durations[last_status] = round(now - phase_started_at, 2)
                 logger.info(
-                    "[{}] creation status: {} -> {} (prev took {:.1f}s)",
+                    "[{}] create attempt status: {} -> {} (prev took {:.1f}s)",
                     label,
                     last_status,
                     state,
                     phase_durations[last_status],
                 )
             else:
-                logger.info("[{}] creation status: (none) -> {}", label, state)
+                logger.info("[{}] create attempt status: (none) -> {}", label, state)
             last_status = state
             phase_started_at = now
             if not state and find_chat_window(ctx) is None:
                 # An empty status with no workspace open is anomalous: the
                 # /status body had no "status" field -- a 403 "Not authenticated"
-                # or 404 "Unknown agent creation". (Empty status once the app has
+                # or 404 "Unknown agent create attempt". (Empty status once the app has
                 # opened the workspace is the normal navigate-on-DONE case,
                 # handled below.) Log the raw response to tell the anomalies apart.
                 with contextlib.suppress(Exception):
@@ -1063,13 +1063,13 @@ def _create_workspace_and_first_message(
             done = True
             break
         if state == "FAILED":
-            raise E2EFailure(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
+            raise E2EFailure(f"[{label}] create attempt FAILED: {payload.get('error', stat['body'])}")
         # On DONE, creating.js hands redirect_url to navigateContent and the
         # app opens the workspace on the content view. The poll can miss the
         # DONE tick that caused it, so an open workspace *is* success and must
         # not keep waiting for a "DONE" it already went past.
         if not state and find_chat_window(ctx) is not None:
-            logger.info("[{}] creation DONE (the app opened the workspace)", label)
+            logger.info("[{}] create attempt DONE (the app opened the workspace)", label)
             done = True
             opened_workspace = True
             break
@@ -1081,15 +1081,15 @@ def _create_workspace_and_first_message(
             snap_page(chrome, snaps.creating_mid)
         _sleep(5)
     total_create_s = sum(phase_durations.values())
-    logger.info("[{}] creation phase timings: {} (total={:.1f}s)", label, phase_durations, total_create_s)
+    logger.info("[{}] create attempt phase timings: {} (total={:.1f}s)", label, phase_durations, total_create_s)
     if not done:
         if EVENTS_LOG.exists():
             tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
             logger.error("[{}] minds-events.jsonl tail:\n{}", label, "\n".join(tail))
-        raise E2EFailure(f"[{label}] creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
+        raise E2EFailure(f"[{label}] create attempt didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
     if not opened_workspace and not done_redirect_url:
         raise E2EFailure(
-            f"[{label}] creation DONE without redirect_url; check the /api/v1/workspaces/operations/create/<id> contract"
+            f"[{label}] create attempt DONE without redirect_url; check the /api/v1/workspaces/operations/create/<id> contract"
         )
     # Pin the wait to THIS workspace's agent host. The window has one content
     # view, so creating W2 repoints the very page W1 is still showing -- an
@@ -1097,7 +1097,7 @@ def _create_workspace_and_first_message(
     # against W1's transcript, which already holds its own reply and so passes.
     created_host_match = re.search(r"(agent-[a-f0-9]+)", done_redirect_url)
     created_host = created_host_match.group(1) if created_host_match else None
-    logger.info("[{}] creation DONE; waiting for the app to open {}", label, created_host or "the workspace")
+    logger.info("[{}] create attempt DONE; waiting for the app to open {}", label, created_host or "the workspace")
     chat = wait_for_chat_window(ctx, label=label, host=created_host)
     chat_url = live_url(chat)
     logger.info("[{}] agent DONE; chat URL={}", label, chat_url)
@@ -1129,7 +1129,7 @@ def _create_workspace_and_first_message(
 
     result = _WorkspaceResult(
         chat_url=chat_url,
-        creation_id=creation_id,
+        create_attempt_id=create_attempt_id,
         phase_durations=phase_durations,
         total_create_s=total_create_s,
     )

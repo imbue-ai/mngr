@@ -7,12 +7,12 @@ import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
-from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
-from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.templates import CATALOG
-from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
+from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
-from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
+from imbue.minds.desktop_client.templates import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_account_plan_modal_page
 from imbue.minds.desktop_client.templates import render_account_plan_section
@@ -42,7 +42,8 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_N
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
-from imbue.minds.primitives import CreationId
+from imbue.minds.mngr_settings.data_types import CloudAccountRecord
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -643,13 +644,13 @@ def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:
     content: creating.js reveals it only when the create-operation status
     reports error_kind GITHUB_AUTH_REQUIRED. It must name the GitHub CLI sign-in
     command, link the official docs, and offer the local-path alternative."""
-    creation_id = CreationId()
-    info = AgentCreationInfo(
-        creation_id=creation_id,
-        status=AgentCreationStatus.INITIALIZING,
+    create_attempt_id = CreateAttemptId()
+    info = AgentCreateAttemptInfo(
+        create_attempt_id=create_attempt_id,
+        status=AgentCreateAttemptStatus.INITIALIZING,
         launch_mode=LaunchMode.DOCKER,
     )
-    html = render_creating_page(creation_id=creation_id, info=info)
+    html = render_creating_page(create_attempt_id=create_attempt_id, info=info)
     assert 'id="github-auth-help"' in html
     assert "gh auth login" in html
     assert "https://docs.github.com/en/github-cli/github-cli/quickstart" in html
@@ -664,13 +665,13 @@ def test_render_creating_page_carries_hidden_generic_git_auth_guidance() -> None
     """The creating page also ships generic (non-GitHub) git-auth guidance,
     revealed for error_kind GIT_AUTH_REQUIRED. It offers the local-path
     alternative but must NOT name the GitHub CLI (which only fits github.com)."""
-    creation_id = CreationId()
-    info = AgentCreationInfo(
-        creation_id=creation_id,
-        status=AgentCreationStatus.INITIALIZING,
+    create_attempt_id = CreateAttemptId()
+    info = AgentCreateAttemptInfo(
+        create_attempt_id=create_attempt_id,
+        status=AgentCreateAttemptStatus.INITIALIZING,
         launch_mode=LaunchMode.DOCKER,
     )
-    html = render_creating_page(creation_id=creation_id, info=info)
+    html = render_creating_page(create_attempt_id=create_attempt_id, info=info)
     assert 'id="git-auth-help"' in html
     assert "path in the form instead of the URL" in html
     # Hidden on first paint.
@@ -681,6 +682,21 @@ def test_render_creating_page_carries_hidden_generic_git_auth_guidance() -> None
     # to this block (the sibling github-auth-help block legitimately has it).
     block_end = html.index("</div>", guidance_index)
     assert "gh auth login" not in html[guidance_index:block_end]
+
+
+def test_render_creating_page_failure_view_carries_a_dismiss_button() -> None:
+    """The failure view ships a Dismiss button (revealed with the view by
+    creating.js when the create attempt fails): it deletes the failed create attempt's
+    pending record and in-memory row so the "Create failed" workspace-list row
+    can be removed without waiting for an app restart."""
+    create_attempt_id = CreateAttemptId()
+    info = AgentCreateAttemptInfo(
+        create_attempt_id=create_attempt_id,
+        status=AgentCreateAttemptStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    html = render_creating_page(create_attempt_id=create_attempt_id, info=info)
+    assert 'id="create-attempt-dismiss-btn"' in html
 
 
 def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2613,18 +2629,18 @@ def test_badge_class_and_id_pass_through() -> None:
 
 
 def test_expected_duration_per_launch_mode() -> None:
-    assert expected_creation_duration_seconds(LaunchMode.DOCKER) == 30.0
-    assert expected_creation_duration_seconds(LaunchMode.IMBUE_CLOUD) == 30.0
-    assert expected_creation_duration_seconds(LaunchMode.LIMA) == 600.0
-    assert expected_creation_duration_seconds(LaunchMode.VULTR) == 300.0
+    assert expected_create_attempt_duration_seconds(LaunchMode.DOCKER) == 30.0
+    assert expected_create_attempt_duration_seconds(LaunchMode.IMBUE_CLOUD) == 30.0
+    assert expected_create_attempt_duration_seconds(LaunchMode.LIMA) == 600.0
+    assert expected_create_attempt_duration_seconds(LaunchMode.VULTR) == 300.0
 
 
 def test_expected_duration_covers_every_launch_mode() -> None:
     # Every launch mode must resolve to a positive duration so the progress
     # bar never divides by zero; unmapped modes fall back to the default.
     for launch_mode in LaunchMode:
-        assert expected_creation_duration_seconds(launch_mode) > 0
-    assert DEFAULT_EXPECTED_CREATION_DURATION_SECONDS == 60.0
+        assert expected_create_attempt_duration_seconds(launch_mode) > 0
+    assert DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS == 60.0
 
 
 def test_base_omits_sentry_bootstrap_when_frontend_reporting_is_off() -> None:
@@ -2716,6 +2732,41 @@ def test_render_account_plan_section_degrades_to_unavailable_without_plan_view()
     html = render_account_plan_section(acct_user_id="u-1")
     assert "Plan and usage are unavailable right now" in html
     assert 'data-trim-running="0"' in html
+
+
+def test_render_create_form_preselects_the_retry_cloud_account_and_machine_size() -> None:
+    # The retry pre-fill restores a bring-your-own-key create exactly: the
+    # account's BYOK option starts selected (the cloud modes have no plain
+    # options, so this is the only way the selection can be restored) and the
+    # stored machine size is threaded into the instance-type populate JS.
+    account = CloudAccountRecord(
+        name="byok-gcp-retrytest",
+        alias="retrytest",
+        backend="gcp",
+        region="us-west1-a",
+        identifier="masked",
+    )
+    html = render_create_form(
+        cloud_accounts=[account],
+        byok_clouds_enabled=True,
+        selected_cloud_account="byok-gcp-retrytest",
+        selected_instance_type="e2-standard-4",
+    )
+    assert re.search(r'value="BYOK:byok-gcp-retrytest"[^>]*\sselected', html) is not None
+    assert 'var instanceTypePreselect = "e2-standard-4";' in html
+
+
+def test_render_create_form_leaves_byok_options_unselected_by_default() -> None:
+    account = CloudAccountRecord(
+        name="byok-aws-other",
+        alias="other",
+        backend="aws",
+        region="us-east-1",
+        identifier="masked",
+    )
+    html = render_create_form(cloud_accounts=[account], byok_clouds_enabled=True)
+    assert re.search(r'value="BYOK:byok-aws-other"[^>]*\sselected', html) is None
+    assert 'var instanceTypePreselect = "";' in html
 
 
 def test_render_account_plan_modal_page_opens_instantly_with_async_placeholder() -> None:

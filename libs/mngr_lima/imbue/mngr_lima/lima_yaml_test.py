@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_lima.constants import lima_host_data_disk_label
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
@@ -322,3 +323,24 @@ def test_generate_default_lima_yaml_with_root_key_enables_root_login() -> None:
     # The btrfs disk is still formatted + mounted; root mode doesn't change that.
     assert "mkfs.btrfs -f" in script
     assert "ln -sfn /mnt/lima-mngr-abc-data /mngr" in script
+
+
+def test_provision_script_labels_data_disk_for_lima(tmp_path: Path) -> None:
+    """The in-guest format applies the exact filesystem label Lima's boot script
+    probes for, and heals unlabeled disks formatted before the label existed --
+    otherwise Lima re-enters its first-time disk setup (sfdisk + failing mkfs)
+    on every boot and cloud-final fails every boot."""
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc123-data",
+        host_data_disk_size="100GiB",
+    )
+    script = config["provision"][0]["script"]
+
+    assert "mkfs.btrfs -f -L lima-mngr-abc123-data" in script
+    assert "btrfs filesystem label /mnt/lima-mngr-abc123-data lima-mngr-abc123-data" in script
+
+
+def test_lima_host_data_disk_label_matches_lima_expectation() -> None:
+    assert lima_host_data_disk_label("mngr-abc-data") == "lima-mngr-abc-data"

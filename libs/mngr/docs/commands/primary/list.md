@@ -6,13 +6,17 @@
 **Synopsis:**
 
 ```text
-mngr [list|ls] [--stdin] [--schema] [--ids] [--addrs] [--fields FIELDS] [--sort CEL] [--include CEL] [--exclude CEL] [--provider PROVIDER] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT] [--limit N] [--on-error MODE]
+mngr [list|ls] [--stdin] [--schema] [--hosts] [--ids] [--addrs] [--fields FIELDS] [--sort CEL] [--include CEL] [--exclude CEL] [--provider PROVIDER] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT] [--limit N] [--on-error MODE]
 ```
 
 List all agents managed by mngr.
 
 Displays agents with their status, host information, and other metadata.
 Supports filtering, sorting, and multiple output formats.
+
+With --hosts, lists hosts instead of agents -- including agent-less hosts and
+destroyed-but-persisted host records -- with each host's labels and the agents
+on it. Only --provider and the output-format options combine with --hosts.
 
 Alias: ls
 
@@ -48,6 +52,7 @@ mngr list [OPTIONS]
 | `--ids` | boolean | Print only agent IDs, one per line | `False` |
 | `--addrs` | boolean | Print only agent addresses (name@host.provider), one per line | `False` |
 | `--schema` | boolean | List the fields referenceable in --include/--exclude, --sort, and --fields/--format (with their types and the contexts they work in), instead of listing agents. | `False` |
+| `--hosts` | boolean | List hosts instead of agents, including agent-less hosts and destroyed-but-persisted host records, with each host's labels. Combinable only with --provider and the output format. | `False` |
 | `--fields` | text | Which fields to include (comma-separated) | None |
 | `--header` | text | Override column header label (format: FIELD=LABEL, repeatable) | None |
 | `--sort` | text | Sort by CEL expression(s) with optional direction, e.g. 'name asc, create_time desc'; enables sorted (non-streaming) output [default: create_time] | `create_time` |
@@ -238,6 +243,12 @@ $ mngr list --host-label env=prod
 
 ```bash
 $ mngr list --format json
+```
+
+**List hosts (agent-less ones included) with their labels**
+
+```bash
+$ mngr list --hosts --format json
 ```
 
 **Filter with CEL expression**

@@ -1,9 +1,9 @@
 """Minimal test for the redirect flow on the creating page.
 
-No Docker, no agent creation -- just tests that the creating page redirects
-into the workspace once creation completes. Completion is driven by the
+No Docker, no agent create attempt -- just tests that the creating page redirects
+into the workspace once the create attempt completes. Completion is driven by the
 creating page's status poll against the v1 operations resource
-(``/api/v1/workspaces/operations/create/<creation_id>``); the SSE stream on
+(``/api/v1/workspaces/operations/create/<create_attempt_id>``); the SSE stream on
 that resource carries only the live log lines.
 
 Run from the repo root:
@@ -11,7 +11,6 @@ Run from the repo root:
 """
 
 import os
-import queue
 import re
 import socket
 import sys
@@ -25,15 +24,16 @@ from werkzeug.serving import make_server
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
@@ -70,24 +70,24 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    # Manually set up a fake agent creation that completes immediately. The
-    # creation is keyed by a minds-internal ``CreationId`` (the handle the
+    # Manually set up a fake agent create attempt that completes immediately. The
+    # create attempt is keyed by a minds-internal ``CreateAttemptId`` (the handle the
     # ``/creating/<id>`` page and the ``operations/create/<id>`` resource use);
     # the canonical ``AgentId`` is a separate namespace, known only once the
     # inner ``mngr create`` returns, and is what the redirect ultimately targets.
-    creation_id = CreationId()
+    create_attempt_id = CreateAttemptId()
     agent_id = AgentId()
-    log_queue: queue.Queue[str] = queue.Queue()
+    log_sink = CreateAttemptLogSink()
 
     with creator._lock:
-        creator._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
-        creator._launch_modes[str(creation_id)] = LaunchMode.DOCKER
-        creator._host_names[str(creation_id)] = "test-workspace"
-        creator._log_queues[str(creation_id)] = log_queue
+        creator._statuses[str(create_attempt_id)] = AgentCreateAttemptStatus.INITIALIZING
+        creator._launch_modes[str(create_attempt_id)] = LaunchMode.DOCKER
+        creator._host_names[str(create_attempt_id)] = "test-workspace"
+        creator._log_sinks[str(create_attempt_id)] = log_sink
 
     # ``paths`` mounts the ``/api/v1`` blueprint, which the creating page's JS
-    # polls for status/logs (``operations/create/<creation_id>``); without it
-    # those routes 404 and the page never learns the creation finished.
+    # polls for status/logs (``operations/create/<create_attempt_id>``); without it
+    # those routes 404 and the page never learns the create attempt finished.
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=resolver,
@@ -122,36 +122,36 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
 
                 # Go directly to the creating page, which shows the loading /
                 # progress screen while the workspace is created in the
-                # background and redirects into it once creation completes.
-                page.goto(f"http://{host}:{port}/creating/{creation_id}")
+                # background and redirects into it once the create attempt completes.
+                page.goto(f"http://{host}:{port}/creating/{create_attempt_id}")
                 page.wait_for_selector("#creating", state="attached", timeout=5000)
                 logger.info("On creating page, waiting for SSE stream to connect...")
 
                 # Give the EventSource time to connect
                 threading.Event().wait(1)
 
-                # Now simulate the creation completing: put some log lines
+                # Now simulate the create attempt completing: put some log lines
                 # then the sentinel into the queue
-                logger.info("Simulating creation completion...")
-                log_queue.put("[test] Building something...")
-                log_queue.put("[test] Almost done...")
+                logger.info("Simulating create attempt completion...")
+                log_sink.put("[test] Building something...")
+                log_sink.put("[test] Almost done...")
                 threading.Event().wait(0.5)
 
                 # Set status to DONE with the resolved agent id + redirect URL,
                 # then put the log sentinel. The creating page's status poll
-                # (`operations/create/<creation_id>`) is the authoritative
+                # (`operations/create/<create_attempt_id>`) is the authoritative
                 # completion signal: once it returns DONE + redirect_url the page
                 # navigates to the workspace on its own. The redirect URL is the
                 # canonical `/goto/<agent>/` route the real creator populates.
                 with creator._lock:
-                    creator._statuses[str(creation_id)] = AgentCreationStatus.DONE
-                    creator._canonical_agent_ids[str(creation_id)] = agent_id
-                    creator._redirect_urls[str(creation_id)] = f"/goto/{agent_id}/"
+                    creator._statuses[str(create_attempt_id)] = AgentCreateAttemptStatus.DONE
+                    creator._canonical_agent_ids[str(create_attempt_id)] = agent_id
+                    creator._redirect_urls[str(create_attempt_id)] = f"/goto/{agent_id}/"
 
-                log_queue.put("[test] Agent created successfully.")
-                log_queue.put(LOG_SENTINEL)
+                log_sink.put("[test] Agent created successfully.")
+                log_sink.put(LOG_SENTINEL)
 
-                logger.info("Creation done, waiting for browser redirect...")
+                logger.info("CreateAttempt done, waiting for browser redirect...")
 
                 # Wait for the redirect
                 page.wait_for_url(re.compile(r"/goto/"), timeout=10000)

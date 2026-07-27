@@ -17,6 +17,7 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LogLevel
@@ -141,6 +142,49 @@ def _run_limactl(
         return cg.run_process_to_completion(cmd, timeout=timeout, on_output=on_output)
     except ProcessError as e:
         raise LimaCommandError(subcommand, e.returncode, e.stderr, e.stdout) from e
+
+
+# Substrings in a failed `limactl start` output that indicate a transient
+# network failure while fetching the base image (worth retrying). Matched
+# case-insensitively against stderr+stdout.
+_TRANSIENT_DOWNLOAD_ERROR_MARKERS: Final[tuple[str, ...]] = (
+    "tls handshake timeout",
+    "connection reset",
+    "connection refused",
+    "unexpected eof",
+    "context deadline exceeded",
+    "i/o timeout",
+    "temporary failure in name resolution",
+    "http status 500",
+    "http status 502",
+    "http status 503",
+    "http status 504",
+)
+
+# Substrings that mark the failure as permanent (the image legitimately does
+# not exist or is inaccessible); these always win over transient markers.
+_PERMANENT_DOWNLOAD_ERROR_MARKERS: Final[tuple[str, ...]] = (
+    "not found",
+    "404",
+    "403",
+    "forbidden",
+    "unauthorized",
+)
+
+
+@pure
+def is_transient_lima_download_error(error: LimaCommandError) -> bool:
+    """Whether a failed ``limactl start`` looks like a transient image-download failure.
+
+    Permanent markers (404/Not Found/403) always win: a missing image will not
+    appear on retry, so those creates should fail immediately.
+    """
+    if error.command != "start":
+        return False
+    lowered = f"{error.stderr}\n{error.stdout}".lower()
+    if any(marker in lowered for marker in _PERMANENT_DOWNLOAD_ERROR_MARKERS):
+        return False
+    return any(marker in lowered for marker in _TRANSIENT_DOWNLOAD_ERROR_MARKERS)
 
 
 def check_lima_installed(provider_name: ProviderInstanceName) -> None:

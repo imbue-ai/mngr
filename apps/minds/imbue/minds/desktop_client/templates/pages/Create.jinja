@@ -1,6 +1,6 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, cloud_accounts=[], byok_clouds_enabled=False, instance_types_by_backend={}, default_instance_type_by_backend={}, byok_region_options={}, byok_region_selected={}, selected_preset="remote", start_advanced=False, color="#0b292b", is_landing_fallback=False #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, cloud_accounts=[], byok_clouds_enabled=False, instance_types_by_backend={}, default_instance_type_by_backend={}, byok_region_options={}, byok_region_selected={}, selected_preset="remote", start_advanced=False, color="#0b292b", is_landing_fallback=False, selected_cloud_account="", selected_instance_type="" #}
 {#
-  Workspace creation form.
+  Workspace create attempt form.
 
   Two views share one form. The simple view offers two compute presets
   -- "remote" (Imbue Cloud) and "local" (directly on this computer) --
@@ -85,6 +85,10 @@
     Object.assign(REGION_SELECTED, {{ byok_region_selected | tojson }});
     var INSTANCE_TYPES = {{ instance_types_by_backend | tojson }};
     var INSTANCE_TYPE_DEFAULT = {{ default_instance_type_by_backend | tojson }};
+    // One-shot machine-size pre-fill (a retry of an interrupted create).
+    // Consumed by the first instance-type populate and then cleared, so later
+    // provider switches fall back to the per-backend defaults.
+    var instanceTypePreselect = {{ selected_instance_type | tojson }};
 
     // Bring-your-own-key account options carry value "BYOK:<block-name>" plus a
     // data-backend attr naming the real LaunchMode. This resolves the select
@@ -502,6 +506,15 @@
       }
       if (instanceTypeSelect.getAttribute('data-mode') !== mode) {
         var preselected = INSTANCE_TYPE_DEFAULT[backend] || options[0][0];
+        // Honor the server-side pre-fill once, when it names a size this
+        // backend actually offers; a stale value (the size list changed since
+        // the interrupted create) silently falls back to the default.
+        if (instanceTypePreselect) {
+          for (var j = 0; j < options.length; j++) {
+            if (options[j][0] === instanceTypePreselect) { preselected = instanceTypePreselect; break; }
+          }
+          instanceTypePreselect = '';
+        }
         instanceTypeSelect.innerHTML = '';
         for (var i = 0; i < options.length; i++) {
           var opt = document.createElement('option');
@@ -981,9 +994,13 @@
             {# Bring-your-own-key cloud accounts (pasted keys). The value carries the
                provider block name; data-backend maps back to the LaunchMode the
                create request submits, data-default-region preselects the region. #}
+            {# selected_cloud_account (a retry of an interrupted BYOK create)
+               wins over selected_launch_mode: the cloud modes are never
+               rendered as plain options, so marking the account's option here
+               is the only way a BYOK selection can be restored server-side. #}
             {% for acct in cloud_accounts %}
               <option value="BYOK:{{ acct.name }}" data-backend="{{ acct.backend | upper }}"
-                      data-default-region="{{ acct.region }}">{{ acct.alias }} ({{ acct.backend | upper }} account)</option>
+                      data-default-region="{{ acct.region }}"{% if acct.name == selected_cloud_account %} selected{% endif %}>{{ acct.alias }} ({{ acct.backend | upper }} account)</option>
             {% endfor %}
             {# Action entries: picking one opens the add-account dialog for that
                backend (the JS reverts the selection; these are never submitted). #}
@@ -1133,7 +1150,7 @@
         </div>
         <div class="mt-3">
           <FormLabel target="ca-secret-key">Secret access key</FormLabel>
-          <TextInput id="ca-secret-key" name="ca-secret-key" type="password" placeholder="paste the secret shown once at key creation" />
+          <TextInput id="ca-secret-key" name="ca-secret-key" type="password" placeholder="paste the secret shown once at key create attempt" />
         </div>
       </div>
       <div id="ca-fields-gcp" class="hidden">

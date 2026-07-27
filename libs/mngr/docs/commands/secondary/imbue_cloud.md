@@ -332,6 +332,7 @@ mngr imbue_cloud keys litellm create [OPTIONS]
 | `--budget-duration` | text | Budget reset duration (e.g. '1d', '30d') | None |
 | `--metadata` | text | JSON-encoded dict of metadata to attach to the key (e.g. agent_id=...) | None |
 | `--connector-url` | text | Override connector URL | None |
+| `--rotate-on-exists` | boolean | When --alias is already taken, delete the existing key and mint a fresh one (the whole rotation runs in this single invocation) | `False` |
 
 ## mngr imbue_cloud keys litellm list
 

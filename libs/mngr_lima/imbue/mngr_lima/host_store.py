@@ -72,6 +72,17 @@ class HostRecord(FrozenModel):
     ssh_identity_file: str | None = Field(default=None, description="Path to SSH identity file")
     config: LimaHostConfig | None = Field(default=None, description="Lima VM configuration")
     resources: HostResources | None = Field(default=None, description="Configured host resources")
+    is_creation_in_progress: bool = Field(
+        default=False,
+        description=(
+            "True while create_host is still running for this host. Written as a "
+            "name reservation before `limactl start` so concurrent creates with "
+            "the same host name conflict instead of racing; flipped back to False "
+            "by the final record write when creation completes. Discovery reports "
+            "such records as BUILDING. Default False so pre-existing on-disk "
+            "records deserialize as completed hosts."
+        ),
+    )
 
 
 class LimaHostStore(MutableModel):

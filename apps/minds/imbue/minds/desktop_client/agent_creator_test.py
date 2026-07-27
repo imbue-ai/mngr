@@ -7,10 +7,13 @@ suite (``libs/mngr_imbue_cloud``) covers the lease + adopt path; this
 file covers minds' command-building and helpers.
 """
 
-import queue
+import json
 import subprocess
 import threading
 import time
+from collections.abc import Callable
+from datetime import datetime
+from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
@@ -20,10 +23,14 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.agent_creator import CreationErrorKind
+from imbue.minds.desktop_client.agent_creator import CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES
+from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
+from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
+from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
@@ -34,7 +41,7 @@ from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import checkout_existing_branch
-from imbue.minds.desktop_client.agent_creator import classify_creation_error
+from imbue.minds.desktop_client.agent_creator import classify_create_attempt_error
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -45,13 +52,19 @@ from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.errors import PendingCreateAttemptStoreError
+from imbue.minds.errors import WorkspaceNameInUseError
 from imbue.minds.primitives import BackupProvider
-from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
@@ -137,7 +150,7 @@ def test_is_github_https_url_matches_only_github_http_urls() -> None:
     assert not _is_github_https_url("https://evil.example.com/github.com/acme/repo")
 
 
-def test_classify_creation_error_flags_any_failed_github_clone() -> None:
+def test_classify_create_attempt_error_flags_any_failed_github_clone() -> None:
     """ANY failed clone of a github.com source classifies -- no matching of
     git's error text (deliberately: substring matching is brittle, and a
     failed github clone is overwhelmingly an access problem the guidance
@@ -152,10 +165,12 @@ def test_classify_creation_error_flags_any_failed_github_clone() -> None:
         "Could not resolve host: github.com",
     )
     for message in failures:
-        assert classify_creation_error(url, GitCloneError(message)) is CreationErrorKind.GITHUB_AUTH_REQUIRED, message
+        assert (
+            classify_create_attempt_error(url, GitCloneError(message)) is CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
+        ), message
 
 
-def test_classify_creation_error_flags_non_github_remotes_generically() -> None:
+def test_classify_create_attempt_error_flags_non_github_remotes_generically() -> None:
     """A failed clone of a non-github REMOTE git source classifies as the
     generic GIT_AUTH_REQUIRED (same access guidance, without the GitHub-CLI
     advice) -- covering another host over https and scp-style ssh remotes."""
@@ -163,33 +178,34 @@ def test_classify_creation_error_flags_non_github_remotes_generically() -> None:
         "git clone failed:\nfatal: Authentication failed for 'https://gitlab.example.com/acme/repo.git/'"
     )
     assert (
-        classify_creation_error("https://gitlab.example.com/acme/repo.git", error)
-        is CreationErrorKind.GIT_AUTH_REQUIRED
+        classify_create_attempt_error("https://gitlab.example.com/acme/repo.git", error)
+        is CreateAttemptErrorKind.GIT_AUTH_REQUIRED
     )
     assert (
-        classify_creation_error("git@gitlab.example.com:acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
+        classify_create_attempt_error("git@gitlab.example.com:acme/repo.git", error)
+        is CreateAttemptErrorKind.GIT_AUTH_REQUIRED
     )
     assert (
-        classify_creation_error("ssh://git@gitlab.example.com/acme/repo.git", error)
-        is CreationErrorKind.GIT_AUTH_REQUIRED
+        classify_create_attempt_error("ssh://git@gitlab.example.com/acme/repo.git", error)
+        is CreateAttemptErrorKind.GIT_AUTH_REQUIRED
     )
 
 
-def test_classify_creation_error_ignores_local_paths_and_bare_input() -> None:
+def test_classify_create_attempt_error_ignores_local_paths_and_bare_input() -> None:
     """A clone failure on a local path is not an access problem, and a bare
     non-remote string is not a recognizable remote -- neither classifies."""
     error = GitCloneError("git clone failed:\nfatal: repository not found")
-    assert classify_creation_error("/local/path/to/repo", error) is None
-    assert classify_creation_error("./relative/repo", error) is None
-    assert classify_creation_error("~/repo", error) is None
-    assert classify_creation_error("just-a-name", error) is None
+    assert classify_create_attempt_error("/local/path/to/repo", error) is None
+    assert classify_create_attempt_error("./relative/repo", error) is None
+    assert classify_create_attempt_error("~/repo", error) is None
+    assert classify_create_attempt_error("just-a-name", error) is None
 
 
-def test_classify_creation_error_ignores_non_clone_errors() -> None:
+def test_classify_create_attempt_error_ignores_non_clone_errors() -> None:
     """Only clone failures classify; a downstream mngr failure that happens to
     echo an auth-shaped string must not trigger the clone guidance."""
     error = MngrCommandError("mngr create failed:\nfatal: could not read Username for 'https://github.com'")
-    assert classify_creation_error("https://github.com/acme/repo.git", error) is None
+    assert classify_create_attempt_error("https://github.com/acme/repo.git", error) is None
 
 
 def test_redact_url_credentials_strips_userinfo_for_schemed_urls() -> None:
@@ -1044,6 +1060,9 @@ def _make_test_creator(
     notification_dispatcher: NotificationDispatcher | None = None,
     backup_setup_retry_budget_seconds: float = 0.0,
     backup_setup_retry_wait_seconds: float = 0.0,
+    pending_create_attempt_store: PendingCreateAttemptStore | None = None,
+    mngr_binary: str | None = None,
+    on_create_attempts_changed: Callable[[], None] | None = None,
 ) -> AgentCreator:
     paths = WorkspacePaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -1061,6 +1080,9 @@ def _make_test_creator(
         system_interface_health_tracker=system_interface_health_tracker or SystemInterfaceHealthTracker(),
         backup_setup_retry_budget_seconds=backup_setup_retry_budget_seconds,
         backup_setup_retry_wait_seconds=backup_setup_retry_wait_seconds,
+        pending_create_attempt_store=pending_create_attempt_store,
+        on_create_attempts_changed=on_create_attempts_changed,
+        mngr_binary=mngr_binary if mngr_binary is not None else MNGR_BINARY,
     )
 
 
@@ -1139,24 +1161,24 @@ def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) 
 def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:
     """Default construction (``mngr_forward_port=0``) skips the probe entirely."""
     creator = _make_test_creator(tmp_path, mngr_forward_port=0, preauth_cookie="anything")
-    log_q: queue.Queue[str] = queue.Queue()
+    log_sink = CreateAttemptLogSink()
     aid = AgentId.generate()
     started = time.monotonic()
-    creator._wait_for_workspace_ready(aid, log_q)
+    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
     # Returns immediately -- no network calls, no log lines.
     assert time.monotonic() - started < 0.1
-    assert log_q.empty()
+    assert log_sink.appended_line_count == 0
 
 
 def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> None:
     """Empty preauth cookie also disables the probe (the plugin requires auth)."""
     creator = _make_test_creator(tmp_path, mngr_forward_port=8421, preauth_cookie="")
-    log_q: queue.Queue[str] = queue.Queue()
+    log_sink = CreateAttemptLogSink()
     aid = AgentId.generate()
     started = time.monotonic()
-    creator._wait_for_workspace_ready(aid, log_q)
+    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
     assert time.monotonic() - started < 0.1
-    assert log_q.empty()
+    assert log_sink.appended_line_count == 0
 
 
 def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
@@ -1171,18 +1193,16 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
             poll_interval_seconds=0.02,
             probe_timeout_seconds=0.5,
         )
-        log_q: queue.Queue[str] = queue.Queue()
+        log_sink = CreateAttemptLogSink()
         # The probe connects to the plugin on loopback and carries the agent
         # vhost only in the Host header, so the http.server bound to 127.0.0.1
         # answers it without any ``*.localhost`` name resolution. Construct a
         # plausible-looking AgentId so the Host header is well-formed.
         aid = AgentId.generate()
-        creator._wait_for_workspace_ready(aid, log_q)
+        creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
     finally:
         server.shutdown()
-    drained: list[str] = []
-    while not log_q.empty():
-        drained.append(log_q.get_nowait())
+    drained = list(log_sink.read_chunk(0, timeout_seconds=0.0).lines)
     assert any("Waiting for system interface" in line for line in drained)
     # Assert the *success* line specifically -- the timeout-warning line also
     # contains the word "ready", so a substring check would pass on a timeout.
@@ -1218,7 +1238,7 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
             probe_timeout_seconds=0.5,
             system_interface_health_tracker=tracker,
         )
-        creator._wait_for_workspace_ready(aid, queue.Queue())
+        creator._wait_for_workspace_ready(aid, CreateAttemptLogSink(), creator.workspace_ready_timeout_seconds)
     finally:
         server.shutdown()
     # ``record_probe_success`` de-enrolled the agent, so it is no longer a
@@ -1331,19 +1351,17 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
             poll_interval_seconds=0.05,
             probe_timeout_seconds=0.2,
         )
-        log_q: queue.Queue[str] = queue.Queue()
+        log_sink = CreateAttemptLogSink()
         aid = AgentId.generate()
         started = time.monotonic()
-        creator._wait_for_workspace_ready(aid, log_q)
+        creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
         elapsed = time.monotonic() - started
     finally:
         server.shutdown()
     # The probe should give up around the timeout; allow a generous margin
     # so we don't flake under load.
     assert 0.2 <= elapsed <= 1.5
-    drained: list[str] = []
-    while not log_q.empty():
-        drained.append(log_q.get_nowait())
+    drained = list(log_sink.read_chunk(0, timeout_seconds=0.0).lines)
     assert any("did not become ready" in line for line in drained)
 
 
@@ -1352,7 +1370,7 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
 #
 # AI-provider selection moved out of the create flow entirely: workspaces boot
 # unauthenticated and sign in through the workspace's own Claude modal. These
-# guard the removal -- creation must never mint a LiteLLM key (the mint moved
+# guard the removal -- create attempt must never mint a LiteLLM key (the mint moved
 # to the desktop app's /settings/ai-keys page; see ai_keys_test.py).
 # ---------------------------------------------------------------------------
 
@@ -1377,26 +1395,28 @@ def _make_creator_with_cli(tmp_path: Path, cli: RecordingImbueCloudCli) -> Agent
     )
 
 
-def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 30.0) -> None:
-    """Poll ``get_creation_info`` until status is DONE or FAILED, then return.
+def _wait_until_finished(
+    creator: AgentCreator, create_attempt_id: CreateAttemptId, deadline_seconds: float = 30.0
+) -> None:
+    """Poll ``get_create_attempt_info`` until status is DONE or FAILED, then return.
 
     The deadline is only a ceiling -- the loop returns the instant the status is
     terminal, so a passing test never waits for it. It is set to 30s (matching the
-    ``@pytest.mark.timeout(30)`` on the creation tests) so heavy setup under
+    ``@pytest.mark.timeout(30)`` on the create attempt tests) so heavy setup under
     offload CI contention does not trip a spurious timeout at the old 10s.
     """
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
-        info = creator.get_creation_info(creation_id)
-        if info is not None and info.status in (AgentCreationStatus.DONE, AgentCreationStatus.FAILED):
+        info = creator.get_create_attempt_info(create_attempt_id)
+        if info is not None and info.status in (AgentCreateAttemptStatus.DONE, AgentCreateAttemptStatus.FAILED):
             return
         threading.Event().wait(0.05)
-    raise AssertionError(f"creation {creation_id} did not finish within {deadline_seconds}s")
+    raise AssertionError(f"create attempt {create_attempt_id} did not finish within {deadline_seconds}s")
 
 
 @pytest.mark.timeout(30)
-def test_start_creation_never_mints_a_litellm_key(tmp_path: Path) -> None:
-    """Creation injects no Anthropic credentials: even with an imbue_cloud
+def test_start_create_attempt_never_mints_a_litellm_key(tmp_path: Path) -> None:
+    """CreateAttempt injects no Anthropic credentials: even with an imbue_cloud
     account supplied (for compute/backups), no LiteLLM key is minted -- the
     workspace signs in through its own modal after boot."""
     cli = RecordingImbueCloudCli(
@@ -1404,13 +1424,13 @@ def test_start_creation_never_mints_a_litellm_key(tmp_path: Path) -> None:
     )
     creator = _make_creator_with_cli(tmp_path, cli)
 
-    creation_id = creator.start_creation(
+    create_attempt_id = creator.start_create_attempt(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
         launch_mode=LaunchMode.DOCKER,
         account_email="alice@imbue.com",
     )
-    _wait_until_finished(creator, creation_id)
+    _wait_until_finished(creator, create_attempt_id)
 
     assert cli.create_calls == []
 
@@ -1481,3 +1501,488 @@ def test_checkout_existing_branch_raises_for_missing_branch(tmp_path: Path) -> N
         checkout_existing_branch(dest, GitBranch("no-such-branch-55307"))
 
     assert "no-such-branch-55307" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Pending-create-attempt records, workspace-id host label, and in-flight name guard
+# ---------------------------------------------------------------------------
+
+
+def test_build_mngr_create_command_stamps_workspace_id_host_label_for_lima() -> None:
+    command = _build_mngr_create_command(
+        LaunchMode.LIMA, HostName("test-agent"), workspace_id_label="create-attempt-abc123"
+    )
+    label_idx = command.index("--host-label")
+    assert command[label_idx + 1] == "workspace-id=create-attempt-abc123"
+
+
+def test_build_mngr_create_command_stamps_workspace_id_host_label_for_docker() -> None:
+    command = _build_mngr_create_command(
+        LaunchMode.DOCKER, HostName("test-agent"), workspace_id_label="create-attempt-abc123"
+    )
+    label_idx = command.index("--host-label")
+    assert command[label_idx + 1] == "workspace-id=create-attempt-abc123"
+
+
+def test_build_mngr_create_command_omits_workspace_id_host_label_when_unset() -> None:
+    for launch_mode in (LaunchMode.LIMA, LaunchMode.DOCKER):
+        command = _build_mngr_create_command(launch_mode, HostName("test-agent"))
+        assert "--host-label" not in command
+
+
+def test_create_attempt_log_sink_replays_lines_and_marks_done_on_sentinel() -> None:
+    log_sink = CreateAttemptLogSink()
+    for line in ("one", "two", "three", "four"):
+        log_sink.put(line)
+    log_sink.put(LOG_SENTINEL)
+
+    # A full replay from index 0 sees every real line; the sentinel is never
+    # buffered -- it only flips the done flag.
+    first = log_sink.read_chunk(0, timeout_seconds=0.0)
+    assert first.lines == ("one", "two", "three", "four")
+    assert first.is_done
+    assert not first.is_truncated
+    # A second reader replays the same history (the buffer is not consume-once).
+    assert log_sink.read_chunk(0, timeout_seconds=0.0).lines == ("one", "two", "three", "four")
+    # Reading past the end returns an empty terminal chunk.
+    tail = log_sink.read_chunk(first.next_index, timeout_seconds=0.0)
+    assert tail.lines == ()
+    assert tail.is_done
+
+
+def test_create_attempt_log_sink_truncates_replay_beyond_the_buffer_cap() -> None:
+    log_sink = CreateAttemptLogSink()
+    total_line_count = CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES + 25
+    for i in range(total_line_count):
+        log_sink.put(f"line-{i}")
+
+    replay = log_sink.read_chunk(0, timeout_seconds=0.0)
+    # Only the most recent CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES survive, and the
+    # replay is flagged truncated so the streamer can emit a marker.
+    assert replay.is_truncated
+    assert len(replay.lines) == CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES
+    assert replay.lines[0] == "line-25"
+    assert replay.lines[-1] == f"line-{total_line_count - 1}"
+    assert replay.next_index == total_line_count
+    # A reader already past the drop point is not flagged.
+    assert not log_sink.read_chunk(total_line_count - 5, timeout_seconds=0.0).is_truncated
+    # The FAILED-record snapshot takes the newest lines.
+    assert log_sink.tail_lines(3) == (
+        f"line-{total_line_count - 3}",
+        f"line-{total_line_count - 2}",
+        f"line-{total_line_count - 1}",
+    )
+    # A zero-line tail is empty (not the whole buffer via the [-0:] slice).
+    assert log_sink.tail_lines(0) == ()
+
+
+class _ParkedAgentCreator(AgentCreator):
+    """Creator whose background worker parks until released, keeping create attempts live.
+
+    ``start_create_attempt``'s bookkeeping (status maps, duplicate guard, pending
+    record) runs unmodified; only the background thread body is replaced so
+    the create attempt deterministically stays non-terminal for the duration of a
+    test instead of racing a real clone + ``mngr create``.
+    """
+
+    _release: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def _create_agent_background(self, create_attempt_id: CreateAttemptId, *args: object, **kwargs: object) -> None:
+        del create_attempt_id, args, kwargs
+        self._release.wait(timeout=30.0)
+
+    def release_all(self) -> None:
+        self._release.set()
+
+
+def _make_parked_creator(
+    tmp_path: Path, pending_create_attempt_store: PendingCreateAttemptStore | None = None
+) -> _ParkedAgentCreator:
+    cg = ConcurrencyGroup(name="agent-creator-test")
+    cg.__enter__()
+    return _ParkedAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds-data"),
+        root_concurrency_group=cg,
+        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        pending_create_attempt_store=pending_create_attempt_store,
+    )
+
+
+def test_start_create_attempt_rejects_duplicate_in_flight_name_on_same_provider(tmp_path: Path) -> None:
+    creator = _make_parked_creator(tmp_path)
+    creator.start_create_attempt(
+        "https://example.com/repo.git", host_name="dup-name-71503", launch_mode=LaunchMode.DOCKER
+    )
+
+    # Same name + same provider instance: hard reject (case-insensitively).
+    with pytest.raises(WorkspaceNameInUseError):
+        creator.start_create_attempt(
+            "https://example.com/repo.git", host_name="DUP-Name-71503", launch_mode=LaunchMode.DOCKER
+        )
+
+    # Same name on a DIFFERENT provider instance is fine (per-provider scope).
+    creator.start_create_attempt(
+        "https://example.com/repo.git", host_name="dup-name-71503", launch_mode=LaunchMode.LIMA
+    )
+
+    creator.release_all()
+    creator.wait_for_all()
+
+
+def test_live_in_flight_host_names_scopes_by_provider(tmp_path: Path) -> None:
+    creator = _make_parked_creator(tmp_path)
+    creator.start_create_attempt(
+        "https://example.com/repo.git", host_name="lima-name-88104", launch_mode=LaunchMode.LIMA
+    )
+    creator.start_create_attempt(
+        "https://example.com/repo.git", host_name="docker-name-88104", launch_mode=LaunchMode.DOCKER
+    )
+
+    assert creator.live_in_flight_host_names("lima") == {"lima-name-88104"}
+    assert creator.live_in_flight_host_names("docker") == {"docker-name-88104"}
+    # Unscoped: the union across providers (feeds the workspace-N auto-namer).
+    assert creator.live_in_flight_host_names() == {"lima-name-88104", "docker-name-88104"}
+
+    creator.release_all()
+    creator.wait_for_all()
+
+
+def test_terminal_create_attempt_frees_its_name(tmp_path: Path) -> None:
+    creator = _make_test_creator(tmp_path)
+    create_attempt_id = creator.start_create_attempt("file:///nonexistent-repo-63927", host_name="freed-name-63927")
+    _wait_until_finished(creator, create_attempt_id)
+
+    assert creator.live_in_flight_host_names() == set()
+    # A fresh create may reuse the dead create attempt's name without a conflict.
+    second_id = creator.start_create_attempt("file:///nonexistent-repo-63927", host_name="freed-name-63927")
+    _wait_until_finished(creator, second_id)
+    creator.wait_for_all()
+
+
+def test_start_create_attempt_writes_pending_record_before_spawn(tmp_path: Path) -> None:
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    creator = _make_parked_creator(tmp_path, pending_create_attempt_store=store)
+
+    create_attempt_id = creator.start_create_attempt(
+        "https://example.com/repo.git",
+        host_name="recorded-name-40118",
+        display_name="Recorded Name",
+        branch="feature-1",
+        launch_mode=LaunchMode.LIMA,
+        color="#a1b2c3",
+        account_id="user-40118",
+        account_email="user-40118@example.com",
+    )
+
+    record = store.read_record(str(create_attempt_id))
+    assert record is not None
+    assert record.state is PendingCreateAttemptState.IN_FLIGHT
+    assert record.provider_instance_name == "lima"
+    assert record.request.repo_source == "https://example.com/repo.git"
+    assert record.request.host_name == "recorded-name-40118"
+    assert record.request.display_name == "Recorded Name"
+    assert record.request.branch == "feature-1"
+    assert record.request.launch_mode is LaunchMode.LIMA
+    assert record.request.color == "#a1b2c3"
+    assert record.request.account_id == "user-40118"
+    assert record.request.account_email == "user-40118@example.com"
+
+    creator.release_all()
+    creator.wait_for_all()
+
+
+@pytest.mark.timeout(30)
+def test_failed_create_attempt_marks_pending_record_failed_with_log_tail(tmp_path: Path) -> None:
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    creator = _make_test_creator(tmp_path, pending_create_attempt_store=store)
+
+    create_attempt_id = creator.start_create_attempt("file:///nonexistent-repo-52977", host_name="failing-name-52977")
+    _wait_until_finished(creator, create_attempt_id)
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    record = store.read_record(str(create_attempt_id))
+    assert record is not None
+    assert record.state is PendingCreateAttemptState.FAILED
+    assert record.error
+    assert record.log_tail, "the FAILED record must carry the create attempt log tail"
+    creator.wait_for_all()
+
+
+class _TerminalWriteFailingPendingCreateAttemptStore(PendingCreateAttemptStore):
+    """Store where the initial IN_FLIGHT write succeeds but the terminal flips fail.
+
+    Simulates the disk going bad mid-create: ``mark_done`` / ``mark_failed``
+    both read the (present) record and then hit the failing write.
+    """
+
+    def write_record(self, record: PendingCreateAttemptRecord) -> None:
+        if record.state is not PendingCreateAttemptState.IN_FLIGHT:
+            raise PendingCreateAttemptStoreError(f"disk full while writing {record.create_attempt_id}")
+        super().write_record(record)
+
+
+@pytest.mark.timeout(30)
+def test_create_attempt_survives_pending_store_write_failure_on_terminal_flip(tmp_path: Path) -> None:
+    """Store write errors are downgraded to warnings, never thread crashes.
+
+    The record is the crash-safety net, not a precondition: a store that fails
+    at the FAILED flip must not prevent the create attempt from reaching its terminal
+    in-memory status (here FAILED for an unreachable repo).
+    """
+    store = _TerminalWriteFailingPendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    creator = _make_test_creator(tmp_path, pending_create_attempt_store=store)
+
+    create_attempt_id = creator.start_create_attempt("file:///nonexistent-repo-18344", host_name="store-broken-18344")
+    _wait_until_finished(creator, create_attempt_id)
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    # The record survives, still IN_FLIGHT: only the terminal flip was lost.
+    record = store.read_record(str(create_attempt_id))
+    assert record is not None
+    assert record.state is PendingCreateAttemptState.IN_FLIGHT
+    creator.wait_for_all()
+
+
+def test_mark_pending_create_attempt_done_downgrades_store_errors(tmp_path: Path) -> None:
+    """A store failure while flipping DONE must not raise into the create attempt thread."""
+    store = _TerminalWriteFailingPendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    creator = _make_parked_creator(tmp_path, pending_create_attempt_store=store)
+    create_attempt_id = creator.start_create_attempt("https://example.com/repo.git", host_name="done-broken-73551")
+
+    # Does not raise; the DONE flip is simply lost (warned, not fatal).
+    creator._mark_pending_create_attempt_done(str(create_attempt_id), "agent-y", "host-z")
+
+    record = store.read_record(str(create_attempt_id))
+    assert record is not None
+    assert record.state is PendingCreateAttemptState.IN_FLIGHT
+    creator.release_all()
+    creator.wait_for_all()
+
+
+def _make_dead_record(
+    create_attempt_id: str,
+    *,
+    provider_instance_name: str = "lima",
+    host_name: str = "retry-name-90210",
+    state: PendingCreateAttemptState = PendingCreateAttemptState.IN_FLIGHT,
+) -> PendingCreateAttemptRecord:
+    now = datetime.now(timezone.utc)
+    return PendingCreateAttemptRecord(
+        create_attempt_id=create_attempt_id,
+        state=state,
+        provider_instance_name=provider_instance_name,
+        created_at=now,
+        updated_at=now,
+        request=PendingCreateAttemptRequest(
+            repo_source="https://example.com/repo.git",
+            host_name=host_name,
+            launch_mode=LaunchMode.LIMA if provider_instance_name == "lima" else LaunchMode.DOCKER,
+        ),
+    )
+
+
+def _write_fake_discard_mngr(
+    tmp_path: Path,
+    hosts_payload: dict[str, object],
+    destroy_exit_code: int = 0,
+) -> tuple[str, Path]:
+    """Fake ``mngr`` for the implicit-discard tests.
+
+    ``list`` prints the canned hosts payload; ``destroy`` exits with
+    ``destroy_exit_code``. Every invocation's argv is appended to a calls log.
+    """
+    calls_path = tmp_path / "implicit-discard-calls.log"
+    calls_path.write_text("")
+    listing_path = tmp_path / "implicit-discard-hosts.json"
+    listing_path.write_text(json.dumps(hosts_payload))
+    script_path = tmp_path / "fake-implicit-discard-mngr"
+    script_path.write_text(
+        "#!/bin/bash\n"
+        f'echo "$@" >> "{calls_path}"\n'
+        'if [ "$1" = "list" ]; then\n'
+        f'  cat "{listing_path}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "destroy" ]; then\n'
+        f"  exit {destroy_exit_code}\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    script_path.chmod(0o755)
+    return str(script_path), calls_path
+
+
+def test_forget_create_attempt_drops_terminal_create_attempts_but_refuses_live_ones(tmp_path: Path) -> None:
+    creator = _make_parked_creator(tmp_path)
+    live_id = creator.start_create_attempt("https://example.com/repo.git", host_name="live-name-31337")
+
+    # A live create attempt is never forgotten: its worker still publishes status.
+    assert creator.forget_create_attempt(live_id) is False
+    assert creator.get_create_attempt_info(live_id) is not None
+
+    creator.release_all()
+    creator.wait_for_all()
+
+    failed_creator = _make_test_creator(tmp_path)
+    failed_id = failed_creator.start_create_attempt("file:///nonexistent-repo-31337", host_name="dead-name-31337")
+    _wait_until_finished(failed_creator, failed_id)
+
+    assert failed_creator.forget_create_attempt(failed_id) is True
+    assert failed_creator.get_create_attempt_info(failed_id) is None
+    assert failed_creator.list_create_attempt_infos() == []
+    assert failed_creator.get_log_sink(failed_id) is None
+    failed_creator.wait_for_all()
+
+
+def test_list_create_attempt_infos_snapshots_every_tracked_create_attempt(tmp_path: Path) -> None:
+    creator = _make_parked_creator(tmp_path)
+    lima_id = creator.start_create_attempt(
+        "https://example.com/repo.git", host_name="snap-a-47", launch_mode=LaunchMode.LIMA
+    )
+    docker_id = creator.start_create_attempt(
+        "https://example.com/repo.git", host_name="snap-b-47", launch_mode=LaunchMode.DOCKER
+    )
+
+    infos_by_id = {str(info.create_attempt_id): info for info in creator.list_create_attempt_infos()}
+    assert set(infos_by_id) == {str(lima_id), str(docker_id)}
+    assert infos_by_id[str(lima_id)].provider_instance_name == "lima"
+    assert infos_by_id[str(docker_id)].provider_instance_name == "docker"
+
+    creator.release_all()
+    creator.wait_for_all()
+
+
+@pytest.mark.timeout(30)
+def test_on_create_attempts_changed_fires_on_start_and_terminal_state(tmp_path: Path) -> None:
+    fired = threading.Event()
+    fire_count: list[int] = []
+
+    def _on_changed() -> None:
+        fire_count.append(1)
+        fired.set()
+
+    creator = _make_test_creator(tmp_path, on_create_attempts_changed=_on_changed)
+    create_attempt_id = creator.start_create_attempt("file:///nonexistent-repo-61555", host_name="notify-name-61555")
+    assert fire_count, "start_create_attempt must fire the change callback"
+    _wait_until_finished(creator, create_attempt_id)
+    # The FAILED flip fires it again (at least twice total).
+    assert len(fire_count) >= 2
+    creator.wait_for_all()
+
+
+def test_implicit_discard_destroys_leftover_host_and_deletes_dead_record(tmp_path: Path) -> None:
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    dead_record = _make_dead_record("create-attempt-" + "a" * 32, host_name="retry-name-90210")
+    store.write_record(dead_record)
+    mngr_binary, calls_path = _write_fake_discard_mngr(
+        tmp_path,
+        {
+            "hosts": [
+                {
+                    "id": "host-leftover",
+                    "name": "retry-name-90210",
+                    "provider": "lima",
+                    "state": "BUILDING",
+                    "labels": {"workspace-id": dead_record.create_attempt_id},
+                }
+            ]
+        },
+    )
+    creator = _make_test_creator(tmp_path, pending_create_attempt_store=store, mngr_binary=mngr_binary)
+
+    creator._discard_dead_create_attempts_holding_name(
+        current_create_attempt_id_str="create-attempt-" + "0" * 32,
+        provider_instance_name="lima",
+        # Case-insensitive name match, mirroring the live-name guard.
+        host_name="RETRY-Name-90210",
+        log_sink=CreateAttemptLogSink(),
+    )
+
+    calls = [line for line in calls_path.read_text().splitlines() if line]
+    assert "destroy @host-leftover.lima --force" in calls
+    assert store.read_record(dead_record.create_attempt_id) is None
+
+
+def test_implicit_discard_keeps_record_when_the_destroy_fails(tmp_path: Path) -> None:
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    dead_record = _make_dead_record("create-attempt-" + "b" * 32, host_name="retry-name-90211")
+    store.write_record(dead_record)
+    mngr_binary, _calls_path = _write_fake_discard_mngr(
+        tmp_path,
+        {
+            "hosts": [
+                {
+                    "id": "host-leftover",
+                    "name": "retry-name-90211",
+                    "provider": "lima",
+                    "labels": {"workspace-id": dead_record.create_attempt_id},
+                }
+            ]
+        },
+        destroy_exit_code=1,
+    )
+    creator = _make_test_creator(tmp_path, pending_create_attempt_store=store, mngr_binary=mngr_binary)
+    log_sink = CreateAttemptLogSink()
+
+    creator._discard_dead_create_attempts_holding_name(
+        current_create_attempt_id_str="create-attempt-" + "0" * 32,
+        provider_instance_name="lima",
+        host_name="retry-name-90211",
+        log_sink=log_sink,
+    )
+
+    # The record stays (its row remains for a manual discard) and the create
+    # log carries the warning.
+    assert store.read_record(dead_record.create_attempt_id) is not None
+    logged = list(log_sink.read_chunk(0, timeout_seconds=0.0).lines)
+    assert any("could not remove" in line for line in logged)
+
+
+def test_implicit_discard_is_provider_scoped_and_ignores_done_records(tmp_path: Path) -> None:
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    other_provider_record = _make_dead_record(
+        "create-attempt-" + "c" * 32, provider_instance_name="docker", host_name="scoped-name-90212"
+    )
+    store.write_record(other_provider_record)
+    done_record = _make_dead_record(
+        "create-attempt-" + "d" * 32, host_name="scoped-name-90212", state=PendingCreateAttemptState.DONE
+    )
+    store.write_record(done_record)
+    mngr_binary, calls_path = _write_fake_discard_mngr(tmp_path, {"hosts": []})
+    creator = _make_test_creator(tmp_path, pending_create_attempt_store=store, mngr_binary=mngr_binary)
+
+    creator._discard_dead_create_attempts_holding_name(
+        current_create_attempt_id_str="create-attempt-" + "0" * 32,
+        provider_instance_name="lima",
+        host_name="scoped-name-90212",
+        log_sink=CreateAttemptLogSink(),
+    )
+
+    # No matching dead record on lima: nothing listed, nothing destroyed,
+    # both records intact (the docker one is another provider's row; the DONE
+    # one represents a real workspace).
+    assert calls_path.read_text() == ""
+    assert store.read_record(other_provider_record.create_attempt_id) is not None
+    assert store.read_record(done_record.create_attempt_id) is not None
+
+
+def test_implicit_discard_deletes_record_when_no_leftover_host_exists(tmp_path: Path) -> None:
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    dead_record = _make_dead_record("create-attempt-" + "e" * 32, host_name="hostless-name-90213")
+    store.write_record(dead_record)
+    mngr_binary, calls_path = _write_fake_discard_mngr(tmp_path, {"hosts": []})
+    creator = _make_test_creator(tmp_path, pending_create_attempt_store=store, mngr_binary=mngr_binary)
+
+    creator._discard_dead_create_attempts_holding_name(
+        current_create_attempt_id_str="create-attempt-" + "0" * 32,
+        provider_instance_name="lima",
+        host_name="hostless-name-90213",
+        log_sink=CreateAttemptLogSink(),
+    )
+
+    calls = [line for line in calls_path.read_text().splitlines() if line]
+    assert calls == ["list --hosts --provider lima --format json"]
+    assert store.read_record(dead_record.create_attempt_id) is None

@@ -18,8 +18,8 @@ import pytest
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import _build_destroy_command
-from imbue.minds.desktop_client.destroying import _is_pid_alive
 from imbue.minds.desktop_client.destroying import delete_destroying
+from imbue.minds.desktop_client.destroying import is_pid_alive
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.destroying import read_host_id
@@ -32,14 +32,14 @@ from imbue.mngr.primitives import HostId
 def _wait_for_pid_exit(pid: int, timeout: float = 5.0, poll: float = 0.05) -> bool:
     """Block until ``pid`` is no longer alive (or ``timeout`` elapses).
 
-    Uses ``destroying._is_pid_alive`` so that zombie children (the test
+    Uses ``destroying.is_pid_alive`` so that zombie children (the test
     process is the Popen parent in tests; the destroy bash exits to
     zombie state until reaped) get reaped via ``os.waitpid`` and
     correctly transition to "not alive".
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not _is_pid_alive(pid):
+        if not is_pid_alive(pid):
             return True
         time.sleep(poll)
     return False
