@@ -7,11 +7,11 @@ workspace-association handler, and the workspace-disassociation handler in
 routing them through the router module made the dependency graph
 unnecessarily fan-shaped.
 
-The token lives at ``runtime/secrets/cloudflare_tunnel.env`` inside the agent.
-``runtime/secrets/`` is a directory of per-secret ``*.env`` files (this token,
+The token lives at ``data/.secrets/cloudflare_tunnel.env`` inside the agent.
+``data/.secrets/`` is a directory of per-secret ``*.env`` files (this token,
 ``restic.env`` for backups); each writer owns its
 own file so they never clobber one another. The agent's cloudflare-tunnel
-service (``libs/cloudflare_tunnel/.../runner.py``) watches this file: it starts
+service (``system/libs/cloudflare_tunnel/.../runner.py``) watches this file: it starts
 cloudflared when the token appears and stops it when the file is removed.
 """
 
@@ -24,7 +24,7 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.primitives import AgentId
 
 # Path (relative to the agent's work_dir) the cloudflare-tunnel service watches.
-_TUNNEL_TOKEN_FILE: Final[str] = "runtime/secrets/cloudflare_tunnel.env"
+_TUNNEL_TOKEN_FILE: Final[str] = "data/.secrets/cloudflare_tunnel.env"
 
 # Generous ceiling for the single ``mngr exec`` that writes/removes the token file.
 _TUNNEL_TOKEN_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
@@ -43,7 +43,7 @@ def inject_tunnel_token_into_agent(agent_id: AgentId, token: str, mngr_caller: M
         [
             "exec",
             str(agent_id),
-            f"mkdir -p runtime/secrets && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\\n' {safe_token} > {_TUNNEL_TOKEN_FILE}",
+            f"mkdir -p data/.secrets && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\\n' {safe_token} > {_TUNNEL_TOKEN_FILE}",
         ],
         timeout=_TUNNEL_TOKEN_EXEC_TIMEOUT_SECONDS,
     )

@@ -4,7 +4,7 @@ minds is the source of truth for how to reach each workspace's restic
 repository. For every workspace with backups configured, minds keeps the
 definitive ``restic.env`` (repository URL + backend credentials + the
 workspace's random ``RESTIC_PASSWORD``) here, 0600, under the minds env's
-data dir. The copy inside the workspace at ``runtime/secrets/restic.env``
+data dir. The copy inside the workspace at ``data/.secrets/restic.env``
 is just an injected mirror of this file; config changes are made here and
 re-injected whole.
 

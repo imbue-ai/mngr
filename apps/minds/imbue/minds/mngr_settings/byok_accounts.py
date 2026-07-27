@@ -16,6 +16,9 @@ from imbue.minds.mngr_settings.provider_blocks import AWS_DOCKER_RUNTIME
 from imbue.minds.mngr_settings.provider_blocks import AWS_INSTALL_GVISOR_RUNTIME
 from imbue.minds.mngr_settings.provider_blocks import BYOK_PROVIDER_NAME_PREFIX
 from imbue.minds.mngr_settings.provider_blocks import BYOK_SUPPORTED_BACKENDS
+from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_DIR
+from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_LOG_DIR
+from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_VOLUME_HOME_PATH
 from imbue.minds.mngr_settings.provider_blocks import cloud_account_provider_name
 from imbue.minds.mngr_settings.provider_blocks import remove_provider_block
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings
@@ -160,6 +163,10 @@ def _register_cloud_account_block(
         raise MindsSettingsError(f"A cloud account named {alias!r} already exists ({provider_name})")
     block = tomlkit.table()
     block["backend"] = backend
+    # Every vps-based backend gets the user-data layout knobs (see provider_blocks).
+    block["host_dir"] = WORKSPACE_HOST_DIR
+    block["volume_home_path"] = WORKSPACE_VOLUME_HOME_PATH
+    block["host_log_dir"] = WORKSPACE_HOST_LOG_DIR
     # Per-backend placement + shape.
     # AWS keeps the gVisor hardening knobs; GCP / Azure run the providers' default docker runtime (their templates' hardening args are runtime-agnostic).
     # GCE is zonal, so the GCP "region" value is a zone.

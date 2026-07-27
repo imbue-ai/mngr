@@ -75,6 +75,7 @@ def generate_default_lima_yaml(
     host_data_disk_name: str | None = None,
     host_data_disk_size: str | None = None,
     root_authorized_public_key: str | None = None,
+    volume_home_path: str | None = None,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
@@ -101,6 +102,10 @@ def generate_default_lima_yaml(
         root_authorized_public_key: Optional client public key to authorize for
             the VM's root user. When provided, the provisioning script enables
             key-based root login so mngr can run the agent as root.
+        volume_home_path: Optional container-side path (e.g. /home/user) that
+            is symlinked to the btrfs data disk INSTEAD of host_dir; host_dir
+            must then be a path inside it and is mkdir'd on the disk. Only
+            meaningful together with host_data_disk_name.
     """
     image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
@@ -112,6 +117,7 @@ def generate_default_lima_yaml(
         host_dir=host_dir,
         host_data_disk_name=host_data_disk_name,
         root_authorized_public_key=root_authorized_public_key,
+        volume_home_path=volume_home_path,
     )
 
     config: dict = {
@@ -161,6 +167,7 @@ def _build_provisioning_script(
     host_dir: str = "/mngr",
     host_data_disk_name: str | None = None,
     root_authorized_public_key: str | None = None,
+    volume_home_path: str | None = None,
 ) -> str:
     """Build the Lima ``provision[mode=system]`` script.
 
@@ -173,7 +180,7 @@ def _build_provisioning_script(
     land the btrfs host-data disk at the canonical mount point.
     """
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
-    host_data_disk_block = _build_host_data_disk_block(host_data_disk_name, host_dir)
+    host_data_disk_block = _build_host_data_disk_block(host_data_disk_name, host_dir, volume_home_path)
     root_authorized_keys_block = _build_root_authorized_keys_block(root_authorized_public_key)
     # Permit key-based root login only when the agent runs as root; the default
     # (non-root) path leaves sshd's PermitRootLogin untouched.
@@ -286,21 +293,32 @@ chmod 600 /root/.ssh/authorized_keys
 chown -R root:root /root/.ssh"""
 
 
-def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) -> str:
-    """Return a bash block that symlinks ``host_dir`` to Lima's auto-mounted btrfs disk, or an inert comment when no disk was attached.
+def _build_host_data_disk_block(
+    host_data_disk_name: str | None,
+    host_dir: str,
+    volume_home_path: str | None,
+) -> str:
+    """Return a bash block that symlinks the data path to Lima's auto-mounted btrfs disk, or an inert comment when no disk was attached.
 
     Lima auto-mounts named ``additionalDisks`` with ``format: true`` inside
     the guest under ``/mnt/lima-<disk_name>`` via a generated systemd .mount
-    unit. We symlink ``host_dir`` directly to that path -- no intermediate
+    unit. We symlink the data path directly to that path -- no intermediate
     bind-mount onto a canonical "host-volume" path. The bind-mount approach
     we tried first stacked an empty-ext4 layer under the btrfs mount when
     the fstab-generated unit fired before Lima's auto-mount; symlinking
     directly to Lima's path avoids the ordering issue entirely.
+
+    The symlinked path is ``host_dir`` by default; when ``volume_home_path``
+    is set (e.g. /home/user), that path is symlinked instead and ``host_dir``
+    (which must live inside it) is mkdir'd on the disk, so the whole home
+    tree persists on the btrfs volume.
     """
     if host_data_disk_name is None:
         return "# (no host-data disk attached; host_dir uses today's bind mount or local fs)"
     lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
     format_and_mount_block = _build_format_and_mount_data_disk_block(host_data_disk_name)
+    symlinked_path = volume_home_path if volume_home_path is not None else host_dir
+    host_dir_mkdir_line = f"\nmkdir -p {host_dir}" if volume_home_path is not None else ""
     return f"""\
 # Format + mount the additional btrfs disk ourselves (Lima can't on minimal images).
 {format_and_mount_block}
@@ -310,15 +328,15 @@ def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) 
 # root:root with 0755). Mirrors the chmod 777 the script applies to /code.
 chmod 0777 {lima_mount}
 
-# Replace host_dir with a symlink to the mounted btrfs disk.
+# Replace the data path with a symlink to the mounted btrfs disk.
 # ``ln -sfn`` alone won't replace an existing directory, so rm any real
 # dir first. Idempotent across re-runs.
-if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
-    ln -sfn {lima_mount} {host_dir}
+if [ -L {symlinked_path} ] || [ ! -e {symlinked_path} ]; then
+    ln -sfn {lima_mount} {symlinked_path}
 else
-    rm -rf {host_dir}
-    ln -sfn {lima_mount} {host_dir}
-fi"""
+    rm -rf {symlinked_path}
+    ln -sfn {lima_mount} {symlinked_path}
+fi{host_dir_mkdir_line}"""
 
 
 def _build_format_and_mount_data_disk_block(host_data_disk_name: str) -> str:

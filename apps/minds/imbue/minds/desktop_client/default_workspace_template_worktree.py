@@ -6,7 +6,7 @@ working tree. To let a coordinated mngr+DEFAULT_WORKSPACE_TEMPLATE change be tes
 module reproduces the ``just minds-start`` debug state ahead of time: it clones
 the *paired* DEFAULT_WORKSPACE_TEMPLATE branch (the default-workspace-template-remote branch whose name matches the current
 mngr branch, else DEFAULT_WORKSPACE_TEMPLATE ``main``) and vendors this mngr checkout's HEAD into the
-tree's ``vendor/mngr`` so the workspace container runs the mngr code under test.
+tree's ``system/vendor/mngr`` so the workspace container runs the mngr code under test.
 
 The materialize step runs where git works -- the CI runner (before the snapshot
 image is staged) or a local machine -- never inside the crippled snapshot
@@ -135,17 +135,17 @@ def _write_pytest_config_opt_in(settings_path: Path) -> None:
 
 
 def _vendor_mngr_into_default_workspace_template(default_workspace_template_dir: Path) -> None:
-    """Replace ``default_workspace_template_dir/vendor/mngr`` with an archive of this mngr checkout's HEAD.
+    """Replace ``default_workspace_template_dir/system/vendor/mngr`` with an archive of this mngr checkout's HEAD.
 
     Mirrors ``just sync-vendor-mngr``: ``git archive HEAD`` of the mngr repo into
-    ``vendor/mngr`` so the workspace container runs the mngr under test rather
+    ``system/vendor/mngr`` so the workspace container runs the mngr under test rather
     than whatever mngr the DEFAULT_WORKSPACE_TEMPLATE ref vendored. Requires the mngr checkout's git to
     work, so it runs only on the runner / a local machine, never in the sandbox.
     """
-    vendor = default_workspace_template_dir / "vendor" / "mngr"
+    vendor = default_workspace_template_dir / "system" / "vendor" / "mngr"
     if not vendor.parent.is_dir():
         raise DefaultWorkspaceTemplateWorktreeError(
-            f"DEFAULT_WORKSPACE_TEMPLATE clone at {default_workspace_template_dir} has no vendor/ directory to sync mngr into"
+            f"DEFAULT_WORKSPACE_TEMPLATE clone at {default_workspace_template_dir} has no system/vendor/ directory to sync mngr into"
         )
     archive = subprocess.run(
         ["git", "-C", str(_REPO_ROOT), "archive", "--format=tar", "HEAD"],
@@ -168,7 +168,7 @@ def materialize_paired_default_workspace_template_worktree(
 
     Clones the paired DEFAULT_WORKSPACE_TEMPLATE branch (``mngr_branch`` or :func:`_current_mngr_branch`
     if it exists on the DEFAULT_WORKSPACE_TEMPLATE remote, else ``main``), vendors this mngr checkout's
-    HEAD into ``vendor/mngr``, writes the pytest config opt-in, and commits both
+    HEAD into ``system/vendor/mngr``, writes the pytest config opt-in, and commits both
     so the create flow's ``git checkout -B <branch> FETCH_HEAD`` transfers them
     into the workspace container cleanly (FETCH_HEAD is aligned to the commit so
     that checkout is a content-preserving no-op).

@@ -38,7 +38,7 @@ desktop for next time. Flags (pass via `bash -s -- <flags>`):
 - `--version REF` -- mngr ref to install (default: latest `minds-v*` tag;
   `main` for the development tip)
 - `--dev` -- contributor layout: `main` + a local default-workspace-template
-  checkout + launch via `just minds-start` (vendor/mngr sync included)
+  checkout + launch via `just minds-start` (system/vendor/mngr sync included)
 - `--install-dir DIR` (default `~/mngr`), `--no-launch`
 
 It installs, skipping anything already present: apt basics + Electron's

@@ -101,6 +101,7 @@ from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
+from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
@@ -1194,7 +1195,9 @@ class ModalProviderInstance(BaseProviderInstance):
             # in the above block, thus this cannot be started any earlier.
             # Plus we really want the boot time to be written, etc, as otherwise it can be a bit racey
             with log_span("Starting activity watcher in sandbox"):
-                start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
+                start_activity_watcher_cmd = build_start_activity_watcher_command(
+                    str(self.host_dir), host_log_dir=self._host_log_dir_str()
+                )
                 exit_code = sandbox.exec("sh", "-c", start_activity_watcher_cmd).wait()
                 if exit_code != 0:
                     raise MngrError(f"Failed to start activity watcher in sandbox (exit code {exit_code})")
@@ -1202,7 +1205,9 @@ class ModalProviderInstance(BaseProviderInstance):
             # Start periodic volume sync to flush writes to the host volume (only when a host volume is mounted)
             if self.config.is_host_volume_created:
                 with log_span("Starting volume sync in sandbox"):
-                    volume_sync_cmd = build_start_volume_sync_command(HOST_VOLUME_MOUNT_PATH, str(self.host_dir))
+                    volume_sync_cmd = build_start_volume_sync_command(
+                        HOST_VOLUME_MOUNT_PATH, str(self.host_dir), host_log_dir=self._host_log_dir_str()
+                    )
                     exit_code = sandbox.exec("sh", "-c", volume_sync_cmd).wait()
                     if exit_code != 0:
                         raise MngrError(f"Failed to start volume sync in sandbox (exit code {exit_code})")
@@ -1218,6 +1223,10 @@ class ModalProviderInstance(BaseProviderInstance):
 
             return final_host, ssh_host, ssh_port, host_public_key
 
+    def _host_log_dir_str(self) -> str:
+        """Directory for plain-text service logs (shutdown, activity watcher, volume sync) in sandboxes."""
+        return resolve_host_log_dir(str(self.host_dir), self.config.host_log_dir)
+
     def _create_shutdown_script(
         self,
         host: Host,
@@ -1232,6 +1241,7 @@ class ModalProviderInstance(BaseProviderInstance):
         """
         sandbox_id = sandbox.get_object_id()
         host_dir_str = str(host.host_dir)
+        log_dir_str = self._host_log_dir_str()
 
         # Build the optional volume sync section for the shutdown script
         volume_sync_section = (
@@ -1260,7 +1270,7 @@ set -euo pipefail
 # Usage: shutdown.sh [stop_reason]
 #   stop_reason: 'PAUSED' (idle shutdown, default) or 'STOPPED' (user requested)
 
-LOG_FILE="{host_dir_str}/logs/shutdown.log"
+LOG_FILE="{log_dir_str}/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{

@@ -42,6 +42,16 @@ class LimaProviderConfig(ProviderInstanceConfig):
             "required when is_run_as_root=True."
         ),
     )
+    volume_home_path: Path | None = Field(
+        default=None,
+        description=(
+            "VM path (e.g. /home/user) symlinked to the btrfs data disk instead of host_dir, "
+            "so the whole tree persists on the disk while mngr data lives in a subdirectory "
+            "(host_dir must then be a path strictly inside it, e.g. /home/user/.mngr). "
+            "Requires is_host_data_volume_exposed=False. When unset, host_dir itself is "
+            "symlinked to the disk exactly as before."
+        ),
+    )
     host_data_disk_size: str = Field(
         default=DEFAULT_HOST_DATA_DISK_SIZE,
         description=(
@@ -119,5 +129,22 @@ class LimaProviderConfig(ProviderInstanceConfig):
             raise LimaConfigError(
                 "providers.lima.is_run_as_root=True requires the btrfs additional-disk layout; "
                 "set providers.lima.is_host_data_volume_exposed=false."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_volume_home_path(self) -> Self:
+        if self.volume_home_path is None:
+            return self
+        if self.is_host_data_volume_exposed:
+            raise LimaConfigError(
+                "providers.lima.volume_home_path requires the btrfs additional-disk layout; "
+                "set providers.lima.is_host_data_volume_exposed=false."
+            )
+        effective_host_dir = self.host_dir if self.host_dir is not None else Path("/mngr")
+        if not effective_host_dir.is_relative_to(self.volume_home_path) or effective_host_dir == self.volume_home_path:
+            raise LimaConfigError(
+                f"providers.lima.host_dir ({effective_host_dir}) must be a path strictly inside "
+                f"volume_home_path ({self.volume_home_path}) so mngr data persists on the data disk."
             )
         return self

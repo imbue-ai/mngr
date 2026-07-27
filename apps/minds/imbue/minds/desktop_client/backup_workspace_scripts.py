@@ -8,7 +8,7 @@ out of arbitrarily noisy output:
 - the *check* script: verifies the installed backup-service code against the
   *minimum required* ``minds-v*`` tag (fetching tags from the ``official``
   remote only when the tag is missing locally), reports the supervisord state
-  of the ``host-backup`` program and the current ``runtime/secrets/restic.env``
+  of the ``host-backup`` program and the current ``data/.secrets/restic.env``
   (sha256 + content, so minds can compare against its canonical copy and adopt
   externally configured envs).
 - the *gate probe* script: reports which chat agents are actively RUNNING
@@ -16,14 +16,15 @@ out of arbitrarily noisy output:
   services agent -- worktree/worker agents live elsewhere and never count)
   and whether a backup tick is currently in flight.
 - the *apply update* script: the single mutating step -- stash, check out
-  ``libs/host_backup`` at the target tag, commit ``backup-update: <tag>``,
+  the backup-service code (``system/libs/host_backup``, or ``libs/host_backup``
+  on pre-declutter workspaces) at the target tag, commit ``backup-update: <tag>``,
   ``uv sync``, restart the service, verify it comes back, and auto-rollback
   (``git revert``) on failure. Optionally stops running chats first.
-- the *restore* script: rewinds the whole host dir to a chosen restic
+- the *restore* script: rewinds the whole backup root to a chosen restic
   snapshot, in place -- gate on chats/ticks, stop every supervisord service
-  (they all run from and write into the host dir this restore rewrites), take
+  (they all run from and write into the tree this restore rewrites), take
   a ``pre-restore`` safety snapshot (so any restore is undoable), then
-  ``restic restore <id>:<subpath> --target <host_dir> --delete`` with
+  ``restic restore <id>:<subpath> --target <backup_root> --delete`` with
   ``--overwrite if-changed``: no staging copy, only changed files are
   rewritten, and a failed restore converges when simply re-run. The current
   ``restic.env`` is written back afterwards, a ``restored`` snapshot of the
@@ -32,7 +33,7 @@ out of arbitrarily noisy output:
   then ``uv sync`` and a restart of every supervisord service. Every exit
   path after the service stop restarts the services (best-effort). The
   snapshot's subpath (the directory inside the snapshot that corresponds to
-  the host dir) and timestamp are resolved by minds and passed in via argv,
+  the backup root) and timestamp are resolved by minds and passed in via argv,
   so the script never queries restic for metadata minds already holds. The
   in-place restore needs restic >= 0.17; when the workspace's restic is
   older, the script downloads the pinned, sha256-verified build and installs
@@ -78,8 +79,13 @@ import time as _time
 
 OFFICIAL_REMOTE_NAME = "official"
 DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/default-workspace-template.git"
-BACKUP_CODE_PATH = "libs/host_backup"
-RESTIC_ENV_PATH = "runtime/secrets/restic.env"
+# The backup-service code inside the workspace: system/libs/host_backup on the
+# decluttered template layout, libs/host_backup on pre-declutter workspaces.
+# Resolved from the workspace's own tree (cwd is always the workspace root);
+# pathspecs addressed at a *tag's* tree instead follow that tag's own layout
+# via _backup_code_path_in_tree, since the two can differ across the declutter.
+BACKUP_CODE_PATH = "system/libs/host_backup" if _os.path.isdir("system/libs/host_backup") else "libs/host_backup"
+RESTIC_ENV_PATH = "data/.secrets/restic.env"
 GIT_IDENTITY = ["-c", "user.name=minds-backup-update", "-c", "user.email=backup-update@minds.local"]
 TICK_COMPLETION_TYPES = (
     "RESTIC_BACKUP_SUCCEEDED",
@@ -124,6 +130,21 @@ def _has_flag(flag):
 
 def _tag_exists(tag):
     return _run(["git", "rev-parse", "-q", "--verify", "refs/tags/%s" % tag]).returncode == 0
+
+
+def _backup_code_path_in_tree(ref):
+    """The backup-service path as laid out in ref's tree, or "" if absent.
+
+    Tags cut before the workspace-root declutter store the code at
+    libs/host_backup; decluttered trees at system/libs/host_backup. The
+    workspace's own layout (BACKUP_CODE_PATH) and a target tag's layout can
+    therefore differ in either direction, and diff/checkout pathspecs must
+    follow the tree they address.
+    """
+    for candidate in ("system/libs/host_backup", "libs/host_backup"):
+        if _run(["git", "rev-parse", "-q", "--verify", "%s:%s" % (ref, candidate)]).returncode == 0:
+            return candidate
+    return ""
 
 
 def _official_url():
@@ -222,11 +243,29 @@ def _compute_code_state(minimum_tag, installed_version):
        needed because backup updates land as *content* commits, which never
        make the minimum tag an ancestor on workspaces created before it.
     """
-    diffed = _run(["git", "diff", "--quiet", minimum_tag, "--", BACKUP_CODE_PATH])
-    if diffed.returncode == 0:
-        return "matches", ""
-    if diffed.returncode != 1:
-        return "unverifiable", ("git diff failed: %s" % (diffed.stderr or diffed.stdout).strip()[-500:])
+    tag_path = _backup_code_path_in_tree(minimum_tag) or BACKUP_CODE_PATH
+    if tag_path == BACKUP_CODE_PATH:
+        diffed = _run(["git", "diff", "--quiet", minimum_tag, "--", BACKUP_CODE_PATH])
+        if diffed.returncode == 0:
+            return "matches", ""
+        if diffed.returncode != 1:
+            return "unverifiable", ("git diff failed: %s" % (diffed.stderr or diffed.stdout).strip()[-500:])
+    else:
+        # The tag lays the code out at the other declutter-era path, so a
+        # same-path `git diff` can never match. Content equality across the
+        # rename is tree-hash equality between the tag's directory and the
+        # committed workspace directory, with a clean worktree at that path
+        # (the same predicate the same-path worktree diff answers).
+        src_tree = _run(["git", "rev-parse", "-q", "--verify", "%s:%s" % (minimum_tag, tag_path)])
+        dest_tree = _run(["git", "rev-parse", "-q", "--verify", "HEAD:%s" % BACKUP_CODE_PATH])
+        dirty = _run(["git", "status", "--porcelain", "--", BACKUP_CODE_PATH]).stdout.strip()
+        if (
+            src_tree.returncode == 0
+            and dest_tree.returncode == 0
+            and src_tree.stdout.strip() == dest_tree.stdout.strip()
+            and not dirty
+        ):
+            return "matches", ""
     ancestor = _run(["git", "merge-base", "--is-ancestor", minimum_tag, "HEAD"])
     if ancestor.returncode == 0:
         return "newer", ""
@@ -321,7 +360,7 @@ def _list_running_chats():
 def _backup_events_path(agent_id):
     state_dir = _os.environ.get("MNGR_AGENT_STATE_DIR", "")
     if not state_dir and agent_id:
-        host_dir = _os.environ.get("MNGR_HOST_DIR", "/mngr")
+        host_dir = _os.environ.get("MNGR_HOST_DIR", "/home/user/.mngr")
         state_dir = _os.path.join(host_dir, "agents", agent_id)
     if not state_dir:
         return ""
@@ -567,7 +606,16 @@ def _main():
         _git(["checkout", "HEAD", "--", BACKUP_CODE_PATH])
         _pop_stash_into(result)
         _finish(result, "failed", "git rm failed: %s" % (removed.stderr or removed.stdout).strip()[-500:])
-    checked_out = _git(["checkout", tag, "--", BACKUP_CODE_PATH])
+    tag_path = _backup_code_path_in_tree(tag) or BACKUP_CODE_PATH
+    if tag_path == BACKUP_CODE_PATH:
+        checked_out = _git(["checkout", tag, "--", BACKUP_CODE_PATH])
+    else:
+        # The tag stores the code at the other declutter-era path; a same-path
+        # checkout can never match its tree. Stage the tag's subtree at the
+        # workspace's path, then materialize the staged entries.
+        checked_out = _git(["read-tree", "--prefix=%s/" % BACKUP_CODE_PATH, "%s:%s" % (tag, tag_path)])
+        if checked_out.returncode == 0:
+            checked_out = _git(["checkout", "--", BACKUP_CODE_PATH])
     if checked_out.returncode != 0:
         _git(["checkout", "HEAD", "--", BACKUP_CODE_PATH])
         _pop_stash_into(result)
@@ -618,10 +666,11 @@ _main()
 )
 
 
-# Rewinds the whole host dir (/mngr) to one restic snapshot, in place.
+# Rewinds the whole backup root (/home/user on the current layout; the host
+# dir itself on legacy /mngr workspaces) to one restic snapshot, in place.
 # Parameterized via argv: --agent-id, --snapshot-id, --snapshot-subpath (the
-# directory inside the snapshot that corresponds to the host dir, resolved by
-# minds from its own view of the repository) and --source-time, plus the
+# directory inside the snapshot that corresponds to the backup root, resolved
+# by minds from its own view of the repository) and --source-time, plus the
 # optional flags --stop-chats, --skip-chat-gate (an explicit user "force
 # restore" on a workspace that can no longer answer `mngr list`) and
 # --skip-safety-snapshot (an explicit user "restore without backing up first"
@@ -656,7 +705,7 @@ _FALLBACK_RESTIC_DIR_NAME = ".minds-restic"
 # them far faster than a human (or the SSE log stream) needs.
 _PROGRESS_INTERVAL_SECONDS = 2.0
 # Fallback excludes for the safety/restored snapshots when the workspace has
-# no readable runtime/backup.toml excludes. Matches host_backup's built-in
+# no readable backup.toml excludes. Matches host_backup's built-in
 # defaults so those snapshots look like every hourly snapshot; when the user
 # customized excludes in backup.toml, theirs are used instead (read below).
 _DEFAULT_SNAPSHOT_EXCLUDES = (
@@ -774,10 +823,10 @@ def _download_pinned_restic(fallback_path):
     return "", "could not install the downloaded restic binary"
 
 
-def _resolve_restic_binary(host_dir, result):
+def _resolve_restic_binary(backup_root, result):
     # Returns (binary, error): any restic at/above the minimum, downloading
     # the pinned one if needed.
-    fallback_path = _os.path.join(host_dir, _FALLBACK_RESTIC_DIR_NAME, "restic")
+    fallback_path = _os.path.join(backup_root, _FALLBACK_RESTIC_DIR_NAME, "restic")
     for candidate in ("restic", fallback_path):
         version = _restic_version_tuple(candidate)
         if version is not None and version >= _MINIMUM_RESTIC_VERSION:
@@ -790,8 +839,13 @@ def _resolve_restic_binary(host_dir, result):
 
 def _read_snapshot_excludes(code_dir):
     # The user's current backup.toml excludes, or host_backup's defaults when
-    # absent/unreadable.
-    toml_path = _os.path.join(code_dir, "runtime", "backup.toml")
+    # absent/unreadable. The file lives at data/system/backup.toml on the
+    # decluttered template layout and runtime/backup.toml on pre-declutter
+    # workspaces; read whichever exists so the safety/restored snapshots
+    # honor the same excludes as the workspace's own hourly snapshots.
+    toml_path = _os.path.join(code_dir, "data", "system", "backup.toml")
+    if not _os.path.isfile(toml_path):
+        toml_path = _os.path.join(code_dir, "runtime", "backup.toml")
     excludes = list(_DEFAULT_SNAPSHOT_EXCLUDES)
     if _os.path.isfile(toml_path):
         try:
@@ -965,7 +1019,15 @@ def _main():
         _finish(result, gate_status, gate_detail)
 
     code_dir = _os.path.realpath(_os.getcwd())
-    host_dir = _os.path.realpath(_os.environ.get("MNGR_HOST_DIR", "/mngr"))
+    # The restore target is the BACKUP ROOT -- the whole persistent tree the
+    # host-backup service snapshots. Current layout: /home/user, of which
+    # MNGR_HOST_DIR is the hidden .mngr child; legacy workspaces backed up the
+    # host dir itself, so there the target stays MNGR_HOST_DIR.
+    mngr_host_dir = _os.path.realpath(_os.environ.get("MNGR_HOST_DIR", "/home/user/.mngr"))
+    if _os.path.basename(mngr_host_dir) == ".mngr":
+        backup_root = _os.path.dirname(mngr_host_dir)
+    else:
+        backup_root = mngr_host_dir
     env_path = _os.path.join(code_dir, RESTIC_ENV_PATH)
     try:
         with open(env_path, "rb") as env_file:
@@ -979,13 +1041,13 @@ def _main():
     # Resolve a usable restic (downloading the pinned build if the installed
     # one is too old) and the snapshot excludes before anything is stopped or
     # mutated, so these failures are cheap and leave the workspace untouched.
-    restic_binary, restic_error = _resolve_restic_binary(host_dir, result)
+    restic_binary, restic_error = _resolve_restic_binary(backup_root, result)
     if not restic_binary:
         _finish(result, "failed", restic_error)
     excludes = _read_snapshot_excludes(code_dir)
 
     # Quiesce the workspace: every supervisord service runs from (and writes
-    # into) the host dir this restore rewrites, so a service left running
+    # into) the backup root this restore rewrites, so a service left running
     # could recreate or hold files mid-restore. Stop them all -- the exec
     # channel this script runs through is not supervisord-managed, so it
     # survives. Best-effort: already-stopped (or missing) services must not
@@ -1001,7 +1063,7 @@ def _main():
     # step failed.
     if not is_safety_snapshot_skipped:
         _progress("Backing up the current state (safety snapshot)...")
-        backup_args = ["backup", host_dir, "--tag", "pre-restore"]
+        backup_args = ["backup", backup_root, "--tag", "pre-restore"]
         for pattern in excludes:
             backup_args += ["--exclude", pattern]
         backed_up, backup_output = _restic_step_with_unlock_retry(backup_args, env_map, restic_binary)
@@ -1015,7 +1077,7 @@ def _main():
     # -- so no double disk, and a restore that fails midway converges when
     # simply re-run. The subpath maps the snapshot's recorded layout (volume-
     # level on btrfs providers, the host dir itself on plain docker) onto the
-    # host dir; minds resolved and validated it before dispatch.
+    # backup root; minds resolved and validated it before dispatch.
     _progress("Restoring the selected backup into place...")
     # The restore may rewrite or delete this process's original cwd entries.
     _os.chdir("/")
@@ -1023,7 +1085,7 @@ def _main():
         "restore",
         "%s:%s" % (snapshot_id, snapshot_subpath),
         "--target",
-        host_dir,
+        backup_root,
         "--delete",
         "--overwrite",
         "if-changed",
@@ -1035,8 +1097,14 @@ def _main():
             "running the restore again picks up where this one stopped." % restore_output[-500:]
         )
         _finish(result, "failed", detail)
-    if not _os.path.isdir(_os.path.join(host_dir, "code")):
-        _finish(result, "failed", "the restore completed but left no code/ checkout at %s" % host_dir)
+    # Sanity-check the restored tree by its repo checkout: workspace/ in the
+    # current layout, code/ in legacy snapshots.
+    if not _os.path.isdir(_os.path.join(backup_root, "workspace")) and not _os.path.isdir(
+        _os.path.join(backup_root, "code")
+    ):
+        _finish(
+            result, "failed", "the restore completed but left no workspace/ or code/ checkout at %s" % backup_root
+        )
     result["restored"] = True
 
     # The snapshot carries whatever restic.env it had at backup time (possibly
@@ -1057,7 +1125,7 @@ def _main():
     # succeeded and the next backup tick would capture this state anyway, so a
     # failure here must not fail the operation.
     _progress("Recording the restored state in the backup timeline...")
-    restored_backup_args = ["backup", host_dir, "--tag", "restored"]
+    restored_backup_args = ["backup", backup_root, "--tag", "restored"]
     if source_time:
         restored_backup_args += ["--tag", "restored-from:%s" % source_time]
     for pattern in excludes:
@@ -1082,6 +1150,9 @@ def _main():
     # must also verify the service actually came back.
     _progress("Restarting the workspace services...")
     _DEBTS["is_resume_owed"] = False
+    # `restart all` also re-runs the env-converge one-shot, which converges the
+    # (untouched) rootfs back to the restored environment record -- that is
+    # what makes a restore reproduce the restored package set, not just files.
     restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
     result["services_restarted"] = restarted.returncode == 0
     if restarted.returncode != 0:

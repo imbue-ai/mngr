@@ -123,7 +123,7 @@ def pool() -> None:
     "--mngr-source",
     type=click.Path(exists=True),
     default=None,
-    help="Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts.",
+    help="Path to the mngr monorepo root. If provided, rsyncs into the template's system/vendor/mngr/ before creating hosts.",
 )
 @click.option(
     "--server-id",

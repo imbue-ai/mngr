@@ -25,15 +25,24 @@ from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 
 
-def _realizer(temp_mngr_ctx: MngrContext, key_dir: Path, container_ssh_port: int = 2222) -> DockerRealizer:
+def _realizer(
+    temp_mngr_ctx: MngrContext,
+    key_dir: Path,
+    container_ssh_port: int = 2222,
+    volume_home_path: Path | None = None,
+    host_dir: Path | None = None,
+) -> DockerRealizer:
+    config = VpsProviderConfig(
+        backend=ProviderBackendName("test-vps-docker"),
+        container_ssh_port=container_ssh_port,
+        volume_home_path=volume_home_path,
+        host_dir=host_dir if host_dir is not None else Path("/mngr"),
+    )
     return DockerRealizer(
-        config=VpsProviderConfig(
-            backend=ProviderBackendName("test-vps-docker"),
-            container_ssh_port=container_ssh_port,
-        ),
+        config=config,
         mngr_ctx=temp_mngr_ctx,
         key_dir=key_dir,
-        host_dir=temp_mngr_ctx.config.default_host_dir,
+        host_dir=host_dir if host_dir is not None else temp_mngr_ctx.config.default_host_dir,
         provider_name=ProviderInstanceName("test-vps-docker"),
     )
 
@@ -56,6 +65,21 @@ def test_host_dir_path_on_outer_is_under_the_btrfs_subvolume(temp_mngr_ctx: Mngr
     realizer = _realizer(temp_mngr_ctx, tmp_path)
     host_id = HostId.generate()
     expected = realizer.config.btrfs_mount_path / host_id.get_uuid().hex / "host_dir"
+    assert realizer.host_dir_path_on_outer(host_id) == expected
+
+
+def test_host_dir_path_on_outer_with_volume_home_path_is_inside_the_home_subtree(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """With volume_home_path configured, host_dir lives under the volume's home/ subtree on the outer."""
+    realizer = _realizer(
+        temp_mngr_ctx,
+        tmp_path,
+        volume_home_path=Path("/home/user"),
+        host_dir=Path("/home/user/.mngr"),
+    )
+    host_id = HostId.generate()
+    expected = realizer.config.btrfs_mount_path / host_id.get_uuid().hex / "home" / ".mngr"
     assert realizer.host_dir_path_on_outer(host_id) == expected
 
 

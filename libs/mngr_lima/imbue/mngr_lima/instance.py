@@ -61,6 +61,7 @@ from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
+from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
@@ -416,18 +417,25 @@ class LimaProviderInstance(BaseProviderInstance):
             )
         )
 
+    def _volume_home_path_str(self) -> str | None:
+        return str(self.config.volume_home_path) if self.config.volume_home_path is not None else None
+
+    def _host_log_dir_str(self) -> str:
+        """Directory for plain-text service logs (shutdown, activity watcher) in the VM."""
+        return resolve_host_log_dir(str(self.host_dir), self.config.host_log_dir)
+
     def _create_shutdown_script(self, host: Host) -> None:
         """Create the shutdown.sh script inside the VM.
 
         For Lima, the shutdown script calls sudo poweroff.
         """
-        host_dir_str = str(host.host_dir)
+        log_dir_str = self._host_log_dir_str()
 
         script_content = f"""#!/bin/bash
 # Auto-generated shutdown script for mngr Lima host
 # Calls sudo poweroff to stop the VM
 
-LOG_FILE="{host_dir_str}/logs/shutdown.log"
+LOG_FILE="{log_dir_str}/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{
@@ -728,6 +736,7 @@ sudo poweroff
                     host_data_disk_name=host_data_disk_name,
                     host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
                     root_authorized_public_key=root_authorized_public_key,
+                    volume_home_path=self._volume_home_path_str(),
                 )
                 lima_config = merge_lima_yaml(base_config, user_config)
             else:
@@ -743,6 +752,7 @@ sudo poweroff
                     host_data_disk_name=host_data_disk_name,
                     host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
                     root_authorized_public_key=root_authorized_public_key,
+                    volume_home_path=self._volume_home_path_str(),
                 )
 
             # Write the YAML config to a temp file
@@ -856,7 +866,9 @@ sudo poweroff
 
         # Start the activity watcher
         with log_span("Starting activity watcher in VM"):
-            start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
+            start_activity_watcher_cmd = build_start_activity_watcher_command(
+                str(self.host_dir), host_log_dir=self._host_log_dir_str()
+            )
             host.execute_stateful_command(f"sh -c '{start_activity_watcher_cmd}'")
 
         # Add authorized keys if provided
@@ -990,7 +1002,9 @@ sudo poweroff
 
         # Restart activity watcher
         with log_span("Restarting activity watcher in VM"):
-            start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
+            start_activity_watcher_cmd = build_start_activity_watcher_command(
+                str(self.host_dir), host_log_dir=self._host_log_dir_str()
+            )
             host_obj.execute_stateful_command(f"sh -c '{start_activity_watcher_cmd}'")
 
         self._evict_cached_host(host_id, replacement=host_obj)

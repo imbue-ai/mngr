@@ -47,6 +47,16 @@ class DockerProviderConfig(ProviderInstanceConfig):
         default=None,
         description="Base directory for mngr data inside containers (defaults to /mngr)",
     )
+    volume_mount_path: Path | None = Field(
+        default=None,
+        description=(
+            "Path inside each host container where the per-host volume is mounted. "
+            "When unset (the default), the volume is mounted at host_dir exactly as before. "
+            "When set, the volume is mounted here and host_dir must be a path inside it, so "
+            "the whole tree (e.g. /home/user) persists on the volume while mngr data lives "
+            "in a subdirectory (e.g. /home/user/.mngr). Requires isolate_host_volumes=true."
+        ),
+    )
     default_image: str | None = Field(
         default=None,
         description="Default base image. None uses debian:bookworm-slim.",
@@ -125,6 +135,27 @@ class DockerProviderConfig(ProviderInstanceConfig):
             raise DockerConfigValidationError(
                 "isolate_host_volumes=True requires is_host_volume_created=True "
                 "(host-volume isolation is meaningless without a host volume)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_volume_mount_path_requires_isolation(self) -> "DockerProviderConfig":
+        if self.volume_mount_path is None:
+            return self
+        if self.isolate_host_volumes is not True:
+            raise DockerConfigValidationError(
+                "volume_mount_path requires isolate_host_volumes=true (the legacy shared-volume "
+                "mode always symlinks host_dir into the shared state volume and cannot mount "
+                "the per-host volume at a custom path)"
+            )
+        effective_host_dir = self.host_dir if self.host_dir is not None else Path("/mngr")
+        if (
+            not effective_host_dir.is_relative_to(self.volume_mount_path)
+            or effective_host_dir == self.volume_mount_path
+        ):
+            raise DockerConfigValidationError(
+                f"host_dir ({effective_host_dir}) must be a path strictly inside "
+                f"volume_mount_path ({self.volume_mount_path}) so mngr data persists on the volume"
             )
         return self
 

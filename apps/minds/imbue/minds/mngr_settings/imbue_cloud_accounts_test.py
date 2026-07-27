@@ -6,6 +6,9 @@ import pytest
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.mngr_settings.enablement import set_provider_is_enabled
 from imbue.minds.mngr_settings.imbue_cloud_accounts import set_imbue_cloud_provider_for_account
+from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_DIR
+from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_LOG_DIR
+from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_VOLUME_HOME_PATH
 from imbue.minds.testing import stub_mngr_host_dir
 
 _FAKE_CONNECTOR_URL = "https://test--rsc-api.modal.run"
@@ -30,6 +33,10 @@ def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.M
         "docker_runtime": "runsc",
         "install_gvisor_runtime": True,
         "default_start_args": ["--workdir=/", "--security-opt=no-new-privileges"],
+        # The user-data layout knobs (see provider_blocks).
+        "host_dir": WORKSPACE_HOST_DIR,
+        "volume_home_path": WORKSPACE_VOLUME_HOME_PATH,
+        "host_log_dir": WORKSPACE_HOST_LOG_DIR,
     }
 
 
@@ -128,6 +135,9 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
         'docker_runtime = "runsc"\n'
         "install_gvisor_runtime = true\n"
         'default_start_args = ["--workdir=/", "--security-opt=no-new-privileges"]\n'
+        f'host_dir = "{WORKSPACE_HOST_DIR}"\n'
+        f'volume_home_path = "{WORKSPACE_VOLUME_HOME_PATH}"\n'
+        f'host_log_dir = "{WORKSPACE_HOST_LOG_DIR}"\n'
     )
 
     changed = set_imbue_cloud_provider_for_account(

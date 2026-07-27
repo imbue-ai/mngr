@@ -57,14 +57,14 @@ if agent_id:
 # Authoritative liveness check: ask supervisord -- which owns every background
 # service since the services.toml/bootstrap-service-manager migration -- whether
 # the system_interface program is RUNNING. supervisorctl must be pointed at the
-# repo-root config (-c /code/supervisord.conf) so it finds the unix socket
+# workspace config (-c /home/user/workspace/system/supervisord.conf) so it finds the unix socket
 # declared there; the default config search path does not include
-# /code/supervisord.conf. The exec runs as root, so the 0700 socket is
+# /home/user/workspace/system/supervisord.conf. The exec runs as root, so the 0700 socket is
 # reachable. The raw status line is captured here; recovery_probe parses the
 # state word (RUNNING/STOPPED/...) into the yes/no/unknown answer.
 try:
     proc = subprocess.run(
-        ["supervisorctl", "-c", "/code/supervisord.conf", "status", "system_interface"],
+        ["supervisorctl", "-c", "/home/user/workspace/system/supervisord.conf", "status", "system_interface"],
         capture_output=True, text=True, timeout=1,
     )
     result["system_interface_status"] = (proc.stdout + proc.stderr).strip()
@@ -80,7 +80,7 @@ except Exception as e:
 # inner_port None, which the port + curl probes surface as a parse failure.
 try:
     parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.read("/code/supervisord.conf")
+    parser.read("/home/user/workspace/system/supervisord.conf")
     command = parser.get("program:system_interface", "command", fallback="") or ""
     m = re.search(r"--url\s+\S+://[^:]+:(\d+)", command)
     if m:

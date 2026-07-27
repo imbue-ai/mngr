@@ -98,6 +98,51 @@ def test_host_record_reads_legacy_ssh_port_key(store: DockerHostStore, tmp_path:
     assert result.last_discovered_ssh_port == 54321
 
 
+def test_container_config_host_dir_round_trips(store: DockerHostStore) -> None:
+    """The per-host host_dir persists with the record (discovery replays it later)."""
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=HOST_ID_A, host_name="test-host", created_at=now, updated_at=now
+        ),
+        ssh_host="127.0.0.1",
+        last_discovered_ssh_port=12345,
+        ssh_host_public_key="ssh-ed25519 AAAA",
+        config=ContainerConfig(start_args=(), host_dir="/home/user/.mngr"),
+        container_id="abc123def456",
+    )
+    store.write_host_record(record)
+
+    result = store.read_host_record(HostId(HOST_ID_A), use_cache=False)
+    assert result is not None
+    assert result.config is not None
+    assert result.config.host_dir == "/home/user/.mngr"
+
+
+def test_container_config_host_dir_defaults_to_none_for_legacy_records(store: DockerHostStore, tmp_path: Path) -> None:
+    """A record written before the host_dir field existed loads with host_dir=None.
+
+    None means "use the provider config's host_dir", which is what those hosts
+    were actually created with.
+    """
+    record_dir = tmp_path / "docker-store" / "host_state"
+    record_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    (record_dir / f"{HOST_ID_A}.json").write_text(
+        "{"
+        f'"certified_host_data": {{"host_id": "{HOST_ID_A}", "host_name": "legacy-host", '
+        f'"created_at": "{now}", "updated_at": "{now}"}}, '
+        '"ssh_host": "127.0.0.1", "ssh_port": 54321, "ssh_host_public_key": "ssh-ed25519 AAAA", '
+        '"config": {"start_args": []}'
+        "}"
+    )
+
+    result = store.read_host_record(HostId(HOST_ID_A))
+    assert result is not None
+    assert result.config is not None
+    assert result.config.host_dir is None
+
+
 def test_read_host_record_returns_none_for_nonexistent(store: DockerHostStore) -> None:
     result = store.read_host_record(HostId(HOST_ID_B))
     assert result is None
@@ -244,3 +289,15 @@ def test_list_persisted_agent_data_warns_and_reports_empty_when_listing_fails(tm
     store = DockerHostStore(volume=_FailingListdirVolume(root_path=tmp_path / "docker-store"))
     with allow_warnings(match="Persisted-agent listing"):
         assert store.list_persisted_agent_data_for_host(HostId(HOST_ID_A)) == []
+
+
+def test_container_config_volume_mount_path_defaults_to_none() -> None:
+    """Records written before the field existed deserialize to mount-at-host_dir behavior."""
+    config = ContainerConfig.model_validate({"start_args": []})
+    assert config.volume_mount_path is None
+
+
+def test_container_config_volume_mount_path_round_trips() -> None:
+    config = ContainerConfig(start_args=(), volume_mount_path="/home/user")
+    reloaded = ContainerConfig.model_validate_json(config.model_dump_json())
+    assert reloaded.volume_mount_path == "/home/user"

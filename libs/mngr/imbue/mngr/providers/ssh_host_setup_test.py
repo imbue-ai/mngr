@@ -561,3 +561,25 @@ def test_start_sshd_command_is_a_noop_when_sshd_is_already_running(tmp_path: Pat
     not_running_cmd = cmd.replace("! grep -lxs sshd /proc/[0-9]*/comm >/dev/null 2>&1", "true")
     subprocess.run(["sh", "-c", not_running_cmd], check=False)
     assert marker.exists()
+
+
+def test_build_start_activity_watcher_command_with_custom_log_dir() -> None:
+    """A custom host_log_dir moves the watcher's plain-text log out of host_dir."""
+    cmd = build_start_activity_watcher_command("/mngr/hosts/test", host_log_dir="/var/log/mngr")
+    assert "mkdir -p '/var/log/mngr'" in cmd
+    assert "> '/var/log/mngr/activity_watcher.log'" in cmd
+    assert "/mngr/hosts/test/logs" not in cmd
+
+
+def test_build_start_activity_watcher_command_defaults_log_dir_to_host_dir() -> None:
+    """Without host_log_dir the log stays at <host_dir>/logs, exactly as before."""
+    cmd = build_start_activity_watcher_command("/mngr/hosts/test")
+    assert "> '/mngr/hosts/test/logs/activity_watcher.log'" in cmd
+
+
+def test_build_start_volume_sync_command_with_custom_log_dir() -> None:
+    """A custom host_log_dir moves the sync loop's plain-text log out of host_dir."""
+    cmd = build_start_volume_sync_command("/host_volume", "/mngr", host_log_dir="/var/log/mngr")
+    assert "mkdir -p '/var/log/mngr'" in cmd
+    assert "> '/var/log/mngr/volume_sync.log'" in cmd
+    assert "/mngr/logs" not in cmd

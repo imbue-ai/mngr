@@ -62,9 +62,9 @@ the actual commands (ask your agent to run it, or read
   `vault login` and bootstrap + deploy your dev env
   (`minds env activate --create --deploy dev-<your-user>` -> `minds env deploy`).
 - **Every startup** (fresh shell) -- activate the env, then `just minds-start`,
-  which re-syncs your live mngr into the worktree's `vendor/mngr/` and launches
+  which re-syncs your live mngr into the worktree's `system/vendor/mngr/` and launches
   Electron. You create your first agent from the login URL it prints.
 - **Iterate** against a running agent with `apps/minds/scripts/propagate_changes`.
 
-The skill has the exact commands, the every-Create `vendor/mngr/` sync, and how
+The skill has the exact commands, the every-Create `system/vendor/mngr/` sync, and how
 to find a running container's SSH port/key.

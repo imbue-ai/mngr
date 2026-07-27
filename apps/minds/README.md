@@ -38,10 +38,10 @@ app prints on startup.
 
 4. Inside the services agent's Docker container:
    - The bootstrap (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf`
-   - On first boot the bootstrap also writes `CLAUDE_CONFIG_DIR` to the host env file and creates the initial chat agent (gated by `runtime/initial_chat_created`)
-   - Services register their ports via `scripts/forward_port.py` into `runtime/applications.toml`
+   - On first boot the bootstrap also writes `CLAUDE_CONFIG_DIR` to the host env file and creates the initial chat agent (gated by `data/.state/initial_chat_created`)
+   - Services register their ports via `system/scripts/forward_port.py` into `data/.state/applications.toml`
    - An **app watcher** service monitors `applications.toml` and writes server events to `events.jsonl` for discovery
-   - A **cloudflared** service watches `runtime/secrets` for a tunnel token and runs the Cloudflare tunnel
+   - A **cloudflared** service watches `data/.secrets` for a tunnel token and runs the Cloudflare tunnel
 
 ## Learn more
 

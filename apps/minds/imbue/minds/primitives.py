@@ -234,7 +234,7 @@ class BackupProvider(UpperCaseStrEnum):
 
     - ``IMBUE_CLOUD`` -- create a per-workspace R2 bucket (named after the
       host id) + a scoped key against the selected account, then inject a
-      ``runtime/secrets/restic.env`` pointing restic at that bucket.
+      ``data/.secrets/restic.env`` pointing restic at that bucket.
       Requires a selected account.
     - ``API_KEY`` -- inject a user-supplied ``KEY=VALUE`` block verbatim
       into ``restic.env``; the user owns ``RESTIC_REPOSITORY`` and any

@@ -171,15 +171,19 @@ def _rewrite_container_host_name(
     private_key_path: Path,
     known_hosts_path: Path,
     new_host_name: str,
-    data_json_path: str = "/mngr/data.json",
+    # Candidate container-internal host-record paths, tried in order. The
+    # caller passes its configured layout first, then the other declutter-era
+    # layout, so a new-layout client can lease a not-yet-rebaked old-layout
+    # pool host and vice versa.
+    data_json_paths: Sequence[str],
     connect_timeout_seconds: float = 30.0,
 ) -> None:
     """Rewrite ``data.json``'s ``host_name`` field on the leased container.
 
-    The pool host's ``/mngr/data.json`` was written at bake time with the
+    The pool host's ``<host_dir>/data.json`` was written at bake time with the
     bake's per-bake unique placeholder host name (``pool-<hex>-host``).
     The DEFAULT_WORKSPACE_TEMPLATE bootstrap reads that file to decide what to name the initial
-    chat agent (see ``default-workspace-template/libs/bootstrap/src/bootstrap/
+    chat agent (see ``default-workspace-template/system/libs/bootstrap/src/bootstrap/
     manager.py:_read_host_name``). Without this rewrite, every lease would
     end up with a chat agent named after the bake's placeholder instead
     of the user's chosen workspace name.
@@ -216,8 +220,23 @@ def _rewrite_container_host_name(
     try:
         sftp = client.open_sftp()
         try:
-            with sftp.open(data_json_path, "r") as remote:
-                raw = remote.read()
+            # Locate the host record: the first candidate path that exists wins
+            # (only a missing file falls through to the next layout; any other
+            # SFTP failure raises).
+            raw = None
+            data_json_path = None
+            for candidate_path in data_json_paths:
+                try:
+                    with sftp.open(candidate_path, "r") as remote:
+                        raw = remote.read()
+                except FileNotFoundError:
+                    continue
+                data_json_path = candidate_path
+                break
+            if data_json_path is None or raw is None:
+                raise MngrError(
+                    f"no host record found on leased host {vps_address} at any of: {', '.join(data_json_paths)}"
+                )
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as exc:
@@ -1332,15 +1351,19 @@ class ImbueCloudProvider(BaseProviderInstance):
                 lease_result.container_ssh_port,
                 lease_result.container_host_public_key,
             )
-            # The pool host's ``/mngr/data.json`` was baked with a placeholder
-            # host name; rewrite it to the user-supplied name so the DEFAULT_WORKSPACE_TEMPLATE
-            # bootstrap inherits the user's chosen workspace name.
+            # The pool host's ``<host_dir>/data.json`` was baked with a
+            # placeholder host name; rewrite it to the user-supplied name so
+            # the DEFAULT_WORKSPACE_TEMPLATE bootstrap inherits the user's
+            # chosen workspace name. Try this provider's configured host_dir
+            # first, then the legacy pre-declutter location, so mixed pool
+            # generations both lease correctly.
             _rewrite_container_host_name(
                 vps_address=lease_result.vps_address,
                 container_ssh_port=lease_result.container_ssh_port,
                 private_key_path=final_private_key,
                 known_hosts_path=known_hosts_path,
                 new_host_name=str(name),
+                data_json_paths=tuple(dict.fromkeys((f"{self.host_dir}/data.json", "/mngr/data.json"))),
             )
             host = self._build_host_object(self._leased_info_from_result(lease_result))
         logger.info(

@@ -71,6 +71,17 @@ test-sdk-live args="":
   RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
 
 
+# Deploy the apt mirror Worker (apps/apt_mirror/worker) to the production
+# Cloudflare account. Requires CLOUDFLARE_API_TOKEN in the environment -- use
+# the APT_MIRROR_DEPLOY_CLOUDFLARE_API_TOKEN value from the
+# secrets/minds/production/apt-mirror Vault entry (see apps/apt_mirror/README.md).
+deploy-apt-mirror:
+  cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm exec wrangler deploy
+
+# Run the apt mirror Worker's vitest suite (workerd runtime, mocked upstreams).
+test-apt-mirror-worker:
+  cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test
+
 # Diffs against the real base branch, so it must run on a real checkout
 # (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
 # sandbox has no base ref and the check would pass vacuously. Bare `python`

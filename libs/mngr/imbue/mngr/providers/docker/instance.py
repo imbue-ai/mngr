@@ -98,6 +98,7 @@ from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoi
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
+from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
@@ -341,6 +342,18 @@ def _read_local_docker_runtime_spec_by_name() -> dict[str, Mapping[str, object]]
     return {name: spec for name, spec in runtimes.items() if isinstance(spec, dict)}
 
 
+def _recorded_host_dir_override(host_record: HostRecord) -> Path | None:
+    """Return the host_dir this host was created with, or None for legacy records.
+
+    Hosts must be read at the host_dir recorded at creation time -- the provider
+    config resolved in the current context (e.g. `mngr list` run outside the repo
+    whose settings customized host_dir) can disagree with it.
+    """
+    if host_record.config is None or host_record.config.host_dir is None:
+        return None
+    return Path(host_record.config.host_dir)
+
+
 class DockerProviderInstance(BaseProviderInstance):
     """Provider instance for managing Docker containers as hosts.
 
@@ -459,26 +472,58 @@ class DockerProviderInstance(BaseProviderInstance):
         """Get the path to the known_hosts file for this provider instance."""
         return self._keys_dir / "known_hosts"
 
-    def _build_volume_mount_args(self, host_id: HostId, is_isolated: bool) -> list[str]:
+    def _build_volume_mount_args(
+        self,
+        host_id: HostId,
+        is_isolated: bool,
+        volume_mount_path: str | None,
+        host_dir: str,
+    ) -> list[str]:
         """Build the docker CLI args for the host's volume mount.
 
         Returns an empty list when host volumes are disabled. In isolated mode
         the per-host sub-folder of the shared state volume is bound directly at
-        host_dir via `--mount ... volume-subpath=...` (Docker Engine >= 25.0),
-        so the container cannot see sibling hosts' sub-folders. In shared mode
-        the entire state volume is mounted at HOST_VOLUME_MOUNT_PATH and the
-        caller is expected to symlink host_dir into it.
+        ``host_dir`` (or at ``volume_mount_path`` when set, with host_dir living
+        inside it) via `--mount ... volume-subpath=...` (Docker Engine >= 25.0),
+        so the container cannot see sibling hosts' sub-folders. ``host_dir`` is
+        the host's *effective* host_dir (the recorded per-host value on replay
+        paths), so a restored container mounts the volume where the host's data
+        actually lives. In shared mode the entire state volume is mounted at
+        HOST_VOLUME_MOUNT_PATH and the caller is expected to symlink host_dir
+        into it.
         """
         if not self.config.is_host_volume_created:
             return []
         if is_isolated:
             volume_id = self._volume_id_for_host(host_id)
+            mount_target = volume_mount_path if volume_mount_path is not None else host_dir
             spec = (
                 f"type=volume,source={self._state_volume_name},"
-                f"target={self.host_dir},volume-subpath=volumes/{volume_id}"
+                f"target={mount_target},volume-subpath=volumes/{volume_id}"
             )
             return ["--mount", spec]
         return ["-v", f"{self._state_volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw"]
+
+    def _configured_volume_mount_path_str(self) -> str | None:
+        return str(self.config.volume_mount_path) if self.config.volume_mount_path is not None else None
+
+    def _effective_host_dir_str(self, config: ContainerConfig) -> str:
+        """The host_dir this host's containers must be provisioned against.
+
+        The recorded per-host value when present; legacy records (written before
+        host_dir was persisted) fall back to the provider config's host_dir,
+        which is what those hosts were actually created with.
+        """
+        return config.host_dir if config.host_dir is not None else str(self.host_dir)
+
+    def _host_log_dir_str(self, host_dir: str) -> str:
+        """Directory for plain-text service logs (shutdown, activity watcher) on hosts.
+
+        Takes the host's effective host_dir so the ``<host_dir>/logs`` default
+        lands next to the data the host actually uses, not wherever the current
+        context's provider config points.
+        """
+        return resolve_host_log_dir(host_dir, self.config.host_log_dir)
 
     def _get_host_volume_symlink_target(self, host_id: HostId, is_isolated: bool) -> str | None:
         """Get the path inside a container that host_dir should symlink to.
@@ -571,6 +616,7 @@ class DockerProviderInstance(BaseProviderInstance):
     def _check_and_install_packages(
         self,
         container: docker.models.containers.Container,
+        host_dir: str,
         host_volume_mount_path: str | None = None,
     ) -> None:
         """Check for required packages and install if missing, with warnings.
@@ -579,7 +625,7 @@ class DockerProviderInstance(BaseProviderInstance):
         to the volume path so data persists on the shared Docker volume.
         """
         check_install_cmd = build_check_and_install_packages_command(
-            str(self.host_dir),
+            host_dir,
             host_volume_mount_path=host_volume_mount_path,
         )
         exit_code, output = self._exec_in_container(container, check_install_cmd)
@@ -595,13 +641,14 @@ class DockerProviderInstance(BaseProviderInstance):
         client_public_key: str,
         host_private_key: str,
         host_public_key: str,
+        host_dir: str,
         ssh_user: str = "root",
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         host_volume_mount_path: str | None = None,
     ) -> None:
         """Set up SSH access and start sshd in the container."""
-        self._check_and_install_packages(container, host_volume_mount_path=host_volume_mount_path)
+        self._check_and_install_packages(container, host_dir=host_dir, host_volume_mount_path=host_volume_mount_path)
 
         with log_span("Configuring SSH keys in container", ssh_user=ssh_user):
             configure_ssh_cmd = build_configure_ssh_command(
@@ -678,6 +725,10 @@ class DockerProviderInstance(BaseProviderInstance):
         host_key_path, host_public_key = self._get_host_keypair()
         host_private_key = host_key_path.read_text()
 
+        # Provision against the host_dir this host was created with (recorded in
+        # its config), not the current context's -- start/restore can run from a
+        # context whose provider config resolves a different host_dir.
+        host_dir_str = self._effective_host_dir_str(config)
         host_volume_symlink_target = self._get_host_volume_symlink_target(
             host_id, is_isolated=config.is_isolated_host_volume
         )
@@ -686,6 +737,7 @@ class DockerProviderInstance(BaseProviderInstance):
             client_public_key,
             host_private_key,
             host_public_key,
+            host_dir=host_dir_str,
             known_hosts=known_hosts,
             authorized_keys=authorized_keys,
             host_volume_mount_path=host_volume_symlink_target,
@@ -720,6 +772,7 @@ class DockerProviderInstance(BaseProviderInstance):
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
+            host_dir_override=Path(config.host_dir) if config.host_dir is not None else None,
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                 callback_host_id, certified_data
             ),
@@ -731,7 +784,9 @@ class DockerProviderInstance(BaseProviderInstance):
         self._create_shutdown_script(host)
 
         with log_span("Starting activity watcher in container"):
-            start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
+            start_activity_watcher_cmd = build_start_activity_watcher_command(
+                host_dir_str, host_log_dir=self._host_log_dir_str(host_dir_str)
+            )
             self._exec_in_container(container, start_activity_watcher_cmd)
 
         return host, ssh_host, ssh_port, host_public_key
@@ -741,13 +796,13 @@ class DockerProviderInstance(BaseProviderInstance):
 
         For Docker, the shutdown script kills PID 1 to stop the container.
         """
-        host_dir_str = str(host.host_dir)
+        log_dir_str = self._host_log_dir_str(str(host.host_dir))
 
         script_content = f'''#!/bin/bash
 # Auto-generated shutdown script for mngr Docker host
 # Kills PID 1 to stop the container
 
-LOG_FILE="{host_dir_str}/logs/shutdown.log"
+LOG_FILE="{log_dir_str}/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{
@@ -1266,6 +1321,7 @@ kill -TERM 1
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
+            host_dir_override=_recorded_host_dir_override(host_record),
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                 callback_host_id, certified_data
             ),
@@ -1288,6 +1344,7 @@ kill -TERM 1
                 certified_host_data=host_record.certified_host_data,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
+                host_dir_override=_recorded_host_dir_override(host_record),
                 on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                     callback_host_id, certified_data
                 ),
@@ -1380,7 +1437,12 @@ kill -TERM 1
                     container_name=container_name,
                     labels=labels,
                     start_args=effective_start_args,
-                    volume_mount_args=self._build_volume_mount_args(host_id, is_isolated=is_isolated),
+                    volume_mount_args=self._build_volume_mount_args(
+                        host_id,
+                        is_isolated=is_isolated,
+                        volume_mount_path=self._configured_volume_mount_path_str(),
+                        host_dir=str(self.host_dir),
+                    ),
                 )
 
         except docker.errors.APIError as e:
@@ -1409,6 +1471,8 @@ kill -TERM 1
             start_args=effective_start_args,
             image=base_image,
             is_isolated_host_volume=is_isolated,
+            volume_mount_path=self._configured_volume_mount_path_str(),
+            host_dir=str(self.host_dir),
         )
 
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -1661,7 +1725,12 @@ kill -TERM 1
                 container_name=container_name,
                 labels=labels,
                 start_args=effective_start_args,
-                volume_mount_args=self._build_volume_mount_args(host_id, is_isolated=config.is_isolated_host_volume),
+                volume_mount_args=self._build_volume_mount_args(
+                    host_id,
+                    is_isolated=config.is_isolated_host_volume,
+                    volume_mount_path=config.volume_mount_path,
+                    host_dir=self._effective_host_dir_str(config),
+                ),
             )
         except (MngrError, docker.errors.DockerException) as e:
             raise MngrError(f"Failed to create container from snapshot: {e}") from e
@@ -2247,12 +2316,25 @@ kill -TERM 1
 
         Returns a HostVolume backed by a sub-folder of the state volume
         at volumes/vol-<host_hex>/. Returns None when host volumes are disabled.
+
+        The returned volume is rooted at the host's *host_dir* (the HostVolume
+        contract): when the host was created with a volume_mount_path above
+        host_dir (e.g. the volume mounted at /home/user with host_dir at
+        /home/user/.mngr), the volume is scoped down to host_dir's subpath so
+        agent state stays addressable at the same relative paths.
         """
         if not self.config.is_host_volume_created:
             return None
         host_id = host.id if isinstance(host, HostInterface) else host
         volume_id = self._volume_id_for_host(host_id)
         scoped_volume = self._state_volume.scoped(f"volumes/{volume_id}")
+        host_record = self._host_store.read_host_record(host_id)
+        if host_record is not None and host_record.config is not None:
+            record_config = host_record.config
+            if record_config.volume_mount_path is not None and record_config.host_dir is not None:
+                host_dir_in_volume = Path(record_config.host_dir).relative_to(Path(record_config.volume_mount_path))
+                if str(host_dir_in_volume) != ".":
+                    scoped_volume = scoped_volume.scoped(str(host_dir_in_volume))
         return HostVolume(volume=scoped_volume)
 
     def _ensure_host_volume_dir(self, host_id: HostId) -> None:

@@ -131,8 +131,8 @@ class ImbueCloudHost(Host):
         When the pre-baked agent's ``data.json`` is still present on the
         leased container (the common case, right after a fresh lease), we
         skip the file transfer and return the recorded ``work_dir`` -- the
-        default workspace template baked it (``target_path = "/code/"`` for the vultr
-        template, etc.) and we just trust whatever was written.
+        default workspace template baked it (``target_path = "/home/user/workspace/"``
+        in the template's provider blocks) and we just trust whatever was written.
 
         Otherwise, fall through to mngr's standard ``create_agent_work_dir``
         which runs the configured transfer mode against ``host`` / ``path``.
@@ -277,7 +277,7 @@ class ImbueCloudHost(Host):
         self._write_agent_env_file(agent, agent_env)
         anthropic_api_key = agent_env.get("ANTHROPIC_API_KEY") or self.get_env_vars().get("ANTHROPIC_API_KEY")
         if anthropic_api_key:
-            patch_command = _build_patch_claude_config_command(anthropic_api_key, agent.id)
+            patch_command = _build_patch_claude_config_command(anthropic_api_key, agent.id, self.host_dir)
             result = self.execute_idempotent_command(patch_command)
             if not result.success:
                 raise ClaudeConfigPatchError(
@@ -285,12 +285,9 @@ class ImbueCloudHost(Host):
                 )
 
 
-def _build_patch_claude_config_command(litellm_key: str, agent_id: AgentId) -> str:
-    """Build a python one-liner that patches the agent's claude config to approve the new key.
-
-    Mirrors ``_build_patch_claude_config_command`` in minds' agent_creator.py.
-    """
-    claude_config_path = f"/mngr/agents/{agent_id}/plugin/claude/anthropic/.claude.json"
+def _build_patch_claude_config_command(litellm_key: str, agent_id: AgentId, host_dir: Path) -> str:
+    """Build a python one-liner that patches the agent's claude config to approve the new key."""
+    claude_config_path = f"{host_dir}/agents/{agent_id}/plugin/claude/anthropic/.claude.json"
     key_suffix = litellm_key[-20:]
     return (
         'python3 -c "'

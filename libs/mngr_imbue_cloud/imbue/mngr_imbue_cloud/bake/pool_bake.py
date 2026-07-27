@@ -55,13 +55,13 @@ DEFAULT_WORKSPACE_TEMPLATE_BAKE_TEMPLATES: Final[tuple[str, ...]] = ("main", "po
 # sentinel. The bootstrap writes it after creating the chat agent on first boot;
 # removing it (after destroying that chat agent) makes the user's first lease +
 # start re-create the chat agent under the user's own workspace name.
-INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
+INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/home/user/workspace/data/.state/initial_chat_created"
 
 # The baked services checkout whose repo-local git identity we clear at finalize
 # time. mngr's cross-host create (GIT_MIRROR) copies the *operator's* ``git config
-# user.name/email`` into ``/mngr/code/.git/config``; on a shared, pre-provisioned
-# pool host that operator is whoever ran the bake (e.g. "Josh Albrecht"), and every
-# adopting user's agent -- which mirrors/worktrees from /mngr/code -- would inherit
+# user.name/email`` into the workspace checkout's ``.git/config``; on a shared,
+# pre-provisioned pool host that operator is whoever ran the bake (e.g. "Josh
+# Albrecht"), and every adopting user's agent -- which shares that checkout -- would inherit
 # it as its commit author. We unset it here rather than substituting a value: on
 # adoption the DEFAULT_WORKSPACE_TEMPLATE bootstrap re-runs its workspace init
 # (its initial-chat signal was removed during this same finalize) and supplies its
@@ -70,14 +70,14 @@ INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
 # template's Bash-command rewrite hook; this only governs the leftover non-agent
 # commits on the shared checkout.) Local ``mngr`` worktree agents are unaffected --
 # they take the GIT_WORKTREE path, which never runs this copy.
-_BAKED_SERVICES_CHECKOUT_PATH: Final[str] = "/mngr/code"
+BAKED_SERVICES_CHECKOUT_PATH: Final[str] = "/home/user/workspace"
 
 # 30 min: the inner ``mngr create`` builds a fresh Docker image on the host,
 # which can take 10-20 min (network bound).
 _MNGR_CREATE_TIMEOUT_SECONDS: Final[int] = 1800
 
 # Manual rsync excludes layered on top of ``--filter=:- .gitignore`` for the
-# monorepo -> DEFAULT_WORKSPACE_TEMPLATE vendor/mngr sync. The filter handles ``__pycache__`` / ``.venv``
+# monorepo -> DEFAULT_WORKSPACE_TEMPLATE system/vendor/mngr sync. The filter handles ``__pycache__`` / ``.venv``
 # / etc.; these two are NOT in .gitignore: ``.git`` (git's internal dir) and
 # ``uv.lock`` (committed at the mngr root, but each install context regenerates
 # its own).
@@ -91,9 +91,11 @@ _SENTINEL_WAIT_TIMEOUT_SECONDS: Final[int] = 480
 # Exit code GNU ``timeout`` returns when it kills the wrapped command on timeout.
 _COMMAND_TIMEOUT_EXIT_CODE: Final[int] = 124
 
-# The DEFAULT_WORKSPACE_TEMPLATE ``deferred-install`` service writes this marker on success; the bake waits
-# for it (see ``wait_for_deferred_install``) before stopping the services agent.
-_DEFERRED_INSTALL_MARKER: Final[str] = "/var/lib/minds/deferred-install/done.playwright"
+# The DEFAULT_WORKSPACE_TEMPLATE env-converge browser unit is satisfied once the
+# Fortress engine binary is in place (there are no marker files anymore); the
+# bake waits on that condition (see ``wait_for_deferred_install``) before
+# stopping the services agent.
+_DEFERRED_INSTALL_SATISFIED_TEST: Final[str] = "test -x /opt/fortress/tilion-fortress/tilion"
 # Cap on how long the bake blocks for the deferred install (heavy apt + browser
 # download) to finish; on timeout the bake proceeds and the install retries on lease.
 _DEFERRED_INSTALL_WAIT_TIMEOUT_SECONDS: Final[int] = 900
@@ -178,14 +180,14 @@ def run_mngr_command(
 
 
 def sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
-    """Rsync the mngr monorepo into the DEFAULT_WORKSPACE_TEMPLATE workspace's ``vendor/mngr/`` directory.
+    """Rsync the mngr monorepo into the DEFAULT_WORKSPACE_TEMPLATE workspace's ``system/vendor/mngr/`` directory.
 
-    The DEFAULT_WORKSPACE_TEMPLATE Dockerfile COPYs ``vendor/mngr`` and builds the container's mngr from
+    The DEFAULT_WORKSPACE_TEMPLATE Dockerfile COPYs ``system/vendor/mngr`` and builds the container's mngr from
     it, so this populates it (gitignore-filtered) before the bake -- making the
     baked container's mngr match the operator's checkout. Used identically by the
     OVH and slice bakes (both bake the same DEFAULT_WORKSPACE_TEMPLATE image).
     """
-    vendor_mngr = workspace_dir / "vendor" / "mngr"
+    vendor_mngr = workspace_dir / "system" / "vendor" / "mngr"
     vendor_mngr.mkdir(parents=True, exist_ok=True)
     exclude_args: list[str] = []
     for pattern in _VENDOR_RSYNC_MANUAL_EXCLUDES:
@@ -246,7 +248,10 @@ def build_pool_create_command(
             "--label",
             f"pool_attributes={attributes_json}",
             "--host-env",
-            "MNGR_HOST_DIR=/mngr",
+            # The workspace layout's container-internal host_dir (matches the
+            # template's provider blocks): agent state lives inside the
+            # persistent /home/user tree.
+            "MNGR_HOST_DIR=/home/user/.mngr",
         ]
     )
     command.extend(extra_args)
@@ -357,25 +362,27 @@ def wait_for_deferred_install(
     host_name: str,
     timeout_seconds: int = _DEFERRED_INSTALL_WAIT_TIMEOUT_SECONDS,
 ) -> None:
-    """Wait for the DEFAULT_WORKSPACE_TEMPLATE ``deferred-install`` service to finish before the caller stops the services agent.
+    """Wait for the DEFAULT_WORKSPACE_TEMPLATE env-converge browser unit to finish before the caller stops the services agent.
 
-    The deferred-install service kicks off a heavy apt + Playwright/Chromium install at agent boot.
+    The env-converge browser unit kicks off a heavy apt + Fortress/Chromium install at agent boot.
     Stopping the services agent mid-apt kills it, leaving dpkg half-unpacked (reinst-required) -- so the
     install only completes after a repair on the post-lease retry. Calling this right before the stop
     avoids that interruption. Both backends must call it before their respective ``mngr stop`` (OVH stops
     before ``finalize_baked_pool_host``, slices after, so this is a standalone step rather than part of
     finalize). Runs inside the container via the caller-supplied transport.
 
-    Blocks until either the success marker exists OR the ``deferred_install.sh`` process is no longer
-    running -- the latter so a not-yet-started or already-finished/failed install does not block us (it
-    runs or retries cleanly post-lease). Best-effort with a cap: on timeout we log and proceed.
+    Blocks until either the unit's satisfied condition holds (the Fortress engine binary is in
+    place) OR the unit's process is no longer running -- the latter so a not-yet-started or
+    already-finished/failed install does not block us (env-converge re-runs the idempotent unit
+    cleanly post-lease). Best-effort with a cap: on timeout we log and proceed.
     """
-    # The bracket in '[d]eferred_install.sh' is the classic self-match guard: the regex still matches the
-    # real "bash scripts/deferred_install.sh" process, but this wait command's own command line contains
-    # "[d]eferred_install.sh" (not the literal), so pgrep does not match itself into an infinite loop.
+    # The bracket in '[1]000-playwright-fortress' is the classic self-match guard: the regex still
+    # matches the real "bash scripts/env.d/1000-playwright-fortress.sh" unit process, but this wait
+    # command's own command line contains the bracketed spelling, so pgrep does not match itself into
+    # an infinite loop.
     poll = (
-        f"until test -f {_DEFERRED_INSTALL_MARKER} || "
-        f"! pgrep -f '[d]eferred_install.sh' >/dev/null 2>&1; do sleep 5; done"
+        f"until {_DEFERRED_INSTALL_SATISFIED_TEST} || "
+        f"! pgrep -f '[1]000-playwright-fortress' >/dev/null 2>&1; do sleep 5; done"
     )
     wait_command = f"timeout {int(timeout_seconds)} bash -c {shlex.quote(poll)}"
     rc, _out, err = run_in_container(baked, "deferred-install-wait", wait_command, float(timeout_seconds + 60))
@@ -410,10 +417,10 @@ def finalize_baked_pool_host(
        claim flow plus parallel ``mngr observe`` discovery routinely exceeds it.
     2. Clear the baked services checkout's repo-local git identity (best-effort):
        the bake's cross-host create copied the operator's ``git config
-       user.name/email`` into ``/mngr/code``, and adopting users' agents would
+       user.name/email`` into the workspace checkout, and adopting users' agents would
        otherwise inherit the baker as their commit author. Unsetting it lets the
        bootstrap re-supply its neutral fallback on adoption (see
-       ``_BAKED_SERVICES_CHECKOUT_PATH``).
+       ``BAKED_SERVICES_CHECKOUT_PATH``).
     3. Wait for the DEFAULT_WORKSPACE_TEMPLATE bootstrap's initial-chat sentinel, then destroy the
        bootstrap-created chat agent (named after the bake host) and remove the
        sentinel -- so the user's first lease re-creates the chat agent under their
@@ -432,7 +439,7 @@ def finalize_baked_pool_host(
         logger.warning("Could not harden container sshd for {} (exit {}): {}", host_name, sshd_rc, sshd_err.strip())
 
     # Clear the operator's git identity that the bake's cross-host create copied
-    # into the baked services checkout (see _BAKED_SERVICES_CHECKOUT_PATH). Runs
+    # into the baked services checkout (see BAKED_SERVICES_CHECKOUT_PATH). Runs
     # before the sentinel wait so it applies even on hosts where the bootstrap never
     # made a chat agent. Best-effort: the Bash-command rewrite hook is the
     # authoritative per-agent attribution, so a transient failure here shouldn't
@@ -440,7 +447,7 @@ def finalize_baked_pool_host(
     # when the key is already absent; `|| [ $? -eq 5 ]` treats that as success so a
     # checkout that never inherited an identity isn't reported as a failure, while a
     # real error (e.g. not a git repo) still surfaces as a non-5 exit.
-    checkout = shlex.quote(_BAKED_SERVICES_CHECKOUT_PATH)
+    checkout = shlex.quote(BAKED_SERVICES_CHECKOUT_PATH)
     git_identity_command = (
         f"git -C {checkout} config --local --unset user.name || [ $? -eq 5 ]; "
         f"git -C {checkout} config --local --unset user.email || [ $? -eq 5 ]"
@@ -479,9 +486,9 @@ def finalize_baked_pool_host(
         )
 
     logger.info("  Destroying bootstrap-created chat agent: {}", host_name)
-    # Use the canonical in-container mngr invocation (uv run mngr in /mngr/code),
+    # Use the canonical in-container mngr invocation (uv run mngr in the workspace checkout),
     # which works regardless of transport / login PATH in the DEFAULT_WORKSPACE_TEMPLATE image.
-    destroy_command = f"cd /mngr/code && uv run mngr destroy {shlex.quote(host_name)} --force"
+    destroy_command = f"cd {checkout} && uv run mngr destroy {shlex.quote(host_name)} --force"
     destroy_rc, _destroy_out, destroy_err = run_in_container(baked, "chat-destroy", destroy_command, 120.0)
     if destroy_rc != 0:
         raise PoolBakeError(

@@ -29,7 +29,7 @@
 #                      pass `main` for the development tip)
 #   --dev              contributor layout: default --version to main, clone
 #                      default-workspace-template locally, launch via
-#                      `just minds-start` (which syncs vendor/mngr)
+#                      `just minds-start` (which syncs system/vendor/mngr)
 #   --install-dir DIR  where to clone mngr (default: ~/mngr)
 #   --no-launch        set everything up but do not start the app
 set -euo pipefail

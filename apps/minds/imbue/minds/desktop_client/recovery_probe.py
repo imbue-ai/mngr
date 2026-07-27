@@ -524,12 +524,12 @@ def _build_services_agent_running_probe(
 def _supervisorctl_status_inner_command() -> str:
     """In-container ``supervisorctl status`` for the system_interface service.
 
-    Pointed at the repo-root config (``-c /code/supervisord.conf``) so it finds
-    the unix socket declared there; the default config search path does not
-    include that file. Prints supervisord's own status line, e.g.
+    Pointed at the workspace config (``-c /home/user/workspace/system/supervisord.conf``)
+    so it finds the unix socket declared there; the default config search path
+    does not include that file. Prints supervisord's own status line, e.g.
     ``system_interface   RUNNING   pid 42, uptime 0:10:00``.
     """
-    return "supervisorctl -c /code/supervisord.conf status system_interface"
+    return "supervisorctl -c /home/user/workspace/system/supervisord.conf status system_interface"
 
 
 def _build_system_interface_probe(

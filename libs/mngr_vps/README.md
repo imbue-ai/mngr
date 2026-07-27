@@ -67,6 +67,7 @@ The base config (`VpsProviderConfig`) provides these settings:
 |---|---|---|
 | `isolation` | `CONTAINER` | How the agent is isolated on its VPS. CONTAINER (the default) runs the agent in a Docker container; NONE runs it directly on the VPS OS. Selects the realizer the provider uses; the default preserves the original container behavior. |
 | `host_dir` | `/mngr` | Base directory for mngr data on the agent host. With container isolation this is the path inside the container; with bare isolation it is the path on the VM's OS. |
+| `volume_home_path` | `None` | Container path (e.g. /home/user) symlinked onto the unified host volume's home/ subdirectory, so the whole tree persists on the volume while mngr data lives in a subdirectory (host_dir must then be a path strictly inside it, e.g. /home/user/.mngr). When unset, host_dir symlinks to the volume's host_dir/ subdirectory exactly as before. Only used by the container (docker) isolation mode. |
 | `default_image` | `debian:bookworm-slim` | Default Docker image |
 | `default_idle_timeout` | `800` | Idle timeout in seconds |
 | `default_idle_mode` | `IO` | Idle detection mode |

@@ -48,6 +48,17 @@ REQUIRED_HOST_PACKAGES: Final[tuple[RequiredHostPackage, ...]] = (
 
 
 @pure
+def resolve_host_log_dir(mngr_host_dir: str, host_log_dir: str | Path | None) -> str:
+    """The directory for mngr's plain-text service logs on a host.
+
+    host_log_dir when configured, else the default <host_dir>/logs. Single
+    source of truth for the fallback so providers and the command builders
+    below cannot drift.
+    """
+    return str(host_log_dir) if host_log_dir is not None else f"{mngr_host_dir}/logs"
+
+
+@pure
 def get_user_ssh_dir(user: str) -> Path:
     """Get the SSH directory path for a given user.
 
@@ -342,6 +353,7 @@ def load_resource_script(filename: str) -> str:
 def build_start_volume_sync_command(
     volume_mount_path: str,
     mngr_host_dir: str,
+    host_log_dir: str | None = None,
 ) -> str:
     """Build a shell command that starts a background loop to sync the host volume.
 
@@ -349,10 +361,14 @@ def build_start_volume_sync_command(
     path to flush any pending writes. This ensures data is persisted to the
     volume even if the sandbox is terminated without a clean shutdown.
 
+    Plain-text output goes to host_log_dir when provided, otherwise to the
+    default <mngr_host_dir>/logs.
+
     Returns a shell command string that can be executed via sh -c.
     """
+    log_dir = resolve_host_log_dir(mngr_host_dir, host_log_dir)
     script_path = f"{mngr_host_dir}/commands/volume_sync.sh"
-    log_path = f"{mngr_host_dir}/logs/volume_sync.log"
+    log_path = f"{log_dir}/volume_sync.log"
 
     # The sync script content (simple loop)
     sync_script = f"#!/bin/sh\nwhile true; do sync {volume_mount_path} 2>/dev/null; sleep 60; done\n"
@@ -360,7 +376,7 @@ def build_start_volume_sync_command(
 
     script_lines = [
         f"mkdir -p '{mngr_host_dir}/commands'",
-        f"mkdir -p '{mngr_host_dir}/logs'",
+        f"mkdir -p '{log_dir}'",
         f"printf '%s' '{escaped_script}' > '{script_path}'",
         f"chmod +x '{script_path}'",
         f"nohup '{script_path}' > '{log_path}' 2>&1 &",
@@ -372,6 +388,7 @@ def build_start_volume_sync_command(
 @pure
 def build_start_activity_watcher_command(
     mngr_host_dir: str,
+    host_log_dir: str | None = None,
 ) -> str:
     """Build a shell command that installs and starts the activity watcher.
 
@@ -386,6 +403,9 @@ def build_start_activity_watcher_command(
     4. Makes both executable
     5. Starts the activity watcher in the background with nohup
 
+    Plain-text watcher output goes to host_log_dir when provided, otherwise to
+    the default <mngr_host_dir>/logs.
+
     Returns a shell command string that can be executed via sh -c.
     """
     log_lib_content = load_resource_script("mngr_log.sh")
@@ -395,14 +415,15 @@ def build_start_activity_watcher_command(
     escaped_log_lib = log_lib_content.replace("'", "'\"'\"'")
     escaped_script = script_content.replace("'", "'\"'\"'")
 
+    log_dir = resolve_host_log_dir(mngr_host_dir, host_log_dir)
     log_lib_path = f"{mngr_host_dir}/commands/mngr_log.sh"
     script_path = f"{mngr_host_dir}/commands/activity_watcher.sh"
-    log_path = f"{mngr_host_dir}/logs/activity_watcher.log"
+    log_path = f"{log_dir}/activity_watcher.log"
 
     script_lines = [
         # Create commands and logs directories
         f"mkdir -p '{mngr_host_dir}/commands'",
-        f"mkdir -p '{mngr_host_dir}/logs'",
+        f"mkdir -p '{log_dir}'",
         # Write the shared logging library
         f"printf '%s' '{escaped_log_lib}' > '{log_lib_path}'",
         f"chmod +x '{log_lib_path}'",

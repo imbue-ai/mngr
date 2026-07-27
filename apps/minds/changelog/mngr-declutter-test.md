@@ -1,0 +1,5 @@
+Integration branch combining the user-data-layout trains (`mngr/fix-data-layout`, `mngr/declutter-template`) with `mngr/fix-apt-mirror`; the full per-train details live in this project's sibling entries for those branches.
+
+For this project: minds adapts to the `/home/user` workspace layout and the decluttered template root (secrets at `data/.secrets/`, vendored mngr at `system/vendor/mngr/`, backup/restore and recovery probes on the new paths, layout knobs in minds-authored provider blocks), and the release runbook's step 0 cuts the apt snapshot mirror timestamp via the `apt-mirror` operator CLI instead of connector admin routes.
+
+The backup-service check/update scripts now converge across the declutter layout rename in both directions: pathspecs addressed at a target tag follow the tag's own tree layout (`libs/host_backup` on pre-declutter tags, `system/libs/host_backup` after), so a decluttered workspace can converge onto the shipped pre-declutter minimum tag and old-layout workspaces can accept future decluttered release tags. Previously the cross-layout `git checkout <tag> -- <workspace-path>` failed with an unmatched pathspec.

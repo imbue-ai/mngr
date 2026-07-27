@@ -25,6 +25,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_com
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr_vps.container_setup import CONTAINER_ENTRYPOINT_CMD
+from imbue.mngr_vps.container_setup import HOME_SUBPATH
 from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps.container_setup import HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
@@ -179,7 +180,13 @@ class DockerRealizer(SnapshotCapableRealizer):
 
     def host_dir_path_on_outer(self, host_id: HostId) -> Path:
         # The per-host host_dir lives on the btrfs subvolume the unified volume binds to.
-        return self.config.btrfs_mount_path / host_id.get_uuid().hex / HOST_DIR_SUBPATH
+        # With volume_home_path configured, host_dir is a plain directory inside the
+        # volume's home/ subtree rather than the dedicated host_dir/ subdirectory.
+        subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
+        if self.config.volume_home_path is not None:
+            host_dir_in_home = self.host_dir.relative_to(self.config.volume_home_path)
+            return subvolume_path / HOME_SUBPATH / host_dir_in_home
+        return subvolume_path / HOST_DIR_SUBPATH
 
     # --- container identity (keys + known_hosts) ---------------------------
 
@@ -251,6 +258,7 @@ class DockerRealizer(SnapshotCapableRealizer):
         host_volume_mount_path: str | None,
         known_hosts_entries: tuple[str, ...],
         authorized_keys_entries: tuple[str, ...],
+        home_volume_symlink: tuple[str, str] | None,
     ) -> None:
         """Set up SSH inside the container via docker exec."""
         _container_key_path, container_public_key = self._container_ssh_keypair()
@@ -265,6 +273,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             container_host_public_key=container_host_public_key,
             known_hosts_entries=known_hosts_entries,
             authorized_keys_entries=authorized_keys_entries,
+            home_volume_symlink=home_volume_symlink,
         )
 
     def _prepare_btrfs_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> Path:
@@ -302,7 +311,9 @@ class DockerRealizer(SnapshotCapableRealizer):
 
         with log_span("Provisioning unified host volume on btrfs subvolume"):
             subvolume_path = self._prepare_btrfs_on_outer(outer, host_id)
-            seed_host_volume_layout_on_outer(outer, subvolume_path)
+            seed_host_volume_layout_on_outer(
+                outer, subvolume_path, is_home_seeded=self.config.volume_home_path is not None
+            )
             create_bind_volume_on_outer(outer, volume_name=volume_name, device_path=subvolume_path)
 
         # Snapshot helper: lets the in-container host_backup service request
@@ -358,13 +369,27 @@ class DockerRealizer(SnapshotCapableRealizer):
 
         logger.log(LogLevel.BUILD.value, "Setting up SSH in container...", source="vps")
         with log_span("Setting up SSH in container"):
+            # With volume_home_path configured, the home tree symlinks onto the
+            # volume's home/ subdir and host_dir is a plain directory inside it
+            # (no separate host_dir symlink); otherwise host_dir symlinks to the
+            # volume's host_dir/ subdir exactly as before.
+            if self.config.volume_home_path is not None:
+                host_dir_symlink_target = None
+                home_volume_symlink = (
+                    str(self.config.volume_home_path),
+                    f"{HOST_VOLUME_MOUNT_PATH}/{HOME_SUBPATH}",
+                )
+            else:
+                host_dir_symlink_target = f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}"
+                home_volume_symlink = None
             self._setup_container_ssh(
                 outer=outer,
                 host_id=ctx.host_id,
                 container_name=container_name,
-                host_volume_mount_path=f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}",
+                host_volume_mount_path=host_dir_symlink_target,
                 known_hosts_entries=tuple(ctx.known_hosts or ()),
                 authorized_keys_entries=tuple(ctx.authorized_keys or ()),
+                home_volume_symlink=home_volume_symlink,
             )
 
         _container_host_key_path, container_host_public_key = self._container_host_keypair(ctx.host_id)
@@ -387,7 +412,12 @@ class DockerRealizer(SnapshotCapableRealizer):
 
     def start_activity_watcher(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
         container_name = self._require_container_name(handle)
-        exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
+        host_log_dir = str(self.config.host_log_dir) if self.config.host_log_dir is not None else None
+        exec_in_container(
+            outer,
+            container_name,
+            build_start_activity_watcher_command(str(self.host_dir), host_log_dir=host_log_dir),
+        )
 
     def stop_placement(self, outer: OuterHostInterface, handle: PlacementHandle, timeout_seconds: float) -> None:
         with log_span("Stopping container on VPS"):

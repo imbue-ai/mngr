@@ -215,11 +215,11 @@ When a user creates an imbue_cloud workspace, minds makes up to two `mngr create
 
 So a pool whose rows are baked at an older `repo_branch_or_tag` no longer hard-fails newer workspace creations -- they fall back to the slow path. Keeping the pool baked at the current version is still worthwhile because it keeps creations on the fast path. Only when the pool is genuinely empty (no `available` rows) does creation fail, with `ImbueCloudLeaseUnavailableError`.
 
-To rsync the local mngr working tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `vendor/mngr/`
+To rsync the local mngr working tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `system/vendor/mngr/`
 for the duration of the bake (dev-loop pattern; see
 `apps/minds/docs/vendor-mngr-sync.md` for the sync mechanisms), forward
 `--mngr-source <monorepo-root>` as an extra flag through the recipe. The bake
-resets `vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt
+resets `system/vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt
 mngr churn.
 
 List the rows (with the tier activated):
@@ -279,7 +279,7 @@ During development, set `MINDS_WORKSPACE_BRANCH` to your branch name. The minds
 app uses that branch as the lease request's `repo_branch_or_tag`, so the pool
 host's `attributes.repo_branch_or_tag` must match. Bake against your dev env
 (the DSN auto-resolves from its `secrets.toml`, and `--mngr-source` rsyncs your
-live mngr tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `vendor/mngr/` for the bake):
+live mngr tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `system/vendor/mngr/` for the bake):
 
 ```bash
 eval "$(uv run minds env activate dev-<your-user>)"

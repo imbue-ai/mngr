@@ -10,20 +10,20 @@ A release ships three pinned artifacts that must agree:
 
 Both repos tag with the **`minds-v<version>`** prefix (e.g. `minds-v0.3.1`), namespacing minds releases from each repo's own `v<version>`. The shipped binary clones the DEFAULT_WORKSPACE_TEMPLATE tag at runtime via `FALLBACK_BRANCH` in `apps/minds/imbue/minds/desktop_client/templates.py`; tag immutability pins a binary to the snapshot it was verified against.
 
-Both repos release from **`main`**. Neither `main` is branch-protected, so a PR is **never a merge gate** — you can push or merge to `main` directly. Its only role here is as a **CI surface**: `ci.yml` runs on PRs (any branch) and on push to `main`, *never on a bare branch push*, so opening a PR is how you get traditional CI on a release branch. Nothing is opened for human *review* unless real code rides along. Each repo gets a short-lived **release branch** (mngr: the version bump; DEFAULT_WORKSPACE_TEMPLATE: the `vendor/mngr` refresh); you prove the pair green, land both on `main`, tag each `main`, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
+Both repos release from **`main`**. Neither `main` is branch-protected, so a PR is **never a merge gate** — you can push or merge to `main` directly. Its only role here is as a **CI surface**: `ci.yml` runs on PRs (any branch) and on push to `main`, *never on a bare branch push*, so opening a PR is how you get traditional CI on a release branch. Nothing is opened for human *review* unless real code rides along. Each repo gets a short-lived **release branch** (mngr: the version bump; DEFAULT_WORKSPACE_TEMPLATE: the `system/vendor/mngr` refresh); you prove the pair green, land both on `main`, tag each `main`, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
 
 ## The two release branches
 
 | Repo | Carries | Open a PR? |
 |---|---|---|
 | `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`templates.py`), any mngr/minds code | Optional. Traditional CI on an inert bump is redundant with a green `main`, so a PR adds little — open one for a record, or when the branch also carries mngr/minds code you want CI/review on. |
-| `default-workspace-template` | `vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires | Yes — as a **CI surface, not a review**. A pure vendor refresh isn't read, but a PR is the only way to run `ci.yml`'s `test` job (`uv sync` + `system_interface` tests) on the branch, which catches a `uv`-resolution or `system_interface` break fast on a big vendor jump. (You *can* skip it and lean on launch-to-msg, which covers the same end-to-end, just slower.) |
+| `default-workspace-template` | `system/vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires | Yes — as a **CI surface, not a review**. A pure vendor refresh isn't read, but a PR is the only way to run `ci.yml`'s `test` job (`uv sync` + `system_interface` tests) on the branch, which catches a `uv`-resolution or `system_interface` break fast on a big vendor jump. (You *can* skip it and lean on launch-to-msg, which covers the same end-to-end, just slower.) |
 
-**Vendor-match invariant.** DEFAULT_WORKSPACE_TEMPLATE `vendor/mngr` must be the `git archive` of the *exact* mngr SHA it's paired with — the `commit_sha` you verify and the mngr SHA you tag. The binary runs the mngr SHA; the in-VM agent imports `vendor/mngr`. If they diverge, the agent's mngr can mismatch the binary's API (how the `system_interface` → `send_message_to_agents` break slipped in). Re-archive whenever the mngr SHA changes. When iterating on CI this means dispatching a `template_ref` whose `vendor/mngr` is synced to the SHA you're building — never DEFAULT_WORKSPACE_TEMPLATE `main`, which lags: a stale vendor silently rejects a field the binary renamed, so the in-VM agent never starts and the e2e wedges at "Waiting for initial chat agent…" (looks like a frontend hang, is really vendor skew; seen for `use_env_config_dir` → `isolate_local_config_dir`). `just sync-vendor-mngr` produces a matching DEFAULT_WORKSPACE_TEMPLATE branch.
+**Vendor-match invariant.** DEFAULT_WORKSPACE_TEMPLATE `system/vendor/mngr` must be the `git archive` of the *exact* mngr SHA it's paired with — the `commit_sha` you verify and the mngr SHA you tag. The binary runs the mngr SHA; the in-VM agent imports `system/vendor/mngr`. If they diverge, the agent's mngr can mismatch the binary's API (how the `system_interface` → `send_message_to_agents` break slipped in). Re-archive whenever the mngr SHA changes. When iterating on CI this means dispatching a `template_ref` whose `system/vendor/mngr` is synced to the SHA you're building — never DEFAULT_WORKSPACE_TEMPLATE `main`, which lags: a stale vendor silently rejects a field the binary renamed, so the in-VM agent never starts and the e2e wedges at "Waiting for initial chat agent…" (looks like a frontend hang, is really vendor skew; seen for `use_env_config_dir` → `isolate_local_config_dir`). `just sync-vendor-mngr` produces a matching DEFAULT_WORKSPACE_TEMPLATE branch.
 
-> The Apple-Silicon lima-VZ `cryptography` SIGILL is handled in the default workspace template by `OPENSSL_armcap=0` (`.mngr/settings.toml` `host_env__extend` + `scripts/build_workspace.sh`), which skips OpenSSL's SVE CPU-cap probe. mngr does not pin `cryptography`.
+> The Apple-Silicon lima-VZ `cryptography` SIGILL is handled in the default workspace template by `OPENSSL_armcap=0` (`.mngr/settings.toml` `host_env__extend` + `system/scripts/build_workspace.sh`), which skips OpenSSL's SVE CPU-cap probe. mngr does not pin `cryptography`.
 
-**The DEFAULT_WORKSPACE_TEMPLATE vendor refresh is not reviewed.** The `vendor/mngr` snapshot (thousands of files) is generated and verified by *reproduction*, not by reading: the step-6 vendor-match check (a `git ls-tree` blob-hash comparison of the DEFAULT_WORKSPACE_TEMPLATE vendor tree against the tagged mngr SHA's tree) proves it equals that SHA file-for-file. A clean comparison *is* the review. (`vendor/mngr/**` is `linguist-generated` in DEFAULT_WORKSPACE_TEMPLATE's `.gitattributes`, so GitHub also collapses it.) The branch exists only to (a) stage the refresh so launch-to-msg can verify the (binary, template) pair **before** it lands on `main`, and (b) be the commit the tag points at. If a `system_interface` consumer fix rides along, isolate the vendor refresh in its own commit (`vendor/mngr: refresh from mngr <sha>`) so the real code is reviewable on its own — that fix is the only part anyone reads.
+**The DEFAULT_WORKSPACE_TEMPLATE vendor refresh is not reviewed.** The `system/vendor/mngr` snapshot (thousands of files) is generated and verified by *reproduction*, not by reading: the step-6 vendor-match check (a `git ls-tree` blob-hash comparison of the DEFAULT_WORKSPACE_TEMPLATE vendor tree against the tagged mngr SHA's tree) proves it equals that SHA file-for-file. A clean comparison *is* the review. (`system/vendor/mngr/**` is `linguist-generated` in DEFAULT_WORKSPACE_TEMPLATE's `.gitattributes`, so GitHub also collapses it.) The branch exists only to (a) stage the refresh so launch-to-msg can verify the (binary, template) pair **before** it lands on `main`, and (b) be the commit the tag points at. If a `system_interface` consumer fix rides along, isolate the vendor refresh in its own commit (`system/vendor/mngr: refresh from mngr <sha>`) so the real code is reviewable on its own — that fix is the only part anyone reads.
 
 ## File reference
 
@@ -53,8 +53,8 @@ Set these once for the whole session — later steps assume them:
 Three things must hold; only two need *new* CI:
 
 1. **The binary built from the release SHA works end-to-end** — `minds-launch-to-msg.yml` (step 4). `main` never runs this, so it is the release's only unique verification and its wall-clock long pole. Start it as early as possible.
-2. **The DEFAULT_WORKSPACE_TEMPLATE PR's `test` job is green** (step 2) — real signal: it refreshes `vendor/mngr` (and may carry a `system_interface` fix), so a `uv`-resolution or stale-API break surfaces here. `ci.yml` only runs on a PR or on `main`, so this needs the DEFAULT_WORKSPACE_TEMPLATE branch opened as a PR (a CI surface, not a review).
-3. **`vendor/mngr` equals the tagged mngr SHA** — proved by reproduction (the step-6 `git ls-tree` blob-hash comparison), not by CI.
+2. **The DEFAULT_WORKSPACE_TEMPLATE PR's `test` job is green** (step 2) — real signal: it refreshes `system/vendor/mngr` (and may carry a `system_interface` fix), so a `uv`-resolution or stale-API break surfaces here. `ci.yml` only runs on a PR or on `main`, so this needs the DEFAULT_WORKSPACE_TEMPLATE branch opened as a PR (a CI surface, not a review).
+3. **`system/vendor/mngr` equals the tagged mngr SHA** — proved by reproduction (the step-6 `git ls-tree` blob-hash comparison), not by CI.
 
 *Not* new signal: **traditional CI on a version-bump-only mngr branch.** Bumping `version` + `FALLBACK_BRANCH` can't change test behavior — no test asserts the version literal or that `FALLBACK_BRANCH` resolves to an existing tag — so a green `main` already covers it. Let those jobs run as a backstop; don't serialize behind them. (When the mngr branch *also* carries mngr/minds code, its CI is real signal — gate on it.)
 
@@ -73,7 +73,7 @@ The fast path drops the two pre-merge safety nets and keeps the one real gate:
 Sequence:
 
 1. **Bump** version + `FALLBACK_BRANCH` (step 1) on a short mngr branch; `GREEN_MNGR_SHA` = its HEAD.
-2. **Sync** dwt `vendor/mngr` from `GREEN_MNGR_SHA` (step 3) on a short dwt branch.
+2. **Sync** dwt `system/vendor/mngr` from `GREEN_MNGR_SHA` (step 3) on a short dwt branch.
 3. **Land both on `main` by fast-forward** — `git push origin <branch>:main` in each repo. When `main` hasn't moved since you cut the branch (the usual case for a quick release), this is a clean FF and `main` HEAD *becomes* the exact SHA you tag: mngr `main` = `GREEN_MNGR_SHA`, dwt `main` = the vendor-sync commit. No merge commit; the branches' commits landing on `main` auto-close any PR you happened to open. *If `main` did advance, the FF is rejected — fall back to a `--no-ff` merge commit and still tag `GREEN_MNGR_SHA` (the merge parent), never `main` HEAD (see steps 6-7).*
 4. **Verify vendor-match** against the post-merge `origin/main` (step 6). This is the gate — do not tag on a mismatch.
 5. **Tag** both at the frozen SHAs (step 7): mngr at `GREEN_MNGR_SHA`, dwt at its post-merge `origin/main`.
@@ -86,6 +86,36 @@ Sequence:
 
 Use this when the fast-forward path above doesn't apply. Each numbered step is also referenced by the fast path, so the step numbers are shared.
 
+### 0. Cut the apt snapshot mirror timestamp (before any T bump lands)
+
+Only needed when the release advances the DEFAULT_WORKSPACE_TEMPLATE
+`.mngr/apt-snapshot-timestamp` (the pinned Debian archive timestamp every
+workspace's apt sources resolve against). The mirror must serve the new
+timestamp BEFORE the bump commit lands anywhere an image could be built from,
+or fresh builds fail on missing indexes. Run the `apt-mirror` operator CLI
+with the R2 credentials from the `secrets/minds/production/apt-mirror` Vault
+entry exported (see `apps/apt_mirror/README.md`):
+
+```bash
+# Freeze the index set for the new timestamp (idempotent; minutes). On
+# success this rewrites apps/apt_mirror/current-timestamp -- commit it.
+uv run apt-mirror cut --timestamp <YYYYMMDDTHHMMSSZ>
+# Pre-fetch the committed package lists' pool files (parallel; exits
+# nonzero on any gap), then double-check read-only:
+uv run apt-mirror warm
+uv run apt-mirror verify
+```
+
+Only after the cut succeeds, commit the new timestamp to
+`.mngr/apt-snapshot-timestamp` on the DEFAULT_WORKSPACE_TEMPLATE branch --
+it must match the freshly committed `apps/apt_mirror/current-timestamp`.
+Setting `APT_MIRROR_BASE_URL` empty in a workspace build falls back to
+snapshot.debian.org at the same timestamp (correct but throttled), so a
+not-yet-warmed mirror degrades to slow, never to wrong; warming only
+pre-pays the read-through for the packages workspaces actually install.
+Bring-up note: the very first cut ever is this same command -- see the
+one-time bring-up runbook in `apps/apt_mirror/README.md`.
+
 ### 1. Bump version + FALLBACK_BRANCH (mngr branch)
 
 For an iteration of the same version, skip. To bump: set `apps/minds/package.json` `version` (e.g. `0.3.1`) and `templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"`. This bakes in a tag that doesn't exist until step 7 — fine, because step 4 overrides the DEFAULT_WORKSPACE_TEMPLATE ref via `template_ref`, so the tag is only hit in step 8.
@@ -94,11 +124,11 @@ For an iteration of the same version, skip. To bump: set `apps/minds/package.jso
 
 `ci.yml` runs only on PRs (any branch) and on push to `main` — **a bare branch push triggers nothing**, so open a branch as a PR when you want its CI. Gate on the **DEFAULT_WORKSPACE_TEMPLATE** PR's `test` job (`uv sync --all-packages` + root/`system_interface` pytest — exactly what a bad vendor refresh trips). The **mngr** branch's suites (`test-offload`, `test-docker`, `test-offload-acceptance`) are real signal only if it carries mngr/minds code; for a version-bump-only branch they're redundant with a green `main` (see "What actually gates a release"), so a PR there is optional. The release SHA — `GREEN_MNGR_SHA` — is the mngr release-branch HEAD (`main` + the bump commit) and doesn't depend on any of this finishing.
 
-### 3. Refresh DEFAULT_WORKSPACE_TEMPLATE `vendor/mngr` from the green mngr SHA (DEFAULT_WORKSPACE_TEMPLATE branch)
+### 3. Refresh DEFAULT_WORKSPACE_TEMPLATE `system/vendor/mngr` from the green mngr SHA (DEFAULT_WORKSPACE_TEMPLATE branch)
 
 On the DEFAULT_WORKSPACE_TEMPLATE release branch (cut from `origin/main`, clean tree), with the **mngr checkout positioned at `GREEN_MNGR_SHA`** (the mngr release-branch HEAD), run the sync recipe. You can do this the moment the bump commit exists — no need to wait for step 2's CI.
 
-`just sync-vendor-mngr` reads `DEFAULT_WORKSPACE_TEMPLATE_DIR` from your `apps/minds/.env` (Session setup) — no path is baked into the justfile. It does `git archive HEAD` → DEFAULT_WORKSPACE_TEMPLATE `vendor/mngr` (tracked files only; keep `apps/minds/`), commits `Sync vendor/mngr to <branch> (<short>)`, aborts if DEFAULT_WORKSPACE_TEMPLATE is dirty, and **does not push** — it prints the exact `cd … && git push` line (with the resolved DEFAULT_WORKSPACE_TEMPLATE path) for you to run. For why releases use `git archive` (vs the dev loop's `rsync`), see `apps/minds/docs/vendor-mngr-sync.md`.
+`just sync-vendor-mngr` reads `DEFAULT_WORKSPACE_TEMPLATE_DIR` from your `apps/minds/.env` (Session setup) — no path is baked into the justfile. It does `git archive HEAD` → DEFAULT_WORKSPACE_TEMPLATE `system/vendor/mngr` (tracked files only; keep `apps/minds/`), commits `Sync system/vendor/mngr to <branch> (<short>)`, aborts if DEFAULT_WORKSPACE_TEMPLATE is dirty, and **does not push** — it prints the exact `cd … && git push` line (with the resolved DEFAULT_WORKSPACE_TEMPLATE path) for you to run. For why releases use `git archive` (vs the dev loop's `rsync`), see `apps/minds/docs/vendor-mngr-sync.md`.
 
 ```bash
 just sync-vendor-mngr                       # reads DEFAULT_WORKSPACE_TEMPLATE_DIR from .env
@@ -111,7 +141,7 @@ If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`)
 
 ### 4. Prove the pair green pre-merge
 
-This is the long pole — fire it as soon as the DEFAULT_WORKSPACE_TEMPLATE branch exists, in parallel with both branches' traditional CI. The tag doesn't exist yet, so pass the DEFAULT_WORKSPACE_TEMPLATE release branch as `template_ref`. `commit_sha` and that branch's `vendor/mngr` must be the same mngr SHA.
+This is the long pole — fire it as soon as the DEFAULT_WORKSPACE_TEMPLATE branch exists, in parallel with both branches' traditional CI. The tag doesn't exist yet, so pass the DEFAULT_WORKSPACE_TEMPLATE release branch as `template_ref`. `commit_sha` and that branch's `system/vendor/mngr` must be the same mngr SHA.
 
 ```bash
 GREEN_MNGR_SHA=<mngr release-branch HEAD: main + the bump commit>   # carried through to steps 6-8
@@ -126,25 +156,25 @@ Both inputs accept a full 40-char SHA, branch, or tag, and are **frozen to SHAs 
 
 ### 5. Review real code only (if any)
 
-The version bump and the `vendor/mngr` refresh need no review (see "The two release branches"). The only thing to read is reviewable code that rode along — mngr/minds code on the mngr branch, or a `system_interface` fix on the DEFAULT_WORKSPACE_TEMPLATE branch. With `main` unprotected, even that review is social, not a gate. Nothing is tagged yet.
+The version bump and the `system/vendor/mngr` refresh need no review (see "The two release branches"). The only thing to read is reviewable code that rode along — mngr/minds code on the mngr branch, or a `system_interface` fix on the DEFAULT_WORKSPACE_TEMPLATE branch. With `main` unprotected, even that review is social, not a gate. Nothing is tagged yet.
 
 ### 6. Land both branches on `main`
 
 With `main` unprotected you can merge locally (`git merge --no-ff <branch>`, then push) or via a PR — either works. **Land the mngr branch with a merge commit, never a squash.** `main` can advance past the SHA you built and verified in step 4 (`$GREEN_MNGR_SHA`) while you were verifying; a merge commit keeps that exact SHA reachable on `main` as a parent (a squash replaces it with a new commit whose tree also contains the drift — and the binary you verified was built from neither).
 
-The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and DEFAULT_WORKSPACE_TEMPLATE's `vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the *commit you'll actually tag* (DEFAULT_WORKSPACE_TEMPLATE `origin/main` post-merge, not your local working copy) still matches that SHA:
+The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and DEFAULT_WORKSPACE_TEMPLATE's `system/vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the *commit you'll actually tag* (DEFAULT_WORKSPACE_TEMPLATE `origin/main` post-merge, not your local working copy) still matches that SHA:
 
-Compare the two git **trees** by `(blob-hash, path)` — content-exact, and immune to the symlinks, file modes, and `.gitignore` drops that make `diff -r` on extracted tarballs noisy. The only expected delta is files DEFAULT_WORKSPACE_TEMPLATE's `**/.minds/` ignore strips on `git add` (Vault policies + deploy scripts — not part of the installed mngr package); **anything else, especially under `vendor/mngr/libs/**`, is a real mismatch.**
+Compare the two git **trees** by `(blob-hash, path)` — content-exact, and immune to the symlinks, file modes, and `.gitignore` drops that make `diff -r` on extracted tarballs noisy. The only expected delta is files DEFAULT_WORKSPACE_TEMPLATE's `**/.minds/` ignore strips on `git add` (Vault policies + deploy scripts — not part of the installed mngr package); **anything else, especially under `system/vendor/mngr/libs/**`, is a real mismatch.**
 
 ```bash
 GREEN_MNGR_SHA=<the SHA from step 4>
 git -C "$DEFAULT_WORKSPACE_TEMPLATE" fetch origin --quiet
 real_diff=$(diff \
   <(git -C "$MNGR" ls-tree -r "$GREEN_MNGR_SHA"        | awk '{print $3, $4}' | sort) \
-  <(git -C "$DEFAULT_WORKSPACE_TEMPLATE"  ls-tree -r origin/main:vendor/mngr  | awk '{print $3, $4}' | sort) \
+  <(git -C "$DEFAULT_WORKSPACE_TEMPLATE"  ls-tree -r origin/main:system/vendor/mngr  | awk '{print $3, $4}' | sort) \
   | grep '^[<>]' | grep -v '\.minds/')
 [ -z "$real_diff" ] \
-  && echo "OK: vendor/mngr == mngr $GREEN_MNGR_SHA (modulo .minds/)" \
+  && echo "OK: system/vendor/mngr == mngr $GREEN_MNGR_SHA (modulo .minds/)" \
   || { echo "MISMATCH — re-run step 3 / re-merge DEFAULT_WORKSPACE_TEMPLATE:"; echo "$real_diff"; }
 ```
 
@@ -152,18 +182,18 @@ Comparing the mngr side against `main` (HEAD) instead of `$GREEN_MNGR_SHA` may s
 
 ### 7. Tag the verified pair — *not* `main` HEAD
 
-Tag mngr at **`$GREEN_MNGR_SHA`** (the built+verified SHA; reachable on `main` as the merge parent) and DEFAULT_WORKSPACE_TEMPLATE at the commit whose `vendor/mngr` is that SHA's archive (the DEFAULT_WORKSPACE_TEMPLATE branch's merge into `main`):
+Tag mngr at **`$GREEN_MNGR_SHA`** (the built+verified SHA; reachable on `main` as the merge parent) and DEFAULT_WORKSPACE_TEMPLATE at the commit whose `system/vendor/mngr` is that SHA's archive (the DEFAULT_WORKSPACE_TEMPLATE branch's merge into `main`):
 
 ```bash
 # $GH_TOKEN, $MNGR, $DEFAULT_WORKSPACE_TEMPLATE from Session setup
 VERSION=minds-v0.3.1
 GREEN_MNGR_SHA=<the SHA from step 4>
-git -C "$DEFAULT_WORKSPACE_TEMPLATE" fetch origin --quiet; DEFAULT_WORKSPACE_TEMPLATE_SHA=$(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse origin/main)   # vendor/mngr == archive $GREEN_MNGR_SHA (verified in step 6)
+git -C "$DEFAULT_WORKSPACE_TEMPLATE" fetch origin --quiet; DEFAULT_WORKSPACE_TEMPLATE_SHA=$(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse origin/main)   # system/vendor/mngr == archive $GREEN_MNGR_SHA (verified in step 6)
 
-git -C "$MNGR" tag -a "$VERSION" "$GREEN_MNGR_SHA" -m "minds $VERSION: mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) / DEFAULT_WORKSPACE_TEMPLATE $(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse --short $DEFAULT_WORKSPACE_TEMPLATE_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
+git -C "$MNGR" tag -a "$VERSION" "$GREEN_MNGR_SHA" -m "minds $VERSION: mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) / DEFAULT_WORKSPACE_TEMPLATE $(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse --short $DEFAULT_WORKSPACE_TEMPLATE_SHA) (system/vendor/mngr from mngr $GREEN_MNGR_SHA)"
 git -C "$MNGR" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/mngr-internal.git refs/tags/"$VERSION"
 
-git -C "$DEFAULT_WORKSPACE_TEMPLATE" tag -a "$VERSION" "$DEFAULT_WORKSPACE_TEMPLATE_SHA" -m "minds $VERSION: DEFAULT_WORKSPACE_TEMPLATE $(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse --short $DEFAULT_WORKSPACE_TEMPLATE_SHA) / mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
+git -C "$DEFAULT_WORKSPACE_TEMPLATE" tag -a "$VERSION" "$DEFAULT_WORKSPACE_TEMPLATE_SHA" -m "minds $VERSION: DEFAULT_WORKSPACE_TEMPLATE $(git -C "$DEFAULT_WORKSPACE_TEMPLATE" rev-parse --short $DEFAULT_WORKSPACE_TEMPLATE_SHA) / mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) (system/vendor/mngr from mngr $GREEN_MNGR_SHA)"
 git -C "$DEFAULT_WORKSPACE_TEMPLATE" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/default-workspace-template.git refs/tags/"$VERSION"
 ```
 

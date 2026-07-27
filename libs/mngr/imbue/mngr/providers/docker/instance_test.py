@@ -34,6 +34,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
+from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import CONTAINER_SSH_PORT
@@ -447,7 +448,9 @@ def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx
 def test_build_volume_mount_args_legacy_shared_mode(temp_mngr_ctx: MngrContext) -> None:
     """Legacy mode emits `-v <vol>:/mngr-state:rw` regardless of host id."""
     provider = make_docker_provider(temp_mngr_ctx)
-    args = provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False)
+    args = provider._build_volume_mount_args(
+        HostId(HOST_ID_A), is_isolated=False, volume_mount_path=None, host_dir=str(provider.host_dir)
+    )
     assert args[0] == "-v"
     assert args[1].endswith(":/mngr-state:rw")
 
@@ -456,7 +459,9 @@ def test_build_volume_mount_args_isolated_mode(temp_mngr_ctx: MngrContext) -> No
     """Isolated mode emits `--mount type=volume,...,volume-subpath=volumes/vol-<hex>`."""
     provider = make_docker_provider(temp_mngr_ctx)
     host_id = HostId(HOST_ID_A)
-    args = provider._build_volume_mount_args(host_id, is_isolated=True)
+    args = provider._build_volume_mount_args(
+        host_id, is_isolated=True, volume_mount_path=None, host_dir=str(provider.host_dir)
+    )
     assert args[0] == "--mount"
     spec = args[1]
     assert spec.startswith("type=volume,")
@@ -465,6 +470,37 @@ def test_build_volume_mount_args_isolated_mode(temp_mngr_ctx: MngrContext) -> No
     assert f"volume-subpath=volumes/{expected_volume_id}" in spec
     # The state volume name appears as the source.
     assert f"source={provider._state_volume_name}" in spec
+
+
+def test_build_volume_mount_args_isolated_mode_uses_passed_host_dir(temp_mngr_ctx: MngrContext) -> None:
+    """The mount target is the passed (per-host recorded) host_dir, not the provider config's.
+
+    Snapshot restore replays the host_dir the host was created with; a restore
+    run from a context whose config resolves a different host_dir must still
+    mount the volume where the host's data actually lives.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    args = provider._build_volume_mount_args(
+        HostId(HOST_ID_A), is_isolated=True, volume_mount_path=None, host_dir="/home/user/.mngr"
+    )
+    spec = args[1]
+    assert "target=/home/user/.mngr," in spec
+    assert f"target={provider.host_dir}" not in spec
+
+
+def test_build_volume_mount_args_isolated_mode_with_custom_mount_path(temp_mngr_ctx: MngrContext) -> None:
+    """A custom volume_mount_path replaces host_dir as the isolated mount target."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    host_id = HostId(HOST_ID_A)
+    args = provider._build_volume_mount_args(
+        host_id, is_isolated=True, volume_mount_path="/home/user", host_dir=str(provider.host_dir)
+    )
+    assert args[0] == "--mount"
+    spec = args[1]
+    assert "target=/home/user," in spec
+    assert f"target={provider.host_dir}" not in spec
+    expected_volume_id = provider._volume_id_for_host(host_id)
+    assert f"volume-subpath=volumes/{expected_volume_id}" in spec
 
 
 def test_build_volume_mount_args_disabled_returns_empty(temp_mngr_ctx: MngrContext) -> None:
@@ -476,7 +512,12 @@ def test_build_volume_mount_args_disabled_returns_empty(temp_mngr_ctx: MngrConte
         mngr_ctx=temp_mngr_ctx,
         config=config,
     )
-    assert provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False) == []
+    assert (
+        provider._build_volume_mount_args(
+            HostId(HOST_ID_A), is_isolated=False, volume_mount_path=None, host_dir="/mngr"
+        )
+        == []
+    )
 
 
 def test_host_volume_symlink_target_is_none_when_isolated(temp_mngr_ctx: MngrContext) -> None:
@@ -678,6 +719,70 @@ def test_offline_host_from_record_is_writable(
     # mode is not settable on a volume write -- it is ignored, not an error.
     host.write_file(target, b"world", mode="0644")
     assert host.read_file(target) == b"world"
+
+
+def test_offline_host_with_volume_mount_path_reads_at_recorded_host_dir(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """The host volume is scoped to host_dir's subpath under volume_mount_path.
+
+    A host created with the volume mounted at /home/user and host_dir at
+    /home/user/.mngr keeps its agent state at <volume>/.mngr/...; the offline
+    host must report the recorded host_dir and serve host_dir-relative reads
+    from that subpath, or discovery finds no agents on such hosts.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(host_id=HOST_ID_A, host_name="h", created_at=now, updated_at=now),
+        config=ContainerConfig(
+            start_args=(),
+            is_isolated_host_volume=True,
+            volume_mount_path="/home/user",
+            host_dir="/home/user/.mngr",
+        ),
+    )
+    provider._host_store.write_host_record(record)
+
+    vol_id = DockerProviderInstance._volume_id_for_host(HostId(HOST_ID_A))
+    agent_dir = tmp_path / "volumes" / str(vol_id) / ".mngr" / "agents" / "agent-x"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "f.txt").write_text("hi")
+
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, HostFileReadInterface)
+    assert host.host_dir == Path("/home/user/.mngr")
+    assert host.read_text_file(host.host_dir / "agents" / "agent-x" / "f.txt") == "hi"
+    assert not host.path_exists(host.host_dir / "agents" / "missing")
+
+
+def test_offline_host_with_recorded_host_dir_but_no_mount_path_reads_volume_root(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """Without volume_mount_path the volume root IS host_dir -- no subpath scoping."""
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(host_id=HOST_ID_A, host_name="h", created_at=now, updated_at=now),
+        config=ContainerConfig(
+            start_args=(),
+            is_isolated_host_volume=True,
+            host_dir="/home/user/.mngr",
+        ),
+    )
+    provider._host_store.write_host_record(record)
+
+    vol_id = DockerProviderInstance._volume_id_for_host(HostId(HOST_ID_A))
+    agent_dir = tmp_path / "volumes" / str(vol_id) / "agents" / "agent-x"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "f.txt").write_text("hi")
+
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, HostFileReadInterface)
+    assert host.host_dir == Path("/home/user/.mngr")
+    assert host.read_text_file(host.host_dir / "agents" / "agent-x" / "f.txt") == "hi"
 
 
 def test_volume_id_for_host_is_deterministic() -> None:

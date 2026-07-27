@@ -64,6 +64,33 @@ def offline_host(fake_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
     )
 
 
+def test_host_dir_defaults_to_provider_instance_host_dir(offline_host: OfflineHost, temp_host_dir: Path) -> None:
+    assert offline_host.host_dir == temp_host_dir
+
+
+def test_host_dir_override_wins_over_provider_instance_host_dir(
+    fake_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """A per-host recorded host_dir must win over the provider config's host_dir.
+
+    Discovery can run in a context whose provider config resolves a different
+    host_dir than the one the host was created with (e.g. `mngr list` outside
+    the repo whose settings customized it); reads must target the recorded one.
+    """
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    host = OfflineHost(
+        id=host_id,
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id), host_name="test-host", created_at=now, updated_at=now
+        ),
+        provider_instance=fake_provider,
+        mngr_ctx=temp_mngr_ctx,
+        host_dir_override=Path("/home/user/.mngr"),
+    )
+    assert host.host_dir == Path("/home/user/.mngr")
+
+
 def test_get_activity_config_returns_config_from_certified_data(offline_host: OfflineHost) -> None:
     """Test that get_activity_config returns the correct ActivityConfig."""
     config = offline_host.get_activity_config()

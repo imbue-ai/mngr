@@ -78,9 +78,32 @@ def _backup_tree(repository: Path, source: Path) -> None:
 
 
 @pytest.mark.timeout(60)
+def test_resolve_restore_subpath_uses_the_snapshot_root_for_current_layout_snapshots(tmp_path: Path) -> None:
+    # Current layout: the snapshot root is the unified /home/user tree, whose
+    # repo checkout is a workspace/ child; the subpath is the recorded root.
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    repository = tmp_path / "repo"
+    restic_cli.init_repo(repository=str(repository), backend_env={}, password="workspace-key")
+    _write_env_for_local_repo(paths, agent_id, repository)
+    home = (tmp_path / "home-user").resolve()
+    (home / "workspace").mkdir(parents=True)
+    (home / "workspace" / "file.txt").write_text("content\n")
+    (home / ".mngr").mkdir()
+    _backup_tree(repository, home)
+
+    snapshot = _resolve_restore_snapshot(
+        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), parent_cg=None
+    )
+    subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
+
+    assert subpath == snapshot.paths[0]
+
+
+@pytest.mark.timeout(60)
 def test_resolve_restore_subpath_uses_the_snapshot_root_for_plain_snapshots(tmp_path: Path) -> None:
-    # Plain-docker shape: the snapshot root is the host dir itself (it carries
-    # code/ directly), so the subpath is just the recorded root.
+    # Legacy plain-docker shape: the snapshot root is the host dir itself (it
+    # carries code/ directly), so the subpath is just the recorded root.
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     repository = tmp_path / "repo"
@@ -126,8 +149,8 @@ def test_resolve_restore_subpath_descends_into_the_nested_host_dir(tmp_path: Pat
 
 @pytest.mark.timeout(60)
 def test_resolve_restore_subpath_rejects_a_snapshot_without_a_workspace(tmp_path: Path) -> None:
-    # A snapshot with no code/ checkout anywhere cannot be restored; the
-    # dispatch must fail before the workspace is touched, not after.
+    # A snapshot with no workspace/ or code/ checkout anywhere cannot be
+    # restored; the dispatch must fail before the workspace is touched, not after.
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     repository = tmp_path / "repo"
@@ -142,7 +165,7 @@ def test_resolve_restore_subpath_rejects_a_snapshot_without_a_workspace(tmp_path
         agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), parent_cg=None
     )
 
-    with pytest.raises(BackupProvisioningError, match="no code/ checkout"):
+    with pytest.raises(BackupProvisioningError, match="no workspace/ or code/ checkout"):
         _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
 
 

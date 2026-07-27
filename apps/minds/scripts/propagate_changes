@@ -2,7 +2,7 @@
 #
 # propagate_changes -- sync code changes into a running minds agent and restart
 #
-# Syncs the local mngr repo into the template's vendor/mngr/, then syncs the
+# Syncs the local mngr repo into the template's system/vendor/mngr/, then syncs the
 # full template into the agent's work_dir (container or local), rebuilds the
 # frontend, restarts the agent, and restarts the Electron desktop client.
 #
@@ -155,13 +155,13 @@ RSYNC_EXCLUDES=(
 )
 
 # ---------------------------------------------------------------------------
-# Step 1: Sync mngr repo into template's vendor/mngr/
+# Step 1: Sync mngr repo into template's system/vendor/mngr/
 # ---------------------------------------------------------------------------
 
-echo "[1/4] Syncing mngr repo into template vendor/mngr/..."
+echo "[1/4] Syncing mngr repo into template system/vendor/mngr/..."
 rsync -a --delete \
     "${RSYNC_EXCLUDES[@]}" \
-    "${MNGR_REPO_ROOT}/" "${TEMPLATE_DIR}/vendor/mngr/"
+    "${MNGR_REPO_ROOT}/" "${TEMPLATE_DIR}/system/vendor/mngr/"
 echo "      Done."
 
 # ---------------------------------------------------------------------------
@@ -189,15 +189,15 @@ agent_update() {
     if [[ "${MODE}" == "remote" ]]; then
         rsync -avz --delete \
             "${RSYNC_EXCLUDES[@]}" \
-            --filter='protect runtime/' \
+            --filter='protect data/' \
             --filter='protect .mngr/' \
             --filter='protect .claude/settings.local.json' \
             -e "ssh -p ${SSH_PORT} -i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
-            "${TEMPLATE_DIR}/" "${SSH_USER}@${SSH_HOST}:/code/"
+            "${TEMPLATE_DIR}/" "${SSH_USER}@${SSH_HOST}:/home/user/workspace/"
     else
         rsync -a --delete \
             "${RSYNC_EXCLUDES[@]}" \
-            --filter='protect runtime/' \
+            --filter='protect data/' \
             --filter='protect .mngr/' \
             --filter='protect .claude/settings.local.json' \
             "${TEMPLATE_DIR}/" "${LOCAL_TARGET}/"
@@ -207,9 +207,9 @@ agent_update() {
     echo "[3.5/4] Rebuilding system_interface frontend..."
     if [[ "${MODE}" == "remote" ]]; then
         ssh -p "${SSH_PORT}" -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-            "${SSH_USER}@${SSH_HOST}" "cd /code/apps/system_interface/frontend && npm run build" 2>&1
+            "${SSH_USER}@${SSH_HOST}" "cd /home/user/workspace/system/libs/system_interface/frontend && npm run build" 2>&1
     else
-        (cd "${LOCAL_TARGET}/apps/system_interface/frontend" && npm run build) 2>&1
+        (cd "${LOCAL_TARGET}/system/libs/system_interface/frontend" && npm run build) 2>&1
     fi
     echo "      Frontend rebuilt."
 

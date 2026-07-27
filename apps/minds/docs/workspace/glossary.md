@@ -20,9 +20,9 @@ Key concepts in the minds system:
 
 - **supervisord**: the process-control system running inside each agent container that supervises the background services, each declared as a `[program:*]` section in `supervisord.conf` (logs under `/var/log/supervisor`). Replaces the old custom service manager that watched `services.toml` and ran services in tmux windows.
 
-- **application**: a service that exposes a port for forwarding. Registered in `runtime/applications.toml` via `scripts/forward_port.py`. Each application gets both a local URL (via the desktop client) and optionally a global URL (via Cloudflare tunnel).
+- **application**: a service that exposes a port for forwarding. Registered in `data/.state/applications.toml` via `system/scripts/forward_port.py`. Each application gets both a local URL (via the desktop client) and optionally a global URL (via Cloudflare tunnel).
 
-- **app watcher**: a background service that monitors `runtime/applications.toml`, writes service events to `events/services/events.jsonl`, and reconciles with the Cloudflare forwarding API.
+- **app watcher**: a background service that monitors `data/.state/applications.toml`, writes service events to `events/services/events.jsonl`, and reconciles with the Cloudflare forwarding API.
 
 - **cloudflare tunnel**: a persistent connection from the agent container to Cloudflare's network, managed by `cloudflared`. Enables global access to agent applications protected by Cloudflare Access (Google OAuth, service tokens).
 

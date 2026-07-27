@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
@@ -35,3 +38,25 @@ def test_default_activity_sources_includes_all() -> None:
     # Should contain all ActivitySource values
     for source in ActivitySource:
         assert source in config.default_activity_sources
+
+
+def test_volume_home_path_requires_host_dir_inside_it() -> None:
+    with pytest.raises(ValidationError, match="must be a path strictly inside"):
+        VpsProviderConfig(
+            backend=ProviderBackendName("test-backend"),
+            volume_home_path=Path("/home/user"),
+            host_dir=Path("/mngr"),
+        )
+
+
+def test_volume_home_path_accepted_with_host_dir_inside() -> None:
+    config = VpsProviderConfig(
+        backend=ProviderBackendName("test-backend"),
+        volume_home_path=Path("/home/user"),
+        host_dir=Path("/home/user/.mngr"),
+    )
+    assert config.volume_home_path == Path("/home/user")
+
+
+def test_volume_home_path_defaults_to_none() -> None:
+    assert VpsProviderConfig(backend=ProviderBackendName("test-backend")).volume_home_path is None

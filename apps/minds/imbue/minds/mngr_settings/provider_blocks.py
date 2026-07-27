@@ -13,6 +13,12 @@ IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
 IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
 
+# The user-data layout knobs written into every minds-authored vps-based provider block (imbue_cloud, byok aws/gcp/azure), mirroring the default-workspace-template ``[providers.ovh]`` / ``[providers.vultr]`` settings.
+# The container's /home/user symlinks onto the unified volume's home/ subdir (the ONE persistent, backed-up tree), mngr's data dir hides inside it, and mngr's plain-text service logs stay off the volume.
+WORKSPACE_HOST_DIR: Final[str] = "/home/user/.mngr"
+WORKSPACE_VOLUME_HOME_PATH: Final[str] = "/home/user"
+WORKSPACE_HOST_LOG_DIR: Final[str] = "/var/log/mngr"
+
 AWS_BACKEND_NAME: Final[str] = "aws"
 GCP_BACKEND_NAME: Final[str] = "gcp"
 AZURE_BACKEND_NAME: Final[str] = "azure"

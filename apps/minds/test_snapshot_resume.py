@@ -87,7 +87,7 @@ from imbue.mngr.utils.testing import get_short_random_string
 _WORKSPACE_CONTAINER_PREFIX: Final[str] = "minds-"
 _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 # system_interface's in-container port. It is a core bootstrap-managed
-# service with a fixed port (registered in runtime/applications.toml);
+# service with a fixed port (registered in data/.state/applications.toml);
 # kept as a constant so a drift shows up as a clear assertion failure.
 _SYSTEM_INTERFACE_PORT: Final[int] = 8000
 _MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
@@ -158,12 +158,14 @@ def _list_agents_in_container(container_name: str) -> list[dict[str, Any]]:
     """Return the agents mngr sees from inside the workspace container.
 
     Run from inside the host (the container), where mngr uses the local
-    provider and the baked-in ``MNGR_HOST_DIR=/mngr`` -- no desktop-side
+    provider and the baked-in ``MNGR_HOST_DIR=/home/user/.mngr`` -- no desktop-side
     provider fan-out, so an unrelated (uncredentialed) provider can't blank
     the listing. ``--on-error continue`` keeps any single provider failure
     from aborting the list.
     """
-    result = _exec_in_container(container_name, "cd /code && mngr list --format json --on-error continue", timeout=60)
+    result = _exec_in_container(
+        container_name, "cd /home/user/workspace && mngr list --format json --on-error continue", timeout=60
+    )
     assert result.returncode == 0, f"`mngr list` failed inside {container_name}: {result.stderr}"
     return json.loads(result.stdout)["agents"]
 
@@ -221,7 +223,7 @@ def _run_minds_in_container_probe(container_name: str) -> dict[str, Any]:
     ``system_interface_status``, etc.
     """
     result = _exec_in_container(
-        container_name, f"cd /code && {build_probe_shell_command()}", timeout=_PROBE_TIMEOUT_SECONDS
+        container_name, f"cd /home/user/workspace && {build_probe_shell_command()}", timeout=_PROBE_TIMEOUT_SECONDS
     )
     assert PROBE_SENTINEL in result.stdout, (
         f"minds recovery probe sentinel missing; stdout={result.stdout!r} stderr={result.stderr!r}"
@@ -247,7 +249,9 @@ def running_workspace() -> Iterator[_ResumedWorkspace]:
     container_name = _running_workspace_container_name()
     services_agent_id = _system_services_agent_id(container_name)
     start_result = _exec_in_container(
-        container_name, f"cd /code && mngr start {services_agent_id} --quiet", timeout=_MNGR_START_TIMEOUT_SECONDS
+        container_name,
+        f"cd /home/user/workspace && mngr start {services_agent_id} --quiet",
+        timeout=_MNGR_START_TIMEOUT_SECONDS,
     )
     assert start_result.returncode == 0, f"`mngr start` failed for system-services: {start_result.stderr}"
     assert _wait_for_system_interface_up(container_name), (
@@ -368,7 +372,7 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
     """After resume, the bootstrap re-registered the core services in applications.toml.
 
     The app-watcher / bootstrap respawns the standard services on restart and
-    each registers its port into ``runtime/applications.toml``; the always-on
+    each registers its port into ``data/.state/applications.toml``; the always-on
     core services (``system_interface`` and ``terminal``) must be present.
 
     ``web`` was intentionally dropped: default-workspace-template removed the
@@ -378,8 +382,10 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
     under pressure), so requiring it would make this test flaky -- we only
     assert the services guaranteed to survive a resume.
     """
-    result = _exec_in_container(running_workspace.container_name, "cat /code/runtime/applications.toml", timeout=30)
-    assert result.returncode == 0, f"Could not read runtime/applications.toml: {result.stderr}"
+    result = _exec_in_container(
+        running_workspace.container_name, "cat /home/user/workspace/data/.state/applications.toml", timeout=30
+    )
+    assert result.returncode == 0, f"Could not read data/.state/applications.toml: {result.stderr}"
     for service_name in ("system_interface", "terminal"):
         assert service_name in result.stdout, (
             f"Service {service_name!r} not registered in applications.toml after resume:\n{result.stdout}"
@@ -411,7 +417,9 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     # Break it: stopping the system-services agent tears down the bootstrap
     # and the services it manages, including system_interface.
     stop_result = _exec_in_container(
-        container_name, f"cd /code && mngr stop {services_agent_id} --quiet", timeout=_MNGR_START_TIMEOUT_SECONDS
+        container_name,
+        f"cd /home/user/workspace && mngr stop {services_agent_id} --quiet",
+        timeout=_MNGR_START_TIMEOUT_SECONDS,
     )
     assert stop_result.returncode == 0, (
         f"Failed to stop system-services to set up the broken state: {stop_result.stderr}"
@@ -433,7 +441,7 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     # start respawns it, and the bootstrap brings system_interface back up).
     restart_result = _exec_in_container(
         container_name,
-        f"cd /code && mngr stop {services_agent_id} --quiet; mngr start {services_agent_id} --quiet",
+        f"cd /home/user/workspace && mngr stop {services_agent_id} --quiet; mngr start {services_agent_id} --quiet",
         timeout=_MNGR_START_TIMEOUT_SECONDS,
     )
     assert restart_result.returncode == 0, f"system-services agent restart failed: {restart_result.stderr}"
@@ -636,7 +644,7 @@ def _find_chat_agent(container_name: str) -> dict[str, Any]:
 def _wait_for_agent_state(container_name: str, agent_id: str, expected_state: str, *, attempts: int = 40) -> bool:
     """Poll (shell-side, no python sleeps) until the agent reports the state, or time out."""
     read_state = (
-        "cd /code && mngr list --format json --on-error continue | "
+        "cd /home/user/workspace && mngr list --format json --on-error continue | "
         f'python3 -c \'import json,sys; print(next((a["state"] for a in json.load(sys.stdin)["agents"] '
         f'if a["id"] == "{agent_id}"), ""))\''
     )
@@ -651,9 +659,9 @@ def _wait_for_agent_state(container_name: str, agent_id: str, expected_state: st
 def _run_backup_script_in_container(
     container_name: str, script: str, args: tuple[str, ...], *, timeout: int
 ) -> subprocess.CompletedProcess[str]:
-    """Run one of the minds backup workspace scripts inside the container at /code."""
+    """Run one of the minds backup workspace scripts inside the container at /home/user/workspace."""
     command = build_workspace_script_command(script, args)
-    return _exec_in_container(container_name, f"cd /code && {command}", timeout=timeout)
+    return _exec_in_container(container_name, f"cd /home/user/workspace && {command}", timeout=timeout)
 
 
 @pytest.mark.minds_snapshot_resume
@@ -672,12 +680,14 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
     # (the baked workspace carries working credentials). `mngr message`
     # delivers the keystrokes and returns; claude then reads as RUNNING while
     # it generates.
-    started = _exec_in_container(container_name, f"cd /code && mngr start {chat_id} --quiet", timeout=180)
+    started = _exec_in_container(
+        container_name, f"cd /home/user/workspace && mngr start {chat_id} --quiet", timeout=180
+    )
     assert started.returncode == 0, f"`mngr start` failed for the chat agent: {started.stderr}"
     story_marker = get_short_random_string()
     messaged = _exec_in_container(
         container_name,
-        f'cd /code && mngr message {chat_id} -m "Please tell me a really long story about {story_marker}. '
+        f'cd /home/user/workspace && mngr message {chat_id} -m "Please tell me a really long story about {story_marker}. '
         'Make it as long and detailed as you possibly can."',
         timeout=120,
     )
@@ -741,7 +751,7 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
 
 
 def _git_in_workspace(container_name: str, args: str) -> subprocess.CompletedProcess[str]:
-    return _exec_in_container(container_name, f"cd /code && git {args}", timeout=60)
+    return _exec_in_container(container_name, f"cd /home/user/workspace && git {args}", timeout=60)
 
 
 @pytest.mark.minds_snapshot_resume
@@ -862,7 +872,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     Drives the actual provisioning entry points from the sandbox host: real
     `restic init` against local repositories (keyed by the per-workspace
     password), and real
-    `mngr exec` injection/rotation of `runtime/secrets/restic.env` inside the
+    `mngr exec` injection/rotation of `data/.secrets/restic.env` inside the
     resumed workspace container.
     """
     _ensure_restic_on_sandbox_host(tmp_path, monkeypatch)
@@ -904,7 +914,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     repo_two = tmp_path / "restic-repo-2"
 
     def read_workspace_env() -> str:
-        result = _exec_in_container(container_name, "cat /code/runtime/secrets/restic.env", timeout=30)
+        result = _exec_in_container(container_name, "cat /home/user/workspace/data/.secrets/restic.env", timeout=30)
         assert result.returncode == 0, result.stderr
         return result.stdout
 
@@ -929,12 +939,16 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # Repair: corrupt the workspace copy, re-inject, and confirm the drifted
     # copy was rotated aside inside the container rather than lost.
     corrupted = _exec_in_container(
-        container_name, "printf 'RESTIC_REPOSITORY=garbage\n' > /code/runtime/secrets/restic.env", timeout=30
+        container_name,
+        "printf 'RESTIC_REPOSITORY=garbage\n' > /home/user/workspace/data/.secrets/restic.env",
+        timeout=30,
     )
     assert corrupted.returncode == 0, corrupted.stderr
     reinject_canonical_env(agent_id=agent_id, paths=paths)
     assert read_workspace_env() == canonical_one
-    rotated = _exec_in_container(container_name, "grep -l garbage /code/runtime/secrets/restic.env.*", timeout=30)
+    rotated = _exec_in_container(
+        container_name, "grep -l garbage /home/user/workspace/data/.secrets/restic.env.*", timeout=30
+    )
     assert rotated.returncode == 0 and rotated.stdout.strip(), (rotated.stdout, rotated.stderr)
 
     # Destination change: fresh provisioning against repo two; the old
@@ -964,7 +978,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # aside, so the backup service reads "not configured" again.
     disable_backups_for_host(agent_id=agent_id, paths=paths)
     assert read_canonical_env(paths, agent_id) is None
-    gone = _exec_in_container(container_name, "test -f /code/runtime/secrets/restic.env", timeout=30)
+    gone = _exec_in_container(container_name, "test -f /home/user/workspace/data/.secrets/restic.env", timeout=30)
     assert gone.returncode != 0, "the workspace restic.env should be rotated aside after disabling"
     archived_after_disable = list((data_dir / "backup_envs").glob(f"{agent_id}.env.*"))
     assert len(archived_after_disable) == 2
@@ -1005,7 +1019,7 @@ def _cp_repo_container_to_host(container_name: str, repository: Path) -> None:
 
 def _restic_env_prefix() -> str:
     """Shell prefix exporting the injected restic.env for an in-container restic call."""
-    return "set -a; . /code/runtime/secrets/restic.env; set +a; "
+    return "set -a; . /home/user/workspace/data/.secrets/restic.env; set +a; "
 
 
 @pytest.mark.minds_snapshot_resume
@@ -1056,8 +1070,10 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     paths = WorkspacePaths(data_dir=data_dir)
     # The repository path must be identical on the sandbox host and inside the
     # container (the same RESTIC_REPOSITORY string is read by both), so it
-    # lives under /tmp rather than the per-test tmp_path.
-    repository = Path(f"/tmp/restore-e2e-repo-{get_short_random_string()}")
+    # lives at a fixed absolute path rather than the per-test tmp_path. It must
+    # NOT live under /tmp: the workspace container mounts /tmp as a tmpfs, and
+    # `docker cp` cannot copy into a tmpfs mount.
+    repository = Path(f"/var/tmp/restore-e2e-repo-{get_short_random_string()}")
 
     # Enable backups for real (restic init on the host + env injection into
     # the container), then hand the initialized repository to the container.
@@ -1077,12 +1093,13 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     # taken from inside the container (like the hourly service would), with
     # the workspace's own restic -- the distro 0.14 is fine for backup, which
     # is exactly why the restore script must upgrade for restore --delete.
-    sentinel = "/code/restore-e2e-sentinel.txt"
+    sentinel = "/home/user/workspace/restore-e2e-sentinel.txt"
     written = _exec_in_container(container_name, f"printf 'version-one\\n' > {sentinel}", timeout=30)
     assert written.returncode == 0, written.stderr
     source_backup = _exec_in_container(
         container_name,
-        _restic_env_prefix() + "restic backup /mngr --tag e2e-source --exclude '**/.venv' --exclude '**/node_modules' "
+        _restic_env_prefix()
+        + "restic backup /home/user --tag e2e-source --exclude '**/.venv' --exclude '**/node_modules' "
         "--exclude '**/__pycache__' --exclude '**/.cache'",
         timeout=600,
     )
@@ -1091,7 +1108,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     # Work done after the snapshot: the restore must undo both of these.
     mutated = _exec_in_container(
         container_name,
-        f"printf 'version-two\\n' > {sentinel} && printf 'after\\n' > /code/restore-e2e-extra.txt",
+        f"printf 'version-two\\n' > {sentinel} && printf 'after\\n' > /home/user/workspace/restore-e2e-extra.txt",
         timeout=30,
     )
     assert mutated.returncode == 0, mutated.stderr
@@ -1141,12 +1158,12 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     sentinel_after = _exec_in_container(container_name, f"cat {sentinel}", timeout=30)
     assert sentinel_after.returncode == 0, sentinel_after.stderr
     assert sentinel_after.stdout.strip() == "version-one"
-    extra_after = _exec_in_container(container_name, "test -f /code/restore-e2e-extra.txt", timeout=30)
+    extra_after = _exec_in_container(container_name, "test -f /home/user/workspace/restore-e2e-extra.txt", timeout=30)
     assert extra_after.returncode != 0, "the post-snapshot file should have been deleted by the restore"
 
     # The injected credentials survived the restore (the snapshot predates
     # them only logically -- the script writes the current env back).
-    env_after = _exec_in_container(container_name, "cat /code/runtime/secrets/restic.env", timeout=30)
+    env_after = _exec_in_container(container_name, "cat /home/user/workspace/data/.secrets/restic.env", timeout=30)
     assert env_after.returncode == 0, env_after.stderr
     assert f"RESTIC_REPOSITORY={repository}" in env_after.stdout
 

@@ -78,7 +78,7 @@ def _probe_for(response: HostHealthResponse, question_fragment: str) -> Probe:
 
 
 def test_parse_inner_port_matches_forward_port_command() -> None:
-    cmd = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
+    cmd = "python3 system/scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
     assert parse_inner_port_from_command(cmd) == 8000
 
 
@@ -843,7 +843,7 @@ def test_system_interface_command_is_supervisorctl_and_output_is_status_line() -
     response = _response(in_container_stdout=_healthy_probe_stdout(system_interface_status=status))
     probe = _probe_for(response, "running under supervisord")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
-    assert "supervisorctl -c /code/supervisord.conf status system_interface" in probe.command
+    assert "supervisorctl -c /home/user/workspace/system/supervisord.conf status system_interface" in probe.command
     # The output is supervisord's own status line, verbatim.
     assert probe.output == status
 

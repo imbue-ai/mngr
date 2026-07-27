@@ -1,12 +1,12 @@
-# How `vendor/mngr` is synced
+# How `system/vendor/mngr` is synced
 
 `default-workspace-template` (DEFAULT_WORKSPACE_TEMPLATE) vendors a full copy of the mngr monorepo at
-`vendor/mngr/`. The DEFAULT_WORKSPACE_TEMPLATE Docker build installs the container's `mngr` from that
-directory editable (`uv tool install -e vendor/mngr/libs/mngr`, run by
-`scripts/build_workspace.sh`), so whatever lands in `vendor/mngr/` *is* the
+`system/vendor/mngr/`. The DEFAULT_WORKSPACE_TEMPLATE Docker build installs the container's `mngr` from that
+directory editable (`uv tool install -e system/vendor/mngr/libs/mngr`, run by
+`system/scripts/build_workspace.sh`), so whatever lands in `system/vendor/mngr/` *is* the
 mngr that runs inside every agent.
 
-`vendor/mngr/` is a plain copied-in snapshot. It is **not** a git subtree and
+`system/vendor/mngr/` is a plain copied-in snapshot. It is **not** a git subtree and
 **not** a git submodule -- never run `git subtree` or `git submodule` against
 it. It is refreshed by copying mngr's files in, via one of two mechanisms.
 
@@ -14,7 +14,7 @@ it. It is refreshed by copying mngr's files in, via one of two mechanisms.
 
 | Mechanism | Form | Carries | Commits in DEFAULT_WORKSPACE_TEMPLATE? | Used for |
 |---|---|---|---|---|
-| **`git archive`** | `git archive HEAD` -> wipe `vendor/mngr/` -> untar | committed/tracked files at an exact SHA; permissions normalized; reproducible | yes | releases |
+| **`git archive`** | `git archive HEAD` -> wipe `system/vendor/mngr/` -> untar | committed/tracked files at an exact SHA; permissions normalized; reproducible | yes | releases |
 | **`rsync`** | `rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock` | the working tree, including uncommitted edits, gitignore-filtered | no | dev iteration and pool bakes |
 
 Use **archive** for a reproducible, committed snapshot tied to an exact mngr SHA
@@ -25,10 +25,10 @@ working tree).
 ## `git archive` -- the release sync
 
 `just sync-vendor-mngr [default-workspace-template-path]` (root `justfile`) archives mngr `HEAD`,
-replaces `vendor/mngr/` with the snapshot, and commits in DEFAULT_WORKSPACE_TEMPLATE. It carries only
+replaces `system/vendor/mngr/` with the snapshot, and commits in DEFAULT_WORKSPACE_TEMPLATE. It carries only
 committed content, so position your mngr checkout at the exact commit you want
 to vendor first. The full release procedure -- including the vendor-match
-invariant (DEFAULT_WORKSPACE_TEMPLATE `vendor/mngr` must be the `git archive` of the exact mngr SHA it
+invariant (DEFAULT_WORKSPACE_TEMPLATE `system/vendor/mngr` must be the `git archive` of the exact mngr SHA it
 is tagged with) -- is in `apps/minds/docs/release.md`.
 
 ## `rsync` -- the dev / bake sync
@@ -36,7 +36,7 @@ is tagged with) -- is in `apps/minds/docs/release.md`.
 Every rsync path uses one form:
 
 ```
-rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock SRC/ vendor/mngr/
+rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock SRC/ system/vendor/mngr/
 ```
 
 - `--filter=':- .gitignore'` is rsync's dir-merge filter: it reads `.gitignore`
@@ -51,7 +51,7 @@ rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock SRC/
 The exclude set is defined once in code, in
 `libs/mngr_imbue_cloud/.../bake/pool_bake.py`
 (`_VENDOR_RSYNC_MANUAL_EXCLUDES` and `_GITIGNORE_RSYNC_FILTER`). Three paths
-populate `vendor/mngr/` from the monorepo with this form; keep them in step with
+populate `system/vendor/mngr/` from the monorepo with this form; keep them in step with
 those constants:
 
 | Path | Where | Trigger |
@@ -60,15 +60,15 @@ those constants:
 | `sync_mngr_into_template` | `pool_bake.py` (the constants) | `mngr imbue_cloud admin pool create --mngr-source ...` / `minds pool create --mngr-source ...` |
 | `propagate_changes` | `apps/minds/scripts/propagate_changes` (`RSYNC_EXCLUDES`) | each dev-loop iteration into a running container |
 
-`propagate_changes` additionally protects `runtime/`, `.mngr/`, and
-`.claude/settings.local.json` from deletion when rsyncing into `/code/`.
+`propagate_changes` additionally protects `data/`, `.mngr/`, and
+`.claude/settings.local.json` from deletion when rsyncing into `/home/user/workspace/`.
 
 The desktop client's Create flow performs a *separate* rsync -- the DEFAULT_WORKSPACE_TEMPLATE worktree
-over a shallow clone into `/code/` -- not a monorepo->`vendor/mngr` sync.
+over a shallow clone into `/home/user/workspace/` -- not a monorepo->`system/vendor/mngr` sync.
 
-## `vendor/tk`
+## `system/vendor/tk`
 
-`vendor/tk/` is a forked-and-modified copy of the
+`system/vendor/tk/` is a forked-and-modified copy of the
 [tk](https://github.com/wedow/ticket) ticket tracker. We maintain it by hand and
-upgrade it manually; we do not pull from upstream. Like `vendor/mngr`, it is a
+upgrade it manually; we do not pull from upstream. Like `system/vendor/mngr`, it is a
 plain snapshot -- not a subtree or submodule.

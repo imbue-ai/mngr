@@ -189,7 +189,7 @@ def _write_sentinel_in_container(container_name: str, content: str) -> None:
     how this was caught).
     """
     result = subprocess.run(
-        ["docker", "exec", "-i", container_name, "bash", "-lc", f"cat > /code/{_SENTINEL_FILENAME}"],
+        ["docker", "exec", "-i", container_name, "bash", "-lc", f"cat > /home/user/workspace/{_SENTINEL_FILENAME}"],
         input=content,
         capture_output=True,
         text=True,
@@ -197,7 +197,7 @@ def _write_sentinel_in_container(container_name: str, content: str) -> None:
     )
     assert result.returncode == 0, f"Could not write the sentinel: {result.stderr}"
     readback = subprocess.run(
-        ["docker", "exec", container_name, "bash", "-lc", f"cat /code/{_SENTINEL_FILENAME}"],
+        ["docker", "exec", container_name, "bash", "-lc", f"cat /home/user/workspace/{_SENTINEL_FILENAME}"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -529,8 +529,11 @@ def _container_backup_diagnostics(container_name: str) -> str:
     parts: list[str] = []
     for label, command in (
         ("supervisor", "supervisorctl status host-backup"),
-        ("events", "tail -c 3000 /mngr/*/events/backup/events.jsonl 2>/dev/null || echo no-events-file"),
-        ("env", "test -f /code/runtime/secrets/restic.env && echo env-present || echo env-missing"),
+        (
+            "events",
+            "tail -c 3000 /home/user/.mngr/agents/*/events/backup/events.jsonl 2>/dev/null || echo no-events-file",
+        ),
+        ("env", "test -f /home/user/workspace/data/.secrets/restic.env && echo env-present || echo env-missing"),
     ):
         result = subprocess.run(
             ["docker", "exec", container_name, "bash", "-lc", command],

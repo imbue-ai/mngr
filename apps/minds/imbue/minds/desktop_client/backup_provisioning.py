@@ -22,7 +22,7 @@ backups:
 3. writes the canonical ``restic.env`` (repo + creds + random password) to
    the minds-side store (see ``backup_env_store``), and
 4. injects that whole file into the workspace at
-   ``runtime/secrets/restic.env`` via ``mngr exec``.
+   ``data/.secrets/restic.env`` via ``mngr exec``.
 
 ``CONFIGURE_LATER`` is a no-op. Re-provisioning is idempotent: if a
 canonical env already exists for the workspace, minds just re-injects it.
@@ -61,7 +61,7 @@ from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import BackupProvider
 from imbue.mngr.primitives import AgentId
 
-_RESTIC_ENV_REMOTE_PATH = "runtime/secrets/restic.env"
+_RESTIC_ENV_REMOTE_PATH = "data/.secrets/restic.env"
 _RESTIC_ENV_MODE = "600"
 # Bytes of entropy for the per-workspace repository password.
 _WORKSPACE_PASSWORD_ENTROPY_BYTES = 32
@@ -233,7 +233,7 @@ def _write_remote_file(
 
 
 def _inject_canonical_env(agent_id: AgentId, content: str, *, parent_cg: ConcurrencyGroup | None) -> None:
-    """Inject the canonical restic.env into the workspace's runtime/secrets/restic.env.
+    """Inject the canonical restic.env into the workspace's data/.secrets/restic.env.
 
     An existing workspace copy with different content is rotated aside to
     ``restic.env.<timestamp>`` first, so the previous configuration is

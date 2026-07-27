@@ -52,3 +52,30 @@ def test_custom_config() -> None:
 def test_config_backend_is_lima() -> None:
     config = LimaProviderConfig()
     assert config.backend == ProviderBackendName("lima")
+
+
+def test_volume_home_path_requires_btrfs_layout() -> None:
+    with pytest.raises(ValidationError, match="volume_home_path requires the btrfs additional-disk layout"):
+        LimaProviderConfig(volume_home_path=Path("/home/user"), is_host_data_volume_exposed=True)
+
+
+def test_volume_home_path_requires_host_dir_inside_it() -> None:
+    with pytest.raises(ValidationError, match="must be a path strictly inside"):
+        LimaProviderConfig(
+            volume_home_path=Path("/home/user"),
+            is_host_data_volume_exposed=False,
+            host_dir=Path("/mngr"),
+        )
+
+
+def test_volume_home_path_accepted_with_host_dir_inside() -> None:
+    config = LimaProviderConfig(
+        volume_home_path=Path("/home/user"),
+        is_host_data_volume_exposed=False,
+        host_dir=Path("/home/user/.mngr"),
+    )
+    assert config.volume_home_path == Path("/home/user")
+
+
+def test_volume_home_path_defaults_to_none() -> None:
+    assert LimaProviderConfig().volume_home_path is None

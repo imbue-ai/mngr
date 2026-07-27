@@ -113,10 +113,23 @@ class BaseHost(HostInterface):
         default=None,
         description="Optional callback invoked when certified host data is updated",
     )
+    host_dir_override: Path | None = Field(
+        frozen=True,
+        default=None,
+        description=(
+            "Per-host host_dir recorded when the host was created. Providers whose "
+            "hosts persist their host_dir (e.g. docker's ContainerConfig) pass it here "
+            "so discovery and reads target the directory the host was actually created "
+            "with, independent of the provider config resolved in the current context. "
+            "None falls back to the provider instance's configured host_dir."
+        ),
+    )
 
     @property
     def host_dir(self) -> Path:
-        """Get the host state directory path from provider instance."""
+        """Get the host state directory path (per-host record, else provider instance)."""
+        if self.host_dir_override is not None:
+            return self.host_dir_override
         return self.provider_instance.host_dir
 
     # =========================================================================
@@ -413,6 +426,7 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
             certified_host_data=host.certified_host_data,
             provider_instance=host.provider_instance,
             mngr_ctx=host.mngr_ctx,
+            host_dir_override=host.host_dir_override,
             on_updated_host_data=host.on_updated_host_data,
             host_volume=host_volume,
         )

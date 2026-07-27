@@ -55,6 +55,11 @@ HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 # Subdirectory inside the unified volume that backs the agent's mngr host_dir.
 HOST_DIR_SUBPATH: Final[str] = "host_dir"
 
+# Subdirectory inside the unified volume that backs the agent's home tree when
+# the provider's ``volume_home_path`` is configured (e.g. /home/user symlinks
+# to <volume>/home and host_dir lives inside it as a plain directory).
+HOME_SUBPATH: Final[str] = "home"
+
 # Shell command for the agent container's PID 1. Self-heals sshd on every
 # (re)start once mngr has provisioned a host key, so the container is reachable
 # again after an out-of-band restart (VM reboot, `docker restart`) without
@@ -748,16 +753,24 @@ def delete_btrfs_subvolume_on_outer(outer: OuterHostInterface, subvolume_path: P
         raise MngrError(f"btrfs subvolume delete {subvolume_path} failed: stderr={result.stderr.strip()!r}")
 
 
-def seed_host_volume_layout_on_outer(outer: OuterHostInterface, subvolume_path: Path) -> None:
-    """Pre-create the ``host_dir/`` and ``agents/`` subdirectories of the subvolume.
+def seed_host_volume_layout_on_outer(
+    outer: OuterHostInterface,
+    subvolume_path: Path,
+    is_home_seeded: bool = False,
+) -> None:
+    """Pre-create the ``host_dir/`` and ``agents/`` (and optionally ``home/``) subdirectories of the subvolume.
 
     A single ``mkdir -p`` so downstream writers (the agent container,
     ``persist_agent_data``) don't need to mkdir first. Idempotent.
     """
     host_dir_path = subvolume_path / HOST_DIR_SUBPATH
     agents_dir_path = subvolume_path / AGENTS_SUBPATH
+    seeded_paths = [host_dir_path, agents_dir_path]
+    if is_home_seeded:
+        seeded_paths.append(subvolume_path / HOME_SUBPATH)
+    quoted_paths = " ".join(shlex.quote(str(path)) for path in seeded_paths)
     result = outer.execute_idempotent_command(
-        f"mkdir -p {shlex.quote(str(host_dir_path))} {shlex.quote(str(agents_dir_path))}",
+        f"mkdir -p {quoted_paths}",
         timeout_seconds=10.0,
     )
     if not result.success:
@@ -816,6 +829,7 @@ def setup_container_ssh(
     container_host_public_key: str,
     known_hosts_entries: tuple[str, ...],
     authorized_keys_entries: tuple[str, ...],
+    home_volume_symlink: tuple[str, str] | None = None,
 ) -> None:
     """Set up SSH inside the container via docker exec.
 
@@ -824,7 +838,24 @@ def setup_container_ssh(
     and authorized_keys, and starts sshd. Pure-ish orchestration over
     ``exec_in_container`` so both the VPS and Lima providers share it; the
     caller supplies the keypairs it manages.
+
+    When ``home_volume_symlink`` is provided as ``(container_home_path,
+    volume_home_path)``, the container home path is symlinked onto the
+    volume-backed home directory BEFORE the package/host_dir setup, so a
+    host_dir configured inside the home tree resolves onto the volume.
     """
+    if home_volume_symlink is not None:
+        container_home_path, volume_home_path = home_volume_symlink
+        with log_span("Linking container home onto host volume"):
+            symlink_cmd = " && ".join(
+                [
+                    f"mkdir -p {shlex.quote(volume_home_path)}",
+                    f"( [ -L {shlex.quote(container_home_path)} ] || rm -rf {shlex.quote(container_home_path)} )",
+                    f"ln -sfn {shlex.quote(volume_home_path)} {shlex.quote(container_home_path)}",
+                ]
+            )
+            exec_in_container(outer, container_name, symlink_cmd)
+
     with log_span("Installing packages in container"):
         install_cmd = build_check_and_install_packages_command(
             mngr_host_dir=mngr_host_dir,
@@ -1172,7 +1203,7 @@ def _clone_build_context_for_self_contained_git(local_context: Path, git_depth: 
             if clone_result.returncode != 0:
                 raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
             # Overlay the working tree (committed + uncommitted edits, e.g. a
-            # locally-rsynced ``vendor/mngr/``) on top of the fresh clone; the
+            # locally-rsynced ``system/vendor/mngr/``) on top of the fresh clone; the
             # clone alone rolls the context back to HEAD. A depth-only clone of a
             # bare repo has no working tree to overlay.
             if is_git_repo:

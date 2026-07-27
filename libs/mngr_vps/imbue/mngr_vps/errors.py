@@ -51,3 +51,7 @@ class ContainerSetupError(VpsError):
     provider-level ``except MngrError`` cleanup clauses and leak half-built
     hosts. Inherits from VpsError, which inherits from MngrError.
     """
+
+
+class VpsConfigError(VpsError, ValueError):
+    """Raised when a VpsProviderConfig combines mutually-incompatible options."""

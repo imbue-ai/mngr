@@ -72,10 +72,11 @@ _BUILDER_PRUNE_TIMEOUT_SECONDS: Final[float] = 120.0
 # before first boot; the Playwright derive runs ``uv run`` from it. This is a DEFAULT_WORKSPACE_TEMPLATE image
 # contract -- if DEFAULT_WORKSPACE_TEMPLATE moves it, the derive's guard fails fast with a clear message.
 _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR: Final[str] = "/docker_build_code"
-# Where the DEFAULT_WORKSPACE_TEMPLATE deferred-install service writes its success marker; baking it into
-# the seeded image makes ``[program:deferred-install]`` a no-op on every loaded slice.
-_DEFERRED_INSTALL_MARKER_DIR: Final[str] = "/var/lib/minds/deferred-install"
-_DEFERRED_INSTALL_MARKER: Final[str] = f"{_DEFERRED_INSTALL_MARKER_DIR}/done.playwright"
+# The env-converge browser unit's satisfied condition: baking the Fortress
+# engine (and its Chromium apt libs) into the seeded image makes the unit a
+# fast no-op on every loaded slice -- there are no marker files anymore, the
+# unit checks the real installed state.
+_ENV_D_BROWSER_UNIT: Final[str] = "scripts/env.d/1000-playwright-fortress.sh"
 
 
 class SliceVpsDockerProviderConfig(VpsProviderConfig):
@@ -476,27 +477,25 @@ class SliceVpsDockerProvider(VpsProvider):
         reraise=True,
     )
     def _build_playwright_derived_image(self, *, outer: OuterHostInterface, base_image: str, target_tag: str) -> None:
-        """Build target_tag as base_image + a baked Playwright/Chromium layer (and the done marker).
+        """Build target_tag as base_image + a baked Fortress/Chromium layer.
 
-        Playwright is deliberately not in the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (it is shared with the
-        desktop Lima path); baking it cloud-side here keeps the desktop path
-        unchanged while letting every loaded slice skip the deferred install. The
-        browser cache lands in /root/.cache/ms-playwright -- outside the /mngr volume
-        and untouched by default-workspace-template-seed, so it survives into every container.
+        The browser engine is deliberately not in the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (it is
+        shared with the desktop Lima path); baking it cloud-side here -- by running the exact
+        env.d unit the workspace runs at boot -- keeps the desktop path unchanged while letting
+        every loaded slice's env-converge unit hit its fast satisfied-check (the engine binary is
+        already in place; no marker files are involved).
 
         The RUN first guards that the DEFAULT_WORKSPACE_TEMPLATE build-code dir exists, so a future DEFAULT_WORKSPACE_TEMPLATE image
         that relocates it fails fast with a clear message instead of a confusing
         ``cd``-not-found build failure buried in retries.
 
-        Playwright is invoked as ``python -m playwright`` (not the ``playwright``
+        The unit invokes playwright as ``python -m playwright`` (not the ``playwright``
         console script) on purpose: the DEFAULT_WORKSPACE_TEMPLATE Dockerfile builds the uv venv at
-        ``/mngr/code`` and then ``mv``\\s the workspace to ``/docker_build_code``. A uv
-        venv is path-bound -- its console-script shebangs hardcode
-        ``/mngr/code/.venv/bin/python``, which does not exist here, so ``uv run
-        playwright`` would fail with ``Failed to spawn: playwright``. ``python -m``
-        goes through the venv's interpreter symlink (location-independent), so it works
-        from the relocated path. (DEFAULT_WORKSPACE_TEMPLATE's own deferred-install runs the console script,
-        but only at runtime after default-workspace-template-seed restores the workspace to ``/mngr/code``.)
+        ``/home/user/workspace`` and then ``mv``\\s the workspace to ``/docker_build_code``. A uv
+        venv is path-bound -- its console-script shebangs hardcode the original path, which does
+        not exist here, so the console script would fail with ``Failed to spawn: playwright``.
+        ``python -m`` goes through the venv's interpreter symlink (location-independent), so it
+        works from the relocated path.
         """
         guard = (
             f"test -d {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} || "
@@ -506,8 +505,8 @@ class SliceVpsDockerProvider(VpsProvider):
         dockerfile = (
             f"FROM {base_image}\n"
             f"RUN {guard} "
-            f"&& cd {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} && uv run python -m playwright install --with-deps chromium "
-            f"&& mkdir -p {_DEFERRED_INSTALL_MARKER_DIR} && touch {_DEFERRED_INSTALL_MARKER}\n"
+            f"&& cd {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} "
+            f"&& ENV_CONVERGE_WORKSPACE_DIR={_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} bash {_ENV_D_BROWSER_UNIT}\n"
         )
         encoded_dockerfile = base64.b64encode(dockerfile.encode()).decode()
         stage_command = (

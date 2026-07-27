@@ -325,6 +325,35 @@ def test_generate_default_lima_yaml_with_root_key_enables_root_login() -> None:
     assert "ln -sfn /mnt/lima-mngr-abc-data /mngr" in script
 
 
+def test_generate_default_lima_yaml_volume_home_path_symlinks_home_not_host_dir() -> None:
+    """With volume_home_path set, the provisioning script symlinks the home path to
+    the disk and mkdir's host_dir inside it, instead of symlinking host_dir."""
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/home/user/.mngr",
+        host_data_disk_name="mngr-abc123-data",
+        host_data_disk_size="100GiB",
+        volume_home_path="/home/user",
+    )
+    script = config["provision"][0]["script"]
+    assert "ln -sfn /mnt/lima-mngr-abc123-data /home/user" in script
+    assert "ln -sfn /mnt/lima-mngr-abc123-data /home/user/.mngr" not in script
+    assert "mkdir -p /home/user/.mngr" in script
+
+
+def test_generate_default_lima_yaml_without_volume_home_path_symlinks_host_dir() -> None:
+    """The default (no volume_home_path) keeps today's host_dir symlink and adds no mkdir."""
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc123-data",
+        host_data_disk_size="100GiB",
+    )
+    script = config["provision"][0]["script"]
+    assert "ln -sfn /mnt/lima-mngr-abc123-data /mngr" in script
+    assert "mkdir -p /mngr\n" not in script
+
+
 def test_provision_script_labels_data_disk_for_lima(tmp_path: Path) -> None:
     """The in-guest format applies the exact filesystem label Lima's boot script
     probes for, and heals unlabeled disks formatted before the label existed --

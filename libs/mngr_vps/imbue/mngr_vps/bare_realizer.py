@@ -170,9 +170,10 @@ class BareRealizer(HostRealizer):
 
     def start_activity_watcher(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
         # Runs on the VM directly (the watcher is pure shell + jq), not via docker exec.
+        host_log_dir = str(self.config.host_log_dir) if self.config.host_log_dir is not None else None
         _run_on_outer(
             outer,
-            build_start_activity_watcher_command(str(self.host_dir)),
+            build_start_activity_watcher_command(str(self.host_dir), host_log_dir=host_log_dir),
             label="start-activity-watcher",
         )
 

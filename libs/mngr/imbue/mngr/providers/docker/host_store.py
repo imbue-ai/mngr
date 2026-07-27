@@ -39,6 +39,24 @@ class ContainerConfig(HostConfig):
         default=False,
         description="Whether this host was created with isolated volume-subpath mounting",
     )
+    # Sticky per-host mount-target choice, same replay semantics as
+    # is_isolated_host_volume above. None (the default for records written
+    # before this field existed) means the volume mounts at host_dir.
+    volume_mount_path: str | None = Field(
+        default=None,
+        description="Container path where the per-host volume is mounted (None = at host_dir)",
+    )
+    # Sticky per-host host_dir, same replay semantics as the fields above.
+    # Discovery and exec must read agent state at the host_dir this host was
+    # *created* with, not whatever host_dir the current provider config happens
+    # to resolve to (e.g. `mngr list` run outside the repo whose settings set a
+    # custom host_dir would otherwise look in the default /mngr and find no
+    # agents). None (records written before this field existed) means the
+    # provider config's host_dir.
+    host_dir: str | None = Field(
+        default=None,
+        description="Base directory for mngr data inside this container (None = provider config's host_dir)",
+    )
 
 
 class HostRecord(FrozenModel):

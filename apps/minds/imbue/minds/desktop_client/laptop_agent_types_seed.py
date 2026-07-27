@@ -4,7 +4,7 @@ mngr's project-config discovery is cwd-based: from any cwd that isn't
 inside a git worktree containing `.mngr/settings.toml`, the workspace's
 `[agent_types.X]` definitions are invisible. minds.app spawns `mngr forward`
 and `mngr list` with cwd=$HOME, so the DEFAULT_WORKSPACE_TEMPLATE workspace's `[agent_types.main]`
-(which lives at `/code/.mngr/settings.toml` inside the lima VM, with the
+(which lives at `/home/user/workspace/.mngr/settings.toml` inside the lima VM, with the
 laptop only ever seeing it in an ephemeral temp clone during `mngr create`)
 is not loaded for those laptop-side invocations.
 
@@ -32,7 +32,7 @@ _SEED_BLOCK = """
 # Seeded by minds.app at startup so laptop-side mngr (cwd=$HOME) can
 # resolve the DEFAULT_WORKSPACE_TEMPLATE workspace's `main` type without needing to load the
 # workspace's own `.mngr/settings.toml` (which lives inside the lima VM
-# at /code/.mngr/ and on the laptop only in ephemeral mngr-create
+# at /home/user/workspace/.mngr/ and on the laptop only in ephemeral mngr-create
 # temp clones). Without this, `mngr forward` and `mngr list` fall
 # back to BaseAgent for agents whose on-disk data.json records
 # `type = "main"`, which (a) shows them in mngr list as

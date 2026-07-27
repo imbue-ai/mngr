@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -84,3 +86,41 @@ def test_no_host_volume_with_isolation_false_is_fine() -> None:
     with capture_loguru(level="WARNING"):
         config_none = DockerProviderConfig(is_host_volume_created=False)
     assert config_none.isolate_host_volumes is None
+
+
+def test_volume_mount_path_requires_isolation() -> None:
+    """volume_mount_path only works with the isolated volume-subpath mount."""
+    with pytest.raises(ValidationError, match="volume_mount_path requires isolate_host_volumes=true"):
+        DockerProviderConfig(volume_mount_path=Path("/home/user"), isolate_host_volumes=False)
+
+
+def test_volume_mount_path_requires_host_dir_inside_it() -> None:
+    """host_dir must live strictly inside volume_mount_path so mngr data rides the volume."""
+    with pytest.raises(ValidationError, match="must be a path strictly inside"):
+        DockerProviderConfig(
+            volume_mount_path=Path("/home/user"),
+            isolate_host_volumes=True,
+            host_dir=Path("/mngr"),
+        )
+    # host_dir equal to the mount path is also rejected (mngr data would BE the volume root).
+    with pytest.raises(ValidationError, match="must be a path strictly inside"):
+        DockerProviderConfig(
+            volume_mount_path=Path("/home/user"),
+            isolate_host_volumes=True,
+            host_dir=Path("/home/user"),
+        )
+
+
+def test_volume_mount_path_accepted_with_host_dir_inside() -> None:
+    """The intended home-as-volume configuration validates cleanly."""
+    config = DockerProviderConfig(
+        volume_mount_path=Path("/home/user"),
+        isolate_host_volumes=True,
+        host_dir=Path("/home/user/.mngr"),
+    )
+    assert config.volume_mount_path == Path("/home/user")
+
+
+def test_volume_mount_path_defaults_to_none() -> None:
+    """Unset volume_mount_path preserves today's mount-at-host_dir behavior."""
+    assert DockerProviderConfig(isolate_host_volumes=True).volume_mount_path is None

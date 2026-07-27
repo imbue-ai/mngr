@@ -147,6 +147,9 @@ def test_signin_then_signout_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path
                     "docker_runtime": "runsc",
                     "install_gvisor_runtime": True,
                     "default_start_args": ["--workdir=/", "--security-opt=no-new-privileges"],
+                    "host_dir": "/home/user/.mngr",
+                    "volume_home_path": "/home/user",
+                    "host_log_dir": "/var/log/mngr",
                 },
             },
             "plugins": {"recursive": {"enabled": False}},
@@ -227,6 +230,9 @@ def test_byok_cloud_account_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_path:
         {
             "byok-aws-work-aws": {
                 "backend": "aws",
+                "host_dir": "/home/user/.mngr",
+                "volume_home_path": "/home/user",
+                "host_log_dir": "/var/log/mngr",
                 "default_region": "us-west-2",
                 "default_instance_type": "t3.large",
                 "install_gvisor_runtime": True,
@@ -237,12 +243,18 @@ def test_byok_cloud_account_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_path:
             },
             "byok-gcp-gcp-lab": {
                 "backend": "gcp",
+                "host_dir": "/home/user/.mngr",
+                "volume_home_path": "/home/user",
+                "host_log_dir": "/var/log/mngr",
                 "default_zone": "us-west1-a",
                 "default_machine_type": "e2-standard-2",
                 "service_account_key_json": '{"client_email": "svc@proj.iam.gserviceaccount.com"}',
             },
             "byok-azure-azure-lab": {
                 "backend": "azure",
+                "host_dir": "/home/user/.mngr",
+                "volume_home_path": "/home/user",
+                "host_log_dir": "/var/log/mngr",
                 "default_region": "eastus2",
                 "default_vm_size": "Standard_B2ms",
                 "resource_group": "byok-azure-azure-lab-eastus2",

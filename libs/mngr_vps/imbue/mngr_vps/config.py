@@ -1,6 +1,8 @@
 from pathlib import Path
+from typing import Self
 
 from pydantic import Field
+from pydantic import model_validator
 
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import ScalarStrTuple
@@ -8,6 +10,7 @@ from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
+from imbue.mngr_vps.errors import VpsConfigError
 from imbue.mngr_vps.primitives import IsolationMode
 
 
@@ -27,6 +30,16 @@ class VpsProviderConfig(ProviderInstanceConfig):
         description=(
             "Base directory for mngr data on the agent host. With container isolation this is the "
             "path inside the container; with bare isolation it is the path on the VM's OS."
+        ),
+    )
+    volume_home_path: Path | None = Field(
+        default=None,
+        description=(
+            "Container path (e.g. /home/user) symlinked onto the unified host volume's home/ "
+            "subdirectory, so the whole tree persists on the volume while mngr data lives in a "
+            "subdirectory (host_dir must then be a path strictly inside it, e.g. "
+            "/home/user/.mngr). When unset, host_dir symlinks to the volume's host_dir/ "
+            "subdirectory exactly as before. Only used by the container (docker) isolation mode."
         ),
     )
     default_image: str = Field(
@@ -132,6 +145,17 @@ class VpsProviderConfig(ProviderInstanceConfig):
             "the result is not positive."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_volume_home_path_contains_host_dir(self) -> Self:
+        if self.volume_home_path is None:
+            return self
+        if not self.host_dir.is_relative_to(self.volume_home_path) or self.host_dir == self.volume_home_path:
+            raise VpsConfigError(
+                f"host_dir ({self.host_dir}) must be a path strictly inside "
+                f"volume_home_path ({self.volume_home_path}) so mngr data persists on the volume"
+            )
+        return self
 
 
 class OfflineCapableVpsProviderConfig(VpsProviderConfig):

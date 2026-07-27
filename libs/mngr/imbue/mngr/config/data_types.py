@@ -249,6 +249,13 @@ class ProviderInstanceConfig(FrozenModel):
         description="Minimum age (in seconds) before GC will destroy an online host with no agents. "
         "Overrides the global default_min_online_host_age_seconds when set.",
     )
+    host_log_dir: Path | None = Field(
+        default=None,
+        description="Directory on hosts for mngr's plain-text service logs (shutdown, activity "
+        "watcher, volume sync). When unset, logs are written under <host_dir>/logs as before. "
+        "Set to a path outside host_dir (e.g. /var/log/mngr) to keep diagnostic logs out of "
+        "the host's persistent data directory.",
+    )
     discovery_poll_interval_seconds: PositiveFloat = Field(
         default=PositiveFloat(_DEFAULT_DISCOVERY_POLL_INTERVAL_SECONDS),
         description="How often (in seconds) this provider's decoupled discovery loop re-polls. "
