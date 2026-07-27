@@ -1,62 +1,271 @@
-# How it works
+# minds architecture overview
 
-Each workspace is a persistent `mngr` agent running in a Docker container, created from a template repository. The template defines everything the agent needs: services, skills, configuration, and a Dockerfile.
+minds is a desktop app for running persistent, autonomous Claude agents. Each
+agent -- a **workspace** -- runs in its own container (local Docker or Lima, or
+a remote VM / cloud host) and is created from a template git repository. You
+reach every workspace through one local desktop client, and can optionally
+expose individual services to the public internet through a Cloudflare tunnel.
 
-## Architecture
+This document maps how the pieces fit together. For deeper dives, see
+[Where to go next](#where-to-go-next).
 
-The system has two main components:
+## Mental model
 
-### Desktop client (runs on your machine)
+A workspace is a persistent `mngr` agent. The template repository it is created
+from (by default
+[default-workspace-template](https://github.com/imbue-ai/default-workspace-template))
+defines the agent's entire runtime -- its Dockerfile, background services,
+skills, and `mngr` configuration in `.mngr/settings.toml`. There is no
+`minds.toml` and no vendoring: the template repo is the single source of truth
+for what a workspace is.
 
-The desktop client (`minds run`) provides:
-- Authentication via one-time codes and signed cookies
-- A landing page listing all accessible workspaces (or a creation form if none exist). Local (`docker` / `lima`) minds show a live container-status badge and a Start/Stop button (Stop asks for confirmation); the status comes from the discovery snapshot's host state (a user-issued Start/Stop flips it immediately via an optimistic override), and the same liveness drives the quit-time shutdown prompt (see `desktop-app.md`).
-- Agent creation from git repositories or local paths via a web form or API
-- Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own system interface (the `system-interface` CLI, source at `default-workspace-template/apps/system_interface/`; optionally through an SSH tunnel for remote agents)
+You interact with a workspace through a web UI (the dockview interface served
+from inside the container). The desktop client's only jobs are to authenticate
+you and route your browser to the right workspace; it never defines what a
+workspace does or how it responds.
 
-Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/apps/system_interface/`), which serves the dockview UI and multiplexes the workspace's services under `/service/<name>/...` paths (Service Worker bootstrap, HTML/cookie rewriting, and WebSocket shims live there, not in the desktop client). Browsers access a workspace at `http://<agent-id>.localhost:8420/` and its individual services at `http://<agent-id>.localhost:8420/service/<service_name>/`.
+## Architecture at a glance
 
-### Agent container (runs in Docker)
+Three layers, running in different places:
 
-Inside each agent's Docker container:
-- **Claude Code** runs as the main agent process in tmux window 0
-- The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf` (logs under `/var/log/supervisor`)
-- Services register their ports via `scripts/forward_port.py` into `runtime/applications.toml`
-- An **app watcher** service monitors `applications.toml`, reconciles with the Cloudflare forwarding API, and writes service events to `events/services/events.jsonl`
-- A **cloudflared** service watches `runtime/secrets` for a tunnel token and manages the Cloudflare tunnel
-- A **telegram bot** watches for incoming messages and forwards them to the agent via `mngr message`
+```mermaid
+flowchart TB
+    visitor["Public visitor"] --> access["Cloudflare Access<br/>Google OAuth / one-time PIN"]
 
-## Creating agents
+    subgraph machine["Your machine"]
+        browser["Browser / Electron shell"]
+        ui["minds desktop client -- Flask<br/>bare origin localhost:8420<br/>UI + /api/v1 + create + sharing"]
+        fwd["mngr forward plugin<br/>serves agent-id.localhost<br/>HTTP/WS byte-forwarding, TLS + HTTP/2"]
+        latch["mngr latchkey forward<br/>Latchkey gateway, mngr observe, SSH tunnels"]
+    end
 
-Agents can be created in two ways:
+    subgraph container["Workspace container -- one per workspace"]
+        services["system-services agent, is_primary<br/>bootstrap then supervisord"]
+        si["system_interface -- Flask<br/>dockview UI + /service/name/"]
+        chat["chat agents -- Claude runs here"]
+        svc["app-watcher, cloudflared, terminal, ..."]
+    end
 
-1. **Via the web UI**: Visit the desktop client. If no agents exist, you'll see a creation form. Enter a git repository URL (or local path), agent name, and launch mode (DOCKER, LIMA, CLOUD, or IMBUE_CLOUD). The desktop client clones the repo (if URL), runs `mngr create` with the appropriate templates, creates a Cloudflare tunnel, and injects the tunnel token.
-
-2. **Via the API**: POST to `/api/create-agent` with a JSON body containing `git_url`, `agent_name`, and `launch_mode`. Poll `/api/create-agent/{agent_id}/status` for progress.
-
-## Port forwarding
-
-Applications (services with ports) are tracked in `runtime/applications.toml`:
-
-```toml
-[[applications]]
-name = "web"
-url = "http://localhost:8000"
-global = true
+    browser -->|localhost:8420| ui
+    browser -->|agent-id.localhost| fwd
+    fwd -->|forwards to| si
+    ui -. spawns .-> fwd
+    ui -. spawns .-> latch
+    services --> si
+    services --> chat
+    services --> svc
+    access -->|Cloudflare tunnel| si
+    ui -. manages sharing .-> connector["remote-service connector -- Modal"]
+    connector -. configures .-> access
 ```
 
-Each application gets two URLs:
-1. **Local**: `http://{agent_id}.localhost:8420/service/{service_name}/` (the desktop client byte-forwards the subdomain request to the workspace's system interface, which serves the service under `/service/<name>/`)
-2. **Global**: `https://{service}--{agent_id}--{username}.{domain}` (via Cloudflare tunnel)
+### 1. On your machine: the desktop client
 
-The `global` flag indicates whether the agent wants Cloudflare forwarding enabled. The Share modal inside the workspace's dockview UI is authoritative for the actual state.
+`minds run` (`apps/minds/imbue/minds/cli/run.py`) starts everything local. It is
+a **Flask** app served by a synchronous cheroot WSGI server
+(`desktop_client/server.py`), and it does three jobs:
 
-## Cloudflare tunnel integration
+- **Serves the minds UI** on the "bare origin"
+  `http://127.0.0.1:8420/` (`DEFAULT_DESKTOP_CLIENT_PORT`,
+  `config/data_types.py`): the landing page, the workspace-creation form,
+  account and settings pages, the sharing editor, and the `/api/v1` JSON API
+  (`desktop_client/app.py`).
+- **Spawns `mngr forward`** as a subprocess (the `mngr_forward` plugin,
+  `libs/mngr_forward/`). This is what actually serves the per-workspace
+  `https://<agent-id>.localhost/` origins, byte-forwarding HTTP and WebSocket
+  traffic to each workspace's own `system_interface` over TLS + HTTP/2. The
+  `mngr forward` plugin owns its bind port: it uses its own default of 8421
+  (`mngr_forward/config.py`), or an OS-assigned fallback when that port is
+  taken, and reports the port it actually bound back to the desktop client via
+  a `listening` envelope (`desktop_client/forward_cli.py`) -- the desktop
+  client passes no `--port` and simply reads the reported value, so treat 8421
+  as a default rather than a fixed address. The desktop client itself has no
+  subdomain-forwarding or proxy route -- it byte-forwards nothing.
+- **Spawns / adopts a `mngr latchkey forward` supervisor** that owns the shared
+  Latchkey gateway, a single `mngr observe` discovery producer, and the
+  per-agent reverse SSH tunnels. It is restarted on every `minds run` and
+  deliberately left running when minds shuts down.
 
-The remote service connector URL comes from the per-tier `client.toml` loaded via `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). `minds run` has no implicit default: if neither `--config-file` nor `MINDS_CLIENT_CONFIG_PATH` is set it refuses to start. The packaged Electron build passes `--config-file` explicitly from the bundled `client.toml`. Every tunnel request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. Once signed in:
+When packaged, minds ships as an Electron app (see
+[desktop-app.md](./desktop-app.md)); the Electron shell wraps this same Python
+backend unchanged.
 
-1. A tunnel is created automatically after each agent is created
-2. The tunnel token is injected into the agent's `runtime/secrets`
-3. The cloudflared service inside the agent detects the token and starts the tunnel
-4. The app watcher registers services with the Cloudflare forwarding API
-5. Access is protected by Cloudflare Access with a default policy for the signed-in user's email
+**Discovery.** The `mngr forward` plugin tails the shared `mngr observe`
+discovery feed and spawns one `mngr event <agent-id> services requests --follow
+--quiet` per matching agent, emitting JSONL envelopes. The desktop client's
+`EnvelopeStreamConsumer` (`desktop_client/forward_cli.py`) consumes those
+envelopes and updates its backend resolver, so newly created workspaces and
+newly registered services appear without a restart.
+
+### 2. In the container: the workspace
+
+Each workspace is created with `mngr create` and consists of more than one
+`mngr` agent:
+
+- The **primary "services" agent** (`mngr` name `system-services`, carrying the
+  label `is_primary=true`) runs only bootstrap and the background services. Its
+  tmux window 0 is `sleep infinity && claude`, so Claude never actually starts
+  there -- the trailing `&& claude` is deliberately unreachable. It is hidden
+  from the workspace's agent list and protected from direct destroy.
+- One or more **chat agents** are separate `mngr` agents where Claude actually
+  runs. The bootstrap creates the first one on initial boot (gated by
+  `runtime/initial_chat_created`) and writes `CLAUDE_CONFIG_DIR` into the host
+  env file, so every agent on the host shares the services agent's Claude config
+  -- auth, plugins, and sessions are set up once and inherited.
+
+The primary agent's bootstrap (`uv run bootstrap`) runs first-boot setup and
+then execs `supervisord -n`, which supervises the background services declared
+as `[program:*]` sections in `supervisord.conf` (logs under
+`/var/log/supervisor`). Those services include:
+
+- **`system_interface`** -- a Flask app that serves the dockview single-page UI
+  at `/` and multiplexes the workspace's local services under
+  `/service/<name>/...` (Service Worker prefix bootstrap, HTML and cookie
+  rewriting, and WebSocket bridging all happen here, not in the desktop client).
+- **`app-watcher`** -- watches `runtime/applications.toml` and appends
+  `service_registered` / `service_deregistered` events to
+  `$MNGR_AGENT_STATE_DIR/events/services/events.jsonl`, which is how the desktop
+  client discovers a workspace's live services.
+- **`cloudflared`** -- watches `runtime/secrets/cloudflare_tunnel.env` for a
+  tunnel token and runs the Cloudflare tunnel when one is present (a no-op until
+  then).
+- plus `terminal`, `host-backup`, `earlyoom`, a one-shot `deferred-install`
+  (installs Playwright's Chromium and its apt libraries once per boot), and
+  `browser`.
+
+Services register their ports by calling `scripts/forward_port.py`, which
+upserts `{name, url}` entries into `runtime/applications.toml`. All of this
+container-side code lives in the template repo, not in `apps/minds` (see the
+[workspace docs](./workspace/README.md)).
+
+### 3. Authentication
+
+Local minds uses three independent credentials, plus a separate account
+identity:
+
+1. **`minds_session`** -- an `itsdangerous`-signed cookie minted after you
+   consume a one-time login code (printed as a login URL in the terminal when
+   `minds run` starts). It guards the local minds UI on the bare origin. It is
+   host-only (scoped to `localhost:8420`), deliberately *not* `Domain=localhost`
+   -- browsers treat `localhost` as a public suffix and refuse to send such
+   cookies to subdomains (`desktop_client/app.py`).
+2. **`mngr_forward_session`** -- a separate cookie the `mngr forward` plugin
+   mints for each `<agent-id>.localhost` subdomain via its `/goto/<agent-id>/`
+   auth bridge. The Electron shell pre-sets it from the `mngr_forward_started`
+   event minds emits at startup.
+3. **`MINDS_API_KEY`** -- a per-run in-memory bearer token injected by the
+   Latchkey gateway's bundled `minds-api-proxy` extension, so in-container
+   agents can call the minds `/api/v1` surface.
+
+Separately, **SuperTokens** is the Imbue Cloud *account* identity (sign in / sign
+up / password reset). It is owned entirely by the `mngr imbue_cloud auth`
+plugin, which keeps the session on disk; minds only reads the resulting user
+identity (`desktop_client/supertokens_routes.py`). It gates enabling the remote
+Imbue Cloud compute preset and cross-device sync -- you can run minds fully
+locally with only the `minds_session` cookie and no account.
+
+## Creating a workspace
+
+Both the web form (`/create`) and the JSON API (`POST /api/v1/workspaces`) go
+through one front door. Creation is asynchronous: the call returns a
+minds-internal creation id immediately and does the work on a background thread;
+the UI polls `GET /api/v1/workspaces/operations/create/<operation_id>` (keyed by
+the creation id, not the eventual agent id) and streams logs.
+
+Under the hood minds runs, roughly:
+
+```
+mngr create system-services@<host-name>.<provider> --no-connect --format jsonl \
+  --template main --template <mode> --branch :mngr/<host-name> \
+  --label workspace_display_name=<name> --label user_created=true \
+  --label is_primary=true
+```
+
+Every workspace uses the constant agent name `system-services` on its own host,
+so the name you choose is the **host** name that identifies the workspace. The
+canonical agent id is read back from the `{"event": "created", ...}` line of
+`mngr create --format jsonl` -- minds does not pre-generate it. A git URL is
+full-cloned to a temp directory first; a plain local directory is used in place.
+
+Creation walks these status phases:
+`INITIALIZING -> CLONING_REPO -> [CHECKING_OUT_BRANCH] -> [PROVISIONING_AI] ->
+CREATING_WORKSPACE -> WAITING_FOR_READY -> DONE` (or `FAILED`), where the
+bracketed phases run only when a branch/tag was given or the AI provider is
+Imbue Cloud. When the workspace is associated with an account, a post-create
+step also provisions its Cloudflare tunnel -- which exposes nothing on its own
+(see [Global access](#global-access)).
+
+## Launch modes
+
+The `LaunchMode` enum (`primitives.py`) has six members; each stacks a
+mode-specific `mngr` template on top of `--template main` and resolves a
+matching `mngr` provider:
+
+| Mode | Where it runs | mngr template |
+|---|---|---|
+| `DOCKER` | Docker on your machine (runc, or gVisor `runsc` on Linux) | `docker` (+ `docker_runsc`) |
+| `LIMA` | a Lima VM on your machine | `lima` |
+| `VULTR` | Docker on a Vultr VPS (region required) | `vultr` |
+| `AWS` | a gVisor Docker container on an EC2 instance (per region) | `aws` |
+| `IMBUE_CLOUD` | a leased, pre-baked pool host, adopted in place | `imbue_cloud` |
+| `MODAL` | an ephemeral (~1-day) Modal sandbox -- testing only | `modal` |
+
+The simple create view offers two presets -- "local" (Lima) and "remote"
+(Imbue Cloud); the advanced view exposes all six.
+
+## Configuration and environments
+
+`minds run` requires a client config file and refuses to start without one: it
+reads `--config-file <path>` or the `MINDS_CLIENT_CONFIG_PATH` env var, with no
+implicit default. The packaged Electron build passes a bundled `client.toml`
+explicitly. A `client.toml` carries public URLs only (the remote-service
+connector URL and the LiteLLM proxy URL); secrets live in a separate,
+chmod-0600 `secrets.toml`, and deploy-time settings in `deploy.toml`.
+
+minds runs against isolated environment tiers -- `production`, `staging`, `dev`
+(each developer gets a dynamic dev env on top of the shared dev base), and `ci`
+-- with zero cross-tier reach. `minds env activate <name>` prints the shell
+exports that point the whole stack at one env's data root. See
+[environments.md](./environments.md).
+
+## Global access
+
+By default nothing about a workspace is reachable from the public internet.
+Exposure is opt-in, per-service, and even then never openly public.
+
+When a workspace is associated with an account, minds provisions a Cloudflare
+tunnel for it after creation (`mngr imbue_cloud tunnels create`) and writes the
+token to `runtime/secrets/cloudflare_tunnel.env`, which the in-container
+`cloudflared` service picks up. That only establishes the tunnel; on its own it
+exposes no service.
+
+To reach a service from outside, you share it explicitly from the desktop
+client's sharing flow (`/sharing/<agent-id>/<service-name>`, reached from
+Workspace Settings). **Sharing requires at least one email**: an empty allowlist
+is rejected up front (`desktop_client/sharing_handler.py` raises
+`SharingError("Sharing requires at least one email ... an empty list would
+expose the service publicly.")`), because sharing installs a **Cloudflare Access
+policy** scoped to those emails. A visitor to the shared URL must first
+authenticate through Cloudflare Access using the account's configured identity
+providers (for example Google OAuth or an emailed one-time PIN) and match the
+email allowlist, so a shared service is always gated -- never anonymously
+public. This Access gate is separate from, and independent of, the minds
+SuperTokens session.
+
+A shared service is reachable at a global URL of the form
+`https://<service>--<short-agent-id>--<user-id>.<domain>` (the agent and user
+components are 16-hex-character prefixes, not human-readable names). The
+remote-service connector (a Modal-deployed service) owns all tunnel, service,
+and Access state; minds keeps no local copy, and the sharing editor reads from
+and writes to the connector.
+
+## Where to go next
+
+- [design.md](./design.md) -- design principles and the workspace-agent model
+- [Desktop app](./desktop-app.md) -- Electron packaging and distribution (ToDesktop)
+- [Desktop client internals](../imbue/minds/desktop_client/README.md) -- routes, auth, and proxying detail
+- [Workspace template docs](./workspace/README.md) and [glossary](./workspace/glossary.md) -- what a template repo contains and the core vocabulary
+- [environments.md](./environments.md) -- tiers, per-env data roots, and `minds env` activation / deploy
+- [latchkey-permissions.md](./latchkey-permissions.md) -- how agents reach third-party services (Slack, GitHub, ...) through Latchkey
+- [testing-overview.md](./testing-overview.md) -- the map of every kind of minds test
+- [release.md](./release.md) -- cutting a new minds release
