@@ -849,6 +849,20 @@ def test_list_sync_records_parses_records(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(records) == 1
     assert records[0].host_id == "host-1"
     assert records[0].state == "active"
+    assert records[0].destroyed_at is None
+
+
+def test_list_sync_records_keeps_the_server_destroyed_at_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stamp must survive the strict (extra="forbid") transport model so
+    # minds can age destroyed workspaces' backups against the server's clock.
+    tombstone = {**_sync_record_json(), "state": "destroyed", "destroyed_at": "2026-07-01T00:00:00+00:00"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"records": [tombstone]})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    records = client.list_sync_records(SecretStr("tok"))
+    assert records[0].destroyed_at == "2026-07-01T00:00:00+00:00"
 
 
 def test_put_sync_record_returns_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:

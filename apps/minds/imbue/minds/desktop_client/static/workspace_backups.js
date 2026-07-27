@@ -1,6 +1,8 @@
-// Backup section of the workspace settings page: shows the combined
-// snapshot status + backup-service verification breakdown from this
-// workspace's /api/v1/workspaces/<id>/backups, and drives the actions:
+// Backup section of the workspace settings page: shows the snapshot status
+// (fast, from /api/v1/workspaces/<id>/backups) and the backup-service
+// verification breakdown (slow, from .../backup-check -- it execs into the
+// workspace, so it loads asynchronously behind its own spinner), and drives
+// the actions:
 //   - the verification Enable/Disable button (the whole problem/version
 //     breakdown only exists while it is on),
 //   - "Update backup software" (one idempotent converge),
@@ -30,6 +32,7 @@
   var verificationBtn = document.getElementById('backup-verification-btn');
   var verificationBtnWrap = document.getElementById('backup-verification-btn-wrap');
   var verificationSpinner = document.getElementById('backup-verification-spinner');
+  var checkLoadingLine = document.getElementById('backup-check-loading');
 
   var configureToggleBtn = document.getElementById('backup-configure-toggle-btn');
   var configureForm = document.getElementById('backup-configure-form');
@@ -47,6 +50,25 @@
   // The latest known verification state, driving the Enable/Disable label.
   var isVerificationEnabled = true;
 
+  // The latest snapshot entry and backup-check verdict, kept so whichever
+  // half of the split fetch lands second can re-render the history rows'
+  // Restore gate (an offline workspace can be downloaded from but not
+  // restored into; only the check verdict knows about offline).
+  var lastSnapshotsEntry = null;
+  var lastCheckState = null;
+
+  // The /backup-check fetches run the (slow) backup-service check
+  // server-side -- an exec into the workspace that can take 10s+ (minutes
+  // for an unreachable host). This page is swapped in place (no document
+  // teardown), so without an explicit abort a stale fetch survives
+  // navigation, and a few quick Settings visits pin all six of Chromium's
+  // per-origin connections -- queueing every later request behind them.
+  // Abort every backup fetch (the fast /backups half too) on page teardown.
+  var backupsAbortController = new AbortController();
+  window.addEventListener('minds:page-teardown', function () {
+    backupsAbortController.abort();
+  }, { once: true });
+
   var RECENT_LIMIT = 5;
 
   var PROBLEM_LABELS = {
@@ -56,6 +78,7 @@
     ENV_MISMATCH: 'This workspace is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
     SERVICE_NOT_RUNNING: 'The backup software in this workspace is not running. Click "Update backup software" to restart it.',
     UNVERIFIABLE: "minds couldn't check on this workspace's backups. Click \"Update backup software\" to reset them.",
+    BACKUPS_STALE: 'This workspace has not backed up recently even though it is running. Click "Update backup software" to fix this.',
   };
 
   function setShown(el, isShown) {
@@ -126,7 +149,7 @@
 
     setShown(historyCard, true);
     // The server already limits the payload to RECENT_LIMIT rows; slice defensively.
-    var restoreConfig = window.mindsBackupTable.restoreConfigFor(entry, openRestoreDialog);
+    var restoreConfig = window.mindsBackupTable.restoreConfigFor(lastCheckState, openRestoreDialog);
     snapshots.slice(0, RECENT_LIMIT).forEach(function (snapshot, index) {
       historyEl.appendChild(
         window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, restoreConfig)
@@ -145,11 +168,31 @@
     if (hasMore) viewAllLabel.textContent = 'View all ' + total + ' backups';
   }
 
-  function renderEntry(entry) {
-    // History renders regardless of the verification check_state early-returns
-    // below, so drive it up front.
+  // The status line composes from both halves of the split fetch: the fast
+  // snapshot summary (base) and the slow service-check verdict (suffix).
+  // Composing from stored parts keeps the line correct regardless of which
+  // response lands first.
+  var snapshotStatusText = 'Loading backup status...';
+  var checkStatusSuffix = '';
+
+  function renderStatusLine() {
+    statusLine.textContent = (snapshotStatusText + ' ' + checkStatusSuffix).trim();
+  }
+
+  function renderSnapshots(entry) {
+    lastSnapshotsEntry = entry;
     renderHistory(entry);
-    statusLine.textContent = snapshotText(entry);
+    snapshotStatusText = snapshotText(entry);
+    renderStatusLine();
+  }
+
+  function renderCheck(entry) {
+    setShown(checkLoadingLine, false);
+    var isCheckStateChanged = entry.check_state !== lastCheckState;
+    lastCheckState = entry.check_state;
+    // The history rows' Restore gate depends on the verdict (OFFLINE
+    // disables it), so re-render already-painted rows when it changes.
+    if (isCheckStateChanged && lastSnapshotsEntry) renderHistory(lastSnapshotsEntry);
     isVerificationEnabled = !!entry.is_verification_enabled;
     verificationBtn.textContent = isVerificationEnabled ? 'Disable' : 'Enable';
     setShown(verificationBtnWrap, true);
@@ -158,16 +201,19 @@
     problemsEl.classList.add('hidden');
     versionsEl.classList.add('hidden');
     setShown(updateBtnWrap, false);
+    checkStatusSuffix = '';
 
     if (entry.check_state === 'DISABLED') {
-      statusLine.textContent += ' Backup service verification is disabled for this workspace.';
+      checkStatusSuffix = 'Backup service verification is disabled for this workspace.';
+      renderStatusLine();
       // The update is an idempotent converge and does not depend on
       // verification, so it stays available.
       setShown(updateBtnWrap, true);
       return;
     }
     if (entry.check_state === 'OFFLINE') {
-      statusLine.textContent += ' This workspace is offline; its backups will be checked when it is back online.';
+      checkStatusSuffix = 'This workspace is offline; its backups will be checked when it is back online.';
+      renderStatusLine();
       return;
     }
     var versionParts = [];
@@ -197,26 +243,65 @@
       }
       problemsEl.classList.remove('hidden');
     } else if (entry.check_state === 'OK') {
-      statusLine.textContent += ' The backup service is up to date.';
+      checkStatusSuffix = 'The backup service is up to date.';
     }
+    renderStatusLine();
   }
 
-  function refreshHealth() {
+  function refreshSnapshots() {
     // Only the newest RECENT_LIMIT rows are shown here; the total for the
-    // "View all N" link rides along in snapshots_total.
-    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=' + RECENT_LIMIT)
+    // "View all N" link rides along in snapshots_total. This is the fast
+    // half: restic runs from this machine, no exec into the workspace.
+    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=' + RECENT_LIMIT, {
+      signal: backupsAbortController.signal,
+    })
       .then(function (resp) { return resp.ok ? resp.json() : null; })
       .then(function (entry) {
         if (!entry) {
-          statusLine.textContent = 'Backup status unavailable for this workspace.';
+          snapshotStatusText = 'Backup status unavailable for this workspace.';
+          renderStatusLine();
           return;
         }
-        renderEntry(entry);
+        renderSnapshots(entry);
+      })
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return;  // navigated away; the page is gone
+        snapshotStatusText = 'Could not load backup status.';
+        renderStatusLine();
+      });
+  }
+
+  function refreshCheck() {
+    // The slow half: the service check execs into the workspace (spawning
+    // mngr), so it fills in asynchronously behind its own spinner instead of
+    // gating the snapshot list above.
+    setShown(checkLoadingLine, true);
+    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-check', {
+      signal: backupsAbortController.signal,
+    })
+      .then(function (resp) { return resp.ok ? resp.json() : null; })
+      .then(function (entry) {
+        setShown(checkLoadingLine, false);
+        if (!entry) {
+          // The verdict is unavailable; still offer the (idempotent) update.
+          setShown(verificationBtnWrap, true);
+          setShown(updateBtnWrap, true);
+          return;
+        }
+        renderCheck(entry);
         if (window.mindsBackupHealth) window.mindsBackupHealth.ingestEntry(entry);
       })
-      .catch(function () {
-        statusLine.textContent = 'Could not load backup status.';
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return;  // navigated away; the page is gone
+        setShown(checkLoadingLine, false);
+        setShown(verificationBtnWrap, true);
+        setShown(updateBtnWrap, true);
       });
+  }
+
+  function refreshHealth() {
+    refreshSnapshots();
+    refreshCheck();
   }
 
   // -- Verification Enable/Disable ------------------------------------------
@@ -241,19 +326,22 @@
         }
         // Re-fetching also re-runs the (possibly slow) service check; the
         // spinner keeps showing what we're doing until the fresh state lands.
-        return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=' + RECENT_LIMIT)
+        return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-check', {
+          signal: backupsAbortController.signal,
+        })
           .then(function (entryResp) { return entryResp.ok ? entryResp.json() : null; })
           .then(function (entry) {
             verificationSpinner.classList.add('hidden');
             if (entry) {
-              renderEntry(entry);
+              renderCheck(entry);
               if (window.mindsBackupHealth) window.mindsBackupHealth.ingestEntry(entry);
             } else {
               setShown(verificationBtnWrap, true);
             }
           });
       })
-      .catch(function () {
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return;  // navigated away; the page is gone
         verificationSpinner.classList.add('hidden');
         setShown(verificationBtnWrap, true);
         opUi.showError('Could not update the verification setting (network error).');

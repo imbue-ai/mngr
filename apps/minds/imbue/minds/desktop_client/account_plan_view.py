@@ -89,4 +89,7 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
         # Gates the "free up backup space" action on the Accounts page.
         "is_over_storage_quota": _int_field(usage, "total_bucket_bytes")
         > _int_field(entitlements, "max_total_bucket_bytes"),
+        # Gates the "review destroyed workspace backups" link: destroyed
+        # workspaces' buckets count against the cap until they are reaped.
+        "is_at_bucket_quota": _int_field(usage, "buckets") >= _int_field(entitlements, "max_buckets"),
     }

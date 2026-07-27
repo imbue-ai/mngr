@@ -1,0 +1,14 @@
+{#def title, message #}
+{#
+  Friendly fallback for routing-level errors (404/405) that a real navigation
+  can land on. Werkzeug's bare error page has no chrome and no links, so a bad
+  link (e.g. an anchor pointing at a POST-only route) would strand the user on
+  a dead end; this page always offers a way back to the workspace list.
+#}
+<PageNarrowContainer title={{ title }} max_width="max-w-[460px]">
+  <h1 class="type-heading text-primary">{{ title }}</h1>
+  <p class="mt-2 text-primary">{{ message }}</p>
+  <div class="mt-4">
+    <ButtonLink href="/" variant="primary">Back to workspaces</ButtonLink>
+  </div>
+</PageNarrowContainer>

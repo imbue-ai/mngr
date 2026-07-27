@@ -1529,6 +1529,15 @@ class AgentCreator(MutableModel):
             "Other launch modes do not consult this client."
         ),
     )
+    backup_quota_evictor_factory: Callable[[str], Callable[[], bool] | None] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Given an account email, returns the quota-eviction callback backup provisioning "
+            "retries with when the bucket create hits a quota limit (or None when the account "
+            "is unknown). None disables eviction entirely."
+        ),
+    )
     latchkey: Latchkey | None = Field(
         default=None,
         frozen=True,
@@ -2237,6 +2246,11 @@ class AgentCreator(MutableModel):
             # A structured quota refusal is deterministic (retrying cannot
             # succeed), so it is excluded from the retry predicate and falls
             # straight through to the notification below.
+            quota_evictor = (
+                self.backup_quota_evictor_factory(backup_request.account_email)
+                if self.backup_quota_evictor_factory is not None and backup_request.account_email
+                else None
+            )
             for attempt in Retrying(
                 retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError))
                 & retry_if_not_exception_type(ImbueCloudQuotaExceededCliError),
@@ -2253,6 +2267,7 @@ class AgentCreator(MutableModel):
                         imbue_cloud_cli=self.imbue_cloud_cli,
                         paths=self.paths,
                         parent_cg=self.root_concurrency_group,
+                        quota_evictor=quota_evictor,
                     )
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
             logger.opt(exception=exc).warning(

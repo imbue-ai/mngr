@@ -60,7 +60,27 @@
     });
   });
 
-  function renderPage(entry, pageSnapshots) {
+  // The snapshot-only /backups listing doesn't carry the service-check
+  // verdict, and the Restore gate needs it (an offline workspace can be
+  // downloaded from but not restored into) -- so fetch the verdict once, in
+  // parallel with the first page. Until (or unless) it resolves, rows render
+  // with Restore enabled; the restore operation itself reports the failure if
+  // the workspace turns out unreachable. This page has a real document
+  // lifecycle (it is not chrome-swapped), so navigating away cancels an
+  // in-flight check fetch naturally.
+  var checkState = null;
+  var lastPageSnapshots = null;
+  fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-check')
+    .then(function (resp) { return resp.ok ? resp.json() : null; })
+    .then(function (entry) {
+      if (!entry) return;
+      checkState = entry.check_state;
+      // Re-render the rows already on screen so the gate applies to them.
+      if (lastPageSnapshots) renderPage(lastPageSnapshots);
+    })
+    .catch(function () {});
+
+  function renderPage(pageSnapshots) {
     rowsEl.textContent = '';
 
     if (total === 0) {
@@ -72,7 +92,7 @@
     setShown(cardEl, true);
     // Same gate as the settings table: an offline workspace can be downloaded
     // from but not restored into.
-    var restoreConfig = window.mindsBackupTable.restoreConfigFor(entry, openRestoreDialog);
+    var restoreConfig = window.mindsBackupTable.restoreConfigFor(checkState, openRestoreDialog);
     pageSnapshots.forEach(function (snapshot, index) {
       rowsEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, restoreConfig));
     });
@@ -117,7 +137,8 @@
         // collapses to the empty "No backups yet" state.
         var pageSnapshots = entry.snapshots || [];
         total = typeof entry.snapshots_total === 'number' ? entry.snapshots_total : offset + pageSnapshots.length;
-        renderPage(entry, pageSnapshots);
+        lastPageSnapshots = pageSnapshots;
+        renderPage(pageSnapshots);
       })
       .catch(function () {
         showStatus('Could not load backup history.');

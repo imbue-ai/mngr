@@ -52,6 +52,31 @@
       });
     });
 
+    // Clicking anywhere on an account card (except its action buttons) drills
+    // into that one account's Plan & Usage modal -- a single-account view, so
+    // it costs one connector query instead of the full page's query-per-account.
+    function openPlanFor(userId) {
+      if (window.minds && window.minds.openAccountPlan) window.minds.openAccountPlan(userId);
+      else window.location.href = "/accounts/" + encodeURIComponent(userId) + "/plan-modal";
+    }
+    document.querySelectorAll("[data-open-plan]").forEach(function (card) {
+      card.addEventListener("click", function (e) {
+        // Let the Set default / Log out / Sign in again buttons handle their own clicks.
+        if (e.target.closest("button, a")) return;
+        openPlanFor(card.getAttribute("data-open-plan"));
+      });
+      card.addEventListener("keydown", function (e) {
+        // Only act when the card itself is focused: Enter/Space on an inner
+        // button (Set default / Log out / Sign in again) bubbles here too,
+        // and preventDefault would swallow the button's own activation.
+        if (e.target !== card) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openPlanFor(card.getAttribute("data-open-plan"));
+        }
+      });
+    });
+
     // Swap the overlay to the sign-in modal; after a successful sign-in it
     // lands the content view on home, where the account launcher reflects
     // the new account.
@@ -74,7 +99,7 @@
         <div class="flex flex-col gap-2">
         {% for acct in accounts %}
           {% set acct_enabled = enabled_by_user_id.get(acct.user_id | string, True) %}
-          <Card layout="row-spread">
+          <Card layout="row-spread" interactive :data-open-plan="acct.user_id" role="button" tabindex="0" title="View plan & usage">
             <div>
               <div class="font-semibold">
                 {{ acct.email }}

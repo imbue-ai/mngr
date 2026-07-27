@@ -24,6 +24,7 @@ point here.
 
 import base64
 import os
+from datetime import datetime
 from enum import auto
 from typing import Final
 
@@ -34,6 +35,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -78,6 +81,10 @@ class BackupServiceProblem(UpperCaseStrEnum):
     ENV_MISMATCH = auto()
     SERVICE_NOT_RUNNING = auto()
     UNVERIFIABLE = auto()
+    # Configured, but the newest snapshot is much older than the backup
+    # cadence while the workspace has been up long enough to have produced
+    # one -- the catch-all for a silently dead backup pipeline.
+    BACKUPS_STALE = auto()
 
 
 class BackupServiceCheckState(UpperCaseStrEnum):
@@ -110,11 +117,51 @@ class BackupServiceCheck(FrozenModel):
         default=None, description="The minimum required minds-v* tag the check compared against"
     )
     detail: str = Field(default="", description="Human-readable extra detail (e.g. why unverifiable)")
+    uptime_seconds: float | None = Field(
+        default=None, description="How long the workspace has been up (PID 1 elapsed time), when the check ran"
+    )
+
+    def with_added_problem(self, problem: BackupServiceProblem) -> "BackupServiceCheck":
+        if problem in self.problems:
+            return self
+        return self.model_copy_update(
+            to_update(self.field_ref().state, BackupServiceCheckState.PROBLEMS),
+            to_update(self.field_ref().problems, self.problems + (problem,)),
+        )
 
 
 def minimum_backup_tag() -> str:
     """The minimum required backup-service tag (env-overridable for dev/testing)."""
     return os.environ.get(MINIMUM_BACKUP_TAG_ENV_VAR) or MINIMUM_BACKUP_SERVICE_TAG
+
+
+# Staleness thresholds for the BACKUPS_STALE verdict. The backup cadence is
+# hourly, so a newest snapshot older than three intervals means the pipeline
+# is dead rather than merely between ticks; the uptime floor keeps a workspace
+# that was stopped for a while (and only just started) from being flagged
+# before its startup backup has had a chance to run.
+BACKUP_STALE_AFTER_SECONDS: Final[float] = 3 * 3600.0
+BACKUP_STALE_MINIMUM_UPTIME_SECONDS: Final[float] = 3600.0
+
+
+@pure
+def is_backup_history_stale(
+    newest_snapshot_time: datetime | None,
+    # PID 1 elapsed seconds reported by the check exec; None when unknown
+    # (an unknown uptime never flags -- staleness requires positive evidence
+    # that the workspace has been up long enough to have backed up).
+    uptime_seconds: float | None,
+    is_backing_up: bool,
+    now: datetime,
+) -> bool:
+    """Whether a configured workspace's snapshot history says its backup pipeline is dead."""
+    if uptime_seconds is None or uptime_seconds < BACKUP_STALE_MINIMUM_UPTIME_SECONDS:
+        return False
+    if is_backing_up:
+        return False
+    if newest_snapshot_time is None:
+        return True
+    return (now - newest_snapshot_time).total_seconds() > BACKUP_STALE_AFTER_SECONDS
 
 
 def update_target_backup_tag() -> str:
@@ -194,6 +241,9 @@ def classify_check_payload(
     else:
         pass
 
+    raw_uptime = payload.get("uptime_seconds")
+    uptime_seconds = float(raw_uptime) if isinstance(raw_uptime, (int, float)) else None
+
     state = BackupServiceCheckState.PROBLEMS if problems else BackupServiceCheckState.OK
     check = BackupServiceCheck(
         state=state,
@@ -201,6 +251,7 @@ def classify_check_payload(
         installed_version=str(payload.get("installed_version") or "") or None,
         minimum_version=str(payload.get("target_tag") or "") or None,
         detail="; ".join(details),
+        uptime_seconds=uptime_seconds,
     )
     return check, env_to_adopt
 

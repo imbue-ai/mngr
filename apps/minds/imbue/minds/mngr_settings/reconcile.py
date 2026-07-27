@@ -78,6 +78,17 @@ _DESIRED_PROVIDER_BLOCKS: Final[tuple[tuple[str, dict[str, object], dict[str, ob
 # affects minds-spawned subprocesses.
 _DESIRED_PLUGIN_BLOCKS: Final[tuple[tuple[str, dict[str, object]], ...]] = (("recursive", {"enabled": False}),)
 
+# Top-level settings minds pins for every profile it manages.
+#
+# ``default_destroyed_host_persisted_seconds`` keeps destroyed mngr host
+# records for 30 days (mngr's own default is 7), matching the
+# destroyed-workspace backup retention window so host records and backups age
+# out together. Only minds-managed profiles change.
+_DESTROYED_HOST_PERSISTED_SECONDS: Final[int] = 60 * 60 * 24 * 30
+_DESIRED_TOP_LEVEL_SETTINGS: Final[dict[str, object]] = {
+    "default_destroyed_host_persisted_seconds": _DESTROYED_HOST_PERSISTED_SECONDS,
+}
+
 
 def _merge_block(
     section: Table | tomlkit.TOMLDocument,
@@ -118,6 +129,11 @@ def _reconcile_document(doc: tomlkit.TOMLDocument) -> bool:
     plugins_section = doc.setdefault("plugins", tomlkit.table())
     for name, pinned in _DESIRED_PLUGIN_BLOCKS:
         is_changed = _merge_block(plugins_section, name, pinned, {}) or is_changed
+
+    for key, desired_value in _DESIRED_TOP_LEVEL_SETTINGS.items():
+        if doc.get(key) != desired_value:
+            doc[key] = desired_value
+            is_changed = True
     return is_changed
 
 

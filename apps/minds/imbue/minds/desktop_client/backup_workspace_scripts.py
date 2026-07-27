@@ -430,9 +430,24 @@ BACKUP_CHECK_SCRIPT: Final[str] = (
     _SCRIPT_PREAMBLE
     + r"""
 
+def _workspace_uptime_seconds():
+    # Elapsed seconds of PID 1 = how long this workspace (container/VM) has
+    # been up. /proc/uptime is NOT namespaced under plain runc docker (it
+    # reports the host's uptime), so PID 1's elapsed time is the portable
+    # container-uptime signal.
+    listed = _run(["ps", "-o", "etimes=", "-p", "1"])
+    if listed.returncode != 0:
+        return None
+    try:
+        return float(listed.stdout.strip())
+    except ValueError:
+        return None
+
+
 def _main():
     minimum = _arg_value("--minimum-tag")
     result = {"schema": 1}
+    result["uptime_seconds"] = _workspace_uptime_seconds()
     installed_version = _installed_backup_version()
     result["installed_version"] = installed_version
     tag, tag_error = _resolve_minimum_tag(minimum)

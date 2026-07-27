@@ -28,6 +28,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.dek_store import convert_legacy_password_files
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -88,6 +89,14 @@ class WorkspaceSyncScheduler(MutableModel):
         description=(
             "Invoked after a pass materializes new/changed SSH material, so the app "
             "can bounce discovery instead of waiting for the next poll"
+        ),
+    )
+    backup_reaper: BackupReaperManager | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Reaps destroyed workspaces' backups past the retention window. Ticked at the "
+            "end of every pass; it runs on its own (much longer) cadence internally"
         ),
     )
     _kick_event: threading.Event = PrivateAttr(default_factory=threading.Event)
@@ -160,6 +169,8 @@ class WorkspaceSyncScheduler(MutableModel):
             )
         if is_ssh_material_written and self.on_ssh_material_written is not None:
             self.on_ssh_material_written()
+        if self.backup_reaper is not None:
+            self.backup_reaper.maybe_start_reap_pass(accounts)
 
     def _resolve_initial_syncs(
         self,

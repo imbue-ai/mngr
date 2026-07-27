@@ -471,6 +471,8 @@ mngr imbue_cloud bucket destroy [OPTIONS] NAME
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--force` | boolean | When the destroy is refused as non-empty, delete the bucket's contents (batched S3 deletes) and retry | `False` |
+| `--yes`, `-y` | boolean | Skip the --force confirmation prompt | `False` |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 

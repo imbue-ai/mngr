@@ -25,6 +25,8 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreationErrorKind
+from imbue.minds.desktop_client.api_v1 import _drain_backup_summary_rows
+from imbue.minds.desktop_client.api_v1 import _stream_workspace_backup_summaries
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -364,8 +366,8 @@ def test_workspace_version_returns_original_version_label(tmp_path: Path) -> Non
 
 def test_workspace_backups_reports_unconfigured_as_an_ordinary_empty_listing(tmp_path: Path) -> None:
     # No restic.env was written for this workspace: not an error -- the route
-    # returns an empty snapshot list, is_configured false, and the check half
-    # still reports its verdict (OFFLINE here: no discovery host-state data).
+    # returns an empty snapshot list and is_configured false. The service
+    # verification lives on the separate backup-check route.
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
@@ -377,9 +379,14 @@ def test_workspace_backups_reports_unconfigured_as_an_ordinary_empty_listing(tmp
     assert body["snapshots"] == []
     assert body["snapshots_total"] == 0
     assert body["is_backing_up"] is False
-    assert body["check_state"] == "OFFLINE"
-    assert body["is_verification_enabled"] is True
-    assert body["update_target_version"].startswith("minds-v")
+
+    check_response = client.get(f"/api/v1/workspaces/{agent_id}/backup-check", headers=_auth_header())
+
+    assert check_response.status_code == 200
+    check_body = json.loads(check_response.data)
+    assert check_body["check_state"] == "OFFLINE"
+    assert check_body["is_verification_enabled"] is True
+    assert check_body["update_target_version"].startswith("minds-v")
 
 
 @pytest.mark.timeout(120)
@@ -462,6 +469,188 @@ def test_workspace_backups_rejects_a_negative_or_malformed_limit_and_offset(tmp_
         response = client.get(f"/api/v1/workspaces/{agent_id}/backups?{query}", headers=_auth_header())
         assert response.status_code == 400, query
         assert "non-negative integers" in json.loads(response.data)["error"]
+
+
+def test_workspaces_backups_stream_yields_one_ndjson_line_per_agent(tmp_path: Path) -> None:
+    # The landing page's single streaming request: one NDJSON summary per named
+    # workspace. Unconfigured workspaces degrade to an empty snapshot list.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.get(f"/api/v1/workspaces/backups?agent_id={agent_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert "ndjson" in response.headers.get("Content-Type", "")
+    lines = [line for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    assert len(lines) == 1
+    summary = json.loads(lines[0])
+    assert summary["agent_id"] == str(agent_id)
+    assert summary["snapshots"] == []
+    assert summary["is_backing_up"] is False
+
+
+def test_workspaces_backups_stream_streams_a_line_per_requested_agent(tmp_path: Path) -> None:
+    # Two requested ids -> two NDJSON lines (even ids discovery doesn't know still
+    # get a line, so every rendered row resolves off "Checking...").
+    agent_id = AgentId()
+    other_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.get(
+        f"/api/v1/workspaces/backups?agent_id={agent_id}&agent_id={other_id}", headers=_auth_header()
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    assert {row["agent_id"] for row in lines} == {str(agent_id), str(other_id)}
+
+
+def test_workspaces_backups_stream_route_is_not_shadowed_by_the_single_workspace_route(tmp_path: Path) -> None:
+    # /workspaces/backups must reach the streaming batch endpoint, not the
+    # /workspaces/<agent_id> route with agent_id="backups". With no agent_id
+    # params the stream is empty NDJSON, not a single-workspace JSON object.
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/workspaces/backups", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert "ndjson" in response.headers.get("Content-Type", "")
+    assert response.get_data(as_text=True).strip() == ""
+
+
+def test_workspaces_backups_stream_requires_auth(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+    response = client.get("/api/v1/workspaces/backups")
+    assert response.status_code == 401
+
+
+def test_workspaces_backups_stream_fans_out_over_the_concurrency_group(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # With a concurrency group present the endpoint lists each workspace on its
+    # own bounded worker thread; every requested id still gets exactly one line.
+    agent_id = AgentId()
+    other_id = AgentId()
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}}),
+        http_client=None,
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+        mngr_caller=RecordingMngrCaller(),
+        root_concurrency_group=root_concurrency_group,
+    )
+    client = app.test_client()
+
+    response = client.get(
+        f"/api/v1/workspaces/backups?agent_id={agent_id}&agent_id={other_id}", headers=_auth_header()
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    assert {row["agent_id"] for row in lines} == {str(agent_id), str(other_id)}
+
+
+def test_workspaces_backups_stream_degrades_unresolved_rows_on_row_timeout() -> None:
+    # A wedged worker must not silently end the stream: every requested row
+    # still owed a line gets a degraded `error` summary, so the landing page
+    # never leaves a badge stuck on "Checking..." (and never blanks it).
+    resolved_id = AgentId()
+    wedged_id = AgentId()
+    result_queue: queue.Queue[dict[str, object]] = queue.Queue()
+    result_queue.put(
+        {"agent_id": str(resolved_id), "snapshots": [], "is_backing_up": False, "created_at": None, "error": None}
+    )
+
+    lines = [
+        json.loads(line)
+        for line in _drain_backup_summary_rows(
+            result_queue,
+            (str(resolved_id), str(wedged_id)),
+            {str(resolved_id): None, str(wedged_id): "2026-07-01T00:00:00+00:00"},
+            0.05,
+        )
+    ]
+
+    assert [row["agent_id"] for row in lines] == [str(resolved_id), str(wedged_id)]
+    assert lines[0]["error"] is None
+    assert lines[1]["error"] == "backup status probe timed out"
+    assert lines[1]["snapshots"] == []
+    assert lines[1]["created_at"] == "2026-07-01T00:00:00+00:00"
+
+
+def test_workspaces_backups_stream_emits_degraded_rows_when_workers_cannot_spawn(tmp_path: Path) -> None:
+    # A concurrency group that refuses new threads (here: already exited) must
+    # not kill the stream mid-generator: each requested agent still gets a
+    # line, degraded with an error, instead of the response dying.
+    agent_id = AgentId()
+    other_id = AgentId()
+    closed_group = ConcurrencyGroup(name=f"closed-{agent_id}")
+    with closed_group:
+        pass
+
+    lines = [
+        json.loads(line)
+        for line in _stream_workspace_backup_summaries(
+            WorkspacePaths(data_dir=tmp_path / "minds"),
+            (str(agent_id), str(other_id)),
+            {},
+            closed_group,
+        )
+    ]
+
+    assert {row["agent_id"] for row in lines} == {str(agent_id), str(other_id)}
+    for row in lines:
+        assert row["snapshots"] == []
+        assert row["error"] is not None
+        assert "backup status probe failed" in row["error"]
+
+
+def test_workspaces_backups_stream_without_a_concurrency_group_still_yields_one_line_per_agent(
+    tmp_path: Path,
+) -> None:
+    # Minimal setups run the sequential fallback (no concurrency group); the
+    # one-line-per-requested-agent guarantee must hold there too.
+    agent_id = AgentId()
+    other_id = AgentId()
+
+    lines = [
+        json.loads(line)
+        for line in _stream_workspace_backup_summaries(
+            WorkspacePaths(data_dir=tmp_path / "minds"),
+            (str(agent_id), str(other_id)),
+            {str(agent_id): "2026-07-01T00:00:00+00:00", str(other_id): None},
+            None,
+        )
+    ]
+
+    assert [row["agent_id"] for row in lines] == [str(agent_id), str(other_id)]
+    assert lines[0]["created_at"] == "2026-07-01T00:00:00+00:00"
+    for row in lines:
+        assert row["snapshots"] == []
+        assert row["error"] is None
+
+
+def test_workspaces_backups_stream_marks_probe_failures_with_an_error(tmp_path: Path) -> None:
+    # A configured workspace whose repository cannot be listed must not stream
+    # a clean empty summary (the badge would claim "No backups"); the line
+    # carries the listing error so the badge shows "unknown" instead.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    write_canonical_env(
+        WorkspacePaths(data_dir=tmp_path / "minds"),
+        agent_id,
+        f"RESTIC_REPOSITORY={tmp_path / 'no-such-repo'}\nRESTIC_PASSWORD=workspace-key\n",
+    )
+
+    response = client.get(f"/api/v1/workspaces/backups?agent_id={agent_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert lines[0]["agent_id"] == str(agent_id)
+    assert lines[0]["snapshots"] == []
+    assert lines[0]["error"] is not None
 
 
 def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> None:
@@ -2021,7 +2210,7 @@ def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
 # -- Backup service routes --
 
 
-def test_workspace_backups_reports_offline_workspace_with_verification_enabled(
+def test_workspace_backup_check_reports_offline_workspace_with_verification_enabled(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
     # With no discovery host-state data the workspace reads OFFLINE, so the
@@ -2030,7 +2219,7 @@ def test_workspace_backups_reports_offline_workspace_with_verification_enabled(
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
 
-    response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backup-check", headers=_auth_header())
 
     assert response.status_code == 200
     entry = json.loads(response.data)
@@ -2040,21 +2229,37 @@ def test_workspace_backups_reports_offline_workspace_with_verification_enabled(
     assert entry["is_verification_enabled"] is True
 
 
-def test_workspace_backups_reports_disabled_verification_without_exec(
+def test_workspace_backup_check_reports_disabled_verification_without_exec(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    # Verification disabled: no exec runs and the check half reports DISABLED.
+    # Verification disabled: no exec runs and the check reports DISABLED.
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
     set_backup_verification_enabled(WorkspacePaths(data_dir=tmp_path / "minds"), agent_id, False)
 
-    response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backup-check", headers=_auth_header())
 
     assert response.status_code == 200
     entry = json.loads(response.data)
     assert entry["check_state"] == "DISABLED"
     assert entry["is_verification_enabled"] is False
+
+
+def test_workspace_backups_route_no_longer_carries_the_check_fields(tmp_path: Path) -> None:
+    # The snapshot route must never wait on (or leak) the exec-based check:
+    # its response carries only the snapshot picture.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
+
+    assert response.status_code == 200
+    entry = json.loads(response.data)
+    assert "check_state" not in entry
+    assert "problems" not in entry
+    assert entry["is_configured"] is False
+    assert entry["snapshots"] == []
 
 
 def test_backup_service_update_unknown_workspace_returns_404(

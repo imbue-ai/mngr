@@ -3,6 +3,9 @@ import queue
 import re
 import subprocess
 import threading
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -57,9 +61,11 @@ from imbue.minds.desktop_client.request_events import create_request_response_ev
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
@@ -1185,6 +1191,9 @@ def _create_test_client_with_stores(
     # that reach the connector through ``get_state().imbue_cloud_cli`` (e.g.
     # the accounts plan-view fragment) hit the fake instead of degrading.
     imbue_cloud_cli: ImbueCloudCli | None = None,
+    # When set, wired into the app state so routes that reach the backup
+    # reaper through ``get_state().sync_scheduler.backup_reaper`` work.
+    sync_scheduler: WorkspaceSyncScheduler | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with session store and config for testing new routes.
 
@@ -1211,6 +1220,7 @@ def _create_test_client_with_stores(
         paths=WorkspacePaths(data_dir=tmp_path),
         mngr_caller=mngr_caller,
         imbue_cloud_cli=imbue_cloud_cli,
+        sync_scheduler=sync_scheduler,
     )
     client = app.test_client()
     return client, auth_store
@@ -1436,6 +1446,44 @@ def test_account_plan_view_degrades_to_unavailable_without_cli(tmp_path: Path) -
     assert "Plan and usage are unavailable right now" in response.text
 
 
+def test_account_plan_modal_requires_auth(tmp_path: Path) -> None:
+    """The per-account plan modal endpoint requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/accounts/user-test-123/plan-modal")
+    assert response.status_code == 403
+
+
+def test_account_plan_modal_renders_shell_with_async_placeholder(tmp_path: Path) -> None:
+    """The modal shell opens instantly: account email + a spinner placeholder that
+    accounts.js fills from the plan-view fragment -- no connector call in the shell."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/accounts/user-test-123/plan-modal")
+
+    assert response.status_code == 200
+    assert 'id="account-plan-modal-backdrop"' in response.text
+    assert "test@example.com" in response.text
+    assert "data-plan-section" in response.text
+    assert 'data-user-id="user-test-123"' in response.text
+    assert "Loading plan and usage" in response.text
+    assert '<script src="/_static/accounts.js" defer></script>' in response.text
+
+
+def test_account_plan_modal_unknown_account_returns_404(tmp_path: Path) -> None:
+    """A user id with no signed-in account is a 404, not a blank modal."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/accounts/user-does-not-exist/plan-modal")
+
+    assert response.status_code == 404
+
+
 def test_settings_page_requires_auth(tmp_path: Path) -> None:
     """The /settings page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
@@ -1542,6 +1590,8 @@ def test_accounts_modal_lists_logged_in_accounts(tmp_path: Path) -> None:
     assert "test@example.com" in body
     assert 'id="accounts-modal-backdrop"' in body
     assert "Add account" in body
+    # Each account card drills into that account's Plan & Usage modal.
+    assert 'data-open-plan="user-test-123"' in body
 
 
 def _create_sharing_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore, str]:
@@ -2981,3 +3031,149 @@ def test_remove_workspace_record_unknown_host_is_404(tmp_path: Path) -> None:
     client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
     assert client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-nope"}).status_code == 404
+
+
+# -- Recently destroyed workspaces page --
+
+_DESTROYED_AGENT_ID = "agent-" + "9" * 32
+
+
+def _seed_destroyed_record(tmp_path: Path, cli: "FakeImbueCloudCli", destroyed_days_ago: int = 3) -> None:
+    """Tombstone one record for the signed-in test account over the shared data dir."""
+    seed_store = make_session_store_for_test(tmp_path, cli=cli)
+    assert seed_store.record_store is not None
+    destroyed_at = (datetime.now(timezone.utc) - timedelta(days=destroyed_days_ago)).isoformat()
+    seed_store.record_store.upsert_local_record(
+        "user-test-123",
+        "test@example.com",
+        ReplicaRecord(
+            host_id="host-destroyed1",
+            agent_id=_DESTROYED_AGENT_ID,
+            display_name="old-workspace",
+            state="destroyed",
+            destroyed_at=destroyed_at,
+        ),
+    )
+
+
+def test_destroyed_workspaces_page_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/workspaces/destroyed")
+    assert response.status_code == 403
+
+
+def test_destroyed_workspaces_page_renders_async_shell_without_rows(tmp_path: Path) -> None:
+    """The page shell paints instantly: it carries the async fetch hook and does
+    not embed the (slow-to-collect) rows, which arrive from the rows fragment."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    _seed_destroyed_record(tmp_path, cli)
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/workspaces/destroyed")
+
+    assert response.status_code == 200
+    body = response.text
+    # The shell fetches the rows asynchronously and must not block on them.
+    assert "data-destroyed-rows" in body
+    assert "/workspaces/destroyed/rows" in body
+    # The row content lives in the fragment, not the shell.
+    assert "old-workspace" not in body
+
+
+def test_destroyed_workspaces_rows_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/workspaces/destroyed/rows")
+    assert response.status_code == 403
+
+
+def test_destroyed_workspaces_rows_lists_tombstoned_records(tmp_path: Path) -> None:
+    """A tombstoned record renders as a row with countdown, account label, and delete affordance."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    _seed_destroyed_record(tmp_path, cli)
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/workspaces/destroyed/rows")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "old-workspace" in body
+    assert "test@example.com" in body
+    assert "until deletion" in body
+    assert ">Remove<" in body
+    # The armed confirm must use ``flex`` (not ``inline-flex``), or ``.hidden``
+    # loses the cascade and both delete states show at once. (Bare ``inline-flex``
+    # is fine on the always-visible Buttons; only pairing it with ``hidden`` breaks.)
+    assert "hidden flex flex-col items-end gap-1" in body
+    assert "hidden inline-flex" not in body
+    # No local env and no synced secrets: neither download nor a locked hint.
+    assert "Download" not in body
+
+
+def test_destroyed_workspaces_rows_empty_state(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/workspaces/destroyed/rows")
+
+    assert response.status_code == 200
+    assert "No recently destroyed workspaces" in response.text
+
+
+def _make_destroyed_delete_client(
+    tmp_path: Path, cli: "FakeImbueCloudCli"
+) -> tuple[FlaskClient, WorkspaceRecordStore]:
+    """An authenticated client whose app state carries a scheduler with a backup reaper.
+
+    The delete-backup route reaches the reaper via
+    ``get_state().sync_scheduler.backup_reaper``, so both delete tests need
+    this full stack; the record store is returned for assertions.
+    """
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    record_store = session_store.record_store
+    assert record_store is not None
+    reaper = BackupReaperManager(
+        paths=record_store.paths,
+        record_store=record_store,
+        imbue_cloud_cli=None,
+        connector_url="",
+    )
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        backup_reaper=reaper,
+    )
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli, sync_scheduler=scheduler)
+    _authenticate_client(client, auth_store)
+    return client, record_store
+
+
+def test_destroyed_workspaces_delete_backup_reaps_record(tmp_path: Path) -> None:
+    """POST delete-backup runs the reaper's strict deletion and redirects back to the page."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    _seed_destroyed_record(tmp_path, cli)
+    client, record_store = _make_destroyed_delete_client(tmp_path, cli)
+
+    response = client.post(f"/workspaces/destroyed/{_DESTROYED_AGENT_ID}/delete-backup")
+
+    assert response.status_code == 303
+    assert response.headers["Location"] == "/workspaces/destroyed"
+    assert record_store.list_records("user-test-123") == []
+
+
+def test_destroyed_workspaces_delete_backup_unknown_agent_shows_error(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, _record_store = _make_destroyed_delete_client(tmp_path, cli)
+
+    response = client.post("/workspaces/destroyed/agent-doesnotexist/delete-backup")
+
+    assert response.status_code == 200
+    assert "No destroyed workspace found" in response.text

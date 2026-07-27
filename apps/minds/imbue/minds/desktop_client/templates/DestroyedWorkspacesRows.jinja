@@ -1,0 +1,85 @@
+{#def rows=[] #}
+{#
+  Row list for the "Recently destroyed workspaces" page, served as an HTML
+  fragment by GET /workspaces/destroyed/rows and injected by the page shell
+  (pages.DestroyedWorkspaces) after it paints -- collecting these rows queries
+  the record store and inspects local envs, so it must not block first paint.
+
+  Each row is a destroyed workspace still inside the backup retention window
+  (or an orphan backup this device holds with no record at all). Rows offer:
+  - Download: the existing latest-snapshot export
+    (POST /api/v1/workspaces/<agent_id>/backups/latest/export, driven by
+    mindsBackupTable.downloadSnapshot from the page script -- the route is
+    POST-only, so a plain link would 405). Rows whose env can only be
+    reconstructed from synced secrets show a locked hint until the account's
+    sync password is unlocked.
+  - Delete now: frees quota before the window expires. Irreversible, so the
+    button swaps to an explicit inline confirm (naming is in the row) before
+    POSTing /workspaces/destroyed/<agent_id>/delete-backup.
+
+  Rows sort newest-destroyed first; orphans (no record, so no destroyed_at)
+  come last, labeled "this device". Restoring into a new workspace is not
+  offered -- these workspaces no longer exist; the backup download is the
+  escape hatch.
+#}
+{% if rows %}
+  <div class="flex flex-col gap-2">
+    {% for row in rows %}
+      <Card layout="row-spread" data-destroyed-row :data-agent-id="row.agent_id">
+        {# ``min-w-0`` lets the name column shrink so a long "unknown workspace
+           (agent-<hex>)" name wraps within its width instead of squeezing the
+           actions onto a second row. #}
+        <div class="min-w-0">
+          <div class="font-semibold break-words">{{ row.display_name }}</div>
+          <div class="type-helper text-tertiary">
+            {{ row.account_label }}
+            {% if row.destroyed_at_display %} &middot; destroyed {{ row.destroyed_at_display }}{% endif %}
+            {% if row.days_left_display %} &middot; {{ row.days_left_display }}{% endif %}
+          </div>
+          {% if row.is_locked %}
+            <div class="type-helper text-tertiary mt-1">Unlock this account's sync password to download.</div>
+          {% elif not row.has_backup %}
+            <div class="type-helper text-tertiary mt-1">No backup was configured for this workspace.</div>
+          {% endif %}
+          {% if row.delete_hint %}
+            <div class="type-helper text-tertiary mt-1">{{ row.delete_hint }}</div>
+          {% endif %}
+        </div>
+        {# ``shrink-0`` keeps the actions on a single row (the name column
+           absorbs any squeeze). No ``flex-wrap``: the armed confirm stacks its
+           prompt above the buttons instead, so this column never grows wide. #}
+        <div class="flex items-center justify-end gap-2 shrink-0">
+          {# The export route is POST-only (it restores the snapshot server-side
+             and streams a zip), so this must NOT be a link: the page script
+             routes clicks through mindsBackupTable.downloadSnapshot, which
+             POSTs, shows the inline Downloading... state, and saves the blob. #}
+          {% if row.can_download %}
+            <Button variant="secondary" :data-download-backup="row.agent_id">Download</Button>
+          {% endif %}
+          {% if row.can_delete %}
+            <span data-delete-idle>
+              <Button variant="danger" data-arm-delete>Remove</Button>
+            </span>
+            {# The confirm is hidden until the row is armed. Its shown state uses
+               ``flex`` (NOT ``inline-flex``): ``.hidden`` beats ``.flex`` in
+               Tailwind's cascade but LOSES to ``.inline-flex`` (later in the
+               generated stylesheet), so pairing ``hidden`` with ``inline-flex``
+               leaves the confirm permanently visible. Stacked (prompt above the
+               buttons, width-capped) so it never forces the row wider. #}
+            <span data-delete-armed class="hidden flex flex-col items-end gap-1">
+              <span class="type-helper text-secondary text-right max-w-xs">Remove this workspace? This can't be undone.</span>
+              <span class="flex items-center gap-2">
+                <form method="POST" action={{ "/workspaces/destroyed/" ~ row.agent_id ~ "/delete-backup" }} class="inline" data-delete-backup-form>
+                  <ButtonSubmit variant="danger">Delete forever</ButtonSubmit>
+                </form>
+                <Button variant="secondary" data-cancel-delete>Cancel</Button>
+              </span>
+            </span>
+          {% endif %}
+        </div>
+      </Card>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="text-secondary">No recently destroyed workspaces.</p>
+{% endif %}

@@ -5,6 +5,8 @@ Credentials are emitted as JSON; the secret access key is shown only once at
 creation time and is never persisted by the connector.
 """
 
+from collections.abc import Callable
+
 import click
 
 from imbue.mngr_imbue_cloud.cli._common import emit_json
@@ -14,6 +16,8 @@ from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
+from imbue.mngr_imbue_cloud.r2_objects import empty_bucket_for_destroy
 
 
 def _key_material_to_json(material: R2KeyMaterial) -> dict[str, str]:
@@ -87,19 +91,68 @@ def bucket_info(name: str, account: str | None, connector_url: str | None) -> No
     emit_json(info.model_dump(mode="json"))
 
 
+def _destroy_emptying_on_refusal(
+    destroy_bucket_once: Callable[[], None],
+    empty_bucket: Callable[[], int],
+    is_force: bool,
+) -> int:
+    """Destroy the bucket, emptying it only after a not-empty refusal (with force).
+
+    The destroy is always attempted FIRST so server-side refusals that must
+    precede any data loss -- in particular the active-workspace interlock on
+    workspace-backup buckets -- are hit before a single object is deleted.
+    Only the specific not-empty refusal triggers the client-side emptying,
+    after which the destroy is retried. Returns the number of objects deleted
+    (0 when the bucket was already empty).
+    """
+    try:
+        destroy_bucket_once()
+    except ImbueCloudBucketNotEmptyError:
+        if not is_force:
+            raise
+        emptied_object_count = empty_bucket()
+        destroy_bucket_once()
+        return emptied_object_count
+    return 0
+
+
 @bucket.command(name="destroy")
 @click.argument("name")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="When the destroy is refused as non-empty, delete the bucket's contents (batched S3 deletes) and retry",
+)
+@click.option("--yes", "-y", "is_confirmed", is_flag=True, default=False, help="Skip the --force confirmation prompt")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
-def destroy_bucket(name: str, account: str | None, connector_url: str | None) -> None:
-    """Destroy a bucket (refuses if non-empty) and revoke all of its keys."""
+def destroy_bucket(name: str, force: bool, is_confirmed: bool, account: str | None, connector_url: str | None) -> None:
+    """Destroy a bucket (refuses if non-empty) and revoke all of its keys.
+
+    With --force, a bucket whose destroy is refused as non-empty has every
+    object deleted (client-side, over the S3 API, so no long-running server
+    request) and the destroy is retried. The destroy is always attempted
+    first, so the connector's refusal to destroy a workspace-backup bucket
+    whose workspace is active arrives before any contents are deleted,
+    --force or not.
+    """
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
-    client.destroy_bucket(token, name)
-    emit_json({"destroyed": True, "bucket": name})
+    if force and not is_confirmed:
+        click.confirm(
+            f"Delete ALL contents of bucket '{name}' and destroy it? This cannot be undone.",
+            abort=True,
+        )
+    emptied_object_count = _destroy_emptying_on_refusal(
+        destroy_bucket_once=lambda: client.destroy_bucket(token, name),
+        empty_bucket=lambda: empty_bucket_for_destroy(client, token, name),
+        is_force=force,
+    )
+    emit_json({"destroyed": True, "bucket": name, "emptied_object_count": emptied_object_count})
 
 
 @bucket.command(name="roll-key")

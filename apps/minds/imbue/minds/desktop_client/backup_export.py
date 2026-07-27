@@ -12,8 +12,11 @@ previous file rather than accumulating.
 import os
 import shutil
 import tempfile
+import threading
 import time
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from loguru import logger
@@ -84,6 +87,30 @@ def _zip_directory_contents(source_dir: Path, zip_path: Path) -> None:
                     shutil.copyfileobj(source_file, dest_file)
 
 
+# Agents with an export currently running in this process, so the backup
+# reaper can skip a bucket that is mid-download rather than deleting it out
+# from under the restore.
+_EXPORTS_IN_FLIGHT: set[str] = set()
+_EXPORTS_IN_FLIGHT_LOCK = threading.Lock()
+
+
+@contextmanager
+def _export_in_flight(agent_id: AgentId) -> Iterator[None]:
+    with _EXPORTS_IN_FLIGHT_LOCK:
+        _EXPORTS_IN_FLIGHT.add(str(agent_id))
+    try:
+        yield
+    finally:
+        with _EXPORTS_IN_FLIGHT_LOCK:
+            _EXPORTS_IN_FLIGHT.discard(str(agent_id))
+
+
+def is_export_in_flight(agent_id: AgentId) -> bool:
+    """Whether an export for this agent is currently running in this process."""
+    with _EXPORTS_IN_FLIGHT_LOCK:
+        return str(agent_id) in _EXPORTS_IN_FLIGHT
+
+
 def export_snapshot_zip(
     *,
     paths: WorkspacePaths,
@@ -98,6 +125,20 @@ def export_snapshot_zip(
     (backups were never configured) or its repository address is missing;
     propagates ``BackupProvisioningError`` if restic itself fails.
     """
+    with _export_in_flight(agent_id):
+        return _export_snapshot_zip_inner(
+            paths=paths, agent_id=agent_id, host_id=host_id, snapshot=snapshot, parent_cg=parent_cg
+        )
+
+
+def _export_snapshot_zip_inner(
+    *,
+    paths: WorkspacePaths,
+    agent_id: AgentId,
+    host_id: str,
+    snapshot: str,
+    parent_cg: ConcurrencyGroup | None,
+) -> Path:
     content = read_canonical_env(paths, agent_id)
     if content is None:
         raise BackupExportError(f"No backups are configured for {agent_id}")

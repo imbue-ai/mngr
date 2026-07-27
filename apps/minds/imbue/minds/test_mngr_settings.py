@@ -41,6 +41,9 @@ _BASE_RECONCILED_SHAPE = snapshot(
             "modal": {"backend": "modal", "mode": "DIRECT", "is_enabled": True, "is_persistent": True},
         },
         "plugins": {"recursive": {"enabled": False}},
+        # Destroyed mngr host records age out with the 30-day backup retention
+        # window in minds-managed profiles (mngr's own default is 7 days).
+        "default_destroyed_host_persisted_seconds": 60 * 60 * 24 * 30,
     }
 )
 
@@ -147,6 +150,7 @@ def test_signin_then_signout_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path
                 },
             },
             "plugins": {"recursive": {"enabled": False}},
+            "default_destroyed_host_persisted_seconds": 60 * 60 * 24 * 30,
         }
     )
     # Re-signin with identical data is a no-op.

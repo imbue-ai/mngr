@@ -14,12 +14,16 @@ from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURAT
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
+from imbue.minds.desktop_client.templates import render_account_plan_modal_page
 from imbue.minds.desktop_client.templates import render_account_plan_section
+from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_destroyed_workspaces_page
+from imbue.minds.desktop_client.templates import render_destroyed_workspaces_rows_fragment
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_page
@@ -2712,3 +2716,72 @@ def test_render_account_plan_section_degrades_to_unavailable_without_plan_view()
     html = render_account_plan_section(acct_user_id="u-1")
     assert "Plan and usage are unavailable right now" in html
     assert 'data-trim-running="0"' in html
+
+
+def test_render_account_plan_modal_page_opens_instantly_with_async_placeholder() -> None:
+    # The shell must not embed usage: it renders instantly with a spinner and
+    # accounts.js fills the placeholder from GET /accounts/<uid>/plan-view.
+    html = render_account_plan_modal_page(acct_user_id="u-1", account_email="a@b.com")
+    assert "a@b.com" in html
+    assert 'id="account-plan-modal-backdrop"' in html
+    assert "data-plan-section" in html
+    assert 'data-user-id="u-1"' in html
+    assert "Loading plan and usage" in html
+    assert '<script src="/_static/accounts.js" defer></script>' in html
+
+
+def test_render_accounts_modal_page_cards_open_the_plan_modal() -> None:
+    acct = SimpleNamespace(user_id="u-1", email="a@b.com", workspace_ids=[])
+    html = render_accounts_modal_page(accounts=[acct], default_account_id="u-1")
+    # Each card carries the drill-in hook and the modal wires the launcher.
+    assert 'data-open-plan="u-1"' in html
+    assert "openAccountPlan" in html
+
+
+def test_render_destroyed_workspaces_page_shell_is_async_without_rows() -> None:
+    # The shell must paint instantly: it carries the retention copy and the
+    # async fetch hook, but embeds no rows (those come from the rows fragment).
+    html = render_destroyed_workspaces_page(retention_days=30, error="")
+    assert "30 days" in html
+    assert "data-destroyed-rows" in html
+    assert "/workspaces/destroyed/rows" in html
+    assert "Loading recently destroyed workspaces" in html
+
+
+def test_render_destroyed_workspaces_page_shows_error_in_shell() -> None:
+    html = render_destroyed_workspaces_page(retention_days=30, error="Something went wrong")
+    assert "Something went wrong" in html
+
+
+def _destroyed_row_fixture() -> dict[str, object]:
+    return {
+        "agent_id": "agent-abc",
+        "display_name": "old-workspace",
+        "account_label": "test@example.com",
+        "destroyed_at_display": "2026-07-01",
+        "days_left_display": "27 day(s) until deletion",
+        "has_backup": True,
+        "can_download": True,
+        "is_locked": False,
+        "can_delete": True,
+        "delete_hint": "",
+    }
+
+
+def test_render_destroyed_workspaces_rows_fragment_arms_confirm_with_flex_not_inline_flex() -> None:
+    # The armed confirm must use ``flex`` so ``.hidden`` wins the cascade; an
+    # ``inline-flex`` here would leave both delete states visible at once.
+    html = render_destroyed_workspaces_rows_fragment(rows=[_destroyed_row_fixture()])
+    assert "old-workspace" in html
+    assert ">Remove<" in html
+    assert "hidden flex flex-col items-end gap-1" in html
+    # Bare ``inline-flex`` is fine on the always-visible Buttons; the bug is
+    # specifically pairing ``hidden`` with ``inline-flex`` on the armed span.
+    assert "hidden inline-flex" not in html
+    # The actions column must not wrap; the name column shrinks instead.
+    assert "shrink-0" in html
+
+
+def test_render_destroyed_workspaces_rows_fragment_empty_state() -> None:
+    html = render_destroyed_workspaces_rows_fragment(rows=[])
+    assert "No recently destroyed workspaces" in html

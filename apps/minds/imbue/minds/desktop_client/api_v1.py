@@ -28,6 +28,7 @@ on the caller's host".
 import json
 import queue
 import shlex
+import threading
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -99,6 +100,7 @@ from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import StopStateContainerResponse
 from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
+from imbue.minds.desktop_client.api_models import WorkspaceBackupCheckResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
@@ -111,6 +113,7 @@ from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_L
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
+from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.minds.desktop_client.chrome_event_broadcast import build_open_help_payload
@@ -381,7 +384,15 @@ class _WorkspaceSnapshotListing(FrozenModel):
 
 
 def _list_workspace_snapshots_safely(
-    paths: WorkspacePaths, parsed_id: AgentId, *, limit: int | None, offset: int
+    paths: WorkspacePaths,
+    parsed_id: AgentId,
+    *,
+    limit: int | None,
+    offset: int,
+    # Passed explicitly (not read from ``get_state``) so this can run on a
+    # concurrency-group worker thread, where the Flask app-context proxy is
+    # unavailable -- e.g. the streaming batch backups endpoint's fan-out.
+    parent_cg: ConcurrencyGroup | None,
 ) -> _WorkspaceSnapshotListing:
     """List a workspace's snapshots + in-progress flag, degrading errors into the payload.
 
@@ -396,9 +407,7 @@ def _list_workspace_snapshots_safely(
     if not has_canonical_env(paths, parsed_id):
         return _WorkspaceSnapshotListing(snapshots=(), total=0, is_backing_up=False)
     try:
-        snapshots = backup_status.list_workspace_snapshots(
-            paths, parsed_id, parent_cg=get_state().root_concurrency_group
-        )
+        snapshots = backup_status.list_workspace_snapshots(paths, parsed_id, parent_cg=parent_cg)
     except BackupProvisioningError as e:
         logger.warning("Backup snapshot listing failed for {}: {}", parsed_id, e)
         return _WorkspaceSnapshotListing(snapshots=(), total=0, is_backing_up=False, error=str(e))
@@ -406,7 +415,7 @@ def _list_workspace_snapshots_safely(
     # snapshot list alone can't express this, so the landing page reads this
     # flag to show the live "Backing up..." badge.
     is_backing_up = backup_status.is_workspace_backing_up(
-        paths, parsed_id, now=datetime.now(timezone.utc), parent_cg=get_state().root_concurrency_group
+        paths, parsed_id, now=datetime.now(timezone.utc), parent_cg=parent_cg
     )
     # restic returns oldest-first; the API documents newest-first so callers
     # (settings recent table, full-history page) do not re-sort.
@@ -491,19 +500,48 @@ def _parse_snapshot_limit_offset() -> "tuple[int | None, int] | Response":
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
 def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
-    """One workspace's full backup picture: snapshots + service verification.
+    """One workspace's snapshot listing + live backing-up flag (fast; no exec).
 
-    The restic snapshot listing (run from this machine; works even when the
-    workspace is offline or destroyed) and the backup-service check (an exec
-    into the workspace) run concurrently -- the check on a concurrency-group
-    thread, the listing on the request thread. Cross-workspace parallelism is
-    the frontend's job: it fans out one request per workspace.
+    Runs restic from this machine, so it works even when the workspace is
+    offline or destroyed -- and never waits on the (slow, exec-based) service
+    verification, which lives on the separate ``backup-check`` route.
+    Cross-workspace parallelism is the frontend's job: it fans out one
+    request per workspace.
     """
     parsed_id = AgentId(agent_id)
     limit_offset = _parse_snapshot_limit_offset()
     if isinstance(limit_offset, Response):
         return limit_offset
     limit, offset = limit_offset
+    state = get_state()
+    paths: WorkspacePaths | None = state.api_v1_paths
+    if paths is None:
+        return _json_error("Backups are not configured", 501)
+    _materialize_env_from_record_if_missing(paths, parsed_id)
+    listing = _list_workspace_snapshots_safely(
+        paths, parsed_id, limit=limit, offset=offset, parent_cg=state.root_concurrency_group
+    )
+    return WorkspaceBackupsResponse(
+        agent_id=str(parsed_id),
+        is_configured=has_canonical_env(paths, parsed_id),
+        is_backing_up=listing.is_backing_up,
+        snapshots=listing.snapshots,
+        snapshots_total=listing.total,
+        snapshots_error=listing.error,
+    )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceBackupCheckResponse))
+def _handle_workspace_backup_check(agent_id: str) -> WorkspaceBackupCheckResponse | Response:
+    """One workspace's backup-service verification verdict (slow: execs into it).
+
+    The exec-based check runs on a concurrency-group thread while the request
+    thread probes the newest snapshot, whose age (against the workspace uptime
+    the check reports) yields the BACKUPS_STALE verdict -- the catch-all for a
+    configured-but-silently-dead backup pipeline.
+    """
+    parsed_id = AgentId(agent_id)
     state = get_state()
     paths: WorkspacePaths | None = state.api_v1_paths
     if paths is None:
@@ -525,27 +563,243 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
     )
     with cg:
         cg.start_new_thread(target=_run_check_into_results, name=f"backup-check-{parsed_id}")
-        listing = _list_workspace_snapshots_safely(paths, parsed_id, limit=limit, offset=offset)
+        # Only the newest snapshot's age matters for staleness; errors degrade
+        # into the listing so a broken repo never fails the whole check.
+        listing = _list_workspace_snapshots_safely(paths, parsed_id, limit=1, offset=0, parent_cg=parent_cg)
     check = (
         check_results[0]
         if check_results
         else backup_verification.BackupServiceCheck(state=backup_verification.BackupServiceCheckState.UNKNOWN)
     )
 
-    return WorkspaceBackupsResponse(
-        agent_id=str(parsed_id),
-        is_configured=has_canonical_env(paths, parsed_id),
+    # Fold staleness into the verdict: only when configured and the snapshot
+    # probe itself worked (a failed probe is "unknown", not "stale").
+    newest_time = datetime.fromisoformat(listing.snapshots[0].time) if listing.snapshots else None
+    is_stale_check_applicable = (
+        has_canonical_env(paths, parsed_id)
+        and listing.error is None
+        and check.state
+        in (backup_verification.BackupServiceCheckState.OK, backup_verification.BackupServiceCheckState.PROBLEMS)
+    )
+    if is_stale_check_applicable and backup_verification.is_backup_history_stale(
+        newest_snapshot_time=newest_time,
+        uptime_seconds=check.uptime_seconds,
         is_backing_up=listing.is_backing_up,
-        snapshots=listing.snapshots,
-        snapshots_total=listing.total,
-        snapshots_error=listing.error,
-        check_state=check.state.value,
-        problems=tuple(problem.value for problem in check.problems),
-        installed_version=check.installed_version,
-        minimum_version=check.minimum_version,
+        now=datetime.now(timezone.utc),
+    ):
+        checked = check.with_added_problem(backup_verification.BackupServiceProblem.BACKUPS_STALE)
+    else:
+        checked = check
+
+    return WorkspaceBackupCheckResponse(
+        agent_id=str(parsed_id),
+        check_state=checked.state.value,
+        problems=tuple(problem.value for problem in checked.problems),
+        installed_version=checked.installed_version,
+        minimum_version=checked.minimum_version,
         update_target_version=backup_verification.update_target_backup_tag(),
-        check_detail=check.detail,
+        check_detail=checked.detail,
         is_verification_enabled=is_backup_verification_enabled(paths, parsed_id),
+    )
+
+
+# Max concurrent restic listings for the streaming batch endpoint, so a large
+# workspace list doesn't flood the server thread pool (or the R2 backend) at
+# once. Bounds the fan-out the way the browser's six-connection cap used to.
+_BACKUPS_STREAM_CONCURRENCY: Final[int] = 4
+
+# Give up waiting on any single workspace's summary after this long, so one
+# wedged restic call can't keep the streamed response (and its connection) open
+# forever; every row still pending at that point is degraded to an ``error``
+# line (see ``_drain_backup_summary_rows``) so no badge is left unresolved.
+_BACKUPS_STREAM_ROW_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+def _build_backup_summary(
+    paths: WorkspacePaths, parsed_id: AgentId, created_at: str | None, parent_cg: ConcurrencyGroup | None
+) -> dict[str, object]:
+    """One workspace's landing-badge backup summary (snapshots + live flag + create time).
+
+    Only the newest snapshot's time is needed for the badge, so this lists with
+    ``limit=1``; ``_list_workspace_snapshots_safely`` degrades any restic error
+    into an empty listing (with ``error`` set, so the badge can say "unknown"
+    instead of a false "No backups").
+    """
+    listing = _list_workspace_snapshots_safely(paths, parsed_id, limit=1, offset=0, parent_cg=parent_cg)
+    return {
+        "agent_id": str(parsed_id),
+        "snapshots": [{"time": snapshot.time} for snapshot in listing.snapshots],
+        "is_backing_up": listing.is_backing_up,
+        "created_at": created_at,
+        "error": listing.error,
+    }
+
+
+def _degraded_backup_summary(agent_id: str, created_at: str | None, error: str) -> dict[str, object]:
+    """A placeholder summary for a workspace whose probe never delivered a row.
+
+    Carries ``error`` so the badge resolves to "Backup status unknown" rather
+    than a false "No backups" -- and so no requested row is ever left without a
+    line (an unresolved row would otherwise sit on "Checking..." forever).
+    """
+    return {
+        "agent_id": agent_id,
+        "snapshots": [],
+        "is_backing_up": False,
+        "created_at": created_at,
+        "error": error,
+    }
+
+
+def _build_backup_summary_safely(
+    paths: WorkspacePaths, agent_id: str, created_at: str | None, parent_cg: ConcurrencyGroup | None
+) -> dict[str, object]:
+    """Build one workspace's backup summary, degrading a crashed probe to an ``error`` row.
+
+    Always returns exactly one row: a probe that crashes (e.g. the concurrency
+    group refuses a restic subprocess mid-shutdown) degrades to an ``error``
+    summary so the stream's per-agent accounting never comes up short.
+    """
+    try:
+        return _build_backup_summary(paths, AgentId(agent_id), created_at, parent_cg)
+    except (OSError, RuntimeError, ConcurrencyGroupError) as e:
+        logger.warning("Backup summary probe failed for {}: {}", agent_id, e)
+        return _degraded_backup_summary(agent_id, created_at, f"backup status probe failed: {e}")
+
+
+def _put_backup_summary_into_queue(
+    *,
+    result_queue: "queue.Queue[dict[str, object]]",
+    semaphore: threading.Semaphore,
+    paths: WorkspacePaths,
+    agent_id: str,
+    created_at: str | None,
+    parent_cg: ConcurrencyGroup | None,
+) -> None:
+    """Compute one workspace's backup summary (bounded by ``semaphore``) and enqueue it."""
+    with semaphore:
+        result_queue.put(_build_backup_summary_safely(paths, agent_id, created_at, parent_cg))
+
+
+def _stream_workspace_backup_summaries(
+    paths: WorkspacePaths,
+    agent_ids: tuple[str, ...],
+    created_at_by_agent_id: Mapping[str, str | None],
+    parent_cg: ConcurrencyGroup | None,
+) -> Iterator[str]:
+    """Yield one NDJSON backup-summary line per workspace, newest-resolved first.
+
+    Each workspace is listed on its own worker thread (bounded concurrency), and
+    its summary is streamed the moment it resolves -- so fast workspaces paint
+    immediately and a single slow ``restic`` probe never delays the rest. Every
+    requested workspace gets exactly one line: a worker that cannot be spawned
+    or that misses the row timeout is degraded to an ``error`` summary rather
+    than silently dropped, so the client never leaves a row unresolved.
+    """
+    if parent_cg is None:
+        # No concurrency group (minimal setups): compute sequentially, still
+        # streaming each line as it resolves -- with the same crash-to-error
+        # degradation as the threaded path, so every row gets its line.
+        for agent_id in agent_ids:
+            summary = _build_backup_summary_safely(paths, agent_id, created_at_by_agent_id.get(agent_id), None)
+            yield json.dumps(summary) + "\n"
+        return
+    result_queue: queue.Queue[dict[str, object]] = queue.Queue()
+    semaphore = threading.Semaphore(_BACKUPS_STREAM_CONCURRENCY)
+    for agent_id in agent_ids:
+        try:
+            parent_cg.start_new_thread(
+                target=_put_backup_summary_into_queue,
+                kwargs={
+                    "result_queue": result_queue,
+                    "semaphore": semaphore,
+                    "paths": paths,
+                    "agent_id": agent_id,
+                    "created_at": created_at_by_agent_id.get(agent_id),
+                    "parent_cg": parent_cg,
+                },
+                name=f"backup-summary-{agent_id}",
+                daemon=True,
+                is_checked=False,
+            )
+        except (OSError, RuntimeError, ConcurrencyGroupError) as e:
+            # The worker never started (resource exhaustion / group shutdown);
+            # its row must still resolve, so enqueue the degraded summary here.
+            logger.warning("Could not spawn a backup-summary worker for {}: {}", agent_id, e)
+            result_queue.put(
+                _degraded_backup_summary(
+                    agent_id, created_at_by_agent_id.get(agent_id), f"backup status probe failed: {e}"
+                )
+            )
+    yield from _drain_backup_summary_rows(
+        result_queue, agent_ids, created_at_by_agent_id, _BACKUPS_STREAM_ROW_TIMEOUT_SECONDS
+    )
+
+
+def _drain_backup_summary_rows(
+    result_queue: "queue.Queue[dict[str, object]]",
+    agent_ids: tuple[str, ...],
+    created_at_by_agent_id: Mapping[str, str | None],
+    row_timeout_seconds: float,
+) -> Iterator[str]:
+    """Yield one NDJSON line per requested agent as summaries arrive on the queue.
+
+    When no summary arrives within ``row_timeout_seconds`` (a wedged worker),
+    every still-pending agent gets a degraded ``error`` line -- the stream must
+    resolve every requested row, never silently drop one.
+    """
+    # Track which requested rows are still owed a line (as a list, not a set:
+    # the same id requested twice legitimately gets two lines).
+    pending_agent_ids = list(agent_ids)
+    for _ in agent_ids:
+        try:
+            summary = result_queue.get(timeout=row_timeout_seconds)
+        except queue.Empty:
+            logger.warning(
+                "Timed out waiting for backup summaries; degrading {} unresolved row(s)", len(pending_agent_ids)
+            )
+            for pending_id in pending_agent_ids:
+                degraded = _degraded_backup_summary(
+                    pending_id, created_at_by_agent_id.get(pending_id), "backup status probe timed out"
+                )
+                yield json.dumps(degraded) + "\n"
+            return
+        summary_agent_id = str(summary.get("agent_id", ""))
+        if summary_agent_id in pending_agent_ids:
+            pending_agent_ids.remove(summary_agent_id)
+        yield json.dumps(summary) + "\n"
+
+
+@require_api_or_cookie_auth
+def _handle_workspaces_backups_stream() -> Response:
+    """Stream every requested workspace's landing backup badge as NDJSON.
+
+    Replaces the landing page's per-workspace fetch fan-out (which saturated the
+    browser's six-connections-per-origin pool and blocked navigation): the page
+    now makes ONE request and applies each ``{agent_id, snapshots, is_backing_up,
+    created_at, error}`` line as it streams in. Workspaces are named via repeated
+    ``?agent_id=`` params (the ids the page rendered), so every rendered row gets
+    a line even if discovery has since drifted.
+    """
+    state = get_state()
+    paths: WorkspacePaths | None = state.api_v1_paths
+    if paths is None:
+        return _json_error("Backups are not configured", 501)
+    agent_ids = tuple(request.args.getlist("agent_id"))
+    # Resolve create time + materialize any synced-record env on the request
+    # thread (get_state is unavailable on the worker threads below).
+    created_at_by_agent_id: dict[str, str | None] = {}
+    for agent_id in agent_ids:
+        parsed_id = AgentId(agent_id)
+        _materialize_env_from_record_if_missing(paths, parsed_id)
+        info = state.backend_resolver.get_agent_display_info(parsed_id)
+        created_at_by_agent_id[agent_id] = (
+            info.create_time.isoformat() if info is not None and info.create_time is not None else None
+        )
+    return make_streaming_response(
+        _stream_workspace_backup_summaries(paths, agent_ids, created_at_by_agent_id, state.root_concurrency_group),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -1438,6 +1692,22 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
         parsed_id, "Changing the backup destination..." if is_destination_change else "Enabling backups..."
     )
 
+    # A quota-limited account frees space by evicting the oldest destroyed
+    # workspace's backup (something the reapers would delete anyway) and
+    # retrying, so enabling backups self-heals quota pressure.
+    record_store = state.session_store.record_store if state.session_store is not None else None
+    quota_evictor = (
+        make_quota_evictor(
+            record_store=record_store,
+            paths=paths,
+            imbue_cloud_cli=state.imbue_cloud_cli,
+            user_id=str(account.user_id),
+            account_email=account_email,
+        )
+        if account is not None and record_store is not None and state.imbue_cloud_cli is not None
+        else None
+    )
+
     try:
         parent_cg.start_new_thread(
             target=backup_update_module.run_backup_configure_sequence,
@@ -1450,6 +1720,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
                 "parent_cg": parent_cg,
                 "registry": registry,
                 "is_destination_change": is_destination_change,
+                "quota_evictor": quota_evictor,
             },
             name=f"backup-configure-{parsed_id}",
             daemon=True,
@@ -2318,7 +2589,11 @@ def create_api_v1_blueprint() -> Blueprint:
     # Gated by the must-ask ``minds-accounts-read`` permission (not in the agent baseline).
     blueprint.add_url_rule("/accounts", view_func=_handle_list_accounts, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
+    blueprint.add_url_rule("/workspaces/backups", view_func=_handle_workspaces_backups_stream, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/backup-check", view_func=_handle_workspace_backup_check, methods=["GET"]
+    )
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/backups/<snapshot_id>/export",
         view_func=_handle_workspace_backup_export,
@@ -2352,7 +2627,7 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
 
     # Backup service verification + management. The per-workspace health read
-    # (folded into ``/workspaces/<agent_id>/backups`` above) rides the
+    # (the ``/workspaces/<agent_id>/backup-check`` route above) rides the
     # ``minds-workspaces-read`` grant; the mutating backup-service routes are
     # gated by ``minds-workspaces-backups-manage`` at the gateway.
     blueprint.add_url_rule(

@@ -82,6 +82,15 @@ mngr imbue_cloud bucket list
 mngr imbue_cloud bucket info my-backups
 mngr imbue_cloud bucket destroy my-backups
 
+# Force-destroy: when the destroy is refused as non-empty, delete ALL of the
+# bucket's contents (batched S3 deletes, client-side) and retry the destroy.
+# The destroy is attempted first, so any other refusal (e.g. the
+# active-workspace interlock below) aborts before anything is deleted.
+# Prompts for confirmation unless -y. When the account is over its storage
+# quota (keys downgraded to read-only), a cleanup grant temporarily restores
+# write access for the deletion.
+mngr imbue_cloud bucket destroy my-backups --force -y
+
 # Get working credentials again: rolls the key's secret in place (same
 # Access Key ID, fresh secret; the old secret stops working immediately).
 mngr imbue_cloud bucket roll-key my-backups
@@ -92,6 +101,12 @@ mngr imbue_cloud bucket keys list my-backups     # just this bucket's key
 ```
 
 The emitted credentials (`access_key_id`, `secret_access_key`, `s3_endpoint`, `bucket_name`) are standard S3-compatible credentials -- point any S3 client at the endpoint. The secret is shown only once (at creation or roll) and is never stored by the service.
+
+Two rules protect workspace backups (buckets whose short name is their workspace's host id, `host-<hex>`):
+
+- `bucket create` reserves the `host-` short-name prefix: creating such a name is refused unless a workspace record with that host id exists for your account, so a generic bucket can never collide with a backup bucket.
+
+- `bucket destroy` (with or without `--force`) refuses to destroy a workspace-backup bucket whose workspace record is still ACTIVE -- destroy the workspace first. Destroyed workspaces' backups are retained for 30 days and then reaped automatically by the connector (see the minds backup-retention docs).
 
 **Note:** total storage across all your buckets is capped by your plan's quota. While over the cap, an hourly server-side sweep turns your bucket keys read-only (the same credentials keep working for reads); they are restored automatically once you are back under quota, and an account over its storage quota cannot create new buckets.
 

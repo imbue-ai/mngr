@@ -1,15 +1,21 @@
 """Unit tests for the backup-service check classification rules."""
 
 import base64
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 
 import pytest
 
 from imbue.minds.desktop_client.backup_env_store import env_content_sha256
+from imbue.minds.desktop_client.backup_verification import BACKUP_STALE_AFTER_SECONDS
+from imbue.minds.desktop_client.backup_verification import BACKUP_STALE_MINIMUM_UPTIME_SECONDS
 from imbue.minds.desktop_client.backup_verification import BackupServiceCheckState
 from imbue.minds.desktop_client.backup_verification import BackupServiceProblem
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_TAG_ENV_VAR
 from imbue.minds.desktop_client.backup_verification import classify_check_payload
+from imbue.minds.desktop_client.backup_verification import is_backup_history_stale
 from imbue.minds.desktop_client.backup_verification import minimum_backup_tag
 
 _CANONICAL_ENV = "RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=p\n"
@@ -139,3 +145,93 @@ def test_minimum_backup_tag_defaults_to_the_fixed_constant() -> None:
 def test_minimum_backup_tag_honors_the_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(MINIMUM_BACKUP_TAG_ENV_VAR, "minds-v9.9.9")
     assert minimum_backup_tag() == "minds-v9.9.9"
+
+
+def test_classify_parses_the_reported_workspace_uptime() -> None:
+    payload = _healthy_payload()
+    payload["uptime_seconds"] = 7200
+    check, _ = classify_check_payload(payload, canonical_env=_CANONICAL_ENV)
+    assert check.uptime_seconds == 7200.0
+
+
+def test_classify_treats_a_missing_or_malformed_uptime_as_unknown() -> None:
+    check_without, _ = classify_check_payload(_healthy_payload(), canonical_env=_CANONICAL_ENV)
+    assert check_without.uptime_seconds is None
+
+    payload = _healthy_payload()
+    payload["uptime_seconds"] = "not-a-number"
+    check_malformed, _ = classify_check_payload(payload, canonical_env=_CANONICAL_ENV)
+    assert check_malformed.uptime_seconds is None
+
+
+def test_backup_history_is_stale_only_after_the_age_threshold() -> None:
+    now = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    fresh = now - timedelta(minutes=30)
+    old = now - timedelta(hours=BACKUP_STALE_AFTER_SECONDS / 3600.0 + 1)
+
+    assert (
+        is_backup_history_stale(newest_snapshot_time=fresh, uptime_seconds=7200.0, is_backing_up=False, now=now)
+        is False
+    )
+    assert (
+        is_backup_history_stale(newest_snapshot_time=old, uptime_seconds=7200.0, is_backing_up=False, now=now) is True
+    )
+
+
+def test_backup_history_is_not_stale_while_the_workspace_just_started() -> None:
+    # A workspace stopped for days and started minutes ago has an old newest
+    # snapshot, but its startup backup has not had a chance to run yet.
+    now = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    old = now - timedelta(days=2)
+
+    assert (
+        is_backup_history_stale(
+            newest_snapshot_time=old,
+            uptime_seconds=BACKUP_STALE_MINIMUM_UPTIME_SECONDS - 60.0,
+            is_backing_up=False,
+            now=now,
+        )
+        is False
+    )
+    assert (
+        is_backup_history_stale(
+            newest_snapshot_time=old,
+            uptime_seconds=BACKUP_STALE_MINIMUM_UPTIME_SECONDS + 60.0,
+            is_backing_up=False,
+            now=now,
+        )
+        is True
+    )
+
+
+def test_backup_history_is_not_stale_without_uptime_evidence_or_mid_backup() -> None:
+    now = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    old = now - timedelta(days=2)
+
+    # Unknown uptime never flags (staleness requires positive evidence).
+    assert (
+        is_backup_history_stale(newest_snapshot_time=old, uptime_seconds=None, is_backing_up=False, now=now) is False
+    )
+    # A backup running right now is the pipeline working, however old the last one.
+    assert (
+        is_backup_history_stale(newest_snapshot_time=old, uptime_seconds=7200.0, is_backing_up=True, now=now) is False
+    )
+
+
+def test_backup_history_with_no_snapshots_is_stale_once_up_long_enough() -> None:
+    now = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    assert (
+        is_backup_history_stale(newest_snapshot_time=None, uptime_seconds=7200.0, is_backing_up=False, now=now) is True
+    )
+
+
+def test_with_added_problem_flips_the_state_and_is_idempotent() -> None:
+    check, _ = classify_check_payload(_healthy_payload(), canonical_env=_CANONICAL_ENV)
+    assert check.state == BackupServiceCheckState.OK
+
+    flagged = check.with_added_problem(BackupServiceProblem.BACKUPS_STALE)
+    assert flagged.state == BackupServiceCheckState.PROBLEMS
+    assert flagged.problems == (BackupServiceProblem.BACKUPS_STALE,)
+
+    reflagged = flagged.with_added_problem(BackupServiceProblem.BACKUPS_STALE)
+    assert reflagged.problems == (BackupServiceProblem.BACKUPS_STALE,)

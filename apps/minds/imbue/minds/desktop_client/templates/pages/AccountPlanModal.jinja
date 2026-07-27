@@ -1,0 +1,92 @@
+{#def acct_user_id, account_email #}
+{#
+  Centered per-account "Plan & Usage" modal, hosted in the desktop client's
+  shared overlay WebContentsView. Opened by clicking an account card in the
+  Manage Accounts modal (pages.AccountsModal).
+
+  The shell renders INSTANTLY with a spinner and never touches the connector,
+  so the overlay appears the moment the card is clicked. accounts.js then fills
+  the placeholder from GET /accounts/<id>/plan-view (this one account, so a
+  single connector query) and keeps polling it while a backup trim runs --
+  exactly as the full accounts page does.
+
+  The fetched fragment's "Switch plan" / "Free up backup space" forms POST to
+  /accounts/<id>/{plan,trim-backups}, which answer with a redirect to the full
+  /accounts page. Following that inside the overlay iframe would strand the app
+  there, so the delegated submit handler below intercepts them: it POSTs via
+  fetch and reloads this modal (the shell re-renders instantly and the spinner
+  returns while the refreshed usage loads).
+#}
+{% set _scripts %}
+<script src="/_static/accounts.js" defer></script>
+<script>
+  (function () {
+    window.dismissAccountPlanModal = function () {
+      if (window.minds && window.minds.closeModal) window.minds.closeModal();
+      else window.location.href = "/accounts";
+    };
+    // The back affordance returns to the Manage Accounts modal (a flash-free
+    // overlay-to-overlay swap) rather than closing the overlay outright.
+    window.backToAccountsModal = function () {
+      if (window.minds && window.minds.openAccounts) window.minds.openAccounts();
+      else window.location.href = "/accounts";
+    };
+    var backdrop = document.getElementById("account-plan-modal-backdrop");
+    if (backdrop) {
+      backdrop.addEventListener("click", function (e) {
+        if (e.target === backdrop) window.dismissAccountPlanModal();
+      });
+    }
+    // The "review destroyed workspace backups" link must not navigate this
+    // overlay iframe to the full page (that would strand the app inside the
+    // modal): close the modal and navigate the main window instead.
+    document.addEventListener("click", function (e) {
+      var link = e.target.closest ? e.target.closest('a[href="/workspaces/destroyed"]') : null;
+      if (!link) return;
+      e.preventDefault();
+      if (window.minds && window.minds.closeModal && window.minds.navigateContent) {
+        window.minds.closeModal();
+        window.minds.navigateContent("/workspaces/destroyed");
+      } else {
+        window.location.href = "/workspaces/destroyed";
+      }
+    });
+    // Keep the plan-switch / free-up-space actions inside the modal. The forms
+    // arrive inside the async-loaded section, so listen via delegation on the
+    // persistent container: POST via fetch (ignoring the redirect those routes
+    // answer with) and reload the modal so the refreshed usage renders.
+    var section = document.getElementById("account-plan-section");
+    if (section) {
+      section.addEventListener("submit", function (e) {
+        var form = e.target;
+        if (!form || form.tagName !== "FORM") return;
+        e.preventDefault();
+        fetch(form.action, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams(new FormData(form)).toString(),
+        }).then(function () { window.location.reload(); })
+          .catch(function () { window.location.reload(); });
+      });
+    }
+  })();
+</script>
+{% endset %}
+<OverlaySurface title="Plan & Usage"
+                body_style="-webkit-app-region: no-drag;"
+                scripts={{ _scripts }}>
+  <div id="account-plan-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
+    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-lg w-full p-8 max-h-[85vh] overflow-y-auto text-left">
+      <DialogCloseButton onclick="dismissAccountPlanModal()" />
+      <button type="button" onclick="backToAccountsModal()" class="type-label text-secondary hover:text-primary mb-4 -ml-1">&lsaquo; Accounts</button>
+      <h1 class="type-heading-lg text-primary mb-1">Plan &amp; Usage</h1>
+      <div class="type-helper text-tertiary mb-6">{{ account_email }}</div>
+      <div id="account-plan-section" data-plan-section data-user-id="{{ acct_user_id }}">
+        <div class="flex items-center gap-2 type-helper text-tertiary">
+          <Spinner size="sm" /> Loading plan and usage&hellip;
+        </div>
+      </div>
+    </div>
+  </div>
+</OverlaySurface>

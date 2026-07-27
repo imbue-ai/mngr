@@ -46,6 +46,7 @@ app prints on startup.
 ## Learn more
 
 - [Architecture and design](./docs/design.md)
+- [Backup retention for destroyed workspaces](./docs/backup-retention.md)
 - [Desktop client internals](./imbue/minds/desktop_client/README.md)
 - [Glossary of key concepts](./docs/workspace/glossary.md)
 - [Desktop app](./docs/desktop-app.md)

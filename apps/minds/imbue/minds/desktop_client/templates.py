@@ -823,6 +823,12 @@ def render_auth_error_page(message: str) -> str:
 
 
 @pure
+def render_request_error_page(title: str, message: str) -> str:
+    """Render the friendly routing-error page (404/405) with a way back home."""
+    return CATALOG.render("pages.RequestError", title=title, message=message)
+
+
+@pure
 def render_inbox_page(
     cards: Sequence[Mapping[str, str]],
     selected_id: str = "",
@@ -2274,4 +2280,50 @@ def render_accounts_modal_page(
         accounts=accounts,
         default_account_id=default_account_id or "",
         enabled_by_user_id=dict(enabled_by_user_id or {}),
+    )
+
+
+@pure
+def render_destroyed_workspaces_page(retention_days: int, error: str = "") -> str:
+    """Render the recently-destroyed workspaces page shell (``GET /workspaces/destroyed``).
+
+    The shell paints instantly with no record-store / connector work; its
+    script fetches the row list from ``GET /workspaces/destroyed/rows`` (see
+    :func:`render_destroyed_workspaces_rows_fragment`) and injects it, mirroring
+    the accounts page's async plan-view fragment so clicking the link never
+    looks like a dead click.
+    """
+    return CATALOG.render(
+        "pages.DestroyedWorkspaces",
+        retention_days=retention_days,
+        error=error,
+    )
+
+
+@pure
+def render_destroyed_workspaces_rows_fragment(
+    # Row dicts from _collect_destroyed_workspace_rows (agent_id, display_name,
+    # account_label, countdown/lock/delete affordance fields).
+    rows: Sequence[Mapping[str, object]],
+) -> str:
+    """Render the recently-destroyed row list fragment (``GET /workspaces/destroyed/rows``)."""
+    return CATALOG.render(
+        "DestroyedWorkspacesRows",
+        rows=[dict(row) for row in rows],
+    )
+
+
+@pure
+def render_account_plan_modal_page(acct_user_id: str, account_email: str) -> str:
+    """Render the centered per-account "Plan & Usage" modal shell (``GET /accounts/<user_id>/plan-modal``).
+
+    Opened by clicking an account card in the Manage Accounts modal. The shell
+    renders instantly with a spinner and no connector call; accounts.js then
+    fills its usage from ``GET /accounts/<user_id>/plan-view`` (one account, one
+    connector query), so the overlay appears the moment the card is clicked.
+    """
+    return CATALOG.render(
+        "pages.AccountPlanModal",
+        acct_user_id=acct_user_id,
+        account_email=account_email,
     )

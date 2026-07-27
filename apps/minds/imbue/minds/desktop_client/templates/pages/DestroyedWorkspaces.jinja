@@ -1,0 +1,110 @@
+{#def retention_days=30, error="" #}
+{#
+  "Recently destroyed workspaces" -- a full local page on the chrome surface
+  (like /accounts), reached from the Landing page (just below the workspace
+  list).
+
+  The shell paints INSTANTLY: collecting the rows queries the record store and
+  inspects local envs, which is slow enough that clicking the link used to look
+  like nothing happened. So the shell does no such work; the script below
+  fetches the row list from GET /workspaces/destroyed/rows and injects it --
+  the same async pattern the accounts page uses for its per-account plan/usage
+  fragment. Each row's affordances (Download, the two-step "Remove" -> inline
+  confirm) are documented in the fragment (DestroyedWorkspacesRows).
+#}
+{% set _scripts %}
+<script src="/_static/backup_table.js" defer></script>
+<script>
+  (function () {
+    var container = document.querySelector("[data-destroyed-rows]");
+    if (!container) return;
+
+    // Two-step inline confirm for the irreversible delete. The rows are
+    // injected asynchronously, so bind via delegation on the container rather
+    // than to each button at parse time: the first click on a row's "Delete
+    // backup now" arms it (revealing "Delete forever" + Cancel), Cancel disarms.
+    container.addEventListener("click", function (event) {
+      var target = event.target;
+      var armButton = target.closest ? target.closest("[data-arm-delete]") : null;
+      if (armButton) {
+        var armRow = armButton.closest("[data-destroyed-row]");
+        if (armRow) {
+          armRow.querySelector("[data-delete-idle]").classList.add("hidden");
+          armRow.querySelector("[data-delete-armed]").classList.remove("hidden");
+        }
+        return;
+      }
+      var cancelButton = target.closest ? target.closest("[data-cancel-delete]") : null;
+      if (cancelButton) {
+        var cancelRow = cancelButton.closest("[data-destroyed-row]");
+        if (cancelRow) {
+          cancelRow.querySelector("[data-delete-armed]").classList.add("hidden");
+          cancelRow.querySelector("[data-delete-idle]").classList.remove("hidden");
+        }
+        return;
+      }
+      // Download: the export route is POST-only (a plain link would 405 into
+      // a dead-end page), so route it through the shared fetch-and-save
+      // helper, which also shows the inline Downloading... state.
+      var downloadButton = target.closest ? target.closest("[data-download-backup]") : null;
+      if (downloadButton && window.mindsBackupTable) {
+        window.mindsBackupTable.downloadSnapshot(
+          downloadButton.getAttribute("data-download-backup"), downloadButton, "latest"
+        );
+      }
+    });
+
+    // Deleting a backup empties a remote bucket, which can take a long time;
+    // the form submits as a real navigation, so without feedback the click
+    // feels dead. Swap the button to a spinner (and disable re-submits) while
+    // the POST runs.
+    container.addEventListener("submit", function (event) {
+      var form = event.target;
+      if (!form || !form.hasAttribute || !form.hasAttribute("data-delete-backup-form")) return;
+      var button = form.querySelector("button");
+      if (button) {
+        button.disabled = true;
+        button.innerHTML =
+          '<span class="spinner spinner-inverse inline-block align-middle w-3.5 h-3.5 border mr-1"></span> Deleting...';
+      }
+      var armedWrap = form.closest("[data-delete-armed]");
+      var cancelButton = armedWrap ? armedWrap.querySelector("[data-cancel-delete]") : null;
+      if (cancelButton) cancelButton.disabled = true;
+    });
+
+    // Load the (possibly slow) row list after the shell has painted.
+    fetch("/workspaces/destroyed/rows", { credentials: "same-origin" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.text();
+      })
+      .then(function (html) { container.innerHTML = html; })
+      .catch(function () {
+        container.textContent = "";
+        var message = document.createElement("p");
+        message.className = "text-secondary";
+        message.textContent = "Could not load recently destroyed workspaces. Please try again.";
+        container.appendChild(message);
+      });
+  })();
+</script>
+{% endset %}
+<ChromeShell title="Recently destroyed" page_label="Recently destroyed" :show_back="True" scripts={{ _scripts }}>
+  <PageContainer>
+    <h1 class="type-heading-lg text-primary mb-2">Recently destroyed workspaces</h1>
+    <p class="type-helper text-tertiary mb-8">
+      Backups of destroyed workspaces are kept for {{ retention_days }} days, then deleted automatically.
+      Until then you can download them here (the workspaces themselves no longer exist and cannot be
+      restarted). Deleting a backup early frees your storage and bucket quota.
+    </p>
+    {% if error %}
+      <Notice variant="error" extra="mb-6">{{ error }}</Notice>
+    {% endif %}
+    <div data-destroyed-rows>
+      <div class="flex items-center gap-2 type-helper text-tertiary">
+        <Spinner size="sm" /> Loading recently destroyed workspaces&hellip;
+      </div>
+    </div>
+    <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
+  </PageContainer>
+</ChromeShell>

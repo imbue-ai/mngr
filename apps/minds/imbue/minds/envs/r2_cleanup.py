@@ -29,30 +29,27 @@ account token exactly as the connector does (access key = token id, secret =
 SHA-256 of the token value).
 """
 
-import hashlib
-import threading
-import time
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import Any
 
-import boto3
 import httpx
-from botocore.config import Config
-from botocore.exceptions import BotoCoreError
-from botocore.exceptions import ClientError
 from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.errors import MindError
+from imbue.mngr_imbue_cloud.r2_objects import R2ObjectDeletionError
+from imbue.mngr_imbue_cloud.r2_objects import derive_s3_secret_from_token_value
+from imbue.mngr_imbue_cloud.r2_objects import empty_bucket_via_s3
+from imbue.mngr_imbue_cloud.r2_objects import make_r2_s3_client
+from imbue.mngr_imbue_cloud.r2_objects import wait_for_s3_credentials as _shared_wait_for_s3_credentials
 
 _CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 _HTTP_TIMEOUT_SECONDS = 60.0
-_S3_DELETE_BATCH_SIZE = 1000
 # Buckets younger than this are left alone: an in-flight CI run's workspace
 # has a live account, but the app-list read could race its creation.
 _MIN_BUCKET_AGE_HOURS = 2
@@ -64,10 +61,6 @@ _BUCKET_NAME_SEPARATOR = "--"
 # The account-token permission group that grants R2 object writes (deletes).
 _R2_WRITE_PERMISSION_GROUP_NAME = "Workers R2 Storage Bucket Item Write"
 _SWEEP_TOKEN_NAME = "minds-ci-r2-sweep"
-# A freshly-minted Cloudflare token is not immediately accepted by the S3
-# endpoint (the same propagation lag restic_cli retries around).
-_TOKEN_PROPAGATION_TIMEOUT_SECONDS = 180.0
-_TOKEN_PROPAGATION_POLL_SECONDS = 5.0
 
 
 class R2CleanupError(MindError):
@@ -299,13 +292,10 @@ def revoke_token(credentials: CloudflareR2Credentials, token_id: str) -> None:
 
 def _s3_client(credentials: CloudflareR2Credentials, token_id: str, token_value: SecretStr) -> Any:
     """An S3 client for R2: the access key is the token id, the secret its SHA-256."""
-    return boto3.client(
-        "s3",
-        endpoint_url=f"https://{credentials.account_id}.r2.cloudflarestorage.com",
-        aws_access_key_id=token_id,
-        aws_secret_access_key=hashlib.sha256(token_value.get_secret_value().encode("utf-8")).hexdigest(),
-        region_name="auto",
-        config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+    return make_r2_s3_client(
+        s3_endpoint=f"https://{credentials.account_id}.r2.cloudflarestorage.com",
+        access_key_id=token_id,
+        secret_access_key=derive_s3_secret_from_token_value(token_value.get_secret_value()),
     )
 
 
@@ -317,33 +307,18 @@ def wait_for_s3_credentials(s3_client: Any, probe_bucket_name: str) -> None:
     with ``Unauthorized`` while the later ones succeed (exactly what the first
     real run did).
     """
-    deadline = time.monotonic() + _TOKEN_PROPAGATION_TIMEOUT_SECONDS
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            s3_client.list_objects_v2(Bucket=probe_bucket_name, MaxKeys=1)
-            return
-        except (ClientError, BotoCoreError) as e:
-            last_error = e
-            logger.info("Waiting for the R2 sweep token to propagate to the S3 endpoint...")
-            threading.Event().wait(timeout=_TOKEN_PROPAGATION_POLL_SECONDS)
-    raise R2CleanupError(f"The R2 sweep token never became usable for S3: {last_error}")
+    try:
+        _shared_wait_for_s3_credentials(s3_client, probe_bucket_name)
+    except R2ObjectDeletionError as e:
+        raise R2CleanupError(str(e)) from e
 
 
 def empty_bucket(s3_client: Any, bucket_name: str) -> int:
     """Delete every object in the bucket (Cloudflare refuses non-empty deletes); returns the count."""
-    deleted = 0
     try:
-        paginator = s3_client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket_name):
-            keys = [{"Key": entry["Key"]} for entry in page.get("Contents", [])]
-            for start in range(0, len(keys), _S3_DELETE_BATCH_SIZE):
-                batch = keys[start : start + _S3_DELETE_BATCH_SIZE]
-                s3_client.delete_objects(Bucket=bucket_name, Delete={"Objects": batch})
-                deleted += len(batch)
-    except (ClientError, BotoCoreError) as e:
-        raise R2CleanupError(f"Could not empty bucket {bucket_name}: {e}") from e
-    return deleted
+        return empty_bucket_via_s3(s3_client, bucket_name)
+    except R2ObjectDeletionError as e:
+        raise R2CleanupError(str(e)) from e
 
 
 def delete_bucket(credentials: CloudflareR2Credentials, bucket_name: str) -> None:

@@ -1211,8 +1211,22 @@ function registerShortcutsFor(bundle, wc) {
       (!isMac && input.control && input.shift && input.code === 'KeyC');
     if (devTools) {
       event.preventDefault();
-      if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-        bundle.contentView.webContents.toggleDevTools();
+      if (wc.isDestroyed()) return;
+      // Toggle DevTools for the surface that received the keystroke, so the
+      // shortcut also works from hub pages (which live in the chrome view --
+      // e.g. the landing page with no workspace open, where the old
+      // content-view-only targeting opened DevTools into an invisible view).
+      // Non-content surfaces open detached: docked tools would be crammed
+      // into the titlebar strip / modal overlay when a workspace is showing.
+      const isContentSurface = bundle.contentView
+        && !bundle.contentView.webContents.isDestroyed()
+        && wc === bundle.contentView.webContents;
+      if (isContentSurface) {
+        wc.toggleDevTools();
+      } else if (wc.isDevToolsOpened()) {
+        wc.closeDevTools();
+      } else {
+        wc.openDevTools({ mode: 'detach' });
       }
       return;
     }
@@ -1788,6 +1802,7 @@ function overlayIdForUrl(url) {
   if (pathname === '/settings/modal') return 'settings';
   if (pathname === '/settings/ai-keys') return 'ai-keys';
   if (pathname === '/accounts/modal') return 'accounts';
+  if (/^\/accounts\/[A-Za-z0-9._-]+\/plan-modal$/.test(pathname)) return 'account-plan';
   if (/^\/sharing\/agent-[a-f0-9]+\/[^/]+\/modal$/i.test(pathname)) return 'sharing';
   return null;
 }
@@ -2082,6 +2097,15 @@ function openMindsSettingsModal(bundle) {
 function openAccountsModal(bundle) {
   if (!bundle || bundle.window.isDestroyed() || !backendBaseUrl) return;
   openModal(bundle, backendBaseUrl + '/accounts/modal');
+}
+
+// Open one account's Plan & Usage modal on the shared overlay. The user id is
+// validated to a conservative shape (never trust the renderer) before being
+// packed into the /accounts/<user_id>/plan-modal URL.
+function openAccountPlanModal(bundle, userId) {
+  if (!bundle || bundle.window.isDestroyed() || !backendBaseUrl) return;
+  if (typeof userId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(userId)) return;
+  openModal(bundle, backendBaseUrl + '/accounts/' + userId + '/plan-modal');
 }
 
 // Open the sharing editor as a centered modal in the shared overlay. Both ids
@@ -2491,8 +2515,8 @@ function readLastLogLines(lineCount) {
 // from it on launch. The mind itself persists its panel layout server-side and
 // restores it on a fresh load of its root, so reopening the root is enough to
 // land the user back where they were. Non-workspace screens (Home, Create,
-// ``/workspace/<id>/settings``, ...) live on the minds backend and round-trip
-// as plain backend-relative paths.
+// ``/workspace/<id>/settings``, ...) all persist as the workspace-list home
+// page ("/") -- see ``toPersistedContentUrl`` for why.
 
 function loadSessionState() {
   try {
@@ -2557,12 +2581,17 @@ function parseRecoveryPageAgentId(url) {
 // next session's restored window to a dead port (the restored recovery page
 // goes healthy and 302s to the stale return_to). Restoring into the workspace
 // re-enters recovery through the normal unhealthy-redirect with fresh
-// parameters if it is still down. Everything else round-trips as a
-// minds-backend-relative path.
+// parameters if it is still down. Everything else persists as home ("/").
 function toPersistedContentUrl(url) {
   const agentId = parseWorkspaceId(url) || parseRecoveryPageAgentId(url);
   if (agentId) return `/goto/${encodeURIComponent(agentId)}/`;
-  return toRelativeBackendUrl(url);
+  // Anything that is not a workspace persists as the workspace-list home
+  // page. Restoring an arbitrary page verbatim can strand the user on a
+  // context-free dead end at next launch (e.g. a Method Not Allowed page
+  // reached through a bad link, faithfully re-opened by restore), and hub
+  // pages are all one click from home anyway. Non-web URLs (file://,
+  // about:blank) still drop the entry entirely.
+  return toRelativeBackendUrl(url) ? '/' : null;
 }
 
 // Inverse of ``toPersistedContentUrl``: turn a persisted entry's ``url`` back
@@ -4443,6 +4472,14 @@ ipcMain.on('open-minds-settings', (event) => {
 ipcMain.on('open-accounts', (event) => {
   const sender = getBundleFromEvent(event);
   if (sender) openAccountsModal(sender);
+});
+
+// Open one account's Plan & Usage modal. The Manage Accounts modal -- an
+// overlay-hosted page with window.minds -- calls this when a card is clicked;
+// openAccountPlanModal re-validates the user id (never trust the renderer).
+ipcMain.on('open-account-plan', (event, userId) => {
+  const sender = getBundleFromEvent(event);
+  if (sender) openAccountPlanModal(sender, userId);
 });
 
 // Open the sharing-editor modal. The workspace-settings page -- a trusted local

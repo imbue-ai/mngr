@@ -480,13 +480,14 @@ class BackupSnapshotSummary(FrozenModel):
 
 
 class WorkspaceBackupsResponse(FrozenModel):
-    """A workspace's full backup picture: snapshots plus the backup-service verification result.
+    """A workspace's snapshot picture: the restic listing plus the live backing-up flag.
 
-    The snapshot half (restic, run from the minds machine) works even when
-    the workspace is offline or destroyed; the verification half execs into
-    the workspace and reports OFFLINE/DISABLED instead when it cannot or
-    must not run. Cross-workspace parallelism is the caller's job -- this is
-    deliberately the only backup-health surface, one workspace per request.
+    Served from the minds machine's restic access alone, so it works (and
+    stays fast) even when the workspace is offline or destroyed. The slow
+    exec-based service verification lives on the separate ``backup-check``
+    route so this response never waits on an exec into the workspace.
+    Cross-workspace parallelism is the caller's job -- one workspace per
+    request.
     """
 
     agent_id: str = Field(description="The workspace agent id")
@@ -502,6 +503,19 @@ class WorkspaceBackupsResponse(FrozenModel):
     snapshots_error: str | None = Field(
         default=None, description="Why the snapshot listing failed (e.g. restic error), when it did"
     )
+
+
+class WorkspaceBackupCheckResponse(FrozenModel):
+    """The backup-service verification verdict for one workspace.
+
+    The check execs into the workspace (slow: it spawns mngr and runs a
+    script inside the container), which is why it is a separate route from
+    the fast snapshot listing. Staleness (configured but no recent snapshot
+    while the workspace has been up long enough to have produced one) is
+    folded into ``problems``.
+    """
+
+    agent_id: str = Field(description="The workspace agent id")
     check_state: str = Field(description="Verification verdict: OK/PROBLEMS/OFFLINE/DISABLED/UNKNOWN")
     problems: tuple[str, ...] = Field(default=(), description="Detected backup-service problems (badge causes)")
     installed_version: str | None = Field(default=None, description="Installed backup-code version, when known")

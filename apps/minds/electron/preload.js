@@ -78,6 +78,10 @@ contextBridge.exposeInMainWorld('minds', {
   // 'signin' (for "Log In" callers); omitted keeps the sign-up default.
   openMindsSettings: () => ipcRenderer.send('open-minds-settings'),
   openAccounts: () => ipcRenderer.send('open-accounts'),
+  // Open one account's Plan & Usage modal, called by the Manage Accounts modal
+  // when a card is clicked. main re-validates the user id (never trust the
+  // renderer) before building the /accounts/<id>/plan-modal URL.
+  openAccountPlan: (userId) => ipcRenderer.send('open-account-plan', userId),
   openSigninModal: (returnTo, mode) => ipcRenderer.send('open-signin-modal', returnTo, mode),
   // Open the sharing editor as a centered overlay modal, called by the
   // workspace-settings page's "Manage sharing" buttons (a trusted local page on

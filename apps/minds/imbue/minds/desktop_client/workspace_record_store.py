@@ -26,6 +26,8 @@ import tomllib
 from base64 import b64decode
 from base64 import b64encode
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -128,6 +130,13 @@ class ReplicaRecord(FrozenModel):
     hosting_device_id: str | None = Field(default=None, description="Hosting install (None for cloud rows)")
     device_label: str = Field(default="", description="Human-readable device name")
     state: str = Field(default=RECORD_STATE_ACTIVE, description="'active' or 'destroyed'")
+    destroyed_at: str | None = Field(
+        default=None,
+        description=(
+            "When the record was tombstoned (ISO timestamp). Server-stamped on push; "
+            "stamped locally at tombstone time so offline rows still age toward the backup reaper"
+        ),
+    )
     restored_from_host_id: str | None = Field(default=None, description="Lineage link for restorations")
     encrypted_secrets: str | None = Field(default=None, description="Base64 AEAD blob under the account DEK")
     revision: int = Field(default=0, description="Last server-acknowledged revision (0 = never pushed)")
@@ -168,6 +177,7 @@ def replica_record_from_wire(wire: dict[str, object]) -> ReplicaRecord:
         hosting_device_id=(str(wire["hosting_device_id"]) if wire.get("hosting_device_id") is not None else None),
         device_label=str(wire.get("device_label", "")),
         state=str(wire.get("state", RECORD_STATE_ACTIVE)),
+        destroyed_at=(str(wire["destroyed_at"]) if wire.get("destroyed_at") is not None else None),
         restored_from_host_id=(
             str(wire["restored_from_host_id"]) if wire.get("restored_from_host_id") is not None else None
         ),
@@ -663,13 +673,19 @@ class WorkspaceRecordStore(MutableModel):
             self._drop_record_unlocked(user_id, record.host_id)
 
     def tombstone_record(self, user_id: str, account_email: str, agent_id: str) -> None:
-        """Mark ``agent_id``'s record DESTROYED (kept, with secrets, for backup access)."""
+        """Mark ``agent_id``'s record DESTROYED (kept, with secrets, for backup access).
+
+        Stamps ``destroyed_at`` locally so the row ages toward the backup
+        reaper even before (or without) a successful push; the server's own
+        stamp replaces it on the next pull.
+        """
         found = self.find_active_record(agent_id)
         if found is None or found[0] != user_id:
             return
         _, record = found
         tombstoned = record.model_copy_update(
             to_update(record.field_ref().state, RECORD_STATE_DESTROYED),
+            to_update(record.field_ref().destroyed_at, datetime.now(timezone.utc).isoformat()),
             to_update(record.field_ref().is_dirty, True),
         )
         with self._lock:
@@ -1241,6 +1257,7 @@ class WorkspaceRecordStore(MutableModel):
             )
             resurrected = record.model_copy_update(
                 to_update(record.field_ref().state, RECORD_STATE_ACTIVE),
+                to_update(record.field_ref().destroyed_at, None),
                 to_update(record.field_ref().is_dirty, True),
             )
             with self._lock:
@@ -1297,6 +1314,7 @@ class WorkspaceRecordStore(MutableModel):
             )
             tombstoned = record.model_copy_update(
                 to_update(record.field_ref().state, RECORD_STATE_DESTROYED),
+                to_update(record.field_ref().destroyed_at, datetime.now(timezone.utc).isoformat()),
                 to_update(record.field_ref().is_dirty, True),
             )
             with self._lock:

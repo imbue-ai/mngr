@@ -229,7 +229,8 @@
 
       <SectionHeader divider>Backups</SectionHeader>
       <div id="backup-section">
-        <p id="backup-status-line" class="type-body text-secondary mb-4">Loading backup status...</p>
+        <p id="backup-status-line" class="type-body text-secondary mb-1"><Spinner size="sm" extra="mr-1" /> Loading backup status...</p>
+        <p class="type-helper text-tertiary mb-4">If this workspace is destroyed, its backups are kept for 30 days and can be downloaded from the Recently destroyed workspaces page, then deleted automatically.</p>
 
         {# Recent backups: workspace_backups.js fills #backup-history from
            /backups (newest-first). "View all" appears when there are more
@@ -288,6 +289,9 @@
             minds checks your backups regularly and warns you below if anything
             needs attention.
           </p>
+          {# The service check execs into the workspace and takes a while;
+             workspace_backups.js hides this once the verdict arrives. #}
+          <p id="backup-check-loading" class="type-body text-secondary mb-2"><Spinner size="sm" extra="mr-1" /> Checking the backup service...</p>
           <div class="flex items-center gap-2">
             <span id="backup-verification-btn-wrap" class="hidden">
               <Button variant="secondary" id="backup-verification-btn">Disable</Button>
@@ -316,7 +320,7 @@
 
       <Modal id="destroy-dialog">
         <h2 class="type-heading text-primary mb-3">Destroy workspace?</h2>
-        <p class="type-body text-primary mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
+        <p class="type-body text-primary mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone. Backups are kept for 30 days after destruction, then deleted.</p>
         <div class="flex justify-end gap-3">
           <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
           <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>

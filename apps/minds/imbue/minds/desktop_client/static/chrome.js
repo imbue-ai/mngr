@@ -410,6 +410,7 @@
     // Browser-mode full-page fallbacks (Electron shows these as modals).
     if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
     if (path === '/accounts') return { kind: 'page', pageLabel: 'Accounts', showBack: true };
+    if (path === '/workspaces/destroyed') return { kind: 'page', pageLabel: 'Recently destroyed', showBack: true };
     // No back arrow on the auth pages (browser-mode fallbacks; Electron opens
     // the sign-in modal instead): the titlebar home button is the escape, and
     // the home route bounces back to the splash until an account option is

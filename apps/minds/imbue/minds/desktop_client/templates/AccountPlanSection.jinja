@@ -53,6 +53,13 @@
         {% endif %}
       </div>
     {% endif %}
+    {% if plan_view.is_over_storage_quota or plan_view.get("is_at_bucket_quota") %}
+      {# Destroyed workspaces' backups keep consuming quota until reaped;
+         reviewing (and deleting) them is the second reclaim lever. #}
+      <div class="mt-2">
+        <Link href="/workspaces/destroyed" extra="type-helper">Review destroyed workspace backups &rarr;</Link>
+      </div>
+    {% endif %}
   {% else %}
     <div class="type-helper text-tertiary">
       Plan and usage are unavailable right now (could not reach Imbue Cloud).

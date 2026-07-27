@@ -26,6 +26,7 @@ from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 
 _DEFAULT_HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
@@ -204,12 +205,26 @@ def resolve_account_or_active(store: ImbueCloudSessionStore, value: str | None) 
 
 
 def handle_imbue_cloud_errors(func):
-    """Decorator that translates ImbueCloudError into structured JSON failures."""
+    """Decorator that translates ImbueCloudError into structured JSON failures.
+
+    Quota rejections keep their structured detail (``code: quota_exceeded``
+    plus entitlement/limit/current) so callers -- e.g. minds' quota-pressure
+    eviction -- can key off the code instead of parsing message text.
+    """
 
     @_functools.wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except ImbueCloudQuotaExceededError as exc:
+            fail_with_json(
+                str(exc),
+                error_class=type(exc).__name__,
+                code="quota_exceeded",
+                entitlement=exc.entitlement,
+                limit=exc.limit,
+                current=exc.current,
+            )
         except ImbueCloudError as exc:
             fail_with_json(str(exc), error_class=type(exc).__name__)
 

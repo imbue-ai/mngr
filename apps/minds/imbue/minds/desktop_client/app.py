@@ -48,6 +48,13 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_reaper import BACKUP_RETENTION_FALLBACK_SECONDS
+from imbue.minds.desktop_client.backup_reaper import ReapCandidate
+from imbue.minds.desktop_client.backup_reaper import bucket_owner_prefix_from_env
+from imbue.minds.desktop_client.backup_reaper import emails_by_bucket_owner_prefix
+from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
+from imbue.minds.desktop_client.backup_reaper import parse_destroyed_at
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -108,6 +115,7 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
+from imbue.minds.desktop_client.templates import render_account_plan_modal_page
 from imbue.minds.desktop_client.templates import render_account_plan_section
 from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
@@ -117,6 +125,8 @@ from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_consent_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_destroyed_workspaces_page
+from imbue.minds.desktop_client.templates import render_destroyed_workspaces_rows_fragment
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
@@ -128,6 +138,7 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_request_error_page
 from imbue.minds.desktop_client.templates import render_settings_modal_page
 from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
@@ -141,6 +152,7 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
+from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
@@ -2168,6 +2180,27 @@ def _handle_account_plan_view(user_id: str) -> Response:
     return make_html_response(content=html)
 
 
+def _handle_account_plan_modal(user_id: str) -> Response:
+    """Render the per-account "Plan & Usage" modal shell (GET /accounts/<user_id>/plan-modal).
+
+    Opened by clicking an account card in the Manage Accounts modal. The shell
+    renders instantly and does NOT touch the connector; the modal then fills its
+    usage asynchronously from ``GET /accounts/<user_id>/plan-view`` (one account,
+    one connector query), so the overlay appears the moment the card is clicked.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None:
+        return make_response(status_code=404, content="Account not found")
+    html = render_account_plan_modal_page(acct_user_id=user_id, account_email=str(account.email))
+    return make_html_response(content=html)
+
+
 def _handle_account_trim_backups(user_id: str) -> Response:
     """Start the over-quota backup trim flow for one account (idempotent while running)."""
     if not _is_request_authenticated():
@@ -2213,6 +2246,190 @@ def _handle_account_set_plan(user_id: str) -> Response:
         # user-facing explanation -- surface it plainly.
         return _handle_accounts_page(plan_error=f"Could not switch {account.email} to '{plan}': {exc}")
     return make_response(status_code=303, headers={"Location": "/accounts"})
+
+
+def _signed_in_accounts_by_user_id() -> dict[str, str]:
+    """``user_id -> email`` for every signed-in account (empty when no session store)."""
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    if session_store is None:
+        return {}
+    return {str(account.user_id): str(account.email) for account in session_store.list_accounts()}
+
+
+def _destroyed_workspace_retention_days() -> int:
+    scheduler = get_state().sync_scheduler
+    reaper = scheduler.backup_reaper if scheduler is not None else None
+    retention_seconds = reaper.get_retention_seconds() if reaper is not None else BACKUP_RETENTION_FALLBACK_SECONDS
+    return max(1, round(retention_seconds / 86400.0))
+
+
+def _destroyed_workspace_retention_days_cached() -> int:
+    """Retention days from the reaper's cache, never fetching from the connector.
+
+    Used by the page shell so its first paint can't block on a (potentially
+    10-second) connector round-trip; the async rows path uses the fetching
+    :func:`_destroyed_workspace_retention_days` to refresh the cache.
+    """
+    scheduler = get_state().sync_scheduler
+    reaper = scheduler.backup_reaper if scheduler is not None else None
+    retention_seconds = (
+        reaper.get_cached_retention_seconds() if reaper is not None else BACKUP_RETENTION_FALLBACK_SECONDS
+    )
+    return max(1, round(retention_seconds / 86400.0))
+
+
+def _collect_destroyed_workspace_rows() -> list[dict[str, Any]]:
+    """Rows for the recently-destroyed page: tombstoned records (newest first), then orphan envs.
+
+    A row can download when its env is materialized locally (the sync pass
+    reconstructs envs from synced secrets for unlocked accounts, so a
+    still-encrypted row shows a locked hint instead).
+    """
+    state = get_state()
+    paths: WorkspacePaths | None = state.api_v1_paths
+    session_store: MultiAccountSessionStore | None = state.session_store
+    record_store = session_store.record_store if session_store is not None else None
+    if paths is None or record_store is None:
+        return []
+    accounts = _signed_in_accounts_by_user_id()
+    retention_seconds = _destroyed_workspace_retention_days() * 86400.0
+    now = datetime.now(timezone.utc)
+
+    # Tombstoned records for every signed-in account, newest destroyed first.
+    record_rows: list[dict[str, Any]] = []
+    for user_id, account_email in accounts.items():
+        for record in record_store.list_records(user_id):
+            if record.state != RECORD_STATE_DESTROYED:
+                continue
+            destroyed_at = parse_destroyed_at(record.destroyed_at)
+            has_env = read_canonical_env(paths, AgentId(record.agent_id)) is not None
+            has_secrets = record.encrypted_secrets is not None
+            days_left: int | None = None
+            if destroyed_at is not None:
+                days_left = max(0, round((retention_seconds - (now - destroyed_at).total_seconds()) / 86400.0))
+            record_rows.append(
+                {
+                    "agent_id": record.agent_id,
+                    "host_id": record.host_id,
+                    "user_id": user_id,
+                    "account_email": account_email,
+                    "display_name": record.display_name or record.agent_id,
+                    "account_label": account_email,
+                    "destroyed_at": destroyed_at,
+                    "destroyed_at_display": destroyed_at.strftime("%Y-%m-%d") if destroyed_at is not None else "",
+                    "days_left_display": (
+                        ""
+                        if days_left is None
+                        else ("deleting soon" if days_left <= 0 else f"{days_left} day(s) until deletion")
+                    ),
+                    "has_backup": has_env or has_secrets,
+                    "can_download": has_env,
+                    "is_locked": (not has_env) and has_secrets,
+                    "can_delete": True,
+                    "delete_hint": "",
+                }
+            )
+    record_rows.sort(key=lambda row: row["destroyed_at"] if row["destroyed_at"] is not None else now, reverse=True)
+
+    # Orphan envs this device holds with no record at all, newest file first.
+    email_by_prefix = emails_by_bucket_owner_prefix(accounts)
+    orphan_rows: list[dict[str, Any]] = []
+    for agent_id in reversed(list_orphan_env_agent_ids(paths, record_store)):
+        env_content = read_canonical_env(paths, agent_id)
+        owner_prefix = bucket_owner_prefix_from_env(env_content) if env_content is not None else None
+        owner_email = email_by_prefix.get(owner_prefix) if owner_prefix is not None else None
+        is_owner_signed_in = owner_email is not None or owner_prefix is None
+        orphan_rows.append(
+            {
+                "agent_id": str(agent_id),
+                "host_id": "",
+                "user_id": "",
+                "account_email": owner_email or "",
+                "display_name": f"unknown workspace ({agent_id})",
+                "account_label": "this device",
+                "destroyed_at": None,
+                "destroyed_at_display": "",
+                # Only imbue_cloud (R2) orphans are ever cleaned automatically;
+                # BYO envs stay until the user deletes them here.
+                "days_left_display": (
+                    "scheduled for cleanup" if owner_prefix is not None else "kept until you delete it"
+                ),
+                "has_backup": True,
+                "can_download": True,
+                "is_locked": False,
+                "can_delete": is_owner_signed_in,
+                "delete_hint": "" if is_owner_signed_in else "Sign in as the owning account to delete.",
+            }
+        )
+    return record_rows + orphan_rows
+
+
+def _handle_destroyed_workspaces_page(error: str | None = None) -> Response:
+    """Render the recently-destroyed workspaces page shell (GET /workspaces/destroyed).
+
+    The shell paints instantly; the slow row collection happens in
+    ``GET /workspaces/destroyed/rows``, which the shell's script fetches.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    html = render_destroyed_workspaces_page(
+        retention_days=_destroyed_workspace_retention_days_cached(),
+        error=error or "",
+    )
+    return make_html_response(content=html)
+
+
+def _handle_destroyed_workspaces_rows() -> Response:
+    """Render the recently-destroyed row list fragment (GET /workspaces/destroyed/rows).
+
+    Collecting the rows queries the record store and inspects local envs, so it
+    runs here (fetched asynchronously by the page shell) rather than blocking
+    the page's first paint.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    html = render_destroyed_workspaces_rows_fragment(rows=_collect_destroyed_workspace_rows())
+    return make_html_response(content=html)
+
+
+def _handle_destroyed_workspace_delete_backup(agent_id: str) -> Response:
+    """Delete one destroyed workspace's backup now (POST /workspaces/destroyed/<agent_id>/delete-backup).
+
+    Frees quota before the retention window expires: the same strict
+    bucket-record-env deletion the reaper performs, just on user request. On
+    failure the page re-renders with the error rather than losing the row.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    scheduler = get_state().sync_scheduler
+    reaper = scheduler.backup_reaper if scheduler is not None else None
+    if reaper is None:
+        return _handle_destroyed_workspaces_page(error="Backup management is not configured on this install.")
+    accounts = _signed_in_accounts_by_user_id()
+    row = next(
+        (entry for entry in _collect_destroyed_workspace_rows() if entry["agent_id"] == agent_id),
+        None,
+    )
+    if row is None:
+        return _handle_destroyed_workspaces_page(error=f"No destroyed workspace found for {agent_id}.")
+    if row["user_id"]:
+        destroyed_at = row["destroyed_at"] if row["destroyed_at"] is not None else datetime.now(timezone.utc)
+        candidate = ReapCandidate(
+            user_id=row["user_id"],
+            account_email=row["account_email"],
+            agent_id=row["agent_id"],
+            host_id=row["host_id"],
+            display_name=row["display_name"],
+            destroyed_at=destroyed_at,
+        )
+        is_reaped = reaper.reap_candidate(candidate, reason="user_requested")
+    else:
+        is_reaped = reaper.delete_orphan_backup_now(AgentId(agent_id), accounts)
+    if not is_reaped:
+        return _handle_destroyed_workspaces_page(
+            error=f"Could not delete the backup for {row['display_name']}; see the logs and try again."
+        )
+    return make_response(status_code=303, headers={"Location": "/workspaces/destroyed"})
 
 
 def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | None:
@@ -3261,6 +3478,28 @@ def create_desktop_client(
         # own status instead of collapsing them into a 500 -- matching the prior
         # FastAPI/Starlette behavior where the catch-all only handled real 500s.
         if isinstance(exc, HTTPException):
+            # A routing-level 404/405 reached by a real page NAVIGATION would
+            # paint werkzeug's bare error page -- no chrome, no links --
+            # stranding the user (e.g. a link that points at a POST-only
+            # route, which session restore then faithfully re-opens). Serve a
+            # friendly page with a way home instead. Navigation is detected
+            # from the request, not the path: even an /api/ URL strands the
+            # user when opened as a document, while fetch()/XHR callers (who
+            # read resp.ok, not the body) keep the raw status. Chromium always
+            # sends Sec-Fetch-Dest; the Accept sniff is the fallback for
+            # clients that don't (fetches default to Accept: */*).
+            sec_fetch_dest = request.headers.get("Sec-Fetch-Dest", "")
+            is_document_navigation = (
+                sec_fetch_dest == "document" if sec_fetch_dest else "text/html" in request.headers.get("Accept", "")
+            )
+            if exc.code in (404, 405) and is_document_navigation:
+                if exc.code == 404:
+                    title, message = "Page not found", "This page doesn't exist (it may have moved)."
+                else:
+                    title, message = "That didn't work", "This link can't be opened as a page."
+                return make_html_response(
+                    content=render_request_error_page(title=title, message=message), status_code=exc.code
+                )
             return exc
         logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.path)
         return make_response(status_code=500, content=f"Internal Server Error: {exc}")
@@ -3350,6 +3589,13 @@ def create_desktop_client(
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
     app.add_url_rule("/accounts/modal", view_func=_handle_accounts_modal)
+    app.add_url_rule("/workspaces/destroyed", view_func=_handle_destroyed_workspaces_page)
+    app.add_url_rule("/workspaces/destroyed/rows", view_func=_handle_destroyed_workspaces_rows)
+    app.add_url_rule(
+        "/workspaces/destroyed/<agent_id>/delete-backup",
+        view_func=_handle_destroyed_workspace_delete_backup,
+        methods=["POST"],
+    )
     app.add_url_rule("/settings", view_func=_handle_settings_page)
     app.add_url_rule("/settings/ai-keys", view_func=_handle_ai_keys_page)
     app.add_url_rule("/settings/ai-keys/mint", view_func=_handle_mint_ai_key, methods=["POST"])
@@ -3385,6 +3631,7 @@ def create_desktop_client(
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan-view", view_func=_handle_account_plan_view)
+    app.add_url_rule("/accounts/<user_id>/plan-modal", view_func=_handle_account_plan_modal)
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])

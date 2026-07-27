@@ -23,6 +23,7 @@ dependencies = [
     "imbue-mngr",
     "imbue-mngr-aws",
     "imbue-mngr-forward",
+    "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",
     "imbue-mngr-vps",
     "modal>=1.4.3",
@@ -56,6 +57,7 @@ concurrency-group = { workspace = true }
 imbue-mngr = { workspace = true }
 imbue-mngr-aws = { workspace = true }
 imbue-mngr-forward = { workspace = true }
+imbue-mngr-imbue-cloud = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }

@@ -55,6 +55,7 @@ from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketKeyMaterial
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import BackupProvider
@@ -266,10 +267,16 @@ def _is_bucket_already_exists_error(error: ImbueCloudCliError) -> bool:
     return "imbuecloudbucketexistserror" in haystack or "already exists" in haystack
 
 
+# Ceiling on quota evictions within one provisioning attempt: a backstop far
+# above any real bucket quota, so the evict-and-retry loop always terminates.
+_MAX_QUOTA_EVICTIONS: Final[int] = 100
+
+
 def _create_or_reuse_bucket(
     imbue_cloud_cli: ImbueCloudCli,
     account_email: str,
     bucket_short_name: str,
+    quota_evictor: Callable[[], bool] | None,
 ) -> tuple[str, str, R2BucketKeyMaterial]:
     """Create the per-workspace bucket, or reuse it (rolling its single key) if it exists.
 
@@ -277,17 +284,31 @@ def _create_or_reuse_bucket(
     same provisioning can be re-applied to a host whose bucket was already
     created on an earlier run: each bucket has exactly one key, and rolling
     it yields fresh credentials with the same Access Key ID.
+
+    On a quota rejection (bucket count or storage bytes), ``quota_evictor``
+    -- when provided -- force-destroys the oldest destroyed-workspace backup
+    (something the reapers would delete anyway) and the create is retried,
+    until it succeeds or nothing is left to evict. An evictor *failure*
+    aborts immediately (propagates), so a broken destroy path cannot loop.
     """
-    try:
-        result = imbue_cloud_cli.create_bucket(account=account_email, name=bucket_short_name, access="readwrite")
-        return result.bucket.bucket_name, str(result.bucket.s3_endpoint), result.key
-    except ImbueCloudCliError as e:
-        if not _is_bucket_already_exists_error(e):
-            raise
-        logger.debug("Bucket {} already exists; reusing it by rolling its key", bucket_short_name)
-        info = imbue_cloud_cli.get_bucket_info(account_email, bucket_short_name)
-        key = imbue_cloud_cli.roll_bucket_key(account=account_email, name=bucket_short_name)
-        return info.bucket_name, str(info.s3_endpoint), key
+    for _ in range(_MAX_QUOTA_EVICTIONS):
+        try:
+            result = imbue_cloud_cli.create_bucket(account=account_email, name=bucket_short_name, access="readwrite")
+            return result.bucket.bucket_name, str(result.bucket.s3_endpoint), result.key
+        except ImbueCloudQuotaExceededCliError:
+            if quota_evictor is None or not quota_evictor():
+                raise
+            logger.info("Evicted a destroyed workspace's backup to free quota; retrying bucket create")
+        except ImbueCloudCliError as e:
+            if not _is_bucket_already_exists_error(e):
+                raise
+            logger.debug("Bucket {} already exists; reusing it by rolling its key", bucket_short_name)
+            info = imbue_cloud_cli.get_bucket_info(account_email, bucket_short_name)
+            key = imbue_cloud_cli.roll_bucket_key(account=account_email, name=bucket_short_name)
+            return info.bucket_name, str(info.s3_endpoint), key
+    raise BackupProvisioningError(
+        f"Bucket create for {bucket_short_name} still over quota after {_MAX_QUOTA_EVICTIONS} evictions"
+    )
 
 
 def _repository_url_for_bucket(s3_endpoint: str, bucket_name: str) -> str:
@@ -300,6 +321,7 @@ def _resolve_repository_and_backend_env(
     host_id: str,
     *,
     imbue_cloud_cli: ImbueCloudCli | None,
+    quota_evictor: Callable[[], bool] | None,
 ) -> tuple[str, dict[str, str]]:
     """Resolve ``(repository_url, backend_env)`` for the chosen provider.
 
@@ -314,7 +336,9 @@ def _resolve_repository_and_backend_env(
             raise BackupProvisioningError("imbue_cloud backups require an account")
         if not host_id:
             raise BackupProvisioningError("imbue_cloud backups require a host id to name the bucket")
-        bucket_name, s3_endpoint, key = _create_or_reuse_bucket(imbue_cloud_cli, request.account_email, host_id)
+        bucket_name, s3_endpoint, key = _create_or_reuse_bucket(
+            imbue_cloud_cli, request.account_email, host_id, quota_evictor
+        )
         repository = _repository_url_for_bucket(s3_endpoint, bucket_name)
         backend_env = {
             "AWS_ACCESS_KEY_ID": str(key.access_key_id),
@@ -347,6 +371,9 @@ def configure_backups_for_host(
     imbue_cloud_cli: ImbueCloudCli | None,
     paths: WorkspacePaths,
     parent_cg: ConcurrencyGroup | None = None,
+    # Frees quota by force-destroying the oldest destroyed-workspace backup
+    # when the bucket create hits a quota limit; None disables eviction.
+    quota_evictor: Callable[[], bool] | None = None,
 ) -> None:
     """Provision the repository (from minds) and inject the workspace's restic.env.
 
@@ -372,7 +399,7 @@ def configure_backups_for_host(
             return
 
         repository, backend_env = _resolve_repository_and_backend_env(
-            request, host_id, imbue_cloud_cli=imbue_cloud_cli
+            request, host_id, imbue_cloud_cli=imbue_cloud_cli, quota_evictor=quota_evictor
         )
         workspace_password = generate_workspace_password()
 
@@ -450,6 +477,7 @@ def change_backup_destination_for_host(
     imbue_cloud_cli: ImbueCloudCli | None,
     paths: WorkspacePaths,
     parent_cg: ConcurrencyGroup | None = None,
+    quota_evictor: Callable[[], bool] | None = None,
 ) -> None:
     """Point a workspace's backups at a new destination via fresh provisioning.
 
@@ -473,4 +501,5 @@ def change_backup_destination_for_host(
         imbue_cloud_cli=imbue_cloud_cli,
         paths=paths,
         parent_cg=parent_cg,
+        quota_evictor=quota_evictor,
     )

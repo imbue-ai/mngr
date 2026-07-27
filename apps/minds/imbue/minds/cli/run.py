@@ -23,6 +23,7 @@ import os
 import secrets
 import threading
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
@@ -50,6 +51,8 @@ from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
+from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import SupervisorProducerRemediator
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
@@ -411,6 +414,13 @@ def run(
     session_store = MultiAccountSessionStore(
         data_dir=data_directory, cli=imbue_cloud_cli, record_store=workspace_record_store
     )
+    backup_reaper = BackupReaperManager(
+        paths=paths,
+        record_store=workspace_record_store,
+        imbue_cloud_cli=imbue_cloud_cli,
+        connector_url=str(client_env_config.connector_url),
+        concurrency_group=root_concurrency_group,
+    )
     sync_scheduler = WorkspaceSyncScheduler(
         record_store=workspace_record_store,
         session_store=session_store,
@@ -420,6 +430,7 @@ def run(
         # observe child makes the workspace reachable now instead of on the
         # next poll.
         on_ssh_material_written=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
+        backup_reaper=backup_reaper,
     )
     sync_scheduler.start(root_concurrency_group)
     response_events = load_response_events(data_directory)
@@ -550,6 +561,9 @@ def run(
         mngr_forward_preauth_cookie=preauth_cookie,
         system_interface_health_tracker=system_interface_health_tracker,
         lima_image_gate=lima_image_gate,
+        backup_quota_evictor_factory=lambda account_email: _resolve_backup_quota_evictor(
+            session_store, workspace_record_store, paths, imbue_cloud_cli, account_email
+        ),
     )
 
     # Every newly-discovered agent on a minds-managed host gets
@@ -804,6 +818,30 @@ class _StreamedPermissionRequestHandler(FrozenModel):
             return HostId(info.host_id)
         except ValueError:
             return None
+
+
+def _resolve_backup_quota_evictor(
+    session_store: MultiAccountSessionStore,
+    workspace_record_store: WorkspaceRecordStore,
+    paths: WorkspacePaths,
+    imbue_cloud_cli: ImbueCloudCli,
+    account_email: str,
+) -> Callable[[], bool] | None:
+    """Bind quota eviction for a creation's account, or None when the account is unknown.
+
+    Partial-applied over the app's stores at startup to form the
+    ``AgentCreator.backup_quota_evictor_factory`` (account email -> evictor).
+    """
+    account = next((entry for entry in session_store.list_accounts() if str(entry.email) == account_email), None)
+    if account is None:
+        return None
+    return make_quota_evictor(
+        record_store=workspace_record_store,
+        paths=paths,
+        imbue_cloud_cli=imbue_cloud_cli,
+        user_id=str(account.user_id),
+        account_email=account_email,
+    )
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:

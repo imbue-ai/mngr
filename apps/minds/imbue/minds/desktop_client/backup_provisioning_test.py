@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.backup_provisioning import env_text_defines_rest
 from imbue.minds.desktop_client.backup_provisioning import generate_workspace_password
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketCreateResult
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketKeyMaterial
@@ -142,7 +143,7 @@ def test_is_bucket_already_exists_error_matches_structured_and_prose() -> None:
 
 def test_create_or_reuse_creates_a_fresh_bucket() -> None:
     cli = _make_cli()
-    bucket_name, endpoint, key = _create_or_reuse_bucket(cli, "a@b.com", "host-abc")
+    bucket_name, endpoint, key = _create_or_reuse_bucket(cli, "a@b.com", "host-abc", None)
     assert bucket_name == "u--host-abc"
     assert endpoint == _ENDPOINT + "/"
     assert key.access_key_id == "AKID"
@@ -152,7 +153,7 @@ def test_create_or_reuse_creates_a_fresh_bucket() -> None:
 
 def test_create_or_reuse_reuses_existing_bucket_with_fresh_key() -> None:
     cli = _make_cli(create_error_stderr='{"error": "bucket already exists"}')
-    bucket_name, _endpoint, key = _create_or_reuse_bucket(cli, "a@b.com", "host-abc")
+    bucket_name, _endpoint, key = _create_or_reuse_bucket(cli, "a@b.com", "host-abc", None)
     assert bucket_name == "u--host-abc"
     assert cli.minted_key_names == ["host-abc"]
     assert key.secret_access_key.get_secret_value() == "SECRET"
@@ -161,7 +162,7 @@ def test_create_or_reuse_reuses_existing_bucket_with_fresh_key() -> None:
 def test_create_or_reuse_propagates_non_exists_errors() -> None:
     cli = _make_cli(create_error_stderr='{"error": "internal error"}')
     with pytest.raises(ImbueCloudCliError):
-        _create_or_reuse_bucket(cli, "a@b.com", "host-abc")
+        _create_or_reuse_bucket(cli, "a@b.com", "host-abc", None)
 
 
 # --- _resolve_repository_and_backend_env ---
@@ -169,7 +170,9 @@ def test_create_or_reuse_propagates_non_exists_errors() -> None:
 
 def test_resolve_imbue_cloud_builds_repo_and_creds() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="a@b.com")
-    repository, backend_env = _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=_make_cli())
+    repository, backend_env = _resolve_repository_and_backend_env(
+        request, "host-abc", imbue_cloud_cli=_make_cli(), quota_evictor=None
+    )
     assert repository == f"s3:{_ENDPOINT}/u--host-abc"
     assert backend_env == {"AWS_ACCESS_KEY_ID": "AKID", "AWS_SECRET_ACCESS_KEY": "SECRET"}
 
@@ -177,13 +180,13 @@ def test_resolve_imbue_cloud_builds_repo_and_creds() -> None:
 def test_resolve_imbue_cloud_requires_cli() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="a@b.com")
     with pytest.raises(BackupProvisioningError):
-        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
+        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None, quota_evictor=None)
 
 
 def test_resolve_imbue_cloud_requires_account() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="")
     with pytest.raises(BackupProvisioningError):
-        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=_make_cli())
+        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=_make_cli(), quota_evictor=None)
 
 
 def test_resolve_api_key_extracts_repo_and_backend_env() -> None:
@@ -191,7 +194,9 @@ def test_resolve_api_key_extracts_repo_and_backend_env() -> None:
         backup_provider=BackupProvider.API_KEY,
         api_key_env_text="RESTIC_REPOSITORY=s3:r\nAWS_ACCESS_KEY_ID=k\nAWS_SECRET_ACCESS_KEY=s\n",
     )
-    repository, backend_env = _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
+    repository, backend_env = _resolve_repository_and_backend_env(
+        request, "host-abc", imbue_cloud_cli=None, quota_evictor=None
+    )
     assert repository == "s3:r"
     assert backend_env == {"AWS_ACCESS_KEY_ID": "k", "AWS_SECRET_ACCESS_KEY": "s"}
 
@@ -202,13 +207,13 @@ def test_resolve_api_key_rejects_restic_password() -> None:
         api_key_env_text="RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=nope\n",
     )
     with pytest.raises(BackupProvisioningError):
-        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
+        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None, quota_evictor=None)
 
 
 def test_resolve_api_key_requires_repository() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="AWS_ACCESS_KEY_ID=k\n")
     with pytest.raises(BackupProvisioningError):
-        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
+        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None, quota_evictor=None)
 
 
 def test_backup_exec_argv_never_starts_a_stopped_host() -> None:
@@ -220,3 +225,50 @@ def test_backup_exec_argv_never_starts_a_stopped_host() -> None:
     argv = build_backup_exec_argv(AgentId.generate(), "echo hi")
     assert argv[1] == "exec"
     assert "--no-start" in argv
+
+
+# --- quota-pressure eviction ---
+
+
+class _QuotaThenSuccessCli(_FakeImbueCloudCli):
+    """Raises the typed quota error until ``quota_failures`` creates have been attempted."""
+
+    quota_failures: int = Field(default=1)
+    attempt_count: int = Field(default=0)
+
+    def create_bucket(self, *, account: str, name: str, access: str = "readwrite") -> R2BucketCreateResult:
+        self.attempt_count += 1
+        if self.attempt_count <= self.quota_failures:
+            raise ImbueCloudQuotaExceededCliError("bucket create: quota exceeded")
+        return super().create_bucket(account=account, name=name, access=access)
+
+
+def test_create_or_reuse_evicts_and_retries_on_quota_pressure() -> None:
+    cli = _QuotaThenSuccessCli(connector_url=AnyUrl("http://connector.example"), quota_failures=2)
+    evictions: list[int] = []
+
+    def evictor() -> bool:
+        evictions.append(1)
+        return True
+
+    bucket_name, _endpoint, _key = _create_or_reuse_bucket(cli, "a@b.com", "host-abc", evictor)
+
+    assert bucket_name == "u--host-abc"
+    assert len(evictions) == 2
+    assert cli.attempt_count == 3
+
+
+def test_create_or_reuse_raises_quota_error_when_nothing_to_evict() -> None:
+    cli = _QuotaThenSuccessCli(connector_url=AnyUrl("http://connector.example"), quota_failures=99)
+
+    with pytest.raises(ImbueCloudQuotaExceededCliError):
+        _create_or_reuse_bucket(cli, "a@b.com", "host-abc", lambda: False)
+
+    # The failed eviction aborts immediately: exactly one create was attempted.
+    assert cli.attempt_count == 1
+
+
+def test_create_or_reuse_raises_quota_error_without_an_evictor() -> None:
+    cli = _QuotaThenSuccessCli(connector_url=AnyUrl("http://connector.example"), quota_failures=1)
+    with pytest.raises(ImbueCloudQuotaExceededCliError):
+        _create_or_reuse_bucket(cli, "a@b.com", "host-abc", None)

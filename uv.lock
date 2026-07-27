@@ -2057,6 +2057,7 @@ name = "imbue-mngr-imbue-cloud"
 version = "0.1.6"
 source = { editable = "libs/mngr_imbue_cloud" }
 dependencies = [
+    { name = "boto3" },
     { name = "click" },
     { name = "click-option-group" },
     { name = "concurrency-group" },
@@ -2075,6 +2076,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3" },
     { name = "click" },
     { name = "click-option-group" },
     { name = "concurrency-group", editable = "libs/concurrency_group" },
@@ -2883,6 +2885,7 @@ dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-aws" },
     { name = "imbue-mngr-forward" },
+    { name = "imbue-mngr-imbue-cloud" },
     { name = "imbue-mngr-latchkey" },
     { name = "imbue-mngr-vps" },
     { name = "itsdangerous" },
@@ -2920,6 +2923,7 @@ requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-aws", editable = "libs/mngr_aws" },
     { name = "imbue-mngr-forward", editable = "libs/mngr_forward" },
+    { name = "imbue-mngr-imbue-cloud", editable = "libs/mngr_imbue_cloud" },
     { name = "imbue-mngr-latchkey", editable = "libs/mngr_latchkey" },
     { name = "imbue-mngr-vps", editable = "libs/mngr_vps" },
     { name = "itsdangerous", specifier = ">=2.2.0" },

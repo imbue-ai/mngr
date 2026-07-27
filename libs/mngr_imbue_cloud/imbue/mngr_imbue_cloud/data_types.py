@@ -473,6 +473,13 @@ class SyncWorkspaceRecord(FrozenModel):
     revision: int = Field(description="Per-row monotonic revision; pushes are CAS on this")
     created_at: str = Field(default="", description="Server timestamp (response only)")
     updated_at: str = Field(default="", description="Server timestamp (response only)")
+    destroyed_at: str | None = Field(
+        default=None,
+        description=(
+            "Server tombstone stamp (response only; set while state is 'destroyed'). Passed through so "
+            "clients can age destroyed workspaces' backups against the server's clock."
+        ),
+    )
 
 
 class SyncKeyBundle(FrozenModel):
