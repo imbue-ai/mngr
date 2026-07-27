@@ -1719,7 +1719,12 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Create a work_dir by mirroring the git repo and optionally rsyncing extra files."""
         target_path = self._resolve_transfer_target(source_host, source_path, options)
 
-        with self.mngr_ctx.concurrency_group.make_concurrency_group("_create_work_dir_via_git_mirror") as cg:
+        # Generous exit timeout (vs the 10s default): the git mirror of a large work_dir -- e.g. a
+        # repo that vendors the full mngr tree -- plus its Modal-volume upload can take well over 10s,
+        # and a create must wait for it rather than terminating the strand mid-transfer.
+        with self.mngr_ctx.concurrency_group.make_concurrency_group(
+            "_create_work_dir_via_git_mirror", exit_timeout_seconds=300.0
+        ) as cg:
             self._mkdir(target_path)
 
             # Track generated work dir in a thread to reduce latency
@@ -2651,8 +2656,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 "tmux": options.tmux.to_data_dict(),
             }
 
-            # this is really just here to parallelize some of the work and decrease latency to creating a host
-            with self.mngr_ctx.concurrency_group.make_concurrency_group("write_agent_state") as concurrency_group:
+            # this is really just here to parallelize some of the work and decrease latency to creating a host.
+            # Generous exit timeout (vs the 10s default): persisting agent state uploads to a Modal volume,
+            # which for a large work_dir (e.g. a repo vendoring the full mngr tree) can exceed 10s -- wait
+            # for the upload rather than terminating the strand mid-write.
+            with self.mngr_ctx.concurrency_group.make_concurrency_group(
+                "write_agent_state", exit_timeout_seconds=300.0
+            ) as concurrency_group:
                 threads: list[ObservableThread] = []
 
                 threads.append(

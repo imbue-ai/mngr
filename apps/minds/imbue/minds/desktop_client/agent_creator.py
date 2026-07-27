@@ -1024,6 +1024,15 @@ def _build_mngr_create_command(
             # inherits the same gateway URL / password / JWT.
             latchkey_host_env_args.extend(["--host-env", f"{key}={value}"])
 
+    # Extra env vars this creating host wants forwarded onto every created workspace host, named (not
+    # valued) in ``MINDS_EXTRA_PASS_HOST_ENV`` (space-separated). ``--pass-host-env`` reads each from
+    # THIS process's env, so the values ride the creating process rather than the command line. The
+    # eval harness sets this on its box to push feature flags into eval workspaces; a normal create
+    # leaves it unset.
+    extra_pass_host_env_args: list[str] = []
+    for name in os.environ.get("MINDS_EXTRA_PASS_HOST_ENV", "").split():
+        extra_pass_host_env_args.extend(["--pass-host-env", name])
+
     color_label_args: list[str] = []
     if color is not None:
         # Pre-normalized by the caller (or the form POST handler) to
@@ -1074,6 +1083,7 @@ def _build_mngr_create_command(
         "--label",
         "user_created=true",
         *latchkey_host_env_args,
+        *extra_pass_host_env_args,
         "--label",
         "is_primary=true",
         *color_label_args,
@@ -1190,6 +1200,13 @@ def _build_mngr_create_command(
             # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
             # run the provisioning chain over SSH on the freshly-created sandbox.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
+            # Optional overlay template stacked on ``modal`` (like ``docker_runsc`` on
+            # ``docker``): any create host may name one via ``MINDS_MODAL_EXTRA_TEMPLATE``.
+            # The eval harness sets it to ``modal_eval`` (shorter sandbox timeout); a
+            # normal create leaves it unset and gets plain ``modal``.
+            extra_modal_template = os.environ.get("MINDS_MODAL_EXTRA_TEMPLATE")
+            if extra_modal_template:
+                mngr_command.extend(["--template", extra_modal_template])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.GCP:
             # Same shape as aws; the address already selects the ``byok-gcp-<slug>``
