@@ -41,6 +41,26 @@ create flow from the cut-over template, on the production env.
 - Direct visit to the openvscode share hostname silently authenticated via
   the existing Access session and rendered the full VS Code workbench.
 
+## openvscode multi-origin observations (reported by operator)
+
+- VS Code webviews (walkthroughs, previews, extension UIs) load from their
+  default sandbox origin `<hash>.vscode-cdn.net`. The minds Electron shell's
+  window-open policy treats that foreign origin as external and opens it in
+  the system browser instead of rendering inline. Fix options: allowlist
+  `*.vscode-cdn.net` iframes in the Electron shell, and/or run openvscode
+  with `--webview-external-endpoint={{uuid}}.openvscode.<workspace-host>` so
+  webviews use the service's own sub-origin space (deep sub-origin routing
+  already validated locally; on shares this is the wildcard-cert "Option C"
+  connector follow-up).
+- On the share, a walkthrough image
+  (`.../static/out/vs/workbench/contrib/welcomeGettingStarted/common/media/dark.png`)
+  rendered broken. Diagnosis: backend serves it 200, local forward serves it
+  200 (image/png), and the share hostname 302s unauthenticated requests to
+  Access login -- so the browser sent that request without the Access cookie
+  (cross-site webview/subresource context vs the Access cookie's SameSite).
+  This is the exact class the planned connector work addresses
+  (`allow_iframe: true` + non-Strict SameSite on the Access app cookie).
+
 ## Caveats / follow-ups
 
 - WebKit/Safari local: `*.localhost` subdomain iframes get no cookies (each
