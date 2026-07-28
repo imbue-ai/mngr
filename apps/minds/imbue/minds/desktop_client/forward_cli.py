@@ -85,7 +85,7 @@ class ForwardSubprocessConfig(FrozenModel):
     ``mngr_forward_session=<value>`` on ``localhost:<port>``.
     """
 
-    service: str = Field(default="system_interface", description="Service name to forward")
+    service: str = Field(default="system-interface", description="Service name to forward")
     agent_include: tuple[str, ...] = Field(
         default=("has(agent.labels.is_primary)",),
         description="CEL include filters passed to --agent-include",

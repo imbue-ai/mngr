@@ -738,13 +738,13 @@ def test_build_forward_command_includes_use_http2_flag() -> None:
     the rest of minds builds, so a client that expects https reaches an https
     proxy.
     """
-    config = ForwardSubprocessConfig(service="system_interface")
+    config = ForwardSubprocessConfig(service="system-interface")
     command = _build_forward_command(config, preauth_cookie="a-secret")
     assert "--use-http2" in command
     # Core flags are always present alongside the TLS flag.
     assert command[:2] == [config.mngr_binary, "forward"]
     assert "--observe-via-file" in command
-    assert command[command.index("--service") + 1] == "system_interface"
+    assert command[command.index("--service") + 1] == "system-interface"
     assert command[command.index("--preauth-cookie") + 1] == "a-secret"
 
 
@@ -773,7 +773,7 @@ def test_redact_secrets_masks_preauth_cookie_value() -> None:
         "--port",
         "8421",
         "--service",
-        "system_interface",
+        "system-interface",
         "--preauth-cookie",
         "this-is-a-secret-value",
         "--format",
@@ -785,7 +785,7 @@ def test_redact_secrets_masks_preauth_cookie_value() -> None:
     # The flag name itself must remain so the log retains diagnostic value.
     assert "--preauth-cookie" in redacted
     # Other args must be untouched.
-    assert "system_interface" in redacted
+    assert "system-interface" in redacted
     assert "8421" in redacted
 
 

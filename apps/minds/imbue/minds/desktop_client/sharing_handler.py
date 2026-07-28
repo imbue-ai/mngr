@@ -36,6 +36,14 @@ from imbue.mngr.primitives import AgentId
 
 _CLOUDFLARE_ACCESS_LOGIN_HOST_SUFFIX: Final[str] = "cloudflareaccess.com"
 
+# The workspace shell's registered service name. Sharing this service means
+# "share the workspace": the shared shell iframes every other service on its
+# sibling hostname (<name>--<host>--<user>.<domain>), so every registered
+# service is exposed alongside it with the same email grants. (Interim
+# single-tier model: the connector-side Access-Group master list from the
+# forwarding-redesign plan replaces this fan-out later.)
+SHELL_SERVICE_NAME: Final[str] = "system-interface"
+
 # Substring marker (in the plugin's JSON stderr) of Cloudflare's transient
 # Access-API internal error -- e.g. code 10001, seen when re-enabling sharing
 # seconds after a disable while the deleted Access app is still tearing down.
@@ -222,8 +230,60 @@ def enable_sharing_via_cloudflare(
     if tunnel.token is None:
         raise SharingError("Sharing enabled but the connector did not return a Cloudflare token.")
     inject_tunnel_token_into_agent(agent_id, tunnel.token.get_secret_value(), cli.mngr_caller)
+
+    if str(service_name) == SHELL_SERVICE_NAME:
+        _share_sibling_services(
+            cli=cli,
+            account_email=account_email,
+            agent_id=agent_id,
+            emails=emails,
+            backend_resolver=backend_resolver,
+        )
+
     hostname = str(service.get("hostname") or "")
     return tunnel, f"https://{hostname}{base_path}" if hostname else None
+
+
+def _share_sibling_services(
+    cli: ImbueCloudCli,
+    account_email: str,
+    agent_id: AgentId,
+    emails: Sequence[str],
+    backend_resolver: BackendResolverInterface,
+) -> None:
+    """Expose every other registered service with the same grants as the shell.
+
+    The shared shell derives each panel's hostname by swapping the first
+    ``--`` token of its own host, so a workspace share is only usable if the
+    sibling hostnames actually exist and admit the same emails. The connector
+    call is the same idempotent ``enable_sharing`` used for the shell itself.
+
+    A sibling that has no backend URL yet is skipped (it registers later and
+    can be re-shared by re-saving the workspace share); a connector failure on
+    one sibling aborts with a message naming it, so a partially-published
+    share is at least visible to the user.
+    """
+    for sibling_name in backend_resolver.list_services_for_agent(agent_id):
+        if str(sibling_name) == SHELL_SERVICE_NAME:
+            continue
+        sibling_url = backend_resolver.get_backend_url(agent_id, sibling_name)
+        if not sibling_url:
+            logger.info("Skipping share of '{}' on {}: no backend URL yet", sibling_name, agent_id)
+            continue
+        sibling_origin = split_origin_and_base_path(sibling_url)[0]
+        try:
+            cli.enable_sharing(
+                account=account_email,
+                agent_id=str(agent_id),
+                service_name=str(sibling_name),
+                service_url=sibling_origin,
+                policy={"emails": list(emails)},
+            )
+        except ImbueCloudCliError as exc:
+            raise SharingError(
+                f"Workspace share is partially published: sharing panel service '{sibling_name}' "
+                f"failed ({exc}). Re-save the share to retry."
+            ) from exc
 
 
 def get_sharing_status(
@@ -324,10 +384,17 @@ def disable_sharing(
         # ``tunnel.services`` is the same authoritative list ``get_sharing_status``
         # reads, so this never skips a service that is actually still shared.
         return
-    try:
-        cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=str(service_name))
-    except ImbueCloudCliError as exc:
-        raise SharingError(f"Failed to disable sharing: {exc}") from exc
+    # Disabling the workspace share tears down every service that was
+    # published alongside the shell (the fan-out in enable), not just the
+    # shell's own hostname -- otherwise the panels would stay reachable.
+    names_to_remove = (
+        tuple(tunnel.services) if str(service_name) == SHELL_SERVICE_NAME else (str(service_name),)
+    )
+    for name in names_to_remove:
+        try:
+            cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=name)
+        except ImbueCloudCliError as exc:
+            raise SharingError(f"Failed to disable sharing for '{name}': {exc}") from exc
 
 
 # Body marker of Cloudflare Access's transient error page: the edge can start

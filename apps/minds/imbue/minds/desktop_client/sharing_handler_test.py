@@ -10,6 +10,8 @@ from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sharing_handler import SHELL_SERVICE_NAME
+from imbue.minds.desktop_client.sharing_handler import _share_sibling_services
 from imbue.minds.desktop_client.sharing_handler import disable_sharing
 from imbue.minds.desktop_client.sharing_handler import get_sharing_status
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
@@ -138,6 +140,110 @@ def test_disable_sharing_is_idempotent_when_service_already_absent(tmp_path: Pat
     disable_sharing(agent_id, ServiceName("web"), cli, store)
 
     assert cli.remove_service_calls == []
+
+
+def test_disable_sharing_of_shell_removes_every_shared_service(tmp_path: Path) -> None:
+    """Disabling the workspace share tears down the shell AND all fanned-out panels."""
+    agent_id = AgentId()
+    cli = _DisableStubCli(
+        connector_url=FAKE_CONNECTOR_URL,
+        stub_tunnel=TunnelInfo(
+            tunnel_name="u--abcd1234efgh5678",
+            tunnel_id="t1",
+            services=(SHELL_SERVICE_NAME, "terminal", "openvscode"),
+        ),
+    )
+    cli.add_account(user_id="u-1", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    store.associate_created_workspace(
+        user_id="u-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    disable_sharing(agent_id, ServiceName(SHELL_SERVICE_NAME), cli, store)
+
+    assert cli.remove_service_calls == [SHELL_SERVICE_NAME, "terminal", "openvscode"]
+
+
+def test_disable_sharing_of_single_service_removes_only_it(tmp_path: Path) -> None:
+    """A narrow per-service disable never touches sibling services."""
+    agent_id = AgentId()
+    cli = _DisableStubCli(
+        connector_url=FAKE_CONNECTOR_URL,
+        stub_tunnel=TunnelInfo(
+            tunnel_name="u--abcd1234efgh5678",
+            tunnel_id="t1",
+            services=(SHELL_SERVICE_NAME, "terminal"),
+        ),
+    )
+    cli.add_account(user_id="u-1", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    store.associate_created_workspace(
+        user_id="u-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    disable_sharing(agent_id, ServiceName("terminal"), cli, store)
+
+    assert cli.remove_service_calls == ["terminal"]
+
+
+# -- workspace-share fan-out (share the shell => share every panel service) --
+
+
+class _FanoutStubCli(FakeImbueCloudCli):
+    """Fake CLI that records every enable_sharing call it receives."""
+
+    enable_sharing_calls: list[tuple[str, str, tuple[str, ...]]] = Field(default_factory=list)
+
+    def enable_sharing(
+        self,
+        *,
+        account: str,
+        agent_id: str,
+        service_name: str,
+        service_url: str,
+        policy: object,
+    ) -> tuple[TunnelInfo, dict[str, object]]:
+        emails = tuple(policy["emails"]) if isinstance(policy, dict) else ()
+        self.enable_sharing_calls.append((service_name, service_url, emails))
+        tunnel = TunnelInfo(tunnel_name="u--abcd1234efgh5678", tunnel_id="t1", services=(service_name,))
+        return tunnel, {"hostname": f"{service_name}--abc--owner.example.com"}
+
+
+def test_share_sibling_services_shares_every_registered_service_except_shell(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _FanoutStubCli(connector_url=FAKE_CONNECTOR_URL)
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={
+            str(agent_id): {
+                SHELL_SERVICE_NAME: "http://localhost:8000",
+                "terminal": "http://localhost:7681",
+                "openvscode": "http://localhost:8082",
+            }
+        }
+    )
+
+    _share_sibling_services(
+        cli=cli,
+        account_email="owner@example.com",
+        agent_id=agent_id,
+        emails=("friend@example.com",),
+        backend_resolver=resolver,
+    )
+
+    shared = sorted(call[0] for call in cli.enable_sharing_calls)
+    assert shared == ["openvscode", "terminal"]
+    # Every sibling gets the same grant list as the shell.
+    assert all(call[2] == ("friend@example.com",) for call in cli.enable_sharing_calls)
 
 
 _SHARE_URL = "https://web--abc--owner.example.com"

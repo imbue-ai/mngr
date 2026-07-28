@@ -308,7 +308,7 @@ def _build_scenarios() -> list[Scenario]:
                 ws_name="alpha",
                 current_account=None,
                 accounts=(account_a,),
-                servers=("system_interface",),
+                servers=("system-interface",),
             ),
         ),
         Scenario(
@@ -318,7 +318,7 @@ def _build_scenarios() -> list[Scenario]:
                 ws_name="alpha",
                 current_account=account_a,
                 accounts=(account_a,),
-                servers=("system_interface", "frontend"),
+                servers=("system-interface", "frontend"),
             ),
         ),
         Scenario(

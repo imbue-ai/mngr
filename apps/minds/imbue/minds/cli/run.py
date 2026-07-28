@@ -3,7 +3,7 @@
 Replaces the deleted ``desktop_client/runner.py``. The auth + subdomain-
 forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 
-1. Spawns ``mngr forward --service system_interface --preauth-cookie ...`` as
+1. Spawns ``mngr forward --service system-interface --preauth-cookie ...`` as
    a subprocess via ``EnvelopeStreamConsumer`` (which feeds the surviving
    ``MngrCliBackendResolver`` from the plugin's envelope stream).
 2. Builds the slimmed minds-side bare-origin Flask app and runs it on
