@@ -56,6 +56,7 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.file_utils import atomic_write
 
 # Sub-directory under the user's ``latchkey_directory`` that holds every
 # file written by this plugin (gateway record, default permissions,
@@ -76,6 +77,17 @@ _ADMIN_PERMISSIONS_FILENAME: Final[str] = "latchkey_admin_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
 _HOSTS_DIR_NAME: Final[str] = "hosts"
 _OPAQUE_PERMISSIONS_DIR_NAME: Final[str] = "permissions"
+
+# Filename of the shared detent config that holds the additional (custom)
+# services' scope/permission schemas. Every per-host permissions file
+# ``include``s it *by this bare name*, and detent resolves that include relative
+# to the directory of the file that references it. On the desktop the gateway
+# evaluates a host file through its opaque handle in ``opaque_permissions_dir``,
+# so the shared file must live there; on a VPS the gateway's single
+# ``permissions.json`` lives in ``~/.latchkey``, so the shared file is shipped
+# alongside it there. The bare relative name therefore resolves correctly on
+# both sides without rewriting the include.
+SHARED_SCHEMAS_FILENAME: Final[str] = "minds_shared_schemas.json"
 
 
 def plugin_data_dir(latchkey_directory: Path) -> Path:
@@ -254,6 +266,14 @@ class LatchkeyPermissionsConfig(FrozenModel):
             "without depending on names from detent's built-in schema catalog."
         ),
     )
+    include: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Optional relative paths to other detent config files whose schemas/rules are merged "
+            "in (detent's ``include`` directive). Used to reference the shared additional-services "
+            "schemas file so a custom scope resolves without inlining its schema into every host file."
+        ),
+    )
 
 
 def hosts_dir(data_dir: Path) -> Path:
@@ -339,6 +359,30 @@ def opaque_permissions_dir(data_dir: Path) -> Path:
     JWT.
     """
     return data_dir / _OPAQUE_PERMISSIONS_DIR_NAME
+
+
+def shared_schemas_path(data_dir: Path) -> Path:
+    """Return the desktop path of the shared additional-services schemas file.
+
+    It lives inside :func:`opaque_permissions_dir` because the gateway evaluates
+    a host permissions file through its opaque handle there, and detent resolves
+    the bare ``include`` name relative to that handle's directory.
+    """
+    return opaque_permissions_dir(data_dir) / SHARED_SCHEMAS_FILENAME
+
+
+def write_shared_schemas_file(data_dir: Path, content: str) -> Path:
+    """Atomically (over)write the shared additional-services schemas file (mode 0o600).
+
+    Idempotently rewritten on every gateway bring-up so a package update to the
+    additional-services schemas always wins over a stale on-disk copy. Returns
+    the written path. A newly-created file gets ``atomic_write``'s default 0o600
+    mode; a rewrite preserves the existing mode.
+    """
+    path = shared_schemas_path(data_dir)
+    atomic_write(path, content)
+    logger.debug("Wrote shared additional-services schemas file to {}", path)
+    return path
 
 
 _OPAQUE_PERMISSIONS_PATH_MAX_ATTEMPTS: Final[int] = 16
@@ -449,15 +493,20 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     User-driven per-service grants still go through the gateway's
     ``permissions`` extension instead.
 
-    An empty ``schemas`` dict is omitted from the output (detent
-    accepts both shapes); ``rules`` is always emitted, even when empty.
+    An empty ``schemas`` dict (and an empty ``include`` list) is omitted
+    from the output (detent accepts both shapes); ``rules`` is always
+    emitted, even when empty.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     # Pydantic's ``exclude=`` drops the field entirely; we drop
-    # ``schemas`` when empty so existing on-disk files (and the
+    # ``schemas``/``include`` when empty so existing on-disk files (and the
     # gateway's own writers) keep emitting the same ``{"rules": ...}``
     # shape they always have.
-    exclude: set[str] = set() if config.schemas else {"schemas"}
+    exclude: set[str] = set()
+    if not config.schemas:
+        exclude.add("schemas")
+    if not config.include:
+        exclude.add("include")
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(config.model_dump_json(indent=2, exclude=exclude))
     tmp_path.chmod(0o600)

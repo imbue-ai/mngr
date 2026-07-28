@@ -21,6 +21,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.additional_services import load_additional_service_registrations
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
@@ -48,6 +49,7 @@ from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import shared_schemas_path
 from imbue.mngr_latchkey.testing import FakeLatchkey
 
 _POLL_INTERVAL_SECONDS = 0.05
@@ -124,18 +126,26 @@ def test_start_gateway_raises_when_binary_disappears_after_initialize(tmp_path: 
 
 
 def _make_version_binary(tmp_path: Path, version_output: str, exit_code: int = 0) -> Path:
-    """Build a stub ``latchkey`` that responds to ``--version`` and nothing else.
+    """Build a stub ``latchkey`` that responds to ``--version`` (and the no-op ``services`` calls).
 
-    Sufficient for the ``initialize`` version-gate tests, which never
-    drive the manager past the version check.
+    Sufficient for the ``initialize`` version-gate tests. The version-failure
+    tests never drive the manager past the version check; the version-success
+    tests proceed to additional-service registration, so ``services list`` /
+    ``services register`` are handled as no-ops to keep those clean.
     """
     script = tmp_path / "latchkey"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import sys\n"
-        f'assert sys.argv[1] == "--version", f"unexpected argv: {{sys.argv[1:]!r}}"\n'
-        f"print({version_output!r})\n"
-        f"sys.exit({exit_code})\n"
+        'if sys.argv[1] == "--version":\n'
+        f"    print({version_output!r})\n"
+        f"    sys.exit({exit_code})\n"
+        'if sys.argv[1:3] == ["services", "list"]:\n'
+        "    print('[]')\n"
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["services", "register"]:\n'
+        "    sys.exit(0)\n"
+        'raise AssertionError(f"unexpected argv: {sys.argv[1:]!r}")\n'
     )
     script.chmod(0o755)
     return script
@@ -188,6 +198,84 @@ def test_initialize_raises_when_version_command_exits_nonzero(tmp_path: Path) ->
         manager.initialize()
 
 
+# -- initialize() additional-service registration ----------------------------
+
+
+def _make_registration_recording_binary(
+    tmp_path: Path,
+    existing_services: tuple[str, ...],
+    register_log_path: Path,
+) -> Path:
+    """Build a stub ``latchkey`` that records ``services register`` invocations.
+
+    ``--version`` reports the minimum version; ``services list`` returns
+    ``existing_services`` as JSON; each ``services register <name>
+    --base-api-url <url>`` appends ``<name> <url>`` to ``register_log_path``.
+    Enough to assert which additional services ``initialize`` registers.
+    """
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        'if sys.argv[1] == "--version":\n'
+        f"    print({LATCHKEY_MIN_VERSION!r})\n"
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["services", "list"]:\n'
+        f"    print(json.dumps({list(existing_services)!r}))\n"
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["services", "register"]:\n'
+        "    name = sys.argv[3]\n"
+        "    base_api_url = sys.argv[sys.argv.index('--base-api-url') + 1]\n"
+        f"    open({str(register_log_path)!r}, 'a').write(name + ' ' + base_api_url + '\\n')\n"
+        "    sys.exit(0)\n"
+        'raise AssertionError(f"unexpected argv: {sys.argv[1:]!r}")\n'
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_initialize_registers_additional_service_when_absent(tmp_path: Path) -> None:
+    """A bundled additional service not yet known to latchkey is registered at init."""
+    register_log = tmp_path / "register.log"
+    binary = _make_registration_recording_binary(tmp_path, existing_services=(), register_log_path=register_log)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    manager.initialize()
+
+    # ``claude-ai`` is the seed additional service; it must be registered with
+    # its bundled base API URL.
+    assert "claude-ai https://claude.ai/\n" in register_log.read_text()
+
+
+def test_initialize_skips_registration_when_service_already_present(tmp_path: Path) -> None:
+    """Registration is skipped for services latchkey already knows (register is not idempotent)."""
+    register_log = tmp_path / "register.log"
+    already_registered = tuple(registration.name for registration in load_additional_service_registrations())
+    binary = _make_registration_recording_binary(
+        tmp_path, existing_services=already_registered, register_log_path=register_log
+    )
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    manager.initialize()
+
+    assert not register_log.exists()
+
+
+def test_initialize_materializes_shared_schemas_file(tmp_path: Path) -> None:
+    """``initialize`` writes the shared additional-services schemas file the host baselines include."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+
+    manager.initialize()
+
+    shared_path = shared_schemas_path(manager.plugin_data_dir)
+    assert shared_path.is_file()
+    parsed = json.loads(shared_path.read_text())
+    # It is a schemas-only detent config carrying the additional-service schemas.
+    assert set(parsed.keys()) == {"schemas"}
+    assert "claude-ai" in parsed["schemas"]
+
+
 def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
     """Build a shell script that imitates ``latchkey`` for gateway / ensure-browser / create-jwt.
 
@@ -237,6 +325,15 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
         "    args = [a for a in sys.argv[3:] if not a.startswith('--')]\n"
         "    print(f'fake-jwt-for:{args[0]}' if args else 'fake-jwt')\n"
+        "    sys.exit(0)\n"
+        # ``services list`` / ``services register`` are what
+        # ``Latchkey.initialize`` runs to register the additional (custom)
+        # services. Report an empty service list and accept every
+        # registration so initialize() completes cleanly.
+        'if sys.argv[1:3] == ["services", "list"]:\n'
+        "    print('[]')\n"
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["services", "register"]:\n'
         "    sys.exit(0)\n"
         # ``auth re-encrypt <destination> [service ...]`` writes a fake
         # filtered store as ``credentials.json.enc`` into the <destination>

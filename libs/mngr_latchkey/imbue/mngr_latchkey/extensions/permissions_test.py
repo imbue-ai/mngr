@@ -243,6 +243,58 @@ def _post_json(url: str, body: object) -> tuple[int, object]:
         return int(e.code), None
 
 
+def test_available_includes_additional_claude_ai_service(node_extension: str) -> None:
+    """The additional (custom) claude.ai service is served by the available endpoint."""
+    status, payload = _get_json(f"{node_extension}/permissions/available/claude-ai")
+
+    assert status == 200
+    entries = _as_list(payload)
+    # An additional service exposes exactly one scope.
+    assert len(entries) == 1
+    entry = _as_dict(entries[0])
+    assert entry["scope"] == "claude-ai"
+    _as_nonempty_str(entry["display_name"])
+    permission_names = [_as_dict(permission)["name"] for permission in _as_list(entry["permissions"])]
+    # ``any`` is injected at index 0; the named ``everything`` permission follows.
+    assert permission_names[0] == "any"
+    assert "everything" in permission_names
+
+
+def test_post_rule_for_additional_service_writes_rule_only(tmp_path: Path) -> None:
+    """Granting a custom-service scope writes only the rule; its schema comes from the include.
+
+    A custom (additional) service's scope schema lives in the shared
+    ``minds_shared_schemas.json`` file that every host permissions file
+    references via detent's ``include``, so the write path no longer inlines
+    schemas into the host file -- the grant is a plain rule, exactly like a
+    builtin scope.
+    """
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key=claude-ai"
+        status, payload = _post_json(url, {"permissions": ["everything"]})
+
+    assert status == 201, payload
+    on_disk = json.loads(target.read_text())
+    assert on_disk["rules"] == [{"claude-ai": ["everything"]}]
+    assert "schemas" not in on_disk
+
+
+def test_post_rule_for_builtin_scope_writes_no_schemas(tmp_path: Path) -> None:
+    """A builtin scope's rule carries no inline schemas (they live in detent)."""
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key=slack-api"
+        status, payload = _post_json(url, {"permissions": ["any"]})
+
+    assert status == 201, payload
+    on_disk = json.loads(target.read_text())
+    assert on_disk["rules"] == [{"slack-api": ["any"]}]
+    assert "schemas" not in on_disk
+
+
 def test_post_rule_creates_missing_host_directory(tmp_path: Path) -> None:
     """``POST /permissions/rules`` materializes the parent host directory if absent.
 

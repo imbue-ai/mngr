@@ -1,0 +1,24 @@
+{
+  "claude-ai": {
+    "display_name": "Claude",
+    "base_api_url": "https://claude.ai/",
+    "scope": {
+      "name": "claude-ai",
+      "schema": {
+        "properties": {
+          "domain": {
+            "const": "claude.ai"
+          }
+        },
+        "required": ["domain"]
+      }
+    },
+    "permissions": [
+      {
+        "name": "everything",
+        "description": "Full access to claude.ai.",
+        "schema": {}
+      }
+    ]
+  }
+}

@@ -25,6 +25,13 @@ not carry, so they live here as curated constants. A scope without a curated
 display name falls back to a title-cased service name and is reported on stderr
 so a maintainer can curate it.
 
+Minds' own *additional* (custom) services -- ones detent has no schemas for, e.g.
+``claude.ai`` -- are appended from ``additional_services.json`` (see
+:mod:`imbue.mngr_latchkey.additional_services`). Folding them in here is what
+lets every reader of the catalog work from one file in one shape; that file
+remains the source of the extra data those services need beyond the catalog
+(their ``base_api_url`` and their inline detent schemas).
+
 Run with::
 
     uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
@@ -43,6 +50,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import setup_logging
+from imbue.mngr_latchkey.additional_services import additional_services_catalog_payload
 
 # detent built-in schemas live under this subdirectory of a detent checkout.
 _BUILTIN_SCHEMAS_SUBPATH: Final[str] = "src/schemas/builtin"
@@ -299,7 +307,33 @@ def build_services_catalog(builtin_schemas_directory: Path) -> dict[str, list[di
         service_name: [entry.model_dump() for entry in entries_by_service_name[service_name]]
         for service_name in ordered_service_names
     }
-    return catalog
+
+    # Append minds' own *additional* (custom) services, which detent knows
+    # nothing about. Folding them in here means every reader of the catalog --
+    # the Python ``ServicesCatalog`` and both gateway extensions -- sees exactly
+    # one file in one shape, instead of each merging a second file itself.
+    return {**catalog, **_additional_services_catalog(catalog)}
+
+
+def _additional_services_catalog(
+    detent_catalog: Mapping[str, list[dict[str, object]]],
+) -> dict[str, list[dict[str, object]]]:
+    """Return the additional services' catalog entries, refusing to shadow a detent service.
+
+    A name or scope collision means the same service is defined twice (once
+    upstream, once by minds) and the merged file would silently keep only one,
+    so it is a hard error rather than a silent overwrite.
+    """
+    additional = additional_services_catalog_payload()
+    name_collisions = sorted(set(detent_catalog) & set(additional))
+    if name_collisions:
+        raise GenerateServicesError(f"Additional services collide with detent service name(s): {name_collisions}")
+    detent_scopes = {entry["scope"] for entries in detent_catalog.values() for entry in entries}
+    additional_scopes = {entry["scope"] for entries in additional.values() for entry in entries}
+    scope_collisions = sorted(detent_scopes & additional_scopes)
+    if scope_collisions:
+        raise GenerateServicesError(f"Additional services collide with detent scope(s): {scope_collisions}")
+    return additional
 
 
 def _write_catalog(catalog: Mapping[str, object], output_path: Path) -> None:

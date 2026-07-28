@@ -80,12 +80,13 @@ def latchkey_root(tmp_path: Path) -> Path:
 def fake_latchkey_binary(tmp_path: Path) -> Path:
     """Drop a ``latchkey`` shell script that satisfies the CLI's read-side calls.
 
-    Implements only ``--version``, ``ensure-browser``, and
-    ``gateway create-jwt``: enough for ``Latchkey.initialize`` plus
-    ``prepare_agent_latchkey`` to succeed without touching a real
-    ``latchkey`` binary. Mirrors the helper in ``core_test.py`` so
-    these tests can run on machines where the real upstream CLI is
-    unavailable.
+    Implements ``--version``, ``ensure-browser``, ``gateway create-jwt``,
+    and the no-op ``services list`` / ``services register`` calls
+    ``Latchkey.initialize`` makes to register additional services: enough
+    for ``initialize`` plus ``prepare_agent_latchkey`` to succeed without
+    touching a real ``latchkey`` binary. Mirrors the helper in
+    ``core_test.py`` so these tests can run on machines where the real
+    upstream CLI is unavailable.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -101,6 +102,11 @@ def fake_latchkey_binary(tmp_path: Path) -> Path:
         'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
         "    args = [a for a in sys.argv[3:] if not a.startswith('--')]\n"
         "    print(f'fake-jwt-for:{args[0]}' if args else 'fake-jwt')\n"
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["services", "list"]:\n'
+        "    print('[]')\n"
+        "    sys.exit(0)\n"
+        'if sys.argv[1:3] == ["services", "register"]:\n'
         "    sys.exit(0)\n"
         "sys.exit(99)\n"
     )

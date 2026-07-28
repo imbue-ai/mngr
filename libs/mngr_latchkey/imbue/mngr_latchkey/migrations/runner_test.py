@@ -69,6 +69,8 @@ def test_run_migrates_legacy_store_up_and_records_current_version(tmp_path: Path
     rule_keys = [next(iter(rule.keys())) for rule in migrated["rules"]]
     assert "minds-workspaces" not in rule_keys
     assert "minds-workspaces" not in migrated["schemas"]
+    # Migration 3 stamps the shared additional-services schemas include.
+    assert migrated["include"] == ["minds_shared_schemas.json"]
 
 
 def test_run_is_noop_once_already_at_current_version(tmp_path: Path) -> None:

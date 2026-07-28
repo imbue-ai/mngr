@@ -10,6 +10,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import SHARED_SCHEMAS_FILENAME
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
@@ -17,13 +18,16 @@ from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import forward_log_path
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import load_forward_info
+from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import point_opaque_handle_at_host
 from imbue.mngr_latchkey.store import save_forward_info
 from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.store import shared_schemas_path
 from imbue.mngr_latchkey.store import update_forward_info_gateway_port
+from imbue.mngr_latchkey.store import write_shared_schemas_file
 
 # Gateway-record save/load/delete tests went away when the on-disk
 # gateway record did. The supervisor's bound gateway port is now
@@ -314,3 +318,35 @@ def test_update_forward_info_gateway_port_raises_when_record_absent(tmp_path: Pa
         update_forward_info_gateway_port(tmp_path, gateway_port=32867)
     assert "32867" in str(exc_info.value)
     assert load_forward_info(tmp_path) is None
+
+
+# -- include field + shared schemas file ---------------------------------------
+
+
+def test_save_and_load_round_trips_include(tmp_path: Path) -> None:
+    """A non-empty ``include`` list survives a save/load round-trip."""
+    path = tmp_path / "perms.json"
+    config = LatchkeyPermissionsConfig(rules=({"claude-ai": ["everything"]},), include=("minds_shared_schemas.json",))
+    save_permissions(path, config)
+
+    assert json.loads(path.read_text())["include"] == ["minds_shared_schemas.json"]
+    assert load_permissions(path).include == ("minds_shared_schemas.json",)
+
+
+def test_save_omits_empty_include(tmp_path: Path) -> None:
+    """An empty ``include`` is dropped from the file, matching the pre-existing shape."""
+    path = tmp_path / "perms.json"
+    save_permissions(path, LatchkeyPermissionsConfig())
+    assert "include" not in json.loads(path.read_text())
+
+
+def test_write_shared_schemas_file_writes_into_opaque_dir(tmp_path: Path) -> None:
+    """The shared schemas file lands in the opaque permissions dir under the bare include name."""
+    content = '{"schemas": {"claude-ai": {}}}\n'
+    path = write_shared_schemas_file(tmp_path, content)
+
+    assert path == shared_schemas_path(tmp_path)
+    assert path.name == SHARED_SCHEMAS_FILENAME
+    assert path.parent == opaque_permissions_dir(tmp_path)
+    assert path.read_text() == content
+    assert (path.stat().st_mode & 0o777) == 0o600

@@ -423,6 +423,35 @@ uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
 Display names and the service ordering are editorial metadata detent does
 not carry; they live as curated constants in that script.
 
+`services.json` also carries minds' own *additional* (custom) services --
+ones detent has no schemas for, currently `claude.ai`. Their definitions are
+hand-maintained in `imbue/mngr_latchkey/additional_services.json` (a
+`display_name`, a `base_api_url`, the single Detent `scope` it exposes with
+an inline scope `schema`, and its grantable `permissions`, each with an
+inline `schema`), and the generator *folds their catalog entries into*
+`services.json`. That way every reader of the catalog -- `ServicesCatalog`
+and both gateway extensions -- works from one file in one shape and never
+has to know which of the two sources a service came from.
+
+Because a custom scope is not a detent builtin, its schemas have to reach the
+gateway's permission check. Rather than inlining them into every host file,
+`core.Latchkey.initialize()` materializes them **once** into a shared
+`minds_shared_schemas.json` (a schemas-only detent config, see
+`SHARED_SCHEMAS_FILENAME`), and every per-host permissions file references it
+via detent's `include` directive (added by the agent baseline and, for
+pre-existing files, a data-format migration). The include is a *bare relative*
+name so it resolves next to the referencing file on both the desktop (the
+opaque-handle directory) and a VPS (`~/.latchkey`, where `remote_gateway`
+ships the shared file alongside the permissions file). Granting a custom scope
+is then a plain rule write -- no per-host schema inlining.
+
+`imbue.mngr_latchkey.additional_services` is the single Python chokepoint for
+the file. It exposes the registration list (each service is registered with the
+`latchkey` CLI at gateway bring-up), the merged schemas used to materialize the
+shared file, and the catalog projection the generator folds into
+`services.json`. No gateway extension reads it -- they only read
+`services.json`.
+
 A typical end-to-end shell flow:
 
 ```sh

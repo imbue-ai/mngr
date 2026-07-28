@@ -437,12 +437,18 @@ def test_sync_permissions_copies_per_host_file_to_remote_permissions_json(tmp_pa
     sync_permissions(outer, latchkey_directory, host_id)
 
     written = _stub(outer).written
-    assert len(written) == 1
-    assert written[0].path == "/root/.latchkey/permissions.json"
-    assert b"slack-read-all" in written[0].content
-    assert written[0].mode == "0600"
+    # Two files ship: the shared additional-services schemas file and the permissions file.
+    assert len(written) == 2
+    written_by_path = {w.path: w for w in written}
+    permissions = written_by_path["/root/.latchkey/permissions.json"]
+    assert b"slack-read-all" in permissions.content
+    assert permissions.mode == "0600"
     # Written atomically (tmp + rename) so the remote gateway never reads a partial file.
-    assert written[0].is_atomic is True
+    assert permissions.is_atomic is True
+    # The shared schemas file (which the permissions file's ``include`` resolves to) ships too.
+    shared = written_by_path["/root/.latchkey/minds_shared_schemas.json"]
+    assert b"claude-ai" in shared.content
+    assert shared.is_atomic is True
 
 
 def test_sync_permissions_falls_back_to_restrictive_default_when_local_missing(tmp_path: Path) -> None:
@@ -453,10 +459,11 @@ def test_sync_permissions_falls_back_to_restrictive_default_when_local_missing(t
     sync_permissions(outer, latchkey_directory, host_id)
 
     written = _stub(outer).written
-    assert len(written) == 1
-    assert written[0].path == "/root/.latchkey/permissions.json"
-    # The deny-all default carries an empty rules list and no schemas block.
-    assert written[0].content == b'{\n  "rules": []\n}'
+    assert len(written) == 2
+    written_by_path = {w.path: w for w in written}
+    # The deny-all default carries an empty rules list and no schemas/include block.
+    assert written_by_path["/root/.latchkey/permissions.json"].content == b'{\n  "rules": []\n}'
+    assert b"claude-ai" in written_by_path["/root/.latchkey/minds_shared_schemas.json"].content
 
 
 def test_sync_permissions_resolves_remote_home_for_the_destination(tmp_path: Path) -> None:
@@ -466,7 +473,9 @@ def test_sync_permissions_resolves_remote_home_for_the_destination(tmp_path: Pat
 
     sync_permissions(outer, latchkey_directory, host_id)
 
-    assert _stub(outer).written[0].path == "/home/agent/.latchkey/permissions.json"
+    written_paths = {w.path for w in _stub(outer).written}
+    assert "/home/agent/.latchkey/permissions.json" in written_paths
+    assert "/home/agent/.latchkey/minds_shared_schemas.json" in written_paths
 
 
 def test_sync_permissions_raises_when_home_resolution_fails(tmp_path: Path) -> None:

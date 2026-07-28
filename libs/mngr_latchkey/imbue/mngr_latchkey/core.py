@@ -48,6 +48,9 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey.additional_services import AdditionalServiceRegistration
+from imbue.mngr_latchkey.additional_services import load_additional_service_registrations
+from imbue.mngr_latchkey.additional_services import shared_schemas_file_content
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
@@ -59,6 +62,7 @@ from imbue.mngr_latchkey.store import ensure_browser_log_path
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
 from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.store import write_shared_schemas_file
 
 # Default value for :attr:`Latchkey.latchkey_binary` -- the bare
 # command name, looked up on ``PATH`` by every spawn site via
@@ -94,6 +98,11 @@ _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # Empirically, reencryption takes around 0.1s.
 _REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# Listing services and registering an additional (custom) service are quick
+# config-store operations, but can stall on slow keychains like the others.
+_SERVICES_LIST_TIMEOUT_SECONDS: Final[float] = 15.0
+_SERVICES_REGISTER_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # ``latchkey --version`` is normally a print-and-exit, but the upstream CLI
 # runs its credential-store data-format migrations before printing anything --
@@ -757,6 +766,16 @@ class Latchkey(MutableModel):
         migration that needs to inspect the credential store gets the
         latchkey directory and binary to do so.
 
+        Also materializes the shared additional-services schemas file that every
+        per-host permissions baseline references via detent's ``include`` (so a
+        granted custom scope resolves without inlining its schema per host), and
+        registers minds' additional (custom) latchkey services (see
+        :func:`imbue.mngr_latchkey.additional_services.load_additional_service_registrations`)
+        so the gateway can inject their credentials. This happens before the
+        gateway is spawned so the running gateway picks up the registrations.
+        Registration is best-effort: a failure is logged and does not abort
+        initialization (only that service's credential injection is affected).
+
         There is intentionally **no** cross-process gateway-record
         reconciliation: the new ``mngr latchkey forward`` /
         :class:`LatchkeyForwardSupervisor` design guarantees at most
@@ -776,7 +795,13 @@ class Latchkey(MutableModel):
                 (non-zero exit, unparseable output, spawn error).
         """
         self._check_minimum_version()
+        # Materialize the shared additional-services schemas file before touching
+        # any host permissions file: every per-host baseline ``include``s it, so
+        # it must exist before the gateway evaluates a host file (and before the
+        # migration stamps the include into existing files).
+        write_shared_schemas_file(self.plugin_data_dir, shared_schemas_file_content())
         run_data_format_migrations(self.plugin_data_dir, self.latchkey_directory, self.latchkey_binary)
+        self._register_additional_services()
         with self._lock:
             self._is_initialized = True
 
@@ -1520,6 +1545,103 @@ class Latchkey(MutableModel):
                 f"Installed latchkey version {installed} is older than the required minimum {minimum}; "
                 f"upgrade the binary at {self.latchkey_binary}."
             )
+
+    def _register_additional_services(self) -> None:
+        """Register minds' additional (custom) latchkey services, skipping any already present.
+
+        ``latchkey services register`` is not idempotent -- it exits non-zero
+        when a service of the same name already exists -- so we consult
+        ``latchkey services list`` first and only register the missing ones.
+        Best-effort: a failure to list or to register one service is logged and
+        does not abort gateway bring-up.
+        """
+        registrations = load_additional_service_registrations()
+        if not registrations:
+            return
+        existing_service_names = self._list_service_names()
+        for registration in registrations:
+            if registration.name in existing_service_names:
+                continue
+            self._register_one_additional_service(registration)
+
+    def _list_service_names(self) -> frozenset[str]:
+        """Return every service name latchkey currently knows (builtin + registered).
+
+        Runs ``latchkey services list`` (a JSON array of names). Returns an empty
+        set on any failure so the caller falls back to attempting registration
+        (itself guarded and best-effort).
+        """
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        cg = ConcurrencyGroup(name="latchkey-services-list")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[self.latchkey_binary, "services", "list"],
+                    timeout=_SERVICES_LIST_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            logger.warning("Failed to launch 'latchkey services list': {}", group)
+            return frozenset()
+        if result.returncode != 0:
+            logger.warning(
+                "'latchkey services list' exited {}: {}",
+                result.returncode,
+                result.stderr.strip() or result.stdout.strip(),
+            )
+            return frozenset()
+        try:
+            parsed = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("Could not parse 'latchkey services list' output: {}", e)
+            return frozenset()
+        if not isinstance(parsed, list):
+            logger.warning("'latchkey services list' returned an unexpected shape: {!r}", parsed)
+            return frozenset()
+        service_names: list[str] = []
+        for name in parsed:
+            if not isinstance(name, str):
+                logger.warning("'latchkey services list' returned a non-string entry: {!r}", name)
+                return frozenset()
+            service_names.append(name)
+        return frozenset(service_names)
+
+    def _register_one_additional_service(self, registration: AdditionalServiceRegistration) -> None:
+        """Register a single additional service via ``latchkey services register`` (best-effort)."""
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        cg = ConcurrencyGroup(name="latchkey-services-register")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[
+                        self.latchkey_binary,
+                        "services",
+                        "register",
+                        registration.name,
+                        "--base-api-url",
+                        registration.base_api_url,
+                    ],
+                    timeout=_SERVICES_REGISTER_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            logger.warning("Failed to launch 'latchkey services register' for {!r}: {}", registration.name, group)
+            return
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to register additional latchkey service {!r}: 'latchkey services register' exited {}: {}",
+                registration.name,
+                result.returncode,
+                result.stderr.strip() or result.stdout.strip(),
+            )
+            return
+        logger.debug("Registered additional latchkey service {!r}", registration.name)
 
     def _spawn_gateway(
         self,

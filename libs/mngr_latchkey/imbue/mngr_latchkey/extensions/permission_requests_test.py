@@ -282,6 +282,55 @@ def test_post_creates_predefined_request_with_target_and_effect(
     assert json.loads(stored.read_text()) == parsed
 
 
+def test_post_creates_predefined_request_for_additional_service(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A ``predefined`` request for a custom (additional) service validates like a builtin one."""
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs claude.ai",
+            "type": "predefined",
+            "payload": {"scope": "claude-ai", "permissions": ["everything"], "account": "me@example.com"},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["payload"] == {
+        "scope": "claude-ai",
+        "permissions": ["everything"],
+        "account": "me@example.com",
+    }
+    # A custom scope composes with per-account scoping exactly like a builtin one:
+    # the rule key carries the account and the effect ships the generated
+    # account-gating schema. The custom scope's *own* schema is not inlined here --
+    # it resolves from the shared ``minds_shared_schemas.json`` include.
+    rule_key = account_scope_key("claude-ai", "me@example.com")
+    assert parsed["effect"] == {
+        "schemas": {rule_key: build_account_scope_schema("claude-ai", "me@example.com")},
+        "rules": [{rule_key: ["everything"]}],
+    }
+
+
+def test_post_rejects_unknown_permission_for_additional_service(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A permission not offered by a custom service is rejected, just like for a builtin one."""
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, _body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs claude.ai",
+            "type": "predefined",
+            "payload": {"scope": "claude-ai", "permissions": ["not-a-real-permission"]},
+        },
+    )
+    assert status == 400
+
+
 @pytest.mark.parametrize(
     ("access", "expected_methods"),
     [

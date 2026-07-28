@@ -28,6 +28,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.mngr_latchkey.migrations.account_scope_service_rules import AccountScopeServiceRules
+from imbue.mngr_latchkey.migrations.add_shared_schemas_include import AddSharedSchemasInclude
 from imbue.mngr_latchkey.migrations.fold_workspace_scope_into_latchkey_self import FoldWorkspaceScopeIntoLatchkeySelf
 from imbue.mngr_latchkey.migrations.interface import DataFormatMigration
 from imbue.mngr_latchkey.migrations.interface import LatchkeyMigrationError
@@ -38,6 +39,7 @@ from imbue.mngr_latchkey.migrations.interface import LatchkeyMigrationError
 _MIGRATIONS: Final[tuple[DataFormatMigration, ...]] = (
     FoldWorkspaceScopeIntoLatchkeySelf(version=1),
     AccountScopeServiceRules(version=2),
+    AddSharedSchemasInclude(version=3),
 )
 
 # The data-format version the installed code targets: the highest known migration

@@ -29,13 +29,16 @@ from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
+from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.testing import FakeLatchkey
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
@@ -133,6 +136,9 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
             ],
         },
     ]
+    # The baseline references the shared additional-services schemas file, so a
+    # granted custom scope resolves without inlining its schema per host.
+    assert on_disk["include"] == ["minds_shared_schemas.json"]
     schemas = on_disk["schemas"]
     # The report scope + permission both pin to a POST on the per-agent
     # ``/report`` path, so any agent's bug-report escalation is let through
@@ -492,6 +498,74 @@ def test_register_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
     # unauthorized agent_id, rejecting with the empty permission list
     # rather than falling through to the latchkey-self baseline rule).
     assert rule_keys == ["minds-api-proxy-report", "minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
+
+
+def test_register_agent_for_host_preserves_the_shared_schemas_include(tmp_path: Path) -> None:
+    """Registering an agent must not drop the host file's ``include``.
+
+    Regression test: rebuilding the config from ``rules``/``schemas`` alone
+    silently dropped ``include``, which points at the shared additional-services
+    schemas file. Losing it leaves any granted custom scope (e.g. ``claude-ai``)
+    referencing a schema detent can no longer resolve.
+    """
+    host_id = HostId.generate()
+    path = permissions_path_for_host(tmp_path, host_id)
+    # A host that already carries the include plus a granted custom scope.
+    save_permissions(
+        path,
+        LatchkeyPermissionsConfig(
+            rules=AGENT_BASELINE_PERMISSIONS.rules + ({"claude-ai": ["everything"]},),
+            schemas=AGENT_BASELINE_PERMISSIONS.schemas,
+            include=("minds_shared_schemas.json",),
+        ),
+    )
+
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+
+    config = json.loads(path.read_text())
+    assert config["include"] == ["minds_shared_schemas.json"]
+    # The custom-scope grant survives too.
+    assert {"claude-ai": ["everything"]} in config["rules"]
+
+
+def test_register_agent_for_host_restores_a_missing_shared_schemas_include(tmp_path: Path) -> None:
+    """A host file that lost its include gets it back on the next registration.
+
+    The data-format migration only runs when the recorded version changes, so it
+    cannot repair a file stripped afterwards; registration is the self-heal point.
+    """
+    host_id = HostId.generate()
+    path = permissions_path_for_host(tmp_path, host_id)
+    # A host file in the damaged state: baseline rules/schemas but no include.
+    save_permissions(
+        path,
+        LatchkeyPermissionsConfig(
+            rules=AGENT_BASELINE_PERMISSIONS.rules,
+            schemas=AGENT_BASELINE_PERMISSIONS.schemas,
+        ),
+    )
+
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+
+    assert json.loads(path.read_text())["include"] == ["minds_shared_schemas.json"]
+
+
+def test_register_agent_for_host_preserves_unrelated_includes(tmp_path: Path) -> None:
+    """Ensuring the baseline include does not clobber includes someone else added."""
+    host_id = HostId.generate()
+    path = permissions_path_for_host(tmp_path, host_id)
+    save_permissions(
+        path,
+        LatchkeyPermissionsConfig(
+            rules=AGENT_BASELINE_PERMISSIONS.rules,
+            schemas=AGENT_BASELINE_PERMISSIONS.schemas,
+            include=("some_other_config.json",),
+        ),
+    )
+
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+
+    assert json.loads(path.read_text())["include"] == ["some_other_config.json", "minds_shared_schemas.json"]
 
 
 def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:

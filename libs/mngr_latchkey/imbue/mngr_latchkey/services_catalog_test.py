@@ -178,3 +178,24 @@ def test_default_catalog_reads_the_bundled_file() -> None:
     slack = catalog.get_by_scope("slack-api")
     assert slack is not None
     assert slack.name == "slack"
+
+
+# -- Additional (custom) services merged into the bundled catalog -------------
+
+
+def test_default_catalog_includes_additional_claude_ai_service() -> None:
+    """The bundled catalog merges the additional (custom) services alongside builtins."""
+    catalog = ServicesCatalog()
+    assert "claude-ai" in catalog.all_service_names()
+    info = catalog.get_by_scope("claude-ai")
+    assert info is not None
+    assert info.name == "claude-ai"
+    assert info.display_name == "Claude"
+    # The named ``everything`` permission is offered (alongside the injected ``any``).
+    assert "everything" in info.permission_schemas
+
+
+def test_additional_service_scope_resolves_to_its_service_name() -> None:
+    """A granted additional-service scope maps back to its service name (credential-sync path)."""
+    config = LatchkeyPermissionsConfig(rules=({"claude-ai": ["everything"]},))
+    assert ServicesCatalog().services_for_permissions(config) == frozenset({"claude-ai"})

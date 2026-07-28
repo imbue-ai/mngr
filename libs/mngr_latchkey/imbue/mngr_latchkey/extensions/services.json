@@ -1811,5 +1811,17 @@
         }
       ]
     }
+  ],
+  "claude-ai": [
+    {
+      "scope": "claude-ai",
+      "display_name": "Claude",
+      "permissions": [
+        {
+          "name": "everything",
+          "description": "Full access to claude.ai."
+        }
+      ]
+    }
   ]
 }

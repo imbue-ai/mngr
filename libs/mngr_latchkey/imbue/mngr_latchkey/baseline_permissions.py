@@ -17,6 +17,7 @@ freshly-created host's permissions file look like?".
 from typing import Final
 
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import SHARED_SCHEMAS_FILENAME
 
 # Detent schema names and host string for the gateway-self baseline that
 # every agent inherits. Defined inline (in the agent's permissions file)
@@ -203,4 +204,9 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
             "required": ["method", "path"],
         },
     },
+    # Every host file references the shared additional-services schemas file, so a
+    # granted custom scope (e.g. ``claude-ai``) resolves without inlining its
+    # schema here. The bare name resolves relative to the file's directory (see
+    # ``SHARED_SCHEMAS_FILENAME``).
+    include=(SHARED_SCHEMAS_FILENAME,),
 )

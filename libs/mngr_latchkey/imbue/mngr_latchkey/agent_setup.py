@@ -42,6 +42,7 @@ from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
@@ -51,7 +52,6 @@ from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
-from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import load_permissions
@@ -207,7 +207,24 @@ def register_agent_for_host(
             },
         },
     }
-    new_config = LatchkeyPermissionsConfig(rules=config.rules, schemas=schemas)
+    # Copy-with-update rather than reconstructing from ``rules``/``schemas``:
+    # rebuilding by hand silently drops every other field (notably ``include``,
+    # which points at the shared additional-services schemas file -- losing it
+    # would leave a granted custom scope referencing an unresolvable schema).
+    #
+    # We also *ensure* the baseline's includes are present rather than merely
+    # preserving what is there. This function already owns making a host file
+    # well-formed (it writes the whole baseline when the file is absent), and it
+    # runs on every agent discovery, so it is the natural self-heal point for a
+    # file that lost its include -- the data-format migration cannot do it,
+    # since it only runs when the recorded version changes.
+    merged_include = config.include + tuple(
+        name for name in AGENT_BASELINE_PERMISSIONS.include if name not in config.include
+    )
+    new_config = config.model_copy_update(
+        to_update(config.field_ref().schemas, schemas),
+        to_update(config.field_ref().include, merged_include),
+    )
     save_permissions(path, new_config)
 
 

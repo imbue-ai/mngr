@@ -12,6 +12,11 @@ and the grantable ``permissions`` (each with its own optional
 description). A single service may expose more than one scope (e.g.
 ``github`` -> ``github-rest-api``, ``github-git``).
 
+The file is generated (see ``scripts/generate_services_json.py``) from detent's
+builtin request schemas *plus* minds' own additional (custom) services, so this
+module -- and the gateway extensions that read the same file -- never have to
+know which of the two a service came from.
+
 This module is the single chokepoint for that file. All access goes
 through :class:`ServicesCatalog`, which serves two layers:
 
