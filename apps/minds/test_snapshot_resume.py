@@ -87,7 +87,7 @@ from imbue.mngr.utils.testing import get_short_random_string
 _WORKSPACE_CONTAINER_PREFIX: Final[str] = "minds-"
 _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 # system_interface's in-container port. It is a core bootstrap-managed
-# service with a fixed port (registered in data/.state/applications.toml);
+# app with a fixed port (registered in the data/.state app registry);
 # kept as a constant so a drift shows up as a clear assertion failure.
 _SYSTEM_INTERFACE_PORT: Final[int] = 8000
 _MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
@@ -368,27 +368,30 @@ def test_resumed_workspace_system_services_agent_is_alive(running_workspace: _Re
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(300)
-def test_resumed_workspace_registered_expected_services(running_workspace: _ResumedWorkspace) -> None:
-    """After resume, the bootstrap re-registered the core services in applications.toml.
+def test_resumed_workspace_registered_expected_apps(running_workspace: _ResumedWorkspace) -> None:
+    """After resume, the bootstrap re-registered the core apps in the app registry.
 
-    The app-watcher / bootstrap respawns the standard services on restart and
-    each registers its port into ``data/.state/applications.toml``; the always-on
-    core services (``system_interface`` and ``terminal``) must be present.
+    The app-watcher / bootstrap respawns the standard programs on restart and
+    each registers its port into ``data/.state/apps.toml`` (``applications.toml``
+    on pre-rename templates); the always-on core apps (``system_interface`` and
+    ``terminal``) must be present.
 
     ``web`` was intentionally dropped: default-workspace-template removed the
     blank example web service (its ``[program:web]`` supervisord entry and the
     ``libs/web_server`` scaffold), so it no longer registers. ``browser`` does
     autostart now, but it is memory-heavy and expendable (earlyoom can shed it
     under pressure), so requiring it would make this test flaky -- we only
-    assert the services guaranteed to survive a resume.
+    assert the apps guaranteed to survive a resume.
     """
     result = _exec_in_container(
-        running_workspace.container_name, "cat /home/user/workspace/data/.state/applications.toml", timeout=30
+        running_workspace.container_name,
+        "cat /home/user/workspace/data/.state/apps.toml 2>/dev/null || cat /home/user/workspace/data/.state/applications.toml",
+        timeout=30,
     )
-    assert result.returncode == 0, f"Could not read data/.state/applications.toml: {result.stderr}"
-    for service_name in ("system_interface", "terminal"):
-        assert service_name in result.stdout, (
-            f"Service {service_name!r} not registered in applications.toml after resume:\n{result.stdout}"
+    assert result.returncode == 0, f"Could not read the data/.state app registry: {result.stderr}"
+    for app_name in ("system_interface", "terminal"):
+        assert app_name in result.stdout, (
+            f"App {app_name!r} not registered in the app registry after resume:\n{result.stdout}"
         )
 
 
@@ -634,11 +637,38 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
 
 
 def _find_chat_agent(container_name: str) -> dict[str, Any]:
-    """Return the workspace's (claude-type) chat agent record from mngr list."""
+    """Return the workspace's chat agent record from mngr list.
+
+    The template repo's chat create-template types the agent ``chat`` (a
+    ``claude``-parented type carrying the chat output style); older baked
+    snapshots predate that type and report plain ``claude``.
+    """
     agents = _list_agents_in_container(container_name)
-    chats = [agent for agent in agents if agent.get("type") == "claude"]
-    assert chats, f"No claude chat agent among {[a.get('name') for a in agents]!r}"
+    chats = [agent for agent in agents if agent.get("type") in ("chat", "claude")]
+    assert chats, f"No chat agent among {[(a.get('name'), a.get('type')) for a in agents]!r}"
     return chats[0]
+
+
+def _dump_chat_agent_diagnostics(container_name: str, chat_id: str) -> str:
+    """Best-effort in-container evidence for why a chat agent is not running.
+
+    Captures the agent list, the agent's state-dir logs/events, its tmux
+    window (if any survives), and supervisor status, so a CI failure log
+    explains a dead chat instead of only reporting its state.
+    """
+    diagnostic_script = (
+        "cd /home/user/workspace; "
+        "echo '--- mngr list ---'; mngr list --format json --on-error continue 2>&1 | tail -c 4000; "
+        f"echo '--- agent dir ---'; AGENT_DIR=$(ls -d $HOME/.mngr/agents/{chat_id} 2>/dev/null); "
+        'echo "$AGENT_DIR"; find "$AGENT_DIR" -maxdepth 2 -type f 2>/dev/null | head -40; '
+        "echo '--- agent logs (tails) ---'; "
+        'for f in $(find "$AGENT_DIR" -maxdepth 3 -type f \\( -name "*.log" -o -name "*.jsonl" \\) 2>/dev/null | head -8); do '
+        'echo "== $f"; tail -c 2000 "$f" 2>/dev/null; echo; done; '
+        "echo '--- tmux ---'; tmux ls 2>&1; "
+        "echo '--- supervisor ---'; supervisorctl status 2>&1 | head -20"
+    )
+    result = _exec_in_container(container_name, diagnostic_script, timeout=60)
+    return f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
 
 def _wait_for_agent_state(container_name: str, agent_id: str, expected_state: str, *, attempts: int = 40) -> bool:
@@ -691,7 +721,10 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
         'Make it as long and detailed as you possibly can."',
         timeout=120,
     )
-    assert messaged.returncode == 0, f"`mngr message` failed for the chat agent: {messaged.stderr}"
+    assert messaged.returncode == 0, (
+        f"`mngr message` failed for the chat agent: {messaged.stderr}\n"
+        f"Diagnostics:\n{_dump_chat_agent_diagnostics(container_name, chat_id)}"
+    )
     assert _wait_for_agent_state(container_name, chat_id, "RUNNING"), (
         "The chat agent never reached RUNNING after being asked for a long story."
     )

@@ -1,7 +1,7 @@
 """Unit tests for the Cloudflare tunnel token file path.
 
 The path here must match the file the DEFAULT_WORKSPACE_TEMPLATE cloudflare-tunnel runner watches
-(``system/libs/cloudflare_tunnel/.../runner.py``: ``data/.secrets/cloudflare_tunnel.env``).
+(``system/services/cloudflare_tunnel/.../runner.py``: ``data/.secrets/cloudflare_tunnel.env``).
 Pinning it on both sides catches an accidental divergence of the contract.
 """
 

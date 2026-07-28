@@ -11,7 +11,7 @@ The token lives at ``data/.secrets/cloudflare_tunnel.env`` inside the agent.
 ``data/.secrets/`` is a directory of per-secret ``*.env`` files (this token,
 ``restic.env`` for backups); each writer owns its
 own file so they never clobber one another. The agent's cloudflare-tunnel
-service (``system/libs/cloudflare_tunnel/.../runner.py``) watches this file: it starts
+service (``system/services/cloudflare_tunnel/.../runner.py``) watches this file: it starts
 cloudflared when the token appears and stops it when the file is removed.
 """
 

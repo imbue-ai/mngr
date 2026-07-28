@@ -8,8 +8,8 @@ The minds app creates and manages persistent Claude agents running in Docker con
 
 - A local web interface accessible through the desktop client
 - Optional global access via Cloudflare tunnels (with Google OAuth protection)
-- Background services (web server, terminal, etc.) supervised by supervisord
-- The ability to expose application ports via both local and global URLs
+- Apps (terminal, etc.) and background services supervised by supervisord
+- The ability to expose app ports via both local and global URLs
 
 ## Getting started
 
@@ -39,8 +39,8 @@ app prints on startup.
 4. Inside the services agent's Docker container:
    - The bootstrap (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf`
    - On first boot the bootstrap also writes `CLAUDE_CONFIG_DIR` to the host env file and creates the initial chat agent (gated by `data/.state/initial_chat_created`)
-   - Services register their ports via `system/scripts/forward_port.py` into `data/.state/applications.toml`
-   - An **app watcher** service monitors `applications.toml` and writes server events to `events.jsonl` for discovery
+   - Apps register their ports via `system/scripts/forward_port.py` into `data/.state/apps.toml`
+   - An **app watcher** service monitors `apps.toml` and writes server events to `events.jsonl` for discovery
    - A **cloudflared** service watches `data/.secrets` for a tunnel token and runs the Cloudflare tunnel
 
 ## Learn more

@@ -3,7 +3,8 @@
 Runs as part of the per-workspace backups route: for an online,
 verification-enabled workspace, one ``mngr exec`` runs the stdlib-only check
 script (see ``backup_workspace_scripts``) which compares the installed
-backup-service code (``system/libs/host_backup``, or ``libs/host_backup`` on
+backup-service code (``system/services/host_backup``, ``system/libs/host_backup``,
+or ``libs/host_backup`` on
 pre-declutter workspaces) against the *minimum required* ``minds-v*`` tag
 (fetching tags from the ``official`` remote only when the tag is missing
 locally), reports the supervisord state of the ``host-backup`` program, and

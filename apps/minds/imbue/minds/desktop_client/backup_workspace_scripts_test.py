@@ -37,7 +37,8 @@ def _make_workspace_repo(tmp_path: Path, *, code_path: str = "libs/host_backup")
     """A git repo shaped like a workspace: the backup-service code dir + an unrelated file.
 
     ``code_path`` is the repo-relative backup-service directory (pass
-    ``system/libs/host_backup`` for a repo shaped like the decluttered template).
+    ``system/services/host_backup`` for a repo shaped like the creation-rename
+    template, ``system/libs/host_backup`` for the decluttered one).
     """
     repo = tmp_path / "workspace"
     repo.mkdir()
@@ -195,6 +196,19 @@ def test_check_script_reports_outdated_on_a_new_layout_workspace(tmp_path: Path)
     # read "matches").
     repo = _make_workspace_repo(tmp_path, code_path="system/libs/host_backup")
     tag_newer_release_content(repo, code_path="system/libs/host_backup")
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["code_state"] == "outdated"
+
+
+def test_check_script_reports_outdated_on_a_creation_rename_layout_workspace(tmp_path: Path) -> None:
+    # A workspace shaped like the creation-rename template keeps the backup
+    # code at system/services/host_backup, checked against a tag with the same
+    # layout. The check must resolve and diff that path.
+    repo = _make_workspace_repo(tmp_path, code_path="system/services/host_backup")
+    tag_newer_release_content(repo, code_path="system/services/host_backup")
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)

@@ -112,7 +112,7 @@ _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
 # Pre-tested CSS selector against the system_interface frontend at
-# .external_worktrees/default-workspace-template/system/libs/system_interface/.
+# .external_worktrees/default-workspace-template/system/apps/system_interface/.
 # `.dockview-workspace` is the wrapper div the DockviewWorkspace mithril
 # component mounts on first render.
 _DOCKVIEW_WORKSPACE_SELECTOR: Final[str] = "div.dockview-workspace"

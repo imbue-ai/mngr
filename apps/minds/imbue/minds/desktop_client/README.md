@@ -79,4 +79,4 @@ Because the desktop client only byte-forwards requests to the per-workspace `sys
 - Cookie paths in `Set-Cookie` headers are rewritten to scope under the service prefix.
 - WebSocket connections are proxied bidirectionally.
 
-See `service_dispatcher.py` in the system_interface (at `default-workspace-template/system/libs/system_interface/imbue/system_interface/`) for the service-side implementation.
+See `service_dispatcher.py` in the system_interface (at `default-workspace-template/system/apps/system_interface/imbue/system_interface/`) for the service-side implementation.

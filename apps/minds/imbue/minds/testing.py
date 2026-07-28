@@ -175,8 +175,8 @@ def tag_newer_release_content(
     HEAD (main) then reads as *outdated* relative to the tag. ``removed_file``
     additionally deletes that path inside the release commit, for exercising
     convergence onto a tag that removed a file. ``code_path`` is the repo-relative
-    backup-service directory (pass ``system/libs/host_backup`` for a repo shaped
-    like the decluttered template).
+    backup-service directory (pass ``system/services/host_backup`` for a repo shaped
+    like the creation-rename template).
     """
     run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
     if removed_file is not None:

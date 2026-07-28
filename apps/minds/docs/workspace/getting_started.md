@@ -44,13 +44,13 @@ minds run
 1. The desktop client clones the repo (if URL) or uses it directly (if local path)
 2. Runs `mngr create` with templates from the repo's `.mngr/settings.toml`
 3. If Cloudflare is configured, creates a tunnel and injects the token
-4. The agent starts in a tmux session with background services
+4. The agent starts in a tmux session with its apps and background services
 
 ## Accessing your agent
 
 After creation, the agent is accessible at:
 - **Local**: `http://{agent_id}.localhost:8420/` (the desktop client byte-forwards the subdomain to the workspace's system interface, which serves the dockview UI)
-- **Individual service**: `http://{agent_id}.localhost:8420/service/{service_name}/` (e.g. `.../service/web/`, `.../service/terminal/`)
+- **Individual app**: `http://{agent_id}.localhost:8420/service/{app_name}/` (e.g. `.../service/terminal/`; the `/service/` path segment is plumbing shared by apps and predates the app vocabulary)
 - **Global** (if Cloudflare configured): `https://{service}--{agent_id}--{username}.{domain}`
 
 ## Environment variables and config

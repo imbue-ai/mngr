@@ -16,7 +16,8 @@ out of arbitrarily noisy output:
   services agent -- worktree/worker agents live elsewhere and never count)
   and whether a backup tick is currently in flight.
 - the *apply update* script: the single mutating step -- stash, check out
-  the backup-service code (``system/libs/host_backup``, or ``libs/host_backup``
+  the backup-service code (``system/services/host_backup``,
+  ``system/libs/host_backup``, or ``libs/host_backup``
   on pre-declutter workspaces) at the target tag, commit ``backup-update: <tag>``,
   ``uv sync``, restart the service, verify it comes back, and auto-rollback
   (``git revert``) on failure. Optionally stops running chats first.
@@ -79,12 +80,16 @@ import time as _time
 
 OFFICIAL_REMOTE_NAME = "official"
 DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/default-workspace-template.git"
-# The backup-service code inside the workspace: system/libs/host_backup on the
-# decluttered template layout, libs/host_backup on pre-declutter workspaces.
+# The backup-service code inside the workspace: system/services/host_backup on
+# the creation-rename template layout, system/libs/host_backup on the earlier
+# decluttered layout, libs/host_backup on pre-declutter workspaces.
 # Resolved from the workspace's own tree (cwd is always the workspace root);
 # pathspecs addressed at a *tag's* tree instead follow that tag's own layout
-# via _backup_code_path_in_tree, since the two can differ across the declutter.
-BACKUP_CODE_PATH = "system/libs/host_backup" if _os.path.isdir("system/libs/host_backup") else "libs/host_backup"
+# via _backup_code_path_in_tree, since the layouts differ across the renames.
+BACKUP_CODE_PATH = next(
+    (p for p in ("system/services/host_backup", "system/libs/host_backup") if _os.path.isdir(p)),
+    "libs/host_backup",
+)
 RESTIC_ENV_PATH = "data/.secrets/restic.env"
 GIT_IDENTITY = ["-c", "user.name=minds-backup-update", "-c", "user.email=backup-update@minds.local"]
 TICK_COMPLETION_TYPES = (
@@ -136,12 +141,13 @@ def _backup_code_path_in_tree(ref):
     """The backup-service path as laid out in ref's tree, or "" if absent.
 
     Tags cut before the workspace-root declutter store the code at
-    libs/host_backup; decluttered trees at system/libs/host_backup. The
-    workspace's own layout (BACKUP_CODE_PATH) and a target tag's layout can
-    therefore differ in either direction, and diff/checkout pathspecs must
-    follow the tree they address.
+    libs/host_backup; decluttered trees at system/libs/host_backup; the
+    creation-rename layout at system/services/host_backup. The workspace's own
+    layout (BACKUP_CODE_PATH) and a target tag's layout can therefore differ
+    in either direction, and diff/checkout pathspecs must follow the tree they
+    address.
     """
-    for candidate in ("system/libs/host_backup", "libs/host_backup"):
+    for candidate in ("system/services/host_backup", "system/libs/host_backup", "libs/host_backup"):
         if _run(["git", "rev-parse", "-q", "--verify", "%s:%s" % (ref, candidate)]).returncode == 0:
             return candidate
     return ""
@@ -251,9 +257,9 @@ def _compute_code_state(minimum_tag, installed_version):
         if diffed.returncode != 1:
             return "unverifiable", ("git diff failed: %s" % (diffed.stderr or diffed.stdout).strip()[-500:])
     else:
-        # The tag lays the code out at the other declutter-era path, so a
+        # The tag lays the code out at a different layout era's path, so a
         # same-path `git diff` can never match. Content equality across the
-        # rename is tree-hash equality between the tag's directory and the
+        # renames is tree-hash equality between the tag's directory and the
         # committed workspace directory, with a clean worktree at that path
         # (the same predicate the same-path worktree diff answers).
         src_tree = _run(["git", "rev-parse", "-q", "--verify", "%s:%s" % (minimum_tag, tag_path)])
@@ -610,7 +616,7 @@ def _main():
     if tag_path == BACKUP_CODE_PATH:
         checked_out = _git(["checkout", tag, "--", BACKUP_CODE_PATH])
     else:
-        # The tag stores the code at the other declutter-era path; a same-path
+        # The tag stores the code at a different layout era's path; a same-path
         # checkout can never match its tree. Stage the tag's subtree at the
         # workspace's path, then materialize the staged entries.
         checked_out = _git(["read-tree", "--prefix=%s/" % BACKUP_CODE_PATH, "%s:%s" % (tag, tag_path)])

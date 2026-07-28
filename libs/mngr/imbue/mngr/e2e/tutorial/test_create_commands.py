@@ -134,7 +134,7 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
 @pytest.mark.timeout(120)
 # Flaky: collateral damage from a leaked `mngr observe` process that the
 # system_interface's AgentManager spawns and doesn't always clean up (lives
-# in default-workspace-template/system/libs/system_interface). session_cleanup
+# in default-workspace-template/system/apps/system_interface). session_cleanup
 # attributes the leak to whichever test runs last in the offload sandbox;
 # this one happens to draw the short straw. Real fix lives in
 # system_interface's observe lifecycle, not here.
