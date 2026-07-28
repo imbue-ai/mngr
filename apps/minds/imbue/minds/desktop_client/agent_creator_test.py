@@ -1732,12 +1732,16 @@ def test_failed_create_attempt_marks_pending_record_failed_with_log_tail(tmp_pat
 
     info = creator.get_create_attempt_info(create_attempt_id)
     assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    # The worker flips the in-memory status to FAILED before writing the FAILED
+    # record to the store, so a read taken the instant _wait_until_finished returns
+    # can still see IN_FLIGHT. Join the worker first: wait_for_all makes the store
+    # write happen-before the read.
+    creator.wait_for_all()
     record = store.read_record(str(create_attempt_id))
     assert record is not None
     assert record.state is PendingCreateAttemptState.FAILED
     assert record.error
     assert record.log_tail, "the FAILED record must carry the create attempt log tail"
-    creator.wait_for_all()
 
 
 class _TerminalWriteFailingPendingCreateAttemptStore(PendingCreateAttemptStore):
