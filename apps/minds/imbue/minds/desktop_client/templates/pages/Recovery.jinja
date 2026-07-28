@@ -26,7 +26,7 @@
 {{ style_html | safe }}</style>
   {# Center the card in the viewport region below the fixed 38px titlebar,
      mirroring the standalone loader's body centering (24px padding). #}
-  <div class="min-h-[calc(100dvh_-_38px)] flex items-center justify-center p-6">
+  <div class="min-h-full flex items-center justify-center p-6">
     {{ card_html | safe }}
   </div>
 </ChromeShell>
