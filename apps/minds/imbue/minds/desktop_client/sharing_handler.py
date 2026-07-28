@@ -92,6 +92,32 @@ def is_probeable_share_url(url: str) -> bool:
     return not (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved)
 
 
+def split_origin_and_base_path(backend_url: str) -> tuple[str, str]:
+    """Split a service's backend URL into a Cloudflare origin and a base path.
+
+    Cloudflare tunnel ingress rules reject an origin that carries a path --
+    "ingress rules don't support proxying to a different path on the origin
+    service. The path will be the same as the eyeball request's path" (Access
+    API error 1056). So a service registered at ``http://localhost:8082/service/openvscode``
+    (openvscode runs with ``--server-base-path`` so it can bake the prefix into
+    the WebSocket URL its Web Worker opens) cannot be handed to the connector
+    verbatim.
+
+    Splitting it is enough, because Cloudflare preserves the request path:
+    registering origin ``http://localhost:8082`` and pointing the user at
+    ``https://<hostname>/service/openvscode`` reconstructs exactly the path the
+    base-path server expects -- including for the Web Worker WebSocket, since
+    the prefix baked in server-side is correct end to end.
+
+    Returns ``(origin, base_path)`` where ``base_path`` is "" for the common
+    case of a path-less backend URL, so callers can append it unconditionally.
+    A bare "/" path is normalized to "" as well.
+    """
+    parsed = urlparse(backend_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return origin, parsed.path.rstrip("/")
+
+
 class SharingError(RuntimeError):
     """Raised by :func:`enable_sharing_via_cloudflare` on a soft failure.
 
@@ -176,12 +202,14 @@ def enable_sharing_via_cloudflare(
             f"{agent_id}; wait for the agent to publish its services and try again."
         )
 
+    origin, base_path = split_origin_and_base_path(backend_url)
+
     try:
         tunnel, service = cli.enable_sharing(
             account=account_email,
             agent_id=str(agent_id),
             service_name=str(service_name),
-            service_url=backend_url,
+            service_url=origin,
             policy={"emails": list(emails)},
         )
     except ImbueCloudCliError as exc:
@@ -195,7 +223,7 @@ def enable_sharing_via_cloudflare(
         raise SharingError("Sharing enabled but the connector did not return a Cloudflare token.")
     inject_tunnel_token_into_agent(agent_id, tunnel.token.get_secret_value(), cli.mngr_caller)
     hostname = str(service.get("hostname") or "")
-    return tunnel, f"https://{hostname}" if hostname else None
+    return tunnel, f"https://{hostname}{base_path}" if hostname else None
 
 
 def get_sharing_status(
@@ -203,6 +231,7 @@ def get_sharing_status(
     service_name: ServiceName,
     cli: ImbueCloudCli | None,
     session_store: MultiAccountSessionStore | None,
+    backend_resolver: BackendResolverInterface | None = None,
 ) -> dict[str, Any]:
     """Return the current sharing status for a service as the editor JS contract.
 
@@ -211,6 +240,12 @@ def get_sharing_status(
     connector is the source of truth). When sharing is not yet enabled (or no CLI
     / associated account is available), reports ``enabled=False`` with a default
     policy of the workspace's associated account email.
+
+    ``backend_resolver`` is needed only to re-derive a base-path suffix (see
+    :func:`split_origin_and_base_path`): the connector stores the path-less
+    origin we registered, so the path cannot be recovered from it. Without the
+    resolver -- or once the agent stops reporting the service -- the URL falls
+    back to the bare hostname, which is correct for every path-less service.
     """
     if cli is None:
         return {"enabled": False, "url": None, "policy": {"emails": []}}
@@ -241,6 +276,8 @@ def get_sharing_status(
         (entry.get("hostname") for entry in service_entries if entry.get("service_name") == str(service_name)),
         None,
     )
+    backend_url = backend_resolver.get_backend_url(agent_id, service_name) if backend_resolver else None
+    base_path = split_origin_and_base_path(backend_url)[1] if backend_url else ""
 
     try:
         policy = cli.get_service_auth(account_email, tunnel.tunnel_name, str(service_name))
@@ -256,7 +293,7 @@ def get_sharing_status(
 
     return {
         "enabled": True,
-        "url": f"https://{hostname}" if hostname else None,
+        "url": f"https://{hostname}{base_path}" if hostname else None,
         "policy": policy,
     }
 

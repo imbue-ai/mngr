@@ -4,14 +4,18 @@ import httpx
 import pytest
 from pydantic import Field
 
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import disable_sharing
+from imbue.minds.desktop_client.sharing_handler import get_sharing_status
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
+from imbue.minds.desktop_client.sharing_handler import split_origin_and_base_path
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -175,3 +179,84 @@ def test_probe_not_ready_without_edge_redirect() -> None:
 
     client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
     assert probe_share_url_readiness(client, _SHARE_URL) is False
+
+
+def test_split_origin_and_base_path_strips_a_service_base_path() -> None:
+    # openvscode runs with --server-base-path, so it registers a backend URL
+    # carrying a path. Cloudflare rejects an origin with a path (Access error
+    # 1056), so the origin must be handed over path-less and the path moved
+    # onto the public URL instead.
+    origin, base_path = split_origin_and_base_path("http://localhost:8082/service/openvscode")
+    assert origin == "http://localhost:8082"
+    assert base_path == "/service/openvscode"
+
+
+@pytest.mark.parametrize("backend_url", ["http://localhost:8000", "http://localhost:8000/"])
+def test_split_origin_and_base_path_is_a_no_op_for_path_less_urls(backend_url: str) -> None:
+    # Every other service (system_interface, terminal, notes, browser) reports a
+    # bare host:port, and a lone "/" must normalize to "" so callers can append
+    # the base path unconditionally without emitting a trailing slash.
+    origin, base_path = split_origin_and_base_path(backend_url)
+    assert origin == "http://localhost:8000"
+    assert base_path == ""
+
+
+class _StatusStubCli(FakeImbueCloudCli):
+    """Fake CLI reporting one tunnel with a single shared service."""
+
+    stub_tunnel: TunnelInfo | None = None
+    stub_hostname: str = "openvscode--abc--owner.example.com"
+
+    def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
+        return self.stub_tunnel
+
+    def list_services(self, account: str, tunnel_name: str) -> list[dict[str, str]]:
+        return [{"service_name": "openvscode", "hostname": self.stub_hostname}]
+
+    def get_service_auth(self, account: str, tunnel_name: str, service_name: str) -> dict[str, object]:
+        return {"emails": ["owner@example.com"]}
+
+
+def _status_fixtures(tmp_path: Path) -> tuple[AgentId, _StatusStubCli, MultiAccountSessionStore]:
+    agent_id = AgentId()
+    cli = _StatusStubCli(
+        connector_url=FAKE_CONNECTOR_URL,
+        stub_tunnel=TunnelInfo(tunnel_name="u--abcd1234efgh5678", tunnel_id="t1", services=("openvscode",)),
+    )
+    cli.add_account(user_id="u-1", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    store.associate_created_workspace(
+        user_id="u-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
+    return agent_id, cli, store
+
+
+def test_get_sharing_status_url_re_appends_the_service_base_path(tmp_path: Path) -> None:
+    # The connector only stores the path-less origin, so a reload has to recover
+    # the base path from the agent's reported backend URL -- otherwise the editor
+    # link would point at the origin root, which the base-path server 404s.
+    agent_id, cli, store = _status_fixtures(tmp_path)
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"openvscode": "http://localhost:8082/service/openvscode"}}
+    )
+
+    status = get_sharing_status(agent_id, ServiceName("openvscode"), cli, store, resolver)
+
+    assert status["enabled"] is True
+    assert status["url"] == "https://openvscode--abc--owner.example.com/service/openvscode"
+
+
+def test_get_sharing_status_url_is_bare_hostname_without_a_resolver(tmp_path: Path) -> None:
+    # No resolver (or an agent that has stopped reporting the service) degrades
+    # to the bare hostname rather than failing -- correct for every path-less
+    # service, which is all of them but openvscode.
+    agent_id, cli, store = _status_fixtures(tmp_path)
+
+    status = get_sharing_status(agent_id, ServiceName("openvscode"), cli, store)
+
+    assert status["url"] == "https://openvscode--abc--owner.example.com"
