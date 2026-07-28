@@ -157,6 +157,17 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                 probes=probes,
                 timeout_seconds=timeout_seconds,
             )
+            if outcome.is_confirmed and outcome.is_rejection:
+                logger.warning(
+                    "Agent {} rejected {!r}; nothing was executed (evidence: {})",
+                    self.name,
+                    message,
+                    outcome.confirming_probe_name,
+                )
+                self.record_message_delivery_event(
+                    "send_rejected_by_agent",
+                    f"agent rejected the message {message!r} (evidence: {outcome.confirming_probe_name})",
+                )
             if not outcome.is_confirmed:
                 if len(probes) == 0:
                     # No evidence exists for this agent type; the send was a

@@ -262,6 +262,33 @@ def test_submit_and_confirm_returns_confirmed_outcome() -> None:
     assert len(agent.captured_commands) == 1
 
 
+def test_submit_and_confirm_flags_rejection_when_a_rejection_probe_confirms() -> None:
+    probes = (
+        *_make_probes(),
+        SubmissionEvidenceProbe(
+            name="unknown-command",
+            baseline_command="wc -c < /tmp/evidence 2>/dev/null",
+            poll_command="echo rejected",
+            is_rejection=True,
+        ),
+    )
+    agent = _make_probe_agent(CommandResult(stdout="MNGR_CONFIRMED unknown-command\n", stderr="", success=True))
+    outcome = submit_message_and_confirm(
+        agent=agent, tmux_target=_FAKE_TARGET, message="/typo", probes=probes, timeout_seconds=5.0
+    )
+    assert outcome.is_confirmed is True
+    assert outcome.is_rejection is True
+
+
+def test_submit_and_confirm_does_not_flag_rejection_for_acceptance_probes() -> None:
+    agent = _make_probe_agent(CommandResult(stdout="MNGR_CONFIRMED marker\n", stderr="", success=True))
+    outcome = submit_message_and_confirm(
+        agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=_make_probes(), timeout_seconds=5.0
+    )
+    assert outcome.is_confirmed is True
+    assert outcome.is_rejection is False
+
+
 def test_submit_and_confirm_returns_unconfirmed_outcome_on_timeout() -> None:
     agent = _make_probe_agent(
         CommandResult(stdout="MNGR_UNCONFIRMED\nMNGR_PROBE marker base=[] final=[]\n", stderr="", success=False)
