@@ -104,6 +104,7 @@ from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import StopStateContainerResponse
+from imbue.minds.desktop_client.api_models import TimezoneResponse
 from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
 from imbue.minds.desktop_client.api_models import WorkspaceBackupCheckResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
@@ -127,6 +128,7 @@ from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
+from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_workspace_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
@@ -331,6 +333,20 @@ def _handle_list_accounts() -> AccountsResponse:
         else ()
     )
     return AccountsResponse(accounts=accounts)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(TimezoneResponse))
+def _handle_timezone() -> TimezoneResponse:
+    """Return the host machine's IANA timezone (empty when undeterminable).
+
+    Lets a workspace agent resolve "the user's local time" (e.g. the scheduler's
+    "3 AM" runs) by pulling the timezone from the desktop client on demand,
+    instead of the desktop client pushing it into each workspace at create time.
+    Baseline-granted at the latchkey gateway (like the API schema document), so
+    every agent can read it without a per-agent grant.
+    """
+    return TimezoneResponse(timezone=read_host_timezone())
 
 
 @require_api_or_cookie_auth
@@ -2859,6 +2875,8 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/workspaces/<agent_id>", view_func=_handle_get_workspace, methods=["GET"])
     # Gated by the must-ask ``minds-accounts-read`` permission (not in the agent baseline).
     blueprint.add_url_rule("/accounts", view_func=_handle_list_accounts, methods=["GET"])
+    # Baseline-granted at the gateway (``minds-api-timezone-read``), so every agent can read it.
+    blueprint.add_url_rule("/timezone", view_func=_handle_timezone, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/backups", view_func=_handle_workspaces_backups_stream, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])

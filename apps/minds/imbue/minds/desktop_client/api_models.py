@@ -210,6 +210,17 @@ class EmptyResponse(FrozenModel):
     """An empty ``{}`` success body (e.g. an idempotent dismissal)."""
 
 
+class TimezoneResponse(FrozenModel):
+    """The host machine's timezone, for callers that need the user's local time."""
+
+    timezone: str = Field(
+        description=(
+            "IANA timezone of the machine the desktop client runs on (e.g. America/Los_Angeles); "
+            "empty string when it cannot be determined"
+        )
+    )
+
+
 class AgentNotificationRequest(ApiRequestModel):
     """Body for sending a desktop notification on behalf of an agent."""
 

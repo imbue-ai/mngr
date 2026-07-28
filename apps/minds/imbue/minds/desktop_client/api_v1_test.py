@@ -10,6 +10,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -912,6 +913,29 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert str(creator.last_call["color"]) == "#0b292b"
     assert str(creator.last_call["branch"]) == "main"
     assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
+
+
+def test_timezone_returns_valid_iana_name_or_empty(tmp_path: Path) -> None:
+    # The endpoint reports the machine's own timezone, so the value is
+    # host-dependent: assert the contract (a loadable IANA name, or "" when
+    # undeterminable) rather than a specific zone.
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/timezone", headers=_auth_header())
+
+    assert response.status_code == 200
+    tz_name = json.loads(response.data)["timezone"]
+    assert isinstance(tz_name, str)
+    if tz_name:
+        ZoneInfo(tz_name)
+
+
+def test_timezone_requires_auth(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/timezone")
+
+    assert response.status_code == 401
 
 
 def test_create_workspace_ignores_stale_ai_provider_field(
