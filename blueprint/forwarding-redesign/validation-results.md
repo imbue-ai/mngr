@@ -60,6 +60,15 @@ create flow from the cut-over template, on the production env.
   (cross-site webview/subresource context vs the Access cookie's SameSite).
   This is the exact class the planned connector work addresses
   (`allow_iframe: true` + non-Strict SameSite on the Access app cookie).
+  Nuance: `SameSite=None` fixes cross-site cookie attachment only where
+  third-party cookies are permitted (Chrome/Electron today; Firefox
+  partitions them; Safari blocks them) -- most webview resource loads are
+  unaffected either way because they go through VS Code's service-worker
+  relay to the parent workbench. The browser-proof fix is self-hosting the
+  webview endpoint on the service's own sub-origins
+  (`--webview-external-endpoint={{uuid}}.openvscode.<workspace-host>`),
+  which makes everything same-site; on shares that is gated on the
+  wildcard-cert (Option C) connector work.
 
 ## Caveats / follow-ups
 
