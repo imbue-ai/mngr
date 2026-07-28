@@ -106,7 +106,7 @@ def test_apply_up_rewrites_every_host_file(tmp_path: Path) -> None:
     _write_permissions_file(permissions_path_for_host(tmp_path, host_a), _LEGACY_CONFIG)
     _write_permissions_file(permissions_path_for_host(tmp_path, host_b), _LEGACY_CONFIG)
 
-    FoldWorkspaceScopeIntoLatchkeySelf(version=1).apply_up(tmp_path)
+    FoldWorkspaceScopeIntoLatchkeySelf(version=1).apply_up(tmp_path, tmp_path, "latchkey")
 
     for host_id in (host_a, host_b):
         migrated = json.loads(permissions_path_for_host(tmp_path, host_id).read_text())
@@ -120,8 +120,8 @@ def test_apply_up_then_down_restores_two_scope_layout(tmp_path: Path) -> None:
     _write_permissions_file(permissions_path_for_host(tmp_path, host_id), _LEGACY_CONFIG)
     migration = FoldWorkspaceScopeIntoLatchkeySelf(version=1)
 
-    migration.apply_up(tmp_path)
-    migration.apply_down(tmp_path)
+    migration.apply_up(tmp_path, tmp_path, "latchkey")
+    migration.apply_down(tmp_path, tmp_path, "latchkey")
 
     restored = json.loads(permissions_path_for_host(tmp_path, host_id).read_text())
     rule_keys = [next(iter(rule.keys())) for rule in restored["rules"]]

@@ -13,6 +13,7 @@ from flask import Request
 from flask import Response
 from flask.testing import FlaskClient
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
@@ -48,12 +49,17 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
-from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.account_scopes import build_account_grant
+from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
+from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.testing import FakeLatchkey
 
 _OTHER_REQUEST_TYPE = "OTHER"
 
@@ -91,6 +97,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         host_id: HostId,
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
+        account_choice: str,
     ) -> GrantResult:
         self.grant_calls.append(
             {
@@ -99,6 +106,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
                 "host_id": str(host_id),
                 "scope": service_info.scope,
                 "granted_permissions": tuple(granted_permissions),
+                "account_choice": account_choice,
             }
         )
         # NEEDS_MANUAL_CREDENTIALS and FAILED keep the request pending and
@@ -150,6 +158,22 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         return self.deny_message, response_event
 
 
+def _account_grants_config(*grants: tuple[str, str, tuple[str, ...]]) -> LatchkeyPermissionsConfig:
+    """Build the permissions config production writes for each ``(scope, account, permissions)``.
+
+    Goes through :func:`build_account_grant` so the seeded file carries the
+    generated schemas that pin each rule to its account -- which is what the
+    readers inspect (they never interpret a rule key).
+    """
+    rules: list[dict[str, list[str]]] = []
+    schemas: dict[str, JsonValue] = {}
+    for scope, account, permissions in grants:
+        rule_key, granted, grant_schemas = build_account_grant(scope, account, permissions)
+        rules.append({rule_key: list(granted)})
+        schemas.update(grant_schemas)
+    return LatchkeyPermissionsConfig(rules=tuple(rules), schemas=schemas)
+
+
 def _get_app_request_inbox(client: FlaskClient) -> RequestInbox:
     """Pull the live request inbox out of the Flask app behind a test client."""
     inbox = get_state(client.application).request_inbox
@@ -180,6 +204,25 @@ _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
 }
 
 
+# The account the stub latchkey reports as signed in, so the dialog has a
+# concrete account to preselect and pre-check grants against.
+_TEST_ACCOUNT: str = "alice@example.com"
+
+
+def _make_stub_latchkey(tmp_path: Path) -> FakeLatchkey:
+    """Return a non-spawning ``Latchkey`` reporting one valid signed-in account."""
+    latchkey = FakeLatchkey(latchkey_directory=tmp_path)
+    latchkey.configure(
+        service_info=LatchkeyServiceInfo(
+            credential_status=CredentialStatus.VALID,
+            accounts=(ServiceAccountCredential(account=_TEST_ACCOUNT, credential_status=CredentialStatus.VALID),),
+            auth_options=frozenset({LATCHKEY_AUTH_OPTION_BROWSER}),
+            set_credentials_example=None,
+        ),
+    )
+    return latchkey
+
+
 def _make_recording_handler(
     tmp_path: Path,
     grant_outcome: GrantOutcome = GrantOutcome.GRANTED,
@@ -190,7 +233,7 @@ def _make_recording_handler(
     gateway_client = build_fake_gateway_client()
     return _RecordingHandler(
         data_dir=tmp_path,
-        latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
+        latchkey=_make_stub_latchkey(tmp_path),
         services_catalog=ServicesCatalog.from_catalog_payload(_TEST_SERVICES_CATALOG_PAYLOAD),
         mngr_message_sender=MngrMessageSender(
             mngr_caller=RecordingMngrCaller(),
@@ -505,7 +548,7 @@ def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) 
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
-        data={"permissions": ["slack-read-all", "slack-write-all"]},
+        data={"permissions": ["slack-read-all", "slack-write-all"], "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 200
@@ -561,7 +604,7 @@ def test_post_permission_grant_with_failed_signin_keeps_request_pending(tmp_path
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
-        data={"permissions": ["slack-read-all"]},
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 200
@@ -595,7 +638,7 @@ def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
-        data={"permissions": ["slack-read-all"]},
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 200
@@ -672,14 +715,14 @@ def test_post_permission_grant_after_resolution_returns_409(tmp_path: Path) -> N
 
     first = client.post(
         f"/requests/{request.event_id}/grant",
-        data={"permissions": ["slack-read-all"]},
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
     )
     assert first.status_code == 200
     assert len(handler.grant_calls) == 1
 
     second = client.post(
         f"/requests/{request.event_id}/grant",
-        data={"permissions": ["slack-read-all"]},
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
     )
     assert second.status_code == 409
     # The handler must not have been invoked a second time.
@@ -719,7 +762,7 @@ def test_post_permission_grant_unknown_service_returns_400(tmp_path: Path) -> No
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
-        data={"permissions": ["some-perm"]},
+        data={"permissions": ["some-perm"], "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 400
@@ -737,7 +780,7 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
     # is keyed by.
     save_permissions(
         permissions_path_for_host(tmp_path / "mngr_latchkey", host_id),
-        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-chat-read"]},)),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-chat-read",))),
     )
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
@@ -774,7 +817,7 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
     host_id = HostId()
     save_permissions(
         permissions_path_for_host(tmp_path / "mngr_latchkey", host_id),
-        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-chat-read"]},)),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-chat-read",))),
     )
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
@@ -830,7 +873,7 @@ def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
-        data={"permissions": ["slack-read-all"]},
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 503
@@ -854,7 +897,7 @@ def test_unauthenticated_grant_post_returns_403(tmp_path: Path) -> None:
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
-        data={"permissions": ["slack-read-all"]},
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 403
@@ -966,7 +1009,7 @@ def test_dispatcher_routes_grant_to_handler_matching_request_type(tmp_path: Path
     # Granting a LATCHKEY_PERMISSION event must hit the permission handler only.
     perm_response = client.post(
         f"/requests/{permission_request.event_id}/grant",
-        data={"permissions": ["slack-read-all"]},
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
     )
     assert perm_response.status_code == 200
     assert other_handler.grant_event_ids == [str(other_request.event_id)]

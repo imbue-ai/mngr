@@ -26,6 +26,23 @@ _LEGACY_CONFIG = LatchkeyPermissionsConfig(
 )
 
 
+def _fake_auth_list_binary(tmp_path: Path) -> Path:
+    """Write a fake ``latchkey`` CLI reporting one stored Slack account.
+
+    The registered migrations read the credential store by shelling out, so an
+    end-to-end run through :func:`run_data_format_migrations` needs a binary to
+    shell out to.
+    """
+    binary = tmp_path / "latchkey"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        'print(\'{"slack": {"alice@example.com": '
+        '{"credentialType": "rawCurl", "credentialStatus": "unknown"}}}\')\n'
+    )
+    binary.chmod(0o755)
+    return binary
+
+
 def test_read_version_defaults_to_zero_when_file_absent(tmp_path: Path) -> None:
     assert read_data_format_version(tmp_path) == 0
 
@@ -37,7 +54,7 @@ def test_read_version_raises_on_non_integer_contents(tmp_path: Path) -> None:
 
 
 def test_run_on_fresh_store_stamps_current_version_without_touching_data(tmp_path: Path) -> None:
-    run_data_format_migrations(tmp_path)
+    run_data_format_migrations(tmp_path, tmp_path, str(_fake_auth_list_binary(tmp_path)))
     assert read_data_format_version(tmp_path) == CURRENT_DATA_FORMAT_VERSION
 
 
@@ -45,7 +62,7 @@ def test_run_migrates_legacy_store_up_and_records_current_version(tmp_path: Path
     host_id = HostId.generate()
     save_permissions(permissions_path_for_host(tmp_path, host_id), _LEGACY_CONFIG)
 
-    run_data_format_migrations(tmp_path)
+    run_data_format_migrations(tmp_path, tmp_path, str(_fake_auth_list_binary(tmp_path)))
 
     assert read_data_format_version(tmp_path) == CURRENT_DATA_FORMAT_VERSION
     migrated = json.loads(permissions_path_for_host(tmp_path, host_id).read_text())
@@ -57,11 +74,11 @@ def test_run_migrates_legacy_store_up_and_records_current_version(tmp_path: Path
 def test_run_is_noop_once_already_at_current_version(tmp_path: Path) -> None:
     host_id = HostId.generate()
     save_permissions(permissions_path_for_host(tmp_path, host_id), _LEGACY_CONFIG)
-    run_data_format_migrations(tmp_path)
+    run_data_format_migrations(tmp_path, tmp_path, str(_fake_auth_list_binary(tmp_path)))
     migrated_once = permissions_path_for_host(tmp_path, host_id).read_text()
 
     # A second run finds the recorded version already current and rewrites nothing.
-    run_data_format_migrations(tmp_path)
+    run_data_format_migrations(tmp_path, tmp_path, str(_fake_auth_list_binary(tmp_path)))
     assert permissions_path_for_host(tmp_path, host_id).read_text() == migrated_once
 
 
@@ -71,12 +88,12 @@ class _RecordingMigration(DataFormatMigration):
     applied_up_versions: list[int] = []
     applied_down_versions: list[int] = []
 
-    def apply_up(self, plugin_data_dir: Path) -> None:
-        del plugin_data_dir
+    def apply_up(self, plugin_data_dir: Path, latchkey_directory: Path, latchkey_binary: str) -> None:
+        del plugin_data_dir, latchkey_directory, latchkey_binary
         self.applied_up_versions.append(self.version)
 
-    def apply_down(self, plugin_data_dir: Path) -> None:
-        del plugin_data_dir
+    def apply_down(self, plugin_data_dir: Path, latchkey_directory: Path, latchkey_binary: str) -> None:
+        del plugin_data_dir, latchkey_directory, latchkey_binary
         self.applied_down_versions.append(self.version)
 
 
@@ -84,7 +101,9 @@ def test_sequence_applies_up_migrations_above_recorded_version_in_order(tmp_path
     first = _RecordingMigration(version=1)
     second = _RecordingMigration(version=2)
 
-    _sequence_migrations(tmp_path, (first, second), target_version=2)
+    _sequence_migrations(
+        tmp_path, (first, second), target_version=2, latchkey_directory=tmp_path, latchkey_binary="latchkey"
+    )
 
     assert first.applied_up_versions == [1]
     assert second.applied_up_versions == [2]
@@ -99,7 +118,9 @@ def test_sequence_reverts_down_migrations_above_target_highest_first(tmp_path: P
     (tmp_path / "data-format-version").write_text("2\n")
 
     # Downgrade from recorded version 2 to target 1: only migration 2 is reverted.
-    _sequence_migrations(tmp_path, (first, second), target_version=1)
+    _sequence_migrations(
+        tmp_path, (first, second), target_version=1, latchkey_directory=tmp_path, latchkey_binary="latchkey"
+    )
 
     assert second.applied_down_versions == [2]
     assert first.applied_down_versions == []
@@ -109,7 +130,13 @@ def test_sequence_reverts_down_migrations_above_target_highest_first(tmp_path: P
 
 def test_sequence_rejects_non_consecutive_registry(tmp_path: Path) -> None:
     with pytest.raises(LatchkeyMigrationError):
-        _sequence_migrations(tmp_path, (_RecordingMigration(version=2),), target_version=2)
+        _sequence_migrations(
+            tmp_path,
+            (_RecordingMigration(version=2),),
+            target_version=2,
+            latchkey_directory=tmp_path,
+            latchkey_binary="latchkey",
+        )
 
 
 def test_migration_interface_rejects_non_positive_version() -> None:

@@ -1,23 +1,51 @@
-{#def agent_id, request_id, ws_name, rationale, display_name, scope, permission_schemas, description_by_permission_name, checked_permissions, wildcard_permission, wildcard_label, will_open_browser, mngr_forward_origin #}
+{#def agent_id, request_id, ws_name, rationale, display_name, scope, permission_schemas, description_by_permission_name, checked_permissions, account_choices, selected_account_value, new_account_value, wildcard_permission, wildcard_label, will_open_browser, mngr_forward_origin #}
 {#
   Latchkey predefined permission request fragment. Rendered inside the
-  inbox modal's right pane. Provides the per-permission simple/editor
-  views and the auth-browser progress notice. Chrome (backdrop, close
-  button, escape/backdrop dismiss, form submission JS, Adjust toggle)
-  lives in the inbox shell and operates on these elements via the ids
-  below (#permissions-form, #permissions-simple-view, etc.).
+  inbox modal's right pane. Provides the account picker, the
+  per-permission simple/editor views and the auth-browser progress
+  notice. Chrome (backdrop, close button, escape/backdrop dismiss, form
+  submission JS, Adjust toggle) lives in the inbox shell and operates on
+  these elements via the ids below (#permissions-form,
+  #permissions-simple-view, etc.).
+
+  Grants are per account: the form always submits exactly one ``account``
+  radio, either an account already signed in to the service or the
+  "new account" choice, which makes Approve run a browser sign-in first.
 #}
 <div class="permissions-detail">
   <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
 
   <PermissionsForm :request_id="request_id">
+    {# Account picker: which signed-in account of the service the grant
+       applies to. Rendered above the permissions because the account is
+       what the permissions are scoped to. A single radio is always
+       preselected, so the form can never submit without an account. #}
+    <div id="permissions-account-view" class="mb-4">
+      <h2 class="type-label text-primary mb-2">Account to use:</h2>
+      <Card extra="space-y-2">
+        {% for choice in account_choices %}
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input type="radio" name="account" value="{{ choice.value }}" class="mt-1 shrink-0"
+                   {% if choice.value == selected_account_value %}checked{% endif %}>
+            <span class="min-w-0">
+              <span class="type-body text-primary">{{ choice.label }}</span>
+              {% if choice.hint %}
+                <span class="type-helper text-tertiary"> &middot; {{ choice.hint }}</span>
+              {% endif %}
+            </span>
+          </label>
+        {% endfor %}
+      </Card>
+    </div>
+
     {# Simple (default) view: a read-only summary of the permissions that
        will be granted on Approve, with no checkboxes. The full checkbox
        editor is hidden behind the "Adjust" link below. #}
     <div id="permissions-simple-view">
       {% if checked_permissions %}
         <p class="type-body text-primary mb-3">
-          Approving will grant {{ ws_name or agent_id }} and its sibling agents the following permissions:
+          Approving will grant {{ ws_name or agent_id }} and its sibling agents the following permissions
+          on the selected account:
         </p>
         <Card extra="space-y-3">
           {% for permission in permission_schemas %}

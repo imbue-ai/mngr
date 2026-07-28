@@ -10,7 +10,10 @@ exposes two extensions added in version 2.9.0:
   them once granted or denied.
 * ``permissions`` -- per-host permissions config editor. The desktop
   client POSTs to ``/permissions/rules?path=<host_file>&rule_key=<scope>``
-  with a JSON body of permission-schema names to apply a grant.
+  with ``{"permissions": [...], "schemas": {...}}`` to apply a grant; the
+  extension merges exactly what it is given (see
+  :mod:`imbue.mngr_latchkey.account_scopes`, which composes the per-account
+  schemas).
 
 Both extensions sit behind the gateway's standard auth wall: callers
 present the listen password in ``Authorization: Bearer <password>`` and
@@ -49,6 +52,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import load_forward_info
 
 # Header names baked into the upstream gateway's wire contract.
@@ -100,6 +104,14 @@ class PredefinedRequestPayload(FrozenModel):
         description=(
             "Permission schemas the agent is requesting under the scope. May be empty, "
             "in which case the agent is asking for any permissions the user chooses to grant."
+        ),
+    )
+    account: str | None = Field(
+        default=None,
+        description=(
+            "Latchkey account the grant should apply to (the unnamed default account is the "
+            "empty string), or ``None`` when the agent named none -- grants are per account, so "
+            "the user then picks one (or signs a new one in) in the approval dialog."
         ),
     )
 
@@ -185,8 +197,8 @@ class PermissionEffect(FrozenModel):
         default_factory=dict,
         description=(
             "Detent schema definitions referenced by ``rules``. Populated for ``file-sharing`` "
-            "requests (which introduce custom per-path schemas); empty for ``predefined`` "
-            "requests, which only reference detent's built-in catalog."
+            "requests (custom per-path schemas) and for ``predefined`` requests that name an "
+            "account (the generated schema gating the built-in scope on that account)."
         ),
     )
 
@@ -207,7 +219,7 @@ _PAYLOAD_CLASS_BY_REQUEST_TYPE: Final[Mapping[str, type[FrozenModel]]] = {
 class StreamedPermissionRequest(FrozenModel):
     """Single JSONL record produced by ``GET /permission-requests``.
 
-    The on-disk schema is versioned (``permission_requests/v2``). The ``payload``
+    The on-disk schema is versioned (``permission_requests/v3``). The ``payload``
     field is one of four type-specific variants. They are *not* all
     shape-disjoint -- ``workspace`` and ``accounts`` payloads both validate
     against an empty object (every field defaulted / no fields) -- so the variant
@@ -552,17 +564,17 @@ class LatchkeyGatewayClient(MutableModel):
                 f"POST {url} returned {response.status_code}: {response.text.strip()}",
             )
 
-    def get_granted_permissions_for_scopes(
+    def get_permissions_config(
         self,
         permissions_file_path: Path,
-        scopes: Sequence[str],
-    ) -> frozenset[str]:
-        """Return the union of granted permission schemas across ``scopes`` in the file.
+    ) -> LatchkeyPermissionsConfig:
+        """Return the whole permissions file (rules *and* schemas).
 
-        Wraps ``GET /permissions?path=<...>`` and walks the parsed
-        ``rules`` list. A missing file (404) is treated as "no rules"
-        and returns the empty set, matching the previous filesystem
-        read's behaviour. Any other non-2xx surfaces as
+        Wraps ``GET /permissions?path=<...>``. Callers that need to know what a
+        rule actually grants must look at its schema (see
+        :mod:`imbue.mngr_latchkey.account_scopes`), so the schemas travel with
+        the rules. A missing file (404) is reported as an empty config, matching
+        the deny-all default a host starts from; any other non-2xx surfaces as
         :class:`LatchkeyGatewayClientError`.
         """
         self.ensure_initialized()
@@ -574,7 +586,7 @@ class LatchkeyGatewayClient(MutableModel):
         except httpx.HTTPError as e:
             raise self._wrap_transport_error(e, f"GET {url} failed") from e
         if response.status_code == 404:
-            return frozenset()
+            return LatchkeyPermissionsConfig()
         if response.status_code >= 400:
             raise LatchkeyGatewayClientError(
                 f"GET {url} returned {response.status_code}: {response.text.strip()}",
@@ -585,96 +597,68 @@ class LatchkeyGatewayClient(MutableModel):
             raise LatchkeyGatewayClientError(f"GET {url} returned non-JSON body: {e}") from e
         if not isinstance(payload, dict):
             raise LatchkeyGatewayClientError(f"GET {url} returned non-object JSON: {payload!r}")
-        rules = payload.get("rules")
-        if not isinstance(rules, list):
-            return frozenset()
-        scopes_set = set(scopes)
-        granted: set[str] = set()
-        for rule in rules:
-            if not isinstance(rule, dict):
-                continue
-            for scope_name, permissions in rule.items():
-                if scope_name in scopes_set and isinstance(permissions, list):
-                    granted.update(p for p in permissions if isinstance(p, str))
-        return frozenset(granted)
+        try:
+            return LatchkeyPermissionsConfig.model_validate(payload)
+        except ValueError as e:
+            raise LatchkeyGatewayClientError(f"GET {url} returned a malformed permissions file: {e}") from e
 
     def get_permission_rules(
         self,
         permissions_file_path: Path,
     ) -> dict[str, tuple[str, ...]]:
-        """Return every rule in the file as a ``{scope: (permission, ...)}`` mapping.
+        """Return every rule in the file as a ``{rule_key: (permission, ...)}`` mapping.
 
-        Wraps ``GET /permissions?path=<...>`` and flattens the parsed
-        ``rules`` list (each element is a single-key ``{scope:
-        [permission, ...]}`` object) into one mapping keyed by scope.
-        A missing file (404) is treated as "no rules" and returns an
-        empty mapping, matching :meth:`get_granted_permissions_for_scopes`.
-        Any other non-2xx surfaces as :class:`LatchkeyGatewayClientError`.
+        A flattened view of :meth:`get_permissions_config`'s ``rules``, for the
+        callers that only care about permission names under a *known* rule key
+        (the gateway-self scope's file-sharing / workspace verbs). Anything that
+        has to interpret a rule key goes through the config instead.
 
-        Duplicate scope keys (which the on-disk format does not expect)
-        are merged by union so no grant is silently dropped.
+        Duplicate keys (which the on-disk format does not expect) are merged by
+        union so no grant is silently dropped.
         """
-        self.ensure_initialized()
-        url = f"{self._require_base_url().rstrip('/')}/permissions"
-        params = {"path": str(permissions_file_path)}
-        try:
-            with self._one_shot_client() as client:
-                response = client.get(url, params=params, headers=self._build_headers())
-        except httpx.HTTPError as e:
-            raise self._wrap_transport_error(e, f"GET {url} failed") from e
-        if response.status_code == 404:
-            return {}
-        if response.status_code >= 400:
-            raise LatchkeyGatewayClientError(
-                f"GET {url} returned {response.status_code}: {response.text.strip()}",
-            )
-        try:
-            payload = response.json()
-        except ValueError as e:
-            raise LatchkeyGatewayClientError(f"GET {url} returned non-JSON body: {e}") from e
-        if not isinstance(payload, dict):
-            raise LatchkeyGatewayClientError(f"GET {url} returned non-object JSON: {payload!r}")
-        rules = payload.get("rules")
-        if not isinstance(rules, list):
-            return {}
         merged: dict[str, list[str]] = {}
-        for rule in rules:
-            if not isinstance(rule, dict):
-                continue
-            for scope_name, permissions in rule.items():
-                if not isinstance(scope_name, str) or not isinstance(permissions, list):
-                    continue
-                bucket = merged.setdefault(scope_name, [])
+        for rule in self.get_permissions_config(permissions_file_path).rules:
+            for rule_key, permissions in rule.items():
+                bucket = merged.setdefault(rule_key, [])
                 for permission in permissions:
-                    if isinstance(permission, str) and permission not in bucket:
+                    if permission not in bucket:
                         bucket.append(permission)
-        return {scope: tuple(permissions) for scope, permissions in merged.items()}
+        return {rule_key: tuple(permissions) for rule_key, permissions in merged.items()}
 
     def set_permission_rule(
         self,
         permissions_file_path: Path,
         rule_key: str,
         granted_permissions: Sequence[str],
+        schemas: Mapping[str, JsonValue] | None = None,
     ) -> None:
         """Add or replace the rule for ``rule_key`` in ``permissions_file_path``.
 
-        Wraps ``POST /permissions/rules?path=<...>&rule_key=<...>`` with
-        a JSON-array body of permission-schema names. The extension
-        creates the target file (and any missing parent directories,
-        e.g. ``hosts/<host_id>/``) if it does not yet exist; it refuses
-        any path outside ``LATCHKEY_EXTENSION_PERMISSIONS_ROOT`` with
-        a 403, which we surface verbatim so misconfigurations are
-        loud.
+        Wraps ``POST /permissions/rules?path=<...>&rule_key=<...>`` with a
+        ``{"permissions": [...], "schemas": {...}}`` body. ``schemas`` carries
+        the definitions that must exist for the rule key (and anything it
+        references) to resolve -- the extension merges them by name and
+        synthesizes nothing itself, so a rule key that is not a built-in detent
+        schema *must* be defined here (see
+        :func:`imbue.mngr_latchkey.account_scopes.build_account_grant`).
+
+        The extension creates the target file (and any missing parent
+        directories, e.g. ``hosts/<host_id>/``) if it does not yet exist; it
+        refuses any path outside ``LATCHKEY_EXTENSION_PERMISSIONS_ROOT`` with a
+        403, which we surface verbatim so misconfigurations are loud.
         """
         self.ensure_initialized()
         url = f"{self._require_base_url().rstrip('/')}/permissions/rules"
         params = {"path": str(permissions_file_path), "rule_key": rule_key}
+        body: dict[str, JsonValue] = {"permissions": list(granted_permissions)}
+        if schemas:
+            body["schemas"] = dict(schemas)
         try:
             with self._one_shot_client() as client:
                 response = client.post(
                     url,
                     params=params,
-                    json=list(granted_permissions),
+                    json=body,
                     headers=self._build_headers(),
                 )
         except httpx.HTTPError as e:

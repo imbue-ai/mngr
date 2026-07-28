@@ -33,6 +33,8 @@ from urllib.parse import quote
 
 import pytest
 
+from imbue.mngr_latchkey.account_scopes import build_account_grant
+
 _NODE_BINARY: Final[str | None] = shutil.which("node")
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "permissions.mjs"
@@ -255,9 +257,89 @@ def test_post_rule_creates_missing_host_directory(tmp_path: Path) -> None:
     env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
     with _spawn_node_extension(env) as base_url:
         url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key=slack-api"
-        status, payload = _post_json(url, ["any"])
+        status, payload = _post_json(url, {"permissions": ["any"]})
 
     assert status == 201, payload
     assert target.is_file()
     on_disk = json.loads(target.read_text())
     assert on_disk["rules"] == [{"slack-api": ["any"]}]
+
+
+def test_post_rule_merges_the_supplied_schemas(tmp_path: Path) -> None:
+    """The caller owns the schemas; the extension merges them by name.
+
+    A rule key that is not a name detent already knows (here: a generated
+    per-account schema, composed by ``account_scopes``) only resolves because
+    its definition travels with the request.
+    """
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    rule_key, permissions, schemas = build_account_grant("slack-api", "alice@example.com", ("slack-read-all",))
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key={quote(rule_key)}"
+        status, payload = _post_json(url, {"permissions": list(permissions), "schemas": schemas})
+
+    assert status == 201, payload
+    on_disk = json.loads(target.read_text())
+    assert on_disk["rules"] == [{rule_key: ["slack-read-all"]}]
+    assert on_disk["schemas"] == schemas
+
+
+def test_post_rule_keeps_schemas_it_was_not_given(tmp_path: Path) -> None:
+    """Merging is by name: unrelated schemas already in the file survive."""
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    target.parent.mkdir(parents=True)
+    baseline_schema = {"properties": {"domain": {"const": "latchkey-self.invalid"}}, "required": ["domain"]}
+    target.write_text(
+        json.dumps(
+            {
+                "rules": [{"latchkey-self": ["latchkey-self-read-self-permissions"]}],
+                "schemas": {"latchkey-self": baseline_schema},
+            }
+        )
+    )
+    rule_key, permissions, schemas = build_account_grant("slack-api", "", ("slack-read-all",))
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key={quote(rule_key)}"
+        status, _ = _post_json(url, {"permissions": list(permissions), "schemas": schemas})
+
+    assert status == 201
+    on_disk = json.loads(target.read_text())
+    assert on_disk["schemas"]["latchkey-self"] == baseline_schema
+    assert on_disk["schemas"][rule_key] == schemas[rule_key]
+
+
+def test_post_rule_without_schemas_leaves_the_schemas_block_untouched(tmp_path: Path) -> None:
+    """A rule whose key detent already knows needs no schema, and mints none."""
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key=latchkey-self"
+        status, _ = _post_json(url, {"permissions": ["latchkey-self-read-self-permissions"]})
+
+    assert status == 201
+    assert "schemas" not in json.loads(target.read_text())
+
+
+def test_post_rule_rejects_a_bare_array_body(tmp_path: Path) -> None:
+    """The body must be the ``{permissions, schemas?}`` object, not a bare list."""
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key=slack-api"
+        status, _ = _post_json(url, ["any"])
+
+    assert status == 400
+    assert not target.exists()
+
+
+def test_post_rule_rejects_a_non_object_schema(tmp_path: Path) -> None:
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key=slack-api%3Aa%40b"
+        status, _ = _post_json(url, {"permissions": ["any"], "schemas": {"slack-api:a@b": "not-a-schema"}})
+
+    assert status == 400
+    assert not target.exists()

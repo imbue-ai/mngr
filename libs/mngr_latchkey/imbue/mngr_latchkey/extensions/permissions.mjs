@@ -31,8 +31,21 @@
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
- *       Add or replace the rule for <key>. Body: JSON array of
- *       permission-schema names.
+ *       Add or replace the rule for <key>. Body:
+ *       ``{"permissions": [<schema_name>, ...], "schemas": {<name>:
+ *       <schema>, ...}}``. ``permissions`` are the permission-schema
+ *       names to put under the rule; ``schemas`` (optional) are schema
+ *       definitions merged by name into the file's ``schemas`` object
+ *       before the rule is written.
+ *
+ *       A caller whose ``rule_key`` is not a name detent already knows
+ *       (a built-in schema, or one already defined in the file) MUST
+ *       define it here -- notably minds' per-account service grants,
+ *       whose rule key names a generated schema composing a built-in
+ *       scope with the account latchkey injects. This extension never
+ *       synthesizes schemas of its own and never interprets the rule
+ *       key: composing them is the job of
+ *       ``imbue.mngr_latchkey.account_scopes``, which owns that shape.
  *   DELETE /permissions/rules?path=<path>&rule_key=<key>
  *       Remove the rule for <key>.
  *
@@ -386,10 +399,18 @@ async function readRequestBody(request) {
   return Buffer.concat(chunks).toString('utf-8');
 }
 
-async function parseRulePermissionsBody(request) {
+/**
+ * Parse the ``POST /permissions/rules`` body into
+ * ``{permissions, schemas}``.
+ *
+ * ``permissions`` is a JSON array of permission-schema names; ``schemas`` is an
+ * optional object of schema definitions to merge into the file by name (see the
+ * module docstring on why the caller, not this extension, authors them).
+ */
+async function parseRuleBody(request) {
   const raw = await readRequestBody(request);
   if (raw.trim().length === 0) {
-    throw new InvalidRequestBodyError('expected a JSON array, got empty body');
+    throw new InvalidRequestBodyError('expected a JSON object, got empty body');
   }
   let parsed;
   try {
@@ -398,15 +419,31 @@ async function parseRulePermissionsBody(request) {
     const message = error instanceof Error ? error.message : String(error);
     throw new InvalidRequestBodyError(`not valid JSON: ${message}`);
   }
-  if (!Array.isArray(parsed)) {
-    throw new InvalidRequestBodyError('expected a JSON array of permission-schema names');
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new InvalidRequestBodyError(
+      "expected a JSON object with a 'permissions' array and an optional 'schemas' object",
+    );
   }
-  for (const entry of parsed) {
-    if (typeof entry !== 'string') {
-      throw new InvalidRequestBodyError('every array element must be a string');
+  const extraneous = Object.keys(parsed).filter((name) => name !== 'permissions' && name !== 'schemas');
+  if (extraneous.length > 0) {
+    throw new InvalidRequestBodyError(
+      `unknown field(s): ${extraneous.map((name) => `'${name}'`).join(', ')}`,
+    );
+  }
+  const permissions = parsed.permissions;
+  if (!Array.isArray(permissions) || permissions.some((entry) => typeof entry !== 'string')) {
+    throw new InvalidRequestBodyError("'permissions' is required and must be an array of strings");
+  }
+  const schemas = parsed.schemas === undefined ? {} : parsed.schemas;
+  if (typeof schemas !== 'object' || schemas === null || Array.isArray(schemas)) {
+    throw new InvalidRequestBodyError("'schemas', when present, must be a JSON object keyed by schema name");
+  }
+  for (const [name, schema] of Object.entries(schemas)) {
+    if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
+      throw new InvalidRequestBodyError(`schema '${name}' must be a JSON object`);
     }
   }
-  return parsed;
+  return { permissions: [...permissions], schemas };
 }
 
 function sendJson(response, statusCode, payload) {
@@ -588,7 +625,7 @@ function handleGetRule(response, filePath, ruleKey) {
 }
 
 async function handlePostRule(request, response, filePath, ruleKey) {
-  const permissions = await parseRulePermissionsBody(request);
+  const { permissions, schemas } = await parseRuleBody(request);
 
   const file = existsSync(filePath) ? readPermissionsFile(filePath) : { rules: [] };
   const rules = Array.isArray(file.rules) ? [...file.rules] : [];
@@ -600,6 +637,15 @@ async function handlePostRule(request, response, filePath, ruleKey) {
     rules[existingIndex] = newRule;
   }
   const updated = { ...file, rules };
+  if (Object.keys(schemas).length > 0) {
+    // Merge by name, overwriting: a caller re-granting the same thing sends an
+    // identical definition, and the caller owns the shape either way.
+    const existingSchemas =
+      typeof file.schemas === 'object' && file.schemas !== null && !Array.isArray(file.schemas)
+        ? file.schemas
+        : {};
+    updated.schemas = { ...existingSchemas, ...schemas };
+  }
   writePermissionsFileAtomic(filePath, updated);
 
   sendJson(response, existingIndex === -1 ? 201 : 200, newRule);

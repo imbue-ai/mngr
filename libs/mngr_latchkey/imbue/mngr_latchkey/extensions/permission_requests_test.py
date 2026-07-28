@@ -34,7 +34,9 @@ from typing import Final
 import pytest
 
 from imbue.mngr.primitives import AgentId
-from imbue.mngr_latchkey.agent_setup import _AGENT_BASELINE_PERMISSIONS
+from imbue.mngr_latchkey.account_scopes import account_scope_key
+from imbue.mngr_latchkey.account_scopes import build_account_scope_schema
+from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 _NODE_BINARY: Final[str | None] = shutil.which("node")
@@ -251,7 +253,7 @@ def test_post_creates_predefined_request_with_target_and_effect(
             "agent_id": _VALID_AGENT_ID,
             "rationale": "needs slack",
             "type": "predefined",
-            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": "alice@example.com"},
         },
     )
     assert status == 201
@@ -262,11 +264,21 @@ def test_post_creates_predefined_request_with_target_and_effect(
     # ``request_type`` to avoid shadowing the Python ``type`` builtin
     # in the consumer's pydantic model.
     assert parsed["request_type"] == "predefined"
-    assert parsed["payload"] == {"scope": "slack-api", "permissions": ["slack-read-all"]}
+    assert parsed["payload"] == {
+        "scope": "slack-api",
+        "permissions": ["slack-read-all"],
+        "account": "alice@example.com",
+    }
     assert parsed["target"] == str(permissions_config_path)
-    assert parsed["effect"] == {"rules": [{"slack-api": ["slack-read-all"]}]}
+    # The grant is scoped to the named account: the rule key carries it and the
+    # effect ships the generated schema that gates the built-in scope on it.
+    rule_key = account_scope_key("slack-api", "alice@example.com")
+    assert parsed["effect"] == {
+        "schemas": {rule_key: build_account_scope_schema("slack-api", "alice@example.com")},
+        "rules": [{rule_key: ["slack-read-all"]}],
+    }
     # The persisted file should match the response on disk.
-    stored = next((latchkey_directory / "permission_requests" / "v2").iterdir())
+    stored = next((latchkey_directory / "permission_requests" / "v3").iterdir())
     assert json.loads(stored.read_text()) == parsed
 
 
@@ -681,7 +693,7 @@ def test_post_creates_workspace_request_with_target_and_effect(
     # A different workspace id is not covered by the single-target grant.
     other_id = str(AgentId.generate())
     assert not path_pattern.fullmatch(f"{prefix}/{other_id}/destroy")
-    stored = next((latchkey_directory / "permission_requests" / "v2").iterdir())
+    stored = next((latchkey_directory / "permission_requests" / "v3").iterdir())
     assert json.loads(stored.read_text()) == parsed
 
 
@@ -840,7 +852,7 @@ def test_approve_workspace_grant_folds_into_latchkey_self_on_real_baseline(
     base_url, _latchkey_directory, permissions_config_path = node_extension
     # Seed the exact per-host baseline a live host has: the per-agent gate followed
     # by the domain-only ``latchkey-self`` rule.
-    permissions_config_path.write_text(json.dumps(_AGENT_BASELINE_PERMISSIONS.model_dump()))
+    permissions_config_path.write_text(json.dumps(AGENT_BASELINE_PERMISSIONS.model_dump()))
 
     status, body = _post_json(
         f"{base_url}/permission-requests",
@@ -1036,7 +1048,7 @@ def test_post_rejects_malformed_agent_id(
     )
     assert status == 400, body
     assert "agent_id" in json.loads(body)["error"]
-    persisted_dir = latchkey_directory / "permission_requests" / "v2"
+    persisted_dir = latchkey_directory / "permission_requests" / "v3"
     persisted = list(persisted_dir.iterdir()) if persisted_dir.exists() else []
     assert persisted == [], f"a rejected request must not be persisted, found {persisted}"
 
@@ -1151,6 +1163,135 @@ def test_post_rejects_extraneous_top_level_field(node_extension: tuple[str, Path
     assert "request_id" in json.loads(body)["error"]
 
 
+def test_post_predefined_without_account_has_empty_effect(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """An agent that names no account files a request nobody can blindly approve.
+
+    Grants are per account, so a request that names none has nothing to apply:
+    the effect is empty and a bare ``/approve`` is a no-op. The account has to
+    come from the approving client (the minds dialog, or an approve override).
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["payload"]["account"] is None
+    assert parsed["effect"] == {}
+
+    approve_status, _ = _post_json(f"{base_url}/permission-requests/approve/{parsed['request_id']}", None)
+    assert approve_status == 200
+    # Nothing was granted: the file holds no rules at all.
+    assert json.loads(permissions_config_path.read_text())["rules"] == []
+
+
+def test_approve_with_account_override_grants_that_account(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """The approving client supplies the account the user picked."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all", "slack-write-all"]},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    approve_status, approve_body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"account": "bob@example.com", "permissions": ["slack-read-all"]},
+    )
+    assert approve_status == 200, approve_body
+    applied = json.loads(permissions_config_path.read_text())
+    rule_key = account_scope_key("slack-api", "bob@example.com")
+    # Only the permission subset the user kept is granted, and only for the
+    # account they picked.
+    assert applied["rules"] == [{rule_key: ["slack-read-all"]}]
+    assert applied["schemas"][rule_key] == build_account_scope_schema("slack-api", "bob@example.com")
+
+
+def test_approve_account_override_replaces_the_requested_account(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """The user may grant a different account than the agent asked for."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": "alice@example.com"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    approve_status, _ = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"account": "bob@example.com"},
+    )
+    assert approve_status == 200
+    rule_keys = [next(iter(rule)) for rule in json.loads(permissions_config_path.read_text())["rules"]]
+    assert rule_keys == [account_scope_key("slack-api", "bob@example.com")]
+
+
+def test_post_accepts_an_account_containing_the_naming_separator(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """The rule key is never parsed, so a colon in the account is harmless.
+
+    What pins the grant to the account is the generated schema's ``const`` gate;
+    the key is only a (human-readable) identifier.
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    account = "we:ird@example.com"
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": account},
+        },
+    )
+    assert status == 201, body
+    request_id = json.loads(body)["request_id"]
+    approve_status, _ = _post_json(f"{base_url}/permission-requests/approve/{request_id}", None)
+    assert approve_status == 200
+    applied = json.loads(permissions_config_path.read_text())
+    rule_key = account_scope_key("slack-api", account)
+    assert applied["rules"] == [{rule_key: ["slack-read-all"]}]
+    # The account survives verbatim in the gate, which is what detent matches on.
+    assert applied["schemas"][rule_key] == build_account_scope_schema("slack-api", account)
+
+
+def test_post_rejects_non_string_account(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["any"], "account": 7},
+        },
+    )
+    assert status == 400, body
+    assert "account" in json.loads(body)["error"]
+
+
 def test_post_rejects_unknown_scope_in_predefined(node_extension: tuple[str, Path, Path]) -> None:
     """Predefined requests must name a scope from the bundled services catalog."""
     base_url, *_ = node_extension
@@ -1202,12 +1343,12 @@ def test_post_accepts_any_permission_for_known_scope(node_extension: tuple[str, 
             "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
-            "payload": {"scope": scope, "permissions": ["any"]},
+            "payload": {"scope": scope, "permissions": ["any"], "account": "alice@example.com"},
         },
     )
     assert status == 201, body
     parsed = json.loads(body)
-    assert parsed["effect"] == {"rules": [{scope: ["any"]}]}
+    assert parsed["effect"]["rules"] == [{account_scope_key(scope, "alice@example.com"): ["any"]}]
 
 
 def test_post_rejects_permission_from_a_different_scope(node_extension: tuple[str, Path, Path]) -> None:
@@ -1312,7 +1453,7 @@ def test_approve_writes_target_permissions_for_file_sharing(
     assert _FILE_SHARING_SCOPE_NAME not in applied["schemas"]
 
     # Pending request file was removed.
-    pending_dir = latchkey_directory / "permission_requests" / "v2"
+    pending_dir = latchkey_directory / "permission_requests" / "v3"
     assert list(pending_dir.iterdir()) == []
 
 
@@ -1320,15 +1461,16 @@ def test_approve_merges_predefined_into_existing_rules(
     node_extension: tuple[str, Path, Path],
 ) -> None:
     base_url, _latchkey_directory, permissions_config_path = node_extension
-    # Seed the target with a pre-existing rule for the same scope.
-    permissions_config_path.write_text(json.dumps({"rules": [{"slack-api": ["slack-read-all"]}]}))
+    # Seed the target with a pre-existing rule for the same scope + account.
+    rule_key = account_scope_key("slack-api", "alice@example.com")
+    permissions_config_path.write_text(json.dumps({"rules": [{rule_key: ["slack-read-all"]}]}))
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
             "agent_id": _VALID_AGENT_ID,
             "rationale": "wants more slack",
             "type": "predefined",
-            "payload": {"scope": "slack-api", "permissions": ["slack-write-all"]},
+            "payload": {"scope": "slack-api", "permissions": ["slack-write-all"], "account": "alice@example.com"},
         },
     )
     assert create_status == 201
@@ -1338,7 +1480,7 @@ def test_approve_merges_predefined_into_existing_rules(
     applied = json.loads(permissions_config_path.read_text())
     # Permissions from both the seed and the new effect are unioned in
     # a single rule entry (same scope key).
-    assert applied["rules"] == [{"slack-api": ["slack-read-all", "slack-write-all"]}]
+    assert applied["rules"] == [{rule_key: ["slack-read-all", "slack-write-all"]}]
 
 
 def test_approve_creates_target_when_missing(node_extension: tuple[str, Path, Path]) -> None:
@@ -1350,7 +1492,7 @@ def test_approve_creates_target_when_missing(node_extension: tuple[str, Path, Pa
             "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
-            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": ""},
         },
     )
     assert create_status == 201
@@ -1359,7 +1501,11 @@ def test_approve_creates_target_when_missing(node_extension: tuple[str, Path, Pa
     assert approve_status == 200
     assert permissions_config_path.exists()
     applied = json.loads(permissions_config_path.read_text())
-    assert applied["rules"] == [{"slack-api": ["slack-read-all"]}]
+    # The unnamed default account is a real account: its key ends in the bare
+    # separator and its schema pins the injected account to the empty string.
+    default_key = account_scope_key("slack-api", "")
+    assert applied["rules"] == [{default_key: ["slack-read-all"]}]
+    assert applied["schemas"][default_key] == build_account_scope_schema("slack-api", "")
 
 
 def test_approve_preserves_symlink_at_target_path(
@@ -1393,7 +1539,7 @@ def test_approve_preserves_symlink_at_target_path(
             "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
-            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": "alice@example.com"},
         },
     )
     assert create_status == 201
@@ -1406,7 +1552,7 @@ def test_approve_preserves_symlink_at_target_path(
     assert permissions_config_path.resolve() == canonical_path.resolve()
     # The merge landed on the canonical file underneath.
     applied = json.loads(canonical_path.read_text())
-    assert applied["rules"] == [{"slack-api": ["slack-read-all"]}]
+    assert applied["rules"] == [{account_scope_key("slack-api", "alice@example.com"): ["slack-read-all"]}]
 
 
 def test_approve_404s_on_unknown_request_id(node_extension: tuple[str, Path, Path]) -> None:
@@ -1500,7 +1646,7 @@ def test_approve_rejects_path_override_for_predefined_request(
             "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
-            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": "alice@example.com"},
         },
     )
     assert create_status == 201
@@ -1510,7 +1656,7 @@ def test_approve_rejects_path_override_for_predefined_request(
         {"path": "/home/example/whatever"},
     )
     assert status == 400, body
-    assert "file-sharing" in json.loads(body)["error"]
+    assert "path" in json.loads(body)["error"]
     # The grant was not applied (the request stays pending).
     assert not permissions_config_path.exists()
 
@@ -1604,5 +1750,5 @@ def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) 
     request_id = json.loads(create_body)["request_id"]
     status, _, _ = _http(f"{base_url}/permission-requests/{request_id}", method="DELETE")
     assert status == 204
-    pending_dir = latchkey_directory / "permission_requests" / "v2"
+    pending_dir = latchkey_directory / "permission_requests" / "v3"
     assert list(pending_dir.iterdir()) == []

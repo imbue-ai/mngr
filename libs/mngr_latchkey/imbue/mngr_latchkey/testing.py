@@ -56,6 +56,7 @@ class FakeLatchkey(Latchkey):
         password_error: BaseException | None = None,
         jwt: str | None = None,
         jwt_error: BaseException | None = None,
+        service_info: LatchkeyServiceInfo | None = None,
     ) -> None:
         self._gateway_url = gateway_url
         self._gateway_error = gateway_error
@@ -63,6 +64,10 @@ class FakeLatchkey(Latchkey):
         self._password_error = password_error
         self._jwt = jwt
         self._jwt_error = jwt_error
+        if service_info is not None:
+            # What every ``services_info`` call reports, including the stored
+            # accounts the per-account permission dialog offers.
+            self._service_info = service_info
 
     def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
         del service_name, is_offline
@@ -86,12 +91,16 @@ class FakeLatchkey(Latchkey):
         del service_name, account, is_all
         return (True, "")
 
-    def auth_browser_login(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
-        del service_name, is_ephemeral
+    def auth_browser_login(
+        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+    ) -> tuple[bool, str]:
+        del service_name, is_ephemeral, account
         return (True, "")
 
-    def auth_browser(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
-        del service_name, is_ephemeral
+    def auth_browser(
+        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+    ) -> tuple[bool, str]:
+        del service_name, is_ephemeral, account
         return (True, "")
 
     def add_account(self, service_name: str) -> tuple[bool, str]:

@@ -73,8 +73,8 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
 
     Dispatches on the concrete type of ``streamed.payload``:
     :class:`PredefinedRequestPayload` becomes a
-    :class:`LatchkeyPredefinedPermissionRequestEvent` (the legacy scope/perm
-    grant flow); :class:`FileSharingRequestPayload` becomes a
+    :class:`LatchkeyPredefinedPermissionRequestEvent` (the per-account
+    scope/permission grant flow); :class:`FileSharingRequestPayload` becomes a
     :class:`LatchkeyFileSharingPermissionRequestEvent` (rendered as a single
     per-path yes/no dialog whose grant path goes through
     ``POST /permission-requests/approve/<id>``);
@@ -95,6 +95,7 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
             permissions_target_path=streamed.target,
             scope=payload.scope,
             permissions=payload.permissions,
+            account=payload.account,
             rationale=streamed.rationale,
         )
     if isinstance(payload, FileSharingRequestPayload):

@@ -217,10 +217,14 @@ def _write_permissions_file(path: Path, config: _PermissionsFile) -> None:
 class FoldWorkspaceScopeIntoLatchkeySelf(DataFormatMigration):
     """Rewrite every per-host permissions file between the two-scope and single-scope layouts."""
 
-    def apply_up(self, plugin_data_dir: Path) -> None:
+    # This migration needs nothing beyond the files themselves, so the latchkey
+    # invocation details (which the interface passes to every step) are ignored.
+    def apply_up(self, plugin_data_dir: Path, latchkey_directory: Path, latchkey_binary: str) -> None:
+        del latchkey_directory, latchkey_binary
         self._rewrite_each_host_file(plugin_data_dir, fold_workspace_scope_into_latchkey_self)
 
-    def apply_down(self, plugin_data_dir: Path) -> None:
+    def apply_down(self, plugin_data_dir: Path, latchkey_directory: Path, latchkey_binary: str) -> None:
+        del latchkey_directory, latchkey_binary
         self._rewrite_each_host_file(plugin_data_dir, split_workspace_scope_out_of_latchkey_self)
 
     def _rewrite_each_host_file(

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -14,12 +15,14 @@ from imbue.minds.desktop_client.latchkey.permission_overview import build_worksp
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.account_scopes import account_scope_key
+from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
@@ -92,6 +95,29 @@ def _seed_host(latchkey: Latchkey, host_id: HostId, rules: tuple[dict[str, list[
     )
 
 
+def _seed_account_grants(
+    latchkey: Latchkey,
+    host_id: HostId,
+    *grants: tuple[str, str, tuple[str, ...]],
+) -> None:
+    """Write a host file granting each ``(scope, account, permissions)`` triple.
+
+    Goes through :func:`build_account_grant` so the seeded file has exactly the
+    shape production writes -- rules *and* the generated schemas that say which
+    account each rule is pinned to (which is what the overview reads).
+    """
+    rules: list[dict[str, list[str]]] = []
+    schemas: dict[str, JsonValue] = {}
+    for scope, account, permissions in grants:
+        rule_key, granted, grant_schemas = build_account_grant(scope, account, permissions)
+        rules.append({rule_key: list(granted)})
+        schemas.update(grant_schemas)
+    save_permissions(
+        permissions_path_for_host(latchkey.plugin_data_dir, host_id),
+        LatchkeyPermissionsConfig(rules=tuple(rules), schemas=schemas),
+    )
+
+
 def _resolver(agent_host_pairs: dict[str, HostId], names: dict[str, str]) -> _MultiHostResolver:
     return _MultiHostResolver(
         url_by_agent_and_service={},
@@ -102,47 +128,95 @@ def _resolver(agent_host_pairs: dict[str, HostId], names: dict[str, str]) -> _Mu
     )
 
 
-def test_build_overview_groups_grants_per_service_and_workspace(tmp_path: Path) -> None:
-    latchkey = _latchkey(tmp_path)
+def _accounts_latchkey(tmp_path: Path, accounts_by_service: dict[str, list[str]]) -> "_AccountsLatchkey":
+    """Return a :class:`Latchkey` double reporting the given stored accounts."""
+    return _AccountsLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service=accounts_by_service,
+    )
+
+
+def test_build_overview_groups_grants_per_account_and_workspace(tmp_path: Path) -> None:
+    latchkey = _accounts_latchkey(tmp_path, {"slack": ["alice@x", "bob@x"], "github": [""]})
     agent_a, host_a = str(AgentId()), HostId()
     agent_b, host_b = str(AgentId()), HostId()
-    _seed_host(latchkey, host_a, ({"slack-api": ["slack-read-all"]}, {"github-rest-api": ["github-read-all"]}))
-    _seed_host(latchkey, host_b, ({"slack-api": ["slack-write-all", "slack-read-all"]},))
+    _seed_account_grants(
+        latchkey,
+        host_a,
+        ("slack-api", "alice@x", ("slack-read-all",)),
+        ("github-rest-api", "", ("github-read-all",)),
+    )
+    _seed_account_grants(latchkey, host_b, ("slack-api", "bob@x", ("slack-write-all",)))
     resolver = _resolver({agent_a: host_a, agent_b: host_b}, {agent_a: "Alpha", agent_b: "Beta"})
 
     overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
 
     by_service = {o.service_name: o for o in overview}
-    assert set(by_service) == {"slack", "github"}
     # Sorted by display name: GitHub before Slack.
     assert [o.display_name for o in overview] == ["GitHub", "Slack"]
-    slack_ws = {g.workspace_name: tuple(p.label for p in g.permissions) for g in by_service["slack"].workspace_grants}
-    assert slack_ws == {"Alpha": ("slack-read-all",), "Beta": ("slack-read-all", "slack-write-all")}
-    github_ws = {
-        g.workspace_name: tuple(p.label for p in g.permissions) for g in by_service["github"].workspace_grants
-    }
-    assert github_ws == {"Alpha": ("github-read-all",)}
+    slack_by_account = {a.account: a for a in by_service["slack"].accounts}
+    assert set(slack_by_account) == {"alice@x", "bob@x"}
+    # Each account only sees the workspaces that hold *its* grant.
+    assert [g.workspace_name for g in slack_by_account["alice@x"].workspace_grants] == ["Alpha"]
+    assert [g.workspace_name for g in slack_by_account["bob@x"].workspace_grants] == ["Beta"]
+    assert tuple(p.label for p in slack_by_account["alice@x"].workspace_grants[0].permissions) == ("slack-read-all",)
+    # The unnamed default account is relabelled but keeps its own grants.
+    (github_account,) = by_service["github"].accounts
+    assert (github_account.account, github_account.label) == ("", "Default account")
+    assert [g.workspace_name for g in github_account.workspace_grants] == ["Alpha"]
 
 
-def test_build_overview_relabels_wildcard_as_all(tmp_path: Path) -> None:
-    latchkey = _latchkey(tmp_path)
+def test_build_overview_lists_a_connected_account_with_no_grants(tmp_path: Path) -> None:
+    # A freshly-connected account must be visible (and disconnectable) even
+    # before any workspace has been allowed to use it.
+    latchkey = _accounts_latchkey(tmp_path, {"slack": ["alice@x"]})
     agent, host = str(AgentId()), HostId()
-    _seed_host(latchkey, host, ({"slack-api": ["any"]},))
+    _seed_host(latchkey, host, ())
     resolver = _resolver({agent: host}, {agent: "Alpha"})
 
     overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
 
-    assert len(overview) == 1
-    wildcard = overview[0].workspace_grants[0].permissions
+    (slack,) = overview
+    (account,) = slack.accounts
+    assert (account.account, account.is_connected, account.workspace_grants) == ("alice@x", True, ())
+
+
+def test_build_overview_surfaces_grants_whose_account_is_not_connected(tmp_path: Path) -> None:
+    # An account with no stored credentials -- cleared outside the app, or
+    # granted before it was ever connected -- leaves an inert rule behind; it
+    # must stay visible so the user can still revoke it.
+    latchkey = _accounts_latchkey(tmp_path, {})
+    agent, host = str(AgentId()), HostId()
+    _seed_account_grants(latchkey, host, ("slack-api", "gone@x", ("slack-read-all",)))
+    resolver = _resolver({agent: host}, {agent: "Alpha"})
+
+    overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
+
+    (slack,) = overview
+    (account,) = slack.accounts
+    assert (account.account, account.is_connected) == ("gone@x", False)
+    assert [g.workspace_name for g in account.workspace_grants] == ["Alpha"]
+
+
+def test_build_overview_relabels_wildcard_as_all(tmp_path: Path) -> None:
+    latchkey = _accounts_latchkey(tmp_path, {"slack": ["alice@x"]})
+    agent, host = str(AgentId()), HostId()
+    _seed_account_grants(latchkey, host, ("slack-api", "alice@x", ("any",)))
+    resolver = _resolver({agent: host}, {agent: "Alpha"})
+
+    overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
+
+    wildcard = overview[0].accounts[0].workspace_grants[0].permissions
     assert tuple(p.label for p in wildcard) == ("all",)
     # The catch-all carries a non-empty tooltip description.
     assert wildcard[0].description
 
 
-def test_build_overview_omits_services_with_no_grants(tmp_path: Path) -> None:
-    latchkey = _latchkey(tmp_path)
+def test_build_overview_omits_services_with_neither_accounts_nor_grants(tmp_path: Path) -> None:
+    latchkey = _accounts_latchkey(tmp_path, {"slack": ["alice@x"]})
     agent, host = str(AgentId()), HostId()
-    _seed_host(latchkey, host, ({"slack-api": ["slack-read-all"]},))
+    _seed_account_grants(latchkey, host, ("slack-api", "alice@x", ("slack-read-all",)))
     resolver = _resolver({agent: host}, {agent: "Alpha"})
 
     overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
@@ -152,7 +226,7 @@ def test_build_overview_omits_services_with_no_grants(tmp_path: Path) -> None:
 
 def test_build_overview_ignores_non_catalog_scopes(tmp_path: Path) -> None:
     """Internal minds scopes present in a host file must not surface as services."""
-    latchkey = _latchkey(tmp_path)
+    latchkey = _accounts_latchkey(tmp_path, {})
     agent, host = str(AgentId()), HostId()
     _seed_host(latchkey, host, ({"minds-workspaces": ["minds-workspaces-read"]},))
     resolver = _resolver({agent: host}, {agent: "Alpha"})
@@ -162,35 +236,43 @@ def test_build_overview_ignores_non_catalog_scopes(tmp_path: Path) -> None:
     assert overview == ()
 
 
-def test_revoke_service_for_workspace_removes_all_service_scopes(tmp_path: Path) -> None:
-    latchkey = _latchkey(tmp_path)
+def test_revoke_service_account_leaves_other_accounts_and_services_alone(tmp_path: Path) -> None:
+    latchkey = _accounts_latchkey(tmp_path, {"slack": ["alice@x", "bob@x"], "github": [""]})
     gateway = build_fake_gateway_client()
     agent, host = str(AgentId()), HostId()
-    _seed_host(latchkey, host, ({"slack-api": ["slack-read-all"]}, {"github-rest-api": ["github-read-all"]}))
+    _seed_account_grants(
+        latchkey,
+        host,
+        ("slack-api", "alice@x", ("slack-read-all",)),
+        ("slack-api", "bob@x", ("slack-read-all",)),
+        ("github-rest-api", "", ("github-read-all",)),
+    )
     resolver = _resolver({agent: host}, {agent: "Alpha"})
 
-    revoke_service_for_workspace(resolver, gateway, _catalog(), latchkey, agent, "slack")
+    revoke_service_account_for_workspace(resolver, gateway, _catalog(), latchkey, agent, "slack", "alice@x")
 
     remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))
-    assert "slack-api" not in remaining
-    assert remaining.get("github-rest-api") == ("github-read-all",)
+    assert account_scope_key("slack-api", "alice@x") not in remaining
+    assert remaining.get(account_scope_key("slack-api", "bob@x")) == ("slack-read-all",)
+    assert remaining.get(account_scope_key("github-rest-api", "")) == ("github-read-all",)
 
 
-def test_revoke_service_for_all_workspaces_removes_across_hosts(tmp_path: Path) -> None:
-    latchkey = _latchkey(tmp_path)
+def test_revoke_service_account_for_all_workspaces_removes_across_hosts(tmp_path: Path) -> None:
+    latchkey = _accounts_latchkey(tmp_path, {"slack": ["alice@x"]})
     gateway = build_fake_gateway_client()
     agent_a, host_a = str(AgentId()), HostId()
     agent_b, host_b = str(AgentId()), HostId()
-    _seed_host(latchkey, host_a, ({"slack-api": ["slack-read-all"]},))
-    _seed_host(latchkey, host_b, ({"slack-api": ["slack-write-all"]},))
+    rule_key = account_scope_key("slack-api", "alice@x")
+    _seed_account_grants(latchkey, host_a, ("slack-api", "alice@x", ("slack-read-all",)))
+    _seed_account_grants(latchkey, host_b, ("slack-api", "alice@x", ("slack-write-all",)))
     resolver = _resolver({agent_a: host_a, agent_b: host_b}, {agent_a: "Alpha", agent_b: "Beta"})
 
-    processed = revoke_service_for_all_workspaces(resolver, gateway, _catalog(), latchkey, "slack")
+    processed = revoke_service_account_for_all_workspaces(resolver, gateway, _catalog(), latchkey, "slack", "alice@x")
 
     assert processed == 2
     for host in (host_a, host_b):
         remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))
-        assert "slack-api" not in remaining
+        assert rule_key not in remaining
 
 
 def test_revoke_unknown_service_raises(tmp_path: Path) -> None:
@@ -199,7 +281,9 @@ def test_revoke_unknown_service_raises(tmp_path: Path) -> None:
     resolver = _resolver({agent: host}, {agent: "Alpha"})
 
     with pytest.raises(PermissionOverviewError, match="Unknown service"):
-        revoke_service_for_workspace(resolver, build_fake_gateway_client(), _catalog(), latchkey, agent, "nope")
+        revoke_service_account_for_workspace(
+            resolver, build_fake_gateway_client(), _catalog(), latchkey, agent, "nope", "a@x"
+        )
 
 
 def test_revoke_unresolvable_workspace_raises(tmp_path: Path) -> None:
@@ -207,8 +291,8 @@ def test_revoke_unresolvable_workspace_raises(tmp_path: Path) -> None:
     resolver = _resolver({}, {})
 
     with pytest.raises(PermissionOverviewError, match="Could not resolve host"):
-        revoke_service_for_workspace(
-            resolver, build_fake_gateway_client(), _catalog(), latchkey, str(AgentId()), "slack"
+        revoke_service_account_for_workspace(
+            resolver, build_fake_gateway_client(), _catalog(), latchkey, str(AgentId()), "slack", "a@x"
         )
 
 
@@ -542,7 +626,7 @@ def test_build_overview_lists_service_accounts(tmp_path: Path) -> None:
         accounts_by_service={"slack": ["hynek@imbue-ai", ""]},
     )
     agent, host = str(AgentId()), HostId()
-    _seed_host(latchkey, host, ({"slack-api": ["slack-read-all"]},))
+    _seed_account_grants(latchkey, host, ("slack-api", "hynek@imbue-ai", ("slack-read-all",)))
     resolver = _resolver({agent: host}, {agent: "Alpha"})
 
     overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
@@ -555,30 +639,17 @@ def test_build_overview_lists_service_accounts(tmp_path: Path) -> None:
     ]
 
 
-def test_disconnect_account_reports_not_last_when_accounts_remain(tmp_path: Path) -> None:
+def test_disconnect_account_clears_the_named_account(tmp_path: Path) -> None:
     latchkey = _AccountsLatchkey(
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
         accounts_by_service={"slack": ["a@x", "b@x"]},
     )
 
-    is_last = disconnect_account(latchkey, "slack", "a@x")
+    disconnect_account(latchkey, "slack", "a@x")
 
-    assert is_last is False
     assert latchkey.cleared_calls == [("slack", "a@x")]
-
-
-def test_disconnect_account_reports_last_when_none_remain(tmp_path: Path) -> None:
-    latchkey = _AccountsLatchkey(
-        latchkey_directory=tmp_path,
-        latchkey_binary="/nonexistent",
-        accounts_by_service={"slack": ["only@x"]},
-    )
-
-    is_last = disconnect_account(latchkey, "slack", "only@x")
-
-    assert is_last is True
-    assert latchkey.cleared_calls == [("slack", "only@x")]
+    assert latchkey.accounts_by_service["slack"] == ["b@x"]
 
 
 def test_disconnect_account_raises_when_clear_fails(tmp_path: Path) -> None:

@@ -115,10 +115,11 @@ CREDENTIALS_STORE_FILENAME: Final[str] = "credentials.json.enc"
 
 # Minimum version of the upstream ``latchkey`` CLI this package will operate
 # against. Kept in lockstep with the version we install/bundle (see
-# ``LATCHKEY_VERSION``). 2.18.0 was the first release with the ``auth prepare``
-# subcommand, which the Minds Google OAuth flow (:meth:`Latchkey.auth_prepare`)
-# depends on.
-LATCHKEY_MIN_VERSION: Final[str] = "3.1.0"
+# ``LATCHKEY_VERSION``). 3.2.0 was the first release that reports the account
+# whose credentials it injects to detent as ``customMetadata.account``, which
+# the per-account permission grants (:mod:`imbue.mngr_latchkey.account_scopes`)
+# depend on.
+LATCHKEY_MIN_VERSION: Final[str] = "3.2.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -752,7 +753,9 @@ class Latchkey(MutableModel):
         outstanding :class:`DataFormatMigration` steps between the
         version recorded under :attr:`plugin_data_dir` and the version
         the installed code targets are applied here (cheap in the
-        steady state -- one small file read when already current).
+        steady state -- one small file read when already current). A
+        migration that needs to inspect the credential store gets the
+        latchkey directory and binary to do so.
 
         There is intentionally **no** cross-process gateway-record
         reconciliation: the new ``mngr latchkey forward`` /
@@ -773,7 +776,7 @@ class Latchkey(MutableModel):
                 (non-zero exit, unparseable output, spawn error).
         """
         self._check_minimum_version()
-        run_data_format_migrations(self.plugin_data_dir)
+        run_data_format_migrations(self.plugin_data_dir, self.latchkey_directory, self.latchkey_binary)
         with self._lock:
             self._is_initialized = True
 
@@ -1133,8 +1136,9 @@ class Latchkey(MutableModel):
 
         Any failure (process error, malformed output) degrades to an empty
         mapping rather than raising, mirroring :meth:`services_info`, so a
-        transient latchkey problem renders as \"no accounts\" instead of crashing
-        the page.
+        transient latchkey problem renders as "no accounts" instead of crashing
+        the page. Callers for which that would be destructive read the store
+        themselves (see the per-account permissions migration).
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
         command = [self.latchkey_binary, "auth", "list"]
@@ -1207,8 +1211,20 @@ class Latchkey(MutableModel):
             return False, prepare_detail
         return self.auth_browser_login(service_name, is_ephemeral=True)
 
-    def auth_browser(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
+    def auth_browser(
+        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+    ) -> tuple[bool, str]:
         """Run ``latchkey auth browser <service>`` and report success or failure.
+
+        ``account`` targets one already-stored account of the service (the
+        unnamed default account is :data:`DEFAULT_ACCOUNT`): latchkey then
+        reuses that account's stored OAuth client instead of the service-level
+        preparation, which is what a re-sign-in of a specific account needs.
+        Latchkey still stores the result under whichever account the user
+        actually logs in as, so callers must read the account back rather than
+        assume it. Passing an account latchkey does not know about makes the
+        call fail, so callers only pass one they have just seen in
+        :meth:`services_info`.
 
         Returns ``(True, "")`` on a clean exit. Any non-zero exit -- whether
         from a cancelled browser flow, network failure, or something else --
@@ -1239,7 +1255,7 @@ class Latchkey(MutableModel):
         account already left behind.
         """
         if not is_ephemeral:
-            is_success, detail = self.auth_browser_login(service_name)
+            is_success, detail = self.auth_browser_login(service_name, account=account)
             if is_success:
                 return True, ""
             if "latchkey auth browser-prepare" not in detail.lower():
@@ -1265,7 +1281,7 @@ class Latchkey(MutableModel):
         )
         if not is_prepared:
             return False, prepare_detail
-        return self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
+        return self.auth_browser_login(service_name, is_ephemeral=is_ephemeral, account=account)
 
     def _authenticate_with_minds_google_client(
         self, service_name: str, *, is_ephemeral: bool = False
@@ -1295,8 +1311,13 @@ class Latchkey(MutableModel):
             return False, prepare_detail
         return self.auth_browser_login(service_name, is_ephemeral=is_ephemeral)
 
-    def auth_browser_login(self, service_name: str, *, is_ephemeral: bool = False) -> tuple[bool, str]:
+    def auth_browser_login(
+        self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
+    ) -> tuple[bool, str]:
         """Run a single ``latchkey auth browser <service>`` with no preparation fallback.
+
+        ``account`` is passed through to latchkey's global ``--account`` option
+        (see :meth:`auth_browser`).
 
         Unlike :meth:`auth_browser`, this never auto-runs ``auth
         browser-prepare`` on failure. It is the bare sign-in used once a
@@ -1305,9 +1326,12 @@ class Latchkey(MutableModel):
         self-setup left behind. Returns ``(True, "")`` on a clean exit,
         otherwise ``(False, detail)``.
         """
+        argv = ["auth", "browser", service_name]
+        if account is not None:
+            argv.extend(["--account", account])
         return self._run_latchkey_auth_command(
             log_label="auth browser",
-            argv=["auth", "browser", service_name],
+            argv=argv,
             service_name=service_name,
             is_ephemeral=is_ephemeral,
         )

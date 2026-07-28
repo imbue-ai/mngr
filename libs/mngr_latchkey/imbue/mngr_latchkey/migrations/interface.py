@@ -8,6 +8,12 @@ the readers. Each migration knows how to move the data from the version just
 below its own up to its own (``apply_up``) and back down again (``apply_down``);
 the runner in :mod:`imbue.mngr_latchkey.migrations.runner` sequences them against
 the version recorded in the ``data-format-version`` file.
+
+Besides the plugin's own data directory, a migration is handed the latchkey
+directory and binary, because rewriting the plugin's state sometimes requires
+looking at the *upstream* latchkey state next to it (which accounts have stored
+credentials, say). A migration that only needs the files under
+``plugin_data_dir`` simply ignores them.
 """
 
 from abc import ABC
@@ -33,9 +39,9 @@ class DataFormatMigration(MutableModel, ABC):
     )
 
     @abstractmethod
-    def apply_up(self, plugin_data_dir: Path) -> None:
+    def apply_up(self, plugin_data_dir: Path, latchkey_directory: Path, latchkey_binary: str) -> None:
         """Migrate the data under ``plugin_data_dir`` up from ``version - 1`` to :attr:`version`."""
 
     @abstractmethod
-    def apply_down(self, plugin_data_dir: Path) -> None:
+    def apply_down(self, plugin_data_dir: Path, latchkey_directory: Path, latchkey_binary: str) -> None:
         """Revert the data under ``plugin_data_dir`` down from :attr:`version` to ``version - 1``."""

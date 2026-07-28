@@ -50,6 +50,8 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr_latchkey.account_scopes import list_account_grants
+from imbue.mngr_latchkey.account_scopes import resolved_schema_names
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 # Package and filename of the bundled catalog. Kept in sync with the copy
@@ -137,6 +139,27 @@ class ServicePermissionInfo(FrozenModel):
             "Permissions without a summary are omitted; the injected ``any`` never has one."
         ),
     )
+
+
+class ServiceAccountGrant(FrozenModel):
+    """One per-account grant from a permissions file, resolved to its catalog service.
+
+    The single shape every reader of "which service accounts have been granted
+    what" works from -- the connectors settings page, the permission dialog's
+    pre-check, and the revoke paths. It is derived from the *structure* of the
+    file's schemas (see :func:`imbue.mngr_latchkey.account_scopes.list_account_grants`),
+    so nothing downstream has to interpret a rule key.
+    """
+
+    service_name: str = Field(description="Canonical latchkey service name (e.g. ``slack``).")
+    scope: str = Field(description="Detent scope the grant composes (e.g. ``slack-api``).")
+    account: str = Field(
+        description='Latchkey account the grant is pinned to (``""`` for the unnamed default account).',
+    )
+    rule_key: str = Field(
+        description="Opaque key of the rule in the file; pass it back to the gateway to rewrite or delete it.",
+    )
+    permissions: tuple[str, ...] = Field(description="Permission schema names granted under the rule.")
 
 
 # The catalog is a JSON object keyed by canonical service name, each value
@@ -270,6 +293,38 @@ class ServicesCatalog(MutableModel):
         assert self._by_scope is not None
         return self._by_scope.get(scope)
 
+    def list_service_account_grants(self, config: LatchkeyPermissionsConfig) -> tuple[ServiceAccountGrant, ...]:
+        """Return every per-account service grant in ``config``, in file order.
+
+        Reads each rule's *schema* to recover the (scope, account) pair it gates
+        (see :mod:`imbue.mngr_latchkey.account_scopes`) and keeps the ones whose
+        scope belongs to a catalog service. Rules that are not per-account
+        service grants -- the gateway-self scopes, the minds-api-proxy gate,
+        anything hand-edited -- are skipped.
+
+        This is the one place that turns a permissions file into "service X,
+        account Y, these permissions"; callers filter or group the result rather
+        than looking at rule keys themselves.
+        """
+        self._ensure_loaded()
+        assert self._by_scope is not None
+        grants: list[ServiceAccountGrant] = []
+        for grant in list_account_grants(config):
+            info = self._by_scope.get(grant.scope)
+            if info is None:
+                logger.debug("Ignoring grant for non-catalog scope {} in permissions file", grant.scope)
+                continue
+            grants.append(
+                ServiceAccountGrant(
+                    service_name=info.name,
+                    scope=grant.scope,
+                    account=grant.account,
+                    rule_key=grant.rule_key,
+                    permissions=grant.permissions,
+                )
+            )
+        return tuple(grants)
+
     def as_mapping(self) -> Mapping[str, tuple[ServicePermissionInfo, ...]]:
         """Return the catalog as a read-only mapping keyed by service name."""
         self._ensure_loaded()
@@ -286,23 +341,33 @@ class ServicesCatalog(MutableModel):
         """Resolve the canonical service names a permissions config grants access to.
 
         Each rule in ``config.rules`` is a single-key ``{scope: [permission,
-        ...]}`` object; the key is a Detent scope schema name. This maps each
-        such scope back to its canonical service name via the catalog. Scopes
-        that are not third-party services -- minds' own internal scopes
-        (``minds-api-proxy-unauthorized``, the gateway-self schemas, ...) --
-        are simply absent from the catalog and dropped, so they contribute no
-        service. The Detent wildcard scope (``any``) grants every service and
-        therefore resolves to the full catalog.
+        ...]}`` object whose key is a Detent schema name -- either a scope from
+        the catalog directly, or a generated per-account schema that *composes*
+        one (see :mod:`imbue.mngr_latchkey.account_scopes`). Which service a
+        rule needs is therefore resolved through the schema graph -- the key
+        plus the transitive ``$ref`` closure of its definition -- rather than by
+        reading anything into the key's name: credentials are stored and shipped
+        per service, so a grant for any one account still requires the whole
+        service's store.
+
+        Names that are not third-party service scopes -- minds' own internal
+        scopes (``minds-api-proxy-unauthorized``, the gateway-self schemas,
+        ...) -- are simply absent from the catalog and contribute no service.
+        The Detent wildcard scope (``any``) grants every service and therefore
+        resolves to the full catalog.
 
         Returns an empty set for a deny-all config (no rules), which is the
         safe default: a host with no grants has no credentials shipped to it.
         """
         self._ensure_loaded()
         assert self._by_scope is not None
-        scope_keys = [next(iter(rule)) for rule in config.rules if len(rule) == 1]
-        if _WILDCARD_SCOPE in scope_keys:
+        rule_keys = [next(iter(rule)) for rule in config.rules if len(rule) == 1]
+        schema_names = frozenset(
+            name for rule_key in rule_keys for name in resolved_schema_names(rule_key, config.schemas)
+        )
+        if _WILDCARD_SCOPE in schema_names:
             return self.all_service_names()
-        return frozenset(self._by_scope[scope].name for scope in scope_keys if scope in self._by_scope)
+        return frozenset(self._by_scope[name].name for name in schema_names if name in self._by_scope)
 
     @classmethod
     def from_catalog_payload(cls, payload: Mapping[str, object]) -> "ServicesCatalog":

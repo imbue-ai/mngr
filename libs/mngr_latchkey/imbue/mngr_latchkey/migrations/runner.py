@@ -12,6 +12,13 @@ newer store back after a downgrade -- then rewrites the version file.
 A fresh install (no version file, no host data yet) is stamped straight to the
 current version: the up-migrations are no-ops against an empty store, so nothing
 is rewritten and future migrations get an accurate baseline.
+
+Some migrations also need to look at the *upstream* latchkey state next to the
+plugin's own (which accounts have stored credentials, say), so every step is
+handed the latchkey directory and binary alongside ``plugin_data_dir``. A step
+that only rewrites files ignores them; one that shells out to latchkey does so
+only when it actually has something to rewrite, so a startup with nothing to
+migrate never pays for it.
 """
 
 from collections.abc import Sequence
@@ -20,6 +27,7 @@ from typing import Final
 
 from loguru import logger
 
+from imbue.mngr_latchkey.migrations.account_scope_service_rules import AccountScopeServiceRules
 from imbue.mngr_latchkey.migrations.fold_workspace_scope_into_latchkey_self import FoldWorkspaceScopeIntoLatchkeySelf
 from imbue.mngr_latchkey.migrations.interface import DataFormatMigration
 from imbue.mngr_latchkey.migrations.interface import LatchkeyMigrationError
@@ -27,7 +35,10 @@ from imbue.mngr_latchkey.migrations.interface import LatchkeyMigrationError
 # The ordered, consecutive-from-1 list of migrations the installed code knows how
 # to apply. Append new migrations here (never renumber or reorder existing ones):
 # each new entry's ``version`` must be exactly one greater than the last.
-_MIGRATIONS: Final[tuple[DataFormatMigration, ...]] = (FoldWorkspaceScopeIntoLatchkeySelf(version=1),)
+_MIGRATIONS: Final[tuple[DataFormatMigration, ...]] = (
+    FoldWorkspaceScopeIntoLatchkeySelf(version=1),
+    AccountScopeServiceRules(version=2),
+)
 
 # The data-format version the installed code targets: the highest known migration
 # version (or 0 when there are none). Stamped into the version file after any
@@ -82,6 +93,8 @@ def _sequence_migrations(
     plugin_data_dir: Path,
     migrations: Sequence[DataFormatMigration],
     target_version: int,
+    latchkey_directory: Path,
+    latchkey_binary: str,
 ) -> None:
     """Apply/revert ``migrations`` to move ``plugin_data_dir`` to ``target_version``, then stamp it.
 
@@ -98,16 +111,23 @@ def _sequence_migrations(
         for migration in sorted(migrations, key=lambda m: m.version, reverse=True):
             if target_version < migration.version <= recorded_version:
                 logger.debug("Reverting mngr_latchkey data-format migration to version {}", migration.version - 1)
-                migration.apply_down(plugin_data_dir)
+                migration.apply_down(plugin_data_dir, latchkey_directory, latchkey_binary)
     else:
         # Upgrade: apply each migration above the recorded version, lowest first.
         for migration in sorted(migrations, key=lambda m: m.version):
             if recorded_version < migration.version <= target_version:
                 logger.debug("Applying mngr_latchkey data-format migration to version {}", migration.version)
-                migration.apply_up(plugin_data_dir)
+                migration.apply_up(plugin_data_dir, latchkey_directory, latchkey_binary)
     _write_data_format_version(plugin_data_dir, target_version)
 
 
-def run_data_format_migrations(plugin_data_dir: Path) -> None:
-    """Bring ``plugin_data_dir`` to :data:`CURRENT_DATA_FORMAT_VERSION`, applying migrations as needed."""
-    _sequence_migrations(plugin_data_dir, _MIGRATIONS, CURRENT_DATA_FORMAT_VERSION)
+def run_data_format_migrations(plugin_data_dir: Path, latchkey_directory: Path, latchkey_binary: str) -> None:
+    """Bring ``plugin_data_dir`` to :data:`CURRENT_DATA_FORMAT_VERSION`, applying migrations as needed.
+
+    ``latchkey_directory`` / ``latchkey_binary`` let a migration inspect the
+    upstream latchkey state it rewrites the plugin's state against; they are
+    only ever used by a migration that has work to do.
+    """
+    _sequence_migrations(
+        plugin_data_dir, _MIGRATIONS, CURRENT_DATA_FORMAT_VERSION, latchkey_directory, latchkey_binary
+    )

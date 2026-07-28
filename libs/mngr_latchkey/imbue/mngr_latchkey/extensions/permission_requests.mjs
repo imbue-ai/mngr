@@ -11,13 +11,22 @@
  *         - ``type``       (one of "predefined" | "file-sharing" | "workspace")
  *         - ``payload``    (object whose shape depends on ``type``)
  *       For ``type=="predefined"`` the payload is
- *         ``{scope: <string>, permissions: [<string>, ...]}``,
- *       matching the legacy detent-flavored scope/permission grant.
- *       The scope must be one of the Detent scopes named in the
- *       bundled ``services.json`` catalog, and every entry in
- *       ``permissions`` must be one of the permission-schema names
- *       the catalog lists under that scope; otherwise the request is
- *       rejected with HTTP 400.
+ *         ``{scope: <string>, permissions: [<string>, ...],
+ *           account: <string>|null}``,
+ *       a detent-flavored scope/permission grant for one signed-in
+ *       account of the service. The scope must be one of the Detent
+ *       scopes named in the bundled ``services.json`` catalog, and
+ *       every entry in ``permissions`` must be one of the
+ *       permission-schema names the catalog lists under that scope;
+ *       otherwise the request is rejected with HTTP 400.
+ *       ``account`` names the latchkey account the grant applies to
+ *       (the unnamed default account is the empty string). It is
+ *       optional -- an agent that does not know which account (or
+ *       whether any account exists at all) omits it and the user picks
+ *       one when approving. A request with no account has an *empty*
+ *       ``effect``: it can only be resolved by a client that supplies
+ *       the chosen account in the approve override body, never by a
+ *       bare ``/approve`` call.
  *       For ``type=="file-sharing"`` the payload is
  *         ``{path: <absolute_or_tilde_path>}``;
  *       the path must be absolute (start with ``/``) or use ``~`` /
@@ -75,11 +84,12 @@
  *       for the deny flow, and as a forget-without-grant escape hatch).
  *
  * Each pending request is stored as a single JSON file at
- * ``<latchkey-directory>/permission_requests/v2/<request_id>.json``,
+ * ``<latchkey-directory>/permission_requests/v3/<request_id>.json``,
  * where ``<latchkey-directory>`` is ``LATCHKEY_DIRECTORY`` if set,
- * otherwise ``~/.latchkey``. The ``v2`` segment is the on-disk schema
+ * otherwise ``~/.latchkey``. The ``v3`` segment is the on-disk schema
  * version; future shape changes get a new directory rather than
- * trying to migrate files in place.
+ * trying to migrate files in place. (``v3`` introduced the per-account
+ * ``predefined`` payload and its account-scoped effect.)
  *
  * NOTE: extension requests still go through the gateway's permission
  * check, so callers must have a rule that allows them to talk to
@@ -261,6 +271,68 @@ const WORKSPACE_GRANT_SCOPE_NAME = 'latchkey-self';
 // known scope.
 const ALWAYS_AVAILABLE_PERMISSION = 'any';
 
+// Separator used when naming a per-account rule key
+// (``slack-api:hynek@imbue-ai``). Mirrors ``ACCOUNT_SCOPE_SEPARATOR`` in
+// ``imbue/mngr_latchkey/account_scopes.py``, which owns the format on the
+// Python side; the cross-language drift guard lives in
+// ``account_scopes_test.py``. Duplicated here (rather than imported) because
+// the gateway loads each extension independently. The key is an opaque
+// identifier -- nothing ever splits it back apart.
+const ACCOUNT_SCOPE_SEPARATOR = ':';
+
+// Percent-escapes applied to the *scope* half of a key so distinct
+// (scope, account) pairs can never produce the same key. Ordered: the escape
+// character itself is escaped first, otherwise the second pass would escape the
+// ``%`` the first pass just introduced. Mirrors ``_SCOPE_ESCAPES`` in
+// ``account_scopes.py``.
+const SCOPE_ESCAPES = [
+  ['%', '%25'],
+  [ACCOUNT_SCOPE_SEPARATOR, '%3A'],
+];
+
+/**
+ * Build the rule key (and generated schema name) granting ``scope`` for
+ * ``account``. The unnamed default account (the empty string) yields a trailing
+ * separator (``slack-api:``), which is still account-gated: its schema pins the
+ * injected account to ``""``, which is what latchkey reports for it.
+ *
+ * The scope half is percent-escaped so the (scope, account) -> key mapping is
+ * injective; the account is the last field and needs no escaping. Keep in sync
+ * with ``account_scope_key`` in ``account_scopes.py``.
+ */
+function accountScopeKey(scope, account) {
+  let encodedScope = scope;
+  for (const [character, escape] of SCOPE_ESCAPES) {
+    encodedScope = encodedScope.split(character).join(escape);
+  }
+  return `${encodedScope}${ACCOUNT_SCOPE_SEPARATOR}${account}`;
+}
+
+/**
+ * Build the generated schema backing an account-scoped rule key: the base
+ * scope (referenced through detent's ``#/$defs/`` mechanism, which resolves
+ * built-in schemas too) intersected with an exact match on the account
+ * latchkey injected. Keep in sync with ``build_account_scope_schema`` in
+ * ``imbue/mngr_latchkey/account_scopes.py``.
+ */
+function buildAccountScopeSchema(scope, account) {
+  return {
+    allOf: [
+      { $ref: `#/$defs/${scope}` },
+      {
+        properties: {
+          customMetadata: {
+            type: 'object',
+            properties: { account: { const: account } },
+            required: ['account'],
+          },
+        },
+        required: ['customMetadata'],
+      },
+    ],
+  };
+}
+
 // Names and constants used when generating the ``effect`` for a
 // ``file-sharing`` request. The agent reaches the Minds API through
 // the gateway's ``minds-api-proxy`` extension, which mounts under
@@ -406,7 +478,7 @@ function resolveLatchkeyDirectory() {
 
 function resolvePermissionRequestsDirectory() {
   // Bump the version when doing backwards incompatible changes to the data model so that we don't need to deal with old permission requests.
-  return join(resolveLatchkeyDirectory(), 'permission_requests', 'v2');
+  return join(resolveLatchkeyDirectory(), 'permission_requests', 'v3');
 }
 
 function validateRequestId(rawValue) {
@@ -720,13 +792,35 @@ function validatePredefinedAgainstCatalog(scope, permissions) {
 }
 
 /**
+ * Validate an optional ``account`` field and normalize it to a string or
+ * ``null``. An absent field and an explicit JSON ``null`` both mean "the
+ * agent does not know which account this should apply to"; the empty string
+ * is a real value (latchkey's unnamed default account). Any other string is
+ * accepted verbatim: the account only ever appears inside the generated
+ * schema's ``const`` gate and (cosmetically) in the rule key, neither of which
+ * is ever parsed.
+ */
+function validateOptionalAccount(rawAccount, fieldPrefix) {
+  if (rawAccount === undefined || rawAccount === null) {
+    return null;
+  }
+  if (typeof rawAccount !== 'string') {
+    throw new InvalidRequestBodyError(
+      `${fieldPrefix}'account' must be a string, null, or omitted.`,
+    );
+  }
+  return rawAccount;
+}
+
+/**
  * Validate the payload object for a ``predefined`` permission request.
- * Returns the canonical payload shape (``{scope, permissions}``).
+ * Returns the canonical payload shape (``{scope, permissions, account}``).
  *
  * Beyond structural type-checking, the scope and permissions are
  * cross-checked against the bundled services catalog so a request can
  * only ever name a (scope, permission) combination the catalog
- * actually exposes.
+ * actually exposes. ``account`` is optional (see the module docstring):
+ * ``null`` means the approving user still has to choose one.
  */
 function validatePredefinedPayload(payload) {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
@@ -734,9 +828,13 @@ function validatePredefinedPayload(payload) {
   }
   ensureNonEmptyString('payload.', 'scope', payload.scope);
   ensureStringArray('payload.', 'permissions', payload.permissions);
-  ensureNoExtraneousFields('payload ', ['scope', 'permissions'], payload);
+  ensureNoExtraneousFields('payload ', ['scope', 'permissions', 'account'], payload);
   validatePredefinedAgainstCatalog(payload.scope, payload.permissions);
-  return { scope: payload.scope, permissions: [...payload.permissions] };
+  return {
+    scope: payload.scope,
+    permissions: [...payload.permissions],
+    account: validateOptionalAccount(payload.account, 'payload.'),
+  };
 }
 
 /**
@@ -919,9 +1017,12 @@ async function parsePermissionRequestBody(request) {
 /**
  * Compute the ``effect`` (the patch that approving the request will
  * splice into the target permissions.json). ``predefined`` requests
- * use built-in detent schemas (slack-api, github-rest-api, ...) so
- * the effect carries no ``schemas`` field; only the new
- * scope-to-permissions rule is included. ``file-sharing`` requests
+ * grant one signed-in account of a service, so the effect carries both
+ * the account-scoped rule and the generated schema that gates the
+ * built-in scope (slack-api, github-rest-api, ...) on that account --
+ * or, when the request names no account yet, nothing at all (an empty
+ * effect a bare ``/approve`` applies as a no-op; the account has to
+ * come from the approve override body). ``file-sharing`` requests
  * need a custom per-path permission schema because the proxy-mediated
  * endpoint isn't in detent's built-in catalog -- that single schema
  * goes in ``effect.schemas``. The scope it activates under is the
@@ -933,9 +1034,7 @@ async function parsePermissionRequestBody(request) {
 function computeEffect(type, payload) {
   switch (type) {
     case REQUEST_TYPE_PREDEFINED:
-      return {
-        rules: [{ [payload.scope]: [...payload.permissions] }],
-      };
+      return computePredefinedEffect(payload.scope, payload.permissions, payload.account);
     case REQUEST_TYPE_FILE_SHARING:
       return computeFileSharingEffect(payload.path, payload.access);
     case REQUEST_TYPE_WORKSPACE:
@@ -947,6 +1046,26 @@ function computeEffect(type, payload) {
       // exists only to satisfy the type system / linters.
       throw new InvalidRequestBodyError(`unhandled request type '${type}'.`);
   }
+}
+
+/**
+ * Compute the ``effect`` for a ``predefined`` request: the account-scoped
+ * rule plus the generated schema that backs its key.
+ *
+ * ``account`` is ``null`` when nobody has picked an account yet, in which
+ * case there is nothing to grant and the effect is empty: approving such a
+ * request without naming an account in the override body applies no change
+ * (rather than silently granting every account of the service).
+ */
+function computePredefinedEffect(scope, permissions, account) {
+  if (account === null) {
+    return {};
+  }
+  const ruleKey = accountScopeKey(scope, account);
+  return {
+    schemas: { [ruleKey]: buildAccountScopeSchema(scope, account) },
+    rules: [{ [ruleKey]: [...permissions] }],
+  };
 }
 
 /**
@@ -1231,7 +1350,7 @@ function ensureDirectory(directory) {
 
 /**
  * Atomic write helper. Two callers: writing a pending-request file
- * under our own ``permission_requests/v2`` directory (mode 0600) and
+ * under our own ``permission_requests/v3`` directory (mode 0600) and
  * writing the target permissions.json on approval (preserves existing
  * mode if any). ``mode`` is the unix mode for the *temp* file.
  *
@@ -1722,10 +1841,12 @@ function mergeSchemas(existingSchemas, effectSchemas) {
  * deferred to :func:`resolveEffectForApproval`, which knows the request's type.
  *
  * The override mechanism lets the user adjust the grant at approval time: a
- * ``file-sharing`` request carries ``{path}`` (the user-edited share path); a
- * ``workspace`` request carries ``{permissions, target_workspace_id}`` (the
- * verbs the user ticked and whether the targeted verbs apply to one workspace
- * or all).
+ * ``predefined`` request carries ``{account, permissions?}`` (the account the
+ * user picked -- mandatory whenever the request itself named none -- and
+ * optionally a narrowed permission list); a ``file-sharing`` request carries
+ * ``{path}`` (the user-edited share path); a ``workspace`` request carries
+ * ``{permissions, target_workspace_id}`` (the verbs the user ticked and
+ * whether the targeted verbs apply to one workspace or all).
  */
 async function parseApproveOverrideBody(request) {
   const raw = await readRequestBody(request);
@@ -1755,6 +1876,11 @@ async function parseApproveOverrideBody(request) {
  * ``requestRecord.effect``. Otherwise the effect is recomputed from the user's
  * approval-time choices, dispatched on the request type:
  *
+ *  * ``predefined``: ``{account, permissions?}`` -- the account the user chose
+ *    to grant (an agent-supplied one may be overridden, and a request that
+ *    named none can only be granted this way) and, optionally, the permission
+ *    subset the user ticked. Both are re-validated exactly as at creation
+ *    time.
  *  * ``file-sharing``: ``{path}`` -- the user-edited share path, re-validated
  *    with the same traversal-rejection rules as request creation. The access
  *    mode is fixed at creation and is not user-editable.
@@ -1770,6 +1896,19 @@ function resolveEffectForApproval(requestRecord, override) {
     return requestRecord.effect;
   }
   switch (requestRecord.request_type) {
+    case REQUEST_TYPE_PREDEFINED: {
+      ensureNoExtraneousFields('approve body ', ['account', 'permissions'], override);
+      const account = validateOptionalAccount(override.account, 'approve body ');
+      if (override.permissions !== undefined) {
+        ensureStringArray('approve body ', 'permissions', override.permissions);
+      }
+      const permissions = [
+        ...(override.permissions === undefined ? requestRecord.payload.permissions : override.permissions),
+      ];
+      const scope = requestRecord.payload.scope;
+      validatePredefinedAgainstCatalog(scope, permissions);
+      return computePredefinedEffect(scope, permissions, account ?? requestRecord.payload.account ?? null);
+    }
     case REQUEST_TYPE_FILE_SHARING: {
       ensureNoExtraneousFields('approve body ', ['path'], override);
       if (override.path === undefined) {
@@ -1792,9 +1931,9 @@ function resolveEffectForApproval(requestRecord, override) {
     }
     default:
       throw new InvalidRequestBodyError(
-        `a body override is only valid for '${REQUEST_TYPE_FILE_SHARING}' or `
-        + `'${REQUEST_TYPE_WORKSPACE}' requests; request ${requestRecord.request_id} is `
-        + `'${requestRecord.request_type}'.`,
+        `a body override is only valid for '${REQUEST_TYPE_PREDEFINED}', `
+        + `'${REQUEST_TYPE_FILE_SHARING}' or '${REQUEST_TYPE_WORKSPACE}' requests; request `
+        + `${requestRecord.request_id} is '${requestRecord.request_type}'.`,
       );
   }
 }

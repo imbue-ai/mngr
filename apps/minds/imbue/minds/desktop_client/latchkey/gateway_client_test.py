@@ -18,6 +18,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
+from imbue.mngr_latchkey.account_scopes import build_account_grant
 
 
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
@@ -62,7 +63,32 @@ def test_set_permission_rule_sends_expected_headers_body_and_url() -> None:
     assert "latchkey_permissions.json" in url
     assert captured["auth"] == "hunter2"
     assert captured["override"] == "admin-jwt-token"
-    assert captured["body"] == ["any"]
+    # No schemas to define for a rule key detent already knows.
+    assert captured["body"] == {"permissions": ["any"]}
+
+
+def test_set_permission_rule_sends_the_supplied_schemas() -> None:
+    """The definitions a rule key needs travel with the request.
+
+    The extension authors no schemas of its own, so a per-account grant only
+    resolves if its generated schema is in the body.
+    """
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={})
+
+    rule_key, permissions, schemas = build_account_grant("slack-api", "a@b", ("slack-read-all",))
+    client = _build_client(_handler)
+    client.set_permission_rule(
+        permissions_file_path=Path("/perms/host-1/latchkey_permissions.json"),
+        rule_key=rule_key,
+        granted_permissions=permissions,
+        schemas=schemas,
+    )
+
+    assert captured["body"] == {"permissions": ["slack-read-all"], "schemas": schemas}
 
 
 def test_set_permission_rule_raises_on_non_2xx() -> None:
@@ -345,58 +371,55 @@ def test_approve_permission_request_raises_on_4xx() -> None:
     assert "404" in str(exc_info.value)
 
 
-def test_get_granted_permissions_unions_matching_scopes() -> None:
-    """The reader collects permission names across every rule whose key is in ``scopes``."""
+def test_get_permissions_config_returns_rules_and_schemas() -> None:
+    """The reader hands back the whole file: readers need the schemas, not just the rules."""
+    rule_key, permissions, schemas = build_account_grant("slack-api", "a@b", ("slack-read-all",))
 
     def _handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
         assert request.url.path == "/permissions"
         assert "path=" in str(request.url)
-        return httpx.Response(
-            200,
-            json={
-                "rules": [
-                    {"slack-api": ["slack-read-all", "slack-write-messages"]},
-                    {"github-rest-api": ["github-read-all"]},
-                    {"slack-api": ["any"]},
-                ],
-            },
-        )
+        return httpx.Response(200, json={"rules": [{rule_key: list(permissions)}], "schemas": schemas})
 
     client = _build_client(_handler)
-    granted = client.get_granted_permissions_for_scopes(
-        Path("/perms/host-1/latchkey_permissions.json"),
-        scopes=["slack-api"],
-    )
-    assert granted == frozenset({"slack-read-all", "slack-write-messages", "any"})
+    config = client.get_permissions_config(Path("/perms/host-1/latchkey_permissions.json"))
+
+    assert config.rules == ({rule_key: ["slack-read-all"]},)
+    assert config.schemas == schemas
 
 
-def test_get_granted_permissions_returns_empty_on_404() -> None:
-    """A missing permissions file is treated as 'no rules', not an error."""
+def test_get_permissions_config_returns_empty_on_404() -> None:
+    """A missing permissions file is treated as the deny-all default, not an error."""
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
         return httpx.Response(404, json={"error": "not found"})
 
     client = _build_client(_handler)
-    granted = client.get_granted_permissions_for_scopes(
-        Path("/perms/host-1/latchkey_permissions.json"),
-        scopes=["slack-api"],
-    )
-    assert granted == frozenset()
+    config = client.get_permissions_config(Path("/perms/host-1/latchkey_permissions.json"))
+
+    assert config.rules == ()
+    assert config.schemas == {}
 
 
-def test_get_granted_permissions_raises_on_other_4xx() -> None:
+def test_get_permissions_config_raises_on_other_4xx() -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
         return httpx.Response(403, json={"error": "outside root"})
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_granted_permissions_for_scopes(
-            Path("/etc/passwd"),
-            scopes=["any"],
-        )
+        client.get_permissions_config(Path("/etc/passwd"))
+
+
+def test_get_permissions_config_raises_on_a_malformed_file() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"rules": "not-a-list"})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_permissions_config(Path("/perms/host-1/latchkey_permissions.json"))
 
 
 def test_iter_permission_requests_raises_on_http_error() -> None:
@@ -461,12 +484,12 @@ def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: ht
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
+        client.get_permissions_config(Path("/tmp/p.json"))
     # ``_require_base_url`` now raises ``LatchkeyGatewayClientNotInitializedError``
     # (a subclass of ``LatchkeyGatewayClientError``) because the cache
     # was cleared by the connect-error handler.
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
+        client.get_permissions_config(Path("/tmp/p.json"))
 
 
 def test_non_connect_transport_errors_do_not_invalidate() -> None:
@@ -487,12 +510,12 @@ def test_non_connect_transport_errors_do_not_invalidate() -> None:
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
+        client.get_permissions_config(Path("/tmp/p.json"))
     # The cache was *not* cleared, so the second call hits the
     # transport again (instead of failing fast on the missing
     # ``base_url``).
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
+        client.get_permissions_config(Path("/tmp/p.json"))
     assert call_count["value"] == 2
 
 

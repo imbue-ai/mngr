@@ -94,20 +94,27 @@
     });
   }
 
+  // Connector grants are per account: every revoke below carries both the
+  // service (from the enclosing service block) and the account (from the
+  // enclosing account subsection).
   document.querySelectorAll('.revoke-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var serviceSection = btn.closest('[data-service-name]');
+      var accountSection = btn.closest('[data-account]');
       var card = btn.closest('[data-workspace-agent-id]');
       var serviceLabel = serviceSection.getAttribute('data-service-label');
+      var accountLabel = accountSection.getAttribute('data-account-label');
       var workspaceName = card.getAttribute('data-workspace-name');
       openRevokeDialog(
         'Revoke ' + serviceLabel + ' access?',
-        'This removes ' + workspaceName + "'s " + serviceLabel + ' permissions. The agent can request them again later.',
+        'This removes ' + workspaceName + "'s " + serviceLabel + ' permissions for ' + accountLabel
+          + '. The agent can request them again later.',
         {
           url: '/settings/permissions/revoke',
           body: {
             workspace_agent_id: card.getAttribute('data-workspace-agent-id'),
             service_name: serviceSection.getAttribute('data-service-name'),
+            account: accountSection.getAttribute('data-account'),
           },
         }
       );
@@ -117,21 +124,27 @@
   document.querySelectorAll('.remove-all-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var serviceSection = btn.closest('[data-service-name]');
+      var accountSection = btn.closest('[data-account]');
       var serviceLabel = serviceSection.getAttribute('data-service-label');
+      var accountLabel = accountSection.getAttribute('data-account-label');
       openRevokeDialog(
-        'Remove all ' + serviceLabel + ' authorizations?',
-        'This removes ' + serviceLabel + ' permissions from every workspace. Agents can request them again later.',
+        'Remove all ' + serviceLabel + ' authorizations for ' + accountLabel + '?',
+        'This removes ' + serviceLabel + ' permissions for ' + accountLabel + ' from every workspace. '
+          + 'Agents can request them again later.',
         {
           url: '/settings/permissions/revoke-all',
-          body: { service_name: serviceSection.getAttribute('data-service-name') },
+          body: {
+            service_name: serviceSection.getAttribute('data-service-name'),
+            account: accountSection.getAttribute('data-account'),
+          },
         }
       );
     });
   });
 
   // Disconnect one account from a service. Confirmed through the shared
-  // revoke dialog; the server also revokes the service's permissions from
-  // every workspace when the last account goes.
+  // revoke dialog; the server also revokes that account's permissions from
+  // every workspace.
   document.querySelectorAll('.disconnect-account-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var serviceSection = btn.closest('[data-service-name]');
@@ -140,8 +153,8 @@
       var accountLabel = row.getAttribute('data-account-label');
       openRevokeDialog(
         'Disconnect ' + accountLabel + '?',
-        'This signs ' + accountLabel + ' out of ' + serviceLabel + '. Your saved credentials for this '
-          + 'account are removed; agents can reconnect it later.',
+        'This signs ' + accountLabel + ' out of ' + serviceLabel + '. Your saved credentials and this '
+          + "account's permissions are removed; agents can reconnect it later.",
         {
           url: '/settings/connectors/disconnect-account',
           confirmLabel: 'Disconnect',

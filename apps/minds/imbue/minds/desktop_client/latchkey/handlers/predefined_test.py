@@ -1,4 +1,5 @@
 import json
+import re
 import shlex
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,6 +19,8 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionFlowError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.predefined import _build_account_choices
+from imbue.minds.desktop_client.latchkey.handlers.templates import NEW_ACCOUNT_FORM_VALUE
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -27,6 +30,7 @@ from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
@@ -135,6 +139,12 @@ _DEFAULT_AUTH_OPTIONS_JSON: str = json.dumps(["browser", "set"])
 _DEFAULT_SET_EXAMPLE: str = 'latchkey auth set slack -H "Authorization: Bearer xoxb-your-token"'
 
 
+# Account the fake binary reports once a browser sign-in has completed,
+# modelling latchkey storing the credentials under whichever account the user
+# logged in as.
+_SIGNED_IN_ACCOUNT: str = "signed-in@example.com"
+
+
 def _make_latchkey_with_status(
     tmp_path: Path,
     *,
@@ -144,8 +154,9 @@ def _make_latchkey_with_status(
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
     set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
     latchkey_directory: Path | None = None,
+    signed_in_account: str = _SIGNED_IN_ACCOUNT,
 ) -> Latchkey:
-    """Build a ``Latchkey`` that uses two fake binaries.
+    """Build a ``Latchkey`` backed by one stateful fake binary.
 
     Both ``services info`` and ``auth browser`` call the same fake binary
     via ``latchkey_binary``. The binary inspects ``argv[0]`` (``services``
@@ -153,9 +164,15 @@ def _make_latchkey_with_status(
     auth-browser recording. ``auth_options_json`` controls the
     ``authOptions`` array latchkey reports; pass ``json.dumps(["set"])``
     to simulate a service that doesn't support browser sign-in.
+
+    A *successful* ``auth browser`` run makes every later ``services info``
+    report ``signed_in_account`` as a stored, valid account -- what real
+    latchkey does when the user completes a sign-in, and what the grant flow
+    reads back to learn which account it just connected.
     """
     binary = tmp_path / "latchkey"
     auth_recording = tmp_path / "auth_latchkey_report.jsonl"
+    signed_in_marker = tmp_path / "signed_in_account"
     # latchkey 3.0.0 reports per-account credentials keyed by account name (the
     # default account keyed by ``""``); a ``missing`` service has an empty
     # ``credentials`` object rather than a top-level status.
@@ -164,25 +181,30 @@ def _make_latchkey_with_status(
         if credential_status == "missing"
         else {"": {"credentialType": "rawCurl", "credentialStatus": credential_status}}
     )
-    services_payload = json.dumps(
-        {
-            "credentials": credentials,
-            "authOptions": json.loads(auth_options_json),
-            "setCredentialsExample": set_credentials_example,
-        }
-    )
     binary.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
+        f"credentials = json.loads({json.dumps(json.dumps(credentials))})\n"
+        f"marker = {str(signed_in_marker)!r}\n"
         "argv = sys.argv[1:]\n"
         "if argv[:2] == ['services', 'info']:\n"
-        f"    print({services_payload!r})\n"
+        "    if os.path.exists(marker):\n"
+        "        with open(marker) as f:\n"
+        "            credentials[f.read()] = {'credentialType': 'oauth', 'credentialStatus': 'valid'}\n"
+        "    print(json.dumps({\n"
+        "        'credentials': credentials,\n"
+        f"        'authOptions': json.loads({json.dumps(auth_options_json)}),\n"
+        f"        'setCredentialsExample': {set_credentials_example!r},\n"
+        "    }))\n"
         "    sys.exit(0)\n"
         "elif argv[:2] == ['auth', 'browser']:\n"
         f"    with open({str(auth_recording)!r}, 'a') as f:\n"
         "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
         f"    if {auth_browser_stderr!r}:\n"
         f"        sys.stderr.write({auth_browser_stderr!r})\n"
+        f"    if {auth_browser_exit} == 0:\n"
+        "        with open(marker, 'w') as f:\n"
+        f"            f.write({signed_in_account!r})\n"
         f"    sys.exit({auth_browser_exit})\n"
         "else:\n"
         "    sys.stderr.write('unexpected argv: ' + repr(argv))\n"
@@ -203,6 +225,7 @@ def _build_handler(
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
     set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
     latchkey_directory: Path | None = None,
+    signed_in_account: str = _SIGNED_IN_ACCOUNT,
 ) -> LatchkeyPermissionGrantHandler:
     latchkey = _make_latchkey_with_status(
         tmp_path,
@@ -212,6 +235,7 @@ def _build_handler(
         auth_options_json=auth_options_json,
         set_credentials_example=set_credentials_example,
         latchkey_directory=latchkey_directory,
+        signed_in_account=signed_in_account,
     )
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
@@ -236,6 +260,7 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all", "slack-write-all"),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -244,8 +269,12 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     # Auth browser must not have been invoked.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
     # Permissions file reflects the new rule and is keyed by host (not agent).
+    # The rule is scoped to the account that was granted (here the unnamed
+    # default one), so no other Slack account inherits it.
     on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
-    assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}
+    rule_key = account_scope_key("slack-api", "")
+    assert on_disk["rules"] == [{rule_key: ["slack-read-all", "slack-write-all"]}]
+    assert rule_key in on_disk["schemas"]
     # Response event was written and mngr message sent.
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
@@ -266,6 +295,7 @@ def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> 
         host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -283,6 +313,7 @@ def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path
         host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -305,6 +336,7 @@ def test_grant_with_unknown_credentials_proceeds_without_invoking_auth_browser(t
         host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -331,6 +363,7 @@ def test_grant_with_unknown_credentials_and_set_only_auth_proceeds(tmp_path: Pat
         host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -402,6 +435,7 @@ def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path)
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     # A failed sign-in is a FAILED outcome, not a denial.
@@ -430,6 +464,7 @@ def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
             host_id=HostId(),
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=(),
+            account_choice="",
         )
 
     # Defence-in-depth: nothing should have been written.
@@ -446,12 +481,13 @@ def test_grant_rejects_permissions_outside_catalog(tmp_path: Path) -> None:
             host_id=HostId(),
             service_info=_SLACK_SERVICE_INFO,
             granted_permissions=("not-a-real-permission",),
+            account_choice="",
         )
 
     assert load_response_events(tmp_path) == []
 
 
-def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
+def test_grant_replaces_existing_rule_for_same_scope_and_account(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
     agent_id = AgentId()
     host_id = HostId()
@@ -462,6 +498,7 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
     handler.grant(
         request_event_id="evt-2",
@@ -469,10 +506,11 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all", "slack-write-all"),
+        account_choice="",
     )
 
     on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
-    assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}
+    assert on_disk["rules"] == [{account_scope_key("slack-api", ""): ["slack-read-all", "slack-write-all"]}]
 
 
 # -- LatchkeyPermissionGrantHandler.grant: NEEDS_MANUAL_CREDENTIALS path --
@@ -495,6 +533,7 @@ def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -529,6 +568,7 @@ def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: P
         host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -562,6 +602,7 @@ def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path
         host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -598,6 +639,7 @@ def test_grant_prefixes_set_example_with_pinned_latchkey_directory(tmp_path: Pat
         host_id=HostId(),
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -644,6 +686,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
     assert first.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
 
@@ -656,6 +699,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
     assert second.outcome == GrantOutcome.GRANTED
     assert second.response_event is not None
@@ -720,6 +764,7 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -727,7 +772,7 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
     # per-host file under the plugin data dir.
     assert len(fake_client.set_calls) == 1
     call = fake_client.set_calls[0]
-    assert call.rule_key == "slack-api"
+    assert call.rule_key == account_scope_key("slack-api", "")
     assert call.granted_permissions == ("slack-read-all",)
     assert call.permissions_file_path == permissions_path_for_host(tmp_path / "mngr_latchkey", host_id)
     # The pending request is removed from the gateway queue exactly once.
@@ -875,9 +920,304 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
         host_id=host_id,
         service_info=_SLACK_SERVICE_INFO,
         granted_permissions=("slack-read-all",),
+        account_choice="",
     )
 
     on_disk = json.loads(host_path.read_text())
-    assert on_disk["schemas"] == baseline["schemas"]
+    # The baseline schemas survive; the grant only adds the generated schema
+    # backing its own account-scoped rule key.
+    rule_key = account_scope_key("slack-api", "")
+    assert on_disk["schemas"]["latchkey-self"] == baseline["schemas"]["latchkey-self"]
     assert {"latchkey-self": baseline["rules"][0]["latchkey-self"]} in on_disk["rules"]
-    assert {"slack-api": ["slack-read-all"]} in on_disk["rules"]
+    assert {rule_key: ["slack-read-all"]} in on_disk["rules"]
+
+
+# -- Per-account grants ---------------------------------------------------------
+
+
+def _make_multi_account_latchkey(
+    tmp_path: Path,
+    accounts: dict[str, str],
+    *,
+    signed_in_account: str = _SIGNED_IN_ACCOUNT,
+) -> Latchkey:
+    """Build a ``Latchkey`` whose fake binary reports several stored accounts.
+
+    ``accounts`` maps account name to its ``credentialStatus``. A successful
+    ``auth browser`` records its argv (so tests can assert on ``--account``)
+    and adds ``signed_in_account`` as a valid account, mirroring latchkey
+    storing the credentials under whoever logged in.
+    """
+    binary = tmp_path / "latchkey"
+    auth_recording = tmp_path / "auth_latchkey_report.jsonl"
+    marker = tmp_path / "signed_in_account"
+    credentials = {
+        account: {"credentialType": "oauth", "credentialStatus": status} for account, status in accounts.items()
+    }
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"credentials = json.loads({json.dumps(json.dumps(credentials))})\n"
+        f"marker = {str(marker)!r}\n"
+        "argv = sys.argv[1:]\n"
+        "if argv[:2] == ['services', 'info']:\n"
+        "    if os.path.exists(marker):\n"
+        "        with open(marker) as f:\n"
+        "            credentials[f.read()] = {'credentialType': 'oauth', 'credentialStatus': 'valid'}\n"
+        "    print(json.dumps({'credentials': credentials, 'authOptions': ['browser'], "
+        "'setCredentialsExample': ''}))\n"
+        "    sys.exit(0)\n"
+        "elif argv[:2] == ['auth', 'browser-prepare']:\n"
+        "    sys.exit(0)\n"
+        "elif argv[:2] == ['auth', 'browser']:\n"
+        f"    with open({str(auth_recording)!r}, 'a') as f:\n"
+        "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': "
+        "os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
+        "    with open(marker, 'w') as f:\n"
+        f"        f.write({signed_in_account!r})\n"
+        "    sys.exit(0)\n"
+        "sys.stderr.write('unexpected argv: ' + repr(argv))\n"
+        "sys.exit(99)\n"
+    )
+    binary.chmod(0o755)
+    return Latchkey(latchkey_binary=str(binary), latchkey_directory=tmp_path)
+
+
+def _build_handler_for_latchkey(tmp_path: Path, latchkey: Latchkey) -> LatchkeyPermissionGrantHandler:
+    return LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog=_build_slack_services_catalog(),
+        mngr_message_sender=_message_sender(),
+        gateway_client=build_fake_gateway_client(),
+    )
+
+
+def test_grant_for_one_account_does_not_touch_another_accounts_rule(tmp_path: Path) -> None:
+    """Two accounts of the same service hold independent grants."""
+    latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid", "bob@x": "valid"})
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+    host_id = HostId()
+
+    handler.grant(
+        request_event_id="evt-1",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice="alice@x",
+    )
+    handler.grant(
+        request_event_id="evt-2",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-write-all",),
+        account_choice="bob@x",
+    )
+
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk["rules"] == [
+        {account_scope_key("slack-api", "alice@x"): ["slack-read-all"]},
+        {account_scope_key("slack-api", "bob@x"): ["slack-write-all"]},
+    ]
+    # No browser sign-in: both accounts already had usable credentials.
+    assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
+
+
+def test_grant_with_new_account_choice_grants_the_account_that_signed_in(tmp_path: Path) -> None:
+    """Picking "new account" signs in and grants whichever account latchkey stored."""
+    latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid"}, signed_in_account="carol@x")
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-new",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice=NEW_ACCOUNT_FORM_VALUE,
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert "carol@x" in result.message
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    # Only the freshly-connected account is granted; alice keeps no grant.
+    assert on_disk["rules"] == [{account_scope_key("slack-api", "carol@x"): ["slack-read-all"]}]
+
+
+def test_grant_re_signs_in_a_specific_stale_account(tmp_path: Path) -> None:
+    """An account whose credentials went invalid is re-authenticated by name."""
+    latchkey = _make_multi_account_latchkey(
+        tmp_path, {"alice@x": "invalid", "bob@x": "valid"}, signed_in_account="alice@x"
+    )
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-stale",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice="alice@x",
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    # latchkey was told which account to re-authenticate, so it reuses that
+    # account's stored client rather than the service-level preparation.
+    recording = _read_recording(tmp_path / "auth_latchkey_report.jsonl")
+    assert recording[0]["argv"] == ["auth", "browser", "slack", "--account", "alice@x"]
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk["rules"] == [{account_scope_key("slack-api", "alice@x"): ["slack-read-all"]}]
+
+
+def test_grant_fails_when_the_signed_in_account_is_ambiguous(tmp_path: Path) -> None:
+    """If we cannot tell which account was connected, nothing is granted."""
+
+    # The fake completes the sign-in but stores nothing, so the account list is
+    # unchanged and carries more than one candidate.
+    def _make_binary() -> Latchkey:
+        binary = tmp_path / "latchkey"
+        credentials = {
+            "alice@x": {"credentialType": "oauth", "credentialStatus": "valid"},
+            "bob@x": {"credentialType": "oauth", "credentialStatus": "valid"},
+        }
+        binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "argv = sys.argv[1:]\n"
+            "if argv[:2] == ['services', 'info']:\n"
+            f"    print(json.dumps({{'credentials': json.loads({json.dumps(json.dumps(credentials))}), "
+            "'authOptions': ['browser'], 'setCredentialsExample': ''}))\n"
+            "    sys.exit(0)\n"
+            "sys.exit(0)\n"
+        )
+        binary.chmod(0o755)
+        return Latchkey(latchkey_binary=str(binary), latchkey_directory=tmp_path)
+
+    handler = _build_handler_for_latchkey(tmp_path, _make_binary())
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-ambiguous",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice=NEW_ACCOUNT_FORM_VALUE,
+    )
+
+    assert result.outcome == GrantOutcome.FAILED
+    assert result.response_event is None
+    # Nothing was granted and the request stays pending.
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
+    assert load_response_events(tmp_path) == []
+
+
+def test_render_detail_fragment_offers_every_account_plus_a_new_one(tmp_path: Path) -> None:
+    latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid", "bob@x": "valid"})
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        rationale="need to read a channel",
+        account="bob@x",
+    )
+
+    body = handler.render_request_detail_fragment(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        mngr_forward_origin="",
+    )
+
+    assert 'value="alice@x"' in body
+    assert 'value="bob@x"' in body
+    assert f'value="{NEW_ACCOUNT_FORM_VALUE}"' in body
+    # The account the agent asked for is the preselected one (and the only one).
+    checked_values = re.findall(r'name="account" value="([^"]*)"[^>]*\bchecked\b', body)
+    assert checked_values == ["bob@x"]
+
+
+def test_render_detail_fragment_offers_a_requested_account_that_is_not_connected(tmp_path: Path) -> None:
+    """An agent may name an account nobody has signed in to; the dialog must say so.
+
+    Dropping it would silently preselect a *different* account, so approving
+    would grant one account while the agent kept using another and stayed
+    blocked.
+    """
+    latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid"})
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        rationale="need to read a channel",
+        account="bob@x",
+    )
+
+    body = handler.render_request_detail_fragment(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        mngr_forward_origin="",
+    )
+
+    # The un-connected account is offered *and* preselected, next to the
+    # already-connected one.
+    assert 'value="alice@x"' in body
+    assert 'value="bob@x"' in body
+    assert re.findall(r'name="account" value="([^"]*)"[^>]*\bchecked\b', body) == ["bob@x"]
+    assert "not connected yet" in body
+    # Approving will therefore open a browser rather than granting silently.
+    assert "Opening a browser window for you to sign in to" in body
+
+
+def test_grant_for_a_requested_account_that_is_not_connected_signs_it_in(tmp_path: Path) -> None:
+    """Approving the un-connected choice signs in and grants the stored account."""
+    latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid"}, signed_in_account="bob@x")
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-not-connected",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice="bob@x",
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    # The user signed in as the account the agent asked for, so that is what got
+    # granted -- and alice@x is untouched.
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk["rules"] == [{account_scope_key("slack-api", "bob@x"): ["slack-read-all"]}]
+
+
+def test_grant_for_an_unconnected_account_follows_the_account_actually_signed_in(tmp_path: Path) -> None:
+    """If the user signs in as someone else, the grant follows reality."""
+    latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid"}, signed_in_account="carol@x")
+    handler = _build_handler_for_latchkey(tmp_path, latchkey)
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-other",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice="bob@x",
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert "carol@x" in result.message
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk["rules"] == [{account_scope_key("slack-api", "carol@x"): ["slack-read-all"]}]
+
+
+def test_build_account_choices_keeps_a_single_sign_in_option_when_nothing_is_connected() -> None:
+    """With no accounts and no request, the only option is the sign-in one."""
+    choices, selected = _build_account_choices((), None)
+
+    assert [(choice.value, choice.label) for choice in choices] == [(NEW_ACCOUNT_FORM_VALUE, "Sign in")]
+    assert selected == NEW_ACCOUNT_FORM_VALUE

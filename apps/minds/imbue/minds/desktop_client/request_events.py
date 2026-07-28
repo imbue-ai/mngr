@@ -84,10 +84,11 @@ class LatchkeyPredefinedPermissionRequestEvent(RequestEvent):
 
     The agent declares which Detent scope schema it wants (e.g.
     ``slack-api``), which permission schemas under that scope it would
-    like, and why. The user picks the final permission set in the
-    desktop dialog (which may broaden or narrow the agent's request);
-    the desktop client launches ``latchkey auth browser`` if no
-    credentials exist for the service yet.
+    like, optionally which signed-in account it wants to use, and why.
+    The user picks the final account and permission set in the desktop
+    dialog (which may broaden or narrow the agent's request); the
+    desktop client launches ``latchkey auth browser`` if the chosen
+    account has no usable credentials yet.
     """
 
     scope: str = Field(
@@ -98,6 +99,14 @@ class LatchkeyPredefinedPermissionRequestEvent(RequestEvent):
         description=(
             "Permission schemas the agent requested under the scope; the user may grant a "
             "different subset in the dialog."
+        ),
+    )
+    account: str | None = Field(
+        default=None,
+        description=(
+            "Latchkey account the agent asked to use (the unnamed default account is the empty "
+            "string), or ``None`` when the agent named none and the user has to pick one in the "
+            "dialog. Grants are per account (see ``imbue.mngr_latchkey.account_scopes``)."
         ),
     )
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
@@ -231,6 +240,7 @@ def create_latchkey_predefined_permission_request_event(
     rationale: str,
     permissions: tuple[str, ...] = (),
     is_user_requested: bool = False,
+    account: str | None = None,
 ) -> "LatchkeyPredefinedPermissionRequestEvent":
     """Create a new latchkey-permission request event with auto-generated metadata."""
     return LatchkeyPredefinedPermissionRequestEvent(
@@ -243,6 +253,7 @@ def create_latchkey_predefined_permission_request_event(
         is_user_requested=is_user_requested,
         scope=scope,
         permissions=permissions,
+        account=account,
         rationale=rationale,
     )
 

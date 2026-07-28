@@ -7,6 +7,7 @@ from pathlib import Path
 
 from flask.testing import FlaskClient
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -24,6 +25,8 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.account_scopes import account_scope_key
+from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
@@ -133,6 +136,10 @@ def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
     return predicate()
 
 
+# The signed-in account the connector fixtures grant permissions to.
+_TEST_ACCOUNT: str = "hynek@imbue-ai"
+
+
 def _build_handler(
     tmp_path: Path,
     gateway_client: FakeLatchkeyGatewayClient | None = None,
@@ -140,7 +147,12 @@ def _build_handler(
 ) -> LatchkeyPermissionGrantHandler:
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
-        latchkey=latchkey or Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
+        latchkey=latchkey
+        or _ConnectorLatchkey(
+            latchkey_directory=tmp_path,
+            latchkey_binary="/nonexistent",
+            accounts_by_service={"slack": [_TEST_ACCOUNT]},
+        ),
         services_catalog=ServicesCatalog.from_catalog_payload(_CATALOG_PAYLOAD),
         mngr_message_sender=MngrMessageSender(
             mngr_caller=RecordingMngrCaller(),
@@ -175,6 +187,22 @@ def _build_client(
     return client
 
 
+def _account_grants_config(*grants: tuple[str, str, tuple[str, ...]]) -> LatchkeyPermissionsConfig:
+    """Build the permissions config production writes for each ``(scope, account, permissions)``.
+
+    Goes through :func:`build_account_grant` so the seeded file carries the
+    generated schemas that pin each rule to its account -- which is what the
+    readers inspect (they never interpret a rule key).
+    """
+    rules: list[dict[str, list[str]]] = []
+    schemas: dict[str, JsonValue] = {}
+    for scope, account, permissions in grants:
+        rule_key, granted, grant_schemas = build_account_grant(scope, account, permissions)
+        rules.append({rule_key: list(granted)})
+        schemas.update(grant_schemas)
+    return LatchkeyPermissionsConfig(rules=tuple(rules), schemas=schemas)
+
+
 def _plugin_dir(tmp_path: Path) -> Path:
     return Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent").plugin_data_dir
 
@@ -186,7 +214,7 @@ def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
-        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
@@ -213,7 +241,7 @@ def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
-        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
@@ -229,9 +257,12 @@ def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path
     assert 'id="settings-modal-backdrop"' in body
 
 
-def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
+def test_settings_page_empty_state_when_no_accounts_and_no_grants(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
-    handler = _build_handler(tmp_path)
+    handler = _build_handler(
+        tmp_path,
+        latchkey=_ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
+    )
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
 
     response = client.get("/settings")
@@ -244,13 +275,16 @@ def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
 def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     path = permissions_path_for_host(_plugin_dir(tmp_path), host)
-    save_permissions(path, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
+    save_permissions(
+        path,
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
+    )
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
 
     response = client.post(
         "/settings/permissions/revoke",
-        json={"workspace_agent_id": agent, "service_name": "slack"},
+        json={"workspace_agent_id": agent, "service_name": "slack", "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 200
@@ -262,14 +296,22 @@ def test_revoke_all_removes_rule_across_workspaces(tmp_path: Path) -> None:
     agent_b, host_b = str(AgentId()), HostId()
     path_a = permissions_path_for_host(_plugin_dir(tmp_path), host_a)
     path_b = permissions_path_for_host(_plugin_dir(tmp_path), host_b)
-    save_permissions(path_a, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
-    save_permissions(path_b, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-write-all"]},)))
+    save_permissions(
+        path_a,
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
+    )
+    save_permissions(
+        path_b,
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-write-all",))),
+    )
     handler = _build_handler(tmp_path)
     client = _build_client(
         tmp_path, handler, {agent_a: str(host_a), agent_b: str(host_b)}, {agent_a: "A", agent_b: "B"}
     )
 
-    response = client.post("/settings/permissions/revoke-all", json={"service_name": "slack"})
+    response = client.post(
+        "/settings/permissions/revoke-all", json={"service_name": "slack", "account": _TEST_ACCOUNT}
+    )
 
     assert response.status_code == 200
     assert handler.gateway_client.get_permission_rules(path_a) == {}
@@ -283,7 +325,7 @@ def test_revoke_unknown_service_returns_400(tmp_path: Path) -> None:
 
     response = client.post(
         "/settings/permissions/revoke",
-        json={"workspace_agent_id": agent, "service_name": "nope"},
+        json={"workspace_agent_id": agent, "service_name": "nope", "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 400
@@ -306,7 +348,7 @@ def test_settings_page_lists_service_accounts_and_add_button(tmp_path: Path) -> 
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
-        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     latchkey = _ConnectorLatchkey(
         latchkey_directory=tmp_path,
@@ -325,7 +367,35 @@ def test_settings_page_lists_service_accounts_and_add_button(tmp_path: Path) -> 
     assert "hynek@glebs-corner" in body
     assert "Disconnect" in body
     assert 'data-account="hynek@imbue-ai"' in body
-    assert "Allowed on all accounts:" in body
+    # Each account is its own section, so both appear as separate blocks.
+    assert 'data-account="hynek@glebs-corner"' in body
+    # Both accounts have stored credentials, so neither is flagged.
+    assert "not connected" not in body
+
+
+def test_settings_page_flags_an_account_with_no_stored_credentials(tmp_path: Path) -> None:
+    """A grant for an account latchkey has no credentials for is shown, and flagged.
+
+    Such a grant is inert (latchkey never injects credentials it does not have),
+    but it must stay visible so the user can revoke it.
+    """
+    agent, host = str(AgentId()), HostId()
+    save_permissions(
+        permissions_path_for_host(_plugin_dir(tmp_path), host),
+        _account_grants_config(("slack-api", "gone@x", ("slack-read-all",))),
+    )
+    latchkey = _ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
+    handler = _build_handler(tmp_path, latchkey=latchkey)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    body = response.text
+    assert 'data-account="gone@x"' in body
+    assert "not connected" in body
+    # It is still revocable: the workspace card (and its Revoke button) render.
+    assert "My Workspace" in body
 
 
 def test_add_account_invokes_latchkey_add_account(tmp_path: Path) -> None:
@@ -366,10 +436,17 @@ def test_add_account_missing_service_name_returns_400(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
-def test_disconnect_account_clears_but_keeps_grants_when_accounts_remain(tmp_path: Path) -> None:
+def test_disconnect_account_revokes_only_that_accounts_grants(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     path = permissions_path_for_host(_plugin_dir(tmp_path), host)
-    save_permissions(path, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
+    kept_key = account_scope_key("slack-api", "b@x")
+    save_permissions(
+        path,
+        _account_grants_config(
+            ("slack-api", "a@x", ("slack-read-all",)),
+            ("slack-api", "b@x", ("slack-read-all",)),
+        ),
+    )
     latchkey = _ConnectorLatchkey(
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
@@ -382,17 +459,17 @@ def test_disconnect_account_clears_but_keeps_grants_when_accounts_remain(tmp_pat
 
     assert response.status_code == 200
     assert latchkey.cleared_calls == [("slack", "a@x")]
-    # An account still remains, so the service's grants are left in place.
-    assert handler.gateway_client.get_permission_rules(path) == {"slack-api": ("slack-read-all",)}
+    # The disconnected account's grants go; the other account keeps its own.
+    assert _wait_until(lambda: handler.gateway_client.get_permission_rules(path) == {kept_key: ("slack-read-all",)})
 
 
-def test_disconnect_last_account_revokes_grants_across_workspaces(tmp_path: Path) -> None:
+def test_disconnect_account_revokes_its_grants_across_workspaces(tmp_path: Path) -> None:
     agent_a, host_a = str(AgentId()), HostId()
     agent_b, host_b = str(AgentId()), HostId()
     path_a = permissions_path_for_host(_plugin_dir(tmp_path), host_a)
     path_b = permissions_path_for_host(_plugin_dir(tmp_path), host_b)
-    save_permissions(path_a, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
-    save_permissions(path_b, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-write-all"]},)))
+    save_permissions(path_a, _account_grants_config(("slack-api", "only@x", ("slack-read-all",))))
+    save_permissions(path_b, _account_grants_config(("slack-api", "only@x", ("slack-write-all",))))
     latchkey = _ConnectorLatchkey(
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
@@ -409,8 +486,7 @@ def test_disconnect_last_account_revokes_grants_across_workspaces(tmp_path: Path
 
     assert response.status_code == 200
     assert latchkey.cleared_calls == [("slack", "only@x")]
-    # Disconnecting the last account triggers the background "revoke all", which
-    # strips the service's grants from every workspace host.
+    # The background cleanup strips the account's grants from every host.
     assert _wait_until(lambda: handler.gateway_client.get_permission_rules(path_a) == {})
     assert _wait_until(lambda: handler.gateway_client.get_permission_rules(path_b) == {})
 
@@ -540,7 +616,7 @@ def test_revoke_requires_authentication(tmp_path: Path) -> None:
 
     response = client.post(
         "/settings/permissions/revoke",
-        json={"workspace_agent_id": agent, "service_name": "slack"},
+        json={"workspace_agent_id": agent, "service_name": "slack", "account": _TEST_ACCOUNT},
     )
 
     assert response.status_code == 403

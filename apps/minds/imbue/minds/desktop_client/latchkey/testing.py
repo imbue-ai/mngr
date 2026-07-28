@@ -6,14 +6,17 @@ are exercised through the tests that import them.
 
 import json
 import os
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -34,8 +37,12 @@ class RecordedSetPermissionCall(FrozenModel):
     """Recorded args from one :meth:`FakeLatchkeyGatewayClient.set_permission_rule` call."""
 
     permissions_file_path: Path = Field(description="Target permissions file the caller asked us to edit.")
-    rule_key: str = Field(description="Detent scope schema being upserted.")
+    rule_key: str = Field(description="Detent schema name being upserted as a rule.")
     granted_permissions: tuple[str, ...] = Field(description="Permission schemas the caller granted.")
+    schemas: Mapping[str, JsonValue] = Field(
+        default_factory=dict,
+        description="Schema definitions the caller asked us to merge into the file.",
+    )
 
 
 class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
@@ -72,22 +79,9 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         """``(path, rule_key)`` pairs the test code asked to delete, in arrival order."""
         return tuple(self._deleted_rule_calls)
 
-    def get_permission_rules(
-        self,
-        permissions_file_path: Path,
-    ) -> dict[str, tuple[str, ...]]:
-        """Read the on-disk file directly, matching the real extension's GET response."""
-        if not permissions_file_path.is_file():
-            return {}
-        rules = json.loads(permissions_file_path.read_text()).get("rules", [])
-        merged: dict[str, list[str]] = {}
-        for rule in rules:
-            for scope_name, permissions in rule.items():
-                bucket = merged.setdefault(scope_name, [])
-                for permission in permissions:
-                    if permission not in bucket:
-                        bucket.append(permission)
-        return {scope: tuple(permissions) for scope, permissions in merged.items()}
+    # ``get_permission_rules`` is deliberately *not* overridden: the real
+    # implementation is a pure view over ``get_permissions_config``, which this
+    # fake replaces, so it works unchanged (and cannot drift).
 
     def delete_permission_rule(
         self,
@@ -104,28 +98,21 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         updated = {**existing, "rules": new_rules}
         _atomic_write_text(permissions_file_path, json.dumps(updated, indent=2))
 
-    def get_granted_permissions_for_scopes(
+    def get_permissions_config(
         self,
         permissions_file_path: Path,
-        scopes: Sequence[str],
-    ) -> frozenset[str]:
+    ) -> LatchkeyPermissionsConfig:
         """Read the on-disk file directly, matching the real extension's GET response."""
         if not permissions_file_path.is_file():
-            return frozenset()
-        rules = json.loads(permissions_file_path.read_text()).get("rules", [])
-        scopes_set = set(scopes)
-        granted: set[str] = set()
-        for rule in rules:
-            for scope_name, permissions in rule.items():
-                if scope_name in scopes_set:
-                    granted.update(permissions)
-        return frozenset(granted)
+            return LatchkeyPermissionsConfig()
+        return LatchkeyPermissionsConfig.model_validate_json(permissions_file_path.read_text())
 
     def set_permission_rule(
         self,
         permissions_file_path: Path,
         rule_key: str,
         granted_permissions: Sequence[str],
+        schemas: Mapping[str, JsonValue] | None = None,
     ) -> None:
         """Apply the grant in-process, matching the real extension's filesystem effect."""
         granted_tuple = tuple(granted_permissions)
@@ -134,6 +121,7 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
                 permissions_file_path=permissions_file_path,
                 rule_key=rule_key,
                 granted_permissions=granted_tuple,
+                schemas=dict(schemas or {}),
             ),
         )
         permissions_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,6 +145,10 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         # Mirror the real extension's spread semantics: every key other
         # than ``rules`` is preserved verbatim (notably ``schemas``).
         updated = {**existing, "rules": new_rules}
+        # ... and its schema handling: whatever the caller supplied is merged in
+        # by name (the extension authors nothing itself).
+        if schemas:
+            updated["schemas"] = {**existing.get("schemas", {}), **dict(schemas)}
         _atomic_write_text(permissions_file_path, json.dumps(updated, indent=2))
 
     def delete_permission_request(self, request_id: str) -> None:

@@ -7,6 +7,14 @@ lets the user revoke them. Revocation removes the rule from that host's
 extension, the single owner of on-disk permission writes); stored credentials
 are left untouched, so a fresh grant does not force the user to re-authenticate.
 
+Grants are per *account*: a host's rule key is ``<scope>:<account>`` (see
+:mod:`imbue.mngr_latchkey.account_scopes`), so the Connectors page is organized
+as one section per signed-in account rather than one per service. A section is
+shown for every account latchkey has stored *and* for every account that still
+appears in some host's rules without being connected (one whose credentials were
+cleared outside the app, or one that was granted before it was ever connected),
+so no grant is invisible and unrevocable.
+
 Permissions are stored per host -- every agent on a host shares one
 ``latchkey_permissions.json`` (see :func:`permissions_path_for_host`). Minds
 workspaces map 1:1 to hosts, so each column in the settings view is one
@@ -19,6 +27,7 @@ narrowing) an existing grant is done through the ordinary agent-driven
 permission-request flow, not here.
 """
 
+from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -126,6 +135,32 @@ class ServiceAccount(FrozenModel):
     label: str = Field(description="User-facing account label (the default account reads as ``Default account``).")
 
 
+class ServiceAccountOverview(FrozenModel):
+    """All active-workspace grants held for one account of a predefined service.
+
+    One of these renders as one Connectors section: the account's own header
+    (with its Disconnect / Revoke-all actions) and a card per workspace that
+    holds permissions for it. Sections exist for accounts with no grants too,
+    so a freshly-connected account is visible (and disconnectable) right away.
+    """
+
+    account: str = Field(
+        description='Latchkey account key (an e-mail / handle; ``""`` for the unnamed default); the revoke key.',
+    )
+    label: str = Field(description="User-facing account label (the default account reads as ``Default account``).")
+    is_connected: bool = Field(
+        description=(
+            "Whether latchkey stores credentials for the account. ``False`` for an account that "
+            "only appears in some host's rules -- its credentials were cleared elsewhere, or it "
+            "was granted before ever being connected -- which is shown so those (inert) grants "
+            "can still be revoked."
+        ),
+    )
+    workspace_grants: tuple["WorkspaceServiceGrant", ...] = Field(
+        description="One entry per active workspace that has at least one permission for this account.",
+    )
+
+
 class WorkspaceServiceGrant(FrozenModel):
     """The permissions a single workspace's host has been granted for one service."""
 
@@ -139,19 +174,19 @@ class WorkspaceServiceGrant(FrozenModel):
 
 
 class ServicePermissionOverview(FrozenModel):
-    """All active-workspace grants for a single predefined service."""
+    """Every account-scoped Connectors section belonging to one predefined service.
+
+    The service level only carries what is genuinely service-wide: its label and
+    the "+ Add account" action. All grants hang off the individual accounts.
+    """
 
     service_name: str = Field(description="Raw service name (e.g. ``slack``); used as the revoke action key.")
-    display_name: str = Field(description="Human-readable service label shown as the section header.")
-    accounts: tuple[ServiceAccount, ...] = Field(
-        default=(),
+    display_name: str = Field(description="Human-readable service label shown above the account sections.")
+    accounts: tuple[ServiceAccountOverview, ...] = Field(
         description=(
-            "Signed-in accounts for this service, read from ``latchkey services info --offline``. "
-            "Empty when the service has a grant but no stored credentials."
+            "One entry per account of this service: those latchkey has credentials for (read via "
+            "``latchkey auth list --offline``) plus any that only appear in a host's rules."
         ),
-    )
-    workspace_grants: tuple[WorkspaceServiceGrant, ...] = Field(
-        description="One entry per active workspace that has at least one permission for this service.",
     )
 
 
@@ -234,26 +269,34 @@ def build_permission_overview(
     services_catalog: ServicesCatalog,
     latchkey: Latchkey,
 ) -> tuple[ServicePermissionOverview, ...]:
-    """Assemble the per-service, per-workspace grant overview for the settings page.
+    """Assemble the per-account, per-workspace grant overview for the settings page.
 
     Reads each active workspace host's permissions file once (through the
-    gateway extension) and groups the grants by catalog service. Only services
-    with at least one active-workspace grant are returned; the result is sorted
-    by display name for a stable UI.
+    gateway extension) and resolves its per-account grants with
+    :meth:`ServicesCatalog.list_service_account_grants` -- the single place that
+    turns a permissions file into (service, account, permissions) triples by
+    inspecting the schemas rather than the rule keys. Those grants are then
+    grouped by service and account. A service is returned when it has at least
+    one account -- either one latchkey stores credentials for or one that only
+    appears in a host's grants -- and the result is sorted by display name for a
+    stable UI.
 
     Raises :class:`LatchkeyGatewayClientError` if a host file cannot be read.
     Because every host shares one gateway, a read error almost always means the
     gateway itself is unavailable, so the caller surfaces an explicit
     "unavailable" state rather than silently rendering the page as if nothing
     were granted (a missing file is not an error -- the client maps it to an
-    empty rule set).
+    empty config).
     """
     hosts = _list_active_workspace_hosts(backend_resolver)
     plugin_data_dir = latchkey.plugin_data_dir
-    rules_by_agent: dict[str, dict[str, tuple[str, ...]]] = {}
+    # (service, account) -> the hosts that grant it, with the granted permissions.
+    grants_by_service_account: dict[tuple[str, str], list[tuple[_WorkspaceHost, frozenset[str]]]] = {}
     for host in hosts:
-        path = permissions_path_for_host(plugin_data_dir, host.host_id)
-        rules_by_agent[host.agent_id] = gateway_client.get_permission_rules(path)
+        config = gateway_client.get_permissions_config(permissions_path_for_host(plugin_data_dir, host.host_id))
+        for grant in services_catalog.list_service_account_grants(config):
+            key = (grant.service_name, grant.account)
+            grants_by_service_account.setdefault(key, []).append((host, frozenset(grant.permissions)))
 
     # One ``latchkey auth list --offline`` call reports every service's stored
     # accounts, so we don't shell out per service while rendering the page.
@@ -263,35 +306,69 @@ def build_permission_overview(
     for service_name, service_infos in services_catalog.as_mapping().items():
         if not service_infos:
             continue
-        scopes = tuple(info.scope for info in service_infos)
-        grants: list[WorkspaceServiceGrant] = []
-        for host in hosts:
-            rules = rules_by_agent[host.agent_id]
-            granted: set[str] = set()
-            for scope in scopes:
-                granted.update(rules.get(scope, ()))
-            permissions = _granted_permissions(service_infos, frozenset(granted))
-            if not permissions:
-                continue
-            grants.append(
-                WorkspaceServiceGrant(
-                    workspace_agent_id=host.agent_id,
-                    workspace_name=host.workspace_name,
-                    host_id=str(host.host_id),
-                    color=host.color,
-                    permissions=permissions,
-                )
+        stored_accounts = _service_accounts(accounts_by_service.get(service_name, ()))
+        stored_account_names = frozenset(entry.account for entry in stored_accounts)
+        granted_accounts = frozenset(
+            account for granted_service, account in grants_by_service_account if granted_service == service_name
+        )
+        not_connected_accounts = _sorted_accounts_by_label(granted_accounts - stored_account_names)
+        account_overviews = tuple(
+            ServiceAccountOverview(
+                account=account,
+                label=_account_label(account),
+                is_connected=account in stored_account_names,
+                workspace_grants=_workspace_grants_for_account(
+                    service_infos,
+                    grants_by_service_account.get((service_name, account), ()),
+                ),
             )
-        if grants:
+            for account in tuple(entry.account for entry in stored_accounts) + not_connected_accounts
+        )
+        if account_overviews:
             overviews.append(
                 ServicePermissionOverview(
                     service_name=service_name,
                     display_name=service_infos[0].display_name,
-                    accounts=_service_accounts(accounts_by_service.get(service_name, ())),
-                    workspace_grants=tuple(grants),
+                    accounts=account_overviews,
                 )
             )
     return tuple(sorted(overviews, key=lambda overview: overview.display_name.lower()))
+
+
+def _sorted_accounts_by_label(accounts: Iterable[str]) -> tuple[str, ...]:
+    """Sort account names for display: named ones alphabetically, the unnamed default last."""
+    return tuple(sorted(accounts, key=lambda account: (account == DEFAULT_ACCOUNT, account.lower())))
+
+
+def _workspace_grants_for_account(
+    service_infos: Sequence[ServicePermissionInfo],
+    host_grants: Sequence[tuple[_WorkspaceHost, frozenset[str]]],
+) -> tuple[WorkspaceServiceGrant, ...]:
+    """Turn one account's per-host grants into the settings page's workspace cards.
+
+    A host may grant the same account under more than one of the service's
+    scopes (e.g. GitHub's REST and git scopes), so the permissions of all of its
+    grants are unioned into a single card.
+    """
+    permissions_by_host: dict[str, tuple[_WorkspaceHost, set[str]]] = {}
+    for host, permissions in host_grants:
+        _, granted = permissions_by_host.setdefault(host.agent_id, (host, set()))
+        granted.update(permissions)
+    cards: list[WorkspaceServiceGrant] = []
+    for host, granted in permissions_by_host.values():
+        permissions = _granted_permissions(service_infos, frozenset(granted))
+        if not permissions:
+            continue
+        cards.append(
+            WorkspaceServiceGrant(
+                workspace_agent_id=host.agent_id,
+                workspace_name=host.workspace_name,
+                host_id=str(host.host_id),
+                color=host.color,
+                permissions=permissions,
+            )
+        )
+    return tuple(cards)
 
 
 def _account_label(account: str) -> str:
@@ -632,52 +709,81 @@ def _resolve_host_id(
         return None
 
 
-def revoke_service_for_workspace(
+def _revoke_service_account_at_path(
+    gateway_client: LatchkeyGatewayClient,
+    services_catalog: ServicesCatalog,
+    permissions_file_path: Path,
+    service_name: str,
+    account: str,
+) -> None:
+    """Delete every rule of ``permissions_file_path`` that grants ``account`` of ``service_name``.
+
+    The rules to delete are the ones :meth:`ServicesCatalog.list_service_account_grants`
+    resolves to this (service, account) pair, so the keys come from the file
+    itself instead of being reconstructed from a naming convention. Other
+    accounts of the same service, and every other rule, are untouched. The
+    generated schema behind each deleted key is left in the file: it is inert
+    once unreferenced, and a later re-grant overwrites it by name.
+    """
+    config = gateway_client.get_permissions_config(permissions_file_path)
+    for grant in services_catalog.list_service_account_grants(config):
+        if grant.service_name == service_name and grant.account == account:
+            gateway_client.delete_permission_rule(permissions_file_path, grant.rule_key)
+
+
+def revoke_service_account_for_workspace(
     backend_resolver: BackendResolverInterface,
     gateway_client: LatchkeyGatewayClient,
     services_catalog: ServicesCatalog,
     latchkey: Latchkey,
     workspace_agent_id: str,
     service_name: str,
+    account: str,
 ) -> None:
-    """Remove every rule for ``service_name`` from the given workspace's host file.
+    """Remove one account's grants for ``service_name`` from the given workspace's host file.
 
-    A service may own more than one detent scope; each is deleted. Raises
-    :class:`PermissionOverviewError` for an unknown service or an
+    Raises :class:`PermissionOverviewError` for an unknown service or an
     unresolvable workspace (the caller maps these to a 400 / 503).
     """
-    service_infos = services_catalog.get(service_name)
-    if not service_infos:
+    if not services_catalog.get(service_name):
         raise PermissionOverviewError(f"Unknown service '{service_name}'.")
     host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
         raise PermissionOverviewError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot revoke.",
         )
-    path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
-    for info in service_infos:
-        gateway_client.delete_permission_rule(path, info.scope)
+    _revoke_service_account_at_path(
+        gateway_client,
+        services_catalog,
+        permissions_path_for_host(latchkey.plugin_data_dir, host_id),
+        service_name,
+        account,
+    )
 
 
-def revoke_service_for_all_workspaces(
+def revoke_service_account_for_all_workspaces(
     backend_resolver: BackendResolverInterface,
     gateway_client: LatchkeyGatewayClient,
     services_catalog: ServicesCatalog,
     latchkey: Latchkey,
     service_name: str,
+    account: str,
 ) -> int:
-    """Remove every rule for ``service_name`` from every active workspace host.
+    """Remove one account's grants for ``service_name`` from every active workspace host.
 
     Returns the number of workspace hosts processed. Raises
     :class:`PermissionOverviewError` for an unknown service.
     """
-    service_infos = services_catalog.get(service_name)
-    if not service_infos:
+    if not services_catalog.get(service_name):
         raise PermissionOverviewError(f"Unknown service '{service_name}'.")
     plugin_data_dir = latchkey.plugin_data_dir
     hosts = _list_active_workspace_hosts(backend_resolver)
     for host in hosts:
-        path = permissions_path_for_host(plugin_data_dir, host.host_id)
-        for info in service_infos:
-            gateway_client.delete_permission_rule(path, info.scope)
+        _revoke_service_account_at_path(
+            gateway_client,
+            services_catalog,
+            permissions_path_for_host(plugin_data_dir, host.host_id),
+            service_name,
+            account,
+        )
     return len(hosts)

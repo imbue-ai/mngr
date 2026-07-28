@@ -3,10 +3,16 @@
 This module is one of the two sibling handlers under
 :mod:`imbue.minds.desktop_client.latchkey.handlers`. It owns the
 flow for *predefined* (catalog-backed) permission requests: rendering
-the per-permission dialog, probing credential status, running
+the account + per-permission dialog, probing credential status, running
 ``latchkey auth browser`` when needed, rewriting the per-host
 ``latchkey_permissions.json`` via the gateway extension, appending the
 response event, and notifying the waiting agent via ``mngr message``.
+
+Grants are *per account*: the dialog always resolves to exactly one
+latchkey account (an existing one or a freshly signed-in one) and the
+rule it writes is keyed ``<scope>:<account>`` (see
+:mod:`imbue.mngr_latchkey.account_scopes`), so a second account of the
+same service gets no access until it is granted in its own right.
 
 The :mod:`.file_sharing` sibling handles file-sharing permission
 requests (single path, yes/no decision). Both siblings share the
@@ -42,6 +48,9 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.templates import DEFAULT_ACCOUNT_LABEL
+from imbue.minds.desktop_client.latchkey.handlers.templates import NEW_ACCOUNT_FORM_VALUE
+from imbue.minds.desktop_client.latchkey.handlers.templates import PermissionAccountChoice
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -56,10 +65,13 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -104,11 +116,12 @@ class LatchkeyPermissionFlowError(Exception):
     """Raised for caller-facing programming errors (empty grants, unknown permissions)."""
 
 
-def _format_granted_message(service_display_name: str, granted: Sequence[str]) -> str:
+def _format_granted_message(service_display_name: str, granted: Sequence[str], account: str) -> str:
     permissions = ", ".join(granted)
+    account_clause = "" if account == DEFAULT_ACCOUNT else f" for account '{account}'"
     return (
-        f"Your permission request for {service_display_name} was granted with the following "
-        f"permissions: {permissions}."
+        f"Your permission request for {service_display_name} was granted{account_clause} with the "
+        f"following permissions: {permissions}."
     )
 
 
@@ -146,27 +159,6 @@ def _prepend_latchkey_directory(command: str, latchkey_directory: Path) -> str:
     return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
 
 
-def _needs_credential_setup(latchkey_service_info: LatchkeyServiceInfo) -> bool:
-    """True when the grant flow must sort out credentials before granting.
-
-    Only intervene when latchkey is certain credentials are absent
-    (MISSING) or known-broken (INVALID). VALID obviously proceeds.
-    UNKNOWN also proceeds: it covers both generic ``rawCurl``
-    credentials latchkey has no way to verify, and catalog scopes that
-    are not registered latchkey services at all (e.g. the minds-internal
-    scopes served by a gateway extension that injects its own
-    credential -- ``latchkey services info`` fails and degrades to
-    UNKNOWN). Treating UNKNOWN as "needs setup" would prompt the user
-    for credentials that either already exist or were never theirs to
-    manage; if a credential is in fact stale, the downstream API call
-    will fail and surface a real error instead.
-    """
-    return latchkey_service_info.credential_status in (
-        CredentialStatus.MISSING,
-        CredentialStatus.INVALID,
-    )
-
-
 def _supports_browser_auth(latchkey_service_info: LatchkeyServiceInfo) -> bool:
     """True when ``latchkey auth browser`` is the right way to fix credentials.
 
@@ -175,6 +167,96 @@ def _supports_browser_auth(latchkey_service_info: LatchkeyServiceInfo) -> bool:
     fallback: keep the old always-run-browser behaviour).
     """
     return LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options or not latchkey_service_info.auth_options
+
+
+def _account_label(account: str) -> str:
+    """Render a latchkey account key as a user-facing label (the default one is unnamed)."""
+    return DEFAULT_ACCOUNT_LABEL if account == DEFAULT_ACCOUNT else account
+
+
+def _sorted_accounts(accounts: Sequence[ServiceAccountCredential]) -> tuple[ServiceAccountCredential, ...]:
+    """Order accounts for display: named ones alphabetically, the unnamed default last.
+
+    Matches the connectors settings page so the same service lists its accounts
+    in the same order everywhere.
+    """
+    return tuple(
+        sorted(accounts, key=lambda entry: (entry.account == DEFAULT_ACCOUNT, entry.account.lower())),
+    )
+
+
+def _needs_account_credential_setup(credential_status: CredentialStatus) -> bool:
+    """True when one account's credentials must be (re-)established before granting.
+
+    Only intervene when latchkey is certain the credentials are absent
+    (MISSING) or known-broken (INVALID). VALID obviously proceeds. UNKNOWN also
+    proceeds: it covers both generic ``rawCurl`` credentials latchkey has no way
+    to verify, and catalog scopes that are not registered latchkey services at
+    all (e.g. the minds-internal scopes served by a gateway extension that
+    injects its own credential -- ``latchkey services info`` fails and degrades
+    to UNKNOWN). Treating UNKNOWN as "needs setup" would prompt the user for
+    credentials that either already exist or were never theirs to manage; if a
+    credential is in fact stale, the downstream API call will fail and surface a
+    real error instead.
+    """
+    return credential_status in (CredentialStatus.MISSING, CredentialStatus.INVALID)
+
+
+def _build_account_choices(
+    accounts: Sequence[ServiceAccountCredential],
+    requested_account: str | None,
+) -> tuple[tuple[PermissionAccountChoice, ...], str]:
+    """Build the dialog's account radio list and the value to preselect.
+
+    Every account currently signed in to the service is offered, plus the
+    always-available "new account" choice.
+
+    An agent may name an account that is *not* signed in -- a typo, an account
+    the user has on the service but never connected here, or one whose
+    credentials were since cleared. That account is offered as its own choice
+    (and preselected) rather than dropped, because dropping it silently would
+    grant a *different* account on the next Approve click while the agent keeps
+    using the one it asked for, and stays blocked. Picking it runs the sign-in
+    flow and grants whichever account latchkey ends up storing (see
+    :meth:`LatchkeyPermissionGrantHandler._account_after_sign_in`), which is the
+    requested one whenever the user does sign in as it.
+
+    The preselection is otherwise the first signed-in account, or the
+    new-account choice when nothing is signed in.
+    """
+    ordered = _sorted_accounts(accounts)
+    choices = [
+        PermissionAccountChoice(
+            value=entry.account,
+            label=_account_label(entry.account),
+            hint="needs sign-in" if _needs_account_credential_setup(entry.credential_status) else "",
+        )
+        for entry in ordered
+    ]
+    is_requested_signed_in = any(entry.account == requested_account for entry in ordered)
+    if requested_account is not None and not is_requested_signed_in:
+        choices.append(
+            PermissionAccountChoice(
+                value=requested_account,
+                label=_account_label(requested_account),
+                hint="not connected yet -- opens a browser sign-in",
+            )
+        )
+    choices.append(
+        PermissionAccountChoice(
+            value=NEW_ACCOUNT_FORM_VALUE,
+            # "Sign in" only reads right when it is the single option.
+            label="Sign in" if len(choices) == 0 else "Use a new account",
+            hint="opens a browser sign-in",
+        )
+    )
+    if requested_account is not None:
+        selected = requested_account
+    elif ordered:
+        selected = ordered[0].account
+    else:
+        selected = NEW_ACCOUNT_FORM_VALUE
+    return tuple(choices), selected
 
 
 def _json_error(message: str, status_code: int) -> Response:
@@ -330,8 +412,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         host_id: HostId,
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
+        account_choice: str,
     ) -> GrantResult:
-        """Apply a grant, falling back to a manual-credentials flow when needed.
+        """Apply a grant for one account, signing in / falling back as needed.
 
         ``host_id`` is the agent's host: latchkey permissions are stored
         per-host (every agent on the host shares one
@@ -344,6 +427,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         for ``slack``). It supplies the human-readable display name, the
         latchkey service name for ``services_info`` / ``auth_browser``,
         and the legal permission set used to validate the dialog form.
+
+        ``account_choice`` is the dialog's account radio: either an account
+        latchkey has stored for the service (the unnamed default account is
+        the empty string) or :data:`NEW_ACCOUNT_FORM_VALUE`, which signs a
+        fresh one in. Whatever it resolves to is the *only* account the
+        resulting rule grants (see :mod:`imbue.mngr_latchkey.account_scopes`).
 
         The HTTP layer mirrors any non-None ``response_event`` into the
         in-memory inbox so it doesn't have to reload from disk, and
@@ -364,50 +453,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 f"Granted permissions not in catalog for service '{service_info.name}': {invalid}",
             )
 
-        latchkey_service_info = self.latchkey.services_info(service_info.name)
-        if _needs_credential_setup(latchkey_service_info):
-            # If a browser flow is available, run it. Otherwise refuse the
-            # grant and ask the user to set credentials manually -- the
-            # request stays pending so a follow-up Approve click re-checks
-            # status.
-            if not _supports_browser_auth(latchkey_service_info):
-                logger.info(
-                    "Credentials for {} reported as {}; latchkey does not advertise a browser flow, "
-                    "asking user to run 'latchkey auth set'",
-                    service_info.name,
-                    latchkey_service_info.credential_status,
-                )
-                return GrantResult(
-                    outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
-                    message=_format_manual_credentials_message(service_info.display_name),
-                    response_event=None,
-                    set_credentials_example=_prepend_latchkey_directory(
-                        latchkey_service_info.set_credentials_example
-                        or _fallback_set_credentials_example(service_info.name),
-                        self.latchkey.latchkey_directory,
-                    ),
-                )
-            logger.info(
-                "Credentials for {} reported as {}; running browser sign-in",
-                service_info.name,
-                latchkey_service_info.credential_status,
-            )
-            # ``auth_browser`` owns all of the auth-flow logic, including the
-            # Minds Google OAuth client preference for ``google-*`` services.
-            is_success, detail = self.latchkey.auth_browser(service_info.name)
-            if not is_success:
-                # The browser sign-in (or its one-off ``auth
-                # browser-prepare`` step) did not complete. Treat this as a
-                # FAILED approval, not a denial: leave the request pending
-                # (no response event, gateway record untouched, agent not
-                # notified) so a fresh Approve click can retry, and surface
-                # the reason to the user in the dialog.
-                return GrantResult(
-                    outcome=GrantOutcome.FAILED,
-                    message=_format_auth_failed_message(service_info.display_name, detail),
-                    response_event=None,
-                    set_credentials_example=None,
-                )
+        resolved = self._resolve_account_for_grant(service_info, account_choice)
+        if isinstance(resolved, GrantResult):
+            # Credentials could not be established (sign-in cancelled, manual
+            # credentials required, ...): the request stays pending.
+            return resolved
 
         # Apply the grant to latchkey_permissions.json before writing the response
         # event so the agent can never observe a GRANTED response without
@@ -415,10 +465,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self._apply_grant_to_permissions_file(
             host_id=host_id,
             scope=service_info.scope,
+            account=resolved,
             granted_permissions=granted_permissions,
         )
 
-        granted_message = _format_granted_message(service_info.display_name, granted_permissions)
+        granted_message = _format_granted_message(service_info.display_name, granted_permissions, resolved)
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=agent_id,
@@ -430,6 +481,136 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             outcome=GrantOutcome.GRANTED,
             message=granted_message,
             response_event=response_event,
+            set_credentials_example=None,
+        )
+
+    def _resolve_account_for_grant(
+        self,
+        service_info: ServicePermissionInfo,
+        account_choice: str,
+    ) -> str | GrantResult:
+        """Turn the dialog's account choice into the concrete account to grant.
+
+        Returns the account name on success, or the :class:`GrantResult` the
+        caller must return when credentials could not be established (which
+        always leaves the request pending so the user can retry).
+
+        Three paths:
+
+        * the chosen account is signed in and its credentials are usable ->
+          nothing to do;
+        * the chosen account is signed in but its credentials are
+          missing/invalid -> re-run the browser sign-in for that account (or
+          ask for manual credentials when the service has no browser flow);
+        * the user picked "new account" (or an account latchkey no longer
+          knows about, e.g. a stale dialog) -> run the sign-in and read back
+          which account it stored.
+
+        The sign-in uses latchkey's *ephemeral* browser mode only when the
+        service already has at least one account: that mode exists so an
+        additional account is not silently bound to the session an existing
+        one left behind. The first sign-in for a service deliberately uses the
+        normal browser state, which is what the user expects when they have
+        never connected the service before.
+        """
+        latchkey_service_info = self.latchkey.services_info(service_info.name)
+        accounts_by_name = {entry.account: entry for entry in latchkey_service_info.accounts}
+        # A submitted value that names a stored account always *is* that account;
+        # only a value matching nothing (the new-account choice, or a stale
+        # dialog naming a since-removed account) starts a sign-in.
+        chosen = accounts_by_name.get(account_choice)
+        if chosen is not None and not _needs_account_credential_setup(chosen.credential_status):
+            return chosen.account
+
+        if not _supports_browser_auth(latchkey_service_info):
+            # No browser flow: refuse the grant and ask the user to set
+            # credentials manually. The request stays pending so a follow-up
+            # Approve click re-checks the status.
+            logger.info(
+                "Credentials for {} account {!r} reported as unusable; latchkey does not advertise a "
+                "browser flow, asking user to run 'latchkey auth set'",
+                service_info.name,
+                account_choice,
+            )
+            return GrantResult(
+                outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
+                message=_format_manual_credentials_message(service_info.display_name),
+                response_event=None,
+                set_credentials_example=_prepend_latchkey_directory(
+                    latchkey_service_info.set_credentials_example
+                    or _fallback_set_credentials_example(service_info.name),
+                    self.latchkey.latchkey_directory,
+                ),
+            )
+
+        accounts_before = frozenset(accounts_by_name)
+        if chosen is not None:
+            logger.info(
+                "Credentials for {} account {!r} reported as {}; running browser sign-in",
+                service_info.name,
+                chosen.account,
+                chosen.credential_status,
+            )
+            # ``auth_browser`` owns all of the auth-flow logic, including the
+            # Minds Google OAuth client preference for ``google-*`` services.
+            is_success, detail = self.latchkey.auth_browser(service_info.name, account=chosen.account)
+        elif accounts_before:
+            logger.info("Adding a new {} account through the permission dialog", service_info.name)
+            is_success, detail = self.latchkey.add_account(service_info.name)
+        else:
+            logger.info("Signing in to {} for the first time through the permission dialog", service_info.name)
+            is_success, detail = self.latchkey.auth_browser(service_info.name)
+        if not is_success:
+            # The browser sign-in (or its one-off ``auth browser-prepare``
+            # step) did not complete. Treat this as a FAILED approval, not a
+            # denial: leave the request pending (no response event, gateway
+            # record untouched, agent not notified) so a fresh Approve click
+            # can retry, and surface the reason to the user in the dialog.
+            return GrantResult(
+                outcome=GrantOutcome.FAILED,
+                message=_format_auth_failed_message(service_info.display_name, detail),
+                response_event=None,
+                set_credentials_example=None,
+            )
+        return self._account_after_sign_in(service_info, accounts_before, chosen)
+
+    def _account_after_sign_in(
+        self,
+        service_info: ServicePermissionInfo,
+        accounts_before: frozenset[str],
+        chosen: ServiceAccountCredential | None,
+    ) -> str | GrantResult:
+        """Read back which account a completed sign-in actually stored.
+
+        latchkey stores the credentials under whichever account the user logged
+        in as, which need not be the one the dialog asked for, so the account
+        is resolved from the store rather than assumed: a newly-appeared
+        account wins, otherwise the account we asked to refresh (if it is still
+        there), otherwise the service's only account. Anything else is
+        ambiguous and fails the approval rather than granting the wrong
+        account.
+        """
+        accounts_after = tuple(entry.account for entry in self.latchkey.services_info(service_info.name).accounts)
+        added = [account for account in accounts_after if account not in accounts_before]
+        if len(added) == 1:
+            return added[0]
+        if chosen is not None and chosen.account in accounts_after:
+            return chosen.account
+        if len(accounts_after) == 1:
+            return accounts_after[0]
+        logger.warning(
+            "Could not tell which {} account the sign-in stored (before={}, after={}); not granting",
+            service_info.name,
+            sorted(accounts_before),
+            sorted(accounts_after),
+        )
+        return GrantResult(
+            outcome=GrantOutcome.FAILED,
+            message=(
+                f"Could not tell which {service_info.display_name} account was signed in, so the "
+                "permission was not granted. Try approving again and picking the account explicitly."
+            ),
+            response_event=None,
             set_credentials_example=None,
         )
 
@@ -501,20 +682,31 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         parsed_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
         host_id = _resolve_host_id(backend_resolver, parsed_id)
-        pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions)
 
-        # Match ``grant()``: ``latchkey auth browser`` runs only when
-        # credentials are not VALID AND the service either advertises a
-        # browser flow or returns no auth options at all (legacy fallback).
-        # Computed up front so the dialog's progress notice tells the
-        # truth about whether to expect a browser pop-up. If the status
-        # changes between render and submit (rare), the user may see a
-        # slightly inaccurate notice for one cycle; the actual outcome
-        # is unaffected.
+        # One ``services info`` call feeds both the account picker and the
+        # progress notice below.
         latchkey_service_info = self.latchkey.services_info(service_info.name)
-        will_open_browser = _needs_credential_setup(latchkey_service_info) and _supports_browser_auth(
-            latchkey_service_info
-        )
+        account_choices, selected_account = _build_account_choices(latchkey_service_info.accounts, req_event.account)
+        # Existing grants are per account, so the pre-check reflects the
+        # preselected one; switching accounts in the dialog does not re-fetch
+        # (the user can still adjust the checkboxes by hand).
+        pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions, selected_account)
+
+        # Match ``grant()``: ``latchkey auth browser`` runs when the selected
+        # account has no usable credentials (or a brand-new account is being
+        # signed in) AND the service either advertises a browser flow or
+        # returns no auth options at all (legacy fallback). Computed up front
+        # so the dialog's progress notice tells the truth about whether to
+        # expect a browser pop-up. If the selection or the status changes
+        # between render and submit, the user may see a slightly inaccurate
+        # notice for one cycle; the actual outcome is unaffected.
+        selected_status_by_account = {
+            entry.account: entry.credential_status for entry in latchkey_service_info.accounts
+        }
+        selected_status = selected_status_by_account.get(selected_account)
+        will_open_browser = (
+            selected_status is None or _needs_account_credential_setup(selected_status)
+        ) and _supports_browser_auth(latchkey_service_info)
 
         return render_predefined_permission_dialog(
             agent_id=req_event.agent_id,
@@ -523,6 +715,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             rationale=req_event.rationale,
             service=service_info,
             checked_permissions=pre_checked,
+            account_choices=account_choices,
+            selected_account_value=selected_account,
             will_open_browser=will_open_browser,
             mngr_forward_origin=mngr_forward_origin,
         )
@@ -549,6 +743,14 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 "At least one permission must be selected to approve the request.",
                 status_code=400,
             )
+        # The dialog always preselects an account radio, so an absent field
+        # means the form was not the one we rendered.
+        account_choice = form.get("account")
+        if account_choice is None:
+            return _json_error(
+                "An account must be selected to approve the request.",
+                status_code=400,
+            )
 
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
@@ -566,6 +768,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 host_id=host_id,
                 service_info=service_info,
                 granted_permissions=granted_permissions,
+                account_choice=str(account_choice),
             )
         except LatchkeyPermissionFlowError as e:
             return _json_error(str(e), status_code=400)
@@ -634,14 +837,17 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         host_id: HostId | None,
         service_info: ServicePermissionInfo,
         requested_permissions: Sequence[str],
+        account: str,
     ) -> tuple[str, ...]:
         """Pick the initial checkbox state for the dialog.
 
         The pre-check is the union of (a) permissions already granted
-        for this scope on this host (so the dialog doubles as a revoke
-        UI) and (b) the permissions the agent requested, both
+        for this scope *and account* on this host (so the dialog doubles
+        as a revoke UI) and (b) the permissions the agent requested, both
         intersected with the catalog's known permission schemas for the
         scope. Approving without modification grants exactly that union.
+        ``account`` is the dialog's preselected one; the new-account choice
+        (and any account with no grants yet) simply contributes nothing.
 
         The catch-all ``any`` schema is intentionally not in the
         pre-check: the user must opt into it explicitly. If both the
@@ -659,10 +865,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         if host_id is not None:
             path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
             try:
-                granted = self.gateway_client.get_granted_permissions_for_scopes(
-                    path,
-                    (service_info.scope,),
-                )
+                config = self.gateway_client.get_permissions_config(path)
             except LatchkeyGatewayClientError as e:
                 logger.warning(
                     "Could not load permissions for host {} via the gateway extension; pre-check will "
@@ -671,6 +874,14 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     e,
                 )
             else:
+                # Which rule grants this (service, account) pair is resolved from
+                # the file's schemas, never from a rule key's name.
+                granted = {
+                    permission
+                    for grant in self.services_catalog.list_service_account_grants(config)
+                    if grant.service_name == service_info.name and grant.account == account
+                    for permission in grant.permissions
+                }
                 existing = tuple(p for p in service_info.permission_schemas if p in granted)
         # Preserve catalog order and deduplicate. ``dict.fromkeys``
         # gives an order-preserving set so a permission that appears in
@@ -683,19 +894,25 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         host_id: HostId,
         scope: str,
+        account: str,
         granted_permissions: Sequence[str],
     ) -> None:
         """Apply a grant by POSTing through the gateway's ``permissions`` extension.
 
         The extension owns the actual write to
-        ``<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json``;
-        we just tell it which scope to upsert.
+        ``<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json`` but
+        authors nothing: :func:`build_account_grant` composes the rule key, the
+        permission list, and the schema that gates the scope on ``account``, and
+        we hand all three over so the grant applies to ``account`` and to no
+        other account of the service.
         """
         path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
+        rule_key, permissions, schemas = build_account_grant(scope, account, granted_permissions)
         self.gateway_client.set_permission_rule(
             permissions_file_path=path,
-            rule_key=scope,
-            granted_permissions=granted_permissions,
+            rule_key=rule_key,
+            granted_permissions=permissions,
+            schemas=schemas,
         )
 
     def _write_response_and_notify(
