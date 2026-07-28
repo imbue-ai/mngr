@@ -1,6 +1,7 @@
 help:
     @just --list
 
+[group("mngr build")]
 build target:
   @if [ -d "apps/{{target}}" ]; then \
     uvx --from build pyproject-build --installer=uv --outdir=dist --wheel apps/{{target}}; \
@@ -23,9 +24,11 @@ _skip_acceptance_and_release := "-m 'not acceptance and not release and not mind
 # offload CI batches can suppress them -- see the NOTE in root addopts.
 # --coverage-to-file keeps the term-missing report out of the terminal and
 # writes it to .test_output/ instead.
+[group("mngr test")]
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=term-missing --cov-report=xml --cov-report=html --coverage-to-file --ignore-glob="**/test_*.py" --cov-fail-under=36
 
+[group("mngr test")]
 test-integration:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=term-missing --cov-report=xml --cov-report=html --coverage-to-file --cov-fail-under=80
 
@@ -40,33 +43,40 @@ test-integration:
 # The recipe's default `-m 'not acceptance and not release'` can be
 # overridden by supplying a `-m` inside args (later CLI -m wins).
 # Fast local iteration: forwards args to pytest. No coverage, xdist-parallel.
+[group("mngr test")]
 test-quick args="":
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --no-cov {{args}}
 
 # Regenerate the code-derived agent capability matrix doc (libs/mngr/docs/concepts/agent_capabilities.md)
+[group("mngr dev")]
 regenerate-agent-capabilities-doc:
   uv run python scripts/make_agent_capabilities_doc.py
 
+[group("mngr test")]
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "not release"
 
+[group("mngr test")]
 test-release:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=1200 uv run pytest {{_parallel}} --no-cov -m "acceptance or not acceptance"
 
 # Generate test timings for pytest-split (run periodically to keep timings up to date. Runs all acceptance and release)
+[group("mngr test")]
 test-timings:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=6000 uv run pytest --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
 
 # useful for running against a single test, regardless of how it is marked
+[group("mngr test")]
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
 
 # Run the opt-in live Claude Agent SDK tests (libs/mngr_robinhood). These make real,
 # paid API calls and are excluded from every CI run. ANTHROPIC_API_KEY must already be
 # exported (e.g. `set -a; source .env; set +a`). Pass extra pytest args via `args`.
+[group("mngr test")]
 test-sdk-live args="":
   RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
 
@@ -75,10 +85,12 @@ test-sdk-live args="":
 # Cloudflare account. Requires CLOUDFLARE_API_TOKEN in the environment -- use
 # the APT_MIRROR_DEPLOY_CLOUDFLARE_API_TOKEN value from the
 # secrets/minds/production/apt-mirror Vault entry (see apps/apt_mirror/README.md).
+[group("apt-mirror ops")]
 deploy-apt-mirror:
   cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm exec wrangler deploy
 
 # Run the apt mirror Worker's vitest suite (workerd runtime, mocked upstreams).
+[group("apt-mirror test")]
 test-apt-mirror-worker:
   cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test
 
@@ -88,6 +100,7 @@ test-apt-mirror-worker:
 # (no `uv run`) because the gate is deliberately stdlib-only: no `uv sync`,
 # matching how the `check-changelog` CI job invokes it.
 # Check that this branch has a changelog entry per project it touches.
+[group("mngr dev")]
 check-changelog:
     python -m scripts.check_changelog_entries
 
