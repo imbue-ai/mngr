@@ -19,13 +19,26 @@ function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'log-rotation-test-'));
 }
 
-// Wait for the background gzip (streamed, async) of a just-rotated file to land.
+// A .gz file is only usable once its streamed, async gzip has fully flushed:
+// the filename appears before the content is complete, so an early gunzip fails
+// with "unexpected end of file". Treat a file as ready only when it gunzips.
+function isCompleteGzip(filePath) {
+  try {
+    zlib.gunzipSync(fs.readFileSync(filePath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Wait for the background gzip (streamed, async) of a just-rotated file to land
+// AND finish writing, so callers can gunzip the result without racing.
 function waitForGz(dir, baseName, timeoutMs = 2000) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const poll = () => {
       const gz = fs.readdirSync(dir).filter((n) => n.startsWith(baseName + '.') && n.endsWith('.gz'));
-      if (gz.length > 0) return resolve(gz);
+      if (gz.length > 0 && gz.every((n) => isCompleteGzip(path.join(dir, n)))) return resolve(gz);
       if (Date.now() >= deadline) return reject(new Error('gzip did not appear in time'));
       setTimeout(poll, 20);
     };

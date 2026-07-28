@@ -13,5 +13,6 @@
   aria-*, data-*, target=) flows through via JinjaX's ``attrs``
   passthrough.
 #}
-{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full" if block else "") ~ " " ~ extra -%}
+{# Full-width buttons press with a gentler scale (see Button.jinja). #}
+{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full active:!scale-[0.99]" if block else "") ~ " " ~ extra -%}
 <a {{ attrs.render(href=href, classes=_cls) }}>{{ content }}</a>

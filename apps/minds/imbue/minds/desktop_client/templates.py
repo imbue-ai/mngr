@@ -280,6 +280,15 @@ def _build_catalog() -> Catalog:
 CATALOG: Final[Catalog] = _build_catalog()
 
 
+class InspirationWorkspaceRow(FrozenModel):
+    """One pickable workspace on the Create from Inspiration page's add flow."""
+
+    agent_id: str = Field(description="The workspace agent id (drives the /goto/ href)")
+    name: str = Field(description="Display name")
+    accent: str = Field(description="Accent color hex")
+    liveness: str = Field(description="RUNNING, STOPPED, or UNKNOWN (drives the recovery-restart detour)")
+
+
 class RemoteWorkspaceTile(FrozenModel):
     """A workspace known only from another device's synced record, for the landing list."""
 
@@ -667,6 +676,48 @@ def render_create_form(
         is_landing_fallback=is_landing_fallback,
         selected_cloud_account=selected_cloud_account,
         selected_instance_type=selected_instance_type,
+    )
+
+
+@pure
+def render_inspiration_create_page(
+    git_url: str,
+    branch: str = "",
+    accounts: Sequence[object] | None = None,
+    default_account_id: str = "",
+    color: str = DEFAULT_WORKSPACE_COLOR,
+    mngr_forward_origin: str = "",
+    workspace_rows: Sequence[InspirationWorkspaceRow] = (),
+    region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
+    region_selected_by_launch_mode: Mapping[str, str] | None = None,
+) -> str:
+    """Render the Create from Inspiration page (GET /create/inspiration).
+
+    The landing page for an Inspiration deeplink: a chooser between creating
+    a new workspace from ``git_url`` and adding the Inspiration to an
+    existing workspace. The add flow shows a copyable ``/use-inspiration
+    <git-url>`` message (the skill accepts only a URL, so ``branch`` is
+    deliberately absent from it) plus ``workspace_rows`` to open. The new
+    flow's settings step lets the user keep the preset defaults or reveal the
+    compute / backup provider and region selects inline (the repo and branch
+    stay fixed); the provider enums and region options come from the same
+    source the create form uses.
+    """
+    return CATALOG.render(
+        "pages.InspirationCreate",
+        git_url=git_url,
+        branch=branch,
+        accounts=accounts or [],
+        default_account_id=default_account_id,
+        color=color,
+        mngr_forward_origin=mngr_forward_origin,
+        workspace_rows=list(workspace_rows),
+        launch_modes=list(LaunchMode),
+        backup_providers=list(BackupProvider),
+        region_options_by_launch_mode={
+            key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
+        },
+        region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
     )
 
 

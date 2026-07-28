@@ -15,5 +15,7 @@
   onclick=, title=, aria-*, data-*) flows through via JinjaX's ``attrs``
   passthrough.
 #}
-{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full" if block else "") ~ " " ~ extra -%}
+{# Full-width buttons press with a gentler scale than the base active:scale-[0.98]:
+   the same percentage moves the wide edges much farther, so it reads as too much. #}
+{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full active:!scale-[0.99]" if block else "") ~ " " ~ extra -%}
 <button {{ attrs.render(type="button", classes=_cls) }}>{{ content }}</button>

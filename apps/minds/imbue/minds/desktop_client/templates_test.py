@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from typing import Final
 
 import pytest
@@ -12,6 +13,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
+from imbue.minds.desktop_client.templates import InspirationWorkspaceRow
 from imbue.minds.desktop_client.templates import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_account_plan_modal_page
@@ -27,6 +29,7 @@ from imbue.minds.desktop_client.templates import render_destroyed_workspaces_row
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_page
+from imbue.minds.desktop_client.templates import render_inspiration_create_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -768,6 +771,285 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tie
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "mngr/some-feature" not in html
+
+
+_INSPIRATION_URL = "https://github.com/acme/inspiration"
+
+
+def _render_inspiration(**kwargs: Any) -> str:
+    return render_inspiration_create_page(git_url=_INSPIRATION_URL, **kwargs)
+
+
+def test_render_inspiration_page_shows_chooser_options() -> None:
+    html = _render_inspiration()
+    assert "You've opened an Inspiration" in html
+    assert "Create a new workspace" in html
+    assert "Add to an existing workspace" in html
+    assert _INSPIRATION_URL in html
+    # The eyebrow "INSPIRATION" label above the heading is gone.
+    assert ">Inspiration</p>" not in html
+    # Full-width (block) buttons press with a gentler scale than the base 0.98.
+    assert "active:!scale-[0.99]" in html
+
+
+def test_render_inspiration_page_add_flow_has_copyable_skill_message() -> None:
+    # The skill accepts only a git URL, so the message must exclude the branch
+    # even when the deeplink carried one.
+    html = _render_inspiration(branch="v1.2.3")
+    assert f"/use-inspiration {_INSPIRATION_URL}" in html
+    assert f"/use-inspiration {_INSPIRATION_URL} v1.2.3" not in html
+    assert 'id="inspiration-copy-btn"' in html
+    # The whole box is clickable, not just the button.
+    assert "copyBox.addEventListener('click', doCopy)" in html
+    # The box has a hover animation (a .copy-box hover rule + the class on it).
+    assert "copy-box" in html
+    assert ".copy-box:hover" in html
+    # The read-only value shows a pointer cursor (the whole box copies on click).
+    assert ".copy-box input" in html
+    # The Copy button is borderless (ghost variant), not the bordered secondary.
+    copy_btn = re.search(r'<button[^>]*\bid="inspiration-copy-btn"[^>]*>', html)
+    assert copy_btn is not None
+    assert "border-transparent" in copy_btn.group(0)
+    assert "border-default" not in copy_btn.group(0)
+
+
+def test_render_inspiration_page_confirm_step_labels_account() -> None:
+    # The account picker on the confirm step sits under an "Account" label laid
+    # out like the "Creating from" block above it (uppercase label, value below).
+    html = _render_inspiration()
+    assert ">Account</p>" in html
+    assert ">Creating from</p>" in html
+
+
+def test_render_inspiration_page_step_circle_current_black_previous_gray() -> None:
+    # The current step is a solid black bubble with a white number; previous
+    # (completed) steps are a light-gray bubble with a dark-gray number, driven
+    # by data-state. The bubble carries no border, and the title text follows:
+    # black on the current step, gray on previous ones.
+    html = _render_inspiration()
+    assert "circle.setAttribute('data-state'" in html
+    # Current step: black bubble (inverse surface) + white number.
+    assert '[data-step-circle][data-state="active"]' in html
+    assert "background-color: var(--c-surface-inverse)" in html
+    assert "color: var(--c-text-inverse-primary)" in html
+    # Previous steps: opaque light-gray bubble + dark-gray number.
+    assert '[data-step-circle][data-state="done"]' in html
+    assert "color-mix(in srgb, var(--c-text-primary) 10%, var(--c-surface-primary))" in html
+    # No border (and no plain white fill) on the bubble.
+    circle_cls = re.search(r'data-step-circle class="([^"]*)"', html)
+    assert circle_cls is not None
+    assert "border" not in circle_cls.group(1)
+    assert "bg-surface-primary" not in circle_cls.group(1)
+    # The title text is black on the current step, gray on previous ones.
+    assert "title.classList.toggle('text-primary', !opts.done)" in html
+    assert "title.classList.toggle('text-secondary', opts.done)" in html
+    # Completed steps are marked with a simple green check (text-success).
+    assert 'class="text-success shrink-0"' in html
+
+
+def test_render_inspiration_page_connector_solid_with_dotted_more_stub() -> None:
+    # Regular links between steps are SOLID; the current (last visible) step
+    # instead gets a short 3-dot "more to come" stub -- but only when it isn't
+    # the final step (activeStep < 3), so the last number reads as the end.
+    html = _render_inspiration()
+    assert 'data-step-connector class="absolute hidden"' in html
+    assert "c.classList.add('top-4', 'bottom-0', 'step-connector-line')" in html
+    # The solid line's color matches the completed circle fill exactly.
+    assert ".step-connector-line" in html
+    assert "c.classList.add('step-connector-dots')" in html
+    assert "activeStep < 3" in html
+    # The 3-dot stub itself is a short dotted segment.
+    assert "radial-gradient(circle, var(--c-border-strong)" in html
+
+
+def test_render_inspiration_page_lists_workspaces_with_liveness_gating() -> None:
+    rows = [
+        InspirationWorkspaceRow(agent_id="agent-aa", name="alpha", accent="#112233", liveness="RUNNING"),
+        InspirationWorkspaceRow(agent_id="agent-bb", name="beta", accent="#445566", liveness="STOPPED"),
+    ]
+    html = _render_inspiration(mngr_forward_origin="https://localhost:8421", workspace_rows=rows)
+    assert 'data-agent-id="agent-aa"' in html
+    assert 'data-liveness="STOPPED"' in html
+    assert 'data-default-href="https://localhost:8421/goto/agent-aa/"' in html
+    # The stopped-mind detour mirrors the landing rows' recovery shortcut.
+    assert "intent=restart" in html
+    # Each workspace card carries a right-pointing chevron to signal selection
+    # (the chevron-right glyph path).
+    assert "M5.57617 3.57617" in html
+
+
+def test_render_inspiration_page_empty_workspace_list_links_to_new_flow() -> None:
+    html = _render_inspiration(workspace_rows=[])
+    assert "You don't have any workspaces yet." in html
+    assert 'id="inspiration-empty-to-new"' in html
+
+
+def test_render_inspiration_page_new_flow_requires_trust_checkbox() -> None:
+    html = _render_inspiration()
+    assert 'id="inspiration-trust"' in html
+    assert "I trust this Inspiration" in html
+    assert "not been approved or verified by Imbue" in html
+    # The submit handler gates on the checkbox before any POST.
+    assert "trustCheckbox.checked" in html
+
+
+def test_render_inspiration_page_create_button_gated_on_trust() -> None:
+    # Create starts disabled/grayed and the acknowledgment starts red; both
+    # flip when the box is checked (syncTrustGate).
+    html = _render_inspiration()
+    assert re.search(r'id="inspiration-submit"[^>]*\sdisabled', html) or re.search(
+        r'\sdisabled[^>]*id="inspiration-submit"', html
+    )
+    assert re.search(r'id="inspiration-trust-title"[^>]*text-important', html)
+    assert "submitBtn.disabled = !ok" in html
+
+
+def test_render_inspiration_page_is_three_steps_with_advanced_on_confirm() -> None:
+    # Advanced settings are NOT their own step: the create flow is 3 steps
+    # (choose -> where -> confirm), and an "Advanced settings" dashed divider on
+    # the confirm step reveals the selects in place.
+    html = _render_inspiration(branch="v1.2.3")
+    assert 'id="inspiration-step-create-3"' in html
+    assert 'id="inspiration-step-create-4"' not in html
+    assert 'id="inspiration-toggle-advanced"' in html
+    assert "Advanced settings" in html
+    # The toggle starts as a plain left label: the flanking dashed rules are
+    # hidden until it opens, when JS reveals them (a la the create advanced <hr>).
+    assert re.search(r"data-adv-rule[^>]*border-dashed[^>]*hidden", html)
+    # Opening smoothly animates the morph into the centered divider.
+    assert "animateAdvancedDivider()" in html
+    # Opening pins the centered column (no upward jump) then scrolls the options
+    # into view, rather than letting the layout re-center upward.
+    assert "pinPageColumn()" in html
+    assert "revealAdvanced()" in html
+    # The auto-scroll is a slow, duration-controlled scroll (not native smooth).
+    assert "ADV_SCROLL_MS" in html
+    # Closing plays the open in reverse (divider morph back) and collapses the
+    # panel's height so the Create button rises as the options disappear.
+    assert "closeAdvanced()" in html
+    assert "reverseAdvancedDivider()" in html
+    assert "collapseAdvancedPanel(" in html
+    # The toggle shows a pointer cursor (it's a native button, which wouldn't).
+    assert re.search(r'id="inspiration-toggle-advanced"[^>]*cursor-pointer', html)
+    # The removed settings-choice step's controls are gone.
+    assert 'id="inspiration-use-defaults"' not in html
+    assert 'id="inspiration-configure-more"' not in html
+
+
+def test_render_inspiration_page_advanced_panel_has_provider_and_region_selects() -> None:
+    # The "Advanced settings" dropdown box reveals compute / backup provider and
+    # region selects in place (no navigation away). Submit reads them. (AI
+    # provider was removed from create, so it's absent here too.)
+    html = _render_inspiration(
+        region_options_by_launch_mode={"IMBUE_CLOUD": ["us-west", "eu"]},
+        region_selected_by_launch_mode={"IMBUE_CLOUD": "us-west"},
+    )
+    for select_id in (
+        "inspiration-launch-mode",
+        "inspiration-backup-provider",
+        "inspiration-region",
+    ):
+        assert f'id="{select_id}"' in html, select_id
+    assert 'id="inspiration-ai-provider"' not in html
+    assert "launch_mode: launchSelect.value" in html
+    assert "region: regionSelect.disabled" in html
+    # No navigation off this page -- the settings stay in the flow.
+    assert "window.location = '/create?'" not in html
+
+
+def test_render_inspiration_page_submit_labeled_create_from_inspiration() -> None:
+    html = _render_inspiration()
+    assert "Create from Inspiration" in html
+    assert 'id="inspiration-submit"' in html
+
+
+def test_render_inspiration_page_repo_shown_as_plain_text() -> None:
+    # The repo is display-only and deliberately not rendered as an input-looking
+    # box: it appears as plain paragraph text, and the POSTed value rides in a
+    # hidden input. There is no editable git_url form field.
+    html = _render_inspiration()
+    assert 'name="git_url"' not in html
+    assert 'id="inspiration-git-url"' in html
+    assert f">{_INSPIRATION_URL}</p>" in html
+
+
+def test_render_inspiration_page_downstream_steps_start_hidden() -> None:
+    # Progressive disclosure: only step 1 is visible on load; every downstream
+    # step wrapper starts hidden and is revealed by the timeline's JS. The
+    # ``hidden`` toggle must not sit on a ``flex`` element (flex would win), so
+    # it lives on the plain step wrapper.
+    html = _render_inspiration()
+    assert re.search(r'id="inspiration-step-1" class="inspiration-step"', html)
+    for step_id in (
+        "inspiration-step-create-2",
+        "inspiration-step-create-3",
+        "inspiration-step-add-2",
+        "inspiration-step-add-3",
+    ):
+        assert re.search(rf'id="{step_id}" class="inspiration-step hidden"', html), step_id
+
+
+def test_render_inspiration_page_gates_each_step_on_the_previous() -> None:
+    # The stepper shows one step's body at a time: picking a pathway advances
+    # to step 2, and copying the message / choosing a preset advances to step
+    # 3. render() hides every non-active step's body.
+    html = _render_inspiration()
+    assert "function render()" in html
+    assert "isMessageCopied = true" in html
+    assert "activeStep = 3" in html
+    assert "chooseBranch('create')" in html
+    assert "chooseBranch('add')" in html
+    # Completed steps collapse to a summary of the choice instead of the options.
+    assert "data-step-summary" in html
+    assert "'Create a new workspace'" in html
+
+
+def test_render_inspiration_page_has_animations_and_copy_feedback() -> None:
+    # Each newly-shown step/answer plays one self-contained opacity+slide
+    # reveal to a fixed position (no competing reflow); completed circles pop;
+    # the Copy box turns green (theme success variable) before advancing.
+    html = _render_inspiration()
+    assert "animateReveal" in html
+    assert "animatePop" in html
+    assert "var(--c-success)" in html
+    assert "'Copied'" in html
+
+
+def test_render_inspiration_page_number_and_title_go_back() -> None:
+    # Both the step number and its title are click-to-change affordances.
+    html = _render_inspiration()
+    assert "function wireGoBack" in html
+    assert "[data-step-circle]" in html
+    assert "[data-step-title]" in html
+
+
+def test_render_inspiration_page_skill_message_has_stable_id() -> None:
+    # The copy handler reads the message by id, so the CopyField must carry it.
+    html = _render_inspiration()
+    assert 'id="inspiration-skill-message"' in html
+
+
+def test_render_inspiration_page_carries_branch_hidden_input() -> None:
+    html = _render_inspiration(branch="v1.2.3")
+    assert 'id="inspiration-branch" value="v1.2.3"' in html
+    blank = _render_inspiration()
+    assert 'id="inspiration-branch" value=""' in blank
+
+
+def test_render_inspiration_page_opens_signin_modal_via_overlay_bridge() -> None:
+    html = _render_inspiration(accounts=[])
+    assert "window.minds.openSigninModal()" in html
+    assert "/auth/signin-modal" in html
+
+
+def test_render_inspiration_page_presets_match_create_form() -> None:
+    # Same two presets and the same provider values as the create form's
+    # PRESETS map, so both pages create identically-configured workspaces.
+    html = _render_inspiration()
+    assert 'data-preset="remote"' in html
+    assert 'data-preset="local"' in html
+    for value in ("IMBUE_CLOUD", "LIMA", "CONFIGURE_LATER"):
+        assert value in html
 
 
 def test_resolve_create_host_name_uses_submitted_value() -> None:

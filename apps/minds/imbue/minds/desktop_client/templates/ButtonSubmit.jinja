@@ -16,6 +16,7 @@
   Any HTML attribute on the tag that is not declared above (id=, title=,
   aria-*, data-*) flows through via JinjaX's ``attrs`` passthrough.
 #}
-{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full" if block else "") ~ " " ~ extra -%}
+{# Full-width buttons press with a gentler scale (see Button.jinja). #}
+{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full active:!scale-[0.99]" if block else "") ~ " " ~ extra -%}
 {%- set _form_arg = {"form": form} if form else {} -%}
 <button {{ attrs.render(type="submit", classes=_cls, disabled=disabled, **_form_arg) }}>{{ content }}</button>
