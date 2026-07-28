@@ -17,6 +17,7 @@ re-injection on every grant is safe.
 import ipaddress
 import json
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from typing import Final
 from urllib.parse import urlparse
@@ -31,18 +32,15 @@ from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
+from imbue.minds.primitives import SHELL_SERVICE_NAME
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
 _CLOUDFLARE_ACCESS_LOGIN_HOST_SUFFIX: Final[str] = "cloudflareaccess.com"
 
-# The workspace shell's registered service name. Sharing this service means
-# "share the workspace": the shared shell iframes every other service on its
-# sibling hostname (<name>--<host>--<user>.<domain>), so every registered
-# service is exposed alongside it with the same email grants. (Interim
-# single-tier model: the connector-side Access-Group master list from the
-# forwarding-redesign plan replaces this fan-out later.)
-SHELL_SERVICE_NAME: Final[str] = "system-interface"
+# Upper bound on concurrent connector calls when a workspace share fans out
+# over the registered services (each call is its own mngr subprocess).
+_SHARE_FANOUT_MAX_CONCURRENCY: Final[int] = 8
 
 # Substring marker (in the plugin's JSON stderr) of Cloudflare's transient
 # Access-API internal error -- e.g. code 10001, seen when re-enabling sharing
@@ -257,12 +255,15 @@ def _share_sibling_services(
     ``--`` token of its own host, so a workspace share is only usable if the
     sibling hostnames actually exist and admit the same emails. The connector
     call is the same idempotent ``enable_sharing`` used for the shell itself.
+    Each sibling is an independent connector round trip (seconds each), so they
+    are published concurrently rather than one by one.
 
     A sibling that has no backend URL yet is skipped (it registers later and
-    can be re-shared by re-saving the workspace share); a connector failure on
-    one sibling aborts with a message naming it, so a partially-published
-    share is at least visible to the user.
+    can be re-shared by re-saving the workspace share); connector failures are
+    reported with a message naming every failed sibling, so a
+    partially-published share is at least visible to the user.
     """
+    origins_by_sibling: dict[str, str] = {}
     for sibling_name in backend_resolver.list_services_for_agent(agent_id):
         if str(sibling_name) == SHELL_SERVICE_NAME:
             continue
@@ -270,20 +271,36 @@ def _share_sibling_services(
         if not sibling_url:
             logger.info("Skipping share of '{}' on {}: no backend URL yet", sibling_name, agent_id)
             continue
-        sibling_origin = split_origin_and_base_path(sibling_url)[0]
+        origins_by_sibling[str(sibling_name)] = split_origin_and_base_path(sibling_url)[0]
+    if not origins_by_sibling:
+        return
+
+    def _share_one(sibling: str, origin: str) -> None:
+        cli.enable_sharing(
+            account=account_email,
+            agent_id=str(agent_id),
+            service_name=sibling,
+            service_url=origin,
+            policy={"emails": list(emails)},
+        )
+
+    with ThreadPoolExecutor(max_workers=min(len(origins_by_sibling), _SHARE_FANOUT_MAX_CONCURRENCY)) as executor:
+        futures_by_sibling = {
+            sibling: executor.submit(_share_one, sibling, origin) for sibling, origin in origins_by_sibling.items()
+        }
+    failed_siblings: list[str] = []
+    for sibling, future in futures_by_sibling.items():
         try:
-            cli.enable_sharing(
-                account=account_email,
-                agent_id=str(agent_id),
-                service_name=str(sibling_name),
-                service_url=sibling_origin,
-                policy={"emails": list(emails)},
-            )
+            future.result()
         except ImbueCloudCliError as exc:
-            raise SharingError(
-                f"Workspace share is partially published: sharing panel service '{sibling_name}' "
-                f"failed ({exc}). Re-save the share to retry."
-            ) from exc
+            logger.warning("Sharing panel service '{}' on {} failed: {}", sibling, agent_id, exc)
+            failed_siblings.append(sibling)
+    if failed_siblings:
+        raise SharingError(
+            "Workspace share is partially published: sharing panel service(s) "
+            f"{', '.join(repr(sibling) for sibling in sorted(failed_siblings))} failed. "
+            "Re-save the share to retry."
+        )
 
 
 def get_sharing_status(
@@ -291,7 +308,7 @@ def get_sharing_status(
     service_name: ServiceName,
     cli: ImbueCloudCli | None,
     session_store: MultiAccountSessionStore | None,
-    backend_resolver: BackendResolverInterface | None = None,
+    backend_resolver: BackendResolverInterface,
 ) -> dict[str, Any]:
     """Return the current sharing status for a service as the editor JS contract.
 
@@ -303,9 +320,9 @@ def get_sharing_status(
 
     ``backend_resolver`` is needed only to re-derive a base-path suffix (see
     :func:`split_origin_and_base_path`): the connector stores the path-less
-    origin we registered, so the path cannot be recovered from it. Without the
-    resolver -- or once the agent stops reporting the service -- the URL falls
-    back to the bare hostname, which is correct for every path-less service.
+    origin we registered, so the path cannot be recovered from it. Once the
+    agent stops reporting the service, the URL falls back to the bare
+    hostname, which is correct for every path-less service.
     """
     if cli is None:
         return {"enabled": False, "url": None, "policy": {"emails": []}}
@@ -336,7 +353,7 @@ def get_sharing_status(
         (entry.get("hostname") for entry in service_entries if entry.get("service_name") == str(service_name)),
         None,
     )
-    backend_url = backend_resolver.get_backend_url(agent_id, service_name) if backend_resolver else None
+    backend_url = backend_resolver.get_backend_url(agent_id, service_name)
     base_path = split_origin_and_base_path(backend_url)[1] if backend_url else ""
 
     try:
@@ -387,14 +404,23 @@ def disable_sharing(
     # Disabling the workspace share tears down every service that was
     # published alongside the shell (the fan-out in enable), not just the
     # shell's own hostname -- otherwise the panels would stay reachable.
-    names_to_remove = (
-        tuple(tunnel.services) if str(service_name) == SHELL_SERVICE_NAME else (str(service_name),)
-    )
-    for name in names_to_remove:
+    # Removals are independent connector round trips, so run them concurrently.
+    names_to_remove = tuple(tunnel.services) if str(service_name) == SHELL_SERVICE_NAME else (str(service_name),)
+
+    def _remove_one(name: str) -> None:
+        cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=name)
+
+    with ThreadPoolExecutor(max_workers=min(len(names_to_remove), _SHARE_FANOUT_MAX_CONCURRENCY)) as executor:
+        futures_by_name = {name: executor.submit(_remove_one, name) for name in names_to_remove}
+    failed_names: list[str] = []
+    for name, future in futures_by_name.items():
         try:
-            cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=name)
+            future.result()
         except ImbueCloudCliError as exc:
-            raise SharingError(f"Failed to disable sharing for '{name}': {exc}") from exc
+            logger.warning("Disabling share of '{}' failed: {}", name, exc)
+            failed_names.append(name)
+    if failed_names:
+        raise SharingError(f"Failed to disable sharing for {', '.join(repr(name) for name in sorted(failed_names))}.")
 
 
 # Body marker of Cloudflare Access's transient error page: the edge can start

@@ -98,7 +98,7 @@ _SERVICES_REGISTERED_TIMEOUT_SECONDS: Final[int] = 120
 # The always-on core services that must re-register in the data/.state app registry
 # after a resume. ``browser`` also registers but is required separately, with a
 # memory-pressure shed exception.
-_CORE_REGISTERED_SERVICES: Final[tuple[str, ...]] = ("system_interface", "terminal")
+_CORE_REGISTERED_SERVICES: Final[tuple[str, ...]] = ("system-interface", "terminal")
 _BROWSER_SERVICE_NAME: Final[str] = "browser"
 
 # earlyoom's shed ledger inside the container (written by its ``-N`` hook; path

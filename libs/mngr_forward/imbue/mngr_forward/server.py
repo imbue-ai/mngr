@@ -166,7 +166,13 @@ def _parse_workspace_host(host_header: str) -> tuple[AgentId, ParsedForwardHost]
         return None
 
 
-def _unauthenticated_subdomain_response(request: Request, port: int, use_http2: bool) -> Response:
+def _unauthenticated_subdomain_response(
+    request: Request,
+    port: int,
+    use_http2: bool,
+    agent_id: AgentId,
+    host_info: ParsedForwardHost,
+) -> Response:
     """Redirect HTML navigations to the agent's /goto/ bridge; 403 for everything else.
 
     The bridge re-mints a fresh subdomain auth token using the bare-origin
@@ -182,26 +188,17 @@ def _unauthenticated_subdomain_response(request: Request, port: int, use_http2: 
     the exact origin (and path) that was requested; the cookie the bridge
     sets is domain-scoped to ``agent-<hex>.localhost`` so one hop covers
     the shell and every service subtree.
-
-    Falls back to the bare-origin landing if the host header does not
-    carry an ``agent-<hex>.localhost`` we can parse.
     """
     accept = request.headers.get("accept", "")
     if "text/html" not in accept:
         return Response(status_code=403, content="Not authenticated")
     scheme = "https" if use_http2 else "http"
-    host_header = request.headers.get("host", "")
-    parsed = _parse_workspace_host(host_header)
-    if parsed is None:
-        location = f"{scheme}://localhost:{port}/"
-    else:
-        agent_id, host_info = parsed
-        next_url = request.url.path
-        if request.url.query:
-            next_url = f"{next_url}?{request.url.query}"
-        location = f"{scheme}://localhost:{port}/goto/{agent_id}/?next={quote(next_url, safe='')}"
-        if host_info.service_labels is not None:
-            location = f"{location}&service={host_info.service_labels}"
+    next_url = request.url.path
+    if request.url.query:
+        next_url = f"{next_url}?{request.url.query}"
+    location = f"{scheme}://localhost:{port}/goto/{agent_id}/?next={quote(next_url, safe='')}"
+    if host_info.service_labels is not None:
+        location = f"{location}&service={host_info.service_labels}"
     return Response(status_code=302, headers={"Location": location})
 
 
@@ -595,6 +592,8 @@ def _handle_subdomain_auth_bridge(
 
 async def _handle_workspace_forward_http(
     request: Request,
+    agent_id: AgentId,
+    host_info: ParsedForwardHost,
     auth_store: AuthStoreInterface,
     resolver: ForwardResolver,
     tunnel_manager: SSHTunnelManager,
@@ -607,12 +606,6 @@ async def _handle_workspace_forward_http(
     envelope_writer: EnvelopeWriter,
     use_http2: bool,
 ) -> Response:
-    host_header = request.headers.get("host", "")
-    parsed = _parse_workspace_host(host_header)
-    if parsed is None:
-        return Response(status_code=404)
-    agent_id, host_info = parsed
-
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
         return _handle_subdomain_auth_bridge(
             request, agent_id, auth_store, use_http2, cookie_domain=str(host_info.workspace_domain)
@@ -623,7 +616,7 @@ async def _handle_workspace_forward_http(
         auth_store=auth_store,
         preauth_cookie_value=preauth_cookie_value,
     ):
-        return _unauthenticated_subdomain_response(request, listen_port, use_http2)
+        return _unauthenticated_subdomain_response(request, listen_port, use_http2, agent_id, host_info)
 
     target = resolver.resolve(agent_id, host_info.service_name)
     if target is None:
@@ -680,6 +673,8 @@ async def _handle_workspace_forward_http(
 
 async def _handle_workspace_forward_websocket(
     websocket: WebSocket,
+    agent_id: AgentId,
+    host_info: ParsedForwardHost,
     auth_store: AuthStoreInterface,
     resolver: ForwardResolver,
     tunnel_manager: SSHTunnelManager,
@@ -687,13 +682,6 @@ async def _handle_workspace_forward_websocket(
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
 ) -> None:
-    host_header = websocket.headers.get("host", "")
-    parsed = _parse_workspace_host(host_header)
-    if parsed is None:
-        await websocket.close(code=4004, reason="Unknown host")
-        return
-    agent_id, host_info = parsed
-
     if not _is_authenticated(
         cookies=websocket.cookies,
         auth_store=auth_store,
@@ -988,10 +976,14 @@ def create_forward_app(
     @app.middleware("http")
     async def _subdomain_routing_middleware(request: Request, call_next: Any) -> Response:
         host_header = request.headers.get("host", "")
-        if _parse_workspace_host(host_header) is None:
+        parsed = _parse_workspace_host(host_header)
+        if parsed is None:
             return await call_next(request)
+        agent_id, host_info = parsed
         return await _handle_workspace_forward_http(
             request=request,
+            agent_id=agent_id,
+            host_info=host_info,
             auth_store=auth_store,
             resolver=resolver,
             tunnel_manager=tunnel_manager,
@@ -1051,11 +1043,15 @@ def create_forward_app(
     async def _subdomain_ws(websocket: WebSocket, path: str) -> None:
         del path
         host_header = websocket.headers.get("host", "")
-        if _parse_workspace_host(host_header) is None:
+        parsed = _parse_workspace_host(host_header)
+        if parsed is None:
             await websocket.close(code=4004, reason="Unknown host")
             return
+        agent_id, host_info = parsed
         await _handle_workspace_forward_websocket(
             websocket=websocket,
+            agent_id=agent_id,
+            host_info=host_info,
             auth_store=auth_store,
             resolver=resolver,
             tunnel_manager=tunnel_manager,

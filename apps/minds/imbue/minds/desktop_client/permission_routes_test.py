@@ -13,7 +13,6 @@ from flask import Request
 from flask import Response
 from flask.testing import FlaskClient
 from pydantic import Field
-from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
@@ -34,6 +33,7 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.testing import account_grants_config
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -49,14 +49,12 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
-from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
-from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.testing import FakeLatchkey
@@ -156,22 +154,6 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
             scope=scope,
         )
         return self.deny_message, response_event
-
-
-def _account_grants_config(*grants: tuple[str, str, tuple[str, ...]]) -> LatchkeyPermissionsConfig:
-    """Build the permissions config production writes for each ``(scope, account, permissions)``.
-
-    Goes through :func:`build_account_grant` so the seeded file carries the
-    generated schemas that pin each rule to its account -- which is what the
-    readers inspect (they never interpret a rule key).
-    """
-    rules: list[dict[str, list[str]]] = []
-    schemas: dict[str, JsonValue] = {}
-    for scope, account, permissions in grants:
-        rule_key, granted, grant_schemas = build_account_grant(scope, account, permissions)
-        rules.append({rule_key: list(granted)})
-        schemas.update(grant_schemas)
-    return LatchkeyPermissionsConfig(rules=tuple(rules), schemas=schemas)
 
 
 def _get_app_request_inbox(client: FlaskClient) -> RequestInbox:
@@ -780,7 +762,7 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
     # is keyed by.
     save_permissions(
         permissions_path_for_host(tmp_path / "mngr_latchkey", host_id),
-        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-chat-read",))),
+        account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-chat-read",))),
     )
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
@@ -817,7 +799,7 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
     host_id = HostId()
     save_permissions(
         permissions_path_for_host(tmp_path / "mngr_latchkey", host_id),
-        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-chat-read",))),
+        account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-chat-read",))),
     )
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),

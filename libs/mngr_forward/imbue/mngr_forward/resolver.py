@@ -203,24 +203,23 @@ class ForwardResolver(MutableModel):
             ssh_info = self._ssh_by_agent.get(aid_str)
             services = self._services_by_agent.get(aid_str, {})
 
-        if service_name is not None:
-            url = services.get(service_name)
-            if url is None:
-                return None
-            return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
+        # The bare origin maps to the configured strategy: the shell service in
+        # service mode, the fixed port in manual mode.
+        if service_name is None:
+            match self.strategy:
+                case ForwardServiceStrategy(service_name=shell_service_name):
+                    service_name = shell_service_name
+                case ForwardPortStrategy(remote_port=remote_port):
+                    # Manual mode: target ``127.0.0.1:<remote_port>`` on the agent's
+                    # host. Local agents reach this directly; remote agents go via
+                    # an SSH ``direct-tcpip`` tunnel.
+                    url = f"http://127.0.0.1:{remote_port}"
+                    return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
+                case _ as unreachable:  # pragma: no cover
+                    assert_never(unreachable)
+                    raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
 
-        match self.strategy:
-            case ForwardServiceStrategy(service_name=shell_service_name):
-                url = services.get(shell_service_name)
-                if url is None:
-                    return None
-                return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
-            case ForwardPortStrategy(remote_port=remote_port):
-                # Manual mode: target ``127.0.0.1:<remote_port>`` on the agent's
-                # host. Local agents reach this directly; remote agents go via
-                # an SSH ``direct-tcpip`` tunnel.
-                url = f"http://127.0.0.1:{remote_port}"
-                return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
-            case _ as unreachable:  # pragma: no cover
-                assert_never(unreachable)
-                raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
+        url = services.get(service_name)
+        if url is None:
+            return None
+        return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)

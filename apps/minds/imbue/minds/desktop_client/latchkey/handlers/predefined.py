@@ -45,10 +45,11 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.latchkey.account_display import account_display_sort_key
+from imbue.minds.desktop_client.latchkey.account_display import account_label
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.handlers.templates import DEFAULT_ACCOUNT_LABEL
 from imbue.minds.desktop_client.latchkey.handlers.templates import NEW_ACCOUNT_FORM_VALUE
 from imbue.minds.desktop_client.latchkey.handlers.templates import PermissionAccountChoice
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
@@ -169,22 +170,6 @@ def _supports_browser_auth(latchkey_service_info: LatchkeyServiceInfo) -> bool:
     return LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options or not latchkey_service_info.auth_options
 
 
-def _account_label(account: str) -> str:
-    """Render a latchkey account key as a user-facing label (the default one is unnamed)."""
-    return DEFAULT_ACCOUNT_LABEL if account == DEFAULT_ACCOUNT else account
-
-
-def _sorted_accounts(accounts: Sequence[ServiceAccountCredential]) -> tuple[ServiceAccountCredential, ...]:
-    """Order accounts for display: named ones alphabetically, the unnamed default last.
-
-    Matches the connectors settings page so the same service lists its accounts
-    in the same order everywhere.
-    """
-    return tuple(
-        sorted(accounts, key=lambda entry: (entry.account == DEFAULT_ACCOUNT, entry.account.lower())),
-    )
-
-
 def _needs_account_credential_setup(credential_status: CredentialStatus) -> bool:
     """True when one account's credentials must be (re-)established before granting.
 
@@ -224,11 +209,11 @@ def _build_account_choices(
     The preselection is otherwise the first signed-in account, or the
     new-account choice when nothing is signed in.
     """
-    ordered = _sorted_accounts(accounts)
+    ordered = tuple(sorted(accounts, key=lambda entry: account_display_sort_key(entry.account)))
     choices = [
         PermissionAccountChoice(
             value=entry.account,
-            label=_account_label(entry.account),
+            label=account_label(entry.account),
             hint="needs sign-in" if _needs_account_credential_setup(entry.credential_status) else "",
         )
         for entry in ordered
@@ -238,7 +223,7 @@ def _build_account_choices(
         choices.append(
             PermissionAccountChoice(
                 value=requested_account,
-                label=_account_label(requested_account),
+                label=account_label(requested_account),
                 hint="not connected yet -- opens a browser sign-in",
             )
         )

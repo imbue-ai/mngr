@@ -27,20 +27,25 @@ MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
 MNGR_BINARY: Final[str] = "mngr"
 
-# A single DNS-safe service label: lowercase alphanumeric + hyphen, no
-# leading/trailing hyphen. Service names that collide with the agent
-# coordinate (``agent-<hex>``) are rejected separately at registration.
-_SERVICE_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+# A single DNS-safe service label: lowercase alphanumeric runs joined by
+# single hyphens (so no leading/trailing/consecutive hyphens). Consecutive
+# hyphens are rejected because the shared-workspace hostname scheme
+# (``<name>--<host>--<user>.<domain>``) uses ``--`` as its separator, so a
+# registered name containing ``--`` would be unparseable there; this mirrors
+# the registration rule in the workspace template's ``forward_port.py``.
+# Service names that collide with the agent coordinate (``agent-<hex>``) are
+# rejected separately at registration.
+_SERVICE_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 class ServiceLabel(NonEmptyStr):
-    """A DNS-safe service name label (lowercase alphanumeric + hyphen)."""
+    """A DNS-safe service name label (lowercase alphanumeric + single hyphens)."""
 
     def __new__(cls, value: str) -> "ServiceLabel":
         instance = super().__new__(cls, value)
         if _SERVICE_LABEL_RE.match(str(instance)) is None:
             raise InvalidPrimitiveValueError(
-                f"{cls.__name__} must be lowercase alphanumeric + hyphen (got {value!r})"
+                f"{cls.__name__} must be lowercase alphanumeric runs joined by single hyphens (got {value!r})"
             )
         return instance
 
@@ -72,10 +77,6 @@ class ParsedForwardHost(FrozenModel):
     """
 
     agent_id_str: NonEmptyStr = Field(description="The agent-<hex> coordinate from the Host header")
-    service_name: str | None = Field(
-        default=None,
-        description="Service label (last label before agent-<hex>); None for the bare origin",
-    )
     service_labels: str | None = Field(
         default=None,
         description="Full dotted label chain before agent-<hex> (e.g. 'sub.svc'); None for the bare origin",
@@ -83,6 +84,13 @@ class ParsedForwardHost(FrozenModel):
     workspace_domain: NonEmptyStr = Field(
         description="agent-<hex>.<localhost|127.0.0.1> -- cookie Domain scope for the workspace",
     )
+
+    @property
+    def service_name(self) -> str | None:
+        """Service label (last label before agent-<hex>); None for the bare origin."""
+        if self.service_labels is None:
+            return None
+        return self.service_labels.rsplit(".", 1)[-1]
 
 
 def parse_forward_host(host_header: str) -> ParsedForwardHost | None:
@@ -102,7 +110,6 @@ def parse_forward_host(host_header: str) -> ParsedForwardHost | None:
     suffix = match.group("suffix").lower()
     return ParsedForwardHost(
         agent_id_str=NonEmptyStr(agent),
-        service_name=labels.split(".")[-1].lower() if labels else None,
         service_labels=labels.lower() if labels else None,
         workspace_domain=NonEmptyStr(f"{agent}.{suffix}"),
     )

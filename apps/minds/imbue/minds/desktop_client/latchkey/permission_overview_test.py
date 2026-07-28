@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 from pydantic import Field
-from pydantic import JsonValue
 
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -18,11 +17,11 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
+from imbue.minds.desktop_client.latchkey.testing import account_grants_config
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
-from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
@@ -102,19 +101,13 @@ def _seed_account_grants(
 ) -> None:
     """Write a host file granting each ``(scope, account, permissions)`` triple.
 
-    Goes through :func:`build_account_grant` so the seeded file has exactly the
-    shape production writes -- rules *and* the generated schemas that say which
-    account each rule is pinned to (which is what the overview reads).
+    Goes through :func:`account_grants_config` so the seeded file has exactly
+    the shape production writes -- rules *and* the generated schemas that say
+    which account each rule is pinned to (which is what the overview reads).
     """
-    rules: list[dict[str, list[str]]] = []
-    schemas: dict[str, JsonValue] = {}
-    for scope, account, permissions in grants:
-        rule_key, granted, grant_schemas = build_account_grant(scope, account, permissions)
-        rules.append({rule_key: list(granted)})
-        schemas.update(grant_schemas)
     save_permissions(
         permissions_path_for_host(latchkey.plugin_data_dir, host_id),
-        LatchkeyPermissionsConfig(rules=tuple(rules), schemas=schemas),
+        account_grants_config(*grants),
     )
 
 

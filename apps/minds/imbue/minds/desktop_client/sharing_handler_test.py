@@ -166,7 +166,8 @@ def test_disable_sharing_of_shell_removes_every_shared_service(tmp_path: Path) -
 
     disable_sharing(agent_id, ServiceName(SHELL_SERVICE_NAME), cli, store)
 
-    assert cli.remove_service_calls == [SHELL_SERVICE_NAME, "terminal", "openvscode"]
+    # Removals run concurrently, so compare without ordering.
+    assert sorted(cli.remove_service_calls) == sorted([SHELL_SERVICE_NAME, "terminal", "openvscode"])
 
 
 def test_disable_sharing_of_single_service_removes_only_it(tmp_path: Path) -> None:
@@ -357,12 +358,14 @@ def test_get_sharing_status_url_re_appends_the_service_base_path(tmp_path: Path)
     assert status["url"] == "https://openvscode--abc--owner.example.com/service/openvscode"
 
 
-def test_get_sharing_status_url_is_bare_hostname_without_a_resolver(tmp_path: Path) -> None:
-    # No resolver (or an agent that has stopped reporting the service) degrades
-    # to the bare hostname rather than failing -- correct for every path-less
-    # service, which is all of them but openvscode.
+def test_get_sharing_status_url_is_bare_hostname_when_service_not_reported(tmp_path: Path) -> None:
+    # An agent that has stopped reporting the service degrades to the bare
+    # hostname rather than failing -- correct for every path-less service,
+    # which is all of them but openvscode.
     agent_id, cli, store = _status_fixtures(tmp_path)
 
-    status = get_sharing_status(agent_id, ServiceName("openvscode"), cli, store)
+    status = get_sharing_status(
+        agent_id, ServiceName("openvscode"), cli, store, StaticBackendResolver(url_by_agent_and_service={})
+    )
 
     assert status["url"] == "https://openvscode--abc--owner.example.com"

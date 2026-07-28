@@ -28,31 +28,43 @@ def test_generate_self_signed_cert_has_expected_sans() -> None:
     assert ipaddress.ip_address("127.0.0.1") in ip_addresses
 
 
-def _negotiate_alpn(server_context: ssl.SSLContext, client_offers: list[str]) -> str | None:
-    """Drive a full TLS handshake in-memory (no sockets) and return the server's ALPN choice."""
+def _handshake_in_memory(
+    server_context: ssl.SSLContext,
+    server_hostname: str = "localhost",
+    client_alpn_offers: list[str] | None = None,
+) -> tuple[ssl.SSLObject, ssl.SSLObject]:
+    """Drive a full TLS handshake in-memory (no sockets); return the ``(client, server)`` SSL objects."""
     client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     client_context.check_hostname = False
     client_context.verify_mode = ssl.CERT_NONE
-    client_context.set_alpn_protocols(client_offers)
+    if client_alpn_offers is not None:
+        client_context.set_alpn_protocols(client_alpn_offers)
 
     client_in, client_out = ssl.MemoryBIO(), ssl.MemoryBIO()
     server_in, server_out = ssl.MemoryBIO(), ssl.MemoryBIO()
-    client = client_context.wrap_bio(client_in, client_out, server_hostname="localhost")
+    client = client_context.wrap_bio(client_in, client_out, server_hostname=server_hostname)
     server = server_context.wrap_bio(server_in, server_out, server_side=True)
 
     # Pump both directions until both sides finish the handshake. A bounded loop
     # guards against a stuck handshake instead of spinning forever.
     for _ in range(20):
+        is_handshake_done = True
         for endpoint, out_bio, peer_in in ((client, client_out, server_in), (server, server_out, client_in)):
             try:
                 endpoint.do_handshake()
             except ssl.SSLWantReadError:
-                pass
+                is_handshake_done = False
             pending = out_bio.read()
             if pending:
                 peer_in.write(pending)
-        if client.selected_alpn_protocol() is not None and server.selected_alpn_protocol() is not None:
-            break
+        if is_handshake_done:
+            return client, server
+    raise AssertionError("handshake did not complete")
+
+
+def _negotiate_alpn(server_context: ssl.SSLContext, client_offers: list[str]) -> str | None:
+    """Full in-memory handshake offering ``client_offers``; return the server's ALPN choice."""
+    _, server = _handshake_in_memory(server_context, client_alpn_offers=client_offers)
     return server.selected_alpn_protocol()
 
 
@@ -73,31 +85,10 @@ def test_build_server_ssl_context_falls_back_to_http1_for_ws_clients() -> None:
 
 def _handshake_and_get_server_cert(server_context: ssl.SSLContext, server_hostname: str) -> x509.Certificate:
     """Full in-memory handshake against ``server_hostname``; return the leaf cert served."""
-    client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    client_context.check_hostname = False
-    client_context.verify_mode = ssl.CERT_NONE
-
-    client_in, client_out = ssl.MemoryBIO(), ssl.MemoryBIO()
-    server_in, server_out = ssl.MemoryBIO(), ssl.MemoryBIO()
-    client = client_context.wrap_bio(client_in, client_out, server_hostname=server_hostname)
-    server = server_context.wrap_bio(server_in, server_out, server_side=True)
-
-    for _ in range(20):
-        for endpoint, out_bio, peer_in in ((client, client_out, server_in), (server, server_out, client_in)):
-            try:
-                endpoint.do_handshake()
-            except ssl.SSLWantReadError:
-                pass
-            pending = out_bio.read()
-            if pending:
-                peer_in.write(pending)
-        try:
-            der = client.getpeercert(binary_form=True)
-        except ValueError:
-            continue
-        if der is not None:
-            return x509.load_der_x509_certificate(der)
-    raise AssertionError("handshake did not complete")
+    client, _ = _handshake_in_memory(server_context, server_hostname=server_hostname)
+    der = client.getpeercert(binary_form=True)
+    assert der is not None
+    return x509.load_der_x509_certificate(der)
 
 
 def _cert_dns_names(certificate: x509.Certificate) -> set[str]:
@@ -135,26 +126,11 @@ def test_sni_minted_context_still_negotiates_h2() -> None:
     """The swapped-in per-hostname context must keep the ALPN offer (h2)."""
     cert_pem, key_pem = generate_self_signed_cert()
     context = build_server_ssl_context(cert_pem, key_pem)
-    client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    client_context.check_hostname = False
-    client_context.verify_mode = ssl.CERT_NONE
-    client_context.set_alpn_protocols(["h2", "http/1.1"])
-
-    client_in, client_out = ssl.MemoryBIO(), ssl.MemoryBIO()
-    server_in, server_out = ssl.MemoryBIO(), ssl.MemoryBIO()
-    client = client_context.wrap_bio(client_in, client_out, server_hostname="svc.agent-deadbeef.localhost")
-    server = context.wrap_bio(server_in, server_out, server_side=True)
-    for _ in range(20):
-        for endpoint, out_bio, peer_in in ((client, client_out, server_in), (server, server_out, client_in)):
-            try:
-                endpoint.do_handshake()
-            except ssl.SSLWantReadError:
-                pass
-            pending = out_bio.read()
-            if pending:
-                peer_in.write(pending)
-        if client.selected_alpn_protocol() is not None and server.selected_alpn_protocol() is not None:
-            break
+    _, server = _handshake_in_memory(
+        context,
+        server_hostname="svc.agent-deadbeef.localhost",
+        client_alpn_offers=["h2", "http/1.1"],
+    )
     assert server.selected_alpn_protocol() == "h2"
 
 

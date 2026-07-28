@@ -31,6 +31,19 @@ _generate-release-dockerfile:
     awk '/^CMD/{exit} {print}' "$base" > "$out"
     cat "$extras" >> "$out"
 
+# Copy junit results to the main worktree so new worktrees inherit baselines
+# via COPY mode. A no-op when there are no results or we already are the main
+# worktree.
+[private]
+_copy-junit-to-main-worktree:
+    #!/bin/bash
+    set -ueo pipefail
+    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
+        mkdir -p "$MAIN_WORKTREE/test-results"
+        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
+    fi
+
 # Run tests on Modal via Offload
 test-offload args="":
     #!/bin/bash
@@ -43,12 +56,7 @@ test-offload args="":
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
-    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
-    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
-    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
-        mkdir -p "$MAIN_WORKTREE/test-results"
-        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
-    fi
+    just _copy-junit-to-main-worktree
 
 # Run acceptance tests on Modal via Offload
 test-offload-acceptance args="":
@@ -113,12 +121,7 @@ test-offload-release args="":
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
-    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
-    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
-    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
-        mkdir -p "$MAIN_WORKTREE/test-results"
-        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
-    fi
+    just _copy-junit-to-main-worktree
 
 # Run the minds-snapshot-resume test suite against a pre-built Modal
 # image produced by ``scripts/snapshot_minds_e2e_state.py``.
@@ -177,12 +180,7 @@ test-offload-minds-snapshot snapshot_image_id args="":
         ${EXTRA_ENV_ARGS[@]+"${EXTRA_ENV_ARGS[@]}"} \
         ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} {{args}} || [[ $? -eq 2 ]]
 
-    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
-    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
-    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
-        mkdir -p "$MAIN_WORKTREE/test-results"
-        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
-    fi
+    just _copy-junit-to-main-worktree
 
 # === TMR (test map-reduce) variants ===
 # Canonical per-suite flag sets for `mngr tmr` (one agent per test, run + fix in

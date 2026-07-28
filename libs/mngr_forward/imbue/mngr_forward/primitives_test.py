@@ -105,7 +105,9 @@ def test_service_label_accepts_dns_safe_names(value: str) -> None:
     assert ServiceLabel(value) == value
 
 
-@pytest.mark.parametrize("value", ["", "  ", "under_score", "UPPER", "-lead", "trail-", "dot.name", "sp ace"])
+@pytest.mark.parametrize(
+    "value", ["", "  ", "under_score", "UPPER", "-lead", "trail-", "dot.name", "sp ace", "double--hyphen"]
+)
 def test_service_label_rejects_unsafe_names(value: str) -> None:
     with pytest.raises(ValueError):
         ServiceLabel(value)
