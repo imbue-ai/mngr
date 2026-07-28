@@ -53,6 +53,18 @@ class LimaHostConfig(FrozenModel):
             "time so lifecycle operations replay the right SSH user."
         ),
     )
+    host_dir: str | None = Field(
+        default=None,
+        description=(
+            "In-VM host_dir this host was created with. Reads must target it "
+            "rather than the host_dir the current context's provider config "
+            "resolves to: `mngr create` runs with the workspace repo as cwd "
+            "(so a project `.mngr/settings.toml` applies) while `mngr forward` "
+            "and the per-agent `mngr event` streams run from $HOME (so it does "
+            "not). None for records written before this field existed; those "
+            "fall back to the provider instance's configured host_dir."
+        ),
+    )
 
 
 class HostRecord(FrozenModel):

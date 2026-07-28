@@ -24,6 +24,7 @@ from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.instance import _find_conflicting_host_record
 from imbue.mngr_lima.instance import _parse_size_to_gb
 from imbue.mngr_lima.instance import _record_state_for_conflict_message
+from imbue.mngr_lima.instance import _recorded_host_dir_override
 from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.testing import install_fake_limactl
 
@@ -625,3 +626,59 @@ def test_delete_host_deletes_vm_definition_and_record(
     invocations = invocation_log.read_text()
     assert f"delete --force {instance_name}" in invocations
     assert lima_provider._host_store.read_host_record(host_id, use_cache=False) is None
+
+
+def _record_with_host_dir(host_id: HostId, host_dir: str | None) -> HostRecord:
+    now = datetime.now(timezone.utc)
+    return HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="probe-host",
+            user_tags={},
+            snapshots=[],
+            created_at=now,
+            updated_at=now,
+        ),
+        config=LimaHostConfig(instance_name=f"mngr-{host_id}", host_dir=host_dir),
+    )
+
+
+def test_recorded_host_dir_override_prefers_the_record_over_ambient_config() -> None:
+    """A host created with a custom host_dir is read at that path, not the current config's."""
+    record = _record_with_host_dir(HostId.generate(), "/home/user/.mngr")
+
+    assert _recorded_host_dir_override(record) == Path("/home/user/.mngr")
+
+
+def test_recorded_host_dir_override_is_none_for_legacy_records() -> None:
+    """Records written before host_dir was persisted fall back to the provider instance."""
+    record = _record_with_host_dir(HostId.generate(), None)
+
+    assert _recorded_host_dir_override(record) is None
+
+
+def test_offline_host_reads_at_the_recorded_host_dir(lima_provider: LimaProviderInstance) -> None:
+    """The offline host targets the recorded host_dir even when provider config says otherwise."""
+    record = _record_with_host_dir(HostId.generate(), "/home/user/.mngr")
+
+    offline_host = lima_provider._create_offline_host(record)
+
+    assert offline_host.host_dir == Path("/home/user/.mngr")
+    assert lima_provider.host_dir != Path("/home/user/.mngr")
+
+
+def test_host_log_dir_follows_the_hosts_own_host_dir(lima_provider: LimaProviderInstance) -> None:
+    """Service logs default beside the data the host uses, not the ambient provider host_dir."""
+    recorded_host_dir = Path("/home/user/.mngr")
+
+    assert lima_provider._host_log_dir_str(recorded_host_dir) == "/home/user/.mngr/logs"
+    assert lima_provider._host_log_dir_str(lima_provider.host_dir) == "/mngr/logs"
+
+
+def test_offline_host_log_dir_uses_the_recorded_host_dir(lima_provider: LimaProviderInstance) -> None:
+    """A host created with a custom host_dir resolves its log dir there from any context."""
+    record = _record_with_host_dir(HostId.generate(), "/home/user/.mngr")
+
+    offline_host = lima_provider._create_offline_host(record)
+
+    assert lima_provider._host_log_dir_str(offline_host.host_dir) == "/home/user/.mngr/logs"

@@ -160,6 +160,13 @@ def _record_state_for_conflict_message(record: HostRecord) -> str:
     return "IN USE"
 
 
+def _recorded_host_dir_override(host_record: HostRecord) -> Path | None:
+    """Return the host_dir this host was created with, or None for legacy records."""
+    if host_record.config is None or host_record.config.host_dir is None:
+        return None
+    return Path(host_record.config.host_dir)
+
+
 def _is_retryable_start_error(error: BaseException) -> bool:
     """Whether a failed ``limactl start`` should be retried (transient image download)."""
     return isinstance(error, LimaCommandError) and is_transient_lima_download_error(error)
@@ -349,6 +356,7 @@ class LimaProviderInstance(BaseProviderInstance):
         host_name: HostName,
         ssh_config: LimaSshConfig,
         is_run_as_root: bool,
+        host_dir_override: Path | None = None,
     ) -> Host:
         """Create a Host object from SSH connection info."""
         # Add the host to known_hosts. Re-run on every create/start/get_host
@@ -371,6 +379,7 @@ class LimaProviderInstance(BaseProviderInstance):
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
+            host_dir_override=host_dir_override,
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                 callback_host_id, certified_data
             ),
@@ -411,6 +420,7 @@ class LimaProviderInstance(BaseProviderInstance):
                 certified_host_data=host_record.certified_host_data,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
+                host_dir_override=_recorded_host_dir_override(host_record),
                 on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                     callback_host_id, certified_data
                 ),
@@ -420,16 +430,21 @@ class LimaProviderInstance(BaseProviderInstance):
     def _volume_home_path_str(self) -> str | None:
         return str(self.config.volume_home_path) if self.config.volume_home_path is not None else None
 
-    def _host_log_dir_str(self) -> str:
-        """Directory for plain-text service logs (shutdown, activity watcher) in the VM."""
-        return resolve_host_log_dir(str(self.host_dir), self.config.host_log_dir)
+    def _host_log_dir_str(self, host_dir: Path) -> str:
+        """Directory for plain-text service logs (shutdown, activity watcher) in the VM.
+
+        Takes the host's effective host_dir so the ``<host_dir>/logs`` default lands
+        next to the data that host actually uses, not wherever the current context's
+        provider config points.
+        """
+        return resolve_host_log_dir(str(host_dir), self.config.host_log_dir)
 
     def _create_shutdown_script(self, host: Host) -> None:
         """Create the shutdown.sh script inside the VM.
 
         For Lima, the shutdown script calls sudo poweroff.
         """
-        log_dir_str = self._host_log_dir_str()
+        log_dir_str = self._host_log_dir_str(host.host_dir)
 
         script_content = f"""#!/bin/bash
 # Auto-generated shutdown script for mngr Lima host
@@ -686,6 +701,7 @@ sudo poweroff
             is_host_data_volume_exposed=is_host_data_volume_exposed,
             host_data_disk_name=host_data_disk_name,
             is_run_as_root=self.config.is_run_as_root,
+            host_dir=str(self.host_dir),
         )
 
         # Fail fast on a name conflict and reserve the name with a BUILDING
@@ -867,7 +883,7 @@ sudo poweroff
         # Start the activity watcher
         with log_span("Starting activity watcher in VM"):
             start_activity_watcher_cmd = build_start_activity_watcher_command(
-                str(self.host_dir), host_log_dir=self._host_log_dir_str()
+                str(host.host_dir), host_log_dir=self._host_log_dir_str(host.host_dir)
             )
             host.execute_stateful_command(f"sh -c '{start_activity_watcher_cmd}'")
 
@@ -977,7 +993,11 @@ sudo poweroff
 
         is_run_as_root = host_record.config.is_run_as_root
         host_obj = self._create_host_object(
-            host_id, HostName(host_record.certified_host_data.host_name), ssh_config, is_run_as_root
+            host_id,
+            HostName(host_record.certified_host_data.host_name),
+            ssh_config,
+            is_run_as_root,
+            host_dir_override=_recorded_host_dir_override(host_record),
         )
 
         # Update SSH info in host record (port may change after restart). The user
@@ -1003,7 +1023,7 @@ sudo poweroff
         # Restart activity watcher
         with log_span("Restarting activity watcher in VM"):
             start_activity_watcher_cmd = build_start_activity_watcher_command(
-                str(self.host_dir), host_log_dir=self._host_log_dir_str()
+                str(host_obj.host_dir), host_log_dir=self._host_log_dir_str(host_obj.host_dir)
             )
             host_obj.execute_stateful_command(f"sh -c '{start_activity_watcher_cmd}'")
 
@@ -1189,6 +1209,7 @@ sudo poweroff
             HostName(host_record.certified_host_data.host_name),
             ssh_config,
             host_record.config.is_run_as_root,
+            host_dir_override=_recorded_host_dir_override(host_record),
         )
         self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
