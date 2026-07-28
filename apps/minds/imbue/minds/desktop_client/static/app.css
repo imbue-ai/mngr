@@ -332,6 +332,47 @@ html {
 html.no-scrollbar-gutter {
   scrollbar-gutter: auto;
 }
+/*
+ * Both shell modes lock the document to the viewport: the agent surface fills
+ * it with a fixed content view / iframe, and local pages scroll inside
+ * #local-page-scroll -- a container pinned below the fixed 38px titlebar (see
+ * ChromeShell.jinja). So the DOCUMENT never scrolls on any minds page, the
+ * titlebar never shares an edge with a scrollbar, and its buttons never shift
+ * with gutter differences between pages. A universal default (a page that
+ * genuinely needs document scroll can override on its own html/body); kept
+ * here with the rest of the app's CSS rather than in a template <style> so all
+ * scoping and order live in one place.
+ */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+/*
+ * Scrollbars are left NATIVE (no ``::-webkit-scrollbar`` styling): the OS draws
+ * its own overlay/auto-hiding bar, which matches the platform, auto-aligns to
+ * each scroll container's edge, and adapts to ``color-scheme``. Every
+ * scrollable region -- the local-page surface (#local-page-scroll), settings
+ * panels, the inbox list, dropdowns -- scrolls its own container below the
+ * fixed titlebar, so the native bar sits correctly without any custom geometry.
+ *
+ * #local-page-scroll geometry (kept here, not in the template, so the whole
+ * treatment lives in one place). Two shapes, so the native scrollbar is a
+ * constant distance from whichever box the user perceives as its container:
+ *   - Neutral (all-white) pages -- Home, Create, ...: FULL-BLEED to the window
+ *     ("outer box"), so the scrollbar hugs the window's right edge.
+ *   - Workspace-scoped pages (a colorful accent border bleeds around the card,
+ *     keyed off the titlebar's accent-surface class): the inset rounded "inner
+ *     card", so the scrollbar sits at the card's edge inside that border.
+ */
+#local-page-scroll {
+  position: fixed;
+  inset: 38px 0 0 0;
+}
+body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
+  inset: 38px 4px 4px 4px;
+  border-radius: 12px;
+}
 
 .accent-spine::before {
   content: '';

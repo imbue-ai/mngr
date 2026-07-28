@@ -12,8 +12,11 @@
 {% endset %}
 <ChromeShell title="Creating your workspace..."
       page_label="New workspace"
-      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-6"
       scripts={{ _scripts }}>
+  {# Center inside the local-page card (see PageNarrowContainer / ChromeShell):
+     body-level centering no longer works now the content lives in the fixed
+     #local-page-scroll container. #}
+  <div class="min-h-full flex items-center justify-center p-6">
   <main id="creating"
         class="w-full"
         data-agent-id="{{ agent_id }}"
@@ -105,4 +108,5 @@
     </section>
 
   </main>
+  </div>
 </ChromeShell>

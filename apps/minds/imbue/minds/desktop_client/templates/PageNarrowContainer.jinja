@@ -24,12 +24,18 @@
   and overlay dialogs go outside both.
 #}
 {%- set _padding_cls = "p-8" if padding == "default" else "p-6" -%}
+{# Center the column inside the local-page card (#local-page-scroll in
+   ChromeShell), NOT on the body: the body is viewport-locked and the page's
+   content lives inside that fixed scroll container, so a body-level flex/
+   min-h-screen no longer centers anything. ``min-h-full`` fills the card's
+   height so a short column centers and a tall one scrolls. #}
 <ChromeShell title={{ title }}
       :page_label="page_label"
       :show_back="show_back"
-      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-4"
       scripts={{ scripts }}>
-  <div class="{{ _padding_cls }} {{ max_width }} w-full">
-    {{ content }}
+  <div class="min-h-full flex items-center justify-center p-4">
+    <div class="{{ _padding_cls }} {{ max_width }} w-full">
+      {{ content }}
+    </div>
   </div>
 </ChromeShell>

@@ -1021,17 +1021,22 @@ def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     css = _TOKENS_CSS_PATH.read_text()
     assert "html.no-scrollbar-gutter" in css
     opted_out = '<html lang="en" class="no-scrollbar-gutter">'
-    # The agent-content wrapper additionally carries the ``agent-surface`` mode
-    # class (its viewport-lock CSS is keyed off the html class so the swap
-    # engine's html-class adoption toggles it correctly across in-place swaps).
-    assert '<html lang="en" class="no-scrollbar-gutter agent-surface">' in render_chrome_page()
+    # Every ChromeShell surface is a viewport-locked, edge-to-edge document (the
+    # document lock is a universal ``html, body`` rule in app.css), so all of
+    # them opt out of the document scrollbar gutter -- the titlebar spans the
+    # full window width and its buttons never shift between pages.
+    assert opted_out in render_chrome_page()
     assert opted_out in render_overlay_host_page()
     assert opted_out in render_sidebar_page()
     assert opted_out in render_help_page(workspace_agent_id="")
     assert opted_out in render_inbox_page(cards=())
-    # Normal scrolling content pages keep the reserved gutter so their layout
-    # doesn't shift sideways when a classic scrollbar appears.
-    assert '<html lang="en">' in render_landing_page(accessible_agent_ids=())
+    # Local pages scroll inside the local-page-scroll card (whose own stable
+    # gutter absorbs classic-scrollbar layout shifts) rather than the document.
+    assert opted_out in render_landing_page(accessible_agent_ids=())
+    assert 'id="local-page-scroll"' in render_landing_page(accessible_agent_ids=())
+    # The document viewport-lock lives in app.css (moved out of the template
+    # <style>), applied universally so no per-page class is needed.
+    assert "overflow: hidden" in css
 
 
 def test_render_sidebar_page_contains_workspace_list() -> None:
@@ -2267,9 +2272,11 @@ def test_page_narrow_container_default_padding_and_max_width() -> None:
     assert "<p>body</p>" in html
     # PageNarrowContainer now renders via the shared ChromeShell layout, so a
     # trusted local page reached through it (auth flow, create form) carries the
-    # app titlebar; the body is flex-centered around the column below it.
+    # app titlebar; the column is flex-centered inside the local-page card
+    # (``min-h-full`` fills the card so short content centers) rather than on the
+    # body, which is viewport-locked now.
     assert 'id="minds-titlebar"' in html
-    assert "flex items-center justify-center min-h-screen" in html
+    assert "min-h-full flex items-center justify-center" in html
 
 
 def test_page_narrow_container_form_padding_uses_p6() -> None:

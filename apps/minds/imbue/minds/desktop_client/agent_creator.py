@@ -2185,8 +2185,9 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Flip the pending record to FAILED, downgrading store errors to warnings.
 
-        The in-memory FAILED status is already set by the caller; losing the
-        durable failure snapshot only costs the failed row across restarts.
+        The caller sets the in-memory FAILED status right after this returns;
+        losing the durable failure snapshot only costs the failed row across
+        restarts.
         """
         if self.pending_create_attempt_store is None:
             return
@@ -2679,19 +2680,21 @@ class AgentCreator(MutableModel):
             logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[minds] ERROR: {}".format(e))
             error_kind = classify_create_attempt_error(repo_source, e)
-            with self._lock:
-                self._statuses[cid_str] = AgentCreateAttemptStatus.FAILED
-                self._errors[cid_str] = str(e)
-                if error_kind is not None:
-                    self._error_kinds[cid_str] = error_kind
             # Snapshot the failure (and the create attempt log's tail) into the
-            # pending-create-attempt record so the failed row survives restarts.
+            # pending-create-attempt record BEFORE publishing the in-memory
+            # FAILED status (mirroring the DONE path): anyone who observes
+            # FAILED can rely on the durable record already being terminal.
             self._mark_pending_create_attempt_failed(
                 cid_str,
                 error=str(e),
                 error_kind=error_kind.value if error_kind is not None else None,
                 log_tail=log_sink.tail_lines(FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES),
             )
+            with self._lock:
+                self._statuses[cid_str] = AgentCreateAttemptStatus.FAILED
+                self._errors[cid_str] = str(e)
+                if error_kind is not None:
+                    self._error_kinds[cid_str] = error_kind
             self._notify_create_attempts_changed()
         finally:
             log_sink.put(LOG_SENTINEL)

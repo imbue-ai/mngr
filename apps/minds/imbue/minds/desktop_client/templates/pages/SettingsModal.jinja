@@ -39,8 +39,13 @@
     <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-4xl w-full p-8 h-[85vh] flex flex-col text-left">
       <DialogCloseButton onclick="dismissSettingsModal()" />
       <h1 class="type-heading-lg text-primary mb-8 shrink-0">Settings</h1>
-      <div class="flex-1 min-h-0 overflow-y-auto">
+      {# Only the right pane scrolls (panel_scroll): the nav stays pinned, and
+         the -mr-8 cancels the card's p-8 so the pane's native scrollbar sits
+         at the popup's right edge (the pane's own pr-8 restores the content
+         padding). #}
+      <div class="flex-1 min-h-0 -mr-8">
         <AppSettingsSections
+          :panel_scroll="True"
           :services_overview="services_overview"
           :file_sharing_grants="file_sharing_grants"
           :workspace_delegation_grants="workspace_delegation_grants"

@@ -1,4 +1,4 @@
-{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false, report_unexpected_errors=true #}
+{#def services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false, report_unexpected_errors=true, panel_scroll=false #}
 {#
   The app-level ("Minds") settings, shared verbatim between the centered
   settings modal (pages.SettingsModal, the Electron overlay surface) and the
@@ -31,7 +31,9 @@
   permission-overview models built by the route; ``permissions_unavailable``
   is True when the latchkey gateway could not be reached.
 #}
-<div class="flex gap-8 items-start">
+{# panel_scroll: the modal pins the left nav and scrolls only the right pane
+   (the full /settings page keeps the default: the page itself scrolls). #}
+<div class="flex gap-8 {{ 'h-full items-stretch' if panel_scroll else 'items-start' }}">
   {# Left nav. Grouped into non-interactive section eyebrows ("Permissions" /
      "Other") that carry no ``data-settings-nav`` (the page script ignores
      them). Nav entries share identical base classes (notably no
@@ -62,7 +64,7 @@
     </button>
   </nav>
 
-  <div class="flex-1 min-w-0">
+  <div class="flex-1 min-w-0 {{ 'overflow-y-auto min-h-0 pr-8' if panel_scroll else '' }}">
     {# -- Connectors (predefined / catalog services the agent connects to) -- #}
     <section data-settings-panel="connectors">
       <h2 class="type-heading-lg text-primary mb-2">Connectors</h2>
