@@ -124,6 +124,46 @@
 - **Manual spike**: install openvscode-server in a workspace by hand (supervisord + forward_port); verify workbench, terminal, extensions, markdown preview (webviews) locally; verify shared with webviews via CDN default.
 - **Edge cases**: service names colliding with `agent-` prefix (reject at registration); deep subtree WS; two workspaces open simultaneously (cookie isolation); Safari.
 
+## Implementation resolutions (2026-07-28, post-review)
+
+A pre-implementation review flagged several gaps; how each landed:
+
+- **TLS SANs (review item 1 — valid):** the SAN-extension framing here was
+  unimplementable (X.509 wildcards match one label; no static SAN set can
+  cover unknown agent ids). Implemented instead as **per-SNI dynamic cert
+  minting** in `tls.py`: any uncovered `.localhost` name gets a certificate
+  for that exact hostname on first handshake (cached, signed by the same
+  ephemeral key). Covers any depth and services registered at any time; no
+  regeneration/hot-reload needed. Validated over HTTPS locally incl. deep
+  sub-origins.
+- **Auth redirect (review item 2 — valid, "unchanged except cookie domain"
+  was wrong):** the unauthenticated bounce now carries the full service
+  label chain (`?service=<labels>`) and original path+query (`?next=`);
+  `/goto/` validates each label as a DNS-safe `ServiceLabel` (404 on
+  crafted values) and targets the bridge at the exact requesting origin.
+  Direct deep links to service origins are first-class. Tested.
+- **Resolver strategy dispatch (review item 3 — valid):** decided: in
+  manual-port mode the bare origin maps to the fixed port and named service
+  labels still resolve from the registered service map. Tested.
+- **Regex syntax:** implemented with Python's `(?P<labels>...)`; pattern
+  stays IGNORECASE, parsed labels are lowercased, `ServiceLabel` enforces
+  lowercase at registration.
+- **`global` flag:** confirmed nonexistent on the template branch; nothing
+  to delete (line 33/73 of this plan were stale).
+- **`forward_cli.py` "unchanged":** wrong — the shell rename ripples into
+  mngr (default `--service system-interface`, recovery probe, run.py docs).
+- **Domain-cookie eviction (review addition — accepted trade-off):** any
+  service under `agent-<hex>.localhost` can set/evict a parent-domain cookie
+  named `mngr_forward_session`. Impact is bounded: services never see the
+  real cookie (strip-before-forward), planted values fail signature
+  verification, and a failed cookie self-heals through `/goto/` (the tested
+  stale-cookie path). Residual risk is nuisance eviction (a forced
+  re-bridge hop), not theft or useful fixation. Documented as a local-mode
+  trade-off.
+- Phase 4's `specs/workspace-server-forwarding` / `specs/mngr-forward-plugin`
+  paths do not exist in either repo; the real doc updates happened in the
+  template's skills/docs (build-app et al).
+
 ## Open questions
 
 - Shell service rename: `system-interface` or `shell`? (DNS-safe rename is decided; the name is not.)

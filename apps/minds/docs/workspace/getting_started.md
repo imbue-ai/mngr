@@ -49,9 +49,9 @@ minds run
 ## Accessing your agent
 
 After creation, the agent is accessible at:
-- **Local**: `http://{agent_id}.localhost:8420/` (the desktop client byte-forwards the subdomain to the workspace's system interface, which serves the dockview UI)
-- **Individual app**: `http://{agent_id}.localhost:8420/service/{app_name}/` (e.g. `.../service/terminal/`; the `/service/` path segment is plumbing shared by apps and predates the app vocabulary)
-- **Global** (if Cloudflare configured): `https://{service}--{agent_id}--{username}.{domain}`
+- **Local**: `https://{agent_id}.localhost:8421/` (the forward plugin routes the bare workspace origin to the system interface, which serves the dockview UI)
+- **Individual app**: `https://{app_name}.{agent_id}.localhost:8421/` (e.g. `https://terminal.{agent_id}.localhost:8421/`; every registered app owns its own origin)
+- **Shared** (if Cloudflare configured): `https://{service}--{host}--{user}.{domain}`
 
 ## Environment variables and config
 
