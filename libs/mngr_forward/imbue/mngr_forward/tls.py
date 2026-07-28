@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from hypercorn.config import Config
+from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -156,6 +157,15 @@ class _SNICertMinter(MutableModel):
             minted = self._minted_contexts.get(name)
             if minted is None:
                 if len(self._minted_contexts) >= _MAX_MINTED_CONTEXTS:
+                    # The client will fail hostname verification against the
+                    # static cert; leave a breadcrumb since nothing else would
+                    # explain the failure server-side.
+                    logger.warning(
+                        "SNI cert-mint cap ({}) reached; serving the static cert for {} "
+                        "(clients will fail hostname verification)",
+                        _MAX_MINTED_CONTEXTS,
+                        name,
+                    )
                     return
                 minted = self._mint_context_for(name)
                 self._minted_contexts[name] = minted

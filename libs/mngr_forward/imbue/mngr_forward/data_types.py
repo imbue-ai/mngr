@@ -156,7 +156,7 @@ class ForwardEnvelope(FrozenModel):
 class ForwardServiceStrategy(FrozenModel):
     """Resolve backend URLs by looking up a named service per agent."""
 
-    service_name: str = Field(description="Name of the service to forward (e.g. 'system_interface')")
+    service_name: str = Field(description="Name of the service to forward (e.g. 'system-interface')")
 
 
 class ForwardPortStrategy(FrozenModel):
