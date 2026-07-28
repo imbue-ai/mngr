@@ -449,10 +449,10 @@ def run(
     # are needed here.
     # `mngr forward` and every other laptop-side mngr invocation (including the
     # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
-    # with cwd=$HOME, so the DEFAULT_WORKSPACE_TEMPLATE workspace's `[agent_types.main]` block in
-    # `/home/user/workspace/.mngr/settings.toml` inside the lima VM is invisible to them.
-    # Seed the mapping into user-scope settings.toml here so subsequent mngr
-    # subprocesses resolve `type=main` -> ClaudeAgent without depending on cwd.
+    # with cwd=$HOME, so the DEFAULT_WORKSPACE_TEMPLATE workspace's `[agent_types.X]` blocks in
+    # `/home/user/workspace/.mngr/settings.toml` inside the workspace container are invisible to
+    # them. Seed the mappings into user-scope settings.toml here so subsequent mngr
+    # subprocesses resolve `type=chat` / `main` / `worker` -> ClaudeAgent without depending on cwd.
     seed_laptop_agent_types_for_minds(mngr_host_dir)
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
