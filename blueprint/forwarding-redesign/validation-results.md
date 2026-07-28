@@ -69,6 +69,17 @@ create flow from the cut-over template, on the production env.
   (`--webview-external-endpoint={{uuid}}.openvscode.<workspace-host>`),
   which makes everything same-site; on shares that is gated on the
   wildcard-cert (Option C) connector work.
+- Security scoping decided in review: `SameSite=None` must NOT be applied
+  globally. It re-opens CSRF for that cookie, and cross-site WebSockets
+  (not covered by CORS) would let an arbitrary website open authenticated
+  sockets to shared services -- unacceptable for e.g. the terminal. The
+  shared shell's own panels do not need it (shell and services are
+  same-site under one registrable domain; validated working with Lax).
+  Design: a per-service opt-in declared at registration by the installing
+  agent (forward_port flag threading through sharing -> connector -> Access
+  app cookie settings), default off, plus Origin-header validation on WS
+  endpoints of any opted-in service; treat it as a bridge until
+  self-hosted webview origins land.
 
 ## Caveats / follow-ups
 
