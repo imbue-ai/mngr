@@ -1,0 +1,5 @@
+The launch-to-msg e2e watched the wrong latchkey pending-request directory, so its permission deny/retry phase failed on every run regardless of what the agent did.
+
+Latchkey stores each pending request as a JSON file under `<latchkey-dir>/permission_requests/<schema-version>/`, and a backwards incompatible change gets a new version directory rather than an in-place migration. The per-account permissions work moved that version to `v3`; the e2e still watched `v2`, which nothing writes to. Every read returned empty, so the retry wait ran its full 120s and then reported `Claude did not re-submit after deny` -- while the agent had in fact re-submitted five seconds after the kick, and the gateway had accepted the request and streamed it to the UI.
+
+`_list_permission_request_files` treated a missing directory as "no pending requests". It now distinguishes the two cases: nothing written yet stays empty, but a missing versioned directory alongside sibling versions raises immediately and names the versions it found, so the next schema bump fails in seconds with an accurate message instead of timing out against a plausible-looking wrong one.

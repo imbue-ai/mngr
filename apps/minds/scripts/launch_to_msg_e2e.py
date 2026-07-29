@@ -154,7 +154,13 @@ LATCHKEY_DIR = MINDS_HOME / "latchkey"
 # here. Iter 10 reads this directory directly to verify that Claude
 # re-submits a permission request after a deny (rather than infer it
 # from the requests-panel UI, which doesn't auto-refresh).
-PERMISSION_REQUESTS_DIR = LATCHKEY_DIR / "permission_requests" / "v2"
+#
+# The trailing segment is latchkey's on-disk schema version: a backwards
+# incompatible change gets a new directory rather than an in-place migration
+# (see resolvePermissionRequestsDirectory in permission_requests.mjs). It must
+# match the version the gateway writes, or this reads an empty directory
+# forever -- so `_list_permission_request_files` asserts the directory exists.
+PERMISSION_REQUESTS_DIR = LATCHKEY_DIR / "permission_requests" / "v3"
 
 HOST_NAME = os.environ.get("HOST_NAME") or f"e2e{time.strftime('%H%M%S')}"
 HOST_NAME_2 = os.environ.get("HOST_NAME_2") or f"{HOST_NAME}-b"
@@ -2086,6 +2092,20 @@ def _list_permission_request_files() -> list[Path]:
     empty list means no requests are pending.
     """
     if not PERMISSION_REQUESTS_DIR.exists():
+        # The parent existing without our versioned subdir means the gateway
+        # bumped its on-disk schema version: every read here would return empty
+        # and the retry wait would time out blaming Claude for not re-submitting.
+        sibling_versions = (
+            sorted(p.name for p in PERMISSION_REQUESTS_DIR.parent.iterdir() if p.is_dir())
+            if PERMISSION_REQUESTS_DIR.parent.exists()
+            else []
+        )
+        if sibling_versions:
+            raise E2EFailure(
+                f"latchkey pending-request dir {PERMISSION_REQUESTS_DIR} does not exist, but "
+                f"{PERMISSION_REQUESTS_DIR.parent} holds {sibling_versions}. The gateway's on-disk "
+                f"schema version moved; point PERMISSION_REQUESTS_DIR at the version it writes."
+            )
         return []
     return sorted(p for p in PERMISSION_REQUESTS_DIR.iterdir() if p.suffix == ".json")
 
