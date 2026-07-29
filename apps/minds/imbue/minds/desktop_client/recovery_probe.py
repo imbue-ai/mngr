@@ -264,7 +264,7 @@ _QUESTION_SERVICES_AGENT_REGISTERED: Final[str] = "Is the system-services agent 
 _QUESTION_CAN_RUN_COMMANDS_INSIDE: Final[str] = "Can we run a command inside the container?"
 _QUESTION_SERVICES_AGENT_RUNNING: Final[str] = "Is the system-services agent running?"
 _QUESTION_SYSTEM_INTERFACE_RUNNING: Final[str] = "Is the system_interface service running under supervisord?"
-_QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system_interface inner port?"
+_QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system-interface inner port?"
 _QUESTION_CURL_OK: Final[str] = "Does the inner web server answer GET / inside the container?"
 _QUESTION_PLUGIN_RESOLVER: Final[str] = "Has the system interface registered with the plugin resolver?"
 

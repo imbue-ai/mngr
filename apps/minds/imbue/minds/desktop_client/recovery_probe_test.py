@@ -78,12 +78,12 @@ def _probe_for(response: HostHealthResponse, question_fragment: str) -> Probe:
 
 
 def test_parse_inner_port_matches_forward_port_command() -> None:
-    cmd = "python3 system/scripts/forward_port.py --url http://localhost:8000 --name system_interface && system_interface"
+    cmd = "python3 system/scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
     assert parse_inner_port_from_command(cmd) == 8000
 
 
 def test_parse_inner_port_returns_none_when_command_lacks_url_flag() -> None:
-    assert parse_inner_port_from_command("system_interface") is None
+    assert parse_inner_port_from_command("system-interface") is None
 
 
 # --- supervisorctl status parsing -----------------------------------------
@@ -283,7 +283,7 @@ def test_port_listener_probe_yes_when_listener_present() -> None:
             }
         )
     )
-    assert _answer(response, "listening on the system_interface inner port") == ProbeAnswer.YES
+    assert _answer(response, "listening on the system-interface inner port") == ProbeAnswer.YES
 
 
 def test_plugin_resolver_probe_yes_when_services_registered() -> None:
@@ -872,7 +872,7 @@ def test_port_listening_output_matches_listener_lines() -> None:
     response = _response(
         in_container_stdout=_healthy_probe_stdout(port_listener="LISTEN 0.0.0.0:8000\nLISTEN ::1:8000")
     )
-    probe = _probe_for(response, "listening on the system_interface inner port")
+    probe = _probe_for(response, "listening on the system-interface inner port")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
     assert "/proc/net/tcp" in probe.command
     assert probe.output == "LISTEN 0.0.0.0:8000\nLISTEN ::1:8000"
@@ -881,7 +881,7 @@ def test_port_listening_output_matches_listener_lines() -> None:
 def test_port_listening_no_listener_output_matches_command_fallback() -> None:
     """The no-listener output must be byte-identical to what the command prints."""
     response = _response(in_container_stdout=_healthy_probe_stdout(port_listener=""))
-    probe = _probe_for(response, "listening on the system_interface inner port")
+    probe = _probe_for(response, "listening on the system-interface inner port")
     assert probe.answer == ProbeAnswer.NO
     assert probe.output == "(no LISTEN socket on port 8000)"
     # The command's own fallback (printed when no socket matches) is the same string.

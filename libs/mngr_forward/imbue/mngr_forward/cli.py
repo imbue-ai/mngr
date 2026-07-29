@@ -702,7 +702,7 @@ mode the same URL is also emitted on stdout as a JSONL ``login_url`` event.
 Browser sessions survive SIGHUP-driven observe restarts because the cookie
 signing key is persisted to disk under ``$MNGR_HOST_DIR/plugin/forward/``.""",
     examples=(
-        ("Forward the workspace shell for every agent", "mngr forward --service system_interface"),
+        ("Forward system_interface for every workspace agent", "mngr forward --service system_interface"),
         ("Manual mode against a fixed port", "mngr forward --no-observe --forward-port 8080"),
         (
             "Tail a shared discovery log instead of spawning observe",
