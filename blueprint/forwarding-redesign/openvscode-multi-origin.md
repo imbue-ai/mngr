@@ -89,3 +89,21 @@ the service's own sub-origin space** — run openvscode with
    SameSite opt-in machinery) → hardens shares for Chrome-family browsers.
 3. Connector ACM work (wildcard certs + DNS/ingress/Access) → flip the
    webview endpoint on shares; retire the SameSite bridge for openvscode.
+
+## Related: the `/api/browsers` passthrough (and why terminal has none)
+
+The shell UI itself calls the browser daemon's fleet API (`GET/POST
+/browsers` — list the fleet, create a browser from the "+" menu). After the
+cutover the browser service lives on a sibling origin, and sibling
+subdomains are same-*site* but not same-*origin* — `fetch()` gets no CORS
+exemption from same-siteness, locally or on shares. Rather than adding CORS
+to the daemon (and Access-intercepted preflights on shares), the shell
+backend forwards those two calls server-side as `/api/browsers`, keeping
+the UI's requests same-origin. Terminal needs no equivalent because the
+shell never calls a terminal HTTP API: terminal state lives in the
+connection (clicking "New terminal" opens a ttyd iframe whose URL names the
+tmux session, and attaching creates it), while browser state lives in the
+daemon (a fleet that outlives its viewer panes, with server-allocated
+names). The browser fleet is therefore the one place the shell must *read a
+sibling service's API* rather than merely frame it — and iframing, not
+fetching, is the case the per-origin design is built around.
