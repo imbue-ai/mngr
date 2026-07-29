@@ -55,14 +55,13 @@ the service's own sub-origin space** — run openvscode with
 - **Locally deployable now**: deep sub-origin routing
   (`sub.svc.agent-<hex>.localhost` → `svc`) and per-SNI cert minting are
   already validated on this branch.
-- **On shares, gated on connector "Option C"**:
-  `{{uuid}}.openvscode--<host>--<user>.imbueminds.com` is two labels under
-  the zone, beyond the universal cert's `*.imbueminds.com`. Needs ACM
-  wildcard certs (the paid, gating piece) plus a wildcard DNS record,
-  wildcard ingress rule, and Access coverage for the sub-hosts. ACM only
-  provides TLS; the DNS/ingress/Access wildcard handling is the rest of the
-  work. The connector's hostname handling was designed so this can be added
-  later.
+- **On shares, gated on using ACM (Cloudflare Advanced Certificate
+  Manager)**: `{{uuid}}.openvscode--<host>--<user>.imbueminds.com` is two
+  labels under the zone, beyond the universal cert's `*.imbueminds.com`.
+  ACM provides the deeper wildcard certs (the paid, gating piece); the
+  connector additionally needs a wildcard DNS record, wildcard ingress
+  rule, and Access coverage for the sub-hosts. The connector's hostname
+  handling was designed so this can be added later.
 
 **Interim mitigations (until Option C):**
 
@@ -88,5 +87,5 @@ the service's own sub-origin space** — run openvscode with
    guidance) and/or Electron allowlist → fixes local link behavior now.
 2. Connector cookie settings (`allow_iframe` explicit; per-service
    SameSite opt-in machinery) → hardens shares for Chrome-family browsers.
-3. Connector Option C (ACM + wildcard DNS/ingress/Access) → flip the
+3. Connector ACM work (wildcard certs + DNS/ingress/Access) → flip the
    webview endpoint on shares; retire the SameSite bridge for openvscode.
