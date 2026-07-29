@@ -25,10 +25,10 @@ create flow from the cut-over template, on the production env.
 
 ## Shared (Cloudflare, existing per-service connector API + fan-out)
 
-- `PUT /api/v1/workspaces/<agent>/sharing/system-interface` fanned out to all
+- `PUT /api/v1/workspaces/<agent>/sharing/system_interface` fanned out to all
   registered services; connector returned hostnames
   `<name>--28ed004a817f4eae--61d78f321d9e4683.imbueminds.com` for
-  system-interface, terminal, browser, openvscode with identical email
+  system_interface, terminal, browser, openvscode with identical email
   policies.
 - Fresh external Chromium (no local state): share URL → Cloudflare Access
   login → email OTP → shared shell rendered.

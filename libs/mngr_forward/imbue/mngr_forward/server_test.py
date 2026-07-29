@@ -1240,7 +1240,7 @@ def _make_service_app(
     services: dict[str, str],
 ) -> FastAPI:
     auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system-interface"))
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     resolver.add_known_agent(agent_id)
     resolver.update_services(agent_id, services)
     return create_forward_app(
@@ -1263,7 +1263,7 @@ def test_service_origin_routes_to_that_service_backend(tmp_path: Path) -> None:
         tmp_path,
         agent_id,
         preauth,
-        {"system-interface": "http://shell-backend", "terminal": "http://terminal-backend"},
+        {"system_interface": "http://shell-backend", "terminal": "http://terminal-backend"},
     )
 
     captured: list[httpx.Request] = []
@@ -1323,7 +1323,7 @@ def test_bare_origin_still_routes_to_shell_service(tmp_path: Path) -> None:
         tmp_path,
         agent_id,
         preauth,
-        {"system-interface": "http://shell-backend", "terminal": "http://terminal-backend"},
+        {"system_interface": "http://shell-backend", "terminal": "http://terminal-backend"},
     )
 
     captured: list[httpx.Request] = []
@@ -1347,7 +1347,7 @@ def test_unregistered_service_serves_loading_page(tmp_path: Path) -> None:
     loading page (503), so a service that registers moments later self-heals."""
     agent_id = AgentId()
     preauth = "preauth-unknown-svc"
-    app = _make_service_app(tmp_path, agent_id, preauth, {"system-interface": "http://shell-backend"})
+    app = _make_service_app(tmp_path, agent_id, preauth, {"system_interface": "http://shell-backend"})
 
     with TestClient(app, base_url=f"http://notyet.{agent_id}.localhost:18421", follow_redirects=False) as client:
         response = client.get(
@@ -1406,7 +1406,7 @@ def test_goto_rejects_invalid_service_labels(
     client, store, _resolver = app_setup
     cookie = create_session_cookie(store.get_signing_key())
     valid_agent_id = "agent-" + "0" * 31 + "a"
-    for bad in ("evil.com:8080", "UPPER", "under_score", "-lead", "a..b"):
+    for bad in ("evil.com:8080", "UPPER", "-lead", "a..b"):
         response = client.get(
             f"/goto/{valid_agent_id}/",
             params={"service": bad},
@@ -1419,7 +1419,7 @@ def test_subdomain_auth_bridge_sets_workspace_domain_cookie(tmp_path: Path) -> N
     """The bridge cookie is Domain-scoped to agent-<hex>.localhost so one hop
     covers the shell and every service origin at any depth."""
     auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system-interface"))
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,

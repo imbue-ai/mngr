@@ -100,14 +100,12 @@ def test_parse_forward_host_invalid(host: str) -> None:
 # --- ServiceLabel -----------------------------------------------------------
 
 
-@pytest.mark.parametrize("value", ["terminal", "openvscode", "my-app2", "a", "0x"])
+@pytest.mark.parametrize("value", ["terminal", "openvscode", "my-app2", "a", "0x", "system_interface"])
 def test_service_label_accepts_dns_safe_names(value: str) -> None:
     assert ServiceLabel(value) == value
 
 
-@pytest.mark.parametrize(
-    "value", ["", "  ", "under_score", "UPPER", "-lead", "trail-", "dot.name", "sp ace", "double--hyphen"]
-)
+@pytest.mark.parametrize("value", ["", "  ", "UPPER", "-lead", "trail-", "dot.name", "sp ace", "double--hyphen"])
 def test_service_label_rejects_unsafe_names(value: str) -> None:
     with pytest.raises(ValueError):
         ServiceLabel(value)

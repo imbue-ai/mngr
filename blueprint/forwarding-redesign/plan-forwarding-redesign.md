@@ -70,9 +70,8 @@
   - Terminal/browser refs keep their query args on the new origins (`http://terminal.<ws>/?arg=agent&arg=<name>`).
 - `frontend/src/views/IframePanel.ts` — no change (cross-origin fallback exists).
 - `system/scripts/layout.py` / `layout_ops.py` — update `_TERMINAL_SERVICE_URL_PATH`-style constants to the origin-based scheme.
-- `system/scripts/forward_port.py` — validate DNS-safe names; reject underscores; drop the `global` field.
-- `system/supervisord.conf` — rename `system_interface` service (open question: `system-interface` vs `shell`); drop dead `ROOT_PATH=/service/browser` env; keep everything else.
-- `system/libs/app_watcher` — rename references; behavior unchanged.
+- `system/scripts/forward_port.py` — validate hostname-label-safe names (underscores allowed: `system_interface` predates the scheme and underscore labels resolve fine on Cloudflare DNS and in Chromium); drop the `global` field.
+- `system/supervisord.conf` — keep the `system_interface` service name (a rename was considered for DNS-hygiene but dropped: underscore hostnames already worked for Cloudflare shares, and the rename broke resumed snapshots' `apps.toml`); drop dead `ROOT_PATH=/service/browser` env; keep everything else.
 - Docs: update `apps/minds/docs/overview.md`, workspace glossary, `build-web-service` skill (remove "the proxy handles prefixing" guidance; state "your app owns its origin").
 
 ### remote_service_connector (separate repo — API contract)
@@ -150,8 +149,8 @@ A pre-implementation review flagged several gaps; how each landed:
   lowercase at registration.
 - **`global` flag:** confirmed nonexistent on the template branch; nothing
   to delete (line 33/73 of this plan were stale).
-- **`forward_cli.py` "unchanged":** wrong — the shell rename ripples into
-  mngr (default `--service system-interface`, recovery probe, run.py docs).
+- **`forward_cli.py` "unchanged":** confirmed once the shell rename was
+  dropped — the service name stays `system_interface` on both sides.
 - **Domain-cookie eviction (review addition — accepted trade-off):** any
   service under `agent-<hex>.localhost` can set/evict a parent-domain cookie
   named `mngr_forward_session`. Impact is bounded: services never see the
@@ -166,7 +165,6 @@ A pre-implementation review flagged several gaps; how each landed:
 
 ## Open questions
 
-- Shell service rename: `system-interface` or `shell`? (DNS-safe rename is decided; the name is not.)
 - Per-tab Share button: edits that service's narrow list (leading option) or removed in favor of workspace settings only?
 - Revocation: list-edit only with short session duration, or also revoke active sessions?
 - Subdomain coordinate: keep `agent-<hex>` (current lean) or rename to a workspace id while compatibility is already broken? (Team discussion flagged.)

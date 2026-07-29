@@ -169,7 +169,7 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
         "binds exactly that port and fails if it is unavailable."
     ),
 )
-@click.option("--service", default=None, help="Service name to forward (e.g. 'system-interface')")
+@click.option("--service", default=None, help="Service name to forward (e.g. 'system_interface')")
 @click.option(
     "--forward-port",
     "forward_port",
@@ -702,16 +702,16 @@ mode the same URL is also emitted on stdout as a JSONL ``login_url`` event.
 Browser sessions survive SIGHUP-driven observe restarts because the cookie
 signing key is persisted to disk under ``$MNGR_HOST_DIR/plugin/forward/``.""",
     examples=(
-        ("Forward the workspace shell for every agent", "mngr forward --service system-interface"),
+        ("Forward the workspace shell for every agent", "mngr forward --service system_interface"),
         ("Manual mode against a fixed port", "mngr forward --no-observe --forward-port 8080"),
         (
             "Tail a shared discovery log instead of spawning observe",
-            "mngr forward --service system-interface --observe-via-file",
+            "mngr forward --service system_interface --observe-via-file",
         ),
-        ("Set up reverse tunnels", "mngr forward --service system-interface --reverse 8420:8420"),
+        ("Set up reverse tunnels", "mngr forward --service system_interface --reverse 8420:8420"),
         (
             "Filter to a single label set",
-            "mngr forward --service system-interface --agent-include 'has(agent.labels.is_primary)'",
+            "mngr forward --service system_interface --agent-include 'has(agent.labels.is_primary)'",
         ),
     ),
 ).register()

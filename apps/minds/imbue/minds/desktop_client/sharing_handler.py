@@ -43,7 +43,7 @@ _CLOUDFLARE_ACCESS_LOGIN_HOST_SUFFIX: Final[str] = "cloudflareaccess.com"
 # service is exposed alongside it with the same email grants. (Interim
 # single-tier model: the connector-side Access-Group master list from the
 # forwarding-redesign plan replaces this fan-out later.)
-SHELL_SERVICE_NAME: Final[str] = "system-interface"
+SHELL_SERVICE_NAME: Final[str] = "system_interface"
 
 # Upper bound on concurrent connector calls when a workspace share fans out
 # over the registered services (each call is its own mngr subprocess).

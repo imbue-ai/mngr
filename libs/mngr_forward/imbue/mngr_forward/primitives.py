@@ -27,25 +27,27 @@ MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
 MNGR_BINARY: Final[str] = "mngr"
 
-# A single DNS-safe service label: lowercase alphanumeric runs joined by
-# single hyphens (so no leading/trailing/consecutive hyphens). Consecutive
-# hyphens are rejected because the shared-workspace hostname scheme
-# (``<name>--<host>--<user>.<domain>``) uses ``--`` as its separator, so a
-# registered name containing ``--`` would be unparseable there; this mirrors
-# the registration rule in the workspace template's ``forward_port.py``.
-# Service names that collide with the agent coordinate (``agent-<hex>``) are
-# rejected separately at registration.
-_SERVICE_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# A single service label usable as a hostname label: lowercase alphanumeric/
+# underscore runs joined by single hyphens (so no leading/trailing/consecutive
+# hyphens). Underscores are allowed -- ``system_interface`` predates this
+# scheme and underscore hostname labels resolve fine in practice (Cloudflare
+# DNS and Chromium both accept them). Consecutive hyphens are rejected because
+# the shared-workspace hostname scheme (``<name>--<host>--<user>.<domain>``)
+# uses ``--`` as its separator, so a registered name containing ``--`` would
+# be unparseable there; this mirrors the registration rule in the workspace
+# template's ``forward_port.py``. Service names that collide with the agent
+# coordinate (``agent-<hex>``) are rejected separately at registration.
+_SERVICE_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9_]+(?:-[a-z0-9_]+)*$")
 
 
 class ServiceLabel(NonEmptyStr):
-    """A DNS-safe service name label (lowercase alphanumeric + single hyphens)."""
+    """A service name usable as a hostname label (lowercase alphanumeric/underscore + single hyphens)."""
 
     def __new__(cls, value: str) -> "ServiceLabel":
         instance = super().__new__(cls, value)
         if _SERVICE_LABEL_RE.match(str(instance)) is None:
             raise InvalidPrimitiveValueError(
-                f"{cls.__name__} must be lowercase alphanumeric runs joined by single hyphens (got {value!r})"
+                f"{cls.__name__} must be lowercase alphanumeric/underscore runs joined by single hyphens (got {value!r})"
             )
         return instance
 
@@ -60,7 +62,7 @@ class ServiceLabel(NonEmptyStr):
 #
 # ``127.0.0.1`` stays a synonym for ``localhost``.
 FORWARD_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(?:(?P<labels>[a-z0-9-]+(?:\.[a-z0-9-]+)*)\.)?(?P<agent>agent-[a-f0-9]+)\.(?P<suffix>localhost|127\.0\.0\.1)(?::\d+)?$",
+    r"^(?:(?P<labels>[a-z0-9_-]+(?:\.[a-z0-9_-]+)*)\.)?(?P<agent>agent-[a-f0-9]+)\.(?P<suffix>localhost|127\.0\.0\.1)(?::\d+)?$",
     re.IGNORECASE,
 )
 

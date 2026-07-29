@@ -264,7 +264,7 @@ _QUESTION_SERVICES_AGENT_REGISTERED: Final[str] = "Is the system-services agent 
 _QUESTION_CAN_RUN_COMMANDS_INSIDE: Final[str] = "Can we run a command inside the container?"
 _QUESTION_SERVICES_AGENT_RUNNING: Final[str] = "Is the system-services agent running?"
 _QUESTION_SYSTEM_INTERFACE_RUNNING: Final[str] = "Is the system_interface service running under supervisord?"
-_QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system-interface inner port?"
+_QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system_interface inner port?"
 _QUESTION_CURL_OK: Final[str] = "Does the inner web server answer GET / inside the container?"
 _QUESTION_PLUGIN_RESOLVER: Final[str] = "Has the system interface registered with the plugin resolver?"
 
@@ -522,14 +522,14 @@ def _build_services_agent_running_probe(
 
 
 def _supervisorctl_status_inner_command() -> str:
-    """In-container ``supervisorctl status`` for the system-interface service.
+    """In-container ``supervisorctl status`` for the system_interface service.
 
     Pointed at the workspace config (``-c /home/user/workspace/system/supervisord.conf``)
     so it finds the unix socket declared there; the default config search path
     does not include that file. Prints supervisord's own status line, e.g.
-    ``system-interface   RUNNING   pid 42, uptime 0:10:00``.
+    ``system_interface   RUNNING   pid 42, uptime 0:10:00``.
     """
-    return "supervisorctl -c /home/user/workspace/system/supervisord.conf status system-interface"
+    return "supervisorctl -c /home/user/workspace/system/supervisord.conf status system_interface"
 
 
 def _build_system_interface_probe(

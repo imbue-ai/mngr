@@ -68,11 +68,11 @@ def test_resolve_port_strategy_returns_fixed_url(ssh_info: RemoteSSHInfo) -> Non
 
 def test_resolve_named_service_returns_its_url() -> None:
     """A service origin resolves to that service's registered URL, not the shell's."""
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system-interface"))
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     resolver.add_known_agent(TEST_AGENT_ID_1)
     resolver.update_services(
         TEST_AGENT_ID_1,
-        {"system-interface": "http://127.0.0.1:9100", "terminal": "http://127.0.0.1:7681"},
+        {"system_interface": "http://127.0.0.1:9100", "terminal": "http://127.0.0.1:7681"},
     )
     target = resolver.resolve(TEST_AGENT_ID_1, "terminal")
     assert target is not None
@@ -81,19 +81,19 @@ def test_resolve_named_service_returns_its_url() -> None:
 
 def test_resolve_named_service_returns_none_when_unregistered() -> None:
     """An unknown-but-plausible service on a known agent is unroutable (loading page)."""
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system-interface"))
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     resolver.add_known_agent(TEST_AGENT_ID_1)
-    resolver.update_services(TEST_AGENT_ID_1, {"system-interface": "http://127.0.0.1:9100"})
+    resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:9100"})
     assert resolver.resolve(TEST_AGENT_ID_1, "nonexistent") is None
 
 
 def test_resolve_named_service_returns_none_for_unknown_agent() -> None:
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system-interface"))
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     assert resolver.resolve(TEST_AGENT_ID_1, "terminal") is None
 
 
 def test_resolve_named_service_includes_ssh_info(ssh_info: RemoteSSHInfo) -> None:
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system-interface"))
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     resolver.add_known_agent(TEST_AGENT_ID_1)
     resolver.update_services(TEST_AGENT_ID_1, {"terminal": "http://127.0.0.1:7681"})
     resolver.update_ssh_info(TEST_AGENT_ID_1, ssh_info)
