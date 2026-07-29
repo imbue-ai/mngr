@@ -69,7 +69,7 @@ LATCHKEY_VERSION: Final[str] = "3.2.0"
 # provisioning -- the gateway run script guards on the binaries' presence and
 # falls back to system curl when they're absent.
 _DATALIB_REPO: Final[str] = "imbue-ai/datalib"
-DATALIB_CURL_VERSION: Final[str] = "v0.22.0"
+DATALIB_CURL_VERSION: Final[str] = "v0.25.0"
 # Where the two binaries land on the VPS. ``/usr/local/bin`` is already on the
 # gateway run script's PATH, and the dispatch curl finds the impersonator as a sibling.
 _CURL_IMPERSONATE_INSTALL_DIR: Final[str] = "/usr/local/bin"

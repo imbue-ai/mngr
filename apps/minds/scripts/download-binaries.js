@@ -45,7 +45,7 @@ const DESYNC_VERSION = '1.0.3';
 // EXPECTED_SHA256 to match (the tarball filename is version-less, so the
 // old hash would otherwise be checked against the new bytes and fail).
 const DATALIB_REPO = 'imbue-ai/datalib';
-const DATALIB_CURL_VERSION = 'v0.22.0';
+const DATALIB_CURL_VERSION = 'v0.25.0';
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -77,8 +77,8 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
   // From the datalib release named by DATALIB_CURL_VERSION
   // (`curl-<triple>.tar.gz.sha256`).
-  'curl-aarch64-apple-darwin.tar.gz':      '6d03bed2b15005766df8af3362dc6489690552718b4f4f77644dc80e09a6d0b9',
-  'curl-x86_64-unknown-linux-gnu.tar.gz':  '6f881600d3d56d7033c7e12906bc3146e233bcdd14b458061e52f7111cf7a9eb',
+  'curl-aarch64-apple-darwin.tar.gz':      '36cc5f91fc1e2401e161520b1cc97c8b7d31a54048d85f04a7bc7c3dacaf6931',
+  'curl-x86_64-unknown-linux-gnu.tar.gz':  '76f65f6c7843b95e1a05ebad572074bf6d25deb4059f1435593299884c4f627a',
 };
 
 const MAX_REDIRECTS = 5;
