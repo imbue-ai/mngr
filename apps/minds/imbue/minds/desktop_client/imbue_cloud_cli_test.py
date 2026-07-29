@@ -5,6 +5,7 @@ import pytest
 from pydantic import AnyUrl
 
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
@@ -56,6 +57,57 @@ def test_expect_success_raises_typed_quota_error_with_server_message() -> None:
         cli._expect_success(result, "bucket create")
     assert "allows 5 buckets" in str(exc_info.value)
     assert "bucket create" in str(exc_info.value)
+
+
+def test_expect_success_raises_typed_auth_error_carrying_the_connector_status() -> None:
+    """A rejected sign-in keeps the connector's verdict instead of collapsing to the exit-code message.
+
+    ``mngr imbue_cloud auth signin`` exits 1 for a rejection, writing the
+    connector's status + message as its JSON error body. The sign-in page shows
+    real copy (and its "create one" sign-up path) only when that status
+    survives, so it must not fall through to the generic branch.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    body = json.dumps(
+        {
+            "error": "Incorrect email or password",
+            "error_class": "AuthFailed",
+            "status": "WRONG_CREDENTIALS",
+            "needs_email_verification": False,
+        },
+        indent=2,
+    )
+    result = MngrCallResult(returncode=1, stdout="", stderr="a log line first\n" + body + "\n")
+
+    with pytest.raises(ImbueCloudAuthFailedCliError) as exc_info:
+        cli._expect_success(result, "auth signin")
+
+    assert exc_info.value.auth_status == "WRONG_CREDENTIALS"
+    assert exc_info.value.auth_message == "Incorrect email or password"
+
+
+def test_expect_success_auth_body_without_a_status_stays_a_plain_error() -> None:
+    """The plugin's own malformed-response guard emits no status; it is not a connector verdict."""
+    cli = make_fake_imbue_cloud_cli()
+    body = json.dumps({"error": "Auth response missing required fields", "error_class": "AuthFailed"}, indent=2)
+    result = MngrCallResult(returncode=1, stdout="", stderr=body + "\n")
+
+    with pytest.raises(ImbueCloudAuthFailedCliError) as exc_info:
+        cli._expect_success(result, "auth signin")
+
+    assert exc_info.value.auth_status == "ERROR"
+    assert exc_info.value.auth_message == "Auth response missing required fields"
+
+
+def test_expect_success_unstructured_failure_is_not_reported_as_an_auth_verdict() -> None:
+    """A crash / unreachable connector must not masquerade as a credential verdict."""
+    cli = make_fake_imbue_cloud_cli()
+    result = MngrCallResult(returncode=1, stdout="", stderr="httpx.ConnectError: Name or service not known\n")
+
+    with pytest.raises(ImbueCloudCliError) as exc_info:
+        cli._expect_success(result, "auth signin")
+
+    assert not isinstance(exc_info.value, ImbueCloudAuthFailedCliError)
 
 
 def test_parse_stderr_error_message_survives_surrounding_log_lines() -> None:

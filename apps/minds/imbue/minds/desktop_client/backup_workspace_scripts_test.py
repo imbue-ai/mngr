@@ -602,6 +602,10 @@ def test_apply_update_is_blocked_by_running_chats_without_stop_flag(tmp_path: Pa
     assert payload["running_chats"] == ["chat-1"]
 
 
+# Runs the apply-update script twice (apply, then re-check) over a real git
+# repo, which exceeds the 10s default under a loaded parallel run. Same 120s
+# budget the restore-script tests below already take for the same reason.
+@pytest.mark.timeout(120)
 def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     tag_newer_release_content(repo)

@@ -8,7 +8,12 @@
   Account actions reuse the existing POST routes (/accounts/set-default,
   /accounts/<id>/logout) via fetch + a reload of this page, so the redirect
   those routes answer with never navigates the modal iframe to the full page.
-  "Add account" / "Sign in again" swap the overlay to the sign-in modal.
+  Both take long enough to need an in-flight state (sign-out shells out to
+  ``mngr imbue_cloud auth signout``, tears down the account's provider block
+  and bounces the discovery supervisor), so each action button carries a
+  hidden spinner + a label span the script swaps -- the same busy treatment
+  the inbox's Approve button uses. "Add account" / "Sign in again" swap the
+  overlay to the sign-in modal.
 
   ``enabled_by_user_id`` maps each account's user_id to whether its
   ``[providers.imbue_cloud_<slug>]`` block is enabled in settings.toml; a
@@ -29,26 +34,111 @@
       });
     }
 
+    // -- In-flight state for the per-account actions --
+    //
+    // Both actions POST and then re-render this page, and sign-out in
+    // particular runs for seconds (plugin signout subprocess, provider
+    // teardown, supervisor bounce). Until this was here the buttons looked
+    // untouched for that whole stretch, so a click read as "nothing
+    // happened". The clicked button now swaps its label for a busy one and
+    // reveals its spinner, and *every* action in the modal is disabled so a
+    // second click can't race the first (two overlapping sign-outs would
+    // reload this page out from under each other).
+    var actionButtons = Array.prototype.slice.call(
+      document.querySelectorAll("[data-set-default], [data-logout]")
+    );
+    // Remember each at-rest label so clearing the busy state restores it
+    // verbatim instead of re-deriving text the template owns.
+    actionButtons.forEach(function (btn) {
+      var label = btn.querySelector(".account-action-label");
+      if (label) label.setAttribute("data-idle-label", label.textContent);
+    });
+
+    function setActionsBusy(clickedButton, busyLabel) {
+      actionButtons.forEach(function (btn) { btn.disabled = true; });
+      var spinner = clickedButton.querySelector(".account-action-spinner");
+      var label = clickedButton.querySelector(".account-action-label");
+      if (spinner) spinner.classList.remove("hidden");
+      if (label) label.textContent = busyLabel;
+    }
+
+    function clearActionsBusy() {
+      actionButtons.forEach(function (btn) {
+        btn.disabled = false;
+        var spinner = btn.querySelector(".account-action-spinner");
+        var label = btn.querySelector(".account-action-label");
+        if (spinner) spinner.classList.add("hidden");
+        if (label && label.getAttribute("data-idle-label")) {
+          label.textContent = label.getAttribute("data-idle-label");
+        }
+      });
+    }
+
+    function showActionError(message) {
+      var errorEl = document.getElementById("accounts-modal-error");
+      if (!errorEl) return;
+      errorEl.textContent = message;
+      errorEl.classList.remove("hidden");
+    }
+
+    function hideActionError() {
+      var errorEl = document.getElementById("accounts-modal-error");
+      if (errorEl) errorEl.classList.add("hidden");
+    }
+
+    // A restore from the back/forward cache replays this document exactly as
+    // it was left -- including buttons disabled mid-action -- so reset them.
+    window.addEventListener("pageshow", function (e) {
+      if (e.persisted) clearActionsBusy();
+    });
+
     // Set-default / log-out POST via fetch, then re-render this modal page so
     // the list reflects the new state. The routes answer with a redirect to
     // the full accounts page; following it inside the modal iframe would
     // strand the full page in the overlay, so the response body is ignored.
-    function postThenReload(url, body) {
+    function postThenReload(url, body, clickedButton, busyLabel, failureMessage) {
+      hideActionError();
+      setActionsBusy(clickedButton, busyLabel);
       fetch(url, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: body || "",
-      }).then(function () { window.location.reload(); }).catch(function () { window.location.reload(); });
+      }).then(function (response) {
+        if (!response.ok) {
+          clearActionsBusy();
+          showActionError(failureMessage);
+          return;
+        }
+        // The busy state deliberately stays up across the reload: the action
+        // really is still settling, and the fresh document replaces these
+        // buttons outright, so it cannot get stuck.
+        window.location.reload();
+      }).catch(function () {
+        clearActionsBusy();
+        showActionError(failureMessage);
+      });
     }
     document.querySelectorAll("[data-set-default]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        postThenReload("/accounts/set-default", "user_id=" + encodeURIComponent(btn.getAttribute("data-set-default")));
+        postThenReload(
+          "/accounts/set-default",
+          "user_id=" + encodeURIComponent(btn.getAttribute("data-set-default")),
+          btn,
+          "Switching…",
+          "Could not switch the default account. Try again."
+        );
       });
     });
     document.querySelectorAll("[data-logout]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        postThenReload("/accounts/" + encodeURIComponent(btn.getAttribute("data-logout")) + "/logout");
+        postThenReload(
+          "/accounts/" + encodeURIComponent(btn.getAttribute("data-logout")) + "/logout",
+          "",
+          btn,
+          "Logging out…",
+          "Could not log out of this account. Try again."
+        );
       });
     });
 
@@ -95,6 +185,10 @@
       <DialogCloseButton onclick="dismissAccountsModal()" />
       <h1 class="type-heading-lg text-primary mb-6">Manage Accounts</h1>
 
+      {# Surfaces a failed set-default / log-out. Without it a failure just
+         restored the buttons, which reads as "my click did nothing". #}
+      <Notice variant="error" id="accounts-modal-error" class="hidden mb-4"></Notice>
+
       {% if accounts %}
         <div class="flex flex-col gap-2">
         {% for acct in accounts %}
@@ -117,11 +211,15 @@
                 <Button variant="primary" onclick="openAddAccount()">Sign in again</Button>
               {% endif %}
               {% if acct.user_id | string != default_account_id %}
-                <Button variant="secondary" :data-set-default="acct.user_id">Set default</Button>
+                <Button variant="secondary" :data-set-default="acct.user_id">
+                  <span class="account-action-spinner hidden"><Spinner size="sm" /></span><span class="account-action-label">Set default</span>
+                </Button>
               {% else %}
                 <span class="inline-flex items-center justify-center px-3 py-2 rounded-md type-label bg-fill-subtle text-primary border border-default opacity-60 cursor-default">Default</span>
               {% endif %}
-              <Button variant="danger" :data-logout="acct.user_id">Log out</Button>
+              <Button variant="danger" :data-logout="acct.user_id">
+                <span class="account-action-spinner hidden"><Spinner size="sm" tone="inverse" /></span><span class="account-action-label">Log out</span>
+              </Button>
             </div>
           </Card>
         {% endfor %}

@@ -176,6 +176,25 @@
       }
     };
 
+    // Re-label the account launcher from the chrome SSE's account fields. The
+    // launcher is server-rendered, but a sign-out / sign-in / "Set default"
+    // happens in an overlay modal on top of this page, which is never
+    // reloaded -- so without this it keeps showing an account that is no
+    // longer signed in, and ``data-signed-in`` (which decides whether a click
+    // opens Manage Accounts or the sign-in modal) stays wrong too.
+    function applyAccountLauncher(data) {
+      if (typeof data.account_email !== 'string') return;
+      var button = document.getElementById('landing-account');
+      if (!button) return;
+      var extraCount = data.extra_account_count || 0;
+      var label = data.account_email
+        ? data.account_email + (extraCount > 0 ? ' (+' + extraCount + ')' : '')
+        : 'Log in';
+      button.setAttribute('data-signed-in', data.account_email ? 'true' : 'false');
+      var labelEl = button.querySelector('span');
+      if (labelEl && labelEl.textContent !== label) labelEl.textContent = label;
+    }
+
     window.landingOpenInNewWindow = function (button) {
       var row = button.closest('[data-agent-id]');
       if (!row) return;
@@ -767,6 +786,9 @@
           return;
         }
         if (data.type !== 'workspaces' || !Array.isArray(data.workspaces)) return;
+        // Applied before the reload paths below, which all key off the
+        // workspace list -- an account change moves nothing in it.
+        applyAccountLauncher(data);
         var liveIds = data.workspaces.map(function (w) { return w.id; });
         var liveSet = new Set(liveIds);
         var added = liveIds.some(function (id) { return !renderedSet.has(id); });

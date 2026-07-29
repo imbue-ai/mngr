@@ -116,6 +116,7 @@ from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
+from imbue.minds.desktop_client.supertokens_routes import wake_chrome_event_streams
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -875,6 +876,27 @@ def _account_launcher_context(session_store: MultiAccountSessionStore | None) ->
             shown = account
             break
     return str(shown.email), len(accounts) - 1
+
+
+def _build_account_launcher_payload(session_store: MultiAccountSessionStore | None) -> dict[str, object]:
+    """The account-identity fields every chrome ``workspaces`` frame carries.
+
+    The home screen's bottom-left launcher is server-rendered from the same
+    ``_account_launcher_context``, but the page stays put across a sign-out /
+    sign-in / default-account switch made in an overlay modal. Carrying the
+    identity on the stream is what lets the launcher re-label itself (and flip
+    ``data-signed-in``, which decides whether clicking it opens Manage Accounts
+    or the sign-in modal) without a reload. ``has_accounts`` is derived from the
+    account list rather than the email so the welcome splash's self-advance
+    keeps its exact "any account at all" meaning.
+    """
+    accounts = session_store.list_accounts() if session_store else []
+    launcher_email, launcher_extra_count = _account_launcher_context(session_store)
+    return {
+        "has_accounts": bool(accounts),
+        "account_email": launcher_email,
+        "extra_account_count": launcher_extra_count,
+    }
 
 
 def _compute_cloud_tile_state(
@@ -1695,7 +1717,7 @@ def _handle_chrome_events() -> Response:
             )
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
             last_remote_states = _build_remote_tile_states(backend_resolver, session_store)
-            has_accounts = bool(session_store and session_store.list_accounts())
+            last_account_payload = _build_account_launcher_payload(session_store)
             # The agent ids the shell may restore windows to: live workspaces plus
             # any from the persisted last-good topology not yet re-discovered this
             # session. Lets restore decline to drop a window whose workspace is
@@ -1707,9 +1729,9 @@ def _handle_chrome_events() -> Response:
                         "type": "workspaces",
                         "workspaces": last_workspace_data,
                         "destroying_agent_ids": last_destroying_ids,
-                        "has_accounts": has_accounts,
                         "restorable_workspace_ids": last_restorable_ids,
                         "remote_workspace_states": last_remote_states,
+                        **last_account_payload,
                     }
                 )
             )
@@ -1848,14 +1870,21 @@ def _handle_chrome_events() -> Response:
                 )
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
                 current_remote_states = _build_remote_tile_states(backend_resolver, session_store)
+                # A sign-in / sign-out / default-account switch changes nothing
+                # about the workspace list, so the account payload is its own
+                # diff term -- otherwise the launcher would keep the label of an
+                # account that is no longer signed in.
+                current_account_payload = _build_account_launcher_payload(session_store)
                 if (
                     current_data != last_workspace_data
                     or current_destroying_ids != last_destroying_ids
                     or current_remote_states != last_remote_states
+                    or current_account_payload != last_account_payload
                 ):
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
                     last_remote_states = current_remote_states
+                    last_account_payload = current_account_payload
                     yield "data: {}\n\n".format(
                         json.dumps(
                             {
@@ -1863,6 +1892,7 @@ def _handle_chrome_events() -> Response:
                                 "workspaces": current_data,
                                 "destroying_agent_ids": current_destroying_ids,
                                 "remote_workspace_states": current_remote_states,
+                                **current_account_payload,
                             }
                         )
                     )
@@ -3150,6 +3180,9 @@ def _handle_set_default_account() -> Response:
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config and user_id:
         minds_config.set_default_account_id(user_id)
+        # The home screen's account launcher shows the default account, so the
+        # open windows behind this modal need to re-read it.
+        wake_chrome_event_streams()
     return make_response(status_code=303, headers={"Location": "/accounts"})
 
 

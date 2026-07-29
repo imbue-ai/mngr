@@ -59,6 +59,39 @@
     el.classList.remove('hidden');
   }
 
+  // A rejected sign-in, plus a one-click path to sign-up carrying the address
+  // they already typed.
+  //
+  // The copy deliberately does not claim the account does not exist: the auth
+  // backend answers the same WRONG_CREDENTIALS whether the password was wrong
+  // or no account has that email (telling those apart would leak which emails
+  // are registered), so "sign up instead" would be flat wrong for anyone who
+  // merely fat-fingered their password. The message stays accurate about what
+  // is actually known and makes creating an account the next click.
+  function showSigninCredentialsError(msg) {
+    var el = document.getElementById('signin-error');
+    if (!el) return;
+    // The server's message ("Incorrect email or password") leads the sentence;
+    // any trailing period is dropped so the follow-up reads as one thought.
+    var reason = (msg || 'Incorrect email or password').replace(/[.\s]+$/, '');
+    el.textContent = reason + '. If you don\'t have an account yet, ';
+    var signupLink = document.createElement('a');
+    signupLink.href = '#';
+    signupLink.textContent = 'create one';
+    // The document-level [data-show-tab] handler does the tab switch; this
+    // listener only carries the typed email over to the sign-up form.
+    signupLink.setAttribute('data-show-tab', 'signup');
+    signupLink.className = 'underline font-semibold cursor-pointer';
+    signupLink.addEventListener('click', function () {
+      var signinEmail = document.getElementById('signin-email');
+      var signupEmail = document.getElementById('signup-email');
+      if (signinEmail && signupEmail) signupEmail.value = signinEmail.value;
+    });
+    el.appendChild(signupLink);
+    el.appendChild(document.createTextNode('.'));
+    el.classList.remove('hidden');
+  }
+
   async function handleSignup(e) {
     e.preventDefault();
     document.getElementById('signup-error').classList.add('hidden');
@@ -119,7 +152,7 @@
         if (data.needsEmailVerification) goToCheckEmail();
         else onAuthSuccess();
       } else if (data.status === 'WRONG_CREDENTIALS') {
-        showError('signin', data.message);
+        showSigninCredentialsError(data.message);
       } else {
         showError('signin', data.message || 'Sign-in failed');
       }

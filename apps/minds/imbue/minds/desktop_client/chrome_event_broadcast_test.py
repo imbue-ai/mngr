@@ -44,6 +44,41 @@ def test_unsubscribed_connection_stops_receiving_broadcasts() -> None:
     assert not wake_event.is_set()
 
 
+def test_wake_subscribers_wakes_every_connection_without_queuing_anything() -> None:
+    """The payload-free wake used after an auth change.
+
+    The SSE loop re-derives the signed-in identity whenever it wakes, so the
+    producer only has to ask it to look again -- delivering a payload would
+    make the stream carry a frame no client acts on.
+    """
+    broadcaster = ChromeEventBroadcaster()
+    first_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    second_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    first_event = threading.Event()
+    second_event = threading.Event()
+    broadcaster.subscribe(first_queue, first_event)
+    broadcaster.subscribe(second_queue, second_event)
+
+    broadcaster.wake_subscribers()
+
+    assert first_event.is_set()
+    assert second_event.is_set()
+    assert first_queue.empty()
+    assert second_queue.empty()
+
+
+def test_wake_subscribers_skips_unsubscribed_connections() -> None:
+    broadcaster = ChromeEventBroadcaster()
+    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    wake_event = threading.Event()
+    broadcaster.subscribe(event_queue, wake_event)
+    broadcaster.unsubscribe(event_queue, wake_event)
+
+    broadcaster.wake_subscribers()
+
+    assert not wake_event.is_set()
+
+
 def test_broadcast_with_no_subscribers_is_a_noop() -> None:
     # No window is subscribed, so the payload is simply dropped (there is nowhere to act on it).
     ChromeEventBroadcaster().broadcast(build_workspace_stopped_payload("agent-1"))

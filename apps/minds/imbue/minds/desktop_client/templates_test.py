@@ -3081,6 +3081,27 @@ def test_render_accounts_modal_page_cards_open_the_plan_modal() -> None:
     assert "openAccountPlan" in html
 
 
+def test_render_accounts_modal_page_account_actions_carry_the_busy_affordances() -> None:
+    """Both slow account actions ship the hooks their in-flight state needs.
+
+    Sign-out runs for seconds (plugin signout, provider teardown, supervisor
+    bounce), so the clicked button swaps its label and reveals a spinner. The
+    script binds by these class names, so a card without them would leave the
+    button looking untouched for the whole wait -- the bug this fixes.
+    """
+    # Not the default account, so both actions render on the card.
+    acct = SimpleNamespace(user_id="u-1", email="a@b.com", workspace_ids=[])
+    html = render_accounts_modal_page(accounts=[acct], default_account_id="u-other")
+
+    assert html.count('class="account-action-spinner hidden"') == 2
+    assert html.count('class="account-action-label"') == 2
+    assert "Logging out" in html
+    assert "Switching" in html
+    # Failures surface in the notice instead of silently restoring the buttons.
+    assert 'id="accounts-modal-error"' in html
+    assert "Could not log out of this account" in html
+
+
 def test_render_destroyed_workspaces_page_shell_is_async_without_rows() -> None:
     # The shell must paint instantly: it carries the retention copy and the
     # async fetch hook, but embeds no rows (those come from the rows fragment).

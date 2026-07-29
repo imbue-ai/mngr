@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import re
@@ -994,6 +995,41 @@ class _NoopRemediator(ProducerRemediator):
         pass
 
 
+def test_chrome_events_workspaces_payload_carries_the_account_launcher_identity(tmp_path: Path) -> None:
+    """Every ``workspaces`` frame names the account the home screen's launcher must show.
+
+    The launcher is server-rendered, so a sign-out or "Set default" performed in
+    an overlay modal on top of the (never reloaded) home screen only reaches it
+    through this payload. The default account is the one shown; the rest are the
+    "(+N)" suffix.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-first", email="first@example.com")
+    cli.add_account(user_id="user-second", email="second@example.com")
+    minds_config = MindsConfig(data_dir=tmp_path)
+    minds_config.set_default_account_id("user-second")
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        imbue_cloud_cli=cli,
+        session_store=make_session_store_for_test(tmp_path, cli=cli),
+        minds_config=minds_config,
+    )
+    # End the stream right after its connect-time batch so the client doesn't block.
+    get_state(app).shutdown_event.set()
+    client = app.test_client()
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/_chrome/events")
+
+    assert response.status_code == 200
+    assert '"account_email": "second@example.com"' in response.text
+    assert '"extra_account_count": 1' in response.text
+    assert '"has_accounts": true' in response.text
+
+
 def test_chrome_events_sse_emits_discovery_health_blocked_on_connect(tmp_path: Path) -> None:
     """A BLOCKED watchdog makes the chrome SSE emit a discovery_health payload on connect.
 
@@ -1316,6 +1352,89 @@ def _create_test_client_with_auth_routes(tmp_path: Path, has_signed_in_before: b
         session_store=session_store,
     )
     return app.test_client()
+
+
+def _create_test_client_with_failing_auth_cli(tmp_path: Path, plugin_stderr: str) -> FlaskClient:
+    """Auth-routes client whose ``mngr imbue_cloud auth ...`` subprocess always fails.
+
+    ``plugin_stderr`` is the failure output verbatim, so everything between the
+    subprocess boundary and the browser runs for real: ``_expect_success``'s
+    classification, the auth shim's translation, and the JSON body the sign-in
+    page keys off.
+    """
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout="", stderr=plugin_stderr))
+    cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL, mngr_caller=caller)
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        imbue_cloud_cli=cli,
+        session_store=make_session_store_for_test(tmp_path, cli=cli),
+    )
+    return app.test_client()
+
+
+def _plugin_auth_failure_stderr(message: str, status: str) -> str:
+    """The JSON body ``fail_with_json`` writes for a connector auth rejection."""
+    return json.dumps(
+        {"error": message, "error_class": "AuthFailed", "status": status, "needs_email_verification": False},
+        indent=2,
+    )
+
+
+def test_signin_api_surfaces_the_connector_verdict_not_the_cli_failure_string(tmp_path: Path) -> None:
+    """A rejected sign-in reaches the browser as WRONG_CREDENTIALS + the connector's message.
+
+    The plugin CLI exits non-zero for a rejection, and the raw CLI failure
+    string ("auth signin failed (exit 1); see the desktop client logs for
+    details") used to be what the sign-in form displayed. auth.js only offers
+    its "create one" sign-up path on the WRONG_CREDENTIALS status, so the
+    status has to survive the trip.
+    """
+    client = _create_test_client_with_failing_auth_cli(
+        tmp_path, _plugin_auth_failure_stderr("Incorrect email or password", "WRONG_CREDENTIALS")
+    )
+
+    response = client.post("/auth/api/signin", json={"email": "nobody@example.com", "password": "wrong-password"})
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body == {"status": "WRONG_CREDENTIALS", "message": "Incorrect email or password"}
+
+
+def test_signup_api_surfaces_the_connector_verdict_not_the_cli_failure_string(tmp_path: Path) -> None:
+    """Same recovery for sign-up: the duplicate-email verdict must reach the form."""
+    client = _create_test_client_with_failing_auth_cli(
+        tmp_path, _plugin_auth_failure_stderr("An account with this email already exists", "EMAIL_ALREADY_EXISTS")
+    )
+
+    response = client.post("/auth/api/signup", json={"email": "taken@example.com", "password": "hunter2hunter2"})
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body == {"status": "EMAIL_ALREADY_EXISTS", "message": "An account with this email already exists"}
+
+
+def test_signin_api_replaces_an_unstructured_cli_failure_with_actionable_copy(tmp_path: Path) -> None:
+    """A failure the connector never judged (crash, unreachable) gets generic copy, not CLI text.
+
+    There is no status to recover here, so the only requirement is that the
+    user never sees the exit-code string -- the detail stays in the logs.
+    """
+    client = _create_test_client_with_failing_auth_cli(
+        tmp_path,
+        "Traceback (most recent call last):\nhttpx.ConnectError: [Errno -2] Name or service not known\n",
+    )
+
+    response = client.post("/auth/api/signin", json={"email": "someone@example.com", "password": "pw"})
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "ERROR"
+    assert "exit 1" not in body["message"]
+    assert "desktop client logs" not in body["message"]
+    assert "Traceback" not in body["message"]
+    assert "check your internet connection" in body["message"].lower()
 
 
 def test_auth_login_page_renders_message_query_param(tmp_path: Path) -> None:

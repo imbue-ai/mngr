@@ -20,6 +20,10 @@ Events are fire-and-forget: with no subscriber the payload is dropped (there is
 no window to act on it). The broker pushes directly onto subscriber queues
 rather than invoking callbacks, mirroring the per-connection queue + ``Event``
 wake the SSE loop already uses for health transitions.
+
+``wake_subscribers`` is the payload-free variant, for state the stream
+re-derives itself each wake (e.g. which account is signed in): the producer
+just asks every connection to look again.
 """
 
 import queue
@@ -65,6 +69,21 @@ class ChromeEventBroadcaster(MutableModel):
             subscribers = list(self._subscribers)
         for event_queue, wake_event in subscribers:
             event_queue.put(dict(payload))
+            wake_event.set()
+
+    def wake_subscribers(self) -> None:
+        """Wake every subscribed connection's loop without enqueuing a payload.
+
+        For facts the stream already re-derives from server state on each wake
+        (which account the home screen's launcher shows), the producer only has
+        to say "look again" -- exactly what the backend resolver's on-change
+        callback does. Without this, an account change made in a Flask request
+        thread would not reach an open window until the loop's next idle
+        timeout.
+        """
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for _event_queue, wake_event in subscribers:
             wake_event.set()
 
 

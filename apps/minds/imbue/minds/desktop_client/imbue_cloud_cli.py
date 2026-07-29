@@ -55,6 +55,13 @@ _CONNECTOR_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_UR
 # (like the 503 unavailable_signal) because log lines may surround the body.
 _QUOTA_ERROR_CLASS_SIGNAL = "ImbueCloudQuotaExceededError"
 
+# The plugin's error_class marker for a structured auth rejection, written by
+# ``_persist_auth_response`` in the plugin's auth CLI whenever the connector
+# answers an auth call with a non-OK status. Matched on the parsed body's
+# ``error_class`` field rather than as a substring, because the accompanying
+# ``status`` has to be read out of that body anyway.
+_AUTH_FAILED_ERROR_CLASS = "AuthFailed"
+
 
 class ImbueCloudCliError(MindError):
     """Raised when a `mngr imbue_cloud ...` invocation returns a non-zero exit code.
@@ -82,6 +89,21 @@ class ImbueCloudQuotaExceededCliError(ImbueCloudCliError):
     as terminal and surface it immediately instead of burning their retry
     budget.
     """
+
+
+class ImbueCloudAuthFailedCliError(ImbueCloudCliError):
+    """The auth backend rejected an ``auth signin`` / ``signup`` / ``oauth`` attempt.
+
+    ``auth_status`` carries the connector's own verdict (``WRONG_CREDENTIALS``,
+    ``EMAIL_ALREADY_EXISTS``, ``FIELD_ERROR``, ...) and ``auth_message`` its
+    user-facing explanation. Keeping both typed is what lets the sign-in UI
+    render real copy: without this subclass every rejection collapses into the
+    deliberately traceback-free "<command> failed (exit N)" fallback, which is
+    right for a log line and useless in a sign-in form.
+    """
+
+    auth_status: str = "ERROR"
+    auth_message: str = ""
 
 
 class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
@@ -262,6 +284,19 @@ class ImbueCloudCli(MutableModel):
             quota_exc.stdout = result.stdout
             quota_exc.stderr = result.stderr
             raise quota_exc
+        auth_failure_body = _parse_auth_failure_body(result.stderr)
+        if auth_failure_body is not None:
+            auth_message = str(auth_failure_body["error"])
+            raw_status = auth_failure_body.get("status")
+            auth_exc = ImbueCloudAuthFailedCliError(f"{command_repr}: {auth_message}")
+            # A body without a ``status`` is the plugin's own malformed-response
+            # guard rather than a connector verdict, so it stays a plain ERROR.
+            auth_exc.auth_status = raw_status if isinstance(raw_status, str) and raw_status else "ERROR"
+            auth_exc.auth_message = auth_message
+            auth_exc.exit_code = exit_code
+            auth_exc.stdout = result.stdout
+            auth_exc.stderr = result.stderr
+            raise auth_exc
         # Log the full subprocess output server-side -- it may be a multi-line
         # Python traceback (e.g. an httpx transport error inside the connector
         # subprocess) -- but keep the exception *message* clean and
@@ -855,11 +890,13 @@ def _parse_conflict_stored(stderr: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_stderr_error_message(stderr: str) -> str | None:
-    """Extract the ``error`` message from the plugin's JSON stderr body, if present.
+def _parse_stderr_error_body(stderr: str) -> dict[str, Any] | None:
+    """Return the plugin's JSON error body from ``stderr``, if one is present.
 
     Same scanning approach as ``_parse_conflict_stored``: the body is
-    indent-formatted JSON that may be surrounded by log lines.
+    indent-formatted JSON that may be surrounded by log lines. Only a document
+    carrying a string ``error`` field counts, since that is the shape
+    ``fail_with_json`` always emits.
     """
     decoder = _json.JSONDecoder()
     offset = 0
@@ -874,9 +911,23 @@ def _parse_stderr_error_message(stderr: str) -> str | None:
                 logger.warning("Skipping a brace-prefixed non-JSON stderr line while locating the error body: {}", exc)
                 parsed = None
             if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
-                return str(parsed["error"])
+                return parsed
         offset += len(line)
     return None
+
+
+def _parse_stderr_error_message(stderr: str) -> str | None:
+    """Extract the ``error`` message from the plugin's JSON stderr body, if present."""
+    body = _parse_stderr_error_body(stderr)
+    return None if body is None else str(body["error"])
+
+
+def _parse_auth_failure_body(stderr: str) -> dict[str, Any] | None:
+    """Return the plugin's structured auth-rejection body, or None if this isn't one."""
+    body = _parse_stderr_error_body(stderr)
+    if body is None or body.get("error_class") != _AUTH_FAILED_ERROR_CLASS:
+        return None
+    return body
 
 
 def _parse_stdout_json(stdout: str, command_repr: str) -> Any:
