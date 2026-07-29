@@ -150,6 +150,11 @@ class UnisonSyncer(MutableModel):
             cmd,
             on_output=self._on_output,
             is_checked_by_group=False,
+            # Unison runs in continuous-sync mode for the whole pairing session and
+            # narrates every transfer, so retaining its output would grow without
+            # bound. ``_on_output`` already logs each line as it arrives, and nothing
+            # reads the output back.
+            is_output_accumulated=False,
         )
 
         logger.info("Started continuous sync between {} and {}", self.source_path, self.target_path)

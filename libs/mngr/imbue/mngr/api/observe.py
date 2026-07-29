@@ -565,6 +565,11 @@ class AgentObserver(MutableModel):
             command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
             on_output=self._on_discovery_stream_output,
             is_checked_by_group=False,
+            # This child streams a discovery snapshot per provider every poll interval
+            # for as long as we run, so retaining its output would grow without bound.
+            # Each line is consumed on arrival below, and stderr is logged there, so
+            # nothing needs to read the output back afterwards.
+            is_output_accumulated=False,
         )
 
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
@@ -575,9 +580,13 @@ class AgentObserver(MutableModel):
         drives starting/stopping per-host activity streams; provider error events wake
         the periodic snapshot loop so UNKNOWN state propagates quickly.
         """
-        if not is_stdout:
-            return
         stripped = line.strip()
+        if not is_stdout:
+            # Logged rather than dropped: this process keeps no output history, so this
+            # is the only place the child's stderr can still be seen.
+            if stripped:
+                logger.debug("mngr observe stderr: {}", stripped)
+            return
         if not stripped:
             return
 
@@ -674,6 +683,10 @@ class AgentObserver(MutableModel):
                 ],
                 on_output=lambda line, is_stdout: self._on_activity_event(line, is_stdout, host_id_str),
                 is_checked_by_group=False,
+                # A ``--follow`` stream lives as long as its host does, so retaining
+                # every event it ever emits would grow without bound. Lines are
+                # consumed on arrival by ``_on_activity_event``, which also logs stderr.
+                is_output_accumulated=False,
             )
             with self._lock:
                 self._events_processes[host_id_str] = process
@@ -690,9 +703,13 @@ class AgentObserver(MutableModel):
 
     def _on_activity_event(self, line: str, is_stdout: bool, host_id_str: str) -> None:
         """Handle a line of activity event output from a host."""
-        if not is_stdout:
-            return
         stripped = line.strip()
+        if not is_stdout:
+            # Logged rather than dropped: this process keeps no output history, so this
+            # is the only place the child's stderr can still be seen.
+            if stripped:
+                logger.debug("mngr event stderr for host {}: {}", host_id_str, stripped)
+            return
         if not stripped:
             return
         logger.trace("Activity event from host {}: {}", host_id_str, stripped[:200])

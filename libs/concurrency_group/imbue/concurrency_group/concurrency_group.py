@@ -216,8 +216,11 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                     setup_errors.append(error)
                 except TimeoutExpired as error:
                     command = error.cmd
-                    stdout = process.read_stdout()[:1024]
-                    stderr = process.read_stderr()[:1024]
+                    # The error already carries this process's output (or a placeholder
+                    # when it kept none), so read it from there rather than calling
+                    # read_stdout(), which raises for non-accumulating processes.
+                    stdout = str(error.stdout)[:1024]
+                    stderr = str(error.stderr)[:1024]
                     message = "\n".join(
                         [
                             f"Process {command} did not terminate in time and was killed.",
@@ -441,6 +444,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         # argument values, pass a masked/friendly ``name`` so they never reach the
         # reader thread's name (recorded in JSONL logs) or any raised error message.
         name: str | None = None,
+        is_output_accumulated: bool = True,
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -450,6 +454,12 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         being silently lost. Pass `is_checked_by_group=False` for processes the caller terminates explicitly (e.g.
         long-running streams stopped via `.terminate()`, where SIGTERM yields a non-zero exit code) or for genuine
         fire-and-forget commands whose exit code is not actionable.
+
+        Pass `is_output_accumulated=False` for a process that streams for a long time and whose output you consume
+        via `on_output`: its output is then not retained at all, instead of piling up for the process's whole life
+        (a permanent stream would otherwise grow the parent's memory without bound). `read_stdout()`/`read_stderr()`
+        raise `OutputNotAccumulatedError` in that mode, and any error raised for the process (including by
+        `is_checked_by_group`) reports a placeholder in place of its output.
         """
 
         def process_factory():
@@ -464,6 +474,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 process_class=RunningProcessWithOnLineCallback,
                 process_class_kwargs={"on_line_callback": on_output},
                 name=name,
+                is_output_accumulated=is_output_accumulated,
             )
 
         return self.start_background_process_from_factory(process_factory)

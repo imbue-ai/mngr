@@ -28,6 +28,13 @@ SUBPROCESS_STOPPED_BY_REQUEST_EXIT_CODE: Final[int] = -9999
 
 _READ_SIZE: Final[int] = 2**20
 
+# Stands in for stdout/stderr on a FinishedProcess produced with
+# ``is_output_accumulated=False``. Never an empty string: "we did not keep this"
+# must not be mistaken for "the process printed nothing".
+OUTPUT_NOT_ACCUMULATED_PLACEHOLDER: Final[str] = (
+    "<not recorded: this process was run with is_output_accumulated=False>"
+)
+
 
 class FinishedProcess(FrozenModel):
     """Represents a completed process with its output and exit status."""
@@ -72,14 +79,21 @@ class PartialOutputContainer:
     def __init__(
         self,
         on_complete_line: Callable[[str], None] | None = None,
+        is_output_accumulated: bool = True,
     ) -> None:
         self.buffer: BytesIO = BytesIO()
         self.in_progress_line: bytearray = bytearray()
         self.on_complete_line = on_complete_line
+        # When False, ``buffer`` is left empty: every byte the process ever writes
+        # would otherwise be retained here for its whole lifetime, which is unbounded
+        # growth for a long-running streaming child. Line reassembly (and therefore
+        # ``on_complete_line``) is unaffected -- only the full-history copy is dropped.
+        self.is_output_accumulated = is_output_accumulated
 
     def write(self, output: bytes) -> None:
         """Process output which may contain newlines."""
-        self.buffer.write(output)
+        if self.is_output_accumulated:
+            self.buffer.write(output)
         on_complete_line = self.on_complete_line
         if on_complete_line is None:
             return
@@ -119,6 +133,7 @@ class OutputGatherer:
         on_complete_line_from_stdout: Callable[[str], None] | None,
         on_complete_line_from_stderr: Callable[[str], None] | None,
         shutdown_event: ReadOnlyEvent,
+        is_output_accumulated: bool = True,
     ) -> Self:
         stdout = popen.stdout
         stderr = popen.stderr
@@ -130,8 +145,12 @@ class OutputGatherer:
         return cls(
             stdout=stdout,
             stderr=stderr,
-            stdout_container=PartialOutputContainer(on_complete_line=on_complete_line_from_stdout),
-            stderr_container=PartialOutputContainer(on_complete_line=on_complete_line_from_stderr),
+            stdout_container=PartialOutputContainer(
+                on_complete_line=on_complete_line_from_stdout, is_output_accumulated=is_output_accumulated
+            ),
+            stderr_container=PartialOutputContainer(
+                on_complete_line=on_complete_line_from_stderr, is_output_accumulated=is_output_accumulated
+            ),
             shutdown_event=shutdown_event,
         )
 
@@ -223,6 +242,7 @@ def run_local_command_modern_version(
     pass_fds: Sequence[int] = (),
     on_initialization_complete: Callable[[BaseException | None], None] = lambda success: None,
     name: str | None = None,
+    is_output_accumulated: bool = True,
 ) -> FinishedProcess:
     """
     Run a subprocess command and return the result.
@@ -232,6 +252,12 @@ def run_local_command_modern_version(
     ``name`` is an optional log-safe label for the command (see ``RunningProcess.name``); it is
     carried onto the returned ``FinishedProcess`` and any error raised so secret argument values
     stay out of rendered messages.
+
+    ``is_output_accumulated=False`` keeps no record of what the process printed -- intended for
+    long-running children whose output is consumed line by line via ``trace_on_line_callback``
+    and whose full history would otherwise grow without bound. The returned
+    ``FinishedProcess`` then carries ``OUTPUT_NOT_ACCUMULATED_PLACEHOLDER`` in place of its
+    output, including in any ``ProcessError`` that ``is_checked`` raises.
     """
     try:
         shutdown_event = shutdown_event or Event()
@@ -280,6 +306,7 @@ def run_local_command_modern_version(
             on_complete_line_from_stdout=on_complete_line_from_stdout,
             on_complete_line_from_stderr=on_complete_line_from_stderr,
             shutdown_event=shutdown_event,
+            is_output_accumulated=is_output_accumulated,
         )
 
         timeout_time = time.time() + timeout if timeout is not None else None
@@ -310,8 +337,12 @@ def run_local_command_modern_version(
 
         result = FinishedProcess(
             returncode=exit_code,
-            stdout=stdout.decode("utf-8", errors="replace"),
-            stderr=stderr.decode("utf-8", errors="replace"),
+            stdout=stdout.decode("utf-8", errors="replace")
+            if is_output_accumulated
+            else OUTPUT_NOT_ACCUMULATED_PLACEHOLDER,
+            stderr=stderr.decode("utf-8", errors="replace")
+            if is_output_accumulated
+            else OUTPUT_NOT_ACCUMULATED_PLACEHOLDER,
             command=tuple(command),
             is_timed_out=_is_timeout(timeout_time),
             is_output_already_logged=trace_output,

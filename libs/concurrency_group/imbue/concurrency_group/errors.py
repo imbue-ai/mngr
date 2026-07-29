@@ -93,6 +93,17 @@ class ProcessSetupError(ProcessError):
         )
 
 
+class OutputNotAccumulatedError(ConcurrencyGroupError):
+    """Raised when reading the output of a process started with ``is_output_accumulated=False``.
+
+    Such a process deliberately keeps no record of what it printed, so there is no
+    output to return. Raising makes that unmistakable, rather than handing back an
+    empty string that reads like "the process printed nothing".
+    """
+
+    ...
+
+
 class EnvironmentStoppedError(ConcurrencyGroupError):
     """Raised when the environment is stopped."""
 

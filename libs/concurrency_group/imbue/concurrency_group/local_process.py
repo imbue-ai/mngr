@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import contextvars
 from pathlib import Path
-from queue import Empty
 from queue import Queue
 from subprocess import TimeoutExpired
 from threading import Event
-from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 from typing import TypeVar
 
 from imbue.concurrency_group.errors import EnvironmentStoppedError
+from imbue.concurrency_group.errors import OutputNotAccumulatedError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import MutableEvent
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.concurrency_group.subprocess_utils import OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.concurrency_group.thread_utils import ObservableThread
 
@@ -30,6 +30,7 @@ class RunningProcess:
         shutdown_event: MutableEvent,
         is_checked: bool = False,
         name: str | None = None,
+        is_output_accumulated: bool = True,
     ) -> None:
         self._command = command
         # An optional caller-supplied, log-safe label for this process. Used as
@@ -39,35 +40,55 @@ class RunningProcess:
         # ``command`` is still what gets executed. Defaults (``None``) to the
         # joined command, preserving prior behavior.
         self._name = name
+        # Only ever written to (in ``on_line``); this class exposes no way to read it
+        # back. It is therefore useful solely to a caller that supplied its own queue
+        # and holds its own reference. ``None`` means "nobody is listening", and
+        # ``run_background`` deliberately leaves it that way by default -- populating
+        # a queue no one can drain would retain every output line forever.
         self._output_queue = output_queue
         self._shutdown_event = shutdown_event
         self._is_checked = is_checked
         self._completed_process: FinishedProcess | None = None
         self._thread: ObservableThread | None = None
+        # When False, these stay empty: a process that runs for days would otherwise
+        # retain every line it ever printed. Callers in that mode consume output as it
+        # arrives (via the output queue or an on-line callback) and must not read it
+        # back afterwards -- ``read_stdout``/``read_stderr`` raise instead.
+        self._is_output_accumulated = is_output_accumulated
         self._stdout_lines: list[str] = []
         self._stderr_lines: list[str] = []
 
+    @property
+    def is_output_accumulated(self) -> bool:
+        """Whether this process keeps a record of its output for later reading."""
+        return self._is_output_accumulated
+
     def read_stdout(self) -> str:
+        self._raise_if_output_is_not_accumulated("read_stdout")
         return "".join(self._stdout_lines)
 
-    def stream_stdout_and_stderr(self) -> Iterator[tuple[str, bool]]:
-        """Iterator that yields lines from the process output queue. Each item is (line, is_stdout)."""
-        output_queue = self.get_queue()
-
-        while not self._shutdown_event.is_set():
-            try:
-                line, is_stdout = output_queue.get(timeout=0.1)
-                yield line, is_stdout
-            except Empty:
-                if self.poll() is not None:
-                    break
-
     def read_stderr(self) -> str:
+        self._raise_if_output_is_not_accumulated("read_stderr")
         return "".join(self._stderr_lines)
 
-    def get_queue(self) -> Queue[tuple[str, bool]]:
-        assert self._output_queue is not None, "Output queue must be set to get the queue for RunningProcess"
-        return self._output_queue
+    def _raise_if_output_is_not_accumulated(self, method_name: str) -> None:
+        if not self._is_output_accumulated:
+            raise OutputNotAccumulatedError(
+                f"Cannot call {method_name}() on `{self._get_name()}`: it was started with "
+                "is_output_accumulated=False, so its output was never recorded. Consume output as "
+                "it arrives (via on_output / an output_queue) instead."
+            )
+
+    def _read_output_for_error(self) -> tuple[str, str]:
+        """Return (stdout, stderr) to embed in a raised error; never raises itself.
+
+        Error paths must keep reporting the failure they were built for even when this
+        process kept no output, so they get an explicit placeholder rather than the
+        ``OutputNotAccumulatedError`` the public readers raise.
+        """
+        if not self._is_output_accumulated:
+            return OUTPUT_NOT_ACCUMULATED_PLACEHOLDER, OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
+        return self.read_stdout(), self.read_stderr()
 
     @property
     def returncode(self) -> int | None:
@@ -92,8 +113,7 @@ class RunningProcess:
         if thread.is_alive():
             thread.join(timeout)
         if thread.is_alive():
-            stdout = self.read_stdout()
-            stderr = self.read_stderr()
+            stdout, stderr = self._read_output_for_error()
             raise TimeoutExpired(self._error_display, timeout if timeout is not None else 0.0, stdout, stderr)
         result = self.poll()
         if result is None:
@@ -110,7 +130,7 @@ class RunningProcess:
 
     def check(self) -> None:
         if self.returncode is not None and self.returncode != 0:
-            stdout, stderr = self.read_stdout(), self.read_stderr()
+            stdout, stderr = self._read_output_for_error()
             raise ProcessError(tuple(self._command), stdout, stderr, self.returncode, display_name=self._name)
 
     def poll(self) -> int | None:
@@ -141,8 +161,7 @@ class RunningProcess:
         assert thread is not None
         thread.join(timeout=force_kill_seconds)
         if thread.is_alive():
-            stdout = self.read_stdout()
-            stderr = self.read_stderr()
+            stdout, stderr = self._read_output_for_error()
             raise TimeoutExpired(self._error_display, force_kill_seconds, stdout, stderr)
 
     def start(self, kwargs: dict) -> None:
@@ -188,10 +207,11 @@ class RunningProcess:
         return self._completed_process.is_timed_out
 
     def on_line(self, line: str, is_stdout: bool) -> None:
-        if is_stdout:
-            self._stdout_lines.append(line)
-        else:
-            self._stderr_lines.append(line)
+        if self._is_output_accumulated:
+            if is_stdout:
+                self._stdout_lines.append(line)
+            else:
+                self._stderr_lines.append(line)
         if self._output_queue is not None:
             self._output_queue.put((line, is_stdout))
 
@@ -213,19 +233,28 @@ def run_background(
     process_class: type[ProcessClassType] = RunningProcess,  # ty: ignore[invalid-parameter-default]
     process_class_kwargs: Mapping[str, object] | None = None,
     name: str | None = None,
+    is_output_accumulated: bool = True,
 ) -> ProcessClassType:
     """
     Run a subprocess command in a non-blocking manner with output handling.
 
     Returns immediately with a RunningProcess object that allows the caller to:
-    - Access a queue to process output lines as they are produced
     - Wait for completion and read all output at once
     - Check process status, terminate it, or monitor return codes
 
+    To observe output lines as they are produced, pass your own ``output_queue`` (and
+    drain it) or use ``ConcurrencyGroup.run_process_in_background``'s ``on_output``
+    callback. When ``output_queue`` is omitted none is allocated: ``RunningProcess``
+    exposes no way to read a queue back, so one the caller did not supply could never
+    be drained and would simply retain every output line for the process's lifetime.
+
     ``name`` is an optional log-safe label for the process (see ``RunningProcess``).
+
+    ``is_output_accumulated=False`` discards output once it has been handed to the queue /
+    line callback, instead of retaining all of it for later ``read_stdout()``. Use it for
+    processes that stream for a long time, where the full history is both unwanted and
+    unbounded; ``read_stdout()``/``read_stderr()`` then raise ``OutputNotAccumulatedError``.
     """
-    if output_queue is None:
-        output_queue = Queue()
     true_shutdown_event = shutdown_event if shutdown_event is not None else Event()
     process = process_class(
         output_queue=output_queue,
@@ -233,6 +262,7 @@ def run_background(
         command=command,
         is_checked=is_checked,
         name=name,
+        is_output_accumulated=is_output_accumulated,
         **(process_class_kwargs or {}),
     )
     process.start(
@@ -248,6 +278,7 @@ def run_background(
             env=env,
             pass_fds=pass_fds,
             name=name,
+            is_output_accumulated=is_output_accumulated,
         )
     )
     return process

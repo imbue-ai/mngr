@@ -238,6 +238,11 @@ class ForwardStreamManager(MutableModel):
             on_output=self._on_observe_output,
             cwd=Path.home(),
             is_checked_by_group=False,
+            # This child streams a discovery snapshot per provider every poll interval
+            # for as long as the forward runs, so retaining its output would grow
+            # without bound. ``_on_observe_output`` consumes each line as it arrives
+            # (logging stderr), and nothing reads the output back.
+            is_output_accumulated=False,
         )
 
     def _start_tail_discovery(self) -> None:
@@ -480,6 +485,10 @@ class ForwardStreamManager(MutableModel):
                 on_output=lambda line, is_stdout, _aid=agent_id: self._on_event_output(line, is_stdout, _aid),
                 cwd=Path.home(),
                 is_checked_by_group=False,
+                # A ``--follow`` stream lives as long as its agent does, so retaining
+                # every event it ever emits would grow without bound. Lines are consumed
+                # on arrival by ``_on_event_output``, which also logs stderr.
+                is_output_accumulated=False,
             )
             with self._lock:
                 self._events_processes[aid_str] = process

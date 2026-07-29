@@ -172,6 +172,12 @@ class DiscoveryStreamConsumer(MutableModel):
             on_output=self._on_observe_output,
             cwd=Path.home(),
             is_checked_by_group=False,
+            # ``mngr observe`` streams a discovery snapshot per provider every poll
+            # interval for as long as this supervisor lives (days, in the desktop
+            # client). Retaining that history would grow this process without bound;
+            # ``_on_observe_output`` consumes each line as it arrives and nothing ever
+            # reads the output back.
+            is_output_accumulated=False,
         )
 
     def bounce_observe(self) -> None:
@@ -202,6 +208,8 @@ class DiscoveryStreamConsumer(MutableModel):
                 on_output=self._on_observe_output,
                 cwd=Path.home(),
                 is_checked_by_group=False,
+                # Same unbounded-history reasoning as in ``start``.
+                is_output_accumulated=False,
             )
         except _OBSERVE_BOUNCE_ERRORS as e:
             logger.warning("Failed to respawn observe process during bounce: {}", e)

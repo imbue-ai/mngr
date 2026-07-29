@@ -10,11 +10,13 @@ from time import monotonic
 
 import pytest
 
+from imbue.concurrency_group.errors import OutputNotAccumulatedError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import CompoundEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.local_process import run_background
+from imbue.concurrency_group.subprocess_utils import OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
 from imbue.concurrency_group.test_utils import poll_until
 
@@ -90,6 +92,80 @@ def test_run_background_with_queue() -> None:
         output_queue.get(block=False)
 
     assert process.returncode == 0
+
+
+def test_run_background_allocates_no_queue_when_none_supplied() -> None:
+    """Test that omitting output_queue leaves no queue for output lines to pile up in.
+
+    RunningProcess exposes no way to read its queue back, so a queue the caller did not
+    supply could never be drained: populating one would retain every line a long-running
+    process ever emits. Output must still reach the callers who can actually read it.
+    """
+    process = run_background(["echo", "test output"])
+
+    process.wait(timeout=5.0)
+
+    assert process._output_queue is None
+    assert process.read_stdout() == "test output\n"
+    assert process.returncode == 0
+
+
+def test_run_background_without_output_accumulation_keeps_nothing() -> None:
+    """Test that is_output_accumulated=False retains no output anywhere.
+
+    Lines must still reach a caller-supplied queue as they arrive; what must not happen is
+    the process holding onto them, at either layer that used to (the decoded per-line lists
+    and the raw byte buffer behind FinishedProcess).
+    """
+    output_queue: Queue[tuple[str, bool]] = Queue()
+    process = run_background(
+        ["sh", "-c", "echo 'to stdout'; echo 'to stderr' >&2"],
+        output_queue=output_queue,
+        is_output_accumulated=False,
+    )
+
+    process.wait(timeout=5.0)
+
+    # Output still reaches the consumer that can actually read it, as it arrives.
+    assert sorted(output_queue.get(timeout=1.0) for _ in range(2)) == [
+        ("to stderr\n", False),
+        ("to stdout\n", True),
+    ]
+
+    # ...but nothing is retained: neither the decoded per-line lists...
+    assert process._stdout_lines == []
+    assert process._stderr_lines == []
+    assert not process.is_output_accumulated
+    # ...nor the raw byte buffer that backs FinishedProcess.
+    assert process._completed_process is not None
+    assert process._completed_process.stdout == OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
+    assert process._completed_process.stderr == OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
+    assert process.returncode == 0
+
+
+def test_read_output_raises_when_not_accumulated() -> None:
+    """Test that reading output raises, rather than looking like the process printed nothing."""
+    process = run_background(["echo", "discarded"], is_output_accumulated=False)
+    process.wait(timeout=5.0)
+
+    for read_output in (process.read_stdout, process.read_stderr):
+        with pytest.raises(OutputNotAccumulatedError) as exc_info:
+            read_output()
+        assert "is_output_accumulated=False" in str(exc_info.value)
+
+    with pytest.raises(OutputNotAccumulatedError):
+        process.wait_and_read(timeout=5.0)
+
+
+def test_check_reports_placeholder_when_output_not_accumulated() -> None:
+    """Test that a failure is still reported when the process kept no output to report."""
+    process = run_background(["sh", "-c", "echo 'boom' >&2; exit 3"], is_output_accumulated=False)
+    process.wait(timeout=5.0)
+
+    with pytest.raises(ProcessError) as exc_info:
+        process.check()
+    assert exc_info.value.returncode == 3
+    assert exc_info.value.stderr == OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
 
 
 def test_run_background_multiline_output() -> None:
@@ -353,22 +429,6 @@ def test_run_background_read_methods() -> None:
     assert "stderr2" in stderr
 
     assert process.returncode == 0
-
-
-def test_run_background_get_queue() -> None:
-    """Test get_queue method returns the correct queue."""
-    custom_queue: Queue[tuple[str, bool]] = Queue()
-    process = run_background(["echo", "test"], output_queue=custom_queue)
-
-    # get_queue should return our custom queue
-    assert process.get_queue() is custom_queue
-
-    process.wait(timeout=5.0)
-
-    # Output should be in our custom queue
-    line, is_stdout = custom_queue.get(timeout=1.0)
-    assert line == "test\n"
-    assert is_stdout
 
 
 def test_run_background_concurrent_processes() -> None:
