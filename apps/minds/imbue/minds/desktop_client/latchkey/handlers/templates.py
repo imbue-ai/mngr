@@ -47,6 +47,11 @@ _WILDCARD_PERMISSION_LABEL = "all"
 # account literally named this would still be treated as the account it is.
 NEW_ACCOUNT_FORM_VALUE: Final[str] = f"{ACCOUNT_SCOPE_SEPARATOR}new-account"
 
+# Label for latchkey's single unnamed "default" account (keyed by the empty
+# string). Mirrors the connectors settings page so the same account reads the
+# same way in both places.
+DEFAULT_ACCOUNT_LABEL: Final[str] = "Default account"
+
 
 class PermissionAccountChoice(FrozenModel):
     """One selectable account in the predefined permission dialog."""

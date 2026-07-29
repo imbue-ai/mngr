@@ -27,6 +27,7 @@ narrowing) an existing grant is done through the ordinary agent-driven
 permission-request flow, not here.
 """
 
+from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -35,12 +36,11 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.latchkey.account_display import account_display_sort_key
-from imbue.minds.desktop_client.latchkey.account_display import account_label
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
@@ -118,6 +118,12 @@ class WorkspaceFileSharingGrant(FrozenModel):
     host_id: str = Field(description="Host the grant lives on (every agent on the host shares it).")
     color: str = Field(description="Workspace accent color hex (``#rrggbb``) for the card header dot.")
     paths: tuple[SharedPath, ...] = Field(description="Shared paths with their access level, sorted by path.")
+
+
+# Label shown for a service's single unnamed "default" account (latchkey keys it
+# by the empty string). Users never typed a name for it, so we show a neutral
+# placeholder rather than an empty row.
+_DEFAULT_ACCOUNT_LABEL = "Default account"
 
 
 class ServiceAccount(FrozenModel):
@@ -286,13 +292,11 @@ def build_permission_overview(
     plugin_data_dir = latchkey.plugin_data_dir
     # (service, account) -> the hosts that grant it, with the granted permissions.
     grants_by_service_account: dict[tuple[str, str], list[tuple[_WorkspaceHost, frozenset[str]]]] = {}
-    granted_accounts_by_service: dict[str, set[str]] = {}
     for host in hosts:
         config = gateway_client.get_permissions_config(permissions_path_for_host(plugin_data_dir, host.host_id))
         for grant in services_catalog.list_service_account_grants(config):
             key = (grant.service_name, grant.account)
             grants_by_service_account.setdefault(key, []).append((host, frozenset(grant.permissions)))
-            granted_accounts_by_service.setdefault(grant.service_name, set()).add(grant.account)
 
     # One ``latchkey auth list --offline`` call reports every service's stored
     # accounts, so we don't shell out per service while rendering the page.
@@ -304,12 +308,14 @@ def build_permission_overview(
             continue
         stored_accounts = _service_accounts(accounts_by_service.get(service_name, ()))
         stored_account_names = frozenset(entry.account for entry in stored_accounts)
-        granted_accounts = granted_accounts_by_service.get(service_name, set())
-        not_connected_accounts = tuple(sorted(granted_accounts - stored_account_names, key=account_display_sort_key))
+        granted_accounts = frozenset(
+            account for granted_service, account in grants_by_service_account if granted_service == service_name
+        )
+        not_connected_accounts = _sorted_accounts_by_label(granted_accounts - stored_account_names)
         account_overviews = tuple(
             ServiceAccountOverview(
                 account=account,
-                label=account_label(account),
+                label=_account_label(account),
                 is_connected=account in stored_account_names,
                 workspace_grants=_workspace_grants_for_account(
                     service_infos,
@@ -327,6 +333,11 @@ def build_permission_overview(
                 )
             )
     return tuple(sorted(overviews, key=lambda overview: overview.display_name.lower()))
+
+
+def _sorted_accounts_by_label(accounts: Iterable[str]) -> tuple[str, ...]:
+    """Sort account names for display: named ones alphabetically, the unnamed default last."""
+    return tuple(sorted(accounts, key=lambda account: (account == DEFAULT_ACCOUNT, account.lower())))
 
 
 def _workspace_grants_for_account(
@@ -360,6 +371,11 @@ def _workspace_grants_for_account(
     return tuple(cards)
 
 
+def _account_label(account: str) -> str:
+    """Render a latchkey account key as a user-facing label (default account is unnamed)."""
+    return _DEFAULT_ACCOUNT_LABEL if account == DEFAULT_ACCOUNT else account
+
+
 def _service_accounts(accounts: Sequence[ServiceAccountCredential]) -> tuple[ServiceAccount, ...]:
     """Turn one service's stored accounts (from :meth:`Latchkey.auth_list`) into UI rows.
 
@@ -367,8 +383,8 @@ def _service_accounts(accounts: Sequence[ServiceAccountCredential]) -> tuple[Ser
     any) shown last.
     """
     return tuple(
-        ServiceAccount(account=account.account, label=account_label(account.account))
-        for account in sorted(accounts, key=lambda entry: account_display_sort_key(entry.account))
+        ServiceAccount(account=account.account, label=_account_label(account.account))
+        for account in sorted(accounts, key=lambda entry: (entry.account == DEFAULT_ACCOUNT, entry.account.lower()))
     )
 
 

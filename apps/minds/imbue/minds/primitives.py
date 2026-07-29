@@ -266,14 +266,6 @@ class ServiceName(NonEmptyStr):
     ...
 
 
-# The workspace shell's registered service name (the workspace-template
-# ``system_interface`` app). Sharing this service means "share the workspace":
-# the shared shell iframes every other service on its sibling hostname
-# (<name>--<host>--<user>.<domain>), so every registered service is exposed
-# alongside it with the same email grants (see ``desktop_client.sharing_handler``).
-SHELL_SERVICE_NAME: Final[str] = "system-interface"
-
-
 class GitUrl(NonEmptyStr):
     """A git URL to clone (local path, file://, https://, or ssh)."""
 

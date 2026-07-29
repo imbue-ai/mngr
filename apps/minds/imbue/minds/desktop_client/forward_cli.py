@@ -52,7 +52,6 @@ from imbue.minds.desktop_client.backend_resolver import SERVICES_EVENT_SOURCE_NA
 from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecord
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.errors import EnvelopeStreamConsumerError
-from imbue.minds.primitives import SHELL_SERVICE_NAME
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
@@ -86,7 +85,7 @@ class ForwardSubprocessConfig(FrozenModel):
     ``mngr_forward_session=<value>`` on ``localhost:<port>``.
     """
 
-    service: str = Field(default=SHELL_SERVICE_NAME, description="Service name to forward")
+    service: str = Field(default="system-interface", description="Service name to forward")
     agent_include: tuple[str, ...] = Field(
         default=("has(agent.labels.is_primary)",),
         description="CEL include filters passed to --agent-include",

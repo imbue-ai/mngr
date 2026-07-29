@@ -16,7 +16,6 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
-from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 
@@ -154,22 +153,6 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
 
     def delete_permission_request(self, request_id: str) -> None:
         self._deleted_request_ids.append(request_id)
-
-
-def account_grants_config(*grants: tuple[str, str, tuple[str, ...]]) -> LatchkeyPermissionsConfig:
-    """Build the permissions config production writes for each ``(scope, account, permissions)``.
-
-    Goes through :func:`build_account_grant` so the config carries the
-    generated schemas that pin each rule to its account -- which is what the
-    readers inspect (they never interpret a rule key).
-    """
-    rules: list[dict[str, list[str]]] = []
-    schemas: dict[str, JsonValue] = {}
-    for scope, account, permissions in grants:
-        rule_key, granted, grant_schemas = build_account_grant(scope, account, permissions)
-        rules.append({rule_key: list(granted)})
-        schemas.update(grant_schemas)
-    return LatchkeyPermissionsConfig(rules=tuple(rules), schemas=schemas)
 
 
 def build_fake_gateway_client() -> FakeLatchkeyGatewayClient:

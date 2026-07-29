@@ -32,11 +32,18 @@ from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
-from imbue.minds.primitives import SHELL_SERVICE_NAME
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
 _CLOUDFLARE_ACCESS_LOGIN_HOST_SUFFIX: Final[str] = "cloudflareaccess.com"
+
+# The workspace shell's registered service name. Sharing this service means
+# "share the workspace": the shared shell iframes every other service on its
+# sibling hostname (<name>--<host>--<user>.<domain>), so every registered
+# service is exposed alongside it with the same email grants. (Interim
+# single-tier model: the connector-side Access-Group master list from the
+# forwarding-redesign plan replaces this fan-out later.)
+SHELL_SERVICE_NAME: Final[str] = "system-interface"
 
 # Upper bound on concurrent connector calls when a workspace share fans out
 # over the registered services (each call is its own mngr subprocess).

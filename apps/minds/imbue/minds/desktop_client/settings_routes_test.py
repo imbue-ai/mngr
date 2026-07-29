@@ -7,6 +7,7 @@ from pathlib import Path
 
 from flask.testing import FlaskClient
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -19,13 +20,13 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
-from imbue.minds.desktop_client.latchkey.testing import account_grants_config
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
+from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
@@ -186,6 +187,22 @@ def _build_client(
     return client
 
 
+def _account_grants_config(*grants: tuple[str, str, tuple[str, ...]]) -> LatchkeyPermissionsConfig:
+    """Build the permissions config production writes for each ``(scope, account, permissions)``.
+
+    Goes through :func:`build_account_grant` so the seeded file carries the
+    generated schemas that pin each rule to its account -- which is what the
+    readers inspect (they never interpret a rule key).
+    """
+    rules: list[dict[str, list[str]]] = []
+    schemas: dict[str, JsonValue] = {}
+    for scope, account, permissions in grants:
+        rule_key, granted, grant_schemas = build_account_grant(scope, account, permissions)
+        rules.append({rule_key: list(granted)})
+        schemas.update(grant_schemas)
+    return LatchkeyPermissionsConfig(rules=tuple(rules), schemas=schemas)
+
+
 def _plugin_dir(tmp_path: Path) -> Path:
     return Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent").plugin_data_dir
 
@@ -197,7 +214,7 @@ def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
-        account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
@@ -224,7 +241,7 @@ def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
-        account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
@@ -260,7 +277,7 @@ def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:
     path = permissions_path_for_host(_plugin_dir(tmp_path), host)
     save_permissions(
         path,
-        account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
@@ -281,11 +298,11 @@ def test_revoke_all_removes_rule_across_workspaces(tmp_path: Path) -> None:
     path_b = permissions_path_for_host(_plugin_dir(tmp_path), host_b)
     save_permissions(
         path_a,
-        account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     save_permissions(
         path_b,
-        account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-write-all",))),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-write-all",))),
     )
     handler = _build_handler(tmp_path)
     client = _build_client(
@@ -331,7 +348,7 @@ def test_settings_page_lists_service_accounts_and_add_button(tmp_path: Path) -> 
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
-        account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
+        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     latchkey = _ConnectorLatchkey(
         latchkey_directory=tmp_path,
@@ -365,7 +382,7 @@ def test_settings_page_flags_an_account_with_no_stored_credentials(tmp_path: Pat
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
-        account_grants_config(("slack-api", "gone@x", ("slack-read-all",))),
+        _account_grants_config(("slack-api", "gone@x", ("slack-read-all",))),
     )
     latchkey = _ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
     handler = _build_handler(tmp_path, latchkey=latchkey)
@@ -425,7 +442,7 @@ def test_disconnect_account_revokes_only_that_accounts_grants(tmp_path: Path) ->
     kept_key = account_scope_key("slack-api", "b@x")
     save_permissions(
         path,
-        account_grants_config(
+        _account_grants_config(
             ("slack-api", "a@x", ("slack-read-all",)),
             ("slack-api", "b@x", ("slack-read-all",)),
         ),
@@ -451,8 +468,8 @@ def test_disconnect_account_revokes_its_grants_across_workspaces(tmp_path: Path)
     agent_b, host_b = str(AgentId()), HostId()
     path_a = permissions_path_for_host(_plugin_dir(tmp_path), host_a)
     path_b = permissions_path_for_host(_plugin_dir(tmp_path), host_b)
-    save_permissions(path_a, account_grants_config(("slack-api", "only@x", ("slack-read-all",))))
-    save_permissions(path_b, account_grants_config(("slack-api", "only@x", ("slack-write-all",))))
+    save_permissions(path_a, _account_grants_config(("slack-api", "only@x", ("slack-read-all",))))
+    save_permissions(path_b, _account_grants_config(("slack-api", "only@x", ("slack-write-all",))))
     latchkey = _ConnectorLatchkey(
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
