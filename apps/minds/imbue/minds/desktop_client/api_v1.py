@@ -2532,7 +2532,11 @@ def _handle_sharing_status(agent_id: str, service_name: str) -> Response:
     """Return current sharing status for a service: ``{enabled, url, policy}``."""
     state = get_state()
     status = get_sharing_status(
-        AgentId(agent_id), ServiceName(service_name), state.imbue_cloud_cli, state.session_store
+        AgentId(agent_id),
+        ServiceName(service_name),
+        state.imbue_cloud_cli,
+        state.session_store,
+        state.backend_resolver,
     )
     return _json_response(status)
 

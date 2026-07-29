@@ -10,7 +10,7 @@ The minds desktop app uses a layered proxy architecture:
 
 2. **Desktop client** (FastAPI, `desktop_client/app.py`): Runs on `localhost:PORT`. Handles auth, agent discovery, and proxies `<agent-id>.localhost:PORT` subdomain requests to per-agent system interfaces.
 
-3. **System interface** (`system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`): One per agent. Multiplexes agent services under `/service/<name>/...` paths. Handles cookie path rewriting, Service Worker registration, and HTML rewriting.
+3. **System interface** (`system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`): One per agent. Serves the dockview shell only; it proxies nothing. Each registered service is routed by the forward plugin to its own `<service>.<agent-id>.localhost` origin, so isolation between services is browser origin isolation, not path scoping.
 
 4. **Agent services**: Individual HTTP servers (web UI, terminal, API, etc.) running inside each agent's container.
 
@@ -58,11 +58,11 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 
 | Layer | Mechanism | Status |
 |-------|-----------|--------|
-| Between agents (browser-side) | Origin isolation: different subdomains | Secure |
+| Between agents (browser-side) | Origin isolation: different subdomains; the workspace session cookie is `Domain=agent-<hex>.localhost`, never sent to another agent's subtree | Secure |
 | Between agents (backend-side) | Session cookie stripped by proxy before forwarding | Secure (fixed) |
-| Between services within an agent | Cookie `Path` rewriting (`/service/<name>/`) | Secure |
+| Between services within an agent | Origin isolation: each service owns `<name>.agent-<hex>.localhost` (no path scoping needed) | Secure |
 | Between agents and desktop client | Host-only cookies, no `Domain=localhost` | Secure |
-| Service Worker cookies | Scoped to `/service/<name>/` path | Secure |
+| Workspace session cookie vs services | Read side: stripped before forwarding. Write side: a service can set/evict a parent-domain cookie named `mngr_forward_session`, but planted values fail signature verification and the session self-heals via `/goto/` — residual risk is nuisance eviction only | Accepted trade-off |
 
 ### Web storage scoping
 
@@ -71,7 +71,7 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 | localStorage | Origin isolation | Secure |
 | sessionStorage | Origin isolation | Secure |
 | IndexedDB | Origin isolation | Secure |
-| Service Worker cache | Service Worker scope (`/service/<name>/`) | Secure |
+| Service Worker cache | Origin isolation (each service registers workers on its own origin) | Secure |
 
 ### Electron-level isolation
 

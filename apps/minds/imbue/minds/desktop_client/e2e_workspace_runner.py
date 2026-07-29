@@ -969,7 +969,12 @@ def create_workspace_via_electron(
 
 _FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
 _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
-_TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src*="/service/terminal/"]'
+# Terminal panels are cross-origin iframes at the terminal service's own
+# origin: http://terminal.agent-<hex>.localhost:<port>/ (service-per-origin).
+# Matched by src prefix: session terminals carry ``terminalSessionName`` (not
+# ``serviceName``) in their panel params, so IframePanel does NOT stamp
+# ``data-service-name`` on them -- only ``service:`` panels get that attribute.
+_TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="http://terminal."], iframe[src^="https://terminal."]'
 # The DEFAULT_WORKSPACE_TEMPLATE bootstrap creates the initial chat agent asynchronously after the
 # dockview first renders (it shows "Waiting for initial chat agent..." until
 # then), so the chat input can take a while to appear on a fresh first boot.

@@ -19,3 +19,7 @@ class ForwardAuthError(MngrForwardError):
 
 class ForwardSubprocessError(MngrForwardError):
     """Raised when an ``mngr observe`` / ``mngr event`` subprocess fails to spawn."""
+
+
+class ForwardTLSError(MngrForwardError):
+    """Raised when the ephemeral TLS material cannot be built or loaded."""

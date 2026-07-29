@@ -183,7 +183,7 @@ def test_http2_subdomain_unauthenticated_html_redirects_to_https_goto(tmp_path: 
             },
         )
     assert response.status_code == 302
-    assert response.headers["Location"] == f"https://localhost:{listen_port}/goto/{agent_id}/"
+    assert response.headers["Location"] == f"https://localhost:{listen_port}/goto/{agent_id}/?next=%2F"
 
 
 def test_http2_subdomain_auth_bridge_sets_secure_cookie(tmp_path: Path) -> None:
@@ -409,7 +409,7 @@ def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path)
         )
 
     assert response.status_code == 302
-    assert response.headers["Location"] == f"http://localhost:{listen_port}/goto/{agent_id}/"
+    assert response.headers["Location"] == f"http://localhost:{listen_port}/goto/{agent_id}/?next=%2F"
 
 
 def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
@@ -1228,6 +1228,217 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
+
+
+# -- Service-per-origin routing tests --------------------------------------
+
+
+def _make_service_app(
+    tmp_path: Path,
+    agent_id: AgentId,
+    preauth: str,
+    services: dict[str, str],
+) -> FastAPI:
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(agent_id)
+    resolver.update_services(agent_id, services)
+    return create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=io.StringIO()),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        preauth_cookie_value=preauth,
+    )
+
+
+def test_service_origin_routes_to_that_service_backend(tmp_path: Path) -> None:
+    """``terminal.agent-<hex>.localhost`` must forward to the terminal service's URL,
+    not the shell's."""
+    agent_id = AgentId()
+    preauth = "preauth-service-origin"
+    app = _make_service_app(
+        tmp_path,
+        agent_id,
+        preauth,
+        {"system_interface": "http://shell-backend", "terminal": "http://terminal-backend"},
+    )
+
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=b"tty")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+
+    with TestClient(app, base_url=f"http://terminal.{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/some/path?x=1",
+            headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+        )
+
+    assert response.status_code == 200
+    assert len(captured) == 1
+    assert str(captured[0].url) == "http://terminal-backend/some/path?x=1"
+
+
+def test_deep_sub_origin_routes_to_same_service(tmp_path: Path) -> None:
+    """``deep.svc.agent-<hex>.localhost`` routes to svc: deeper labels are the
+    service's own sub-origin space (multi-origin apps, e.g. webviews)."""
+    agent_id = AgentId()
+    preauth = "preauth-deep-origin"
+    app = _make_service_app(
+        tmp_path,
+        agent_id,
+        preauth,
+        {"svc": "http://svc-backend"},
+    )
+
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=b"ok")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+
+    with TestClient(app, base_url=f"http://deep.svc.{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get("/", headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"})
+
+    assert response.status_code == 200
+    assert len(captured) == 1
+    assert str(captured[0].url) == "http://svc-backend/"
+
+
+def test_bare_origin_still_routes_to_shell_service(tmp_path: Path) -> None:
+    """The bare workspace origin maps to the strategy's shell service."""
+    agent_id = AgentId()
+    preauth = "preauth-bare-origin"
+    app = _make_service_app(
+        tmp_path,
+        agent_id,
+        preauth,
+        {"system_interface": "http://shell-backend", "terminal": "http://terminal-backend"},
+    )
+
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=b"shell")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get("/", headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"})
+
+    assert response.status_code == 200
+    assert str(captured[0].url) == "http://shell-backend/"
+
+
+def test_unregistered_service_serves_loading_page(tmp_path: Path) -> None:
+    """A plausible-but-unregistered service origin gets the auto-retrying
+    loading page (503), so a service that registers moments later self-heals."""
+    agent_id = AgentId()
+    preauth = "preauth-unknown-svc"
+    app = _make_service_app(tmp_path, agent_id, preauth, {"system_interface": "http://shell-backend"})
+
+    with TestClient(app, base_url=f"http://notyet.{agent_id}.localhost:18421", follow_redirects=False) as client:
+        response = client.get(
+            "/",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/html,application/xhtml+xml",
+            },
+        )
+
+    assert response.status_code == 503
+    assert "Loading workspace" in response.text
+
+
+def test_service_origin_unauthenticated_redirects_to_goto_with_service(tmp_path: Path) -> None:
+    """An unauthenticated HTML load on a service origin bounces through /goto/
+    carrying the service labels and the requested path, so the bridge returns
+    the browser to the exact origin + path it asked for."""
+    agent_id = AgentId()
+    preauth = "preauth-svc-unauth"
+    app = _make_service_app(tmp_path, agent_id, preauth, {"svc": "http://svc-backend"})
+
+    with TestClient(app, base_url=f"http://svc.{agent_id}.localhost:18421", follow_redirects=False) as client:
+        response = client.get("/deep/link?a=1", headers={"accept": "text/html"})
+
+    assert response.status_code == 302
+    assert (
+        response.headers["Location"]
+        == f"http://localhost:18421/goto/{agent_id}/?next=%2Fdeep%2Flink%3Fa%3D1&service=svc"
+    )
+
+
+def test_goto_with_service_redirects_to_service_origin_bridge(
+    app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+) -> None:
+    """/goto/<agent>/?service=<labels> sends the browser to the service origin's
+    /_subdomain_auth so the bridge (and its final redirect) run on that origin."""
+    client, store, _resolver = app_setup
+    cookie = create_session_cookie(store.get_signing_key())
+    valid_agent_id = "agent-" + "0" * 31 + "a"
+    response = client.get(
+        f"/goto/{valid_agent_id}/?service=deep.svc&next=/x",
+        cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+    )
+    assert response.status_code == 302
+    location = response.headers["location"]
+    assert location.startswith(f"http://deep.svc.{valid_agent_id}.localhost:18421/_subdomain_auth?token=")
+    assert location.endswith("next=%2Fx")
+
+
+def test_goto_rejects_invalid_service_labels(
+    app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+) -> None:
+    """A crafted ?service= that is not a DNS-safe label chain is a 404, never
+    interpolated into a redirect host."""
+    client, store, _resolver = app_setup
+    cookie = create_session_cookie(store.get_signing_key())
+    valid_agent_id = "agent-" + "0" * 31 + "a"
+    for bad in ("evil.com:8080", "UPPER", "-lead", "a..b"):
+        response = client.get(
+            f"/goto/{valid_agent_id}/",
+            params={"service": bad},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+        assert response.status_code == 404, f"service={bad!r} should be rejected"
+
+
+def test_subdomain_auth_bridge_sets_workspace_domain_cookie(tmp_path: Path) -> None:
+    """The bridge cookie is Domain-scoped to agent-<hex>.localhost so one hop
+    covers the shell and every service origin at any depth."""
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=io.StringIO()),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+    )
+    valid_agent_id = "agent-" + "0" * 31 + "a"
+    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), agent_id=valid_agent_id)
+    with TestClient(app, follow_redirects=False) as client:
+        response = client.get(
+            f"/_subdomain_auth?token={token}&next=/panel",
+            headers={"host": f"svc.{valid_agent_id}.localhost:18421"},
+        )
+    assert response.status_code == 302
+    assert response.headers["location"] == "/panel"
+    set_cookie = response.headers["set-cookie"].lower()
+    assert f"domain={valid_agent_id}.localhost" in set_cookie
 
 
 def test_select_ws_receive_payload_selects_by_value_not_key() -> None:

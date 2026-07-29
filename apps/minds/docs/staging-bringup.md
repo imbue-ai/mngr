@@ -377,8 +377,8 @@ The terminal should print a `login_url`. Open it in a browser.
   `/creating/<agent-id>` page; expect it to flip to `DONE` and
   redirect to the agent.
 - [ ] The agent's dockview UI loads and the `web` service is
-  reachable through `<agent-id>.localhost:<port>/service/web/`.
-- [ ] Open the Share modal on a service and verify the global
+  reachable at its own origin, `web.<agent-id>.localhost:<port>/`.
+- [ ] Share the workspace from workspace settings and verify the
   Cloudflare URL is generated and reachable (gated on the email you
   signed in with).
 

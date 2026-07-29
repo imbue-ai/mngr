@@ -186,8 +186,16 @@ class ForwardResolver(MutableModel):
         with self._lock:
             return self._ssh_by_agent.get(str(agent_id))
 
-    def resolve(self, agent_id: AgentId) -> ProxyTarget | None:
-        """Resolve ``agent_id`` to a backend ``ProxyTarget``, or None if unroutable."""
+    def resolve(self, agent_id: AgentId, service_name: str | None = None) -> ProxyTarget | None:
+        """Resolve ``(agent_id, service_name)`` to a backend ``ProxyTarget``, or None if unroutable.
+
+        ``service_name`` is the label parsed from a service origin
+        (``<name>.agent-<hex>.localhost``); ``None`` means the bare workspace
+        origin, which maps to the configured strategy (the shell service in
+        service mode, the fixed port in manual mode). A named service is
+        looked up directly in the agent's registered service map, so any
+        registered service is reachable at its own origin.
+        """
         with self._lock:
             aid_str = str(agent_id)
             if aid_str not in self._known_agent_ids:
@@ -195,18 +203,23 @@ class ForwardResolver(MutableModel):
             ssh_info = self._ssh_by_agent.get(aid_str)
             services = self._services_by_agent.get(aid_str, {})
 
-        match self.strategy:
-            case ForwardServiceStrategy(service_name=service_name):
-                url = services.get(service_name)
-                if url is None:
-                    return None
-                return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
-            case ForwardPortStrategy(remote_port=remote_port):
-                # Manual mode: target ``127.0.0.1:<remote_port>`` on the agent's
-                # host. Local agents reach this directly; remote agents go via
-                # an SSH ``direct-tcpip`` tunnel.
-                url = f"http://127.0.0.1:{remote_port}"
-                return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
-            case _ as unreachable:  # pragma: no cover
-                assert_never(unreachable)
-                raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
+        # The bare origin maps to the configured strategy: the shell service in
+        # service mode, the fixed port in manual mode.
+        if service_name is None:
+            match self.strategy:
+                case ForwardServiceStrategy(service_name=shell_service_name):
+                    service_name = shell_service_name
+                case ForwardPortStrategy(remote_port=remote_port):
+                    # Manual mode: target ``127.0.0.1:<remote_port>`` on the agent's
+                    # host. Local agents reach this directly; remote agents go via
+                    # an SSH ``direct-tcpip`` tunnel.
+                    url = f"http://127.0.0.1:{remote_port}"
+                    return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
+                case _ as unreachable:  # pragma: no cover
+                    assert_never(unreachable)
+                    raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
+
+        url = services.get(service_name)
+        if url is None:
+            return None
+        return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)

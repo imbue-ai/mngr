@@ -12,9 +12,9 @@ The desktop client (`minds run`) provides:
 - Authentication via one-time codes and signed cookies
 - A landing page listing all accessible workspaces (or a creation form if none exist). Local (`docker` / `lima`) minds show a live container-status badge and a Start/Stop button (Stop asks for confirmation); the status comes from the discovery snapshot's host state (a user-issued Start/Stop flips it immediately via an optimistic override), and the same liveness drives the quit-time shutdown prompt (see `desktop-app.md`).
 - Agent creation from git repositories or local paths via a web form or API
-- Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`; optionally through an SSH tunnel for remote agents)
+- Byte-forwarding of HTTP and WebSocket traffic for the workspace origins — the bare `<agent-id>.localhost` origin to the shell (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`) and `<service>.<agent-id>.localhost` to each registered service's port (optionally through an SSH tunnel for remote agents)
 
-Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), which serves the dockview UI and multiplexes the workspace's services under `/service/<name>/...` paths (Service Worker bootstrap, HTML/cookie rewriting, and WebSocket shims live there, not in the desktop client). Browsers access a workspace at `http://<agent-id>.localhost:8420/` and its individual services at `http://<agent-id>.localhost:8420/service/<service_name>/`.
+Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), which serves the dockview shell UI. Every registered service owns its own browser origin: the shell lives at the bare `https://<agent-id>.localhost:8421/` origin and each service at `https://<service_name>.<agent-id>.localhost:8421/` (deeper subdomains route to the same service, so multi-origin apps work unmodified). Routing is byte-level and Host-header-based in the `mngr forward` plugin; nothing proxies, rewrites, or shims app traffic.
 
 ### Agent container (runs in Docker)
 
@@ -42,14 +42,13 @@ Apps (tab-openable, with forwarded ports) are tracked in `data/.state/apps.toml`
 [[apps]]
 name = "web"
 url = "http://localhost:8000"
-global = true
 ```
 
-Each app gets two URLs:
-1. **Local**: `http://{agent_id}.localhost:8420/service/{service_name}/` (the desktop client byte-forwards the subdomain request to the workspace's system interface, which serves the service under `/service/<name>/`)
-2. **Global**: `https://{service}--{agent_id}--{username}.{domain}` (via Cloudflare tunnel)
+Each app gets two URLs (two spellings of the same service coordinate):
+1. **Local**: `https://{service_name}.{agent_id}.localhost:8421/` (the `mngr forward` plugin routes the service subdomain straight to the app's registered port; service names must be DNS-safe labels)
+2. **Shared**: `https://{service_name}--{host}--{user}.{domain}` (via Cloudflare tunnel, once the workspace or that service is shared)
 
-The `global` flag indicates whether the agent wants Cloudflare forwarding enabled. The Share modal inside the workspace's dockview UI is authoritative for the actual state.
+Every registered service is exposed when the workspace is shared; sharing is configured from the workspace settings in the desktop client.
 
 ## Cloudflare tunnel integration
 

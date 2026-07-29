@@ -53,9 +53,11 @@ from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.loading_page import render_loading_page
-from imbue.mngr_forward.primitives import FORWARD_SUBDOMAIN_PATTERN
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
+from imbue.mngr_forward.primitives import ParsedForwardHost
+from imbue.mngr_forward.primitives import ServiceLabel
+from imbue.mngr_forward.primitives import parse_forward_host
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -148,43 +150,55 @@ def _is_authenticated(
     )
 
 
-def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
-    """Return the agent ID if ``host_header`` is ``agent-<hex>.localhost(:port)``."""
-    if not host_header:
-        return None
-    match = FORWARD_SUBDOMAIN_PATTERN.match(host_header)
-    if match is None:
+def _parse_workspace_host(host_header: str) -> tuple[AgentId, ParsedForwardHost] | None:
+    """Parse ``[<labels>.]agent-<hex>.localhost(:port)`` into its coordinates.
+
+    Returns ``(agent_id, parsed_host)`` -- ``parsed_host.service_name`` is
+    None for the bare workspace origin (the shell) -- or None when the host
+    is not a workspace host at all.
+    """
+    parsed = parse_forward_host(host_header)
+    if parsed is None:
         return None
     try:
-        return AgentId(match.group(1))
+        return AgentId(str(parsed.agent_id_str)), parsed
     except ValueError:
         return None
 
 
-def _unauthenticated_subdomain_response(request: Request, port: int, use_http2: bool) -> Response:
+def _unauthenticated_subdomain_response(
+    request: Request,
+    port: int,
+    use_http2: bool,
+    agent_id: AgentId,
+    host_info: ParsedForwardHost,
+) -> Response:
     """Redirect HTML navigations to the agent's /goto/ bridge; 403 for everything else.
 
     The bridge re-mints a fresh subdomain auth token using the bare-origin
     session cookie (which the host app refreshes on every restart) and
-    sets a new subdomain cookie before bouncing the browser back. Without
-    this, an agent-subdomain cookie that fails verification (stale
+    sets a new workspace-domain cookie before bouncing the browser back.
+    Without this, a workspace cookie that fails verification (stale
     signing key after a host-app restart, expired window) would land the
     user on the bare-origin landing instead of self-healing into the
     workspace.
 
-    Falls back to the bare-origin landing if the host header does not
-    carry an ``agent-<hex>.localhost`` we can parse.
+    Service origins (``<name>.agent-<hex>.localhost``) carry their label
+    chain through the bridge via ``service`` so the final bounce returns to
+    the exact origin (and path) that was requested; the cookie the bridge
+    sets is domain-scoped to ``agent-<hex>.localhost`` so one hop covers
+    the shell and every service subtree.
     """
     accept = request.headers.get("accept", "")
     if "text/html" not in accept:
         return Response(status_code=403, content="Not authenticated")
     scheme = "https" if use_http2 else "http"
-    host_header = request.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        location = f"{scheme}://localhost:{port}/"
-    else:
-        location = f"{scheme}://localhost:{port}/goto/{agent_id}/"
+    next_url = request.url.path
+    if request.url.query:
+        next_url = f"{next_url}?{request.url.query}"
+    location = f"{scheme}://localhost:{port}/goto/{agent_id}/?next={quote(next_url, safe='')}"
+    if host_info.service_labels is not None:
+        location = f"{location}&service={host_info.service_labels}"
     return Response(status_code=302, headers={"Location": location})
 
 
@@ -548,7 +562,15 @@ def _handle_subdomain_auth_bridge(
     agent_id: AgentId,
     auth_store: AuthStoreInterface,
     use_http2: bool,
+    cookie_domain: str,
 ) -> Response:
+    """Redeem a /goto/ token and set the workspace session cookie.
+
+    The cookie is scoped with ``Domain=agent-<hex>.localhost`` (the parsed
+    ``workspace_domain`` of whichever origin the bridge ran on), so a single
+    bridge hop authenticates the bare shell origin and every service origin
+    (``<name>.agent-<hex>.localhost``) at any depth.
+    """
     token = request.query_params.get("token", "")
     next_url = _sanitize_next_url(request.query_params.get("next", "/"))
     signing_key = auth_store.get_signing_key()
@@ -560,6 +582,7 @@ def _handle_subdomain_auth_bridge(
         key=MNGR_FORWARD_SESSION_COOKIE_NAME,
         value=cookie_value,
         path="/",
+        domain=cookie_domain,
         httponly=True,
         samesite="lax",
         secure=use_http2,
@@ -569,6 +592,8 @@ def _handle_subdomain_auth_bridge(
 
 async def _handle_workspace_forward_http(
     request: Request,
+    agent_id: AgentId,
+    host_info: ParsedForwardHost,
     auth_store: AuthStoreInterface,
     resolver: ForwardResolver,
     tunnel_manager: SSHTunnelManager,
@@ -581,22 +606,19 @@ async def _handle_workspace_forward_http(
     envelope_writer: EnvelopeWriter,
     use_http2: bool,
 ) -> Response:
-    host_header = request.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        return Response(status_code=404)
-
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
-        return _handle_subdomain_auth_bridge(request, agent_id, auth_store, use_http2)
+        return _handle_subdomain_auth_bridge(
+            request, agent_id, auth_store, use_http2, cookie_domain=str(host_info.workspace_domain)
+        )
 
     if not _is_authenticated(
         cookies=request.cookies,
         auth_store=auth_store,
         preauth_cookie_value=preauth_cookie_value,
     ):
-        return _unauthenticated_subdomain_response(request, listen_port, use_http2)
+        return _unauthenticated_subdomain_response(request, listen_port, use_http2, agent_id, host_info)
 
-    target = resolver.resolve(agent_id)
+    target = resolver.resolve(agent_id, host_info.service_name)
     if target is None:
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
         return _service_unavailable_response(request)
@@ -651,6 +673,8 @@ async def _handle_workspace_forward_http(
 
 async def _handle_workspace_forward_websocket(
     websocket: WebSocket,
+    agent_id: AgentId,
+    host_info: ParsedForwardHost,
     auth_store: AuthStoreInterface,
     resolver: ForwardResolver,
     tunnel_manager: SSHTunnelManager,
@@ -658,12 +682,6 @@ async def _handle_workspace_forward_websocket(
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
 ) -> None:
-    host_header = websocket.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        await websocket.close(code=4004, reason="Unknown host")
-        return
-
     if not _is_authenticated(
         cookies=websocket.cookies,
         auth_store=auth_store,
@@ -672,7 +690,7 @@ async def _handle_workspace_forward_websocket(
         await websocket.close(code=4003, reason="Not authenticated")
         return
 
-    target = resolver.resolve(agent_id)
+    target = resolver.resolve(agent_id, host_info.service_name)
     if target is None:
         # Mirror the HTTP path: an unresolved backend is a backend failure a
         # consumer must hear about. A loaded SPA whose only live channel is a
@@ -851,13 +869,26 @@ def _handle_goto_workspace(
         parsed_id = AgentId(agent_id)
     except ValueError:
         return Response(status_code=404)
+    # An optional ``service`` carries the dotted label chain of the origin
+    # that bounced here (e.g. ``svc`` or ``sub.svc``) so the bridge -- and
+    # its final redirect -- run on that exact origin. Each label must be a
+    # valid DNS-safe service label; anything else is a crafted URL.
+    service_param = request.query_params.get("service", "")
+    service_host_prefix = ""
+    if service_param:
+        try:
+            validated_labels = [ServiceLabel(label) for label in service_param.split(".")]
+        except ValueError:
+            return Response(status_code=404)
+        service_host_prefix = ".".join(str(label) for label in validated_labels) + "."
     signing_key = auth_store.get_signing_key()
     token = create_subdomain_auth_token(signing_key=signing_key, agent_id=str(parsed_id))
     next_url = _sanitize_next_url(request.query_params.get("next", "/"))
     encoded_next = quote(next_url, safe="")
     scheme = "https" if use_http2 else "http"
     location = (
-        f"{scheme}://{parsed_id}.localhost:{listen_port}{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
+        f"{scheme}://{service_host_prefix}{parsed_id}.localhost:{listen_port}"
+        f"{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
     )
     return Response(status_code=302, headers={"Location": location})
 
@@ -945,11 +976,14 @@ def create_forward_app(
     @app.middleware("http")
     async def _subdomain_routing_middleware(request: Request, call_next: Any) -> Response:
         host_header = request.headers.get("host", "")
-        agent_id = _parse_workspace_subdomain(host_header)
-        if agent_id is None:
+        parsed = _parse_workspace_host(host_header)
+        if parsed is None:
             return await call_next(request)
+        agent_id, host_info = parsed
         return await _handle_workspace_forward_http(
             request=request,
+            agent_id=agent_id,
+            host_info=host_info,
             auth_store=auth_store,
             resolver=resolver,
             tunnel_manager=tunnel_manager,
@@ -1009,11 +1043,15 @@ def create_forward_app(
     async def _subdomain_ws(websocket: WebSocket, path: str) -> None:
         del path
         host_header = websocket.headers.get("host", "")
-        if _parse_workspace_subdomain(host_header) is None:
+        parsed = _parse_workspace_host(host_header)
+        if parsed is None:
             await websocket.close(code=4004, reason="Unknown host")
             return
+        agent_id, host_info = parsed
         await _handle_workspace_forward_websocket(
             websocket=websocket,
+            agent_id=agent_id,
+            host_info=host_info,
             auth_store=auth_store,
             resolver=resolver,
             tunnel_manager=tunnel_manager,
