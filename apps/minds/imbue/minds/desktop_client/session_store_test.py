@@ -268,39 +268,6 @@ def test_get_user_info_nonexistent_returns_none(tmp_path: Path) -> None:
     assert store.get_user_info("nonexistent") is None
 
 
-def test_has_signed_in_before_with_associations(tmp_path: Path) -> None:
-    """has_signed_in_before returns True once any workspace record exists."""
-    store, cli = _make_store_with_users(tmp_path, [])
-    assert not store.has_signed_in_before()
-    cli.add_account(user_id="user-1", email="a@b.com")
-    store.invalidate_identity_cache()
-    store.associate_created_workspace(
-        user_id="user-1", agent_id="agent-x", host_id="host-x", display_name="x", color=None, is_cloud_row=False
-    )
-    assert store.has_signed_in_before()
-
-
-def test_has_signed_in_before_when_plugin_reports_account(tmp_path: Path) -> None:
-    """has_signed_in_before is True even with no records when the plugin has a session."""
-    store, _cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
-    assert store.has_signed_in_before()
-
-
-def test_has_signed_in_before_with_legacy_files(tmp_path: Path) -> None:
-    """A pre-sync install's legacy files still count as having signed in."""
-    store, _cli = _make_store_with_users(tmp_path, [])
-    (tmp_path / "workspace_associations.json").write_text("{}")
-    assert store.has_signed_in_before()
-
-
-def test_has_signed_in_before_with_retired_legacy_files(tmp_path: Path) -> None:
-    """Legacy files renamed aside by the one-shot conversion still count as having signed in."""
-    store, _cli = _make_store_with_users(tmp_path, [])
-    assert not store.has_signed_in_before()
-    (tmp_path / "sessions.json.pre-sync").write_text("{}")
-    assert store.has_signed_in_before()
-
-
 def test_persistence_across_store_instances(tmp_path: Path) -> None:
     """Workspace records written by one store instance are readable by another."""
     cli = make_fake_imbue_cloud_cli()

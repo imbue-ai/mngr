@@ -1295,14 +1295,18 @@ def _create_test_client_with_stores(
     return client, auth_store
 
 
-def _create_test_client_with_auth_routes(tmp_path: Path) -> FlaskClient:
+def _create_test_client_with_auth_routes(tmp_path: Path, has_signed_in_before: bool = False) -> FlaskClient:
     """Create a desktop client with the /auth blueprint mounted.
 
     The auth blueprint is only registered when both a session store and an
-    imbue_cloud CLI are wired, so this passes both.
+    imbue_cloud CLI are wired, so this passes both. ``has_signed_in_before``
+    registers a fake plugin account so the session store reports a prior
+    sign-in, which the auth pages must ignore when picking the leading tab.
     """
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     cli = make_fake_imbue_cloud_cli()
+    if has_signed_in_before:
+        cli.add_account(user_id="user-prior", email="prior@example.com", is_active=True)
     session_store = make_session_store_for_test(tmp_path, cli=cli)
     app = create_desktop_client(
         auth_store=auth_store,
@@ -1343,16 +1347,47 @@ def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) 
     assert "run your workspace on Imbue Cloud" in response.text
 
 
-def test_signin_modal_mode_signin_leads_with_signin_tab(tmp_path: Path) -> None:
-    """GET /auth/signin-modal?mode=signin shows the sign-in tab first; the default stays sign-up."""
+def test_signin_modal_defaults_to_signup_and_mode_signin_leads_with_signin(tmp_path: Path) -> None:
+    """The modal leads with sign-up unless the caller asks for sign-in.
+
+    Callers with nothing to say about the user's intent (the create flow, "Add
+    account") get the sign-up default; ``?mode=signin`` comes only from
+    affordances labeled "Log in" / "Sign in", so it leads with that tab.
+    """
     client = _create_test_client_with_auth_routes(tmp_path)
     default = client.get("/auth/signin-modal")
     assert default.status_code == 200
     assert 'id="signin-tab" class="hidden"' in default.text
+    assert 'id="signup-tab" class="hidden"' not in default.text
     signin = client.get("/auth/signin-modal", query_string={"mode": "signin"})
     assert signin.status_code == 200
     assert 'id="signup-tab" class="hidden"' in signin.text
     assert 'id="signin-tab" class="hidden"' not in signin.text
+
+
+def test_auth_tab_choice_ignores_whether_this_machine_signed_in_before(tmp_path: Path) -> None:
+    """The leading tab follows the route/mode alone, never local sign-in history.
+
+    A returning user signing in on a *new* machine is exactly the population
+    with no local state, so guessing from it would hand them the sign-up form
+    when they pressed "Log in". ``/auth/signup`` and the mode-less modal lead
+    with sign-up; ``/auth/login`` and ``?mode=signin`` lead with sign-in --
+    identically whether or not an account has signed in here before.
+    """
+    for has_signed_in_before in (False, True):
+        client = _create_test_client_with_auth_routes(
+            tmp_path / str(has_signed_in_before), has_signed_in_before=has_signed_in_before
+        )
+        for signup_leading_path, query in (("/auth/signup", {}), ("/auth/signin-modal", {})):
+            response = client.get(signup_leading_path, query_string=query)
+            assert response.status_code == 200
+            assert 'id="signin-tab" class="hidden"' in response.text
+            assert 'id="signup-tab" class="hidden"' not in response.text
+        for signin_leading_path, query in (("/auth/login", {}), ("/auth/signin-modal", {"mode": "signin"})):
+            response = client.get(signin_leading_path, query_string=query)
+            assert response.status_code == 200
+            assert 'id="signup-tab" class="hidden"' in response.text
+            assert 'id="signin-tab" class="hidden"' not in response.text
 
 
 def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
@@ -2133,12 +2168,12 @@ def test_landing_shows_consent_screen_after_account_choice_when_unanswered(tmp_p
 
 
 def test_welcome_signup_login_open_signin_modal_with_page_fallbacks(tmp_path: Path) -> None:
-    """The welcome splash's Sign Up / Log In open the centered sign-in modal in Electron.
+    """The welcome splash's Sign Up / Sign in open the centered sign-in modal in Electron.
 
-    The splash is a trusted local page on the chrome surface, so the buttons call
-    the ``openSigninModal`` shell bridge (with the tab mode and a home
-    return_to); in a plain browser (no bridge) the links fall back to the
-    full-page /auth/* routes.
+    The splash is a trusted local page on the chrome surface, so both call the
+    ``openSigninModal`` shell bridge (with the tab mode and a home return_to);
+    in a plain browser (no bridge) they fall back to the full-page /auth/*
+    routes.
     """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
@@ -2149,6 +2184,31 @@ def test_welcome_signup_login_open_signin_modal_with_page_fallbacks(tmp_path: Pa
     assert 'id="welcome-login-btn"' in welcome.text
     assert 'href="/auth/signup"' in welcome.text
     assert 'href="/auth/login"' in welcome.text
+
+
+def test_welcome_leads_with_sign_up_and_demotes_sign_in_to_a_link(tmp_path: Path) -> None:
+    """Sign Up is the splash's one button; signing in is a text link beneath it.
+
+    Everyone who sees this splash is a first-run user, so sign-up is the
+    primary action. Sign-in keeps the same "Already have an account? Sign in"
+    phrasing as the auth form's own footer, rendered as an inline
+    ``Link`` (``text-accent``) rather than a second button competing with
+    Sign Up -- the equal-weight pair it replaces is what sent new users to the
+    sign-in form.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    welcome = client.get("/welcome")
+    assert welcome.status_code == 200
+    assert "Already have an account?" in welcome.text
+    signup_tag = welcome.text.split('id="welcome-signup-btn"', 1)[0].rsplit("<a", 1)[1]
+    assert "bg-surface-inverse" in signup_tag
+    assert "w-full" in signup_tag
+    login_tag = welcome.text.split('id="welcome-login-btn"', 1)[0].rsplit("<a", 1)[1]
+    assert "text-accent" in login_tag
+    assert "bg-surface-inverse" not in login_tag
+    # The skip affordance survives the redesign.
+    assert 'id="skip-account-btn"' in welcome.text
 
 
 def test_welcome_self_advances_when_an_account_appears(tmp_path: Path) -> None:

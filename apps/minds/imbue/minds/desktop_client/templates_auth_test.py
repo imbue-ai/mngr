@@ -1,9 +1,14 @@
+from pathlib import Path
+
+from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
 from imbue.minds.desktop_client.templates_auth import render_signin_modal_page
+
+_AUTH_JS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "auth.js"
 
 
 def test_render_auth_page_defaults_to_signup() -> None:
@@ -55,6 +60,46 @@ def test_render_auth_page_oauth_buttons_carry_click_spinner() -> None:
     assert 'class="oauth-btn-icon"' in html
 
 
+def test_render_auth_page_signup_tab_asks_for_the_password_twice() -> None:
+    # A mistyped password on sign-up creates an account nobody can sign back
+    # in to, so the sign-up tab takes it twice (the CLI's `imbue_cloud auth
+    # signup` does the same at the TTY). The second field is a real password
+    # input, not a text one.
+    html = render_auth_page(default_to_signup=True)
+    assert "Confirm password" in html
+    confirm_input = html.split('id="signup-password-confirm"', 1)[0].rsplit("<input", 1)[1]
+    confirm_input += html.split('id="signup-password-confirm"', 1)[1].split(">", 1)[0]
+    assert 'type="password"' in confirm_input
+    assert 'name="password_confirm"' in confirm_input
+    assert 'autocomplete="new-password"' in confirm_input
+    assert '<label for="signup-password-confirm"' in html
+
+
+def test_render_auth_page_confirm_field_is_signup_only_and_uniquely_identified() -> None:
+    # The form is shared by the standalone auth page and the sign-in modal, and
+    # auth.js binds by id, so the confirm field must appear exactly once and
+    # must not leak onto the sign-in tab (signing in checks an existing
+    # password against the server; a second box there would be nonsense).
+    html = render_auth_page(default_to_signup=True)
+    assert html.count('id="signup-password-confirm"') == 1
+    assert "signin-password-confirm" not in html
+    signin_tab = html.split('<div id="signin-tab"', 1)[1]
+    assert "Confirm password" not in signin_tab
+
+
+def test_auth_js_blocks_mismatched_signup_passwords_without_sending_the_confirmation() -> None:
+    # The check must gate the request (not just annotate the page), report
+    # through the shared showError('signup', ...) notice, and never put the
+    # confirmation value on the wire -- the request body carries email and
+    # password only.
+    js = _AUTH_JS_PATH.read_text()
+    assert "signup-password-confirm" in js
+    assert "showError('signup', 'Passwords do not match')" in js
+    signup_body = js.split("'/auth/api/signup'", 1)[1].split("});", 1)[0]
+    assert "signup-password-confirm" not in signup_body
+    assert "password_confirm" not in signup_body
+
+
 def test_render_auth_page_includes_toggle_links() -> None:
     html = render_auth_page()
     assert "Already have an account?" in html
@@ -85,6 +130,22 @@ def test_render_signin_modal_page_opts_out_of_scrollbar_gutter() -> None:
     # un-dimmed strip at the window's right edge.
     html = render_signin_modal_page()
     assert '<html lang="en" class="no-scrollbar-gutter">' in html
+
+
+def test_render_signin_modal_page_backdrop_scrolls_instead_of_clipping() -> None:
+    # The sign-up tab (three fields, plus the "Passwords do not match" notice)
+    # is taller than an 800x600 window, the app's minimum size. The backdrop is
+    # a fixed inset-0 box, so with ``items-center`` the card's head and foot
+    # would sit outside the viewport with no way to reach them; ``items-start``
+    # plus ``overflow-y-auto`` makes it scroll, and ``my-auto`` on the card
+    # keeps it centered whenever there is room to spare.
+    html = render_signin_modal_page()
+    backdrop_tag = html.split('id="signin-modal-backdrop"', 1)[1].split(">", 1)[0]
+    assert "overflow-y-auto" in backdrop_tag
+    assert "items-start" in backdrop_tag
+    assert "items-center" not in backdrop_tag
+    card_tag = html.split('id="signin-modal-backdrop"', 1)[1].split("<div", 1)[1].split(">", 1)[0]
+    assert "my-auto" in card_tag
 
 
 def test_render_signin_modal_page_shows_imbue_cloud_intro() -> None:

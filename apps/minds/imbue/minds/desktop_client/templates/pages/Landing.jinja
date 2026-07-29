@@ -165,13 +165,14 @@
       var isSignedIn = signedIn.signedIn === 'true';
       if (window.minds && window.minds.openAccounts && window.minds.openSigninModal) {
         // ``returnTo: '/'`` lands a successful sign-in back on this home
-        // screen (the server's return_to default is the create screen);
-        // ``mode: 'signin'`` leads with the sign-in tab to match the
-        // launcher's "Log in" label.
+        // screen (the server's return_to default is the create screen). No
+        // ``mode``, so the modal leads with sign-up: someone with no account
+        // at all needs to create one, and the sign-up tab still carries an
+        // "Already have an account? Sign in" link for returning users.
         if (isSignedIn) window.minds.openAccounts();
-        else window.minds.openSigninModal('/', 'signin');
+        else window.minds.openSigninModal('/');
       } else {
-        window.location = isSignedIn ? '/accounts' : '/auth/login';
+        window.location = isSignedIn ? '/accounts' : '/auth/signup';
       }
     };
 

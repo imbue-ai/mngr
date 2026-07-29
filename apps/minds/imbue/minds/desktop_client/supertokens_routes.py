@@ -294,9 +294,15 @@ _REMOTE_SIGNIN_EXPLAINER: Final[str] = (
 def _handle_auth_page() -> Response:
     """Render the sign-up or sign-in page.
 
-    /auth/signup always defaults to sign-up mode. /auth/login defaults
-    to sign-in mode (unless the user has never signed in before, in
-    which case it shows sign-up as a convenience).
+    Which tab leads is decided by the route alone: ``/auth/signup`` leads
+    with sign-up, ``/auth/login`` with sign-in. Every caller of
+    ``/auth/login`` is an affordance the user pressed that says "sign in"
+    ("Log in", "Sign in again", "Back to sign in"), so that request is
+    honored verbatim -- guessing from local state would hand the sign-up
+    form to a returning user signing in on a new machine, which is exactly
+    the population that has no local state. Entry points that mean
+    "get me an account" link to ``/auth/signup``; the tabs still flip
+    client-side either way.
 
     An optional ``?message=`` query parameter is rendered as a banner on
     the page (e.g. the Electron shell appends one explaining why the user
@@ -487,9 +493,11 @@ def _handle_signin_modal_page() -> Response:
     sign-in prompt covers the whole window, including the title bar. The
     optional ``?return_to=`` (validated as a safe local path) is where a
     successful sign-in lands the content view; it defaults to the create
-    screen, the modal's original caller. The optional ``?mode=signin`` leads
-    with the sign-in tab (for callers labeled "Log In"); anything else keeps
-    the sign-up default.
+    screen, the modal's original caller. The optional ``?mode=signin``
+    leads with the sign-in tab, for the callers whose label promises exactly
+    that (the home screen's "Log in" launcher, the welcome splash's "Already
+    have an account? Sign in"). Every other caller -- the create flow, "Add
+    account" -- has no such promise to keep and gets the sign-up default.
     """
     return_to = safe_local_redirect_path(request.args.get("return_to")) or "/create"
     default_to_signup = request.args.get("mode") != "signin"

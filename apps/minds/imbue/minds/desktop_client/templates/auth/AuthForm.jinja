@@ -3,9 +3,10 @@
   The two-tab sign-up / sign-in form (email/password + OAuth), shared by the
   standalone auth page (``auth.SignupSignin``) and the in-page sign-in modal on
   the create screen. All interactivity is in ``static/auth.js``, which binds by
-  the element ids below (``signup-form``, ``signin-form``, the ``data-show-tab``
-  / ``data-oauth`` links). ``default_to_signup`` picks which tab is visible on
-  first paint; the inline links flip between them client-side.
+  the element ids below (``signup-form``, ``signin-form``,
+  ``signup-password-confirm``, the ``data-show-tab`` / ``data-oauth`` links).
+  ``default_to_signup`` picks which tab is visible on first paint; the inline
+  links flip between them client-side.
 
   ``intro`` is optional explanatory copy (used by the sign-in modal to explain
   why the user is being asked to sign in). When set it replaces each tab's
@@ -25,6 +26,10 @@
     <div class="mb-4">
       <FormLabel target="signup-password">Password</FormLabel>
       <TextInput type="password" name="password" id="signup-password" required radius="lg" autocomplete="new-password" minlength={{ 8 }} />
+    </div>
+    <div class="mb-4">
+      <FormLabel target="signup-password-confirm">Confirm password</FormLabel>
+      <TextInput type="password" name="password_confirm" id="signup-password-confirm" required radius="lg" autocomplete="new-password" minlength={{ 8 }} />
     </div>
     <ButtonSubmit variant="primary" size="lg" block id="signup-btn">Create account</ButtonSubmit>
   </form>

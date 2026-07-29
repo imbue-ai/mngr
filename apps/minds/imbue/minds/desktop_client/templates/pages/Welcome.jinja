@@ -1,12 +1,15 @@
 {#def #}
 {#
-  Welcome/splash page for first-time users. Offers Sign Up / Log In and a
-  "continue without an account" link. The user must resolve one of the three
-  before moving on: the titlebar home button is hidden here (chrome.js), and
-  the home route bounces back to this splash until an account exists or the
-  skip was chosen.
+  Welcome/splash page for first-time users. Sign Up is the one primary action;
+  signing in is the "Already have an account? Sign in" link below it (matching
+  the in-form footer of ``auth.AuthForm``), because everyone reaching this
+  splash is a first-run user and most of them need an account rather than a
+  session. The third choice is "continue without an account". The user must
+  resolve one of the three before moving on: the titlebar home button is
+  hidden here (chrome.js), and the home route bounces back to this splash
+  until an account exists or the skip was chosen.
 
-  Sign Up / Log In open the centered sign-in modal on the shared overlay
+  Sign Up / Sign in open the centered sign-in modal on the shared overlay
   surface. The splash is a trusted local page on the chrome surface, so it
   calls the ``openSigninModal`` shell bridge directly. ``mode`` picks which
   AuthForm tab leads; ``returnTo: '/'`` lands a successful sign-in on the home
@@ -25,8 +28,8 @@
 <script>
   (function () {
     // Trusted local page on the chrome surface: open the shared sign-in modal
-    // via the shell bridge. In a plain browser (no bridge) the ButtonLinks
-    // navigate to the full-page /auth/* routes on their own.
+    // via the shell bridge. In a plain browser (no bridge) the links navigate
+    // to the full-page /auth/* routes on their own.
     if (window.minds && window.minds.openSigninModal) {
       var openModal = function (mode) {
         window.minds.openSigninModal('/', mode);
@@ -63,9 +66,10 @@
       <h1 class="type-heading-lg text-primary mb-2">Welcome to Minds</h1>
       <p class="text-secondary type-body mb-8">Run persistent, autonomous AI agents</p>
 
-      <div class="flex flex-col gap-3 mb-6">
-        <ButtonLink href="/auth/signup" variant="primary" block id="welcome-signup-btn">Sign Up</ButtonLink>
-        <ButtonLink href="/auth/login" variant="secondary" block id="welcome-login-btn">Log In</ButtonLink>
+      <ButtonLink href="/auth/signup" variant="primary" size="lg" block id="welcome-signup-btn">Sign Up</ButtonLink>
+
+      <div class="mt-4 mb-8 type-body text-secondary">
+        Already have an account? <Link href="/auth/login" weight="medium" id="welcome-login-btn">Sign in</Link>
       </div>
 
       <ButtonLink href="/welcome/skip" variant="ghost" id="skip-account-btn"

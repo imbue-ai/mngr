@@ -61,17 +61,26 @@
 
   async function handleSignup(e) {
     e.preventDefault();
+    document.getElementById('signup-error').classList.add('hidden');
+    // Two-entry password confirmation (the same check the CLI's `imbue_cloud
+    // auth signup` does at the TTY): a typo would otherwise create an account
+    // the user cannot sign back in to. Checked before the button goes busy, and
+    // the confirmation value is never sent -- only the password field is.
+    var password = document.getElementById('signup-password').value;
+    if (password !== document.getElementById('signup-password-confirm').value) {
+      showError('signup', 'Passwords do not match');
+      return false;
+    }
     var btn = document.getElementById('signup-btn');
     btn.disabled = true;
     btn.textContent = 'Creating account...';
-    document.getElementById('signup-error').classList.add('hidden');
     try {
       var res = await fetch('/auth/api/signup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email: document.getElementById('signup-email').value,
-          password: document.getElementById('signup-password').value,
+          password: password,
         }),
       });
       var data = await res.json();

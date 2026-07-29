@@ -319,13 +319,16 @@ def test_render_landing_page_signed_out_launcher_signs_in_back_to_home() -> None
     # "Log in", and (the Landing page being a trusted local page on the chrome
     # surface) it opens the sign-in modal via the shell bridge with
     # ``returnTo: '/'`` so a successful sign-in lands back on the home screen
-    # (the server's return_to default is the create screen), leading with the
-    # sign-in tab to match the launcher's label.
+    # (the server's return_to default is the create screen). It passes no
+    # ``mode``, so the modal leads with sign-up -- a user with no account at
+    # all needs to create one.
     html = render_landing_page(accessible_agent_ids=())
     assert 'id="landing-minds-settings"' in html
     assert 'id="landing-account"' in html
     assert "Log in" in html
-    assert "window.minds.openSigninModal('/', 'signin')" in html
+    assert "window.minds.openSigninModal('/')" in html
+    assert "window.minds.openSigninModal('/', 'signin')" not in html
+    assert "'/auth/signup'" in html
 
 
 def test_render_landing_page_signed_in_launcher_shows_email_and_extra_count() -> None:

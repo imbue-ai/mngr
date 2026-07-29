@@ -31,8 +31,6 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.errors import WorkspaceSyncError
 
 _USER_ID_PREFIX_LENGTH = 16
-_LEGACY_ASSOCIATIONS_FILENAME = "workspace_associations.json"
-_LEGACY_SESSIONS_FILENAME = "sessions.json"
 
 
 class SuperTokensUserId(NonEmptyStr):
@@ -215,20 +213,6 @@ class MultiAccountSessionStore(MutableModel):
     def is_any_signed_in(self) -> bool:
         """Whether at least one account is currently signed in (per the plugin)."""
         return bool(self._identity_by_user_id())
-
-    def has_signed_in_before(self) -> bool:
-        """Whether the user has ever signed in (replica/legacy state exists or the plugin reports anything).
-
-        The legacy files are matched by prefix so their retired
-        (``.pre-sync``-renamed) copies still count after the one-shot
-        record-store conversion.
-        """
-        has_local_state = bool(self._associations_view()) or any(
-            any(self.data_dir.glob(f"{name}*")) for name in (_LEGACY_ASSOCIATIONS_FILENAME, _LEGACY_SESSIONS_FILENAME)
-        )
-        if has_local_state:
-            return True
-        return self.is_any_signed_in()
 
     # -- Public write API (workspace associations) -------------------------
 
