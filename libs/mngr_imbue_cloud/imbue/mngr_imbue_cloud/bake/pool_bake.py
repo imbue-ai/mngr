@@ -377,7 +377,7 @@ def wait_for_deferred_install(
     cleanly post-lease). Best-effort with a cap: on timeout we log and proceed.
     """
     # The bracket in '[1]000-playwright-fortress' is the classic self-match guard: the regex still
-    # matches the real "bash scripts/env.d/1000-playwright-fortress.sh" unit process, but this wait
+    # matches the real "bash system/scripts/env.d/1000-playwright-fortress.sh" unit process, but this wait
     # command's own command line contains the bracketed spelling, so pgrep does not match itself into
     # an infinite loop.
     poll = (

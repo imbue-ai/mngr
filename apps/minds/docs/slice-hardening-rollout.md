@@ -160,6 +160,85 @@ Every slice should be `OK`, and 2.2.0 guestagents should hold steady in the
 tens of MB (2.1.2 ones grew without bound). A `DEAD` slice means its guest is
 unresponsive -- recover it below.
 
+## Tier rollout order: dev -> staging -> production
+
+Steps 2-5 above are written against production but apply verbatim to any tier;
+run them on dev first, then staging, and only then production, so the process
+itself is rehearsed twice before it touches users. Per-tier notes learned from
+the dev rollout:
+
+### Mixed-version fleets are the expected state
+
+Leased slices cannot be destroyed, so during (and after) the rollout every
+tier has boxes carrying a mix of 2.1.2-created and 2.2.0-created VMs, and pool
+rows baked at several `repo_branch_or_tag` values. That is fine by design:
+
+- The lima upgrade is binary-only. Replacing `limactl` + guest artifacts on a
+  box does not disturb running VMs (their hostagents keep the old binary's
+  inode), and the 2.2.0 CLI lists, shells into, and destroys 2.1.2-created
+  instances.
+- Rows baked at an older tag stay leasable: a lease that requests a newer
+  `repo_branch_or_tag` falls back to the slow path (container rebuild) on any
+  free host. The rebuild applies the memory cap from the row's stamped
+  `memory_gb` attribute; a legacy row without `memory_gb` rebuilds uncapped
+  (the provider logs a warning).
+- Old *available* rows should still be retired promptly after the new
+  generation bakes (see "Upgrading the pool" in
+  [host-pool-setup.md](./host-pool-setup.md)): every fast-path lease they
+  absorb is a slice running the old guestagent.
+
+Order matters per box: **prep before bake**, so every new slice VM boots with
+the 2.2.0 guestagent.
+
+### Dev tier notes
+
+- Dev bare-metal boxes are **shared across dev envs** (one box can carry
+  slices for several `dev-<user>` envs, and `just list-servers` slot
+  accounting only counts the activated env's own DB rows -- trust the bake's
+  cross-env occupancy guard / `--dry-run`, not the fleet table, for free
+  slots). Re-prepping a shared box upgrades lima for everyone's slices on it;
+  running VMs are untouched, but give the other devs a heads-up.
+- To put a dev-env lease on the fast path from a *released* desktop binary,
+  bake with `--from-tag <minds-vX.Y.Z>` (i.e. `just bake-slice-prod`, which is
+  env-agnostic despite the name) so the row's `repo_branch_or_tag` equals the
+  binary's `FALLBACK_BRANCH`. `bake-slice-dev` stamps a branch name, which
+  only matches source runs with `MINDS_WORKSPACE_BRANCH` set.
+- The destroy-compat check (2.2.0 CLI destroying a 2.1.2-created instance)
+  usually cannot run on a shared dev box: the old instances belong to other
+  envs or are leased. Defer that single check to staging, where old
+  `available` rows exist to retire.
+
+### Staging tier notes
+
+- Vault: `vault login -method=oidc role=minds_staging` (the default
+  `employee` role is denied on `secrets/minds/staging/*`; tokens expire after
+  168h, so expect to re-login). Deploys additionally need the
+  `minds-staging` Modal profile (see
+  [staging-bringup.md](./staging-bringup.md)).
+- Redeploy the tier services first (`minds env activate --deploy staging` +
+  `minds env deploy --yes-i-mean-staging`, from `main`), then run steps 2-5:
+  canary-prep one box, bake one slice at the release tag, run all four canary
+  checks -- including destroying one old-generation `available` row with the
+  2.2.0 CLI (`just destroy-pool-hosts <old-row-id>`), which is the
+  destroy-compat check dev could not perform.
+- A tier whose laptop-side mngr profile was last seeded by a pre-cutover
+  minds build fails every bake at the outer `mngr create` with `Cannot merge
+  AgentTypeConfig with ClaudeAgentConfig`: the stale seeded
+  `[agent_types.main] parent_type = "claude"` conflicts with the template's
+  command-parented `main`. Launching the current minds.app once against the
+  tier migrates it; headless, run
+  `seed_laptop_agent_types_for_minds(<env-root>/mngr)` (from
+  `imbue.minds.desktop_client.laptop_agent_types_seed`) before baking.
+- Only after the staging canary passes all checks, prep the remaining staging
+  boxes, bake the new generation to capacity, and retire the old `available`
+  rows.
+- Staging is the rehearsal for production: run the same commands in the same
+  order you will use for production (production adds the new-boxes-per-region
+  capacity step from
+  [production-release-deployment.md](./production-release-deployment.md);
+  fresh boxes get lima 2.2.0 at `server setup` automatically, so only
+  *pre-existing* production boxes need the re-prep).
+
 ## Appendix: recovering a wedged slice
 
 If a guest is unresponsive (its ports accept TCP but serve no SSH banner)

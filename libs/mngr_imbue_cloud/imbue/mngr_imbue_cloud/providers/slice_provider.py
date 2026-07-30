@@ -76,8 +76,11 @@ _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR: Final[str] = "/docker_build_code"
 # The env-converge browser unit's satisfied condition: baking the Fortress
 # engine (and its Chromium apt libs) into the seeded image makes the unit a
 # fast no-op on every loaded slice -- there are no marker files anymore, the
-# unit checks the real installed state.
-_ENV_D_BROWSER_UNIT: Final[str] = "scripts/env.d/1000-playwright-fortress.sh"
+# unit checks the real installed state. The path is relative to the workspace
+# repo root (which the DEFAULT_WORKSPACE_TEMPLATE Dockerfile relocates to
+# /docker_build_code) and must match where env-converge finds its units
+# (``<workspace>/system/scripts/env.d/``).
+_ENV_D_BROWSER_UNIT: Final[str] = "system/scripts/env.d/1000-playwright-fortress.sh"
 
 
 class SliceVpsDockerProviderConfig(VpsProviderConfig):
