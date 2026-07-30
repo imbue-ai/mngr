@@ -1,7 +1,8 @@
 {#def display_name, ws_name, agent_id, rationale, header_display_name_html="", rationale_label_html="" #}
 {#
-  Permissions dialog header: h1 ("Permission request: <name>") plus the
-  rationale card ("<workspace> says: ...").
+  Permissions dialog header: h1 ("Permission request: <name>"), a line
+  saying that approving grants only the specific permissions listed, and
+  the rationale card ("<workspace> says: ...").
 
   ``header_display_name_html`` and ``rationale_label_html`` are optional
   Markup overrides for backends that want fancier rendering (e.g. a
@@ -16,6 +17,12 @@
     <span class="font-bold">{{ display_name }}</span>
   {% endif %}
 </h1>
+
+{# Say what approving actually does, so the list below reads as a set of #}
+{# specific grants rather than blanket access. #}
+<p class="type-body text-secondary mt-2">
+  You grant specific permissions: the agent gets only what you approve here, and nothing else.
+</p>
 
 <Card extra="mt-6">
   <div>

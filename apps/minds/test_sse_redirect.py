@@ -140,9 +140,11 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 # Set status to DONE with the resolved agent id + redirect URL,
                 # then put the log sentinel. The creating page's status poll
                 # (`operations/create/<create_attempt_id>`) is the authoritative
-                # completion signal: once it returns DONE + redirect_url the page
-                # navigates to the workspace on its own. The redirect URL is the
-                # canonical `/goto/<agent>/` route the real creator populates.
+                # completion signal: once it returns DONE + redirect_url the
+                # page stamps data-ready + data-redirect-url on the creating
+                # root, and the walkthrough enters the workspace from there.
+                # The redirect URL is the canonical `/goto/<agent>/` route the
+                # real creator populates.
                 with creator._lock:
                     creator._statuses[str(create_attempt_id)] = AgentCreateAttemptStatus.DONE
                     creator._canonical_agent_ids[str(create_attempt_id)] = agent_id
@@ -151,9 +153,19 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 log_sink.put("[test] Agent created successfully.")
                 log_sink.put(LOG_SENTINEL)
 
-                logger.info("CreateAttempt done, waiting for browser redirect...")
+                logger.info("CreateAttempt done, waiting for the ready state...")
+                page.wait_for_selector("#creating[data-ready='true']", state="attached", timeout=10000)
 
-                # Wait for the redirect
+                # Click through the onboarding walkthrough to the last step,
+                # where the Begin button appears once the workspace is ready;
+                # clicking it performs the actual navigation.
+                for _ in range(20):
+                    if page.locator("#onboarding-begin").is_visible():
+                        break
+                    page.click("#onboarding-next")
+                page.click("#onboarding-begin")
+
+                logger.info("Begin clicked, waiting for browser redirect...")
                 page.wait_for_url(re.compile(r"/goto/"), timeout=10000)
                 logger.info("Redirect happened! URL: {}", page.url)
                 assert f"/goto/{agent_id}" in page.url

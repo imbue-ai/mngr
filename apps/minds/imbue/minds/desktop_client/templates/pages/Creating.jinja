@@ -1,4 +1,4 @@
-{#def agent_id, status_text, expected_duration_seconds #}
+{#def agent_id, status_text, expected_duration_seconds, onboarding_services, is_remote #}
 {#
   Progress page shown while an agent is being created. The page is keyed
   by create_attempt_id (passed as agent_id here -- a minds-internal in-flight
@@ -6,9 +6,16 @@
   only comes into existence once the inner mngr create returns.
   expected_duration_seconds drives the client-side time-based progress
   bar (eases toward ~80% over this duration).
+
+  While it runs, the page walks through what minds is: eight steps that
+  play themselves, each swapping the graphic above the copy. onboarding.js
+  advances them on a timer and enters the workspace once it is ready;
+  onboarding_services supplies the app-cloud icons (the bundled latchkey
+  services catalog) and is_remote decides the sharing step's second line.
 #}
 {% set _scripts %}
 <script src="/_static/creating.js" defer></script>
+<script src="/_static/onboarding.js" defer></script>
 {% endset %}
 <ChromeShell title="Creating your workspace..."
       page_label="New workspace"
@@ -20,22 +27,459 @@
   <main id="creating"
         class="w-full"
         data-agent-id="{{ agent_id }}"
-        data-expected-duration-seconds="{{ expected_duration_seconds }}">
+        data-expected-duration-seconds="{{ expected_duration_seconds }}"
+        data-is-remote="{{ 'true' if is_remote else 'false' }}"
+        data-surface-errors="true">
 
-    {# Loading screen: full-width. Holds two mutually exclusive sub-views #}
-    {# (progress vs. failure) plus a shared logs/details footer, so the #}
-    {# streamed logs stay in one place regardless of which sub-view is showing. #}
+    {# Loading screen. Holds the top progress strip plus two mutually #}
+    {# exclusive sub-views: the onboarding walkthrough (in flight) and the #}
+    {# failure view. #}
     <section class="screen w-full" data-screen="loading">
-      {# Progress sub-view: shown while the create attempt is in flight. #}
-      <div id="progress-view">
-        <div class="text-center pt-2 pb-1">
-          <div class="type-heading mb-1.5">Setting up your workspace</div>
-          <p id="tip" class="type-body text-secondary min-h-[34px] transition-opacity"></p>
-        </div>
-        <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
-          <div id="bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>
+
+      <div id="top-strip" class="w-full px-6 pt-4">
+        <div class="type-heading text-center mb-2">Setting up your machine</div>
+        {# The bar and its caption run no wider than the illustration below #}
+        {# (max-w-xl, the browser demo's width), so the strip reads as part #}
+        {# of the same column rather than spanning the whole window. #}
+        <div class="w-full max-w-xl mx-auto">
+          <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
+            <div id="bar-fill" class="h-full w-0 rounded-full transition-[width] duration-300 ease-out"></div>
+          </div>
+          <div class="flex items-center justify-between mt-2 type-helper text-tertiary">
+            <span id="stage">{{ status_text }}</span>
+            <button type="button" id="details-toggle"
+                    class="js-details inline-flex items-center gap-1 text-tertiary hover:text-primary cursor-pointer">
+              Show details
+            </button>
+          </div>
+          {# Height is a share of the window rather than a fixed 200px: the #}
+          {# walkthrough below compacts itself to make this room (see #}
+          {# is-details-open in app.css), and how much room there is to make #}
+          {# depends on how tall the window is. The panel scrolls itself. #}
+          <div id="logs"
+               class="dark hidden mt-3 p-3 bg-surface-primary text-secondary font-mono type-helper rounded-lg max-h-[22vh] overflow-y-auto whitespace-pre-wrap border border-subtle"></div>
         </div>
       </div>
+
+      {# Onboarding walkthrough. Always visible; before the user clicks #}
+      {# Step visibility is driven by data-step on #onboarding, which #}
+
+      <div id="progress-view" class="flex-1 flex flex-col min-h-0">
+        <div id="onboarding" class="onboarding flex-1 flex flex-col items-center justify-center w-full max-w-3xl mx-auto px-6 py-6 gap-6" data-step="1">
+
+          {# ---- Graphics: exactly one visible per step (onboarding.js). ---- #}
+          {# Apps for the wheels, from the bundled latchkey services catalog #}
+          {# (services without a shipped brand icon are skipped), read by #}
+          {# onboarding.js from the JSON block below. #}
+          {# The icons are inlined as data URIs rather than fetched: this page #}
+          {# holds several long-lived SSE streams, which occupy most of the #}
+          {# browser's per-origin connection budget, so separately fetched #}
+          {# icons can sit queued behind them for seconds. #}
+          {%- set cloud_apps = onboarding_services | selectattr("icon_data_uri") | list -%}
+          <script type="application/json" id="cloud-apps">
+            [{% for app in cloud_apps %}{"icon": {{ app.icon_data_uri | tojson }}, "name": {{ app.display_name | tojson }}}{{ "," if not loop.last }}{% endfor %}]
+          </script>
+          {# Fixed height, not a minimum: the graphics differ in height and #}
+          {# the step text does too, and the dot strip below must not move. #}
+          <div id="graphic" class="flex items-center justify-center w-full h-[340px]">
+
+            {# The minds mark, defined once and referenced wherever it is #}
+            {# shown (the intro, the machine row, and both devices). #}
+            <svg width="0" height="0" aria-hidden="true" class="absolute">
+              <symbol id="minds-mark" viewBox="0 0 1024 1024">
+                <rect width="1024" height="1024" rx="200" fill="#492222"/>
+                <path d="M239.393 346.233C213.333 388.701 181.957 578.826 170.21 692.964C168.726 707.387 179.615 719.956 194.083 720.906L243.5 724.15C254.832 724.894 264.36 732.926 267.01 743.968L287.114 827.735C289.477 837.581 297.325 845.189 307.312 846.857C387.978 860.334 533.31 868.318 620.93 820.192C992.068 616.341 865.659 254.427 642.258 194.566C418.857 134.706 303.377 241.962 239.393 346.233Z" fill="#E9ECD9"/>
+                <path d="M719.991 411.97C744.539 411.97 762.39 420.422 774.234 434.21C786.236 448.181 792.898 468.606 792.898 493.876C792.898 542.499 753.481 581.916 704.858 581.916C656.236 581.916 616.819 542.499 616.819 493.876C616.819 470.597 629.516 450.292 649.247 435.491C669.022 420.657 695.154 411.97 719.991 411.97Z" stroke="#492222" stroke-width="17.28" fill="none"/>
+                <path d="M583.295 282.074C621.147 282.074 649.061 294.27 667.574 314.33C686.184 334.495 696.216 363.607 696.216 399.073C696.216 467.817 636.155 524.583 560.738 524.583C485.322 524.583 425.26 467.817 425.26 399.073C425.26 365.723 444.83 336.66 475.056 315.555C505.279 294.451 545.21 282.074 583.295 282.074Z" stroke="#492222" stroke-width="17.28" fill="none"/>
+                <path d="M727.416 125.17C765.268 125.17 793.181 137.366 811.695 157.426C830.305 177.591 840.336 206.703 840.336 242.169C840.336 310.913 780.275 367.679 704.859 367.679C629.442 367.679 569.38 310.913 569.38 242.169C569.38 208.819 588.951 179.756 619.176 158.651C649.4 137.547 689.331 125.17 727.416 125.17Z" stroke="#E9ECD9" stroke-width="17.28" fill="none"/>
+              </symbol>
+            </svg>
+
+            {# A miniature of the app pane, so the laptop and the phone show #}
+            {# the same interface rather than a logo. #}
+            <svg width="0" height="0" aria-hidden="true" class="absolute">
+              <symbol id="app-ui" viewBox="0 0 100 64">
+                <rect x="6" y="6" width="11" height="11" rx="3" fill="currentColor" opacity="0.75"/>
+                <rect x="22" y="9" width="30" height="5" rx="2.5" fill="currentColor" opacity="0.18"/>
+                <rect x="74" y="6" width="9" height="9" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.35" vector-effect="non-scaling-stroke"/>
+                <rect x="86" y="6" width="9" height="9" rx="2.5" fill="currentColor" opacity="0.75"/>
+                <rect x="6" y="26" width="27" height="17" rx="3" fill="currentColor" opacity="0.18"/>
+                <rect x="37" y="26" width="27" height="17" rx="3" fill="currentColor" opacity="0.18"/>
+                <rect x="68" y="26" width="27" height="17" rx="3" fill="currentColor" opacity="0.32"/>
+                <rect x="6" y="50" width="24" height="9" rx="4" fill="currentColor" opacity="0.75"/>
+                <rect x="34" y="50" width="24" height="9" rx="4" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.35" vector-effect="non-scaling-stroke"/>
+              </symbol>
+              {# The machine, drawn the same way wherever it appears. #}
+              <symbol id="laptop" viewBox="0 0 168 116">
+                <use href="#laptop-shell"/>
+                <use href="#app-ui" x="28" y="16" width="112" height="70"/>
+              </symbol>
+              {# The machine on its own, for where the app inside is drawn #}
+              {# separately (so it can be tinted without tinting the machine). #}
+              <symbol id="laptop-shell" viewBox="0 0 168 116">
+                <rect x="18" y="6" width="132" height="88" rx="8" fill="none"
+                      stroke="currentColor" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
+                <path d="M6 106 H162" fill="none" stroke="currentColor" stroke-width="2.5"
+                      stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+              </symbol>
+              {# A simpler app than #app-ui, for the publishing step: there #}
+              {# the point is that two copies match, not what is in them. #}
+              <symbol id="publish-app" viewBox="0 0 100 64">
+                <rect x="8" y="8" width="34" height="8" rx="4" fill="currentColor" opacity="0.85"/>
+                <rect x="8" y="26" width="84" height="14" rx="4" fill="currentColor" opacity="0.3"/>
+                <rect x="8" y="48" width="30" height="10" rx="5" fill="currentColor" opacity="0.85"/>
+              </symbol>
+            </svg>
+
+
+            {# Step 1: the minds logo. #}
+            <div id="gfx-minds" class="gfx flex flex-col items-center gap-2"
+                 data-tooltip="The app you are in now. It runs on your computer.">
+              <svg viewBox="0 0 1024 1024" class="w-40 h-40 rounded-xl" aria-label="minds"><use href="#minds-mark"/></svg>
+              <span class="type-helper text-tertiary">minds</span>
+            </div>
+
+            {# Chat step: one exchange, played out. Its own scene rather #}
+            {# than the browser demo -- there is no window chrome to read #}
+            {# past -- borrowing the demo chat pane's language: the request #}
+            {# filled on the right, the reply a bordered card on the left. #}
+            {# The request types itself, backspaces, and tries another thing #}
+            {# to build; onboarding.js drives the text, because a clip-based #}
+            {# CSS typewriter cannot backspace through lines of differing #}
+            {# length. #}
+            <div id="gfx-chat" class="gfx hidden w-full max-w-md flex flex-col gap-3">
+              <div class="flex justify-end">
+                <div class="chat-bubble chat-bubble-user rounded-xl"
+                     data-tooltip="Ask for whatever you want, in plain language.">
+                  <span id="chat-typed"></span><span class="chat-caret" aria-hidden="true"></span>
+                  {# Holds the width of the longest request the typing will
+                     reach, so the bubble does not grow and shrink under the
+                     text as one option is swapped for another. Keep this in
+                     step with the longest entry in CHAT_OPTIONS. #}
+                  <span class="chat-reserve" aria-hidden="true">Hey! I want to make a tracker for my workouts.</span>
+                </div>
+              </div>
+              <div class="flex justify-start">
+                <div class="chat-bubble chat-bubble-agent rounded-xl chat-reply"
+                     data-tooltip="Your agent builds it -- interface and all.">You&rsquo;ve got it!</div>
+              </div>
+            </div>
+
+            {# Steps 2-4: a browser window. Tabs accumulate as the user #}
+            {# advances (onboarding.js reveals the app/browser tabs). #}
+            <div id="gfx-browser" class="gfx hidden w-full max-w-xl">
+              <div id="theme-demo" class="relative w-full rounded-xl overflow-hidden border border-subtle shadow-overlay text-left">
+                <div id="demo-titlebar" class="demo-titlebar flex items-center">
+                  <div class="flex gap-1.5 px-3">
+                    <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
+                    <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
+                    <span class="demo-dot w-2.5 h-2.5 rounded-full"></span>
+                  </div>
+                  <span class="demo-tab demo-tab-active" data-tab="chat"
+                        data-tooltip="Talk to an agent and watch it work.">Chat</span>
+                  <span class="demo-tab demo-tab-pending" data-tab="app"
+                        data-tooltip="An app your agent built, in its own tab.">My app</span>
+                  <button type="button" class="demo-plus" aria-hidden="true"
+                          data-tooltip="Opens another tab.">+</button>
+                </div>
+                {# Fixed height so switching demo tabs never reflows the page. #}
+                <div class="demo-body p-4 h-[212px] overflow-hidden">
+                  {# The very bubbles from the chat step: the same markup at #}
+                  {# a smaller size, so the window can simply form around #}
+                  {# them rather than anything having to line up. #}
+                  <div class="demo-pane flex flex-col gap-2" data-pane="chat"
+                       data-tooltip="Ask in plain language; the agent does the work.">
+                    <div class="flex justify-end">
+                      <div id="demo-request" class="chat-bubble chat-bubble-user chat-bubble-sm rounded-xl">Hey! I want to make a tracker for my workouts.</div>
+                    </div>
+                    <div class="flex justify-start">
+                      <div class="chat-bubble chat-bubble-agent chat-bubble-sm rounded-xl">You&rsquo;ve got it!</div>
+                    </div>
+                  </div>
+                  {# The app the agent built from that request: seven day #}
+                  {# columns, with the days trained filled in. #}
+                  <div class="demo-pane hidden" data-pane="app" data-tooltip="Agents build and run real apps, not just answers.">
+                    <div class="flex items-center gap-2 mb-3">
+                      <span class="demo-fill h-2 rounded w-16"></span>
+                      <span class="w-4 h-4 rounded-md inline-block ml-auto" style="background-color: color-mix(in srgb, var(--demo-accent) 55%, transparent);"></span>
+                    </div>
+                    <div class="flex gap-1.5">
+                      {% set trained = [0, 2, 4, 5] %}
+                      {% for _day in range(7) %}
+                        <div class="flex-1 flex flex-col gap-1.5">
+                          <span class="demo-fill h-1.5 rounded"></span>
+                          {% if _day in trained %}
+                            <span class="h-10 rounded-md" style="background-color: color-mix(in srgb, var(--demo-accent) 30%, transparent);"></span>
+                          {% else %}
+                            <span class="demo-outline h-10 rounded-md"></span>
+                          {% endif %}
+                        </div>
+                      {% endfor %}
+                    </div>
+                  </div>
+                </div>
+                {# Pointer that flies to the "+" and clicks it when a new tab #}
+                {# opens (onboarding.js drives it; decorative). #}
+                <span id="demo-click-splash" class="demo-click-splash" aria-hidden="true"></span>
+                {# Arrow shifted so its tip sits at the element's top-left, so #}
+                {# onboarding.js can place the tip exactly on the "+". #}
+                {# The wrapper carries the travel (translate) and the arrow #}
+                {# inside carries the click (scale), so a press can never bend #}
+                {# the straight glide. The arrow is shifted so its tip sits at #}
+                {# the wrapper's top-left, which is what onboarding.js aims. #}
+                <span id="demo-cursor" class="demo-cursor" aria-hidden="true">
+                  <svg class="demo-cursor-arrow" viewBox="0 0 24 24">
+                    <path d="M1 1 L1 18 L5.5 13.5 L8.5 20 L11 19 L8 12.5 L14.5 12.5 Z"
+                          fill="#ffffff" stroke="#202020"
+                          stroke-width="1.5" stroke-linejoin="round"/>
+                  </svg>
+                </span>
+              </div>
+            </div>
+
+            {# Apps step: the cloud of services agents can reach. The #}
+            {# connections step shows the same cloud in context. #}
+            <div id="gfx-apps" class="gfx hidden">
+              <div class="app-cloud relative w-[360px] h-[240px]"
+                   data-tooltip="Apps your agents can connect to.">
+                {# The viewBox is padded past the path's own bounds: drawn tight, half of #}
+                  {# the outline falls outside it and is clipped away, which is what #}
+                  {# left the top, bottom and sides looking thinner than the rest. #}
+                  {# The aspect ratio is kept, too -- stretching it flattened the #}
+                  {# curves into ovals. #}
+                  <svg viewBox="-1 3 26 18" class="absolute inset-0 w-full h-full" aria-hidden="true">
+                  <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"
+                        fill="var(--c-fill-subtle)" stroke="var(--gfx-ink-soft)" stroke-width="2.5"/>
+                </svg>
+                <div class="cloud-wheel">
+                  <span class="cloud-wheel-name" aria-hidden="true"></span>
+                </div>
+              </div>
+            </div>
+
+            {# Connections step. A permission request sits on the left; a #}
+            {# pointer approves it, and the green button then travels across #}
+            {# and becomes the link joining the cloud of apps to the machine. #}
+            {# onboarding.js restarts the sequence each time the step shows. #}
+            <div id="gfx-connect" class="gfx hidden">
+              <div class="connect-scene">
+                {# The request the pointer approves. #}
+                <div class="connect-card" data-tooltip="A permission request: agents act only on what you approve.">
+                  <span class="connect-card-title">Permission request</span>
+                  <span class="connect-card-line"></span>
+                  <span class="connect-card-line is-short"></span>
+                </div>
+                {# The apps the agents reach. #}
+                <div class="connect-cloud app-cloud" data-tooltip="Apps your agents can connect to.">
+                  {# The viewBox is padded past the path's own bounds: drawn tight, half of #}
+                  {# the outline falls outside it and is clipped away, which is what #}
+                  {# left the top, bottom and sides looking thinner than the rest. #}
+                  {# The aspect ratio is kept, too -- stretching it flattened the #}
+                  {# curves into ovals. #}
+                  <svg viewBox="-1 3 26 18" class="absolute inset-0 w-full h-full" aria-hidden="true">
+                    <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"
+                          fill="var(--c-fill-subtle)" stroke="var(--gfx-ink-soft)" stroke-width="2.5"/>
+                  </svg>
+                  {# App wheel: one big icon centered with a smaller one either #}
+                  {# side, spinning left -> center -> right (onboarding.js). #}
+                  <div class="cloud-wheel">
+                    <span class="cloud-wheel-name" aria-hidden="true"></span>
+                  </div>
+                </div>
+                {# The boundary the machine cannot cross on its own. It is #}
+                {# there from the start; approving is what opens a way #}
+                {# through it, and the link then crosses it. #}
+                <span class="connect-boundary" aria-hidden="true"
+                      data-tooltip="Nothing reaches your apps until you allow it."></span>
+                {# The machine the agents run on. #}
+                <svg class="connect-laptop" viewBox="0 0 168 116" aria-label="your machine"
+                     data-tooltip="The machine your agents run on.">
+                  <use href="#laptop"/>
+                </svg>
+                {# The approve button, which becomes the link once clicked. #}
+                <span class="connect-approve" aria-hidden="true">
+                  <span class="connect-approve-label">Approve</span>
+                  {# Once the link has settled it carries traffic: a light #}
+                  {# pulse runs up it and another back down, looping while #}
+                  {# the step shows. They live inside the pill, so they #}
+                  {# inherit wherever the morph lands rather than repeating #}
+                  {# its coordinates. #}
+                  <span class="connect-flow">
+                    <span class="connect-flow-pulse is-up"></span>
+                    <span class="connect-flow-pulse is-down"></span>
+                  </span>
+                </span>
+                {# The other answer: the same request can be turned down, and #}
+                {# the link closes again when it is. #}
+                <span class="connect-deny" aria-hidden="true">
+                  <span class="connect-deny-label">Deny</span>
+                  <Icon16 name="close" size="sm" extra="connect-deny-x" />
+                </span>
+                <span class="connect-splash is-approve" aria-hidden="true"></span>
+                <span class="connect-splash is-deny" aria-hidden="true"></span>
+                <span class="connect-cursor" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M1 1 L1 18 L5.5 13.5 L8.5 20 L11 19 L8 12.5 L14.5 12.5 Z"
+                          fill="#ffffff" stroke="#202020" stroke-width="1.5" stroke-linejoin="round"/>
+                  </svg>
+                </span>
+              </div>
+            </div>
+
+            {# Sharing step: the machine on a laptop, an arrow drawing #}
+            {# across to a phone, and then the same interface appearing #}
+            {# there (onboarding.js restarts it each time the step shows). #}
+            <div id="gfx-devices" class="gfx hidden flex items-end justify-center gap-4">
+              <svg viewBox="0 0 168 116" class="w-44 h-32 text-tertiary"
+                   aria-label="your machine on a laptop"
+                   data-tooltip="Your machine, on this computer.">
+                <use href="#laptop"/>
+              </svg>
+              <svg viewBox="0 0 64 24" class="w-16 h-6 mb-12 gfx-arrow" fill="none"
+                   stroke="currentColor" aria-hidden="true">
+                <path class="devices-arrow-line" d="M4 12 H40" stroke-width="2.5" stroke-linecap="round"/>
+                <path class="devices-arrow-head" d="M52 12 L39 18 L39 6 Z" fill="currentColor" stroke="none"/>
+              </svg>
+              <svg viewBox="0 0 76 116" class="w-20 h-32 text-tertiary" fill="none"
+                   stroke="currentColor" aria-label="the same machine on a phone"
+                   data-tooltip="The same machine, reached from your phone.">
+                <rect x="10" y="6" width="56" height="104" rx="10" stroke-width="2.5"/>
+                <path d="M31 16 H45" stroke-width="1.5" stroke-linecap="round"/>
+                <use class="devices-phone-ui" href="#app-ui" x="16" y="32" width="44" height="30"/>
+              </svg>
+            </div>
+
+            {# Publishing step: your machine sends an app up to the cloud and #}
+            {# someone else's machine adapts the same app. All three #}
+            {# copies are the same simplified app drawing; the machines match #}
+            {# and only the app is tinted, so the colour reads as the app. #}
+            {# onboarding.js restarts the arrows each time the step shows. #}
+            <div id="gfx-publish" class="gfx hidden">
+              <div class="publish-scene">
+                {# Where a published app lives, in the neutral tone: the copy #}
+                {# neither machine has coloured. The cloud silhouette is the #}
+                {# one from the apps step, without its wheel of services. #}
+                <div class="publish-cloud"
+                     data-tooltip="Apps people publish live here, ready for anyone to pick up.">
+                  {# The viewBox is padded past the path's own bounds: drawn tight, half of #}
+                  {# the outline falls outside it and is clipped away, which is what #}
+                  {# left the top, bottom and sides looking thinner than the rest. #}
+                  {# The aspect ratio is kept, too -- stretching it flattened the #}
+                  {# curves into ovals. #}
+                  <svg viewBox="-1 3 26 18" class="absolute inset-0 w-full h-full" aria-hidden="true">
+                    <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"
+                          fill="var(--c-fill-subtle)" stroke="var(--gfx-ink-soft)" stroke-width="2.5"/>
+                  </svg>
+                  <svg class="publish-cloud-app" viewBox="0 0 100 64" aria-label="the published app">
+                    <use href="#publish-app"/>
+                  </svg>
+                </div>
+                {# The two machines are the same drawing in the same colour: #}
+                {# only the app inside is tinted, so the colour reads as the #}
+                {# app rather than the computer. #}
+                <svg class="publish-laptop is-mine" viewBox="0 0 168 116"
+                     aria-label="your machine, running an app you built"
+                     data-tooltip="An app you built on your machine.">
+                  <use href="#laptop-shell"/>
+                  <use class="publish-app is-mine-app" href="#publish-app" x="34" y="20" width="100" height="62"/>
+                </svg>
+                <svg class="publish-laptop is-theirs" viewBox="0 0 168 116"
+                     aria-label="someone else's machine, running the same app"
+                     data-tooltip="The same app, in someone else's colour.">
+                  <use href="#laptop-shell"/>
+                  <use class="publish-app is-theirs-app" href="#publish-app" x="34" y="20" width="100" height="62"/>
+                </svg>
+                {# Both arrows on one overlay, so their ends are given in #}
+                {# scene coordinates and can be aimed at the cloud and the #}
+                {# machines directly. #}
+                <svg class="publish-arrows" viewBox="0 0 560 268" fill="none"
+                     stroke="currentColor" aria-hidden="true">
+                  <path class="publish-arrow-line is-up" d="M158 184 Q176 140 200 120"
+                        stroke-width="2.5" stroke-linecap="round"/>
+                  <path class="publish-arrow-head is-up" d="M209 113 L203.5 125.5 L195.5 116.5 Z"
+                        fill="currentColor" stroke="none"/>
+                  <path class="publish-arrow-line is-down" d="M352 114 Q382 138 397 174"
+                        stroke-width="2.5" stroke-linecap="round"/>
+                  <path class="publish-arrow-head is-down" d="M403 185 L392.5 176.5 L402 171 Z"
+                        fill="currentColor" stroke="none"/>
+                </svg>
+                <span class="publish-label is-up">publish</span>
+                <span class="publish-label is-down">adapt</span>
+              </div>
+            </div>
+
+            {# Step 7: the tips step has no illustration, so its headline #}
+            {# takes the graphic's place -- otherwise the reserved height #}
+            {# (which keeps the dot strip still) would sit there blank. #}
+            <div id="gfx-tips" class="gfx hidden flex items-center justify-center px-6">
+              <p class="type-heading-lg text-primary text-center max-w-xl">
+                Hang tight — your machine is nearly ready.
+              </p>
+            </div>
+          </div>
+
+          {# ---- Walkthrough step text panels (1..8). The walkthrough plays #}
+          {# by itself; onboarding.js advances it on a timer. ---- #}
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-1" data-step="1">
+            <p class="onboarding-copy text-primary max-w-xl">This is Minds: your machine for building personalized apps.</p>
+            <p class="onboarding-copy text-primary max-w-xl">Learn more while you wait.</p>
+          </div>
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-1" data-step="2">
+            <p class="onboarding-copy text-primary max-w-xl">Agents can build any interface you can imagine.</p>
+          </div>
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-1" data-step="3">
+            <p class="onboarding-copy text-primary max-w-xl">Agents and tools run in tabs,</p>
+            <p class="onboarding-copy text-primary max-w-xl">so you can see everything at once.</p>
+          </div>
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-1" data-step="4">
+            <p class="onboarding-copy text-primary max-w-xl">Agents can get data from other apps you use, like Slack or Notion,</p>
+            <p class="onboarding-copy text-primary max-w-xl">and browse the web to complete tasks.</p>
+          </div>
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-1" data-step="5">
+            <p class="onboarding-copy text-primary max-w-xl">Your agents can only perform actions you approve.</p>
+            <p class="onboarding-copy max-w-xl">
+              <Link href="https://imbue.com/product/latchkey" target="_blank" rel="noopener"
+                    extra="inline-flex items-center gap-0.5">Learn more<Icon16 name="arrow-up-right" size="sm" /></Link>
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-1" data-step="6">
+            <p class="onboarding-copy text-primary max-w-xl">Share access with your teammates, friends, or even your phone.</p>
+            {# Reaching it with the laptop shut only holds for a machine in #}
+            {# the cloud; a local one is only up while this computer is. #}
+            <p class="onboarding-copy text-primary max-w-xl">
+              {% if is_remote %}
+              This one runs in the cloud, so it is there even when your laptop is closed.
+              {% else %}
+              This one runs locally, so your computer has to be on.
+              {% endif %}
+            </p>
+          </div>
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-1" data-step="7">
+            <p class="onboarding-copy text-primary max-w-xl">You can also publish your apps, or adapt what others have made.</p>
+          </div>
+          {# Last step: the tips, with the headline standing in the graphic's #}
+          {# place (see #gfx-tips above). #}
+          <div class="onboarding-step hidden text-center flex flex-col items-center gap-3" data-step="8">
+            <p id="tip" class="onboarding-copy text-primary min-h-[18px] transition-opacity"></p>
+          </div>
+
+          {# ---- Nav: one dot per step, in fixed-width slots so nothing #}
+          {# shifts. The current step's dot stretches into a pill whose fill #}
+          {# runs out as the step does; clicking any dot jumps to its step #}
+          {# (onboarding.js). ---- #}
+          <nav id="onboarding-dots" class="onboarding-dots" aria-label="Walkthrough">
+            {% for _step in range(1, 9) %}
+              <button type="button" class="onboarding-dot" data-dot="{{ _step }}"
+                      aria-label="Step {{ _step }}">
+                <span class="onboarding-dot-shape" aria-hidden="true">
+                  <span class="onboarding-dot-fill"></span>
+                </span>
+              </button>
+            {% endfor %}
+          </nav>
+        </div>
+      </div>
+
 
       {# Failure sub-view: revealed by creating.js the moment the create attempt fails. #}
       <div id="failure-view" class="hidden">
@@ -95,16 +539,6 @@
         </div>
       </div>
 
-      {# Shared footer: live stage caption + collapsible logs. #}
-      <div class="flex items-center justify-between mt-2 type-helper text-tertiary">
-        <span id="stage">{{ status_text }}</span>
-        <button type="button" id="details-toggle"
-                class="js-details inline-flex items-center gap-1 text-tertiary hover:text-primary cursor-pointer">
-          Show details
-        </button>
-      </div>
-      <div id="logs"
-           class="dark hidden mt-3 p-3 bg-surface-primary text-secondary font-mono type-helper rounded-lg max-h-[260px] overflow-y-auto whitespace-pre-wrap border border-subtle"></div>
     </section>
 
   </main>

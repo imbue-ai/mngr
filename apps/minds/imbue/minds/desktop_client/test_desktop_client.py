@@ -682,10 +682,11 @@ def _create_test_server_with_agent_creator(
 
 
 def test_creating_page_shows_status(tmp_path: Path) -> None:
-    """GET /creating/{agent_id} shows the loading/progress page directly.
+    """GET /creating/{agent_id} shows the loading page with the onboarding walkthrough.
 
-    The page no longer interposes any onboarding questions before the
-    setting-up screen, so it goes straight to the loading view.
+    The page carries the "Setting up your machine" title, the top progress
+    bar, and the minds intro as step one of the walkthrough, which plays
+    itself with no button to press (see Creating.jinja / onboarding.js).
     """
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
@@ -694,10 +695,13 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
     assert "Creating your workspace" in response.text
-    assert "Setting up your workspace" in response.text
-    # The onboarding question UI was removed, so none of its markers render.
-    assert "data-question" not in response.text
-    assert 'class="opt' not in response.text
+    assert "Setting up your machine" in response.text
+    assert 'id="bar-fill"' in response.text
+    # The walkthrough plays itself, so nothing asks the user to start it.
+    assert "Learn more while you wait?" not in response.text
+    assert 'class="onboarding-dot"' in response.text
+    assert 'id="onboarding"' in response.text
+    assert "This is Minds: your machine for building personalized apps." in response.text
     agent_creator.wait_for_all()
 
 

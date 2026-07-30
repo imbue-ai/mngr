@@ -1,7 +1,9 @@
 // Creating-page flow: the workspace is created in the background, so this
-// page shows a loading screen (progress bar + rotating hints) and redirects
-// into the workspace once the create attempt finishes. Create-attempt status + logs stream
-// over SSE.
+// page shows a top progress bar (plus the onboarding walkthrough, see
+// onboarding.js) while the create attempt runs. Status + logs stream over
+// SSE. When it finishes this file marks #creating with data-ready +
+// data-redirect-url and dispatches 'minds:create-ready'; onboarding.js
+// enters the workspace from there.
 (function () {
   var root = document.getElementById('creating');
   if (!root) return;
@@ -17,54 +19,43 @@
   var createAttemptError = '';
   var createAttemptErrorKind = '';
 
-  // ---- Loading screen: progress bar + rotating hints ----
-  var TIPS = [
-    'Tip: your workspace is backed up automatically so your work survives a restart.',
-    'Did you know: in <b>privacy mode</b>, the data we gather stays on your own computer.',
-    'Tip: switch accounts anytime from the workspace menu.',
-    'Tip: share a running app with a teammate from the workspace’s Share menu.',
-    'Did you know: you can revisit permissions and compute settings later.'
-  ];
-  var tipsInterval = null;
+  // ---- Loading screen ----
 
   function startLoading() {
-    // If the create attempt already failed, never show the in-progress UI -- jump
-    // straight to the failure view.
+    // If the create attempt already failed, never show the in-progress UI --
+    // jump straight to the failure view.
     if (createAttemptFailed) {
       showFailure();
       return;
     }
-    startTips();
     requestAnimationFrame(tickProgress);
   }
 
-  function startTips() {
-    var tipEl = document.getElementById('tip');
-    if (!tipEl) return;
-    var idx = 0;
-    tipEl.innerHTML = TIPS[0];
-    // 8s per tip: long enough to comfortably read a full sentence before it
-    // swaps (workspace setup takes minutes, so there is no rush).
-    tipsInterval = setInterval(function () {
-      idx = (idx + 1) % TIPS.length;
-      tipEl.style.opacity = '0';
-      setTimeout(function () {
-        tipEl.innerHTML = TIPS[idx];
-        tipEl.style.opacity = '1';
-      }, 250);
-    }, 8000);
+  // Enter the just-created workspace. redirectUrl is the /goto/<agent>/ URL.
+  // On the trusted chrome surface, hand it to the shell bridge so the
+  // workspace opens in the caged content view instead of navigating this
+  // (chrome) frame into untrusted agent content; a plain browser (no shell)
+  // full-page navigates as before. Shared by the plain-loading auto-enter
+  // (tickProgress) and the walkthrough (onboarding.js, via
+  // window.mindsEnterWorkspace).
+  function enterWorkspace(url) {
+    if (window.minds && window.minds.navigateContent) {
+      window.minds.navigateContent(url);
+    } else {
+      window.location.href = url;
+    }
   }
+  window.mindsEnterWorkspace = enterWorkspace;
 
   // ---- Failure view ----
-  // Surface a create attempt failure prominently. Stops the rotating tips and
-  // progress bar, swaps the loading screen's progress sub-view for the
-  // failure sub-view, and fills in the error message. Idempotent: safe to
-  // call from both the status poll and the SSE 'done' handler.
+  // Surface a create attempt failure prominently. Stops the progress bar,
+  // swaps the loading screen's walkthrough sub-view for the failure
+  // sub-view, and fills in the error message. Idempotent: safe to call from
+  // both the status poll and the SSE 'done' handler.
   var failureShown = false;
   function showFailure() {
     if (failureShown) return;
     failureShown = true;
-    if (tipsInterval) { clearInterval(tipsInterval); tipsInterval = null; }
     var progressView = document.getElementById('progress-view');
     var failureView = document.getElementById('failure-view');
     if (progressView) progressView.classList.add('hidden');
@@ -106,15 +97,13 @@
     }
     if (createAttemptDone && redirectUrl) {
       if (fill) fill.style.width = '100%';
-      // redirectUrl is the /goto/<agent>/ workspace (agent) URL. On a trusted
-      // local page on the chrome surface, hand it to the shell bridge so the new
-      // workspace opens in the caged content view instead of navigating this
-      // (chrome) frame into untrusted agent content. Plain browser (no shell)
-      // full-page navigates as before.
-      if (window.minds && window.minds.navigateContent) {
-        window.minds.navigateContent(redirectUrl);
-      } else {
-        window.location.href = redirectUrl;
+      root.setAttribute('data-redirect-url', redirectUrl);
+      root.setAttribute('data-ready', 'true');
+      root.dispatchEvent(new Event('minds:create-ready'));
+      // The walkthrough enters the workspace itself (diving into the picture
+      // on its way), so it marks itself active; without it, enter here.
+      if (root.getAttribute('data-walkthrough-active') !== 'true') {
+        enterWorkspace(redirectUrl);
       }
       return;
     }
@@ -131,6 +120,9 @@
       var logsEl = document.getElementById('logs');
       var isHidden = logsEl.classList.toggle('hidden');
       detailsToggle.textContent = isHidden ? 'Show details' : 'Hide details';
+      // The walkthrough underneath compacts itself to make room for the
+      // logs, so opening them does not push the page into a scroll.
+      root.classList.toggle('is-details-open', !isHidden);
     });
   }
 

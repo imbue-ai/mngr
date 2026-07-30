@@ -617,3 +617,1091 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 .styleguide-toggle:active {
   background-image: linear-gradient(var(--c-fill-active), var(--c-fill-active));
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * Creating-page onboarding walkthrough (Creating.jinja + onboarding.js).
+ *
+ * The walkthrough is eight steps and plays by itself. #onboarding carries
+ * data-step (1..8); onboarding.js swaps which #graphic block is visible per
+ * step and toggles the step text panels. The CSS here styles the browser
+ * demo, the app cloud, the step dots and the ready/entering states.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * One drawing system for every graphic in the walkthrough.
+ *
+ * Each picture lives in its own viewBox and is placed at its own size, so the
+ * same stroke-width came out at a different thickness in each -- the cloud
+ * read as 1.5px next to a laptop at 4.2px, and the same laptop symbol was
+ * heavier on one step than another. non-scaling-stroke makes stroke-width a
+ * CSS pixel value rather than a user-unit one, so a weight declared once is
+ * the weight that lands, wherever the shape is used and at whatever size.
+ *
+ * Two weights, deliberately: 2.5px for the outlines that carry a shape
+ * (machines, clouds, arrows) and 1.5px for detail inside them (the miniature
+ * interface, a phone's speaker, a pointer's outline). Arrowheads are filled
+ * rather than stroked, so nothing overlaps a line end or doubles up where a
+ * semi-transparent cap crosses one.
+ */
+/* Keyed on stroke-width rather than stroke: several shapes inherit their
+ * stroke from the <svg> around them and declare only a width. */
+#graphic svg [stroke-width] {
+  vector-effect: non-scaling-stroke;
+}
+/*
+ * The drawings are inked in a flat gray rather than the theme's tertiary
+ * text and border tokens, which are translucent black (and translucent
+ * white in the dark theme). A line crossing another compounds their alpha
+ * and the crossing reads darker than either -- which is what made the
+ * arrowheads look like they were sitting on top of their own lines. One
+ * value serves both themes: 45% black on white and 50% white on the dark
+ * surface both land within a shade of it.
+ */
+#graphic {
+  /* The drawings themselves, and the lighter tone their outlines take. */
+  --gfx-ink: #8c8c8c;
+  --gfx-ink-soft: #b0b0b0;
+  /* Arrows carry the eye, so they sit a shade darker than the rest -- dark
+   * gray rather than black, which would jump out of the family. */
+  --gfx-ink-arrow: #6b6b6b;
+}
+.dark #graphic {
+  --gfx-ink: #8c8c8c;
+  --gfx-ink-soft: #5a5a5a;
+  --gfx-ink-arrow: #a8a8a8;
+}
+
+/* Progress bar. Readiness enters the workspace straight away, so the bar
+ * just fills; it never needs a separate finished colour. */
+#bar-fill {
+  background: var(--c-text-secondary);
+}
+
+/* Step text panels all reserve the height of the tallest, so moving between
+ * steps never shifts the dot strip underneath them. */
+.onboarding-step {
+  /* The tallest panel, so the shorter ones reserve the same space and the
+   * strip below stays put. */
+  min-height: 84px;
+}
+
+/*
+ * Step copy sits at 1rem rather than on the type scale (type-body is 14 and
+ * type-heading 18): a deliberate exception, so the walkthrough's message is
+ * not the most minor text on the page.
+ */
+.onboarding-copy {
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+/*
+ * Details open. The logs panel wants most of a fifth of the window, which
+ * the walkthrough at full size has no room to give: opening it pushed the
+ * page into a scroll. Whoever opens the logs came to read them, so the
+ * walkthrough gives up its breathing room and the illustration shrinks to
+ * make that space, rather than the page growing a scrollbar. creating.js
+ * puts is-details-open on #creating alongside revealing the logs.
+ */
+/* py-2 and gap-3, off the same scale the utilities compute from. */
+#creating.is-details-open .onboarding {
+  padding-top: calc(var(--spacing) * 2);
+  padding-bottom: calc(var(--spacing) * 2);
+  gap: calc(var(--spacing) * 3);
+}
+/* Each scene is laid out at fixed pixel sizes, so it scales as a whole
+ * rather than reflowing into a shape it was not drawn for. The box height
+ * is what a 340px scene comes to at this scale. */
+#creating.is-details-open #graphic {
+  height: 210px;
+}
+#creating.is-details-open .gfx {
+  transform: scale(0.62);
+}
+#graphic {
+  transition: height 200ms ease;
+}
+.gfx {
+  transition: transform 200ms ease;
+}
+.onboarding {
+  transition:
+    gap 200ms ease,
+    padding 200ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  #graphic,
+  .gfx,
+  .onboarding {
+    transition: none;
+  }
+}
+
+/*
+ * Step dots. Each sits in a fixed-width slot, so the strip never reflows;
+ * the current step's dot stretches into a pill whose fill runs out over the
+ * step's dwell, showing when the walkthrough will move on.
+ */
+.onboarding-dots {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.onboarding-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* The slot is as wide as the pill, so a dot becoming the current one
+   * stretches within its own slot and moves nothing else. */
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.onboarding-dot-shape {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  overflow: hidden;
+  background: rgb(from var(--c-text-primary) r g b / 0.22);
+  transition: width 300ms cubic-bezier(0.4, 0, 0.2, 1),
+              background-color 200ms ease;
+}
+.onboarding-dot:hover .onboarding-dot-shape {
+  background: rgb(from var(--c-text-primary) r g b / 0.45);
+}
+.onboarding-dot.is-current .onboarding-dot-shape {
+  width: 28px;
+}
+.onboarding-dot-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--c-text-primary);
+}
+.onboarding-dot.is-running .onboarding-dot-fill {
+  animation: onboarding-dot-fill 7000ms linear forwards;
+}
+@keyframes onboarding-dot-fill {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+/*
+ * Connections step. A fixed-size scene so the pieces can be placed against
+ * each other: the permission request on the left, the cloud of apps top
+ * right, the machine below it. A pointer approves the request, and the
+ * green button then travels across and settles as the link between the
+ * cloud and the machine -- the same element throughout, so it reads as one
+ * thing moving rather than two appearing. onboarding.js adds is-playing
+ * when the step comes up, so the sequence starts over on each visit.
+ */
+.connect-scene {
+  position: relative;
+  width: 560px;
+  height: 320px;
+  color: var(--gfx-ink);
+}
+.connect-card {
+  position: absolute;
+  left: 0;
+  top: 70px;
+  width: 200px;
+  height: 160px;
+  padding: 16px;
+  border: 1px solid var(--c-border-default);
+  border-radius: 12px;
+  background: var(--c-surface-primary);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+}
+.connect-card-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--c-text-primary);
+}
+.connect-card-line {
+  display: block;
+  width: 168px;
+  height: 8px;
+  margin-top: 12px;
+  border-radius: 9999px;
+  background: rgb(from var(--c-text-primary) r g b / 0.16);
+}
+.connect-card-line.is-short {
+  width: 116px;
+}
+.connect-cloud {
+  position: absolute;
+  /* Centred on 430, the axis the link and the machine below it share. */
+  left: 313px;
+  top: 0;
+  /* 3:2, the cloud's own proportions, so it fills its box without letterboxing. */
+  width: 234px;
+  height: 156px;
+}
+.connect-laptop {
+  position: absolute;
+  left: 366px;
+  top: 226px;
+  width: 128px;
+  height: 88px;
+}
+
+/* The boundary between the machine and the apps: drawn from the start, so
+ * the picture says "not without permission" before anything happens. The
+ * link that the approval becomes crosses it at its midpoint. */
+.connect-boundary {
+  position: absolute;
+  left: 336px;
+  top: 187px;
+  width: 188px;
+  border-top: 2px dashed var(--gfx-ink-soft);
+}
+
+/* The request can be turned down as well. Deny travels the same way Approve
+ * does, but it lands on the link as an X rather than becoming one: the same
+ * gesture, the opposite outcome. */
+.connect-deny {
+  position: absolute;
+  left: 24px;
+  top: 178px;
+  width: 76px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--c-important);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+}
+.connect-deny-x {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  opacity: 0;
+}
+#gfx-connect.is-playing .connect-deny {
+  animation: connect-deny-morph 900ms 8600ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+#gfx-connect.is-playing .connect-deny-label {
+  animation: connect-fade-out 240ms 8560ms ease-out forwards;
+}
+#gfx-connect.is-playing .connect-deny-x {
+  animation: connect-appear 240ms 9100ms ease-out forwards;
+}
+/* It lands centred on the link it is closing. */
+@keyframes connect-deny-morph {
+  to {
+    left: 414px;
+    top: 172px;
+    width: 32px;
+    height: 32px;
+  }
+}
+@keyframes connect-appear {
+  to { opacity: 1; }
+}
+
+/* Starts as the card's Approve button and ends as the link between the
+ * cloud and the machine; the geometry is animated rather than transformed
+ * so the pill keeps its shape at both ends. */
+.connect-approve {
+  position: absolute;
+  left: 108px;
+  top: 178px;
+  width: 76px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--c-success);
+  color: #ffffff;
+}
+.connect-approve-label {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+#gfx-connect.is-playing .connect-approve {
+  animation:
+    connect-approve-morph 1100ms 3400ms cubic-bezier(0.4, 0, 0.2, 1) forwards,
+    connect-link-cut 420ms 9100ms ease-in forwards;
+}
+@keyframes connect-link-cut {
+  to { opacity: 0; }
+}
+#gfx-connect.is-playing .connect-approve-label {
+  animation: connect-fade-out 240ms 3320ms ease-out forwards;
+}
+@keyframes connect-approve-morph {
+  to {
+    left: 426px;
+    top: 158px;
+    width: 8px;
+    height: 60px;
+  }
+}
+@keyframes connect-fade-out {
+  to { opacity: 0; }
+}
+
+/* The pointer that approves the request. */
+.connect-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 26px;
+  height: 26px;
+  opacity: 0;
+  transform: translate(40px, 268px);
+  filter: drop-shadow(0 2px 3px rgb(0 0 0 / 0.35));
+}
+.connect-cursor svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: top left;
+}
+#gfx-connect.is-playing .connect-cursor {
+  animation: connect-cursor-move 9000ms 500ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+#gfx-connect.is-playing .connect-cursor svg {
+  animation:
+    connect-cursor-press 320ms 2050ms ease-out,
+    connect-cursor-press 320ms 8300ms ease-out;
+}
+/* Held at Approve while the link opens and carries traffic, then across to
+ * Deny, which closes it again. */
+@keyframes connect-cursor-move {
+  0% { opacity: 0; transform: translate(40px, 268px); }
+  4% { opacity: 1; transform: translate(40px, 268px); }
+  16% { opacity: 1; transform: translate(140px, 188px); }
+  72% { opacity: 1; transform: translate(140px, 188px); }
+  84% { opacity: 1; transform: translate(56px, 188px); }
+  96% { opacity: 1; transform: translate(56px, 188px); }
+  100% { opacity: 0; transform: translate(56px, 188px); }
+}
+@keyframes connect-cursor-press {
+  50% { transform: scale(0.8); }
+}
+
+/* The click itself. */
+.connect-splash {
+  position: absolute;
+  top: 193px;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-radius: 9999px;
+  opacity: 0;
+}
+.connect-splash.is-approve {
+  left: 146px;
+  border: 2px solid var(--c-success);
+}
+.connect-splash.is-deny {
+  left: 62px;
+  border: 2px solid var(--c-important);
+}
+#gfx-connect.is-playing .connect-splash.is-approve {
+  animation: connect-splash 620ms 2050ms ease-out;
+}
+#gfx-connect.is-playing .connect-splash.is-deny {
+  animation: connect-splash 620ms 8300ms ease-out;
+}
+@keyframes connect-splash {
+  0% { opacity: 0.6; transform: scale(0.3); }
+  100% { opacity: 0; transform: scale(1.7); }
+}
+
+/* Without animation the sequence never runs, so show its end state. */
+@media (prefers-reduced-motion: reduce) {
+  .connect-approve {
+    left: 426px;
+    top: 158px;
+    width: 8px;
+    height: 60px;
+  }
+  .connect-approve-label,
+  .connect-cursor,
+  .connect-splash {
+    opacity: 0;
+  }
+  .connect-approve {
+    opacity: 1;
+  }
+}
+
+/*
+ * The settled link is a tunnel, not a wire: light pulses run through it for
+ * as long as the step is up, so the connection reads as live traffic rather
+ * than a finished handshake. The pulses are children of the pill itself
+ * (inset: 0), so they inherit the geometry the morph lands on instead of
+ * repeating its coordinates -- move the morph and the traffic moves with it.
+ * A translating segment is used rather than a shifting background gradient
+ * because transform/opacity stay on the compositor for an indefinite loop,
+ * and because a background would have to be re-sized against a pill that is
+ * itself still animating from 76x30 to 8x60.
+ */
+.connect-flow {
+  position: absolute;
+  inset: 0;
+  /* Same clamped stadium as the pill, so a pulse fades out inside the
+   * rounded ends rather than squaring them off. */
+  border-radius: inherit;
+  overflow: hidden;
+}
+.connect-flow-pulse {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 20px;
+  /* Invisible until its own animation starts, which is also what leaves the
+   * pill clean while it is still the Approve button. */
+  opacity: 0;
+  /* currentColor is the white the pill already sets for its label, so the
+   * pulse is lighter than the green in either theme without a new colour. */
+  background: linear-gradient(to bottom, transparent, currentColor, transparent);
+}
+/* Both start only once the morph has landed (1500ms delay + 900ms), and then
+ * repeat forever. The 900ms stagger means one pulse has cleared the link
+ * before the other enters, so the traffic alternates direction instead of
+ * crossing itself inside an 8px-wide pill. Up is first: the machine is what
+ * asks, the app is what answers. */
+#gfx-connect.is-playing .connect-flow-pulse.is-up {
+  animation: connect-flow-up 1800ms 4600ms linear infinite;
+}
+#gfx-connect.is-playing .connect-flow-pulse.is-down {
+  animation: connect-flow-down 1800ms 5500ms linear infinite;
+}
+/* The travel is 80px (20px of pulse plus the link's 60px), which fills 46% of
+ * the cycle; the rest of the cycle is the gap before the answer comes back. */
+@keyframes connect-flow-up {
+  0% { opacity: 0; transform: translateY(60px); }
+  8% { opacity: 0.85; }
+  38% { opacity: 0.85; }
+  46% { opacity: 0; transform: translateY(-20px); }
+  100% { opacity: 0; transform: translateY(-20px); }
+}
+@keyframes connect-flow-down {
+  0% { opacity: 0; transform: translateY(-20px); }
+  8% { opacity: 0.85; }
+  38% { opacity: 0.85; }
+  46% { opacity: 0; transform: translateY(60px); }
+  100% { opacity: 0; transform: translateY(60px); }
+}
+
+/* Nothing should loop forever when motion is unwelcome, and app.css has no
+ * blanket reduced-motion reset, so the loop is switched off explicitly (the
+ * other connect animations get away without it only because they end where
+ * their reduced-motion state puts them). One pulse rests mid-link so the
+ * tunnel still reads as carrying something. */
+@media (prefers-reduced-motion: reduce) {
+  #gfx-connect.is-playing .connect-flow-pulse.is-up,
+  #gfx-connect.is-playing .connect-flow-pulse.is-down {
+    animation: none;
+  }
+  .connect-flow-pulse.is-up {
+    opacity: 0.85;
+    transform: translateY(20px);
+  }
+  .connect-flow-pulse.is-down {
+    opacity: 0;
+  }
+}
+
+/*
+ * Sharing step: the arrow draws from the laptop to the phone, and the
+ * phone's interface appears once it lands. onboarding.js adds is-playing
+ * when the step comes up (and takes it off again), so the sequence starts
+ * over on each visit.
+ */
+#gfx-devices .devices-arrow-line {
+  stroke-dasharray: 40;
+  stroke-dashoffset: 40;
+}
+#gfx-devices .devices-arrow-head,
+#gfx-devices .devices-phone-ui {
+  opacity: 0;
+}
+#gfx-devices.is-playing .devices-arrow-line {
+  animation: devices-arrow-draw 700ms 250ms ease-out forwards;
+}
+#gfx-devices.is-playing .devices-arrow-head {
+  animation: devices-appear 200ms 900ms ease-out forwards;
+}
+#gfx-devices.is-playing .devices-phone-ui {
+  animation: devices-appear 450ms 1150ms ease-out forwards;
+}
+@keyframes devices-arrow-draw {
+  to { stroke-dashoffset: 0; }
+}
+@keyframes devices-appear {
+  to { opacity: 1; }
+}
+/* Without animation the sequence never runs, so show its end state. */
+@media (prefers-reduced-motion: reduce) {
+  #gfx-devices .devices-arrow-line {
+    stroke-dashoffset: 0;
+  }
+  #gfx-devices .devices-arrow-head,
+  #gfx-devices .devices-phone-ui {
+    opacity: 1;
+  }
+}
+
+/*
+ * Chat step. The request types itself out, backspaces, and tries another
+ * thing to build; the reply rises in underneath once the first request has
+ * landed. onboarding.js owns the text, because a CSS typewriter (a clip
+ * animation across a fixed width) cannot backspace through lines that differ
+ * in length. The bubbles borrow the browser demo's chat language.
+ */
+.chat-bubble {
+  /* 1rem rather than a type role, for the same reason .onboarding-copy is at
+   * 1rem: this is the message of the step, not an aside. */
+  font-size: 1rem;
+  line-height: 1.5;
+  padding: 12px 16px;
+  /* Both bubbles carry a border so they come out the same height; the user's
+   * is transparent and its fill shows through it. */
+  border: 1px solid transparent;
+}
+/* Contributes its width and nothing else, so the bubble is always as wide as
+ * the longest request rather than tracking whichever is being typed. */
+.chat-reserve {
+  display: block;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  /* Room for the caret, which rides after the text on the visible line and
+   * would otherwise push the bubble past the width reserved here. */
+  padding-right: 10px;
+}
+.chat-bubble-user {
+  /* The inverse of the page: the text colour as a fill, the surface as ink,
+   * so it is right in either theme without a second set of values. */
+  background: rgb(from var(--c-text-primary) r g b / 0.92);
+  color: var(--c-surface-primary);
+  /* The line is typed a character at a time, so it must not wrap mid-run. */
+  white-space: nowrap;
+}
+.chat-bubble-agent {
+  background: var(--c-surface-primary);
+  border-color: var(--c-border-default);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+}
+.chat-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: currentColor;
+}
+#gfx-chat.is-playing .chat-caret {
+  animation: chat-caret-blink 1s steps(1, end) infinite;
+}
+@keyframes chat-caret-blink {
+  50% { opacity: 0; }
+}
+/* The reply lands once the first request has been typed. */
+.chat-reply {
+  opacity: 0;
+}
+#gfx-chat.is-playing .chat-reply {
+  animation: chat-reply-in 400ms 2600ms ease-out forwards;
+}
+@keyframes chat-reply-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+/* Without animation nothing would ever appear, so show the finished exchange. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-reply {
+    opacity: 1;
+  }
+  .chat-caret {
+    display: none;
+  }
+}
+
+/*
+ * Publishing step: your machine sends an app up to the cloud and someone
+ * else's machine adapts the same app. All three copies are the same
+ * simplified drawing; the machines match and only the app inside is tinted,
+ * so the colour reads as the app rather than the computer. The two arrows are drawn
+ * on one overlay in scene coordinates (see the viewBox on .publish-arrows),
+ * so their ends can be aimed at the cloud and the machines by hand; the
+ * scene's size and those coordinates go together.
+ */
+.publish-scene {
+  position: relative;
+  width: 560px;
+  height: 268px;
+  color: var(--gfx-ink);
+}
+.publish-cloud {
+  position: absolute;
+  left: 190px;
+  top: 0;
+  /* 3:2, the cloud's own proportions. */
+  width: 180px;
+  height: 120px;
+}
+/* The published app, in the middle of the cloud in the neutral tone: the
+ * copy neither machine has coloured. */
+.publish-cloud-app {
+  position: absolute;
+  left: 54px;
+  /* Between the base it sat in and dead centre of the box: the silhouette
+   * carries more mass above the middle, so centring the box put it high. */
+  top: 48px;
+  width: 72px;
+  height: 46px;
+}
+/* Both machines are the same drawing in the same tone; the app drawn inside
+ * carries its own colour, so what differs reads as the app rather than the
+ * computer it is running on. */
+.publish-laptop {
+  position: absolute;
+  top: 160px;
+  width: 145px;
+  height: 100px;
+}
+.publish-laptop.is-mine {
+  left: 6px;
+}
+.publish-laptop.is-theirs {
+  left: 409px;
+}
+.publish-app.is-mine-app {
+  color: var(--c-accent);
+}
+.publish-app.is-theirs-app {
+  color: var(--c-success);
+}
+.gfx-arrow {
+  color: var(--gfx-ink-arrow);
+}
+.publish-arrows {
+  color: var(--gfx-ink-arrow);
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* The machines carry tooltips underneath this overlay. */
+  pointer-events: none;
+}
+.publish-label {
+  position: absolute;
+  top: 122px;
+  width: 90px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--gfx-ink);
+  white-space: nowrap;
+}
+.publish-label.is-up {
+  left: 88px;
+  text-align: right;
+}
+.publish-label.is-down {
+  left: 382px;
+  text-align: left;
+}
+
+/* The sequence tells the story in order: one machine has an app, it is
+ * published and only then does a copy exist in the cloud, someone else adapts
+ * it and only then does their version exist. Both arrows persist once drawn --
+ * the finished picture is the whole journey, not the last leg of it. Both
+ * paths measure 86.9 units, so the dash covers them exactly. */
+.publish-arrow-line {
+  stroke-dasharray: 87;
+  stroke-dashoffset: 0;
+}
+/* Everything that has not happened yet starts absent: the published copy and
+ * the adapted one, and both arrows' heads and labels. */
+.publish-cloud-app,
+.publish-app.is-theirs-app,
+.publish-arrow-head,
+.publish-label {
+  opacity: 0;
+}
+#gfx-publish.is-playing .publish-arrow-line.is-up {
+  animation: publish-arrow-draw 800ms 400ms ease-out both;
+}
+#gfx-publish.is-playing .publish-arrow-head.is-up,
+#gfx-publish.is-playing .publish-label.is-up {
+  animation: publish-appear 240ms 1100ms ease-out forwards;
+}
+/* The copy in the cloud exists because the arrow arrived, so it lands just
+ * after the arrowhead does. */
+#gfx-publish.is-playing .publish-cloud-app {
+  animation: publish-land 420ms 1350ms cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+#gfx-publish.is-playing .publish-arrow-line.is-down {
+  animation: publish-arrow-draw 800ms 2300ms ease-out both;
+}
+#gfx-publish.is-playing .publish-arrow-head.is-down,
+#gfx-publish.is-playing .publish-label.is-down {
+  animation: publish-appear 240ms 3000ms ease-out forwards;
+}
+/* And their version exists because they adapted it. */
+#gfx-publish.is-playing .publish-app.is-theirs-app {
+  animation: publish-land 420ms 3250ms cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+@keyframes publish-arrow-draw {
+  from { stroke-dashoffset: 87; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes publish-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes publish-land {
+  from { opacity: 0; transform: scale(0.86); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #gfx-publish.is-playing .publish-arrow-line,
+  #gfx-publish.is-playing .publish-arrow-head,
+  #gfx-publish.is-playing .publish-label {
+    animation: none;
+  }
+}
+
+/* The same bubbles, smaller, once they are inside the window. */
+.chat-bubble-sm {
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 8px 12px;
+}
+
+/*
+ * The window forms around the conversation. Coming from the chat step, the
+ * bubbles are already what is on screen; the frame draws itself around them
+ * -- border, shadow, surface and title bar arriving -- while the bubbles
+ * settle from a shade larger to their size inside it. Nothing has to line up
+ * between the two steps, which is what makes it smooth: it is the frame that
+ * moves, not the text.
+ */
+#gfx-browser.is-forming #theme-demo {
+  animation: demo-frame-in 560ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+#gfx-browser.is-forming #demo-titlebar {
+  animation: demo-titlebar-in 460ms 120ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+#gfx-browser.is-forming .demo-body {
+  animation: demo-body-in 560ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+#gfx-browser.is-forming .demo-pane[data-pane="chat"] {
+  animation: demo-chat-settle 560ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+@keyframes demo-frame-in {
+  from {
+    border-color: transparent;
+    box-shadow: none;
+  }
+}
+@keyframes demo-titlebar-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+@keyframes demo-body-in {
+  from {
+    background: transparent;
+  }
+}
+/* A shade larger to begin with, so the bubbles read as having come from the
+ * bigger scene rather than appearing at this size. */
+@keyframes demo-chat-settle {
+  from {
+    transform: scale(1.12);
+  }
+}
+
+/*
+ * Workspace demo (steps 1-3). The demo is a picture of the workspace, so it
+ * carries the default workspace template's own light theme tokens (see
+ * apps/system_interface/frontend/src/style.css there) rather than the app's
+ * theme-aware tokens -- it should look like the workspace in either minds
+ * theme. The tab strip mirrors the real dockview tabs: a flat sidebar-tinted
+ * bar, the selected tab painted in the content color so it bleeds into the
+ * panel below, 13px/500 labels with 1px dividers, and a 24px "+" button.
+ * Tabs the user has not reached yet are hidden (.demo-tab-pending); the Next
+ * button opens them one at a time via the pointer click.
+ */
+#theme-demo {
+  --demo-bg: #fafaf8;
+  --demo-bar: #f3f2ef;
+  --demo-hover: #edecea;
+  --demo-border: #e4e3df;
+  --demo-surface: #ffffff;
+  --demo-text: #202020;
+  --demo-text-dim: #666666;
+  --demo-accent: #0b292b;
+  --_demo-contrast: lch(from var(--demo-accent) calc((49.44 - l) * infinity) 0 0);
+}
+.demo-titlebar {
+  background: var(--demo-bar);
+}
+.demo-body {
+  background: var(--demo-bg);
+  color: var(--demo-text);
+}
+.demo-card {
+  background: var(--demo-surface);
+  border: 1px solid var(--demo-border);
+  color: var(--demo-text-dim);
+}
+.demo-outline {
+  border: 1px solid var(--demo-border);
+}
+.demo-fill {
+  background: var(--demo-hover);
+}
+.demo-accent-bubble {
+  color: rgb(from var(--_demo-contrast) r g b / 0.95);
+}
+.demo-dot {
+  background: #d6d5d1;
+}
+.demo-tab {
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--demo-text-dim);
+  background: var(--demo-bar);
+  border-right: 1px solid var(--demo-border);
+  cursor: default;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+.demo-tab.demo-tab-active {
+  background: var(--demo-bg);
+  color: var(--demo-text);
+}
+.demo-tab.demo-tab-pending {
+  display: none;
+}
+/* The "+ new tab" affordance next to the tabs (decorative). It flashes
+ * pressed when the demo pointer "clicks" it to open the next tab. */
+.demo-plus {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 4px;
+  border-radius: 6px;
+  font-size: 18px;
+  font-weight: 300;
+  line-height: 1;
+  color: var(--demo-text-dim);
+  cursor: default;
+  transition:
+    background-color 100ms ease,
+    color 100ms ease,
+    transform 140ms ease;
+}
+.demo-plus.is-pressed {
+  background: var(--demo-hover);
+  color: var(--demo-text);
+  transform: scale(0.9);
+}
+
+/*
+ * Demo pointer: flies to the "+" and clicks it when a new tab opens.
+ * onboarding.js owns the transform (translate + a press scale), so the
+ * transition here covers both the glide and the press.
+ */
+.demo-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 3;
+  /* Only the travel (translate) animates here; the click scale lives on the
+   * arrow inside, so pressing can never bend the straight glide path. */
+  transition:
+    transform 520ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 140ms ease;
+}
+.demo-cursor-arrow {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: top left;
+  transition: transform 110ms ease-out;
+  filter: drop-shadow(0 2px 3px rgb(0 0 0 / 0.35));
+}
+.demo-cursor.is-pressing .demo-cursor-arrow {
+  transform: scale(0.8);
+}
+
+/* Click splash: a ring that blooms out of the pointer tip on the press.
+ * onboarding.js parks it on the "+" and restarts the animation. */
+.demo-click-splash {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 9999px;
+  border: 2px solid var(--demo-text-dim);
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.3);
+  z-index: 2;
+}
+.demo-click-splash.is-splashing {
+  animation: demo-click-splash 520ms ease-out;
+}
+@keyframes demo-click-splash {
+  from {
+    opacity: 0.55;
+    transform: scale(0.3);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.6);
+  }
+}
+/*
+ * App cloud: the apps latchkey can connect to, floating in a soft cloud.
+ * Icons are the monochrome simple-icons served as <img> (recolored to a
+ * muted tone; inverted under the app dark theme).
+ */
+/*
+ * App wheel: one big icon centered in the cloud with a smaller one either
+ * side. onboarding.js moves each icon forward through
+ * enter -> left -> center -> right -> exit on a timer, so the icons read as
+ * a wheel spinning apps through the cloud. Positions are pure transforms
+ * (composited) and every element only ever moves forward, so the motion
+ * stays smooth and never jumps backwards.
+ */
+.cloud-wheel {
+  --wheel-offset: 80px;
+  --wheel-size: 46px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 55%;
+  height: 0;
+}
+/* Each cloud is a different size, so the wheel is placed against each one
+ * rather than to a single ratio: lower in the big cloud, and drawn in on the
+ * smaller one, where the outer icons were passing outside the silhouette. */
+#gfx-apps .cloud-wheel {
+  top: 60%;
+}
+#gfx-connect .cloud-wheel {
+  --wheel-offset: 58px;
+  --wheel-size: 40px;
+}
+.cloud-wheel-item {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: var(--wheel-size);
+  height: var(--wheel-size);
+  margin-left: calc(var(--wheel-size) / -2);
+  margin-top: calc(var(--wheel-size) / -2);
+  opacity: 0;
+  transition:
+    transform 900ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 900ms ease;
+  will-change: transform, opacity;
+}
+.cloud-wheel-item.is-enter {
+  transform: translateX(calc(var(--wheel-offset) * -1.5)) scale(0.4);
+  opacity: 0;
+}
+.cloud-wheel-item.is-left {
+  transform: translateX(calc(var(--wheel-offset) * -1)) scale(0.6);
+  opacity: 0.5;
+}
+.cloud-wheel-item.is-center {
+  transform: translateX(0) scale(1);
+  opacity: 0.85;
+}
+.cloud-wheel-item.is-right {
+  transform: translateX(var(--wheel-offset)) scale(0.6);
+  opacity: 0.5;
+}
+.cloud-wheel-item.is-exit {
+  transform: translateX(calc(var(--wheel-offset) * 1.5)) scale(0.4);
+  opacity: 0;
+}
+.dark .cloud-wheel-item {
+  filter: invert(1);
+}
+/* The centered app's name, popping in under it as the icon lands. The
+ * keyframes carry the -50% centering translate so the animation does not
+ * drop it. */
+.cloud-wheel-name {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--wheel-size) / 2 + 10px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--c-text-secondary);
+  opacity: 0;
+}
+.cloud-wheel-name.is-shown {
+  animation: cloud-wheel-name-pop 420ms ease-out both;
+}
+@keyframes cloud-wheel-name-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+
+/*
+ * Entry transition: the page zooms into the graphic before entering the
+ * workspace. onboarding.js adds is-entering to #onboarding, waits for the
+ * animation, then hands the redirect URL to the shell bridge.
+ */
+@keyframes onboarding-enter-zoom {
+  to { transform: scale(6); opacity: 0; }
+}
+.onboarding.is-entering #graphic {
+  animation: onboarding-enter-zoom 620ms ease-in forwards;
+  transform-origin: 50% 50%;
+}
+.onboarding.is-entering .onboarding-step,
+.onboarding.is-entering nav {
+  transition: opacity 300ms ease;
+  opacity: 0;
+}

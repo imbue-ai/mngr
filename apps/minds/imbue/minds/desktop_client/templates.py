@@ -33,6 +33,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
+from imbue.minds.desktop_client.onboarding_services import OnboardingService
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -796,6 +797,7 @@ def expected_create_attempt_duration_seconds(launch_mode: LaunchMode) -> float:
 def render_creating_page(
     create_attempt_id: CreateAttemptId,
     info: AgentCreateAttemptInfo,
+    onboarding_services: Sequence[OnboardingService] = (),
 ) -> str:
     """Render the progress page shown while an agent is being created.
 
@@ -819,6 +821,11 @@ def render_creating_page(
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_create_attempt_duration_seconds(info.launch_mode),
+        # Onboarding walkthrough context: the latchkey services for the app
+        # cloud, and whether the machine is remote, which decides the
+        # sharing step's second line.
+        onboarding_services=list(onboarding_services),
+        is_remote=info.launch_mode is LaunchMode.IMBUE_CLOUD,
     )
 
 

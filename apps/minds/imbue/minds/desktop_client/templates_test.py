@@ -10,6 +10,7 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
+from imbue.minds.desktop_client.onboarding_services import OnboardingService
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
@@ -643,6 +644,139 @@ def test_render_create_form_start_advanced_opens_advanced_view() -> None:
 def test_render_create_form_shows_error_message_when_supplied() -> None:
     html = render_create_form(error_message="Imbue cloud requires an account.")
     assert "Imbue cloud requires an account." in html
+
+
+def test_render_creating_page_renders_onboarding_walkthrough() -> None:
+    """The creating page carries the five-step onboarding walkthrough.
+
+    The title, the step markers (1..5), the intro panel + advance button,
+    and the graphics (minds logo, browser demo, app cloud, and the final
+    latchkey/tunnel illustration) must all be present on first paint.
+    """
+    create_attempt_id = CreateAttemptId()
+    info = AgentCreateAttemptInfo(
+        create_attempt_id=create_attempt_id,
+        status=AgentCreateAttemptStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    services = [
+        OnboardingService(
+            service_id="slack",
+            display_name="Slack",
+            icon_url="/_static/service_icons/slack.svg",
+            icon_data_uri="data:image/svg+xml;base64,PHN2Zy8+",
+        ),
+        OnboardingService(service_id="ramp", display_name="Ramp", icon_url=None, icon_data_uri=None),
+    ]
+    html = render_creating_page(create_attempt_id=create_attempt_id, info=info, onboarding_services=services)
+    assert "Setting up your machine" in html
+    # Eight walkthrough steps: the intro, the chat, the tabs demo, the apps
+    # cloud, the connections scene, the devices, publishing, and the tips.
+    for step_number in range(1, 9):
+        assert f'data-step="{step_number}"' in html
+    assert 'data-step="9"' not in html
+    assert 'id="intro-panel"' not in html
+    # The progress strip is always visible.
+    strip_index = html.index('id="top-strip"')
+    strip_tag = html[html.rindex("<div", 0, strip_index) : html.index(">", strip_index)]
+    assert "hidden" not in strip_tag
+    # Readiness enters the workspace by itself, so there is no Begin button
+    # and the details toggle stays put.
+    assert 'id="top-begin"' not in html
+    assert 'id="details-toggle"' in html
+    # Nav is the dot strip alone: the walkthrough plays itself, so the old
+    # Learn more / Previous / Next buttons are gone. One dot per step, each a
+    # circle carrying the sweep arc.
+    assert 'id="onboarding-advance"' not in html
+    assert 'id="onboarding-prev"' not in html
+    assert html.count('class="onboarding-dot"') == 8
+    # The current step's dot stretches into a pill whose fill times the dwell.
+    assert "onboarding-dot-fill" in html
+    # The strip is dots alone: no play/pause/replay control.
+    assert 'id="onboarding-control"' not in html
+    # Graphics for the phases.
+    for gfx in (
+        'id="gfx-minds"',
+        'id="gfx-chat"',
+        'id="gfx-browser"',
+        'id="gfx-apps"',
+        'id="gfx-connect"',
+        'id="gfx-devices"',
+        'id="gfx-publish"',
+    ):
+        assert gfx in html
+    # The app cloud + its spinning app wheel (fed from the services catalog),
+    # and the latchkey mark on the final protection line.
+    assert "app-cloud" in html
+    assert "cloud-wheel" in html
+    # The wheel is fed a JSON block of catalog entries whose icons are inlined
+    # as data URIs, so it needs no network; services with no shipped brand icon
+    # (Ramp here) are skipped.
+    assert 'id="cloud-apps"' in html
+    assert '"icon": "data:image/svg+xml;base64,' in html
+    assert '"name": "Slack"' in html
+    assert "/_static/service_icons/" not in html
+    assert "Ramp" not in html
+    # The label that pops the centered app's name in.
+    assert "cloud-wheel-name" in html
+    # The connections step: a permission request, the pointer that approves
+    # it, and the button that becomes the link to the machine.
+    assert "connect-card" in html
+    assert "connect-approve" in html
+    assert "connect-cursor" in html
+    # The machine is drawn as a laptop, on this step and the sharing one.
+    assert html.count('href="#laptop"') == 2
+    # The old carousel is gone.
+    assert "service-marquee" not in html
+
+
+def test_render_creating_page_opens_on_the_minds_intro() -> None:
+    """Every creation opens the same way: the title + gray progress strip and
+    the minds intro as step one of a walkthrough that plays itself, with no
+    button to press. Errors surface immediately."""
+    create_attempt_id = CreateAttemptId()
+    info = AgentCreateAttemptInfo(
+        create_attempt_id=create_attempt_id,
+        status=AgentCreateAttemptStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    html = render_creating_page(create_attempt_id=create_attempt_id, info=info)
+    assert 'data-surface-errors="true"' in html
+    assert "This is Minds: your machine for building personalized apps." in html
+    # Every step is two lines: what the thing is, then what you do with it.
+    assert "Learn more while you wait." in html
+    # The minds mark is defined once and referenced wherever it is shown.
+    assert 'id="minds-mark"' in html
+    assert html.count('href="#minds-mark"') == 1
+    # Both devices show the same miniature of the app pane.
+    assert html.count('href="#app-ui"') == 2
+    # Nothing invites a click to start it any more.
+    assert "Learn more while you wait?" not in html
+    # The tips sit on their own final step rather than crowding the picture.
+    tips_index = html.index('data-step="8"')
+    assert 'id="tip"' in html[tips_index : html.index("</div>", html.index('id="tip"'))]
+
+
+def test_render_creating_page_final_copy_matches_launch_mode() -> None:
+    """The final step explains where the workspace runs, per launch mode."""
+    create_attempt_id = CreateAttemptId()
+    local_info = AgentCreateAttemptInfo(
+        create_attempt_id=create_attempt_id,
+        status=AgentCreateAttemptStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    local_html = render_creating_page(create_attempt_id=create_attempt_id, info=local_info)
+    assert "runs locally, so your computer has to be on" in local_html
+    assert 'data-is-remote="false"' in local_html
+
+    remote_info = AgentCreateAttemptInfo(
+        create_attempt_id=create_attempt_id,
+        status=AgentCreateAttemptStatus.INITIALIZING,
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+    )
+    remote_html = render_creating_page(create_attempt_id=create_attempt_id, info=remote_info)
+    assert "even when your laptop is closed" in remote_html
+    assert 'data-is-remote="true"' in remote_html
 
 
 def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:

@@ -89,6 +89,7 @@ from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_ag
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.onboarding_services import list_onboarding_services
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
@@ -185,6 +186,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -1428,7 +1430,15 @@ def _handle_creating_page(
         )
         return make_html_response(content=html)
 
-    html = render_creating_page(create_attempt_id=create_attempt_id, info=info)
+    # The onboarding walkthrough's app cloud lists the services latchkey
+    # can connect to. ServicesCatalog reads the bundled services.json
+    # lazily and memoizes it process-wide, so constructing one here is
+    # cheap.
+    html = render_creating_page(
+        create_attempt_id=create_attempt_id,
+        info=info,
+        onboarding_services=list_onboarding_services(ServicesCatalog()),
+    )
     return make_html_response(content=html)
 
 
