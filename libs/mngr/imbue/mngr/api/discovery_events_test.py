@@ -15,6 +15,7 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
@@ -1714,6 +1715,198 @@ def test_tail_discovery_events_file_waits_for_absent_file(temp_config: MngrConfi
 
     assert len(captured_lines) >= 1
     assert isinstance(parse_discovery_event_line(captured_lines[0]), ProviderDiscoverySnapshotEvent)
+
+
+def _fold_into_aggregator(lines: Sequence[str]) -> DiscoveryStateAggregator:
+    aggregator = DiscoveryStateAggregator()
+    for line in lines:
+        event = parse_discovery_event_line(line)
+        if event is not None:
+            aggregator.apply_event(event)
+    return aggregator
+
+
+def _assert_same_aggregate_state(actual: DiscoveryStateAggregator, expected: DiscoveryStateAggregator) -> None:
+    assert actual.get_agent_by_id() == expected.get_agent_by_id()
+    assert actual.get_host_by_id() == expected.get_host_by_id()
+    assert actual.get_error_by_provider_name() == expected.get_error_by_provider_name()
+    assert actual.get_unknown_agent_ids() == expected.get_unknown_agent_ids()
+    assert actual.get_unknown_host_ids() == expected.get_unknown_host_ids()
+    actual_providers = {provider.provider_name: provider for provider in actual.get_providers()}
+    expected_providers = {provider.provider_name: provider for provider in expected.get_providers()}
+    assert actual_providers == expected_providers
+    assert actual.get_last_snapshot_at() == expected.get_last_snapshot_at()
+
+
+def test_tail_attach_skips_superseded_provider_snapshots(temp_config: MngrConfig) -> None:
+    """The attach replay skips snapshots superseded by their provider's latest one(s),
+    folds to the same state as the full backlog, and summarizes what it skipped.
+
+    A provider that stopped writing (removed from config, or erroring for days) pins
+    the replay window at its last healthy snapshot, so the backlog holds one snapshot
+    per discovery cycle of that gap; re-folding each of them made a long-gap attach
+    take minutes for a net-nil effect.
+    """
+    events_path = get_discovery_events_path(temp_config)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    modal = ProviderInstanceName("modal")
+    modal_error = DiscoveryError(type_name="RuntimeError", message="modal API down", provider_name=modal)
+    # docker's lone healthy snapshot pins the replay window at the start of the file.
+    docker_snapshot = write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=ProviderInstanceName("docker"),
+        agents=[make_test_discovered_agent()],
+        hosts=[],
+        discovery_started_at=base,
+        discovery_finished_at=base + timedelta(minutes=1),
+    )
+    # Superseded: a clean snapshot older than modal's latest clean one.
+    write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=modal,
+        agents=[make_test_discovered_agent()],
+        hosts=[],
+        discovery_started_at=base + timedelta(hours=1),
+        discovery_finished_at=base + timedelta(hours=1, minutes=1),
+    )
+    latest_clean = write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=modal,
+        agents=[make_test_discovered_agent()],
+        hosts=[],
+        discovery_started_at=base + timedelta(hours=2),
+        discovery_finished_at=base + timedelta(hours=2, minutes=1),
+    )
+    # Superseded: an errored snapshot older than modal's latest errored one.
+    write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=modal,
+        agents=[],
+        hosts=[],
+        discovery_started_at=base + timedelta(hours=3),
+        discovery_finished_at=base + timedelta(hours=3, minutes=1),
+        error=modal_error,
+    )
+    latest_errored = write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=modal,
+        agents=[],
+        hosts=[],
+        discovery_started_at=base + timedelta(hours=4),
+        discovery_finished_at=base + timedelta(hours=4, minutes=1),
+        error=modal_error,
+    )
+
+    captured_lines: list[str] = []
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=tail_discovery_events_file,
+        args=(events_path, stop_event, captured_lines.append),
+        daemon=True,
+    )
+    with capture_loguru(level="INFO") as log_output:
+        tail.start()
+        try:
+            # The attach emits the three still-effective snapshots in one synchronous
+            # pass, so seeing the third proves the superseded ones were not emitted
+            # before it.
+            poll_until(lambda: len(captured_lines) >= 3, timeout=5.0)
+            # A snapshot appended after the attach scan is newer than anything scanned
+            # and must be emitted even though it is not an attach-time keeper.
+            appended = write_provider_discovery_snapshot(
+                temp_config,
+                provider_name=modal,
+                agents=[make_test_discovered_agent()],
+                hosts=[],
+                discovery_started_at=base + timedelta(hours=5),
+                discovery_finished_at=base + timedelta(hours=5, minutes=1),
+            )
+            poll_until(lambda: len(captured_lines) >= 4, timeout=5.0)
+        finally:
+            stop_event.set()
+            tail.join(timeout=5.0)
+
+    emitted_ids = {json.loads(line)["event_id"] for line in captured_lines}
+    assert emitted_ids == {
+        str(docker_snapshot.event_id),
+        str(latest_clean.event_id),
+        str(latest_errored.event_id),
+        str(appended.event_id),
+    }
+    # The filtered stream reconstructs the identical world to a full-backlog replay.
+    _assert_same_aggregate_state(
+        _fold_into_aggregator(captured_lines),
+        _fold_into_aggregator(events_path.read_text().splitlines()),
+    )
+    # The skipped snapshots are the on-disk record of the gap, so the attach summarizes
+    # them: one counted line for modal (2 skipped, 1 errored) with its distinct error
+    # message preserved, nothing for docker.
+    log_text = log_output.getvalue()
+    assert "skipped 2 superseded discovery snapshot(s) for provider modal (1 errored" in log_text
+    assert "1x of the snapshots skipped for provider modal carried RuntimeError: modal API down" in log_text
+    assert "for provider docker" not in log_text
+
+
+def test_tail_attach_keeps_latest_snapshot_carrying_provider_config(temp_config: MngrConfig) -> None:
+    """A superseded-looking snapshot is still emitted when it holds the provider's
+    latest non-None ``provider`` config, which later snapshots never overwrite."""
+    events_path = get_discovery_events_path(temp_config)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    modal = ProviderInstanceName("modal")
+    discovered_provider = make_discovered_provider(
+        modal, ProviderInstanceConfig(backend=ProviderBackendName("modal"), is_enabled=True)
+    )
+    with_config = write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=modal,
+        agents=[],
+        hosts=[],
+        discovery_started_at=base,
+        discovery_finished_at=base + timedelta(minutes=1),
+        provider=discovered_provider,
+    )
+    latest_clean = write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=modal,
+        agents=[],
+        hosts=[],
+        discovery_started_at=base + timedelta(hours=1),
+        discovery_finished_at=base + timedelta(hours=1, minutes=1),
+    )
+    latest_errored = write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=modal,
+        agents=[],
+        hosts=[],
+        discovery_started_at=base + timedelta(hours=2),
+        discovery_finished_at=base + timedelta(hours=2, minutes=1),
+        error=DiscoveryError(type_name="RuntimeError", message="modal API down", provider_name=modal),
+    )
+
+    captured_lines: list[str] = []
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=tail_discovery_events_file,
+        args=(events_path, stop_event, captured_lines.append),
+        daemon=True,
+    )
+    tail.start()
+    try:
+        poll_until(lambda: len(captured_lines) >= 3, timeout=5.0)
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)
+
+    emitted_ids = {json.loads(line)["event_id"] for line in captured_lines}
+    assert emitted_ids == {
+        str(with_config.event_id),
+        str(latest_clean.event_id),
+        str(latest_errored.event_id),
+    }
+    _assert_same_aggregate_state(
+        _fold_into_aggregator(captured_lines),
+        _fold_into_aggregator(events_path.read_text().splitlines()),
+    )
 
 
 def test_emit_lines_from_offset_warns_on_corruption_across_calls(tmp_path: Path) -> None:

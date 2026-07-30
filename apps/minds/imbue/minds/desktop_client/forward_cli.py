@@ -43,6 +43,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -55,6 +56,7 @@ from imbue.minds.errors import EnvelopeStreamConsumerError
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
@@ -63,6 +65,7 @@ from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -98,6 +101,83 @@ class ForwardSubprocessConfig(FrozenModel):
     mngr_host_dir: Path = Field(default=_DEFAULT_MNGR_HOST_DIR, description="MNGR_HOST_DIR for the subprocess")
 
 
+class _DroppedPreStartErrorTally(FrozenModel):
+    """The pre-start snapshots dropped for one provider that all carried one same error."""
+
+    error: DiscoveryError = Field(description="The error every tallied snapshot carried")
+    count: int = Field(description="How many snapshots carrying it have been dropped so far")
+    last_snapshot_at: datetime = Field(description="``discovery_finished_at`` of the most recent one")
+
+
+class _PreStartErrorDropLogger(MutableModel):
+    """Collapses the dropped pre-start provider errors into one line per distinct error.
+
+    The events-file backlog holds one snapshot per discovery cycle for however
+    long minds was closed, and a wedged provider errors on every one of them, so
+    logging each drop scales with the downtime. Route every dropped error
+    through :meth:`record_dropped_error`, which only tallies, and end each
+    provider's replay with :meth:`flush_provider`, which logs one counted line
+    per distinct error the backlog dropped for it.
+
+    Nothing is logged while the tally builds, because a provider that is still
+    broken re-asserts its error on the first fresh cycle (which the shared
+    error-log suppressor reports); these lines are the historical record of the
+    gap, so they are worth exactly one line apiece.
+
+    Tallies are kept per distinct error rather than for the latest one alone,
+    because a wedged provider need not repeat a single error: a discovery that
+    overruns its timeout yields a timeout snapshot and then, once the abandoned
+    read resolves, a snapshot carrying the underlying failure, so its backlog
+    alternates two errors. A provider whose backlog errors flap (network down,
+    briefly up, down again) likewise builds one tally per distinct error rather
+    than one per uninterrupted run of it -- only a *post-start* snapshot ends
+    the replay, so a clean pre-start one does not split the tally.
+
+    Thread-safe; use one instance per consumer.
+    """
+
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _tally_by_error_by_provider_name: dict[ProviderInstanceName, dict[DiscoveryError, _DroppedPreStartErrorTally]] = (
+        PrivateAttr(default_factory=dict)
+    )
+
+    def record_dropped_error(
+        self, provider_name: ProviderInstanceName, error: DiscoveryError, snapshot_at: datetime
+    ) -> None:
+        """Tally one dropped pre-start error, to be logged when the provider's replay ends."""
+        with self._lock:
+            tally_by_error = self._tally_by_error_by_provider_name.setdefault(provider_name, {})
+            previous = tally_by_error.get(error)
+            if previous is None:
+                tally_by_error[error] = _DroppedPreStartErrorTally(error=error, count=1, last_snapshot_at=snapshot_at)
+            else:
+                tally_by_error[error] = previous.model_copy_update(
+                    to_update(previous.field_ref().count, previous.count + 1),
+                    to_update(previous.field_ref().last_snapshot_at, snapshot_at),
+                )
+
+    def flush_provider(self, provider_name: ProviderInstanceName) -> None:
+        """Log what one provider's replay dropped: one counted line per distinct error, in first-seen order."""
+        with self._lock:
+            tally_by_error = self._tally_by_error_by_provider_name.pop(provider_name, None)
+        for tally in (tally_by_error or {}).values():
+            logger.info(
+                "Dropped pre-start provider errors for {} while replaying the events-file backlog "
+                "(last at {}): {}x {}",
+                provider_name,
+                tally.last_snapshot_at,
+                tally.count,
+                tally.error.message,
+            )
+
+    def flush_all(self) -> None:
+        """Log every provider's outstanding tallies, for a provider whose replay never ended."""
+        with self._lock:
+            provider_names = tuple(self._tally_by_error_by_provider_name)
+        for provider_name in provider_names:
+            self.flush_provider(provider_name)
+
+
 class EnvelopeStreamConsumer(MutableModel):
     """Owns the ``mngr forward`` subprocess and dispatches its envelope JSONL stream.
 
@@ -126,6 +206,11 @@ class EnvelopeStreamConsumer(MutableModel):
     # the same failure (e.g. missing credentials) logs once per process, not once
     # per poll cycle. Clean snapshots feed it to re-arm on recovery.
     _error_log_suppressor: DiscoveryErrorLogSuppressor = PrivateAttr(default_factory=DiscoveryErrorLogSuppressor)
+    # Collapses the provider errors dropped while the events-file backlog
+    # replays: one snapshot per discovery cycle of downtime, each carrying a
+    # wedged-provider error, logs as one counted line per distinct error once
+    # that provider's replay ends.
+    _pre_start_drop_logger: _PreStartErrorDropLogger = PrivateAttr(default_factory=_PreStartErrorDropLogger)
     # SSH connection info keyed by host id. The aggregator does not model SSH info
     # (it carries no agent/host membership), so it is tracked here and joined onto
     # the agents on each host when building the resolver's view.
@@ -255,6 +340,10 @@ class EnvelopeStreamConsumer(MutableModel):
         so the lifecycle watcher (``_wait_and_report_exit``) does not report
         the resulting exit to the watchdog as a dead pipeline.
         """
+        # A provider that never delivered a post-start snapshot (discovery wedged
+        # for the whole session) still has its replay tallies open; log them now
+        # rather than losing what its backlog said.
+        self._pre_start_drop_logger.flush_all()
         process = self._process
         if process is None:
             return
@@ -375,15 +464,23 @@ class EnvelopeStreamConsumer(MutableModel):
             # since minds restarts that container before this consumer runs.
             # Drop the stale error (a genuinely-broken provider re-asserts it on
             # the first fresh cycle); the snapshot's topology still merges below.
+            # The backlog holds one snapshot per cycle of downtime, so the drops
+            # are tallied by a collapser rather than logged one line apiece. Only
+            # a post-start snapshot ends the replay and logs what it dropped: a
+            # clean pre-start one must not, or a provider whose backlog errors
+            # flap (as they do across a multi-day gap) logs afresh after every
+            # clean cycle in between.
             error = event.error
-            if error is not None and event.discovery_finished_at < self.started_at:
-                logger.info(
-                    "Dropping pre-start provider error for {} (snapshot at {}): {}",
-                    event.provider_name,
-                    event.discovery_finished_at,
-                    error.message,
-                )
-                error = None
+            if event.discovery_finished_at < self.started_at:
+                if error is not None:
+                    self._pre_start_drop_logger.record_dropped_error(
+                        provider_name=event.provider_name,
+                        error=error,
+                        snapshot_at=event.discovery_finished_at,
+                    )
+                    error = None
+            else:
+                self._pre_start_drop_logger.flush_provider(event.provider_name)
             # A per-provider snapshot is also a discovery event, so update_providers
             # bumps last_event_at; merge just this provider's state + freshness.
             # A clean snapshot additionally carries its full host-id set (with the

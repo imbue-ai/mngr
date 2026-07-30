@@ -46,6 +46,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TIMESTAMP = IsoTimestamp("2026-05-03T00:00:00.000000000+00:00")
@@ -100,6 +101,81 @@ def _provider_snapshot(
         discovery_started_at=_DISCOVERY_STARTED_AT,
         discovery_finished_at=discovery_finished_at,
         error=error,
+    )
+
+
+def _replay_consumer() -> EnvelopeStreamConsumer:
+    """A consumer started after the canned snapshot times, so those snapshots read as replay."""
+    return EnvelopeStreamConsumer(
+        resolver=MngrCliBackendResolver(), started_at=_DISCOVERY_FINISHED_AT + timedelta(hours=1)
+    )
+
+
+def _stale_error(message: str = "Docker state container is stopped", provider_name: str = "local") -> DiscoveryError:
+    """The kind of already-outdated provider error a pre-start snapshot carries."""
+    return DiscoveryError(
+        type_name="ProviderUnavailableError", message=message, provider_name=ProviderInstanceName(provider_name)
+    )
+
+
+def _dispatch_replayed_snapshot(
+    consumer: EnvelopeStreamConsumer,
+    error: DiscoveryError,
+    cycle: int,
+    provider_name: str = "local",
+    agents: tuple[DiscoveredAgent, ...] = (),
+) -> None:
+    """Feed the consumer one errored snapshot from the pre-start backlog, ``cycle`` seconds into it."""
+    _dispatch(
+        consumer,
+        _observe_envelope(
+            _provider_snapshot(
+                agents,
+                provider_name=provider_name,
+                error=error,
+                discovery_finished_at=_DISCOVERY_FINISHED_AT + timedelta(seconds=cycle),
+            )
+        ),
+    )
+
+
+def _dispatch_replayed_clean_snapshot(
+    consumer: EnvelopeStreamConsumer, cycle: int, provider_name: str = "local"
+) -> None:
+    """Feed the consumer one error-free snapshot from the pre-start backlog, ``cycle`` seconds into it."""
+    _dispatch(
+        consumer,
+        _observe_envelope(
+            _provider_snapshot(
+                (),
+                provider_name=provider_name,
+                discovery_finished_at=_DISCOVERY_FINISHED_AT + timedelta(seconds=cycle),
+            )
+        ),
+    )
+
+
+def _dispatch_live_snapshot(
+    consumer: EnvelopeStreamConsumer,
+    provider_name: str = "local",
+    agents: tuple[DiscoveredAgent, ...] = (),
+    error: DiscoveryError | None = None,
+) -> None:
+    """Feed the consumer a snapshot from after it started, ending that provider's replay.
+
+    Clean by default; pass ``error`` for the still-wedged case, whose error is
+    current truth rather than gap truth and so registers normally.
+    """
+    _dispatch(
+        consumer,
+        _observe_envelope(
+            _provider_snapshot(
+                agents,
+                provider_name=provider_name,
+                error=error,
+                discovery_finished_at=consumer.started_at + timedelta(seconds=30),
+            )
+        ),
     )
 
 
@@ -332,14 +408,8 @@ def test_pre_start_snapshot_error_is_dropped_but_topology_merges() -> None:
     snapshot's topology still merges (last-good retention). A snapshot taken
     after the consumer started registers its error normally.
     """
-    resolver = MngrCliBackendResolver()
-    # Started AFTER the canned snapshot timestamps: canned snapshots are replay.
-    consumer = EnvelopeStreamConsumer(resolver=resolver, started_at=_DISCOVERY_FINISHED_AT + timedelta(minutes=1))
-    stale_error = DiscoveryError(
-        type_name="ProviderUnavailableError",
-        message="Docker state container is stopped; host records are unreachable",
-        provider_name=ProviderInstanceName("local"),
-    )
+    consumer = _replay_consumer()
+    stale_error = _stale_error("Docker state container is stopped; host records are unreachable")
     _dispatch(
         consumer,
         _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),), error=stale_error)),
@@ -356,6 +426,138 @@ def test_pre_start_snapshot_error_is_dropped_but_topology_merges() -> None:
     )
     _dispatch(consumer, _observe_envelope(fresh))
     assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
+
+
+def test_repeated_pre_start_error_drops_log_one_counted_line_when_replay_ends() -> None:
+    """A long backlog of identical pre-start errors logs one counted line, and only once replay ends.
+
+    The events file holds one snapshot per discovery cycle for however long minds
+    was closed, and a wedged provider repeats the same error on every one of them,
+    so a line per drop scales with the downtime.
+    """
+    consumer = _replay_consumer()
+    error = _stale_error()
+    agents = (_make_agent(_AGENT_ID_1),)
+    with capture_loguru(level="TRACE") as log_output:
+        for cycle in range(50):
+            _dispatch_replayed_snapshot(consumer, error, cycle, agents=agents)
+        # Nothing is logged while the backlog replays -- not even at TRACE.
+        assert "pre-start provider error" not in log_output.getvalue()
+        # The first live snapshot ends the replay and reports the whole tally.
+        _dispatch_live_snapshot(consumer, agents=agents)
+    lines = [line for line in log_output.getvalue().splitlines() if "pre-start provider error" in line]
+    assert len(lines) == 1
+    assert "Dropped pre-start provider errors for local" in lines[0]
+    assert "50x Docker state container is stopped" in lines[0]
+    # The line reports how far the drops reached: the last snapshot dropped, not the first.
+    assert str(_DISCOVERY_FINISHED_AT + timedelta(seconds=49)) in lines[0]
+    assert str(_DISCOVERY_FINISHED_AT) not in lines[0]
+    # The dropped errors stayed dropped, and the live clean snapshot registers none.
+    assert consumer.resolver.get_provider_errors() == {}
+
+
+def test_clean_pre_start_snapshot_does_not_split_a_providers_tally() -> None:
+    """Backlog errors interrupted by clean cycles still collapse into one line per distinct error.
+
+    Over a multi-day gap a provider's backlog flaps (network down, briefly up, down
+    again), so its errored snapshots come in runs separated by clean ones. Ending
+    the tally on any snapshot that drops nothing would re-log the same error once
+    per run -- which is what flooded the log with a line per flap.
+    """
+    consumer = _replay_consumer()
+    error = _stale_error("Could not connect to the endpoint URL")
+    with capture_loguru(level="TRACE") as log_output:
+        for cycle in range(12):
+            # Two errored cycles, then a clean one, repeatedly.
+            if cycle % 3 == 2:
+                _dispatch_replayed_clean_snapshot(consumer, cycle)
+            else:
+                _dispatch_replayed_snapshot(consumer, error, cycle)
+        _dispatch_live_snapshot(consumer)
+    lines = [line for line in log_output.getvalue().splitlines() if "pre-start provider error" in line]
+    assert len(lines) == 1
+    assert "8x Could not connect to the endpoint URL" in lines[0]
+
+
+def test_alternating_pre_start_errors_are_tallied_separately() -> None:
+    """A backlog alternating two errors logs one counted line per distinct error.
+
+    A wedged provider need not repeat a single error: a discovery that overruns its
+    timeout writes a timeout snapshot and then, once the abandoned read resolves, a
+    snapshot carrying the underlying failure, so its backlog alternates the two.
+    Tallying only the latest error would leave every one of those drops logging in
+    full.
+    """
+    consumer = _replay_consumer()
+    with capture_loguru(level="INFO") as log_output:
+        for cycle in range(10):
+            message = "discovery did not complete within 30s" if cycle % 2 == 0 else "docker daemon unreachable"
+            _dispatch_replayed_snapshot(consumer, _stale_error(message), cycle)
+        _dispatch_replayed_snapshot(consumer, _stale_error("token expired"), 10)
+        # Ends the replay, and with it every open tally.
+        _dispatch_live_snapshot(consumer)
+    lines = [line for line in log_output.getvalue().splitlines() if "pre-start provider error" in line]
+    # One line per distinct error, in first-seen order, each carrying its own count.
+    assert len(lines) == 3
+    assert "5x discovery did not complete within 30s" in lines[0]
+    assert "5x docker daemon unreachable" in lines[1]
+    assert "1x token expired" in lines[2]
+    assert all("Dropped pre-start provider errors for local" in line for line in lines)
+
+
+def test_live_errored_snapshot_ends_the_replay_and_registers_its_error() -> None:
+    """A still-wedged provider's first fresh cycle ends the replay, and its error counts.
+
+    A provider wedged for the whole downtime is still wedged at startup, so the
+    snapshot that ends its backlog replay carries the same error the backlog was
+    dropping. That one snapshot both reports what the replay dropped and registers
+    as a current provider error.
+    """
+    consumer = _replay_consumer()
+    error = _stale_error()
+    with capture_loguru(level="INFO") as log_output:
+        for cycle in range(3):
+            _dispatch_replayed_snapshot(consumer, error, cycle)
+        _dispatch_live_snapshot(consumer, error=error)
+    lines = [line for line in log_output.getvalue().splitlines() if "pre-start provider error" in line]
+    assert len(lines) == 1
+    assert "3x Docker state container is stopped" in lines[0]
+    assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
+
+
+def test_pre_start_error_drops_are_collapsed_per_provider() -> None:
+    """Two providers wedged on the same error each get their own line."""
+    consumer = _replay_consumer()
+    with capture_loguru(level="INFO") as log_output:
+        for cycle in range(4):
+            for provider in ("local", "modal"):
+                _dispatch_replayed_snapshot(
+                    consumer, _stale_error("unreachable", provider), cycle, provider_name=provider
+                )
+        for provider in ("local", "modal"):
+            _dispatch_live_snapshot(consumer, provider_name=provider)
+    lines = [line for line in log_output.getvalue().splitlines() if "pre-start provider error" in line]
+    assert len(lines) == 2
+    assert len([line for line in lines if "for local" in line and "4x unreachable" in line]) == 1
+    assert len([line for line in lines if "for modal" in line and "4x unreachable" in line]) == 1
+
+
+def test_shutdown_reports_a_replay_that_never_ended() -> None:
+    """A provider that never delivers a post-start snapshot still reports its drops on terminate.
+
+    Its replay has no natural end -- discovery stayed wedged for the whole session,
+    so no fresh snapshot ever arrives -- and the backlog's errors would otherwise
+    go unlogged entirely.
+    """
+    consumer = _replay_consumer()
+    with capture_loguru(level="INFO") as log_output:
+        for cycle in range(6):
+            _dispatch_replayed_snapshot(consumer, _stale_error(), cycle)
+        assert "pre-start provider error" not in log_output.getvalue()
+        consumer.terminate()
+    lines = [line for line in log_output.getvalue().splitlines() if "pre-start provider error" in line]
+    assert len(lines) == 1
+    assert "6x Docker state container is stopped" in lines[0]
 
 
 # --- observe stream: host ssh info ----------------------------------------

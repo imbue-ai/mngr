@@ -10,12 +10,14 @@ from enum import auto
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
+from typing import Any
 from typing import Final
 from typing import Literal
 
 from loguru import logger
 from pydantic import Discriminator
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import TypeAdapter
 from pydantic import ValidationError
 
@@ -675,13 +677,31 @@ def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
         raise DiscoverySchemaChangedError(str(event_type), str(e)) from e
 
 
-def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
-    """Earliest discovery-span start that a correct replay must reach back to, or None.
+class _DiscoverySnapshotScan(FrozenModel):
+    """What one pass over the events file learned about its ``DISCOVERY_PROVIDER`` snapshots."""
 
-    For each provider, a ``DISCOVERY_PROVIDER`` snapshot is authoritative back to its
-    ``discovery_started_at`` (when its read began), which is *earlier* than its own line
-    position (written at ``discovery_finished_at``). So the value here is the minimum,
-    across every provider, of that provider's *latest non-errored* snapshot's
+    earliest_window_start: datetime | None = Field(
+        description=(
+            "Earliest discovery-span start that a correct replay must reach back to, "
+            "or None when the file holds no snapshot of either kind"
+        )
+    )
+    superseded_snapshot_event_ids: frozenset[str] = Field(
+        description=(
+            "Event ids of the scanned provider snapshots whose entire effect on final "
+            "reconstructed state is reproduced by that provider's kept snapshots; an "
+            "attach-time replay may skip these lines"
+        )
+    )
+
+
+def _scan_discovery_snapshots(events_path: Path) -> _DiscoverySnapshotScan:
+    """One pass over the events file: the replay window start, and which snapshots it may skip.
+
+    Window: for each provider, a ``DISCOVERY_PROVIDER`` snapshot is authoritative back to
+    its ``discovery_started_at`` (when its read began), which is *earlier* than its own
+    line position (written at ``discovery_finished_at``). So the window start is the
+    minimum, across every provider, of that provider's *latest non-errored* snapshot's
     ``discovery_started_at`` (falling back to its latest snapshot when the file holds
     only errored ones). An errored snapshot carries no membership -- its read failed --
     so a window starting there would reconstruct the provider as empty for as long as
@@ -692,12 +712,27 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
     ``DISCOVERY_FULL`` anymore and consumers drop its content, so once any per-provider
     snapshot exists the full line is pure history; letting it participate in the minimum
     would permanently pin the replay window at the last pre-migration write, replaying
-    days of stale events on every attach. Returns None when the file holds no snapshot
-    of either kind.
+    days of stale events on every attach.
+
+    Superseded snapshots: within the window, only three snapshots per provider can still
+    affect the final reconstructed state -- its latest non-errored one (membership: later
+    errored snapshots retain-and-mark-unknown, never drop), its latest one (current
+    error/clear status and snapshot freshness), and its latest one carrying a ``provider``
+    config (the config merge only applies non-None values). Every other snapshot's effect
+    is overwritten by one of those three before the replay ends, so a stream that skips
+    them, while keeping every non-snapshot event, folds to the identical final state. The
+    window may still reach far back -- a provider that stopped writing (removed from
+    config, or erroring for days) pins it at its last healthy snapshot -- and without
+    skipping, every attach would replay one interleaved world-state per discovery cycle
+    of that gap, minutes of parse-and-fold work whose net effect is nil.
     """
     latest_start_by_provider: dict[str, datetime] = {}
     latest_non_errored_start_by_provider: dict[str, datetime] = {}
     latest_full_started_at: datetime | None = None
+    all_snapshot_event_ids: set[str] = set()
+    latest_event_id_by_provider: dict[str, str] = {}
+    latest_non_errored_event_id_by_provider: dict[str, str] = {}
+    latest_with_provider_event_id_by_provider: dict[str, str] = {}
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path) as f:
         for line in f:
@@ -707,9 +742,18 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
             data, _ = parsed
             event_type = data.get("type")
             if event_type == DiscoveryEventType.DISCOVERY_PROVIDER:
+                provider_name = str(data.get("provider_name", ""))
+                event_id = data.get("event_id")
+                if event_id is not None:
+                    event_id_str = str(event_id)
+                    all_snapshot_event_ids.add(event_id_str)
+                    latest_event_id_by_provider[provider_name] = event_id_str
+                    if data.get("error") is None:
+                        latest_non_errored_event_id_by_provider[provider_name] = event_id_str
+                    if data.get("provider") is not None:
+                        latest_with_provider_event_id_by_provider[provider_name] = event_id_str
                 started_at_raw = data.get("discovery_started_at")
                 if started_at_raw is not None:
-                    provider_name = str(data.get("provider_name", ""))
                     started_at = parse_event_timestamp(IsoTimestamp(str(started_at_raw)))
                     latest_start_by_provider[provider_name] = started_at
                     if data.get("error") is None:
@@ -724,11 +768,21 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
                 pass
 
     if latest_start_by_provider:
-        return min(
+        earliest_window_start = min(
             latest_non_errored_start_by_provider.get(provider_name, latest_start)
             for provider_name, latest_start in latest_start_by_provider.items()
         )
-    return latest_full_started_at
+    else:
+        earliest_window_start = latest_full_started_at
+    kept_event_ids = (
+        set(latest_event_id_by_provider.values())
+        | set(latest_non_errored_event_id_by_provider.values())
+        | set(latest_with_provider_event_id_by_provider.values())
+    )
+    return _DiscoverySnapshotScan(
+        earliest_window_start=earliest_window_start,
+        superseded_snapshot_event_ids=frozenset(all_snapshot_event_ids - kept_event_ids),
+    )
 
 
 def _find_offset_of_first_event_at_or_after(events_path: Path, start: datetime) -> int:
@@ -776,7 +830,7 @@ def find_discovery_snapshot_replay_offset(events_path: Path) -> int:
     """
     if not events_path.exists():
         return 0
-    earliest_window_start = _find_earliest_snapshot_window_start(events_path)
+    earliest_window_start = _scan_discovery_snapshots(events_path).earliest_window_start
     if earliest_window_start is None:
         return 0
     return _find_offset_of_first_event_at_or_after(events_path, earliest_window_start)
@@ -1155,18 +1209,100 @@ def extract_agents_and_hosts_from_full_listing(
 DISCOVERY_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
 
 
+class _SkippedSnapshotTally(MutableModel):
+    """Running tally of one provider's superseded snapshots skipped during an attach replay."""
+
+    count: int = Field(description="How many of this provider's snapshot lines were skipped")
+    errored_count: int = Field(description="How many of the skipped snapshots carried an error")
+    first_timestamp: str = Field(description="Envelope timestamp of the earliest skipped snapshot")
+    last_timestamp: str = Field(description="Envelope timestamp of the latest skipped snapshot")
+    # Keyed by (error type_name, error message) so a provider whose outage alternated
+    # between failures (a timeout and its underlying error, say) keeps each on record.
+    count_by_error: dict[tuple[str, str], int] = Field(
+        default_factory=dict, description="How many skipped snapshots carried each distinct error"
+    )
+
+
+class _SupersededSnapshotFilter(MutableModel):
+    """Skips superseded provider snapshots during the attach-time replay, tallying what it skipped.
+
+    Pass :meth:`should_emit` to the attach read only -- never to the live tail loop,
+    where every arriving snapshot is the newest for its provider. The skipped lines'
+    net effect on reconstructed state is nil (see :func:`_scan_discovery_snapshots`),
+    but they are the on-disk record of the gap while no consumer was attached, so
+    :meth:`log_skipped` ends the replay with one counted line per provider plus one
+    per distinct error its skipped snapshots carried -- everything the full replay
+    used to surface about the gap, minus the per-cycle repetition.
+
+    Not thread-safe: the attach read runs on a single thread before the tail starts.
+    """
+
+    superseded_event_ids: frozenset[str] = Field(
+        frozen=True, description="Event ids of the snapshot lines to skip, from the attach-time scan"
+    )
+    _tally_by_provider_name: dict[str, _SkippedSnapshotTally] = PrivateAttr(default_factory=dict)
+
+    def should_emit(self, data: dict[str, Any]) -> bool:
+        """False for a superseded provider snapshot (tallying it); True for everything else."""
+        if data.get("type") != DiscoveryEventType.DISCOVERY_PROVIDER:
+            return True
+        event_id = data.get("event_id")
+        if event_id is None or str(event_id) not in self.superseded_event_ids:
+            return True
+        provider_name = str(data.get("provider_name", ""))
+        timestamp = str(data.get("timestamp", ""))
+        error = data.get("error")
+        tally = self._tally_by_provider_name.get(provider_name)
+        if tally is None:
+            tally = _SkippedSnapshotTally(
+                count=0, errored_count=0, first_timestamp=timestamp, last_timestamp=timestamp
+            )
+            self._tally_by_provider_name[provider_name] = tally
+        tally.count += 1
+        tally.last_timestamp = timestamp
+        if isinstance(error, dict):
+            tally.errored_count += 1
+            error_key = (str(error.get("type_name", "")), str(error.get("message", "")))
+            tally.count_by_error[error_key] = tally.count_by_error.get(error_key, 0) + 1
+        return False
+
+    def log_skipped(self) -> None:
+        """Log one counted line per provider, plus one per distinct error its skipped snapshots carried."""
+        for provider_name, tally in self._tally_by_provider_name.items():
+            logger.info(
+                "Attach replay: skipped {} superseded discovery snapshot(s) for provider {} "
+                "({} errored, spanning {} -> {}); the provider's latest snapshot(s) still replayed",
+                tally.count,
+                provider_name,
+                tally.errored_count,
+                tally.first_timestamp,
+                tally.last_timestamp,
+            )
+            for (type_name, message), count in tally.count_by_error.items():
+                logger.info(
+                    "Attach replay: {}x of the snapshots skipped for provider {} carried {}: {}",
+                    count,
+                    provider_name,
+                    type_name,
+                    message,
+                )
+
+
 def _discovery_stream_emit_line(
     line: str,
     warner: MalformedJsonLineWarner,
     emitted_event_ids: set[str],
     emit_lock: Lock,
     on_line: Callable[[str], None] | None,
+    should_emit: Callable[[dict[str, Any]], bool] | None = None,
 ) -> None:
     """Parse and emit a single JSONL line, deduplicating by event_id."""
     parsed = warner.parse(line)
     if parsed is None:
         return
     data, stripped = parsed
+    if should_emit is not None and not should_emit(data):
+        return
     event_id = data.get("event_id")
     event_type = data.get("type", "unknown")
     with emit_lock:
@@ -1236,6 +1372,7 @@ def _emit_lines_from_offset(
     emitted_event_ids: set[str],
     emit_lock: Lock,
     on_line: Callable[[str], None] | None,
+    should_emit: Callable[[dict[str, Any]], bool] | None = None,
 ) -> int:
     """Read the events file from `offset` to EOF and feed every complete line through the warner.
 
@@ -1255,7 +1392,7 @@ def _emit_lines_from_offset(
         new_content = f.read().decode("utf-8", errors="replace")
     lines, bytes_consumed = split_complete_lines(new_content)
     for line in lines:
-        _discovery_stream_emit_line(line, warner, emitted_event_ids, emit_lock, on_line)
+        _discovery_stream_emit_line(line, warner, emitted_event_ids, emit_lock, on_line, should_emit)
     return offset + bytes_consumed
 
 
@@ -1274,21 +1411,30 @@ def tail_discovery_events_file(
 
     Tolerates the file being absent when called (the tail loop waits for it to appear)
     and being truncated/rotated while tailing (it resets and re-reads). On attach it
-    replays from :func:`find_discovery_snapshot_replay_offset` -- the earliest offset
-    that still includes every provider's latest non-errored per-provider snapshot (or,
-    for a pure pre-migration log, the legacy full snapshot) -- so a consumer attaching
-    mid-stream is populated immediately
-    without re-reading the whole file. The dedup set keeps a later real snapshot from
-    double-emitting.
+    replays from the earliest offset that still includes every provider's latest
+    non-errored per-provider snapshot (or, for a pure pre-migration log, the legacy
+    full snapshot) -- so a consumer attaching mid-stream is populated immediately
+    without re-reading the whole file. Provider snapshots inside that window whose
+    effect is fully reproduced by their provider's latest one(s) are skipped rather
+    than emitted (see :func:`_scan_discovery_snapshots`) and summarized in one counted
+    log line per provider, so an attach after a long gap does not re-fold one stale
+    world-state per discovery cycle of the gap. The dedup set keeps a later real
+    snapshot from double-emitting.
     """
     emitted_event_ids: set[str] = set()
     emit_lock = Lock()
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     if events_path.exists():
-        snapshot_offset = find_discovery_snapshot_replay_offset(events_path)
+        scan = _scan_discovery_snapshots(events_path)
+        if scan.earliest_window_start is None:
+            snapshot_offset = 0
+        else:
+            snapshot_offset = _find_offset_of_first_event_at_or_after(events_path, scan.earliest_window_start)
+        snapshot_filter = _SupersededSnapshotFilter(superseded_event_ids=scan.superseded_snapshot_event_ids)
         initial_offset = _emit_lines_from_offset(
-            events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
+            events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line, snapshot_filter.should_emit
         )
+        snapshot_filter.log_skipped()
     else:
         initial_offset = 0
     tail_discovery_events_from_offset(
