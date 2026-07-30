@@ -195,9 +195,11 @@ def forward_log_path(data_dir: Path) -> Path:
     This file holds whatever the detached process writes to its real
     stdout/stderr file descriptors (human-format console log lines, plus any
     pre-logging tracebacks or Click error messages). Its fd is handed straight
-    to the subprocess, so it cannot be rotated mid-write and is intentionally
-    left unrotated. For the process's own structured, timestamped, in-run-rotated
-    log see :func:`forward_events_log_path`.
+    to the subprocess, so it cannot be rotated mid-write; it is instead rotated
+    at spawn time, while no child holds the fd, and each spawn appends a
+    timestamped marker dating the output that follows. For the process's own
+    structured, timestamped, in-run-rotated log see
+    :func:`forward_events_log_path`.
     """
     return data_dir / _FORWARD_LOG_FILENAME
 
@@ -224,6 +226,11 @@ def ensure_browser_log_path(data_dir: Path) -> Path:
     Not agent-scoped: ``ensure-browser`` is a minds-wide one-time setup
     step that configures a shared Playwright/Chromium browser for the
     latchkey credential directory, run at most once per minds session.
+
+    Like :func:`forward_log_path`, this is a raw stdout/stderr capture whose fd
+    is handed straight to the subprocess: it is rotated at spawn time rather
+    than mid-write, and each spawn appends a timestamped marker dating the
+    output that follows.
     """
     return data_dir / "latchkey_ensure_browser.log"
 

@@ -44,8 +44,9 @@ MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR = "MNGR_LATCHKEY_SENTRY_CONSENT_FILE"
 
 # The ``mngr latchkey forward`` process writes its structured loguru log to
 # ``events.jsonl`` (rotated to ``events.jsonl.<ts>``) and its raw stdout/stderr
-# capture to ``latchkey_forward.log``, all flat in the plugin data dir. None are
-# gzip-compressed on disk, so every file is compressed on upload.
+# capture to ``latchkey_forward.log`` (rotated at spawn time to
+# ``latchkey_forward.log.<ts>`` once it passes 10MB), all flat in the plugin data
+# dir. None are gzip-compressed on disk, so every file is compressed on upload.
 _FORWARD_LOG_ATTACHMENT_GROUPS = (
     # The live structured log (mutable -- re-upload on every report).
     LogAttachmentGroup(
@@ -63,7 +64,11 @@ _FORWARD_LOG_ATTACHMENT_GROUPS = (
         is_compressed=True,
         is_immutable=True,
     ),
-    # The raw stdout/stderr capture log.
+    # The raw stdout/stderr capture log. Unlike the structured log, its rotations
+    # are deliberately left behind: ``*.log`` does not match
+    # ``latchkey_forward.log.<ts>``, and a raw capture only ever rotates because it
+    # grew oversized -- that stale bulk is exactly what rotating it stops us
+    # re-uploading on every report.
     LogAttachmentGroup(
         group_name="raw_logs",
         glob="*.log",

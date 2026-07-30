@@ -1,0 +1,5 @@
+`minds.log` -- the backend's stdout/stderr capture, uploaded with every bug report -- is now timestamped: each captured line is written with an ISO-8601 UTC prefix, matching `electron.log`. Previously the file carried no times at all (the backend's console format is tuned for an interactive terminal, where a timestamp would be noise), which made it impossible to line up against the timestamped logs uploaded beside it (`minds-events.jsonl`, `electron.log`, the discovery/latchkey event streams) when reconstructing when something happened.
+
+Backend stderr was also being written to the log in raw chunks rather than by line. Since a chunk boundary regularly falls mid-line, it is now split into whole lines first, so each line -- including every line of a multi-line traceback -- gets its own stamp. A trailing line with no newline (a backend dying mid-traceback, the output most worth having) is flushed to the log when the process exits instead of being dropped.
+
+The app's own console output in dev mode is deliberately left unstamped, so the interactive dev experience is unchanged.

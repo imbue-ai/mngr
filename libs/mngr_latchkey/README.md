@@ -103,6 +103,18 @@ CLI flag > env var > settings.toml > built-in default.
   or a pre-logging traceback) that never reaches the structured log -- so
   it is the place to look if the supervisor dies before it starts logging.
 
+  Each spawn appends a `<timestamp> === spawning ... ===` marker before
+  handing the descriptor over. The child's own lines cannot be stamped
+  from the parent (it writes to the descriptor directly), so the marker is
+  what dates whatever follows it, letting a traceback here be lined up
+  against the timestamped logs uploaded alongside it. Spawn time is also
+  the only moment the file can safely be rotated -- no child holds the
+  descriptor yet -- so an oversized capture (one left by an older build,
+  or by a child crash-looping before its logging is configured) is rotated
+  there, once it passes 10MB, to `latchkey_forward.log.<timestamp>`, keeping
+  only the newest rotation. Without that the file is append-only for the life
+  of the install, and is gzipped and re-uploaded with every bug report.
+
 ## Error reporting (Sentry)
 
 `mngr latchkey forward` can report errors to Sentry. It is **off by default** and

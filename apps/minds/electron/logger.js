@@ -22,6 +22,7 @@ const path = require('path');
 const util = require('util');
 const paths = require('./paths');
 const { createRotatingLogStream } = require('./log-rotation');
+const { formatTimestampedLine } = require('./log-timestamp');
 
 let logStream = null;
 // Reentrancy guard against a log write synchronously re-entering writeLine.
@@ -36,7 +37,7 @@ let isWritingLine = false;
 
 /** ``LEVEL`` + ISO-8601 UTC timestamp prefix, matching console formatting semantics via util.format. */
 function formatLine(level, args) {
-  return `${new Date().toISOString()} [${level}] ${util.format(...args)}\n`;
+  return formatTimestampedLine(`[${level}] ${util.format(...args)}`);
 }
 
 function writeLine(level, args) {
