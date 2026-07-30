@@ -507,9 +507,11 @@ def encode_claude_project_dir_name(path: Path) -> str:
     letters, CJK, etc.) to ``-`` -- per the algorithm documented in
     anthropics/claude-code#19972. If this encoder diverges from Claude
     Code's, ``on_after_provisioning`` writes the adopted JSONL to a
-    project subdir Claude Code never reads on resume, the find guard in
-    ``assemble_command`` returns no match, and ``--adopt``
-    silently spawns a fresh session via the ``||`` fallback.
+    project subdir Claude Code never reads on resume; the resume gate in
+    ``assemble_command`` still passes via its name-based ``find`` backstop
+    over ``projects/``, but claude's own ``--resume`` fails to see the
+    session and the launch cascades to the fallback branches, so
+    ``--adopt`` silently ends up in a different session.
     """
     return _NON_DASH_ALNUM_ASCII.sub("-", str(path))
 
@@ -593,6 +595,53 @@ def get_agent_hook_settings_path(agent_state_dir: Path, *, use_env_config_dir: b
 # main Claude session (e.g. a reviewer sub-agent that resumed a session).
 SESSION_GUARD: Final[str] = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
 
+# Guard that exits when the firing claude was started in a different directory
+# than the agent's work dir. A *nested* claude (e.g. `claude -p` run from a
+# Bash tool call) inherits the agent's env and config dir, so its hooks pass
+# SESSION_GUARD and would corrupt the agent's state files ($MNGR_AGENT_STATE_DIR
+# comes from the inherited env). CLAUDE_PROJECT_DIR is the physical
+# (symlink-resolved) directory claude was started in, set once per claude
+# process, so comparing it against the agent's work dir (resolved the same way,
+# via cd + pwd -P) identifies sessions launched from another cwd. Fails open:
+# when either side is unset or cannot be resolved, the hook proceeds as before.
+_FOREIGN_PROJECT_GUARD: Final[str] = (
+    '_MNGR_RESOLVED_WD="$([ -n "$MNGR_AGENT_WORK_DIR" ] && cd "$MNGR_AGENT_WORK_DIR" 2>/dev/null && pwd -P)";'
+    ' if [ -n "$_MNGR_RESOLVED_WD" ] && [ -n "$CLAUDE_PROJECT_DIR" ]'
+    ' && [ "$CLAUDE_PROJECT_DIR" != "$_MNGR_RESOLVED_WD" ]; then exit 0; fi; '
+)
+
+# Guard that exits when a *different, still-live* claude process has claimed
+# this agent's state dir as its main session (see the claim snippet in the
+# SessionStart session-tracking hook, which records CLAUDE_PID -- the pid of
+# the claude process that fired the hook -- in the claude_main_pid marker).
+# This blocks a nested claude started *inside the work dir* (which passes the
+# project guard) from touching the agent's state while the real main claude is
+# alive. The `ps` comm check keeps a recycled pid from masquerading as a live
+# main claude (claude sets its process *title* to its version string, but
+# `ps -o comm=` still reports the original executable name). Fails open: when
+# CLAUDE_PID is unset (older claude), no claim exists, the recorded process is
+# dead, or the recorded pid is not a claude process, the hook proceeds.
+_FOREIGN_PROCESS_GUARD: Final[str] = (
+    '_MNGR_MAIN_PID="$(cat "$MNGR_AGENT_STATE_DIR/claude_main_pid" 2>/dev/null)";'
+    ' if [ -n "$CLAUDE_PID" ] && [ -n "$_MNGR_MAIN_PID" ] && [ "$_MNGR_MAIN_PID" != "$CLAUDE_PID" ]'
+    ' && kill -0 "$_MNGR_MAIN_PID" 2>/dev/null'
+    ' && [ "$(ps -o comm= -p "$_MNGR_MAIN_PID" 2>/dev/null | tr -d "[:space:]")" = "claude" ]; then exit 0; fi; '
+)
+
+# The full guard for hooks that write agent state: main session id present,
+# started from the agent's work dir, and not shadowed by a live main claude.
+MAIN_SESSION_ONLY_GUARD: Final[str] = SESSION_GUARD + _FOREIGN_PROJECT_GUARD + _FOREIGN_PROCESS_GUARD
+
+# Claim snippet for the SessionStart session-tracking hook: records the firing
+# claude's pid as this agent's main claude. Runs after MAIN_SESSION_ONLY_GUARD,
+# so it only executes for the main session (a foreign process was already
+# rejected; a dead or missing claim is superseded). Atomic via .tmp + mv, like
+# the claude_session_id marker. No-op when CLAUDE_PID is unset (older claude).
+_CLAIM_MAIN_PID: Final[str] = (
+    'if [ -n "$CLAUDE_PID" ]; then echo "$CLAUDE_PID" > "$MNGR_AGENT_STATE_DIR/claude_main_pid.tmp"'
+    ' && mv "$MNGR_AGENT_STATE_DIR/claude_main_pid.tmp" "$MNGR_AGENT_STATE_DIR/claude_main_pid"; fi; '
+)
+
 # Shell snippet that marks the agent idle: removes the 'active' and
 # 'permissions_waiting' marker files (so get_lifecycle_state reports WAITING
 # rather than RUNNING) and emits an activity event so `mngr observe` promptly
@@ -649,6 +698,23 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       a transcript event older than it belongs to a turn the current process
       did not run, so consumers can treat such a tail as idle rather than
       "still working". Deliberately NOT touched on compact (mid-turn).
+    - claude_main_pid: pid of the claude process currently owning this agent's
+      state (claimed by the SessionStart session-tracking hook, from the
+      CLAUDE_PID each hook receives). Ephemeral -- meaningless across host
+      restarts -- and only consulted while the recorded process is alive. The
+      launch command clears it before each claude launch (a stale claim could
+      otherwise match a recycled pid belonging to another live claude and block
+      every guarded hook, including the SessionStart re-claim).
+
+    Every state-writing hook is prefixed with MAIN_SESSION_ONLY_GUARD rather
+    than bare SESSION_GUARD: a nested claude launched from inside the agent
+    (e.g. a `claude -p` smoke test run via a Bash tool call) inherits
+    MAIN_CLAUDE_SESSION_ID, MNGR_AGENT_STATE_DIR, and the config dir, so its
+    hooks would otherwise fire against the agent's state dir -- overwriting
+    claude_session_id with a foreign session (stranding the next relaunch) and
+    clearing the 'active' marker mid-turn. The guard rejects sessions started
+    outside the agent's work dir, and sessions fired by a different live claude
+    process than the one that claimed claude_main_pid.
 
     The tmux wait-for signals (UserPromptSubmit, and SessionStart for
     /clear//compact) are kept ONLY for older mngr senders; current mngr
@@ -661,17 +727,17 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/session_started"',
+                            "command": MAIN_SESSION_ONLY_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/session_started"',
                         },
                         {
                             "type": "command",
-                            "command": SESSION_GUARD
+                            "command": MAIN_SESSION_ONLY_GUARD
                             + 'echo "The base branch for this work is: ${MNGR_GIT_BASE_BRANCH:-main}"',
                         },
                         {
                             "type": "command",
                             "command": (
-                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                MAIN_SESSION_ONLY_GUARD + _CLAIM_MAIN_PID + "_MNGR_HOOK_INPUT=$(cat);"
                                 ' _MNGR_NEW_SID=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".session_id // empty");'
                                 ' if [ -z "$_MNGR_NEW_SID" ]; then'
                                 ' echo "mngr: SessionStart hook failed to extract session_id from hook input: $_MNGR_HOOK_INPUT" >&2;'
@@ -693,7 +759,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             #  do not trigger UserPromptSubmit).
                             "type": "command",
                             "command": (
-                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                MAIN_SESSION_ONLY_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
                                 ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
                                 ' case "$_MNGR_SOURCE" in clear|compact)'
                                 " tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true ;;"
@@ -718,7 +784,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             # (so it must NOT move the process-start boundary).
                             "type": "command",
                             "command": (
-                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                MAIN_SESSION_ONLY_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
                                 ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
                                 ' case "$_MNGR_SOURCE" in startup|resume)'
                                 ' touch "$MNGR_AGENT_STATE_DIR/claude_process_started" && '
@@ -734,7 +800,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD
+                            "command": MAIN_SESSION_ONLY_GUARD
                             + """touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
                         },
                         {
@@ -748,7 +814,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             #  LATCHES a signal fired with no waiter, which is
                             #  exactly why current mngr stopped trusting it.
                             "type": "command",
-                            "command": SESSION_GUARD
+                            "command": MAIN_SESSION_ONLY_GUARD
                             + "tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true",
                         },
                     ]
@@ -759,7 +825,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": MAIN_SESSION_ONLY_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -769,7 +835,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": MAIN_SESSION_ONLY_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -779,7 +845,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": MAIN_SESSION_ONLY_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -790,7 +856,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT,
+                            "command": MAIN_SESSION_ONLY_GUARD + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT,
                         },
                     ],
                 }
@@ -800,7 +866,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
+                            "command": MAIN_SESSION_ONLY_GUARD
+                            + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
                         },
                     ],
                 }

@@ -109,10 +109,11 @@ _SHED_LEDGER_PATH: Final[str] = "/home/user/workspace/data/.state/oom_priority/e
 _SUPERVISORD_LOG_PATH: Final[str] = "/var/log/supervisor/supervisord.log"
 
 # mngr lifecycle states that mean the agent's tmux window is alive (as opposed
-# to STOPPED / DONE). The system-services agent's window-0 command is
-# ``sleep infinity && claude`` -- claude is unreachable by design (see the
-# minds README), so mngr observes a non-claude process occupying the window
-# and reports REPLACED rather than RUNNING. Both indicate the agent is up.
+# to STOPPED / DONE). The system-services agent is a plain ``command``-type
+# agent whose window-0 command is ``sleep infinity`` (see the minds README),
+# which mngr reports as RUNNING. REPLACED covers workspaces from older template
+# revisions, whose claude-typed services agent held its window with a non-claude
+# process. All of these indicate the agent is up.
 _ALIVE_AGENT_STATES: Final[frozenset[str]] = frozenset(
     {"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"}
 )
@@ -427,10 +428,10 @@ def test_resumed_workspace_serves_system_interface(running_workspace: _ResumedWo
 def test_resumed_workspace_system_services_agent_is_alive(running_workspace: _ResumedWorkspace) -> None:
     """After resume, the primary system-services agent's tmux window is alive.
 
-    The services agent runs ``sleep infinity && claude`` (claude unreachable by
-    design), so mngr reports it as ``REPLACED`` -- a non-claude process holding
-    the window -- rather than ``RUNNING``. Both are "alive"; only STOPPED/DONE
-    would mean the resume failed to bring the agent back.
+    The services agent is a plain ``command``-type agent running
+    ``sleep infinity``, which mngr reports as ``RUNNING`` (workspaces from
+    older template revisions read as ``REPLACED`` instead). Both are "alive";
+    only STOPPED/DONE would mean the resume failed to bring the agent back.
     """
     agents = _list_agents_in_container(running_workspace.container_name)
     services_agents = [agent for agent in agents if agent["id"] == running_workspace.services_agent_id]

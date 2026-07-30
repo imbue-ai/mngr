@@ -441,6 +441,37 @@ def build_mngr_hook_configs(config: ClaudeAgentConfig, *, is_unattended: bool) -
     return hook_configs
 
 
+@pure
+def _build_resumable_session_gate(encoded_project_dir: str, session_id_expression: str) -> str:
+    """Shell gate that succeeds iff claude can actually resume ``session_id_expression``.
+
+    ``claude --resume <id>`` only consults the project dir encoded from its
+    (physical) cwd and ignores empty session files, so the gate checks that a
+    non-empty ``<id>.jsonl`` exists at that exact path (``test -s``). A broader
+    match would pass for sessions claude cannot resume -- e.g. one started from
+    another cwd and filed under a different project dir -- and strand the
+    launch on a fallback branch that cannot succeed either.
+
+    A ``find`` over the whole ``projects/`` tree backstops the exact path in
+    case ``encode_claude_project_dir_name`` ever diverges from Claude Code's
+    encoder: a false-positive gate is harmless (claude's own failure cascades
+    to the next launch branch), while a false negative would skip a viable
+    resume. ``-size +0c`` keeps empty files out of the backstop too.
+
+    ``session_id_expression`` may be a literal UUID or a shell variable
+    reference like ``$MAIN_CLAUDE_SESSION_ID``; it is spliced into
+    double-quoted contexts, so a variable expands at launch time.
+    """
+    session_file = (
+        f'"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}/projects/{encoded_project_dir}/{session_id_expression}.jsonl"'
+    )
+    projects_root = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"'
+    return (
+        f"( test -s {session_file}"
+        f' || find {projects_root} -name "{session_id_expression}.jsonl" -size +0c 2>/dev/null | grep -q . )'
+    )
+
+
 def _has_settings_flag(args: Sequence[str]) -> bool:
     """True if ``args`` contains a claude ``--settings`` flag (``--settings X`` or ``--settings=X``).
 
@@ -2750,13 +2781,28 @@ class ClaudeAgent(
         command_override: CommandString | None,
         initial_message: str | None = None,
     ) -> CommandString:
-        """Assemble command with --resume || --session-id format for session resumption.
+        """Assemble the launch command as a self-healing resume chain.
 
-        The command format is: 'claude --resume $SID args || claude --session-id UUID args'
-        This allows users to hit 'up' and 'enter' in tmux to resume the session (--resume)
-        or create it with that ID (--session-id). The resume path uses $MAIN_CLAUDE_SESSION_ID,
-        resolved at runtime from the session tracking file (falling back to the agent UUID on
-        first run).
+        The command format is a three-branch chain:
+
+            'claude --resume $SID || claude --resume UUID || claude --session-id UUID'
+
+        where each resume branch is gated on its target session actually being
+        resumable (see ``_build_resumable_session_gate``) and UUID is the agent's
+        own id -- its first session. $MAIN_CLAUDE_SESSION_ID resolves at runtime
+        from the session tracking file (falling back to the agent UUID on first
+        run). The middle branch exists because the final ``--session-id`` branch
+        can never succeed once the UUID session exists (claude refuses to create
+        a session whose id is already in use): without it, a tracking file
+        pointing at an unresumable session (clobbered by a nested claude,
+        blank/deleted session file) deadlocks every subsequent launch. Falling
+        back to the agent's own first session explicitly at least resumes *this*
+        agent's conversation, and the SessionStart hook then heals the tracking
+        file. Each fallback branch re-exports MAIN_CLAUDE_SESSION_ID to the id
+        it actually launches so the hooks and env stay truthful.
+
+        This chain also lets users hit 'up' and 'enter' in tmux to re-run the
+        whole launch after an exit.
 
         An activity updater is started in the background to keep the agent's activity
         timestamp up-to-date while the tmux session is alive.
@@ -2801,29 +2847,45 @@ class ClaudeAgent(
             f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{agent_uuid}}}"'
         )
 
-        # Build both command variants using the dynamic session ID.
-        # Use $CLAUDE_CONFIG_DIR to find session files in the per-agent config dir
-        # rather than ~/.claude/. In shared mode the var may be unset (so claude
-        # resolves its default ~/.claude.json -- see modify_env_vars), so the
-        # lookup falls back to $HOME/.claude where the shared session files live.
-        # Session files on disk
-        # are named "<session_id>.jsonl"; matching without the extension would
-        # always miss, the && would short-circuit, and the silent || fallback at
-        # the end of assemble_command would spawn a fresh `claude --session-id
-        # <agent_uuid>` without surfacing any error -- so an adopted session
-        # would appear to do nothing.
+        # Build the three launch branches using the dynamic session ID. The
+        # resume gates use $CLAUDE_CONFIG_DIR to find session files in the
+        # per-agent config dir rather than ~/.claude/. In shared mode the var
+        # may be unset (so claude resolves its default ~/.claude.json -- see
+        # modify_env_vars), so the lookup falls back to $HOME/.claude where the
+        # shared session files live. The project dir segment is encoded from
+        # the host-resolved work dir with the same encoder as session adoption
+        # and the submission-evidence probes, matching where claude itself
+        # files (and looks up) this agent's sessions.
         # mngr injects its own --settings only in shared mode (the managed hooks file
         # written by _configure_agent_hooks). In isolated mode the hooks are baked into
         # the config-dir settings.json, so mngr adds no --settings here. Keyed off the
         # resolved predicate (not the deprecated use_env_config_dir alias) so it matches
         # the write gate in provision() for shared mode set via isolate_local_config_dir=False.
         mngr_settings_arg = f" {MANAGED_SETTINGS_LAUNCH_ARG}" if not self._is_isolated_config_dir() else ""
-        resume_cmd = f'( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base}{mngr_settings_arg} --resume "$MAIN_CLAUDE_SESSION_ID"'
-        create_cmd = f"{base}{mngr_settings_arg} --session-id {agent_uuid}"
+        encoded_project_dir = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
+        marker_gate = _build_resumable_session_gate(encoded_project_dir, "$MAIN_CLAUDE_SESSION_ID")
+        uuid_gate = _build_resumable_session_gate(encoded_project_dir, agent_uuid)
 
-        # Append additional args to both commands if present
+        resume_cmd = f'{marker_gate} && {base}{mngr_settings_arg} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        # Self-healing fallback: when the tracking file points at a session
+        # claude cannot resume, resume the agent's own first session (its UUID)
+        # explicitly. The inequality keeps this branch from re-launching the id
+        # the first branch just failed with. Re-exporting MAIN_CLAUDE_SESSION_ID
+        # lets the SessionStart hook accept the launched session and heal the
+        # tracking file.
+        resume_uuid_cmd = (
+            f'[ "$MAIN_CLAUDE_SESSION_ID" != "{agent_uuid}" ] && {uuid_gate}'
+            f" && export MAIN_CLAUDE_SESSION_ID={agent_uuid}"
+            f" && {base}{mngr_settings_arg} --resume {agent_uuid}"
+        )
+        create_cmd = (
+            f"export MAIN_CLAUDE_SESSION_ID={agent_uuid} && {base}{mngr_settings_arg} --session-id {agent_uuid}"
+        )
+
+        # Append additional args to all launch branches if present
         if args_str:
             resume_cmd = f"{resume_cmd} {args_str}"
+            resume_uuid_cmd = f"{resume_uuid_cmd} {args_str}"
             create_cmd = f"{create_cmd} {args_str}"
 
         # Build the environment exports
@@ -2836,9 +2898,28 @@ class ClaudeAgent(
             session_name, self.mngr_ctx.config.tmux.primary_window_name
         )
 
-        # Combine: start background tasks, export env (including session ID), then run the main command (and make sure we get rid of the session started marker on each run so that wait_for_ready_signal works correctly for both new and resumed sessions)
+        # Combine: start background tasks, export env (including session ID), then run the main command (and make sure we get rid of the session started marker on each run so that wait_for_ready_signal works correctly for both new and resumed sessions).
+        # claude_main_pid is cleared alongside it: whenever this chain runs, any
+        # previous main claude of this agent has exited, so the recorded claim is
+        # stale by definition -- and after a host reboot the recycled pid could
+        # belong to another agent's live claude, which would otherwise block every
+        # guarded hook (including the SessionStart re-claim) until that process
+        # died. The new main claude re-claims on SessionStart.
+        # Every branch is wrapped in a brace group: && and || have equal
+        # precedence in the shell, so a bare final branch containing && (the
+        # export) would run its tail even after an earlier branch succeeded.
+        # Braces rather than ( ) subshells, deliberately: a subshell forks a
+        # bash that becomes the pane's foreground process-group leader for the
+        # branch's whole lifetime, and the lifecycle probe reads a shell in the
+        # foreground with no expected-process descendant as DONE (see
+        # determine_lifecycle_probe_result). A brace group runs in the pane
+        # shell itself, so the branch's own command (claude, or a custom base
+        # like the minds services agent's `sleep infinity`) stays the
+        # foreground command, exactly like the pre-chain launch command.
         return CommandString(
-            f"{background_cmd} {env_exports} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( {resume_cmd} ) || {create_cmd}"
+            f"{background_cmd} {env_exports}"
+            f" && rm -rf $MNGR_AGENT_STATE_DIR/session_started $MNGR_AGENT_STATE_DIR/claude_main_pid"
+            f" && {{ {resume_cmd} ; }} || {{ {resume_uuid_cmd} ; }} || {{ {create_cmd} ; }}"
         )
 
     def on_before_provisioning(

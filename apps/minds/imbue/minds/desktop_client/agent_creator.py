@@ -1413,7 +1413,7 @@ def run_mngr_create(
     irrelevant.
 
     No Anthropic credentials are involved at create time: workspace Claude
-    auth lives in the env block of the shared CLAUDE_CONFIG_DIR settings.json,
+    auth lives in the env block of the workspace's shared ~/.claude/settings.json,
     written by the in-workspace sign-in modal after the workspace boots.
 
     Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical

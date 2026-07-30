@@ -14,6 +14,8 @@ from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
 from modal.stream_type import StreamType as ModalStreamType
 from modal.volume import FileEntryType as ModalFileEntryType
+from tenacity import RetryCallState
+from tenacity import Retrying
 
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
@@ -33,6 +35,7 @@ from imbue.modal_proxy.direct import _unwrap_app
 from imbue.modal_proxy.direct import _unwrap_image
 from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
+from imbue.modal_proxy.direct import _volume_wait
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
@@ -288,6 +291,37 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
 )
 def test_should_retry_volume_op(exc: BaseException, expected: bool) -> None:
     assert _should_retry_volume_op(exc) is expected
+
+
+def _make_volume_retry_state(exception: BaseException | None, attempt_number: int) -> RetryCallState:
+    retry_state = RetryCallState(retry_object=Retrying(), fn=None, args=(), kwargs={})
+    retry_state.attempt_number = attempt_number
+    if exception is not None:
+        retry_state.set_exception((type(exception), exception, None))
+    return retry_state
+
+
+@pytest.mark.parametrize(
+    ("exception", "attempt_number", "expected_wait"),
+    [
+        # Rate limits get the long curve (5/10/20/30s): the limit is shared
+        # across every concurrent client, so a burst can outlast the ordinary
+        # curve's ~15s of total backoff.
+        pytest.param(modal.exception.ResourceExhaustedError("rate limit"), 1, 5.0, id="rate_limit_first"),
+        pytest.param(modal.exception.ResourceExhaustedError("rate limit"), 4, 30.0, id="rate_limit_capped"),
+        # Ordinary transient errors keep the original fast curve (1/2/4/8s) so
+        # genuine failures still surface quickly.
+        pytest.param(modal.exception.InternalError("server error"), 1, 1.0, id="transient_first"),
+        pytest.param(modal.exception.InternalError("server error"), 4, 8.0, id="transient_fourth"),
+        # No recorded outcome falls back to the ordinary curve.
+        pytest.param(None, 1, 1.0, id="no_outcome"),
+    ],
+)
+def test_volume_wait_gives_rate_limits_longer_backoff(
+    exception: BaseException | None, attempt_number: int, expected_wait: float
+) -> None:
+    retry_state = _make_volume_retry_state(exception, attempt_number)
+    assert _volume_wait(retry_state) == expected_wait
 
 
 # --- App-locked detection tests ---

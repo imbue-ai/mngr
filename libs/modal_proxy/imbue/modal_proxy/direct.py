@@ -29,6 +29,7 @@ from modal.stream_type import StreamType as ModalStreamType
 from modal.volume import FileEntryType as ModalFileEntryType
 from pydantic import ConfigDict
 from pydantic import Field
+from tenacity import RetryCallState
 from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import retry_if_exception_type
@@ -193,7 +194,25 @@ def _should_retry_volume_op(e: BaseException) -> bool:
 
 _VOLUME_RETRY = retry_if_exception(_should_retry_volume_op)
 _VOLUME_STOP = stop_after_attempt(5)
-_VOLUME_WAIT = wait_exponential(multiplier=1, min=1, max=10)
+_VOLUME_TRANSIENT_WAIT = wait_exponential(multiplier=1, min=1, max=10)
+_VOLUME_RATE_LIMIT_WAIT = wait_exponential(multiplier=5, min=5, max=30)
+
+
+def _volume_wait(retry_state: RetryCallState) -> float:
+    """Pick the backoff for a volume-op retry based on the failure kind.
+
+    Rate limits (ResourceExhaustedError: "VolumeListFiles rate limit exceeded.
+    Please wait and retry.") need substantially longer waits than ordinary
+    transient errors: the limit is shared across every concurrent client (e.g.
+    CI's parallel acceptance sandboxes), so a burst can outlast the ~15s total
+    that the ordinary curve provides across all attempts. The rate-limit curve
+    waits 5/10/20/30s between attempts (~65s total headroom); everything else
+    keeps the original 1/2/4/8s curve so genuine failures still surface fast.
+    """
+    exception = retry_state.outcome.exception() if retry_state.outcome is not None else None
+    if isinstance(exception, modal.exception.ResourceExhaustedError):
+        return _VOLUME_RATE_LIMIT_WAIT(retry_state)
+    return _VOLUME_TRANSIENT_WAIT(retry_state)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +345,7 @@ class DirectVolume(VolumeInterface):
         return self.volume_name
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_VOLUME_WAIT, reraise=True)
+    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
     def listdir(self, path: str) -> list[FileEntry]:
         entries = self.volume.listdir(path)
         return [
@@ -340,17 +359,17 @@ class DirectVolume(VolumeInterface):
         ]
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_VOLUME_WAIT, reraise=True)
+    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
     def read_file(self, path: str) -> bytes:
         return b"".join(self.volume.read_file(path))
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_VOLUME_WAIT, reraise=True)
+    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
     def remove_file(self, path: str, *, recursive: bool = False) -> None:
         self.volume.remove_file(path, recursive=recursive)
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_VOLUME_WAIT, reraise=True)
+    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
         with self.volume.batch_upload(force=True) as batch:
             for path, file_data in file_contents_by_path.items():

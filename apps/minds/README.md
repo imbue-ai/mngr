@@ -34,11 +34,11 @@ app prints on startup.
 
 2. **Agents** are created from template repositories (like [default-workspace-template](https://github.com/imbue-ai/default-workspace-template)) using `mngr create`. The template's `.mngr/settings.toml` drives all configuration.
 
-3. Inside each minds container, the "primary" agent (`system-services`) runs only the bootstrap and background services -- its window-0 command is `sleep infinity && claude`, so claude never actually starts (the trailing `&& claude` is unreachable; it exists only so `assemble_command` keeps producing a claude-shaped invocation). The user's actual chat agent is a separate `mngr` agent created by the bootstrap on first boot (named after the host) and shares the services agent's `CLAUDE_CONFIG_DIR` so auth, plugins, marketplaces, and sessions are configured once and inherited by every other agent. Destroying chat agents no longer affects services; the services agent is hidden from the UI agent list (it carries `is_primary=true`) and protected against direct destroy.
+3. Inside each minds container, the "primary" agent (`system-services`) runs only the bootstrap and background services -- it is a plain `command`-type agent whose window-0 command is `sleep infinity`, so no claude is ever involved. The user's actual chat agent is a separate `mngr` agent created by the bootstrap on first boot (named after the host). `CLAUDE_CONFIG_DIR` is deliberately unset workspace-wide, so every claude in the workspace (mngr-launched agents and a bare `claude` in a terminal alike) shares claude's own default `~/.claude` -- auth, plugins, marketplaces, and sessions are configured once and shared. Destroying chat agents does not affect services; the services agent is hidden from the UI agent list (it carries `is_primary=true`) and protected against direct destroy.
 
 4. Inside the services agent's Docker container:
    - The bootstrap (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf`
-   - On first boot the bootstrap also writes `CLAUDE_CONFIG_DIR` to the host env file and creates the initial chat agent (gated by `data/.state/initial_chat_created`)
+   - On first boot the bootstrap also creates the initial chat agent (gated by `data/.state/initial_chat_created`)
    - Apps register their ports via `system/scripts/forward_port.py` into `data/.state/apps.toml`
    - An **app watcher** service monitors `apps.toml` and writes server events to `events.jsonl` for discovery
    - A **cloudflared** service watches `data/.secrets` for a tunnel token and runs the Cloudflare tunnel

@@ -12,11 +12,20 @@ are not loaded for those laptop-side invocations.
 The cwd-independent layer is user-scope settings.toml at
 ``<host_dir>/profiles/<profile_id>/settings.toml``. Seeding the minimum
 mapping there lets every laptop-side mngr resolve the workspace's types
-(`chat`, `main`, `worker`) to ClaudeAgent without affecting the system-wide
-``~/.mngr/`` install used outside minds.
+(`chat` and `worker` to ClaudeAgent, `main` to the plain CommandAgent)
+without affecting the system-wide ``~/.mngr/`` install used outside minds.
+
+The seeded parent MUST match the workspace template's own declaration: the
+user-scope entry cross-scope-merges with the workspace repo's
+`[agent_types.X]` block during `mngr create` (run from the temp clone), and
+mngr refuses to merge entries whose parents resolve to different config
+classes ("Cannot merge AgentTypeConfig with ClaudeAgentConfig"). `main` is a
+plain `command` agent since the workspace's ~/.claude cutover, so it is
+seeded (and, for files seeded by older builds, migrated) accordingly.
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Final
 
@@ -24,19 +33,26 @@ from loguru import logger
 
 from imbue.mngr.config.loader import get_or_create_profile_dir
 
-# Every agent type the workspace template declares with `parent_type = "claude"`,
-# paired with what it is used for (rendered as a comment into the seeded block).
-# Each one needs a laptop-side mapping because agents of that type exist on disk
-# (their `data.json` records the bare type name) and every laptop-side mngr
-# command loads them.
-_CLAUDE_PARENTED_WORKSPACE_TYPES: Final[tuple[tuple[str, str], ...]] = (
+# Every agent type the workspace template declares, paired with its parent type
+# (which MUST match the workspace's own `.mngr/settings.toml` declaration -- see
+# the module docstring) and what it is used for (rendered as a comment into the
+# seeded block). Each one needs a laptop-side mapping because agents of that
+# type exist on disk (their `data.json` records the bare type name) and every
+# laptop-side mngr command loads them.
+_WORKSPACE_AGENT_TYPE_SEEDS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         "chat",
+        "claude",
         "every user-facing chat agent -- the initial chat the bootstrap creates, each "
         "'New Agent' chat, and each /assist chat (all created with `--template chat`)",
     ),
-    ("main", "the hidden services agent, whose window 0 runs supervisord and the background services"),
-    ("worker", "the agents a chat agent spawns for delegated tasks"),
+    (
+        "main",
+        "command",
+        "the hidden services agent, whose bootstrap window runs supervisord and the "
+        "background services (a plain command agent; no claude is involved)",
+    ),
+    ("worker", "claude", "the agents a chat agent spawns for delegated tasks"),
 )
 
 # When this file is seeded inside a pytest run, mngr's config loader
@@ -66,9 +82,34 @@ def _get_section_header(type_name: str) -> str:
     return f"[agent_types.{type_name}]"
 
 
-def _render_seed_block(type_name: str, purpose: str) -> str:
+def _render_seed_block(type_name: str, parent_type: str, purpose: str) -> str:
     """Render the seeded block for one agent type (a comment plus the parent-type mapping)."""
-    return f'\n# `{type_name}` is {purpose}.\n{_get_section_header(type_name)}\nparent_type = "claude"\n'
+    return f'\n# `{type_name}` is {purpose}.\n{_get_section_header(type_name)}\nparent_type = "{parent_type}"\n'
+
+
+# The exact `main` block every pre-cutover minds build seeded. Files carrying it
+# must be migrated in place: the laptop profile outlives workspace re-creation,
+# and a claude-parented user-scope `main` cross-scope-merges against the new
+# workspace repo's command-parented `main` at create time, which mngr rejects
+# ("Cannot merge AgentTypeConfig with ClaudeAgentConfig"). The lookahead limits
+# the rewrite to a section that ENDS right after parent_type (blank line, a
+# comment, another section, or end of file -- the only shapes the seeder ever
+# wrote); a hand-edited block that goes on to set extra fields is left alone,
+# since claude-only fields under a command parent would fail validation in a
+# more confusing place -- better to surface the merge error for the user to
+# resolve deliberately.
+_STALE_MAIN_SEED_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
+    r'\[agent_types\.main\]\nparent_type = "claude"\n(?=\n|#|\[|\Z)'
+)
+_MIGRATED_MAIN_SEED_BLOCK: Final[str] = '[agent_types.main]\nparent_type = "command"\n'
+
+
+def _migrate_stale_main_parent(existing: str, settings_path: Path) -> str:
+    """Rewrite the old seeded claude-parented `main` block to the command parent."""
+    migrated, replacement_count = _STALE_MAIN_SEED_BLOCK_RE.subn(_MIGRATED_MAIN_SEED_BLOCK, existing)
+    if replacement_count:
+        logger.info("migrating seeded [agent_types.main] parent_type claude -> command in {}", settings_path)
+    return migrated
 
 
 def _with_pytest_opt_in(existing: str) -> str:
@@ -97,19 +138,22 @@ def seed_laptop_agent_types_for_minds(host_dir: Path) -> None:
     profile_dir = get_or_create_profile_dir(host_dir)
     settings_path = profile_dir / "settings.toml"
     existing = settings_path.read_text() if settings_path.exists() else ""
+    migrated = _migrate_stale_main_parent(existing, settings_path)
     missing_types = tuple(
-        (type_name, purpose)
-        for type_name, purpose in _CLAUDE_PARENTED_WORKSPACE_TYPES
-        if _get_section_header(type_name) not in existing
+        (type_name, parent_type, purpose)
+        for type_name, parent_type, purpose in _WORKSPACE_AGENT_TYPE_SEEDS
+        if _get_section_header(type_name) not in migrated
     )
-    if not missing_types:
+    if not missing_types and migrated == existing:
         return
-    seed_blocks = _SEED_HEADER + "".join(
-        _render_seed_block(type_name, purpose) for type_name, purpose in missing_types
+    rendered_blocks = "".join(
+        _render_seed_block(type_name, parent_type, purpose) for type_name, parent_type, purpose in missing_types
     )
-    settings_path.write_text(_with_pytest_opt_in(existing) + seed_blocks)
-    logger.info(
-        "seeded {} into {}",
-        ", ".join(_get_section_header(type_name) for type_name, _purpose in missing_types),
-        settings_path,
-    )
+    seed_blocks = _SEED_HEADER + rendered_blocks if missing_types else ""
+    settings_path.write_text(_with_pytest_opt_in(migrated) + seed_blocks)
+    if missing_types:
+        logger.info(
+            "seeded {} into {}",
+            ", ".join(_get_section_header(type_name) for type_name, _parent, _purpose in missing_types),
+            settings_path,
+        )

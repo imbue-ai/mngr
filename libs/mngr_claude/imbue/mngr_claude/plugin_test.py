@@ -4,6 +4,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -82,6 +83,7 @@ from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
@@ -383,59 +385,64 @@ class _ParsedAssembleCommand:
 
     The assembled command has the shape (normal mode, no mngr --settings)::
 
-        <bg> <exports> && rm -rf .../session_started
-            && ( ( find ... | grep . ) && <base> --resume "$SID" <args> )
-            || <base> --session-id <uuid> <args>
+        <bg> <exports> && rm -rf .../session_started .../claude_main_pid
+            && { <gate> && <base> --resume "$SID" <args> ; }
+            || { [ "$SID" != <uuid> ] && <gate> && export ... && <base> --resume <uuid> <args> ; }
+            || { export ... && <base> --session-id <uuid> <args> ; }
 
     In use_env_config_dir mode, mngr injects its own ``--settings <path>``
-    immediately after ``<base>`` in both branches.
+    immediately after ``<base>`` in every branch.
 
-    shlex.split tokenizes shell operators (``&&``, ``||``) as their own tokens,
-    so we split on the single top-level ``||`` to separate the resume branch from
-    the create branch, then read the base command, the (optional) managed-settings
-    path, and the trailing args from each. ``mngr_injects_settings`` selects the
-    layout; in normal mode ``resume_settings`` / ``create_settings`` are None.
+    shlex.split tokenizes shell operators (``&&``, ``||``, ``{``, ``;``, ``}``)
+    as their own tokens, so the three branches are anchored by their launch flags:
+    the first ``--resume`` (tracking-file branch), the second ``--resume``
+    (agent-UUID fallback branch), and ``--session-id`` (create branch). Each
+    branch exposes the base command, the (optional) managed-settings path, and
+    the trailing args; ``mngr_injects_settings`` selects the layout, and in
+    normal mode the ``*_settings`` attributes are None.
     """
 
     def __init__(self, command: str, mngr_injects_settings: bool = False) -> None:
         self.tokens = shlex.split(command)
-        # The resume/create split is the LAST top-level `||`. (An earlier `||`
-        # appears inside the SID export's `... 2>/dev/null || true` fallback, so
-        # splitting on the first `||` would be wrong.)
-        split_idx = len(self.tokens) - 1 - self.tokens[::-1].index("||")
-        resume_tokens = self.tokens[:split_idx]
-        create_tokens = self.tokens[split_idx + 1 :]
+        resume_idx = self.tokens.index("--resume")
+        resume_fallback_idx = self.tokens.index("--resume", resume_idx + 1)
+        session_idx = self.tokens.index("--session-id")
 
-        # Resume branch: <base> [--settings <path>] --resume $MAIN_CLAUDE_SESSION_ID <args...>.
-        # With mngr --settings, the launch arg sits immediately before --resume, so
-        # the base is two tokens ahead of it; without it, the base is the token right
-        # before --resume. The resume command is wrapped in a `( ... )` subshell, so a
-        # trailing `)` group token follows the args; drop it before reading the args.
-        resume_idx = resume_tokens.index("--resume")
-        if mngr_injects_settings:
-            assert resume_tokens[resume_idx - 2] == "--settings"
-            self.resume_settings: str | None = resume_tokens[resume_idx - 1]
-            self.resume_base = resume_tokens[resume_idx - 3]
-        else:
-            self.resume_settings = None
-            self.resume_base = resume_tokens[resume_idx - 1]
-        assert resume_tokens[resume_idx + 1] == "$MAIN_CLAUDE_SESSION_ID"
-        resume_arg_tokens = resume_tokens[resume_idx + 2 :]
-        if resume_arg_tokens and resume_arg_tokens[-1] == ")":
-            resume_arg_tokens = resume_arg_tokens[:-1]
-        self.resume_args = resume_arg_tokens
+        # Tracking-file resume branch: <base> [--settings <path>] --resume $MAIN_CLAUDE_SESSION_ID <args...>
+        self.resume_base, self.resume_settings = self._read_base_and_settings(resume_idx, mngr_injects_settings)
+        assert self.tokens[resume_idx + 1] == "$MAIN_CLAUDE_SESSION_ID"
+        self.resume_args = self._read_args_until_group_close(resume_idx + 2)
+
+        # Agent-UUID fallback branch: <base> [--settings <path>] --resume <uuid> <args...>
+        self.resume_fallback_base, self.resume_fallback_settings = self._read_base_and_settings(
+            resume_fallback_idx, mngr_injects_settings
+        )
+        self.resume_fallback_session_id = self.tokens[resume_fallback_idx + 1]
+        self.resume_fallback_args = self._read_args_until_group_close(resume_fallback_idx + 2)
 
         # Create branch: <base> [--settings <path>] --session-id <uuid> <args...>
-        session_idx = create_tokens.index("--session-id")
+        self.create_base, self.create_settings = self._read_base_and_settings(session_idx, mngr_injects_settings)
+        self.create_session_id = self.tokens[session_idx + 1]
+        self.create_args = self._read_args_until_group_close(session_idx + 2)
+
+    def _read_base_and_settings(self, launch_flag_idx: int, mngr_injects_settings: bool) -> tuple[str, str | None]:
+        # With mngr --settings, the launch arg sits immediately before the launch
+        # flag, so the base is two tokens further ahead; without it, the base is
+        # the token right before the flag.
         if mngr_injects_settings:
-            assert create_tokens[session_idx - 2] == "--settings"
-            self.create_settings: str | None = create_tokens[session_idx - 1]
-            self.create_base = create_tokens[session_idx - 3]
-        else:
-            self.create_settings = None
-            self.create_base = create_tokens[session_idx - 1]
-        self.create_session_id = create_tokens[session_idx + 1]
-        self.create_args = create_tokens[session_idx + 2 :]
+            assert self.tokens[launch_flag_idx - 2] == "--settings"
+            return self.tokens[launch_flag_idx - 3], self.tokens[launch_flag_idx - 1]
+        return self.tokens[launch_flag_idx - 1], None
+
+    def _read_args_until_group_close(self, start_idx: int) -> list[str]:
+        # Every branch is wrapped in a `{ ... ; }` brace group, so its args run
+        # up to the `;` that precedes the closing `}`.
+        args: list[str] = []
+        for token in self.tokens[start_idx:]:
+            if token == ";":
+                break
+            args.append(token)
+        return args
 
     @property
     def has_is_sandbox(self) -> bool:
@@ -707,9 +714,24 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     session_name = f"{prefix}test-agent"
     background_cmd = agent._build_background_tasks_command(session_name, temp_mngr_ctx.config.tmux.primary_window_name)
     sid_export = _sid_export_for(uuid)
+    encoded = encode_claude_project_dir_name(Path(os.path.realpath(agent.work_dir)))
+    projects = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"'
+    marker_gate = (
+        f'( test -s "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}/projects/{encoded}/$MAIN_CLAUDE_SESSION_ID.jsonl"'
+        f' || find {projects} -name "$MAIN_CLAUDE_SESSION_ID.jsonl" -size +0c 2>/dev/null | grep -q . )'
+    )
+    uuid_gate = (
+        f'( test -s "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}/projects/{encoded}/{uuid}.jsonl"'
+        f' || find {projects} -name "{uuid}.jsonl" -size +0c 2>/dev/null | grep -q . )'
+    )
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f"{background_cmd} export IS_SANDBOX=1 && {sid_export}"
+        f" && rm -rf $MNGR_AGENT_STATE_DIR/session_started $MNGR_AGENT_STATE_DIR/claude_main_pid"
+        f' && {{ {marker_gate} && claude --resume "$MAIN_CLAUDE_SESSION_ID" ; }}'
+        f' || {{ [ "$MAIN_CLAUDE_SESSION_ID" != "{uuid}" ] && {uuid_gate}'
+        f" && export MAIN_CLAUDE_SESSION_ID={uuid} && claude --resume {uuid} ; }}"
+        f" || {{ export MAIN_CLAUDE_SESSION_ID={uuid} && claude --session-id {uuid} ; }}"
     )
 
 
@@ -729,6 +751,40 @@ def test_claude_agent_assemble_command_quotes_agent_args_with_shell_metacharacte
     assert prompt in tokens, f"prompt should be a single token after shell parsing, got tokens={tokens!r}"
 
 
+def _set_up_assemble_command_pipeline(
+    tmp_path: Path, stub_claude_script_body: str
+) -> tuple[Path, Path, Path, dict[str, str]]:
+    """Create the on-disk fixtures for executing an assembled launch pipeline.
+
+    Returns (config_dir, state_dir, invocation_log, env) with a stub
+    ``claude`` on PATH whose body is ``stub_claude_script_body`` (it can read
+    ``$@`` and append to the invocation log at ``$MNGR_CLAUDE_STUB_LOG``).
+    """
+    config_dir = tmp_path / "claude-config"
+    (config_dir / "projects").mkdir(parents=True)
+    state_dir = tmp_path / "agent-state"
+    (state_dir / "commands").mkdir(parents=True)
+    bg_script = state_dir / "commands" / "claude_background_tasks.sh"
+    bg_script.write_text("#!/bin/bash\nexit 0\n")
+    bg_script.chmod(0o755)
+
+    stub_dir = tmp_path / "stub_bin"
+    stub_dir.mkdir()
+    invocation_log = tmp_path / "claude_invocations.log"
+    stub_claude = stub_dir / "claude"
+    stub_claude.write_text(f"#!/bin/bash\n{stub_claude_script_body}\n")
+    stub_claude.chmod(0o755)
+
+    env = {
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+        "CLAUDE_CONFIG_DIR": str(config_dir),
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "MNGR_CLAUDE_STUB_LOG": str(invocation_log),
+        "HOME": str(tmp_path),
+    }
+    return config_dir, state_dir, invocation_log, env
+
+
 def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exists(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -743,50 +799,30 @@ def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exi
     and a brand-new session opened with no error.
 
     This test executes the assembled shell pipeline against a stub ``claude``
-    binary that records its argv, with a real session ``.jsonl`` planted at
-    the location the resume path expects to find it. The argv recorded by
-    the stub must contain ``--resume <session_id>`` -- if it contains
-    ``--session-id <agent_uuid>`` instead, the regression is back.
+    binary that records its argv, with a real session ``.jsonl`` planted under
+    ``projects/`` where the resume gate's ``find`` backstop searches. The argv
+    recorded by the stub must contain ``--resume <session_id>`` -- if it
+    contains ``--session-id <agent_uuid>`` instead, the regression is back.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
-    # Plant a real session file at the location the resume guard inspects.
-    config_dir = tmp_path / "claude-config"
+    # The stub claude records one argv token per line and exits 0.
+    stub_body = 'printf \'%s\\n\' "$@" >> "$MNGR_CLAUDE_STUB_LOG"\nexit 0'
+    config_dir, state_dir, invocation_log, env = _set_up_assemble_command_pipeline(tmp_path, stub_body)
+
+    # Plant a real session file where only the resume gate's find backstop sees
+    # it (a project dir other than the one encoded from the agent's work dir).
     project_dir = config_dir / "projects" / "some-encoded-project"
-    project_dir.mkdir(parents=True)
+    project_dir.mkdir()
     target_session_id = "adopted-sid-deadbeef"
     (project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
 
     # Provide the session-id tracking file so $MAIN_CLAUDE_SESSION_ID resolves
     # to the adopted id rather than the agent's UUID fallback.
-    state_dir = tmp_path / "agent-state"
-    (state_dir / "commands").mkdir(parents=True)
     (state_dir / "claude_session_id").write_text(target_session_id)
-
-    # Stub the background-tasks script (the assembled command runs it
-    # backgrounded with &; we just need the path to exist and exit cleanly).
-    bg_script = state_dir / "commands" / "claude_background_tasks.sh"
-    bg_script.write_text("#!/bin/bash\nexit 0\n")
-    bg_script.chmod(0o755)
-
-    # Stub claude: write argv to a log and exit 0. Putting the stub on PATH
-    # ahead of the real claude (if any) ensures the assembled command's
-    # bare `claude` invocation hits our stub.
-    stub_dir = tmp_path / "stub_bin"
-    stub_dir.mkdir()
-    invocation_log = tmp_path / "claude_invocation.log"
-    stub_claude = stub_dir / "claude"
-    stub_claude.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$@\" > {shlex.quote(str(invocation_log))}\nexit 0\n")
-    stub_claude.chmod(0o755)
 
     command = agent.assemble_command(host=host, agent_args=("--print", "hi"), command_override=None)
 
-    env = {
-        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
-        "CLAUDE_CONFIG_DIR": str(config_dir),
-        "MNGR_AGENT_STATE_DIR": str(state_dir),
-        "HOME": str(tmp_path),
-    }
     result = subprocess.run(
         ["bash", "-c", str(command)],
         env=env,
@@ -811,6 +847,143 @@ def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exi
     assert target_session_id in invocation_args, (
         f"Expected adopted session id {target_session_id!r} in claude argv, got {invocation_args!r}."
     )
+
+
+def test_claude_agent_assemble_command_has_agent_uuid_resume_fallback_branch(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The launch chain must fall back to resuming the agent's own UUID session.
+
+    The final ``--session-id <uuid>`` branch can never succeed once the UUID
+    session exists (claude refuses an id that is already in use), so a
+    tracking file pointing at an unresumable session would deadlock every
+    launch without an explicit ``--resume <uuid>`` middle branch.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+
+    uuid = str(agent.id.get_uuid())
+    parsed = _ParsedAssembleCommand(str(command))
+    assert parsed.resume_fallback_base == "claude"
+    assert parsed.resume_fallback_session_id == uuid
+    # The branch only fires when it would launch something different from the
+    # tracking-file branch that just failed.
+    assert f'[ "$MAIN_CLAUDE_SESSION_ID" != "{uuid}" ]' in str(command)
+    # Fallback branches re-export MAIN_CLAUDE_SESSION_ID to the id they launch
+    # so the SessionStart hooks accept the session and heal the tracking file.
+    assert str(command).count(f"export MAIN_CLAUDE_SESSION_ID={uuid}") == 2
+    # The resume gates check the exact project dir claude consults on resume.
+    encoded = encode_claude_project_dir_name(Path(os.path.realpath(agent.work_dir)))
+    assert f"/projects/{encoded}/$MAIN_CLAUDE_SESSION_ID.jsonl" in str(command)
+    assert f"/projects/{encoded}/{uuid}.jsonl" in str(command)
+
+
+def test_claude_agent_assemble_command_falls_back_to_agent_uuid_when_marker_session_unresumable(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A tracking file clobbered with a foreign-project session must not strand the launch.
+
+    Regression for the incident where a nested ``claude -p`` run from /tmp
+    overwrote claude_session_id with a session filed under ``projects/-tmp/``:
+    ``claude --resume`` only consults the current project dir, so the first
+    branch fails, and the old ``--session-id <uuid>`` fallback then died with
+    "already in use". The chain must instead resume the agent's own UUID
+    session explicitly.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    agent_uuid = str(agent.id.get_uuid())
+
+    # The stub claude mimics the real one's project scoping: resuming the
+    # foreign session id fails (claude cannot see sessions filed under another
+    # project dir), anything else succeeds.
+    foreign_sid = "f0e1d2c3-dead-beef-0000-111122223333"
+    stub_body = (
+        'printf \'%s \' "$@" >> "$MNGR_CLAUDE_STUB_LOG"; echo >> "$MNGR_CLAUDE_STUB_LOG"\n'
+        f'if [ "$2" = "{foreign_sid}" ]; then echo "No conversation found with session ID: $2" >&2; exit 1; fi\n'
+        "exit 0"
+    )
+    config_dir, state_dir, invocation_log, env = _set_up_assemble_command_pipeline(tmp_path, stub_body)
+
+    # The foreign session exists (non-empty) under a /tmp-style project dir,
+    # and the agent's own UUID session exists under the work-dir project.
+    foreign_project = config_dir / "projects" / "-tmp"
+    foreign_project.mkdir()
+    (foreign_project / f"{foreign_sid}.jsonl").write_text('{"type":"message"}\n')
+    encoded = encode_claude_project_dir_name(Path(os.path.realpath(agent.work_dir)))
+    own_project = config_dir / "projects" / encoded
+    own_project.mkdir()
+    (own_project / f"{agent_uuid}.jsonl").write_text('{"type":"message"}\n')
+    (state_dir / "claude_session_id").write_text(foreign_sid)
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+    result = subprocess.run(["bash", "-c", str(command)], env=env, capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0, f"pipeline failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    invocations = invocation_log.read_text().splitlines()
+    assert invocations == [
+        f"--resume {foreign_sid} ",
+        f"--resume {agent_uuid} ",
+    ], f"Expected foreign resume to fail then the UUID fallback to fire, got {invocations!r}"
+
+
+def test_claude_agent_assemble_command_skips_blank_marker_session_without_launching_it(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A blank (zero-byte) tracking-file session must be skipped by the gate itself.
+
+    claude's resume index ignores empty session files, so launching
+    ``--resume`` against one always fails; the gate's ``test -s`` (and the
+    ``find -size +0c`` net) must route straight to the UUID fallback without
+    burning a claude launch on the dead id.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    agent_uuid = str(agent.id.get_uuid())
+
+    stub_body = 'printf \'%s \' "$@" >> "$MNGR_CLAUDE_STUB_LOG"; echo >> "$MNGR_CLAUDE_STUB_LOG"\nexit 0'
+    config_dir, state_dir, invocation_log, env = _set_up_assemble_command_pipeline(tmp_path, stub_body)
+
+    blank_sid = "b1a2b3c4-0000-4000-8000-999988887777"
+    encoded = encode_claude_project_dir_name(Path(os.path.realpath(agent.work_dir)))
+    own_project = config_dir / "projects" / encoded
+    own_project.mkdir()
+    (own_project / f"{blank_sid}.jsonl").touch()
+    (own_project / f"{agent_uuid}.jsonl").write_text('{"type":"message"}\n')
+    (state_dir / "claude_session_id").write_text(blank_sid)
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+    result = subprocess.run(["bash", "-c", str(command)], env=env, capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0, f"pipeline failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    invocations = invocation_log.read_text().splitlines()
+    assert invocations == [f"--resume {agent_uuid} "], (
+        f"Expected the blank marker session to be skipped without a launch, got {invocations!r}"
+    )
+
+
+def test_claude_agent_assemble_command_clears_stale_main_pid_claim(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The launch pipeline must clear a leftover claude_main_pid claim.
+
+    The claim is only re-written by the SessionStart hook, which itself runs
+    behind the foreign-process guard: after a host reboot a recycled pid could
+    belong to another live claude, and a stale claim would then block every
+    guarded hook (including the re-claim) until that process died. When the
+    launch chain runs, any previous main claude of this agent has exited, so
+    the claim is stale by definition and must be removed before claude starts.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    stub_body = 'printf \'%s \' "$@" >> "$MNGR_CLAUDE_STUB_LOG"; echo >> "$MNGR_CLAUDE_STUB_LOG"\nexit 0'
+    _, state_dir, _, env = _set_up_assemble_command_pipeline(tmp_path, stub_body)
+    (state_dir / "claude_main_pid").write_text("12345")
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+    result = subprocess.run(["bash", "-c", str(command)], env=env, capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0, f"pipeline failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert not (state_dir / "claude_main_pid").exists()
 
 
 # =============================================================================
@@ -1159,16 +1332,128 @@ def test_session_start_hook_resets_stale_active_marker(tmp_path: Path, source: s
 
 
 def test_build_readiness_hooks_config_all_commands_guard_on_main_session() -> None:
-    """Every command in readiness hooks should exit early when MAIN_CLAUDE_SESSION_ID is unset."""
+    """Every command in readiness hooks should exit early when MAIN_CLAUDE_SESSION_ID is unset.
+
+    Beyond the bare session guard, every state-writing hook must carry the full
+    MAIN_SESSION_ONLY_GUARD so a *nested* claude (which inherits the agent's env
+    and config dir) cannot fire the hooks against the agent's state dir.
+    """
     config = build_readiness_hooks_config()
     guard = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
+    assert MAIN_SESSION_ONLY_GUARD.startswith(guard)
 
     for event_name, event_hooks in config["hooks"].items():
         for hook_group in event_hooks:
             for hook in hook_group["hooks"]:
-                assert hook["command"].startswith(guard), (
-                    f"{event_name} hook command does not start with session guard: {hook['command'][:80]}"
+                assert hook["command"].startswith(MAIN_SESSION_ONLY_GUARD), (
+                    f"{event_name} hook command does not start with the main-session-only guard: "
+                    f"{hook['command'][:80]}"
                 )
+
+
+def _run_session_marker_hook(state_dir: Path, work_dir: Path, extra_env: Mapping[str, str]) -> None:
+    """Run the SessionStart session-tracking hook command via bash."""
+    config = build_readiness_hooks_config()
+    # hooks[2] is the session-tracking (claude_session_id) hook (asserted in
+    # test_build_readiness_hooks_config_has_session_start_hook).
+    command = config["hooks"]["SessionStart"][0]["hooks"][2]["command"]
+    env = {
+        "MAIN_CLAUDE_SESSION_ID": "main-sid",
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "MNGR_AGENT_WORK_DIR": str(work_dir),
+        "PATH": os.environ.get("PATH", ""),
+    }
+    env.update(extra_env)
+    result = subprocess.run(
+        ["bash", "-c", command],
+        input=json.dumps({"session_id": "new-sid", "source": "startup"}),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to run the SessionStart hook command")
+def test_session_marker_hook_ignores_claude_started_outside_work_dir(tmp_path: Path) -> None:
+    """A nested claude started from another cwd must not overwrite claude_session_id.
+
+    Regression for the incident where a `claude -p` smoke test run from /tmp
+    (inheriting the agent's env through a Bash tool call) clobbered the
+    tracking file with a session the relaunch could never resume.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    foreign_dir = tmp_path / "elsewhere"
+    foreign_dir.mkdir()
+
+    _run_session_marker_hook(state_dir, work_dir, {"CLAUDE_PROJECT_DIR": str(foreign_dir.resolve())})
+    assert not (state_dir / "claude_session_id").exists()
+    assert not (state_dir / "claude_session_id_history").exists()
+
+    # The same hook fired from the work dir itself (as the main claude does,
+    # with the physical path) must write the marker.
+    _run_session_marker_hook(state_dir, work_dir, {"CLAUDE_PROJECT_DIR": str(work_dir.resolve())})
+    assert (state_dir / "claude_session_id").read_text().strip() == "new-sid"
+    assert "new-sid startup" in (state_dir / "claude_session_id_history").read_text()
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to run the SessionStart hook command")
+def test_session_marker_hook_claims_and_respects_main_claude_pid(tmp_path: Path) -> None:
+    """The marker hook claims the firing claude's pid and rejects other live claudes.
+
+    A nested claude started *inside* the work dir passes the project guard, so
+    the pid claim is what keeps it from overwriting the marker while the real
+    main claude is alive. A dead or recycled claim must be superseded (fail
+    open) so a relaunch after a crash still tracks its session.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    project_env = {"CLAUDE_PROJECT_DIR": str(work_dir.resolve())}
+
+    # A live process whose comm is "claude", standing in for the main claude.
+    # Short sleeps in a loop (rather than one long sleep) so that killing the
+    # bash wrapper below leaves at most a one-second orphaned sleep child.
+    fake_claude_dir = tmp_path / "fake_bin"
+    fake_claude_dir.mkdir()
+    fake_claude = fake_claude_dir / "claude"
+    fake_claude.write_text("#!/bin/bash\nwhile :; do sleep 1; done\n")
+    fake_claude.chmod(0o755)
+    with subprocess.Popen([str(fake_claude)]) as fake_claude_proc:
+        try:
+            reported_comm = subprocess.run(
+                ["ps", "-o", "comm=", "-p", str(fake_claude_proc.pid)], capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+            if reported_comm != "claude":
+                pytest.skip(f"ps reports comm {reported_comm!r} for a script named claude on this platform")
+
+            # First start: no claim exists, so the firing claude claims its pid.
+            _run_session_marker_hook(state_dir, work_dir, {**project_env, "CLAUDE_PID": str(fake_claude_proc.pid)})
+            assert (state_dir / "claude_session_id").read_text().strip() == "new-sid"
+            assert (state_dir / "claude_main_pid").read_text().strip() == str(fake_claude_proc.pid)
+
+            # A different claude process while the claimant is alive is rejected.
+            (state_dir / "claude_session_id").write_text("main-sid")
+            _run_session_marker_hook(state_dir, work_dir, {**project_env, "CLAUDE_PID": "99999"})
+            assert (state_dir / "claude_session_id").read_text().strip() == "main-sid"
+            assert (state_dir / "claude_main_pid").read_text().strip() == str(fake_claude_proc.pid)
+
+            # The claimant itself (session replacement in the same process) passes.
+            _run_session_marker_hook(state_dir, work_dir, {**project_env, "CLAUDE_PID": str(fake_claude_proc.pid)})
+            assert (state_dir / "claude_session_id").read_text().strip() == "new-sid"
+        finally:
+            fake_claude_proc.kill()
+
+    # Once the claimant is dead, a new claude process supersedes the claim.
+    (state_dir / "claude_session_id").write_text("main-sid")
+    _run_session_marker_hook(state_dir, work_dir, {**project_env, "CLAUDE_PID": "88888"})
+    assert (state_dir / "claude_session_id").read_text().strip() == "new-sid"
+    assert (state_dir / "claude_main_pid").read_text().strip() == "88888"
 
 
 def test_build_credential_sync_hooks_config_structure() -> None:
@@ -4642,8 +4927,9 @@ def test_on_after_provisioning_adopts_session_by_id(
     assert dest_memory_file.exists(), f"Memory file not found at {dest_memory_file}"
     assert dest_memory_file.read_text() == "# Memory\n"
 
-    # Regression: verify the session file is discoverable the same way Claude Code
-    # finds it at runtime: `find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" -name "$SESSION_ID.jsonl"`.
+    # Regression: verify the session file is discoverable under the config dir
+    # (the launch chain's resume gates check the encoded project dir, with a
+    # find over projects/ as the backstop).
     claude_config_dir = agent.get_claude_config_dir()
     matches = list(claude_config_dir.rglob(target_session_id + ".jsonl"))
     assert len(matches) == 1, (

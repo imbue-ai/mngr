@@ -18,9 +18,9 @@ Key concepts in the minds system:
 
 - **template base**: the template state a workspace started from (or last updated itself to) -- the newest `update-self:` / `Initial workspace commit` marker on its first-parent history. Publishing an inspiration diffs against it; formerly called the "creation snapshot".
 
-- **primary agent**: the single `system-services` agent on each workspace host, labeled `is_primary=true`. It runs bootstrap and the background services rather than a user-facing chat -- its window-0 command is `sleep infinity && claude`, so claude never starts there. Its `workspace_display_name` label holds the workspace's human-readable name (the normalized slug is the host's name). Hidden from the UI agent list and protected against direct destroy.
+- **primary agent**: the single `system-services` agent on each workspace host, labeled `is_primary=true`. It runs bootstrap and the background services rather than a user-facing chat -- it is a plain `command`-type agent whose window-0 command is `sleep infinity`, so no claude is ever involved. Its `workspace_display_name` label holds the workspace's human-readable name (the normalized slug is the host's name). Hidden from the UI agent list and protected against direct destroy.
 
-- **chat agent**: a user-facing mngr agent created on demand in a workspace, one per chat tab. Created with `--transfer none`, so it shares the primary agent's work_dir and Claude config dir. Bootstrap seeds the first one on initial container boot; the count grows and shrinks with the user's workload, and is not capped.
+- **chat agent**: a user-facing mngr agent created on demand in a workspace, one per chat tab. Created with `--transfer none`, so it shares the primary agent's work_dir; like every claude in the workspace, it uses claude's default shared `~/.claude` config dir (`CLAUDE_CONFIG_DIR` is unset workspace-wide). Bootstrap seeds the first one on initial container boot; the count grows and shrinks with the user's workload, and is not capped.
 
 - **worktree agent**: a mngr agent created from the "New agent" tab, using `--template worktree` and `--transfer git-worktree` on branch `mngr/<name>`. Unlike a chat agent it lives in its own git worktree, outside the repo-root work_dir. Labeled `user_created=true`.
 

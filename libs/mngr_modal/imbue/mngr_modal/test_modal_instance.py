@@ -621,6 +621,11 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
 # =============================================================================
 
 
+# Flaky: the volume probes (get_volume_for_host / read_file) go through Modal's
+# VolumeListFiles API, whose per-workspace rate limit can stay exceeded for
+# longer than the volume layer's in-process retry budget when the parallel
+# acceptance fan-out hammers the same workspace.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalProviderInstance) -> None:
@@ -654,6 +659,9 @@ def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalPr
         wait_for(volume_is_available, timeout=30.0, error_message="Host volume not visible after 30s")
 
 
+# Flaky for the same VolumeListFiles rate-limit reason as
+# test_host_volume_is_symlinked_and_persists_data above.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_host_volume_data_readable_via_volume_interface(real_modal_provider: ModalProviderInstance) -> None:
