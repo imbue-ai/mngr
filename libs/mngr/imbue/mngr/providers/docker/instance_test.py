@@ -55,6 +55,7 @@ from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 from imbue.mngr.providers.docker.testing import write_fake_docker_context
 from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
 from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
+from imbue.mngr.providers.docker.volume import state_container_name
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -64,17 +65,42 @@ HOST_ID_B = "host-00000000000000000000000000000002"
 
 class _FakeContainer:
     """Minimal stand-in for a docker SDK container: just the attributes
-    ``_raise_if_state_container_stopped`` reads (``labels`` + ``status``)."""
+    ``_raise_if_state_container_stopped`` reads (``name`` + ``labels`` + ``status``)."""
 
-    def __init__(self, labels: dict[str, str], status: str) -> None:
+    def __init__(self, name: str, labels: dict[str, str], status: str) -> None:
+        self.name = name
         self.labels = labels
         self.status = status
 
 
 def _fake_containers(*containers: _FakeContainer) -> list[docker.models.containers.Container]:
-    # The helper only reads ``.labels`` / ``.status``, so the duck-typed fakes
-    # stand in for real SDK containers; cast to satisfy the static type.
+    # The helper only reads ``.name`` / ``.labels`` / ``.status``, so the
+    # duck-typed fakes stand in for real SDK containers; cast to satisfy the
+    # static type.
     return cast(list[docker.models.containers.Container], list(containers))
+
+
+def _own_state_container(status: str, mngr_ctx: MngrContext) -> _FakeContainer:
+    """A state container named the way this env's provider names its own."""
+    return _FakeContainer(
+        name=state_container_name(mngr_ctx.config.prefix, str(mngr_ctx.get_profile_user_id())),
+        labels={STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE},
+        status=status,
+    )
+
+
+def _sibling_env_state_container(status: str, mngr_ctx: MngrContext) -> _FakeContainer:
+    """A state container belonging to an env whose prefix extends this one's.
+
+    ``_list_containers`` prefix-matches with ``startswith``, so an env prefixed
+    ``minds-`` also lists the containers of ``minds-staging-`` -- including its
+    state container, which carries the same type label and provider label.
+    """
+    return _FakeContainer(
+        name=state_container_name(f"{mngr_ctx.config.prefix}sibling-", "0" * 32),
+        labels={STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE},
+        status=status,
+    )
 
 
 def test_raise_if_state_container_stopped_raises_when_present_but_stopped(temp_mngr_ctx: MngrContext) -> None:
@@ -82,14 +108,14 @@ def test_raise_if_state_container_stopped_raises_when_present_but_stopped(temp_m
     # must treat this as ProviderUnavailableError (so the retain-on-error path
     # keeps last-known hosts) rather than silently reporting zero hosts.
     provider = make_docker_provider(temp_mngr_ctx)
-    containers = _fake_containers(_FakeContainer({STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}, "exited"))
+    containers = _fake_containers(_own_state_container("exited", temp_mngr_ctx))
     with pytest.raises(ProviderUnavailableError):
         provider._raise_if_state_container_stopped(containers)
 
 
 def test_raise_if_state_container_stopped_ok_when_running(temp_mngr_ctx: MngrContext) -> None:
     provider = make_docker_provider(temp_mngr_ctx)
-    containers = _fake_containers(_FakeContainer({STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}, "running"))
+    containers = _fake_containers(_own_state_container("running", temp_mngr_ctx))
     # A running state container is the normal case -- must not raise.
     provider._raise_if_state_container_stopped(containers)
 
@@ -98,8 +124,38 @@ def test_raise_if_state_container_stopped_noop_when_absent(temp_mngr_ctx: MngrCo
     # No state container in the list (e.g. a never-created / removed env): leave
     # the genuinely-empty case alone -- only present-but-stopped raises.
     provider = make_docker_provider(temp_mngr_ctx)
-    provider._raise_if_state_container_stopped(_fake_containers(_FakeContainer({LABEL_HOST_ID: HOST_ID_A}, "running")))
+    provider._raise_if_state_container_stopped(
+        _fake_containers(_FakeContainer("some-host", {LABEL_HOST_ID: HOST_ID_A}, "running"))
+    )
     provider._raise_if_state_container_stopped(_fake_containers())
+
+
+def test_raise_if_state_container_stopped_ignores_sibling_env_state_container(temp_mngr_ctx: MngrContext) -> None:
+    # Regression: quitting a minds env stops that env's state container, and
+    # Docker lists newest-created first, so a sibling env's stopped state
+    # container used to sort ahead of this env's own running one and wedge this
+    # provider's discovery until it was started again.
+    provider = make_docker_provider(temp_mngr_ctx)
+    containers = _fake_containers(
+        _sibling_env_state_container("exited", temp_mngr_ctx),
+        _own_state_container("running", temp_mngr_ctx),
+    )
+    provider._raise_if_state_container_stopped(containers)
+
+
+def test_raise_if_state_container_stopped_raises_for_own_behind_running_sibling(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    # The mirror of the regression: a *running* sibling must not vouch for this
+    # env either -- our own stopped state container still makes host records
+    # unreachable, whatever order it appears in.
+    provider = make_docker_provider(temp_mngr_ctx)
+    containers = _fake_containers(
+        _sibling_env_state_container("running", temp_mngr_ctx),
+        _own_state_container("exited", temp_mngr_ctx),
+    )
+    with pytest.raises(ProviderUnavailableError):
+        provider._raise_if_state_container_stopped(containers)
 
 
 # =========================================================================

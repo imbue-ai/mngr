@@ -1188,10 +1188,27 @@ kill -TERM 1
         as unavailable keeps discovery from misreporting "zero hosts". An absent
         state container is left alone (the read-only emptiness guard / lazy
         create handles that); only the present-but-stopped case raises here.
+
+        Requires the container's actual name to be the one
+        ``state_container_name`` assigns to *this* environment. The type label
+        carries no environment discriminator, and ``_list_containers``' prefix
+        filter is a plain ``startswith``, so one environment's list also
+        contains the state containers of every environment whose prefix extends
+        its own (``minds-`` matches ``minds-staging-``). Matching the first
+        labelled container in that list therefore let a sibling environment's
+        stopped state container mark this provider unavailable -- Docker returns
+        newest-created first, so quitting a newer env (which stops its state
+        container) wedged an older env's discovery until that container was
+        started again.
         """
+        expected_container_name = state_container_name(
+            self.mngr_ctx.config.prefix, str(self.mngr_ctx.get_profile_user_id())
+        )
         for container in containers:
             labels = container.labels or {}
             if labels.get(STATE_CONTAINER_TYPE_LABEL) != STATE_CONTAINER_TYPE_VALUE:
+                continue
+            if container.name != expected_container_name:
                 continue
             if container.status != "running":
                 raise ProviderUnavailableError(
