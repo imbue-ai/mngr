@@ -13,6 +13,7 @@ from datetime import timezone
 from typing import Any
 from typing import Final
 
+import google.auth
 from google.api_core import exceptions as google_api_exceptions
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.credentials import AnonymousCredentials
@@ -60,8 +61,8 @@ GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 def gcp_credentials_available() -> bool:
     """Return True iff Google ADC can resolve credentials.
 
-    Used to gate release tests and the session-end cleanup hook (no-op when
-    credentials are absent). Delegates to the same
+    Used to gate release tests and the session-end cleanup hook. Delegates to
+    the same
     ``GcpProviderConfig.get_credentials_and_resolved_project`` the provider calls
     at construction time, so the gate and production code agree on what counts as
     "available".
@@ -91,6 +92,15 @@ def get_default_project() -> str | None:
         return config.resolve_project_id(adc_project)
     except (GcpCredentialsError, GcpProjectError, google_auth_exceptions.GoogleAuthError):
         return None
+
+
+_REAPER_IMAGE: Final[str] = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+
+
+def make_gcp_reaper_client(project: str) -> GcpVpsClient:
+    """Build a ``GcpVpsClient`` for the session-end hook / standalone reaper."""
+    credentials, _project = google.auth.default()
+    return GcpVpsClient(credentials=credentials, project_id=project, zone=GCP_DEFAULT_ZONE, image=_REAPER_IMAGE)
 
 
 class FakeOperation:

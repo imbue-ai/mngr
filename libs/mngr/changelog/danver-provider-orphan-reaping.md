@@ -1,0 +1,1 @@
+mngr: correct docstrings in `utils/testing.py` that described the Modal test-environment cleanup as the "hourly safety net" and referred to "cron/CI logs". There is no cron trigger; the `cleanup_old_modal_test_environments.py` CI job runs on every push to main and every pull request. The docstrings now reflect that. No behavior change.
