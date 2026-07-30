@@ -445,6 +445,20 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
     return os.environ.get(env_var, fallback)
 
 
+def default_workspace_template_ref() -> str:
+    """Return the template ref a plain create uses -- the create form's Version default.
+
+    For an end-user ``minds run`` this is always :data:`FALLBACK_BRANCH`, the
+    ``minds-v*`` tag this binary was verified against; only an opted-in operator
+    (``just minds-start``) sees the ``MINDS_WORKSPACE_BRANCH`` override, which is
+    typically a branch name rather than a release tag.
+
+    ``GET /api/v1/app/version`` also reports this as the ceiling on how far a
+    workspace may update itself, so a branch value here imposes no ceiling.
+    """
+    return _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
+
+
 # Base for auto-generated workspace host names. The generic default is never
 # used bare -- it is always numbered (``workspace-1``, ``workspace-2``, ...).
 _DEFAULT_HOST_NAME_BASE: Final[str] = "workspace"
@@ -601,7 +615,7 @@ def render_create_form(
     if git_url:
         effective_branch = branch
     else:
-        effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
+        effective_branch = branch if branch else default_workspace_template_ref()
     # The selected preset card drives the provider defaults so the highlighted
     # card always matches what a plain submit would create. A fresh form
     # (no explicit selection, no submitted launch mode) defaults to the remote

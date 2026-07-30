@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import shlex
 import threading
 import time
@@ -56,6 +57,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.templates import default_workspace_template_ref
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import restic_backup_a_file
@@ -297,6 +299,40 @@ def test_list_accounts_requires_bearer(tmp_path: Path) -> None:
     client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
 
     response = client.get("/api/v1/accounts")
+
+    assert response.status_code == 401
+
+
+def test_app_version_reports_a_release_tag_a_workspace_can_cap_against(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route's whole job: hand a workspace the ceiling on how far it may update.
+
+    update-self drops the ceiling for anything that is not a
+    ``minds-v<major>.<minor>.<patch>`` tag, so a shipped app reporting a plain
+    branch name would leave every workspace uncapped. Hence the shape assertion
+    rather than a literal version, and the cleared operator opt-in -- under ``just
+    minds-start``, ``MINDS_WORKSPACE_BRANCH`` legitimately overrides the ref with a
+    branch name.
+    """
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
+
+    response = client.get("/api/v1/app/version", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["workspace_template_ref"] == default_workspace_template_ref()
+    assert re.fullmatch(r"minds-v\d+\.\d+\.\d+", body["workspace_template_ref"]), (
+        f"the shipped template pin must be a minds-v* release tag or workspaces lose their "
+        f"update ceiling; got {body['workspace_template_ref']!r}"
+    )
+
+
+def test_app_version_requires_bearer(tmp_path: Path) -> None:
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
+
+    response = client.get("/api/v1/app/version")
 
     assert response.status_code == 401
 

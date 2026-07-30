@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.primitives import AgentId
@@ -28,6 +29,7 @@ from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
+from imbue.mngr_latchkey.agent_setup import reconcile_baseline_permissions
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -132,6 +134,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
                 "latchkey-self-read-available-permissions",
                 "minds-api-proxy-per-agent",
                 "minds-api-schema-read",
+                "minds-app-version-read",
                 "minds-api-timezone-read",
             ],
         },
@@ -197,9 +200,17 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
         "method": {"const": "GET"},
         "path": {"const": "/minds-api-proxy/api/schema"},
     }
-    # Likewise every agent may read the (non-agent-scoped) host timezone by
-    # default: a GET pinned to the proxy's inbound /api/v1/timezone path, so a
-    # workspace scheduler can always resolve the user's local time.
+    # Likewise the app's version, which a workspace's update-self flow reads
+    # unattended to cap how far it may upgrade. Pinned to the exact route so the
+    # baseline grant cannot reach the rest of ``/api/v1`` -- nor whatever app
+    # state a later route hangs off ``/app``.
+    assert schemas["minds-app-version-read"]["properties"] == {
+        "method": {"const": "GET"},
+        "path": {"const": "/minds-api-proxy/api/v1/app/version"},
+    }
+    # ... and the (non-agent-scoped) host timezone: a GET pinned to the proxy's
+    # inbound /api/v1/timezone path, so a workspace scheduler can always resolve
+    # the user's local time.
     assert schemas["minds-api-timezone-read"]["properties"] == {
         "method": {"const": "GET"},
         "path": {"const": "/minds-api-proxy/api/v1/timezone"},
@@ -590,3 +601,111 @@ def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Pat
 # ``workspace`` permission request's effect and spliced in on approval (see
 # ``permission_requests.mjs`` and its end-to-end tests). Nothing about it lives
 # in ``agent_setup`` anymore.
+
+
+# -- reconcile_baseline_permissions ------------------------------------------
+
+
+def _stale_host_config(*allowed_agent_ids: str) -> LatchkeyPermissionsConfig:
+    """A host file as an older build wrote it: gateway-self rule, no app-version grant.
+
+    ``allowed_agent_ids`` seed the per-host allowlist, so a caller can start from
+    a host whose agents are already registered.
+    """
+    any_of: list[JsonValue] = [_build_allowed_agent_anyof_entry(agent_id) for agent_id in allowed_agent_ids]
+    return LatchkeyPermissionsConfig(
+        rules=(
+            {"minds-api-proxy-per-agent-unauthorized": []},
+            {"latchkey-self": ["latchkey-self-read-self-permissions", "minds-api-schema-read"]},
+        ),
+        schemas={
+            "minds-api-proxy-per-agent-unauthorized": {
+                "properties": {"domain": {"const": "latchkey-self.invalid"}, "path": {"not": {"anyOf": any_of}}}
+            },
+            "latchkey-self-read-self-permissions": {"properties": {"method": {"const": "GET"}}},
+            "minds-api-schema-read": {"properties": {"method": {"const": "GET"}}},
+        },
+    )
+
+
+def test_reconcile_adds_missing_baseline_permissions_with_their_schemas() -> None:
+    reconciled = reconcile_baseline_permissions(_stale_host_config())
+
+    gateway_self = next(rule for rule in reconciled.rules if "latchkey-self" in rule)["latchkey-self"]
+    assert "minds-app-version-read" in gateway_self
+    # The schema rides along, pinned to the one route -- a permission name with no
+    # schema would be unresolvable at the gateway.
+    assert reconciled.schemas["minds-app-version-read"] == {
+        "properties": {
+            "method": {"const": "GET"},
+            "path": {"const": "/minds-api-proxy/api/v1/app/version"},
+        },
+        "required": ["method", "path"],
+    }
+    # Grants the older build already had are kept, in order, and other rules are
+    # untouched -- notably the per-host allowlist, which is not baseline state.
+    assert gateway_self[:2] == ["latchkey-self-read-self-permissions", "minds-api-schema-read"]
+    assert reconciled.rules[0] == {"minds-api-proxy-per-agent-unauthorized": []}
+
+
+def test_reconcile_is_a_noop_on_an_already_current_file() -> None:
+    current = reconcile_baseline_permissions(_stale_host_config())
+    assert reconcile_baseline_permissions(current) == current
+
+
+def test_reconcile_does_not_invent_a_gateway_self_rule_but_still_heals_the_include() -> None:
+    """A file with no gateway-self rule gets its include healed and nothing else.
+
+    Inventing the rule would grant far more than reconciliation is about. The
+    include is a different matter: it is not a grant, and a missing one makes
+    detent fail the whole permission check for the host, so it is healed on every
+    path.
+    """
+    config = LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},), schemas={})
+    reconciled = reconcile_baseline_permissions(config)
+    assert reconciled.rules == config.rules
+    assert reconciled.schemas == config.schemas
+    assert reconciled.include == AGENT_BASELINE_PERMISSIONS.include
+
+
+def test_register_backfills_the_baseline_for_an_already_registered_agent(tmp_path: Path) -> None:
+    """The path that matters: an existing host whose agents are already registered.
+
+    This is how a newly added baseline permission reaches hosts created by an
+    older build.
+    """
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    stale = _stale_host_config(str(agent_id))
+    path = permissions_path_for_host(tmp_path, host_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(stale.model_dump_json())
+
+    register_agent_for_host(tmp_path, host_id, agent_id)
+
+    written = json.loads(path.read_text())
+    gateway_self = next(rule for rule in written["rules"] if "latchkey-self" in rule)["latchkey-self"]
+    assert "minds-app-version-read" in gateway_self
+    # The agent was already listed, so the allowlist must not have grown.
+    assert len(written["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]) == 1
+
+
+def test_register_heals_a_missing_include_for_an_already_registered_agent(tmp_path: Path) -> None:
+    """An old host file lacking the shared-schemas include is healed on the early-return path too.
+
+    Without it a granted custom scope references an unresolvable schema, and
+    detent fails the whole permission check for that host rather than just that
+    rule.
+    """
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    stale = _stale_host_config(str(agent_id))
+    assert stale.include == (), "fixture must start without the include for this to test anything"
+    path = permissions_path_for_host(tmp_path, host_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(stale.model_dump_json())
+
+    register_agent_for_host(tmp_path, host_id, agent_id)
+
+    written = json.loads(path.read_text())
+    assert written["include"] == list(AGENT_BASELINE_PERMISSIONS.include)

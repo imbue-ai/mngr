@@ -47,11 +47,13 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.baseline_permissions import MINDS_API_PROXY_PER_AGENT_PATH_PREFIX
+from imbue.mngr_latchkey.baseline_permissions import SCOPE_LATCHKEY_SELF
 from imbue.mngr_latchkey.baseline_permissions import SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import load_permissions
@@ -123,6 +125,61 @@ def _extract_agent_id_from_anyof_entry(entry: JsonValue) -> str:
     return pattern.removeprefix(_ALLOWED_AGENT_PATTERN_PREFIX).removesuffix(_ALLOWED_AGENT_PATTERN_SUFFIX)
 
 
+def reconcile_baseline_permissions(config: LatchkeyPermissionsConfig) -> LatchkeyPermissionsConfig:
+    """Bring ``config``'s ``latchkey-self`` grants and its ``include`` up to the current baseline.
+
+    The agent baseline is only written when a host's permissions file is first
+    created, so a file written by an older build keeps whatever set of
+    gateway-self grants that build shipped. Reconciling in place is how a *new*
+    baseline permission reaches hosts that already exist, without a per-addition
+    migration.
+
+    Only the ``latchkey-self`` rule is reconciled, and only by adding: that scope
+    is domain-only, so within it detent allows a request matching any one listed
+    permission, and every grant minds mints attaches there. Rules other than
+    ``latchkey-self`` are left exactly as found -- notably the ``not.anyOf``
+    allowlist, which is per-host state rather than baseline.
+
+    The baseline's ``include`` is healed on *every* path, including the one with
+    no grant to add, so this function owns the include for both of
+    :func:`register_agent_for_host`'s write paths.
+    """
+    baseline_permissions = tuple(
+        permission for rule in AGENT_BASELINE_PERMISSIONS.rules for permission in rule.get(SCOPE_LATCHKEY_SELF, [])
+    )
+    granted = {permission for rule in config.rules for permission in rule.get(SCOPE_LATCHKEY_SELF, [])}
+    missing = [permission for permission in baseline_permissions if permission not in granted]
+    if not missing or not any(SCOPE_LATCHKEY_SELF in rule for rule in config.rules):
+        # No gateway-self rule at all means a file predating the baseline entirely
+        # (or a hand-written one), where inventing the rule would grant far more
+        # than reconciliation is about. The include still needs healing either way.
+        return config.model_copy_update(to_update(config.field_ref().include, _merged_include(config)))
+
+    rebuilt_rules = tuple(
+        {**rule, SCOPE_LATCHKEY_SELF: [*rule[SCOPE_LATCHKEY_SELF], *missing]}
+        if SCOPE_LATCHKEY_SELF in rule
+        else dict(rule)
+        for rule in config.rules
+    )
+    rebuilt_schemas: dict[str, JsonValue] = dict(config.schemas)
+    for permission in missing:
+        rebuilt_schemas[permission] = AGENT_BASELINE_PERMISSIONS.schemas[permission]
+    # Copy-with-update, never a fresh construction: rebuilding from rules+schemas
+    # alone silently drops ``include``, which would leave a granted custom scope
+    # pointing at an unresolvable schema -- and detent then fails the *whole*
+    # permission check for that host, not just the one rule.
+    return config.model_copy_update(
+        to_update(config.field_ref().rules, rebuilt_rules),
+        to_update(config.field_ref().schemas, rebuilt_schemas),
+        to_update(config.field_ref().include, _merged_include(config)),
+    )
+
+
+def _merged_include(config: LatchkeyPermissionsConfig) -> tuple[str, ...]:
+    """Return ``config``'s includes plus any the baseline has and it lacks."""
+    return config.include + tuple(name for name in AGENT_BASELINE_PERMISSIONS.include if name not in config.include)
+
+
 def register_agent_for_host(
     plugin_data_dir: Path,
     host_id: HostId,
@@ -131,11 +188,13 @@ def register_agent_for_host(
     """Register ``agent_id`` for the given host, granting it access to the Minds API proxy.
 
     Reads the host's ``latchkey_permissions.json`` (writing a fresh
-    baseline if it does not yet exist), extracts the current allowed-agent
-    list out of the ``minds-api-proxy-unauthorized`` scope's ``not.anyOf``
-    block, appends a per-agent entry if ``agent_id`` is not already there,
-    and writes the updated config back atomically. Idempotent:
-    re-registering an agent already in the list is a no-op write.
+    baseline if it does not yet exist), brings any stale gateway-self grants up to
+    the current baseline (:func:`reconcile_baseline_permissions`), extracts the
+    current allowed-agent list out of the ``minds-api-proxy-unauthorized`` scope's
+    ``not.anyOf`` block, appends a per-agent entry if ``agent_id`` is not already
+    there, and writes the updated config back atomically. Idempotent:
+    re-registering an already-listed agent writes only if the baseline
+    reconciliation found something to add.
 
     This is the *only* public way to grant a minds agent access to the
     Minds API proxy. The matching CLI wrapper is ``mngr latchkey
@@ -150,6 +209,10 @@ def register_agent_for_host(
         # First agent on this host: start from the baseline so the
         # gateway-self rules and the minds-api-proxy gate are present.
         config = AGENT_BASELINE_PERMISSIONS
+
+    reconciled = reconcile_baseline_permissions(config)
+    is_baseline_changed = reconciled != config
+    config = reconciled
 
     schemas: dict[str, JsonValue] = dict(config.schemas)
     scope_schema = schemas.get(SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED)
@@ -190,7 +253,10 @@ def register_agent_for_host(
 
     existing_ids = [_extract_agent_id_from_anyof_entry(entry) for entry in any_of]
     if str(agent_id) in existing_ids:
-        # No-op: agent already allowed.
+        # Agent already allowed, but a baseline that moved still has to be
+        # persisted: this is the common path for a host that already exists.
+        if is_baseline_changed:
+            save_permissions(path, config)
         return
     new_any_of: list[JsonValue] = list(any_of) + [_build_allowed_agent_anyof_entry(str(agent_id))]
 
@@ -208,23 +274,8 @@ def register_agent_for_host(
         },
     }
     # Copy-with-update rather than reconstructing from ``rules``/``schemas``:
-    # rebuilding by hand silently drops every other field (notably ``include``,
-    # which points at the shared additional-services schemas file -- losing it
-    # would leave a granted custom scope referencing an unresolvable schema).
-    #
-    # We also *ensure* the baseline's includes are present rather than merely
-    # preserving what is there. This function already owns making a host file
-    # well-formed (it writes the whole baseline when the file is absent), and it
-    # runs on every agent discovery, so it is the natural self-heal point for a
-    # file that lost its include -- the data-format migration cannot do it,
-    # since it only runs when the recorded version changes.
-    merged_include = config.include + tuple(
-        name for name in AGENT_BASELINE_PERMISSIONS.include if name not in config.include
-    )
-    new_config = config.model_copy_update(
-        to_update(config.field_ref().schemas, schemas),
-        to_update(config.field_ref().include, merged_include),
-    )
+    # rebuilding by hand silently drops every other field.
+    new_config = config.model_copy_update(to_update(config.field_ref().schemas, schemas))
     save_permissions(path, new_config)
 
 

@@ -24,7 +24,7 @@ from imbue.mngr_latchkey.store import SHARED_SCHEMAS_FILENAME
 # rather than relying on detent's built-in catalog so the names are
 # self-contained and the grant is exactly the endpoints we want.
 _GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
-_SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
+SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 _PERM_CREATE_PERMISSION_REQUEST: Final[str] = "latchkey-self-create-permission-request"
 _PERM_READ_SELF_PERMISSIONS: Final[str] = "latchkey-self-read-self-permissions"
 _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-permissions"
@@ -76,6 +76,16 @@ _PERM_MINDS_API_PROXY_REPORT: Final[str] = "minds-api-proxy-report-allow"
 _MINDS_API_SCHEMA_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/schema"
 _PERM_MINDS_API_SCHEMA: Final[str] = "minds-api-schema-read"
 
+# The newest workspace-template ref the minds desktop app supports. Granted by
+# default for the same reasons as the schema endpoint above -- not agent-scoped,
+# read-only, identical for every caller -- and additionally because a workspace's
+# ``update-self`` flow reads it *unattended*, from a background worker, where a
+# permission dialog has nobody to answer it. Pinned to the version subpath rather
+# than ``/app`` so the ungated grant cannot widen to whatever app state a later
+# route hangs off that prefix.
+_MINDS_APP_VERSION_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/v1/app/version"
+_PERM_MINDS_APP_VERSION: Final[str] = "minds-app-version-read"
+
 # The read-only host-timezone endpoint (the desktop client reports the IANA
 # timezone of the machine it runs on). Granted to every agent by default for
 # the same reasons as the API schema document: not agent-scoped (the timezone
@@ -103,7 +113,7 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
         # Unauthorized agents trying to access agent-scoped Minds API endpoint get an empty list of permissions, leading to immediate rejection.
         {SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: []},
         {
-            _SCOPE_LATCHKEY_SELF: [
+            SCOPE_LATCHKEY_SELF: [
                 _PERM_CREATE_PERMISSION_REQUEST,
                 _PERM_READ_SELF_PERMISSIONS,
                 _PERM_READ_AVAILABLE_PERMISSIONS,
@@ -111,6 +121,8 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
                 _PERM_MINDS_API_PROXY_PER_AGENT,
                 # Every agent may read the (non-agent-scoped) API schema document.
                 _PERM_MINDS_API_SCHEMA,
+                # ... and the app's version, which caps update-self.
+                _PERM_MINDS_APP_VERSION,
                 # Every agent may read the (non-agent-scoped) host timezone.
                 _PERM_MINDS_API_TIMEZONE,
             ],
@@ -161,7 +173,7 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
             },
             "required": ["path"],
         },
-        _SCOPE_LATCHKEY_SELF: {
+        SCOPE_LATCHKEY_SELF: {
             "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
             "required": ["domain"],
         },
@@ -193,6 +205,13 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
             "properties": {
                 "method": {"const": "GET"},
                 "path": {"const": _MINDS_API_SCHEMA_INBOUND_PATH},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_MINDS_APP_VERSION: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"const": _MINDS_APP_VERSION_INBOUND_PATH},
             },
             "required": ["method", "path"],
         },

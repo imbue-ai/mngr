@@ -77,6 +77,7 @@ from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AccountSummary
 from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
+from imbue.minds.desktop_client.api_models import AppVersionResponse
 from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
 from imbue.minds.desktop_client.api_models import BackupRestoreRequest
 from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
@@ -150,6 +151,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
+from imbue.minds.desktop_client.templates import default_workspace_template_ref
 from imbue.minds.desktop_client.templates import normalize_host_name_slug
 from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.templates import status_text_for
@@ -252,6 +254,26 @@ _INSTANCE_TYPES_BY_LAUNCH_MODE = {
     LaunchMode.GCP: {value for value, _ in CONFIGURED_GCP_MACHINE_TYPES},
     LaunchMode.AZURE: {value for value, _ in CONFIGURED_AZURE_VM_SIZES},
 }
+
+
+# -- App version route --
+#
+# Neither agent-scoped nor gated by a workspace verb: the latchkey baseline grants
+# ``minds-app-version-read`` to every agent, so a workspace can read its update
+# ceiling unattended. Keep the payload to version identity alone -- the grant is
+# pinned to this exact path, so anything added here becomes readable by every
+# agent with no grant and no dialog.
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(AppVersionResponse))
+def _handle_app_version() -> AppVersionResponse:
+    """Return the newest workspace-template ref this app supports.
+
+    A workspace's ``update-self`` flow reads this as the ceiling on how far it may
+    upgrade, so it never runs a template newer than the app driving it.
+    """
+    return AppVersionResponse(workspace_template_ref=default_workspace_template_ref())
 
 
 # -- Cross-workspace management routes --
@@ -2868,6 +2890,10 @@ def create_api_v1_blueprint() -> Blueprint:
     # Notifications (per-agent so the gateway's per-host permission file
     # can restrict each caller to its own agent ids).
     blueprint.add_url_rule("/agents/<agent_id>/notifications", view_func=_handle_notification, methods=["POST"])
+
+    # This app's version. Baseline-granted to every agent (see
+    # ``minds-app-version-read`` in ``mngr_latchkey.baseline_permissions``).
+    blueprint.add_url_rule("/app/version", view_func=_handle_app_version, methods=["GET"])
 
     # Cross-workspace management (read surface). Gated by the
     # ``minds-workspaces`` detent scope at the gateway.

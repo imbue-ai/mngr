@@ -167,6 +167,33 @@ The desktop client matches the same value on the inbound side. The
 key rotates per minds startup; nothing else in the monorepo reads it
 from disk, so there is no on-disk copy to keep in sync.
 
+Three routes are *not* agent-scoped and are granted to every agent by the
+baseline, because they are identical for all callers and carry no
+per-workspace data: `GET /minds-api-proxy/api/schema` (the OpenAPI
+description of the reachable surface), `GET
+/minds-api-proxy/api/v1/timezone` (the IANA timezone of the machine the
+desktop client runs on), and `GET /minds-api-proxy/api/v1/app/version`
+(the newest workspace-template ref the app supports, which for a released
+binary is also its own release tag). That last one is what a workspace's
+`update-self` caps itself against, so it does not pull a template newer
+than the app driving it. Note that this is self-imposed by the workspace,
+not enforced here: nothing stops an agent that skips `resolve-target`, or
+a user running `git merge` by hand. The threat model is a workspace
+breaking itself by accident, not a hostile one. It is baseline-granted
+rather than must-ask because update-self resolves its target from a
+background worker, where a permission dialog has nobody to answer it.
+Each of the three is pinned by `const` to its exact method and path, so
+none of them widens to the rest of `/api/v1` -- note in particular that
+the app grant pins `/app/version` and not `/app`, so it cannot widen to
+whatever app state a later route hangs off that prefix.
+Existing hosts pick a newly-added baseline grant up through
+`reconcile_baseline_permissions`, which `register_agent_for_host` applies
+whenever it registers a discovered agent -- a baseline addition alone
+would otherwise only reach newly-created workspaces. Auto-registration
+de-dupes per `(host, agent)` pair for the life of the process, so a
+baseline addition lands on the first discovery after the app restarts,
+not mid-run.
+
 Per-agent isolation comes from the latchkey gateway's permissions
 file. The agent baseline grants every agent one shared call --
 `POST /minds-api-proxy/api/v1/agents/<...>/notifications` -- so any
