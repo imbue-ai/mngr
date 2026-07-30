@@ -33,6 +33,7 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import box_default_workspace_template_cache_dir
+from imbue.mngr_imbue_cloud.slices.bare_metal import build_slice_container_memory_start_args
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.box_image_cache import BoxImageCacheInterface
 from imbue.mngr_imbue_cloud.slices.box_image_cache import TransferKey
@@ -217,6 +218,19 @@ class SliceVpsDockerProvider(VpsProvider):
     def _resolved_region(self) -> str:
         """The owning bare-metal server's region, or a fallback if unknown."""
         return self.slice_config.slice_region or _FALLBACK_SLICE_REGION
+
+    def _compute_extra_start_args(self) -> tuple[str, ...]:
+        # Hard-cap the workspace container's memory so it can never starve the
+        # slice VM's own daemons (sshd, dockerd, lima-guestagent) -- an uncapped
+        # workspace at capacity collapses the VM-wide page cache and wedges the
+        # VM unrecoverably. Known on both container-creation paths: the bake sets
+        # slice_memory_mib per box, and the slow-path rebuild derives it from the
+        # lease's memory_gb attribute (None only against a legacy row without it,
+        # which keeps the previous uncapped behavior).
+        memory_mib = self.slice_config.slice_memory_mib
+        if memory_mib is None:
+            return ()
+        return build_slice_container_memory_start_args(memory_mib)
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         # Slices have no region/plan flags (the VM is carved locally), so this

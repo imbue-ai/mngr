@@ -16,10 +16,13 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_CONTAINER_MEMORY_RESERVE_MIB
+from imbue.mngr_imbue_cloud.slices.bare_metal import build_slice_container_memory_start_args
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_container_memory_cap_mib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_budget_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
@@ -309,3 +312,20 @@ def test_compute_orphan_slice_disk_names_never_touches_other_envs_or_legacy() ->
     box = {mine, theirs, legacy, "some-other-disk"}
     tracked: set[str] = set()
     assert compute_orphan_slice_disk_names(box, tracked, "dev-josh") == {mine}
+
+
+def test_compute_slice_container_memory_cap_mib_subtracts_the_vm_reserve() -> None:
+    # An 8GiB slice yields a 7GiB container cap: the fixed VM-side reserve comes
+    # off the top so the VM's own daemons (sshd, dockerd, guestagent) keep room.
+    assert compute_slice_container_memory_cap_mib(8192) == 8192 - SLICE_CONTAINER_MEMORY_RESERVE_MIB
+
+
+def test_compute_slice_container_memory_cap_mib_rejects_slices_smaller_than_the_reserve() -> None:
+    with pytest.raises(BareMetalConfigError):
+        compute_slice_container_memory_cap_mib(SLICE_CONTAINER_MEMORY_RESERVE_MIB)
+
+
+def test_build_slice_container_memory_start_args_pins_swap_to_the_memory_cap() -> None:
+    # --memory-swap equals --memory so the container can never swap (it must be
+    # shed under pressure, not thrash).
+    assert build_slice_container_memory_start_args(8192) == ("--memory=7168m", "--memory-swap=7168m")

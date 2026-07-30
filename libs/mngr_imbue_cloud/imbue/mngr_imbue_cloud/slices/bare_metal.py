@@ -54,6 +54,18 @@ SLICE_BOOT_DISK_GIB: Final[int] = 32
 # default for the pricing table and the natural slice size for our workspaces.
 DEFAULT_MEMORY_PER_SLICE_GB: Final[int] = 8
 
+# RAM (MiB) held back from the workspace container's hard cap so the slice VM's own
+# daemons (dockerd/containerd ~200MiB, lima-guestagent, sshd/systemd/journald,
+# uncharged kernel slab, plus a little file cache) always have room. Without a cap,
+# a workspace at memory capacity collapses the VM-wide page cache and wedges the
+# VM's sshd -- making the slice unreachable AND unrecoverable (a live incident, not
+# a hypothesis). The reserve is a fixed delta, not a fraction: the VM-side
+# footprint does not scale with slice size. Measured steady state is ~470-530MiB;
+# 1024 leaves headroom for dockerd build/load spikes. Note ~244MiB of the lima
+# memory size is already consumed by boot-time kernel/firmware reservation, so the
+# guest-visible room left for VM daemons is roughly this reserve minus that.
+SLICE_CONTAINER_MEMORY_RESERVE_MIB: Final[int] = 1024
+
 # Default CPU overcommit factor used to size each slice's vCPUs (vCPUs/slice =
 # floor(threads * ratio / slots)). Overridable per box at ``admin server
 # register --cpu-overcommit``; RAM is never overcommitted.
@@ -172,6 +184,30 @@ def compute_slice_disk_gib(disk_gb: int, slot_count: int) -> int:
             f"{SLICE_BOOT_DISK_GIB}GiB boot disk plus any data disk"
         )
     return data_disk_gib
+
+
+@pure
+def compute_slice_container_memory_cap_mib(slice_memory_mib: int) -> int:
+    """The workspace container's hard memory cap: the slice VM's RAM minus the VM-side reserve."""
+    cap_mib = slice_memory_mib - SLICE_CONTAINER_MEMORY_RESERVE_MIB
+    if cap_mib <= 0:
+        raise BareMetalConfigError(
+            f"slice_memory_mib={slice_memory_mib} leaves no container memory after the "
+            f"{SLICE_CONTAINER_MEMORY_RESERVE_MIB}MiB VM reserve"
+        )
+    return cap_mib
+
+
+@pure
+def build_slice_container_memory_start_args(slice_memory_mib: int) -> tuple[str, ...]:
+    """The ``docker run`` args that hard-cap the workspace container's memory.
+
+    ``--memory-swap`` equals ``--memory`` (memcg ``swap.max=0``) so the container can
+    never swap: under pressure it is shed fast (earlyoom, then the cgroup OOM killer,
+    both steered by the workspace's ``oom_score_adj`` bands) instead of thrashing.
+    """
+    cap_mib = compute_slice_container_memory_cap_mib(slice_memory_mib)
+    return (f"--memory={cap_mib}m", f"--memory-swap={cap_mib}m")
 
 
 @pure

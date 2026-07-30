@@ -11,7 +11,7 @@ def _script() -> str:
     return build_box_prep_script(
         pool_public_key=_POOL_PUB,
         lima_service_user="limahost",
-        lima_version="2.1.2",
+        lima_version="2.2.0",
         slice_base_image_url=_IMAGE_URL,
     )
 
@@ -40,8 +40,8 @@ def test_prep_script_chowns_cache_dir_to_lima_user() -> None:
 def test_prep_script_installs_qemu_and_lima() -> None:
     script = _script()
     assert "qemu-system-x86" in script
-    assert "lima-2.1.2-Linux-x86_64.tar.gz" in script
-    assert "github.com/lima-vm/lima/releases/download/v2.1.2/" in script
+    assert "lima-2.2.0-Linux-x86_64.tar.gz" in script
+    assert "github.com/lima-vm/lima/releases/download/v2.2.0/" in script
 
 
 def test_prep_script_never_invokes_limactl_as_root() -> None:
@@ -63,9 +63,21 @@ def test_prep_script_creates_service_user_with_kvm_and_pool_key() -> None:
 
 def test_prep_script_is_idempotent_guarded() -> None:
     script = _script()
-    # Re-runnable: guards on existing limactl and existing user.
-    assert "command -v limactl >/dev/null 2>&1" in script
+    # Re-runnable: guards on the recorded lima version and the existing user.
+    assert 'if [ "$(cat "$lima_version_marker" 2>/dev/null)" != "2.2.0" ]; then' in script
     assert "id limahost >/dev/null 2>&1" in script
+
+
+def test_prep_script_upgrades_lima_when_installed_version_differs() -> None:
+    # The lima install guard compares a marker file against the pinned release
+    # (never `limactl --version` -- limactl refuses to run as root), so re-running
+    # prep on a box with an older lima (or one prepped before the marker existed,
+    # where the cat yields "") re-extracts the tarball and records the new version.
+    script = _script()
+    assert "lima_version_marker=/usr/local/share/lima/.mngr-installed-lima-version" in script
+    marker_write_idx = script.index('printf \'%s\\n\' "2.2.0" > "$lima_version_marker"')
+    extract_idx = script.index("tar -C /usr/local -xzf")
+    assert extract_idx < marker_write_idx
 
 
 def test_prep_script_installs_uv_for_service_user() -> None:

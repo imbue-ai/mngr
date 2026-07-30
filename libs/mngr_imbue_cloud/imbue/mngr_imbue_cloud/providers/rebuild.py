@@ -1,3 +1,8 @@
+from collections.abc import Mapping
+from typing import Any
+
+from loguru import logger
+
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import ProviderBackendName
@@ -11,6 +16,21 @@ from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.instance import MinimalVpsProvider
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
+
+
+@pure
+def _slice_memory_mib_from_lease_attributes(attributes: Mapping[str, Any]) -> int | None:
+    """The leased slice's RAM in MiB, from its row's stamped ``memory_gb`` attribute.
+
+    Every slice row is stamped with ``memory_gb`` at bake time; None (legacy rows
+    or a non-numeric value) means the rebuilt container gets no memory cap.
+    """
+    memory_gb = attributes.get("memory_gb")
+    if isinstance(memory_gb, bool) or not isinstance(memory_gb, (int, float)):
+        return None
+    if memory_gb <= 0:
+        return None
+    return int(memory_gb * 1024)
 
 
 @pure
@@ -78,10 +98,19 @@ def build_slice_rebuild_provider(
     ``create_host_on_existing_vps``) targets the right ports. runsc/gVisor is
     not used (the VM is the isolation boundary; its Docker is plain runc).
     """
+    # The slice's RAM (stamped on its row) sizes the rebuilt container's memory
+    # cap, exactly as the bake sizes the original container's.
+    slice_memory_mib = _slice_memory_mib_from_lease_attributes(lease_result.attributes)
+    if slice_memory_mib is None:
+        logger.warning(
+            "Lease {} has no usable memory_gb attribute; rebuilding the container without a memory cap",
+            lease_result.host_db_id,
+        )
     slice_config = SliceVpsDockerProviderConfig(
         host_dir=config.host_dir,
         container_ssh_port=config.container_ssh_port,
         box_public_address=lease_result.vps_address,
+        slice_memory_mib=slice_memory_mib,
     )
     # The rebuild never carves/destroys a VM (it only tears down + rebuilds the
     # container on the already-leased slice via the forwarded ports below), so

@@ -5,8 +5,13 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import box_default_workspace_templ
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_base_image_path
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_APT_VERSION
 
-# Lima release to install on the box (matches what the slice path is tested against).
-DEFAULT_LIMA_VERSION: Final[str] = "2.1.2"
+# Lima release to install on the box. Must stay >= 2.2.0: earlier guestagents leak
+# one goroutine + one socket FD per forwarded connection (portfwdserver's blocking
+# closeCh, fixed upstream in the 2.2.0 release), which slowly wedged production
+# slices. Independent of the desktop app's own lima pin (apps/minds/scripts/
+# build.js), which is held back by a macOS-only usernet regression the box's
+# qemu path does not use.
+DEFAULT_LIMA_VERSION: Final[str] = "2.2.0"
 
 # Swapfile size (GiB) to provision on the box. Slice hosts run RAM near capacity, so a
 # real swapfile is cheap OOM insurance against transient spikes (idle baked agents
@@ -68,11 +73,18 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq {apt_packages}
 
-# 2. Install limactl (extract as root; never run limactl as root -- lima refuses).
-if ! command -v limactl >/dev/null 2>&1; then
+# 2. Install limactl (extract as root; never run limactl as root -- lima refuses,
+#    so the installed release is tracked via a marker file instead of `limactl
+#    --version`). Version-aware: re-running prep on a box whose installed lima
+#    does not match the pinned release (including boxes prepped before the marker
+#    existed) re-extracts the tarball, so a version bump reaches existing boxes.
+lima_version_marker=/usr/local/share/lima/.mngr-installed-lima-version
+if [ "$(cat "$lima_version_marker" 2>/dev/null)" != "{lima_version}" ]; then
     curl -fsSL -o /tmp/{lima_tarball} {lima_url}
     tar -C /usr/local -xzf /tmp/{lima_tarball}
     rm -f /tmp/{lima_tarball}
+    mkdir -p /usr/local/share/lima
+    printf '%s\\n' "{lima_version}" > "$lima_version_marker"
 fi
 
 # 3. Dedicated non-root service user that owns the lima VMs (kvm group for /dev/kvm).

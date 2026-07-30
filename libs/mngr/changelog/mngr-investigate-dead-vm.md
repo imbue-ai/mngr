@@ -1,0 +1,1 @@
+Regenerated the `mngr imbue_cloud admin server prep` / `admin server setup` command docs so the documented `--lima-version` default matches the new bare-metal box lima pin (2.2.0, bumped from 2.1.2 in mngr_imbue_cloud for the upstream guestagent portfwdserver leak fix).

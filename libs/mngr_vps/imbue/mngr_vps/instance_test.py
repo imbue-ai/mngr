@@ -728,3 +728,50 @@ def test_create_host_rejects_container_only_inputs_for_bare(temp_mngr_ctx: MngrC
         provider.create_host(HostName("test-host"), build_args=["--file=Dockerfile", "."])
     with pytest.raises(MngrError, match="does not support.*start args"):
         provider.create_host(HostName("test-host"), start_args=["--cpus=2"])
+
+
+class _ExtraStartArgsMinimalProvider(MinimalVpsProvider):
+    """MinimalVpsProvider with provider-computed start args, to pin the composition order.
+
+    Stands in for providers like the imbue_cloud slice provider, whose
+    ``_compute_extra_start_args`` injects the per-slice container memory cap.
+    """
+
+    def _compute_extra_start_args(self) -> tuple[str, ...]:
+        return ("--memory=7168m", "--memory-swap=7168m")
+
+
+def test_effective_start_args_compose_in_last_one_wins_order(temp_mngr_ctx: MngrContext) -> None:
+    """Runtime, then default_start_args, then provider-computed args, then the caller's last.
+
+    Docker's last-one-wins semantics make this ordering the contract: an explicit
+    caller flag must be able to override a provider-computed one (e.g. the slice
+    memory cap), and the provider-computed args must actually reach the composed
+    tuple at all.
+    """
+    provider = _ExtraStartArgsMinimalProvider(
+        name=ProviderInstanceName("test-vps"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsProviderConfig(
+            backend=ProviderBackendName("test-vps"),
+            docker_runtime="runsc",
+            default_start_args=("--cap-add=SYS_PTRACE",),
+        ),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    assert provider._compose_effective_start_args(["--memory=4096m"]) == (
+        "--runtime",
+        "runsc",
+        "--cap-add=SYS_PTRACE",
+        "--memory=7168m",
+        "--memory-swap=7168m",
+        "--memory=4096m",
+    )
+
+
+def test_effective_start_args_are_only_the_callers_by_default(temp_mngr_ctx: MngrContext) -> None:
+    """The base provider computes no extra args and configures no runtime by default."""
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    assert provider._compose_effective_start_args(["--cpus=2"]) == ("--cpus=2",)
+    assert provider._compose_effective_start_args(None) == ()

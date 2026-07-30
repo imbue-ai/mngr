@@ -16,6 +16,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
+from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR
 from imbue.mngr_imbue_cloud.providers.slice_provider import _ENV_D_BROWSER_UNIT
 from imbue.mngr_imbue_cloud.providers.slice_provider import _PLAYWRIGHT_CTX_DIR
@@ -173,3 +174,19 @@ def test_transfer_key_authorize_and_deauthorize_render_expected_commands() -> No
     assert public_key in authorize_command
     assert "grep -vF" in deauthorize_command
     assert public_key in deauthorize_command
+
+
+def test_extra_start_args_cap_container_memory_from_the_slice_size() -> None:
+    # Both container-creation paths (bake and slow-path rebuild) flow through
+    # create_host_on_existing_vps, whose extra-start-args seam must hard-cap the
+    # container at the slice's RAM minus the VM-side reserve -- swap pinned equal
+    # so the workspace is shed under pressure instead of thrashing the VM.
+    provider = SliceVpsDockerProvider.model_construct(slice_config=SliceVpsDockerProviderConfig(slice_memory_mib=8192))
+    assert provider._compute_extra_start_args() == ("--memory=7168m", "--memory-swap=7168m")
+
+
+def test_extra_start_args_are_empty_when_the_slice_size_is_unknown() -> None:
+    # A rebuild against a legacy lease row without a memory_gb stamp must keep
+    # the previous uncapped behavior rather than guessing a cap.
+    provider = SliceVpsDockerProvider.model_construct(slice_config=SliceVpsDockerProviderConfig())
+    assert provider._compute_extra_start_args() == ()

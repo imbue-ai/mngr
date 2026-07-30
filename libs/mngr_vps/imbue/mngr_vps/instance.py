@@ -844,9 +844,7 @@ class VpsProvider(BaseProviderInstance):
         ``_finalize_host_creation`` writes ``host_state.json``.
         """
         base_image = str(image) if image else self.config.default_image
-        # Prepend `--runtime <value>` (e.g. 'runsc' for gVisor) when configured; absent by default.
-        runtime_args = ("--runtime", self.config.docker_runtime) if self.config.docker_runtime is not None else ()
-        effective_start_args = runtime_args + tuple(self.config.default_start_args) + tuple(start_args or ())
+        effective_start_args = self._compose_effective_start_args(start_args)
         parsed = self._parse_build_args(build_args)
 
         realized = self._realizer.realize_placement(
@@ -1264,6 +1262,32 @@ class VpsProvider(BaseProviderInstance):
         (sentinel + host-side watcher), early-returning here for the bare case.
         """
         self._write_shutdown_script(host, f"#!/bin/bash\n{self._realizer.idle_shutdown_command}\n")
+
+    def _compose_effective_start_args(self, start_args: Sequence[str] | None) -> tuple[str, ...]:
+        """The full ``docker run`` args for the container: config-derived args, then the caller's.
+
+        Order matters under docker's last-one-wins semantics: the configured
+        runtime, then ``default_start_args``, then provider-computed args
+        (``_compute_extra_start_args``), then the caller's ``start_args`` last so
+        an explicit caller flag always wins.
+        """
+        # Prepend `--runtime <value>` (e.g. 'runsc' for gVisor) when configured; absent by default.
+        runtime_args = ("--runtime", self.config.docker_runtime) if self.config.docker_runtime is not None else ()
+        return (
+            runtime_args
+            + tuple(self.config.default_start_args)
+            + self._compute_extra_start_args()
+            + tuple(start_args or ())
+        )
+
+    def _compute_extra_start_args(self) -> tuple[str, ...]:
+        """Provider-computed ``docker run`` args appended after ``default_start_args``.
+
+        Subclasses that derive run args from provider-known instance shape (e.g.
+        the imbue_cloud slice provider's per-slice container memory cap) override
+        this; the base provider adds nothing.
+        """
+        return ()
 
     @abstractmethod
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
