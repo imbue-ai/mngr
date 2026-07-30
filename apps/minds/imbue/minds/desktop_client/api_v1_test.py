@@ -28,6 +28,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
+from imbue.minds.desktop_client.api_v1 import _describe_mngr_exec_failure
 from imbue.minds.desktop_client.api_v1 import _drain_backup_summary_rows
 from imbue.minds.desktop_client.api_v1 import _stream_workspace_backup_summaries
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -1261,10 +1262,13 @@ def test_establish_ssh_passes_command_as_single_mngr_exec_arg(
     assert read_argv[2] == "cat ~/.ssh/authorized_keys 2>/dev/null || true"
     assert read_argv[3:] == ["--format", "json"]
     assert "bash" not in read_argv and "-c" not in read_argv and "-lc" not in read_argv and "--" not in read_argv
-    # Write: `mngr exec <id> <write script>` -- single trailing COMMAND arg.
+    # Write: `mngr exec <id> <write script> --format json` -- like the read, the
+    # command is a single COMMAND arg, and the only thing after it is the format
+    # flag pair. Anything else positional here would be parsed as another agent
+    # name; JSON format is what puts a failure somewhere the route can report it.
     assert write_argv[0] == "exec"
     assert write_argv[1] == str(target)
-    assert len(write_argv) == 3, f"write command must be a single arg, got {write_argv!r}"
+    assert write_argv[3:] == ["--format", "json"], f"write command must be a single arg, got {write_argv!r}"
     assert "bash" not in write_argv and "-c" not in write_argv and "-lc" not in write_argv and "--" not in write_argv
     # The write body is composed only from the parsed inner stdout: neither the
     # JSON envelope text nor any human-format status line may reach the file.
@@ -2975,3 +2979,63 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 
     assert response.status_code == 202
     assert creator.last_call["account_id"] == "user-77120"
+
+
+# The stderr an `mngr exec` run really produced against a healthy pre-declutter
+# workspace: three warnings about orphaned key dirs for long-gone hosts, and not
+# one word about the host that was actually asked for.
+_UNRELATED_HOST_WARNINGS = (
+    "WARNING: imbue_cloud[imbue_cloud_acct] outer SSH unreachable for host host-a15c1302: "
+    "Host not found: host-a15c1302\n"
+    "WARNING: imbue_cloud[imbue_cloud_acct] outer SSH unreachable for host host-0b17800a: "
+    "Host not found: host-0b17800a\n"
+)
+
+
+def test_describe_mngr_exec_failure_leads_with_the_target_not_the_unrelated_warnings() -> None:
+    """The per-agent reason must come first, with the warnings kept behind it.
+
+    Leading with stderr told the caller the hub could not reach *some other*
+    workspace's host, which reads as "your box is down" and sent an agent off to
+    restore from backups instead of retrying. Dropping the warnings instead would
+    trade that for a different loss: they are real diagnostics (these ones are a
+    genuine orphaned-key-dir bug), and a caller on another host has no other copy.
+    """
+    envelope = json.dumps(
+        {
+            "results": [],
+            "failed_agents": [{"agent": "system-services", "error": "Agent system-services not found on host"}],
+            "total_executed": 0,
+            "total_failed": 1,
+        }
+    )
+
+    description = _describe_mngr_exec_failure(envelope, _UNRELATED_HOST_WARNINGS)
+
+    assert description.startswith("system-services: Agent system-services not found on host")
+    # The warnings survive, in full, behind the verdict.
+    assert "outer SSH unreachable for host host-a15c1302" in description
+    assert "outer SSH unreachable for host host-0b17800a" in description
+
+
+def test_describe_mngr_exec_failure_caps_a_runaway_stderr() -> None:
+    """Discovery can warn about every unreachable host, so the appended context is bounded."""
+    envelope = json.dumps({"results": [], "failed_agents": [{"agent": "a", "error": "boom"}], "total_failed": 1})
+
+    description = _describe_mngr_exec_failure(envelope, "WARNING: noise\n" * 5000)
+
+    assert description.startswith("a: boom")
+    assert "truncated" in description
+    assert len(description) < 3000
+
+
+def test_describe_mngr_exec_failure_falls_back_to_stderr_without_an_envelope() -> None:
+    """A run that died before emitting JSON still has to report something."""
+    assert _describe_mngr_exec_failure("", "mngr: command not found") == "mngr: command not found"
+
+
+def test_describe_mngr_exec_failure_falls_back_when_no_agent_carries_a_reason() -> None:
+    """A well-formed envelope with nothing useful in it must not report an empty reason."""
+    envelope = json.dumps({"results": [], "failed_agents": [], "total_executed": 0, "total_failed": 0})
+
+    assert _describe_mngr_exec_failure(envelope, "something went wrong") == "something went wrong"

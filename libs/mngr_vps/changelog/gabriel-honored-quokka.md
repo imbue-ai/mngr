@@ -1,0 +1,1 @@
+No behavior change. The bare realizer's listing test now asserts through the host_dir the script resolves rather than an interpolated literal, following the listing scripts gaining fallback host_dir candidates -- bare passes none, so it settles on the single host_dir it was handed.

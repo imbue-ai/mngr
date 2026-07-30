@@ -147,6 +147,11 @@ def test_load_or_create_ssh_keypair_custom_key_name(tmp_path: Path) -> None:
     assert (key_dir / "mykey.pub").exists()
 
 
+# 16 concurrent keypair generations, serialized behind a lock, is 9-15s of real
+# CPU on its own and overruns the 10s global timeout when the suite is running
+# xdist-parallel against other CPU-heavy tests. The contention is the point of
+# the test, so it gets the time rather than a flaky mark.
+@pytest.mark.timeout(30)
 def test_load_or_create_ssh_keypair_concurrent_first_creation_is_consistent(tmp_path: Path) -> None:
     """Concurrent first-time creation must yield one consistent, non-empty keypair.
 

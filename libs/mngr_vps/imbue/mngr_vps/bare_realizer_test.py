@@ -186,7 +186,10 @@ def test_read_live_listing_runs_inner_script_directly_on_the_vm(temp_mngr_ctx: M
     assert agent_data == []
     issued = "\n".join(stub.commands)
     # The inner listing script reads the host_dir directly; there is no docker.
-    assert "/mngr/hosts/test/data.json" in issued
+    # bare passes no fallback candidates, so the script resolves to the one
+    # host_dir it was handed and reads the record from there.
+    assert "HOST_DIR=/mngr/hosts/test" in issued
+    assert '"$HOST_DIR/data.json"' in issued
     assert "docker" not in issued
 
 

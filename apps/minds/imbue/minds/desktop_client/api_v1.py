@@ -1148,6 +1148,61 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
     return OperationHandleResponse(operation_id=str(parsed_id), kind="destroy"), 202
 
 
+# mngr's stderr is appended to a failure message as context. Discovery can warn
+# about every host it could not reach, so cap it; the whole of it is logged
+# unconditionally either way. Matches the truncation the rename/update routes
+# above already apply to mngr stderr.
+_MNGR_CONTEXT_CHAR_LIMIT: Final[int] = 2000
+
+
+def _describe_mngr_exec_failure(stdout: str, stderr: str) -> str:
+    """Explain why an ``mngr exec`` run failed, leading with its structured report.
+
+    ``mngr exec --format json`` puts the per-agent failure in the ``failed_agents``
+    array on *stdout*, leaving stderr to carry only provider-level discovery
+    warnings -- which are routinely about hosts other than the one asked for. So
+    reporting stderr alone hands the caller a reason that is both wrong and
+    alarming ("outer SSH unreachable for host <unrelated id>") while omitting the
+    actual one.
+
+    Those warnings are still real diagnostics, and the caller is an agent on
+    another host that cannot read this one's logs, so they are kept as trailing
+    context rather than dropped -- the verdict just goes first. Reports stderr
+    alone when the envelope is missing or unparseable, which covers a run that
+    died before producing one.
+    """
+    try:
+        failures = json.loads(stdout)["failed_agents"]
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        # Worth surfacing: we asked for --format json, so anything else means
+        # the run died before reporting or the envelope shape has drifted, and
+        # the reason handed to the caller is stderr's warnings rather than the
+        # per-agent verdict.
+        logger.warning("Could not read mngr exec's JSON failure report ({}); reporting stderr alone", e)
+        return stderr.strip()
+    if not isinstance(failures, list):
+        logger.warning("mngr exec's JSON failure report had a non-list 'failed_agents'; reporting stderr alone")
+        return stderr.strip()
+    reasons = [
+        f"{failure.get('agent') or 'agent'}: {failure['error']}"
+        for failure in failures
+        if isinstance(failure, dict) and failure.get("error")
+    ]
+    if not reasons:
+        return stderr.strip()
+    return _with_mngr_context("; ".join(reasons), stderr)
+
+
+def _with_mngr_context(reason: str, stderr: str) -> str:
+    """Append mngr's stderr to a failure reason, labelled and capped."""
+    context = stderr.strip()
+    if not context:
+        return reason
+    if len(context) > _MNGR_CONTEXT_CHAR_LIMIT:
+        context = f"{context[:_MNGR_CONTEXT_CHAR_LIMIT]}... (truncated; see the desktop client log for the rest)"
+    return f"{reason}\nmngr also reported:\n{context}"
+
+
 def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[int, str, str]:
     """Run an ``mngr`` command to completion; return ``(returncode, stdout, stderr)``."""
     cg = parent_cg.make_concurrency_group(name="workspace-lifecycle")
@@ -1173,7 +1228,7 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
     # system-services agent, runs mngr stop --stop-host / start, and sets the
     # optimistic host-state override on success.
     host_action = MindHostAction.START if action == "start" else MindHostAction.STOP
-    succeeded = perform_mind_host_action(
+    outcome = perform_mind_host_action(
         parsed_id,
         host_action,
         backend_resolver,
@@ -1182,8 +1237,9 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
         parent_cg,
         chrome_event_broadcaster=get_state().chrome_event_broadcaster,
     )
-    if not succeeded:
-        return _json_error(f"Could not {action} the workspace host", 502)
+    if not outcome.is_successful:
+        reason = f": {outcome.failure_reason}" if outcome.failure_reason else ""
+        return _json_error(f"Could not {action} the workspace host{reason}", 502)
 
     info = backend_resolver.get_agent_display_info(parsed_id)
     host_state = None
@@ -2176,7 +2232,19 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     except (OSError, ConcurrencyGroupError) as e:
         return _json_error(f"Could not read the target's authorized_keys: {e}", 502)
     if read_returncode != 0:
-        return _json_error(f"Could not read the target's authorized_keys: {read_stderr.strip()}", 502)
+        # The response carries a capped copy; log the whole of it here so the
+        # untruncated output survives locally regardless of what the caller sees.
+        logger.warning(
+            "mngr exec failed reading authorized_keys for {} (rc={}); stdout={} stderr={}",
+            parsed_id,
+            read_returncode,
+            read_stdout.strip(),
+            read_stderr.strip(),
+        )
+        return _json_error(
+            f"Could not read the target's authorized_keys: {_describe_mngr_exec_failure(read_stdout, read_stderr)}",
+            502,
+        )
     try:
         read_result = json.loads(read_stdout)
         existing_authorized_keys = str(read_result["results"][0]["stdout"])
@@ -2192,14 +2260,27 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
         f"printf '%s' {shlex.quote(new_authorized_keys)} > ~/.ssh/authorized_keys; "
         "chmod 600 ~/.ssh/authorized_keys"
     )
-    # Single trailing COMMAND arg (see the read above) -- mngr exec runs it in a shell.
-    write_argv = [mngr_binary, "exec", str(parsed_id), write_script]
+    # Single trailing COMMAND arg (see the read above) -- mngr exec runs it in a
+    # shell. ``--format json`` here is for the failure path only (the write has no
+    # output worth capturing): it puts the per-agent reason somewhere
+    # ``_describe_mngr_exec_failure`` can find it, the same as the read.
+    write_argv = [mngr_binary, "exec", str(parsed_id), write_script, "--format", "json"]
     try:
-        write_returncode, _write_stdout, write_stderr = _run_mngr_blocking(write_argv, parent_cg)
+        write_returncode, write_stdout, write_stderr = _run_mngr_blocking(write_argv, parent_cg)
     except (OSError, ConcurrencyGroupError) as e:
         return _json_error(f"Could not authorize SSH key on the target: {e}", 502)
     if write_returncode != 0:
-        return _json_error(f"Could not authorize SSH key on the target: {write_stderr.strip()}", 502)
+        logger.warning(
+            "mngr exec failed authorizing an SSH key on {} (rc={}); stdout={} stderr={}",
+            parsed_id,
+            write_returncode,
+            write_stdout.strip(),
+            write_stderr.strip(),
+        )
+        return _json_error(
+            f"Could not authorize SSH key on the target: {_describe_mngr_exec_failure(write_stdout, write_stderr)}",
+            502,
+        )
 
     # Decide how the caller reaches the target. A routable (remote) target is
     # connected to directly. A local target's sshd is on the hub's loopback, so

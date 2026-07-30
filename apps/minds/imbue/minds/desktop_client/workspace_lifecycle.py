@@ -14,10 +14,12 @@ from typing import Final
 from typing import assert_never
 
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.chrome_event_broadcast import ChromeEventBroadcaster
 from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_stopped_payload
@@ -46,6 +48,44 @@ class MindHostAction(UpperCaseStrEnum):
     START = auto()
 
 
+class MindHostActionOutcome(FrozenModel):
+    """Whether a host stop/start succeeded, and why it did not.
+
+    Carries ``failure_reason`` so callers can report what mngr actually said.
+    A bare success flag left the API answering "Could not start the workspace
+    host" with no cause, which reads as an unreachable box even when mngr
+    failed for a reason it stated plainly.
+    """
+
+    is_successful: bool = Field(description="True when the host transition completed")
+    failure_reason: str | None = Field(
+        default=None, description="What mngr reported when the action failed; None on success"
+    )
+
+
+def _lead_with_error_lines(stderr: str) -> str:
+    """Reorder an ``mngr`` run's stderr so its verdict comes first.
+
+    A failing run emits its provider-level ``WARNING:`` lines first and its
+    ``ERROR:`` verdict last, and the warnings routinely concern hosts other than
+    the one asked about -- a stale key dir for some long-gone workspace reads as
+    "outer SSH unreachable", which sounds exactly like the box being down. So a
+    reader who takes the output at face value gets the wrong story.
+
+    The defect is the ordering, not the warnings: they are real diagnostics (the
+    stale key dirs above are a genuine bug worth chasing) and dropping them would
+    cost a reader the only copy they have, since a caller on another host cannot
+    read this one's logs. So nothing is filtered -- the ``ERROR:`` lines are
+    promoted ahead of the rest, which follows verbatim.
+    """
+    lines = [line.rstrip() for line in stderr.splitlines() if line.strip()]
+    error_lines = [line for line in lines if line.strip().startswith("ERROR:")]
+    if not error_lines:
+        return stderr.strip()
+    remainder = [line for line in lines if not line.strip().startswith("ERROR:")]
+    return "\n".join([*error_lines, *remainder])
+
+
 def perform_mind_host_action(
     workspace_agent_id: AgentId,
     action: MindHostAction,
@@ -54,8 +94,8 @@ def perform_mind_host_action(
     mngr_host_dir: Path,
     concurrency_group: ConcurrencyGroup,
     chrome_event_broadcaster: ChromeEventBroadcaster,
-) -> bool:
-    """Stop or start one mind's host, running ``mngr`` to completion; return True on success.
+) -> MindHostActionOutcome:
+    """Stop or start one mind's host, running ``mngr`` to completion.
 
     Resolves the workspace to its system-services (primary) agent -- the host's
     stop/start target -- and runs ``mngr stop --stop-host`` / ``mngr start``
@@ -73,7 +113,10 @@ def perform_mind_host_action(
         logger.warning(
             "Could not locate the system-services agent to {} host for {}", action.value, workspace_agent_id
         )
-        return False
+        return MindHostActionOutcome(
+            is_successful=False,
+            failure_reason="could not locate the workspace's system-services agent",
+        )
     info = backend_resolver.get_agent_display_info(workspace_agent_id)
     host_id = HostId(info.host_id) if info is not None else None
     env = dict(os.environ)
@@ -109,8 +152,13 @@ def perform_mind_host_action(
         if host_id is not None:
             backend_resolver.clear_host_state_override(host_id)
             backend_resolver.clear_host_lifecycle_transition(host_id)
-        return False
+        return MindHostActionOutcome(is_successful=False, failure_reason=f"could not run mngr: {exc}")
     if finished.returncode != 0:
+        # mngr's own diagnosis, reordered to lead with its verdict; the warnings
+        # it emits first can name unrelated hosts and read as this host being
+        # unreachable. They are kept -- a caller on another host has no other
+        # copy of them.
+        failure_reason = _lead_with_error_lines(finished.stderr)
         logger.warning(
             "Host {} for {} failed (rc={}): {}",
             action.value,
@@ -121,7 +169,7 @@ def perform_mind_host_action(
         if host_id is not None:
             backend_resolver.clear_host_state_override(host_id)
             backend_resolver.clear_host_lifecycle_transition(host_id)
-        return False
+        return MindHostActionOutcome(is_successful=False, failure_reason=failure_reason)
 
     if host_id is not None:
         match action:
@@ -133,4 +181,4 @@ def perform_mind_host_action(
                 assert_never(unreachable)
     if action is MindHostAction.STOP:
         chrome_event_broadcaster.broadcast(build_workspace_stopped_payload(str(workspace_agent_id)))
-    return True
+    return MindHostActionOutcome(is_successful=True)

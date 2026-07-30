@@ -36,6 +36,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from typing import Final
 from typing import assert_never
@@ -98,6 +99,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.host_dir_layouts import host_dir_fallbacks
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
@@ -164,6 +166,31 @@ def _resolve_fast_path_attributes(attributes: LeaseAttributes) -> LeaseAttribute
     return attributes.model_copy_update(to_update(attributes.field_ref().repo_url, canonical_repo_url))
 
 
+def _read_sftp_file(sftp: paramiko.SFTPClient, path: str) -> bytes:
+    """Read a remote file whole; raises ``FileNotFoundError`` when it is absent."""
+    with sftp.open(path, "r") as remote:
+        return remote.read()
+
+
+def _read_first_existing_host_record(
+    data_json_paths: Sequence[str],
+    read_candidate: Callable[[str], bytes],
+    vps_address: str,
+) -> tuple[bytes, str]:
+    """Return the first candidate's contents and its path; raise if none exist.
+
+    Only a missing file falls through to the next layout -- any other read
+    failure propagates, so a permissions or transport problem is never mistaken
+    for "this host uses the other layout".
+    """
+    for candidate_path in data_json_paths:
+        try:
+            return read_candidate(candidate_path), candidate_path
+        except FileNotFoundError:
+            continue
+    raise MngrError(f"no host record found on leased host {vps_address} at any of: {', '.join(data_json_paths)}")
+
+
 def _rewrite_container_host_name(
     *,
     vps_address: str,
@@ -177,8 +204,15 @@ def _rewrite_container_host_name(
     # pool host and vice versa.
     data_json_paths: Sequence[str],
     connect_timeout_seconds: float = 30.0,
-) -> None:
+) -> str:
     """Rewrite ``data.json``'s ``host_name`` field on the leased container.
+
+    Returns the host_dir the winning candidate lived in. The caller records it:
+    finding the record is the only proof of which layout this pool host was
+    baked with, and without it the host object built next addresses the
+    configured layout instead -- which for a mismatched client means the
+    pre-baked agent's ``data.json`` reads as missing and the adopt fast path
+    silently degrades to a full create against an already-provisioned container.
 
     The pool host's ``<host_dir>/data.json`` was written at bake time with the
     bake's per-bake unique placeholder host name (``pool-<hex>-host``).
@@ -220,23 +254,9 @@ def _rewrite_container_host_name(
     try:
         sftp = client.open_sftp()
         try:
-            # Locate the host record: the first candidate path that exists wins
-            # (only a missing file falls through to the next layout; any other
-            # SFTP failure raises).
-            raw = None
-            data_json_path = None
-            for candidate_path in data_json_paths:
-                try:
-                    with sftp.open(candidate_path, "r") as remote:
-                        raw = remote.read()
-                except FileNotFoundError:
-                    continue
-                data_json_path = candidate_path
-                break
-            if data_json_path is None or raw is None:
-                raise MngrError(
-                    f"no host record found on leased host {vps_address} at any of: {', '.join(data_json_paths)}"
-                )
+            raw, data_json_path = _read_first_existing_host_record(
+                data_json_paths, lambda path: _read_sftp_file(sftp, path), vps_address
+            )
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as exc:
@@ -247,6 +267,7 @@ def _rewrite_container_host_name(
             payload = json.dumps(data, indent=2).encode()
             with sftp.open(data_json_path, "w") as remote:
                 remote.write(payload)
+            return str(PurePosixPath(data_json_path).parent)
         finally:
             try:
                 sftp.close()
@@ -320,6 +341,55 @@ class ImbueCloudProvider(BaseProviderInstance):
 
     def _last_known_agents_path(self, host_id: HostId) -> Path:
         return self._host_state_dir(host_id) / "last_known_agents.json"
+
+    def _resolved_host_dir_path(self, host_id: HostId) -> Path:
+        return self._host_state_dir(host_id) / "resolved_host_dir"
+
+    def _fallback_host_dirs(self) -> tuple[str, ...]:
+        """The other known in-container host_dir layouts, tried after the configured one."""
+        return host_dir_fallbacks(self.host_dir)
+
+    # ------------------------------------------------------------------
+    # Sticky host_dir
+    #
+    # A container is baked with one host_dir layout and keeps it for life, but
+    # the provider config is account-wide, so a client would otherwise address
+    # every host baked under the other layout at a directory it has never had
+    # -- reading no certified data (host stuck UNKNOWN) and, worse,
+    # resolving agent state dirs to nothing, which makes `mngr exec` and
+    # `mngr start` fail with "Agent not found on host" against a perfectly
+    # healthy container. Discovery already resolves the real directory as part
+    # of its one outer-SSH pass, so record it per host and hand it to the host
+    # object as `host_dir_override` (the same per-host mechanism the docker and
+    # lima providers feed from their persisted host records).
+    # ------------------------------------------------------------------
+
+    def _persist_resolved_host_dir(self, host_id: HostId, host_dir: str) -> None:
+        """Record the in-container host_dir a listing pass resolved for this host.
+
+        Best-effort: a write failure is logged, not raised -- discovery must not
+        fail because the cache could not be refreshed; the next reader just
+        falls back to the configured host_dir.
+        """
+        try:
+            atomic_write(self._resolved_host_dir_path(host_id), host_dir)
+        except OSError as exc:
+            logger.warning(
+                "imbue_cloud[{}] could not persist resolved host_dir for host {}: {}", self.name, host_id, exc
+            )
+
+    def _load_resolved_host_dir(self, host_id: HostId) -> Path | None:
+        """Return the recorded in-container host_dir, or None to use the configured one.
+
+        None covers a host never yet discovered by this client and a cache that
+        could not be read, both of which must degrade to the configured value
+        rather than guessing.
+        """
+        try:
+            recorded = self._resolved_host_dir_path(host_id).read_text().strip()
+        except OSError:
+            return None
+        return Path(recorded) if recorded else None
 
     # ------------------------------------------------------------------
     # Sticky agent identity
@@ -628,6 +698,15 @@ class ImbueCloudProvider(BaseProviderInstance):
                 result[host_ref] = agent_refs
                 continue
             self._listing_raw_cache[host_id] = raw
+            # Record which layout this container actually uses while we have a
+            # live answer, so the host objects built later (`mngr exec`,
+            # `mngr start`) address the same directory this pass just read.
+            # Only a pass that found certified data proves the resolution: an
+            # empty container reports the configured default by construction,
+            # which would overwrite a good record with a guess.
+            resolved_host_dir = raw.get("host_dir")
+            if isinstance(resolved_host_dir, str) and resolved_host_dir and raw.get("certified_data"):
+                self._persist_resolved_host_dir(host_id, resolved_host_dir)
             host_state = derive_host_state_from_raw(raw)
             if host_state == HostState.DESTROYED and not include_destroyed:
                 continue
@@ -712,6 +791,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                     host_dir,
                     self.mngr_ctx.config.prefix,
                     window_name=self.mngr_ctx.config.tmux.primary_window_name,
+                    fallback_host_dirs=self._fallback_host_dirs(),
                 )
                 result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
         except HostAuthenticationError as exc:
@@ -1103,6 +1183,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             mngr_ctx=self.mngr_ctx,
             pre_baked_agent_id=agent_id if adopt_pre_baked_agent else None,
             lease_db_id=host_db_id,
+            host_dir_override=self._load_resolved_host_dir(host_id),
         )
         self._evict_cached_host(host_id, replacement=host)
         return host
@@ -1176,6 +1257,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 certified_host_data=certified_host_data,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
+                host_dir_override=self._load_resolved_host_dir(host_id),
             )
         )
 
@@ -1355,16 +1437,23 @@ class ImbueCloudProvider(BaseProviderInstance):
             # placeholder host name; rewrite it to the user-supplied name so
             # the DEFAULT_WORKSPACE_TEMPLATE bootstrap inherits the user's
             # chosen workspace name. Try this provider's configured host_dir
-            # first, then the legacy pre-declutter location, so mixed pool
-            # generations both lease correctly.
-            _rewrite_container_host_name(
+            # first, then the other known layouts, so mixed pool generations
+            # both lease correctly whichever layout this client is configured for.
+            leased_host_dir = _rewrite_container_host_name(
                 vps_address=lease_result.vps_address,
                 container_ssh_port=lease_result.container_ssh_port,
                 private_key_path=final_private_key,
                 known_hosts_path=known_hosts_path,
                 new_host_name=str(name),
-                data_json_paths=tuple(dict.fromkeys((f"{self.host_dir}/data.json", "/mngr/data.json"))),
+                data_json_paths=tuple(
+                    f"{candidate}/data.json" for candidate in (str(self.host_dir), *self._fallback_host_dirs())
+                ),
             )
+            # Record before building the host: the rewrite just proved which
+            # layout this pool host carries, and no discovery pass has run for
+            # it yet, so this is the only thing standing between a mismatched
+            # client and an adopt path that quietly re-provisions the container.
+            self._persist_resolved_host_dir(host_id, leased_host_dir)
             host = self._build_host_object(self._leased_info_from_result(lease_result))
         logger.info(
             "imbue_cloud[{}] FAST PATH: adopted pre-baked agent {} on leased host {}",

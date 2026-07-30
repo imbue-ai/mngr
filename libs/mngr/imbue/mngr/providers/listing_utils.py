@@ -24,6 +24,7 @@ There are two variants:
 import json
 import shlex
 from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
@@ -43,14 +44,57 @@ SEP_PS_END: Final[str] = "---MNGR_PS_END---"
 
 
 @pure
-def build_listing_collection_script(host_dir: str, prefix: str, window_name: str = "agent") -> str:
+def _build_host_dir_resolution_script(host_dir: str, fallback_host_dirs: Sequence[str]) -> str:
+    """Build the prelude that picks the host_dir this host actually uses.
+
+    A host keeps the host_dir it was baked with for life, so the provider config
+    resolved in the current context can name a directory that host has never
+    had. Probing the candidates in order -- configured first, then the rest --
+    lets one client read hosts of either generation.
+
+    The probe is ``data.json``, not directory existence: a failed read against
+    the wrong candidate can *create* that directory as an empty husk (mngr
+    mkdir -p's the state dir on write paths), so existence proves nothing while
+    ``data.json`` is exactly the certified data the caller came for. With no
+    candidate matching, the configured value is used unchanged, which is what a
+    host mid-bootstrap (no data.json yet) needs.
+    """
+    candidates = " ".join(shlex.quote(candidate) for candidate in (host_dir, *fallback_host_dirs))
+    return f"""
+HOST_DIR={shlex.quote(host_dir)}
+for _mngr_candidate in {candidates}; do
+    if [ -f "$_mngr_candidate/data.json" ]; then
+        HOST_DIR="$_mngr_candidate"
+        break
+    fi
+done
+echo "HOST_DIR=$HOST_DIR"
+"""
+
+
+@pure
+def build_listing_collection_script(
+    host_dir: str,
+    prefix: str,
+    window_name: str = "agent",
+    fallback_host_dirs: Sequence[str] = (),
+) -> str:
     """Build a shell script that collects all listing data in one command.
 
     ``window_name`` is the name of the agent's primary tmux window (config
     ``tmux.primary_window_name``); lifecycle detection targets that window by
     name so it works regardless of the user's tmux ``base-index``.
+
+    ``fallback_host_dirs`` are other host_dir locations to fall back to when
+    ``host_dir`` holds no ``data.json`` (see
+    :func:`_build_host_dir_resolution_script`; callers reading a mngr-baked
+    container pass :func:`~imbue.mngr.providers.host_dir_layouts.host_dir_fallbacks`).
+    The resolved directory is echoed as ``HOST_DIR=`` so the caller can record it
+    per host. Defaults to empty: a provider whose hosts only ever use its
+    configured host_dir keeps today's single-candidate behavior.
     """
     return f"""
+{_build_host_dir_resolution_script(host_dir, fallback_host_dirs)}
 # Uptime
 echo "UPTIME=$(cat /proc/uptime 2>/dev/null | awk '{{print $1}}')"
 
@@ -60,15 +104,15 @@ echo "BTIME=$(grep '^btime ' /proc/stat 2>/dev/null | awk '{{print $2}}')"
 # Host lock: held-state (a real flock, probed non-blockingly) and mtime (for
 # display). The lock file persists after release, so existence != held; guard on
 # existence so the probe never creates it.
-echo "LOCK_HELD=$([ -e '{host_dir}/host_lock' ] && ! flock -n '{host_dir}/host_lock' -c true 2>/dev/null && echo true || echo false)"
-echo "LOCK_MTIME=$(stat -c %Y '{host_dir}/host_lock' 2>/dev/null)"
+echo "LOCK_HELD=$([ -e "$HOST_DIR/host_lock" ] && ! flock -n "$HOST_DIR/host_lock" -c true 2>/dev/null && echo true || echo false)"
+echo "LOCK_MTIME=$(stat -c %Y "$HOST_DIR/host_lock" 2>/dev/null)"
 
 # SSH activity mtime
-echo "SSH_ACTIVITY_MTIME=$(stat -c %Y '{host_dir}/activity/ssh' 2>/dev/null)"
+echo "SSH_ACTIVITY_MTIME=$(stat -c %Y "$HOST_DIR/activity/ssh" 2>/dev/null)"
 
 # Host data.json
 echo '{SEP_DATA_JSON_START}'
-cat '{host_dir}/data.json' 2>/dev/null || echo '{{}}'
+cat "$HOST_DIR/data.json" 2>/dev/null || echo '{{}}'
 echo ''
 echo '{SEP_DATA_JSON_END}'
 
@@ -78,8 +122,8 @@ ps -e -o pid=,ppid=,comm= 2>/dev/null
 echo '{SEP_PS_END}'
 
 # Agents
-if [ -d '{host_dir}/agents' ]; then
-    for agent_dir in '{host_dir}/agents'/*/; do
+if [ -d "$HOST_DIR/agents" ]; then
+    for agent_dir in "$HOST_DIR/agents"/*/; do
         [ -d "$agent_dir" ] || continue
         data_file="${{agent_dir}}data.json"
         [ -f "$data_file" ] || continue
@@ -171,6 +215,7 @@ def build_outer_listing_collection_script(
     prefix: str,
     host_id_label: str = "com.imbue.mngr.host-id",
     window_name: str = "agent",
+    fallback_host_dirs: Sequence[str] = (),
 ) -> str:
     """Build a script that runs on the outer (VPS root) and collects listing data.
 
@@ -183,9 +228,15 @@ def build_outer_listing_collection_script(
     Always prepends ``CONTAINER_STATE=`` and ``CONTAINER_EXIT_CODE=`` lines so
     the caller can map the docker container status to a ``HostState`` without
     a second round-trip.
+
+    ``fallback_host_dirs`` are other host_dir locations to try when ``host_dir``
+    holds no ``data.json``; both branches emit the ``HOST_DIR=`` they settled on,
+    always as a path *inside the container* (the stopped branch reports the
+    source of the copy, not the outer temp path it was extracted to).
     """
-    inner_running = build_listing_collection_script(host_dir, prefix, window_name)
+    inner_running = build_listing_collection_script(host_dir, prefix, window_name, fallback_host_dirs)
     inner_stopped = _build_stopped_listing_collection_script(prefix)
+    candidate_host_dirs = " ".join(shlex.quote(candidate) for candidate in (host_dir, *fallback_host_dirs))
     quoted_host_id = shlex.quote(str(host_id))
     quoted_host_dir = shlex.quote(host_dir)
     quoted_label = shlex.quote(host_id_label)
@@ -209,16 +260,36 @@ if [ "$STATE" = "running" ]; then
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/extract"
-if ! docker cp "$CID":{quoted_host_dir} "$TMP/extract/" 2>/dev/null; then
+# A stopped container cannot be exec'd into, so the candidates are tried by
+# copying each out in turn and keeping the first that carries a data.json.
+# ``docker cp`` of an absent path fails outright, so the loop doubles as the
+# existence probe the running branch does with a stat.
+EXTRACTED=
+RESOLVED_HOST_DIR={quoted_host_dir}
+for _mngr_candidate in {candidate_host_dirs}; do
+    _mngr_dest="$TMP/extract-$(echo "$_mngr_candidate" | tr -c 'A-Za-z0-9' '_')"
+    mkdir -p "$_mngr_dest"
+    docker cp "$CID":"$_mngr_candidate" "$_mngr_dest/" 2>/dev/null || continue
+    _mngr_extracted="$_mngr_dest/$(basename "$_mngr_candidate")"
+    [ -d "$_mngr_extracted" ] || continue
+    if [ -z "$EXTRACTED" ]; then
+        # Remember the first readable candidate, so a set of candidates that
+        # all lack a data.json still reports the same tree today's single-path
+        # extraction would have.
+        EXTRACTED="$_mngr_extracted"
+        RESOLVED_HOST_DIR="$_mngr_candidate"
+    fi
+    if [ -f "$_mngr_extracted/data.json" ]; then
+        EXTRACTED="$_mngr_extracted"
+        RESOLVED_HOST_DIR="$_mngr_candidate"
+        break
+    fi
+done
+if [ -z "$EXTRACTED" ]; then
     echo "EXTRACTION_FAILED=true"
     exit 0
 fi
-EXTRACTED="$TMP/extract/$(basename {quoted_host_dir})"
-if [ ! -d "$EXTRACTED" ]; then
-    echo "EXTRACTION_FAILED=true"
-    exit 0
-fi
+echo "HOST_DIR=$RESOLVED_HOST_DIR"
 HOST_DIR="$EXTRACTED" bash <<'{_INNER_STOPPED_EOF}'
 {inner_stopped}
 {_INNER_STOPPED_EOF}
@@ -303,7 +374,14 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
     while idx < len(lines):
         line = lines[idx]
 
-        if line.startswith("UPTIME=") and "uptime_seconds" not in result:
+        if line.startswith("HOST_DIR=") and "host_dir" not in result:
+            # The host_dir the script settled on, as a path inside the host.
+            # Absent when the script never got far enough to resolve one
+            # (container missing, extraction failed), so consumers must treat
+            # it as optional and fall back to their configured value.
+            host_dir_value = line[len("HOST_DIR=") :].strip()
+            result["host_dir"] = host_dir_value if host_dir_value else None
+        elif line.startswith("UPTIME=") and "uptime_seconds" not in result:
             result["uptime_seconds"] = parse_optional_float(line[len("UPTIME=") :])
         elif line.startswith("BTIME=") and "btime" not in result:
             result["btime"] = parse_optional_int(line[len("BTIME=") :])

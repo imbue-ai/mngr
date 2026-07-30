@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -44,6 +45,7 @@ from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
+from imbue.mngr_imbue_cloud.providers.instance import _read_first_existing_host_record
 from imbue.mngr_imbue_cloud.providers.instance import _resolve_fast_path_attributes
 from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
 
@@ -1038,3 +1040,153 @@ def test_reattached_identity_flows_through_to_agent_details(temp_mngr_ctx: MngrC
     agent_details = agent_details_list[0]
     assert str(agent_details.name) == "primary-agent"
     assert agent_details.labels["is_primary"] == "true"
+
+
+# =============================================================================
+# Sticky host_dir: a container is baked with one host_dir layout and keeps it
+# for life, but the provider config is account-wide. Discovery resolves the real
+# location as part of its one outer-SSH pass; recording it per host is what lets
+# the later operations (`mngr exec`, `mngr start`, the minds SSH broker) address
+# the same directory rather than the account-wide default.
+# =============================================================================
+
+
+def _raw_at_host_dir(host_dir: str) -> dict[str, Any]:
+    raw = _raw_with_agents([_agent_data("primary-agent", {"is_primary": "true"}, "codex")])
+    return {**raw, "host_dir": host_dir}
+
+
+def test_discovery_records_the_host_dir_a_pre_declutter_host_actually_uses(temp_mngr_ctx: MngrContext) -> None:
+    """The recorded location must survive into a fresh provider instance.
+
+    Every `mngr exec` is its own process, so an in-memory answer would be lost
+    before the host object that needs it is built -- which is exactly how a
+    healthy old workspace ended up failing with "Agent not found on host".
+    """
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+
+    discovering = _make_sequenced_provider(lease, [(_raw_at_host_dir("/mngr"), None, False)], temp_mngr_ctx)
+    discovering.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    later = _make_sequenced_provider(lease, [], temp_mngr_ctx)
+    assert later.to_offline_host(host_id).host_dir == Path("/mngr")
+
+
+def test_a_host_with_no_recorded_dir_defers_to_the_provider_default(temp_mngr_ctx: MngrContext) -> None:
+    """A host this client has never discovered must not be guessed at."""
+    host_id = HostId.generate()
+    provider = _make_sequenced_provider(_make_lease(host_id), [], temp_mngr_ctx)
+
+    assert provider.to_offline_host(host_id).host_dir_override is None
+
+
+def test_an_unreadable_pass_does_not_overwrite_the_recorded_host_dir(temp_mngr_ctx: MngrContext) -> None:
+    """Only a pass that found certified data proves where the host_dir is.
+
+    A container whose inner data could not be read reports the configured
+    default by construction, so trusting it would let one bad pass overwrite a
+    good record with a guess -- and re-break every later exec and start.
+    """
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    unreadable = {
+        "container_state": RUNNING_CONTAINER_STATE,
+        "certified_data": {},
+        "agents": [],
+        "host_dir": "/home/user/.mngr",
+    }
+    provider = _make_sequenced_provider(
+        lease, [(_raw_at_host_dir("/mngr"), None, False), (unreadable, None, False)], temp_mngr_ctx
+    )
+
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    assert provider.to_offline_host(host_id).host_dir == Path("/mngr")
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_fallback"),
+    [("/home/user/.mngr", "/mngr"), ("/mngr", "/home/user/.mngr")],
+)
+def test_the_listing_probe_offers_the_other_layout_whichever_one_is_configured(
+    configured: str, expected_fallback: str, temp_mngr_ctx: MngrContext
+) -> None:
+    """The candidate list must not assume the client is on the newer layout.
+
+    ``ImbueCloudProviderConfig.host_dir`` still defaults to ``/mngr`` -- only a
+    minds-authored account block names ``/home/user/.mngr``. A bare CLI therefore
+    resolves the old layout, and offering it no candidates left it unable to read
+    any host baked under the new one.
+    """
+    provider = _SequencedListingProvider.model_construct(
+        name=_STICKY_PROVIDER_NAME,
+        mngr_ctx=temp_mngr_ctx,
+        host_dir=Path(configured),
+        _lease=_make_lease(HostId.generate()),
+        _responses=[],
+    )
+
+    assert provider._fallback_host_dirs() == (expected_fallback,)
+
+
+def _reader_over(present: dict[str, bytes]) -> Callable[[str], bytes]:
+    def read(path: str) -> bytes:
+        if path not in present:
+            raise FileNotFoundError(path)
+        return present[path]
+
+    return read
+
+
+def test_leasing_reports_the_layout_the_pool_host_was_actually_baked_with() -> None:
+    """The winning candidate's path is what tells the lease which layout it got.
+
+    A fresh lease has no discovery pass behind it, so this is the only proof of
+    the layout available before the host object is built. Losing it left a
+    mismatched client addressing the configured directory, where the pre-baked
+    agent's data.json reads as missing and the adopt fast path silently
+    re-provisions an already-provisioned container.
+    """
+    raw, path = _read_first_existing_host_record(
+        ("/home/user/.mngr/data.json", "/mngr/data.json"),
+        _reader_over({"/mngr/data.json": b"{}"}),
+        "203.0.113.7",
+    )
+
+    assert raw == b"{}"
+    assert path == "/mngr/data.json"
+
+
+def test_leasing_prefers_the_configured_layout_when_both_records_exist() -> None:
+    """Candidates are ordered by the caller; the first hit wins, never a later one."""
+    _raw, path = _read_first_existing_host_record(
+        ("/home/user/.mngr/data.json", "/mngr/data.json"),
+        _reader_over({"/home/user/.mngr/data.json": b"{}", "/mngr/data.json": b"{}"}),
+        "203.0.113.7",
+    )
+
+    assert path == "/home/user/.mngr/data.json"
+
+
+def test_a_read_failure_other_than_a_missing_file_is_not_read_as_the_other_layout() -> None:
+    """Only FileNotFoundError means "not this layout".
+
+    A permissions or transport error must surface, not silently demote the
+    configured layout and hand back the wrong directory to record.
+    """
+
+    def read(path: str) -> bytes:
+        raise PermissionError(path)
+
+    with pytest.raises(PermissionError):
+        _read_first_existing_host_record(("/home/user/.mngr/data.json", "/mngr/data.json"), read, "203.0.113.7")
+
+
+def test_no_host_record_at_any_candidate_is_an_error() -> None:
+    """Every candidate missing means the lease cannot proceed, not a default guess."""
+    with pytest.raises(MngrError, match="no host record found"):
+        _read_first_existing_host_record(
+            ("/home/user/.mngr/data.json", "/mngr/data.json"), _reader_over({}), "203.0.113.7"
+        )
