@@ -214,7 +214,7 @@
 
     function render() {
       var branchSummary =
-        branch === 'create' ? 'Create a new workspace'
+        branch === 'create' ? 'Create a new machine'
         : branch === 'add' ? 'Add to an existing workspace'
         : '';
       setStep(el.s1, {present: true, active: activeStep === 1, done: activeStep > 1, summary: branchSummary});
@@ -731,8 +731,8 @@
             </span>
           </div>
           <div data-step-body class="flex flex-col gap-3 mt-4">
-            <Button variant="secondary" block id="choose-new-workspace">Create a new workspace</Button>
-            <Button variant="secondary" block id="choose-add-existing">Add to an existing workspace</Button>
+            <Button variant="secondary" block id="choose-new-workspace">Create a new machine</Button>
+            <Button variant="secondary" block id="choose-add-existing">Add to an existing machine</Button>
           </div>
         </div>
       </div>
@@ -757,7 +757,7 @@
               <span data-step-summary-text></span>
             </span>
           </div>
-          <div data-step-body class="mt-4" role="radiogroup" aria-label="Where to run your workspace">
+          <div data-step-body class="mt-4" role="radiogroup" aria-label="Where to run your machine">
             <CreatePresetCards selected_preset="" />
           </div>
         </div>
@@ -806,7 +806,7 @@
                     {% for acct in accounts %}
                       <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
                     {% endfor %}
-                    <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
+                    <option value=""{% if not default_account_id %} selected{% endif %}>No account (private machine)</option>
                   </Select>
                 </div>
               </div>
@@ -902,7 +902,7 @@
           </div>
           <div data-step-body class="mt-4">
             <p class="type-body text-secondary mb-4">
-              You'll paste this into the chat of the workspace you want to add
+              You'll paste this into the chat of the machine you want to add
               this Inspiration to.
             </p>
             <CopyField :value="'/use-inspiration ' ~ git_url" id="inspiration-skill-message" aria-label="Inspiration chat message" extra="copy-box cursor-pointer">
@@ -910,7 +910,7 @@
             </CopyField>
             {% if branch %}
               <p class="type-helper text-tertiary mt-2">
-                The link's branch ({{ branch }}) applies only when creating a new workspace;
+                The link's branch ({{ branch }}) applies only when creating a new machine;
                 the message above always uses the Inspiration's published version.
               </p>
             {% endif %}
@@ -927,7 +927,7 @@
           <span data-step-connector class="absolute hidden"></span>
         </div>
         <div class="flex-1 pb-6 min-w-0">
-          <h2 data-step-title class="type-heading text-primary flex items-center min-h-8">Select a workspace</h2>
+          <h2 data-step-title class="type-heading text-primary flex items-center min-h-8">Select a machine</h2>
           {# Collapsed answer: a check + the chosen option, tucked close under
              its question with extra room below so it clearly groups with the
              question it answers (hidden toggle on this block; flex on inner to
@@ -965,7 +965,7 @@
               </div>
             {% else %}
               <p class="type-body text-secondary">
-                You don't have any workspaces yet.
+                You don't have any machines yet.
                 <a href="#" id="inspiration-empty-to-new" class="text-accent hover:underline">Create a new one from this Inspiration</a> instead.
               </p>
             {% endif %}

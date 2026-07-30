@@ -41,8 +41,10 @@ const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http:
   <button id="back-btn" hidden></button><button id="home-btn"></button>
   <div id="ws-crumb" hidden>
     <button id="workspace-switcher-btn"><span id="workspace-switcher-name"></span></button>
-    <button id="ws-tab-workspace"></button>
-    <button id="ws-tab-settings"></button>
+    <div id="ws-tab-strip">
+      <button id="ws-tab-share"></button>
+      <button id="ws-tab-settings"></button>
+    </div>
   </div>
   <div id="page-crumb" hidden><span id="page-crumb-name"></span></div>
   <button id="min-btn"></button><button id="max-btn"></button><button id="close-btn"></button>
@@ -53,6 +55,7 @@ const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http:
   <script>
     window.__nav = [];
     window.__help = [];
+    window.__wsOptions = [];
     window.__cb = {};
     window.mindsAccent = { get: function (id, cb) { cb('#ffffff'); }, pickForeground: function () { return '0 0 0'; } };
     window.minds = {
@@ -64,6 +67,7 @@ const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http:
       navigateContent: function (url) { window.__nav.push(url); },
       toggleHelp: function (agentId, assistAvailable) { window.__help.push({ agentId: agentId, assistAvailable: assistAvailable }); },
       toggleSidebar: function () {},
+      openWorkspaceOptions: function (agentId, tab, anchor) { window.__wsOptions.push({ agentId: agentId, tab: tab, anchor: anchor }); },
       minimize: function () {}, maximize: function () {}, close: function () {},
       contentGoBack: function () {},
     };

@@ -19,6 +19,11 @@
 #}
 {% if not has_account %}
   <Associate :agent_id="agent_id" :accounts="accounts" :redirect_url="redirect_url" />
+  {# associate.js reports its wait inside the Associate button, so the button
+     busy helper has to be here too. Both are ``defer``, so document order is
+     the load order. #}
+  <script src="/_static/button_busy.js" defer></script>
+  <script src="/_static/associate.js" defer></script>
 {% else %}
 
   {# Same structure as the page always had: a loading line while sharing.js

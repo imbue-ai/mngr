@@ -1,0 +1,45 @@
+{#def dismiss, backdrop_id="", max_width="max-w-lg", card_extra="" #}
+{#
+  The centered dialog every overlay-hosted modal page draws: a dimming
+  full-window backdrop, a card centered on it, and the close X. Sign-in,
+  Accounts, a plan, Minds Settings, sharing and the workspace options panel
+  all had their own copy of this shape, which is how they drifted apart on
+  padding and corner radius.
+
+  The card's surface, padding (p-8) and radius are FIXED here on purpose --
+  they are what make an overlay dialog look like one, and a caller that wants
+  its own is the drift this component exists to stop. What legitimately varies
+  is size, so that is what the props cover.
+
+  ``dismiss`` is a JS expression, not a function name: each page defines its
+  own dismisser (the shell's closeModal in Electron, a navigation in browser
+  mode). It runs on the X and on a backdrop click -- the target check keeps a
+  click INSIDE the card from dismissing it, which every page previously wired
+  by hand in its own inline script.
+
+  ``max_width`` is a Tailwind width utility (``max-w-lg`` … ``max-w-4xl``, or
+  an arbitrary ``max-w-[880px]``). ``card_extra`` carries the height/layout
+  the page needs: a fixed ``h-[85vh] flex flex-col`` for one that pins a
+  header and scrolls its body, ``max-h-[85vh] overflow-y-auto`` for one that
+  simply grows to fit, or nothing at all for a short dialog.
+
+  Any other attribute on the tag (a ``data-*`` the page's script reads off the
+  backdrop, say) flows through to the backdrop element via JinjaX's ``attrs``
+  passthrough.
+
+  Drawers and menus on this surface (the inbox, the workspace switcher) are
+  NOT dialogs and do not belong here -- they are edge-anchored, sized to their
+  content, and have their own chrome.
+#}
+<div {% if backdrop_id %}id="{{ backdrop_id }}"{% endif %} {{ attrs.render() }}
+     onclick="if (event.target === this) { {{ dismiss }} }"
+     class="fixed inset-0 flex items-start justify-center overflow-y-auto bg-surface-overlay p-4">
+  {# items-start + overflow-y-auto + my-auto, not items-center: a card taller
+     than the window (the sign-up form on a short screen) is centered while it
+     fits and scrolls once it does not. Centering alone clipped it off both
+     ends with no way to reach either. #}
+  <div class="relative my-auto bg-surface-primary rounded-lg shadow-overlay {{ max_width }} w-full p-8 text-left {{ card_extra }}">
+    <DialogCloseButton :onclick="dismiss" />
+    {{ content }}
+  </div>
+</div>

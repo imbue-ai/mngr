@@ -153,9 +153,9 @@ def test_read_destroying_status_done_when_pid_dead_and_host_gone(tmp_path: Path)
 def test_read_destroying_status_failed_when_pid_dead_but_host_still_active(tmp_path: Path) -> None:
     """The exact silent-orphan bug: the wrapper exited but the host is still up.
 
-    Models a destroy that tore down only the workspace agent (or otherwise
+    Models a destroy that tore down only the machine agent (or otherwise
     failed) while the host kept running -- it must read as FAILED, not DONE, so
-    the workspace stays visible instead of leaking a still-running host.
+    the machine stays visible instead of leaking a still-running host.
     """
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()

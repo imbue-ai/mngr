@@ -67,6 +67,9 @@ contextBridge.exposeInMainWorld('minds', {
 
   // Modal overlay close (used by the overlay-hosted modal pages)
   closeModal: () => ipcRenderer.send('close-modal'),
+  // Like closeModal, but re-renders the modal underneath: for a detour that
+  // changed what that modal shows (a completed sign-in).
+  completeModalDetour: () => ipcRenderer.send('complete-modal-detour'),
 
   // Centered app-level modals on the shared overlay surface. Used by
   // overlay-hosted pages (the workspace switcher's account entry, the
@@ -88,6 +91,14 @@ contextBridge.exposeInMainWorld('minds', {
   // the chrome surface). main re-validates both ids before building the URL.
   openSharingModal: (agentId, serviceName) =>
     ipcRenderer.send('open-sharing-modal', agentId, serviceName),
+
+  // Workspace options panel (the tabbed Share / Settings panel docked under
+  // the titlebar). ``tab`` is 'share' or 'settings'; ``anchor`` is the
+  // titlebar icon-tab strip's viewport rect { x, y, width, height } so the
+  // panel can draw its own tab strip exactly where that strip sits (the
+  // same anchor trick toggleSidebar uses). main re-validates everything.
+  openWorkspaceOptions: (agentId, tab, anchor) =>
+    ipcRenderer.send('open-workspace-options', agentId, tab, anchor),
 
   // Landing-page Stop button: ask main to show a native stop confirmation and
   // issue the host stop itself (the SSE drives the row). Trusted local page on
@@ -115,6 +126,9 @@ contextBridge.exposeInMainWorld('minds', {
   // replay the cached chrome state into that frame (the sidebar's workspace list,
   // the inbox's request count) without waiting for the next SSE push.
   overlayModalLoaded: (id) => ipcRenderer.send('overlay-modal-loaded', id),
+  // Reports which modal a pop revealed ('' when the stack was empty), so main
+  // can close the overlay outright in that case.
+  overlayModalPopped: (id) => ipcRenderer.send('overlay-modal-popped', id),
 
   // Custom titlebar tooltips. The chrome view computes a trigger's
   // viewport-relative rect and its label, and main forwards it to the overlay

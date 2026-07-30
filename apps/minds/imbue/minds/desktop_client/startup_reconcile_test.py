@@ -86,7 +86,7 @@ def _make_record(
         request=PendingCreateAttemptRequest(
             repo_source="https://example.com/repo.git",
             host_name="foo",
-            display_name="Foo Workspace",
+            display_name="Foo Machine",
             launch_mode=LaunchMode.LIMA,
             account_id=account_id,
             account_email=f"{account_id}@example.com" if account_id else "",

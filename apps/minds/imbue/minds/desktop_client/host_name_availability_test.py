@@ -3,7 +3,7 @@
 Covers the snapshot-reading helper (``create_helpers.taken_host_names_on_provider``)
 and the cookie-only ``GET /api/v1/desktop/host-name-available`` endpoint that the
 create form's Name field polls for live feedback: provider/account scoping,
-exclusion of destroyed workspaces, and case-insensitive matching.
+exclusion of destroyed machines, and case-insensitive matching.
 """
 
 import json
@@ -42,7 +42,7 @@ _ACCOUNT_PROVIDER = "imbue_cloud_alice-imbue-com"
 
 
 def _workspace_agent(host_id: HostId, agent_id: AgentId, name: str, provider: str) -> DiscoveredAgent:
-    """A primary (``is_primary``) workspace agent. Its host name is supplied separately
+    """A primary (``is_primary``) machine agent. Its host name is supplied separately
     via the resolver's ``host_name_by_host_id`` map (the canonical source), not a label."""
     return DiscoveredAgent(
         host_id=host_id,
@@ -54,7 +54,7 @@ def _workspace_agent(host_id: HostId, agent_id: AgentId, name: str, provider: st
 
 
 def _resolver_with_sample_workspaces() -> MngrCliBackendResolver:
-    """A resolver holding three workspaces: docker active, docker destroyed, imbue_cloud active."""
+    """A resolver holding three machines: docker active, docker destroyed, imbue_cloud active."""
     resolver = MngrCliBackendResolver()
     active_host = HostId.generate()
     destroyed_host = HostId.generate()

@@ -41,7 +41,7 @@ def test_document_navigation_to_unknown_path_renders_the_friendly_404_page(tmp_p
     body = response.get_data(as_text=True)
     assert "Page not found" in body
     # The whole point: the page always offers a way back to the workspace list.
-    assert "Back to workspaces" in body
+    assert "Back to machines" in body
     assert 'href="/"' in body
 
 
@@ -56,7 +56,7 @@ def test_document_navigation_to_post_only_route_renders_the_friendly_405_page(tm
     body = response.get_data(as_text=True)
     # The apostrophe in "can't" is HTML-escaped, so match around it.
     assert "be opened as a page." in body
-    assert "Back to workspaces" in body
+    assert "Back to machines" in body
 
 
 def test_fetch_style_request_keeps_the_raw_404(tmp_path: Path) -> None:
@@ -67,7 +67,7 @@ def test_fetch_style_request_keeps_the_raw_404(tmp_path: Path) -> None:
     response = client.get("/no-such-page", headers={"Sec-Fetch-Dest": "empty", "Accept": "*/*"})
 
     assert response.status_code == 404
-    assert "Back to workspaces" not in response.get_data(as_text=True)
+    assert "Back to machines" not in response.get_data(as_text=True)
 
 
 def test_accept_header_fallback_detects_a_navigation_without_sec_fetch_dest(tmp_path: Path) -> None:
@@ -79,6 +79,6 @@ def test_accept_header_fallback_detects_a_navigation_without_sec_fetch_dest(tmp_
     fetch_like = client.get("/no-such-page", headers={"Accept": "*/*"})
 
     assert navigation.status_code == 404
-    assert "Back to workspaces" in navigation.get_data(as_text=True)
+    assert "Back to machines" in navigation.get_data(as_text=True)
     assert fetch_like.status_code == 404
-    assert "Back to workspaces" not in fetch_like.get_data(as_text=True)
+    assert "Back to machines" not in fetch_like.get_data(as_text=True)

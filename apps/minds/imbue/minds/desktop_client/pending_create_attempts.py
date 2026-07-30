@@ -269,7 +269,7 @@ class PendingCreateAttemptStore(MutableModel):
             if record.agent_id is not None and record.agent_id in known_agent_id_strs:
                 if self.delete_record(create_attempt_id):
                     logger.debug(
-                        "Deleted pending-create-attempt record {} (workspace {} confirmed)",
+                        "Deleted pending-create-attempt record {} (machine {} confirmed)",
                         create_attempt_id,
                         record.agent_id,
                     )

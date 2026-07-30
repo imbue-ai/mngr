@@ -29,7 +29,7 @@ class _FakeContentPage:
     """A candidate WebContentsView page; the waiter's page scan only reads ``url``.
 
     ``urls`` is consumed one entry per read; the final entry repeats so a steady
-    state (or a workspace that appears after N polls) can be expressed as a list.
+    state (or a machine that appears after N polls) can be expressed as a list.
     """
 
     def __init__(self, urls: Sequence[str]) -> None:
@@ -114,10 +114,10 @@ def test_wait_returns_the_content_page_that_reached_the_workspace() -> None:
 
 
 def test_wait_returns_for_https_workspace_url() -> None:
-    """The workspace origin is https when the proxy serves TLS + HTTP/2 (the default).
+    """The machine origin is https when the proxy serves TLS + HTTP/2 (the default).
 
     The ready-check must recognize that scheme, not just http -- otherwise the
-    waiter never sees the workspace as ready and times out even though it loaded.
+    waiter never sees the machine as ready and times out even though it loaded.
     """
     https_ready_url = "https://agent-deadbeef.localhost:8421/"
     workspace = _FakeContentPage(urls=[https_ready_url])

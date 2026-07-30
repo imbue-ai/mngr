@@ -372,7 +372,7 @@ class BackupReaperManager(MutableModel):
             return False
         canonical_env_path(self.paths, agent_id).unlink(missing_ok=True)
         logger.info(
-            "Reaped destroyed workspace backup: {} ({}), destroyed {}",
+            "Reaped destroyed machine backup: {} ({}), destroyed {}",
             candidate.display_name,
             candidate.agent_id,
             candidate.destroyed_at.isoformat(),
@@ -500,7 +500,7 @@ def evict_oldest_reapable_backup(
             logger.warning("Evicted {}'s bucket but could not remove its record: {}", candidate.agent_id, e)
         canonical_env_path(paths, agent_id).unlink(missing_ok=True)
         logger.info(
-            "Evicted destroyed workspace backup to free quota: {} ({}), destroyed {}",
+            "Evicted destroyed machine backup to free quota: {} ({}), destroyed {}",
             candidate.display_name,
             candidate.agent_id,
             candidate.destroyed_at.isoformat(),

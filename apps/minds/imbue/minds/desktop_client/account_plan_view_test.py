@@ -39,15 +39,15 @@ def test_build_account_plan_view_maps_every_quota_row() -> None:
     assert view["plan_display_name"] == "Explorer"
     assert view["available_plans"] == ["ally", "explorer"]
     rows_by_label = {row["label"]: row for row in view["usage_rows"]}
-    assert rows_by_label["Remote workspaces"]["used"] == "1"
-    assert rows_by_label["Remote workspaces"]["limit"] == "2"
+    assert rows_by_label["Remote machines"]["used"] == "1"
+    assert rows_by_label["Remote machines"]["limit"] == "2"
     assert rows_by_label["Shared links (tunnels)"]["used"] == "3"
     assert "10" in rows_by_label["Shared links (tunnels)"]["note"]
     assert rows_by_label["Backup storage"]["used"] == "1.5 GB"
     assert rows_by_label["Backup storage"]["limit"] == "50.0 GB"
     assert rows_by_label["AI spend (Imbue Cloud)"]["used"] == "$12.35"
     assert rows_by_label["AI spend (Imbue Cloud)"]["limit"] == "$0.00 / month"
-    assert rows_by_label["Synced workspaces"]["used"] == "4"
+    assert rows_by_label["Synced machines"]["used"] == "4"
 
 
 def test_build_account_plan_view_flags_over_storage_quota() -> None:
@@ -72,5 +72,5 @@ def test_build_account_plan_view_tolerates_missing_fields() -> None:
     assert view["plan_name"] == ""
     assert view["available_plans"] == []
     rows_by_label = {row["label"]: row for row in view["usage_rows"]}
-    assert rows_by_label["Remote workspaces"]["used"] == "0"
+    assert rows_by_label["Remote machines"]["used"] == "0"
     assert rows_by_label["Backup storage"]["limit"] == "0.0 GB"

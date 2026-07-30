@@ -148,8 +148,8 @@ class _AgentRecord(MutableModel):
             "Whether the in-flight RESTARTING restart is start-only (an idempotent ``mngr start`` "
             "that may be a no-op) rather than a full stop+start bounce. Set when a restart wins the "
             "RESTARTING transition and read only while RESTARTING -- the recovery page picks its "
-            "restarting-state copy from it (a full manual bounce reads as 'Restarting your workspace', "
-            "a start-only entry dispatch as the neutral 'Loading workspace'). None outside a restart."
+            "restarting-state copy from it (a full manual bounce reads as 'Restarting your machine', "
+            "a start-only entry dispatch as the neutral 'Loading machine'). None outside a restart."
         ),
     )
 
@@ -450,8 +450,8 @@ class SystemInterfaceHealthTracker(MutableModel):
         Only meaningful while the agent is RESTARTING; returns None otherwise so a
         stale value from a prior restart is never read. The recovery page uses it
         to pick the restarting-state copy -- a full manual bounce reads as
-        "Restarting your workspace", a start-only entry dispatch (which may be a
-        no-op) as the neutral "Loading workspace".
+        "Restarting your machine", a start-only entry dispatch (which may be a
+        no-op) as the neutral "Loading machine".
         """
         with self._lock:
             record = self._records.get(str(agent_id))

@@ -320,7 +320,7 @@ def _auth_error_response(exc: AuthBackendError | ImbueCloudCliError) -> Response
 # enable the remote (Imbue Cloud) compute preset. Used when no explicit
 # ``?message=`` is supplied alongside a ``return_to``.
 _REMOTE_SIGNIN_EXPLAINER: Final[str] = (
-    "Sign in or create an Imbue account to run your workspace on Imbue Cloud. "
+    "Sign in or create an Imbue account to run your machine on Imbue Cloud. "
     "You can also go back and run it directly on your computer."
 )
 
@@ -536,7 +536,18 @@ def _handle_signin_modal_page() -> Response:
     """
     return_to = safe_local_redirect_path(request.args.get("return_to")) or "/create"
     default_to_signup = request.args.get("mode") != "signin"
-    return make_html_response(render_signin_modal_page(return_to=return_to, default_to_signup=default_to_signup))
+    # ``?restore=1`` means this sign-in displaced another modal (the workspace
+    # options panel), which the shell will put back. Handing back is only safe
+    # once the one-time error-reporting consent has been answered: while it is
+    # outstanding /post-login forces every destination to "/" so the gate is
+    # answered first, and a restored panel would cover it.
+    minds_config = get_state().minds_config
+    can_restore = request.args.get("restore") == "1" and (
+        minds_config is None or minds_config.get_error_reporting_consent_given()
+    )
+    return make_html_response(
+        render_signin_modal_page(return_to=return_to, default_to_signup=default_to_signup, can_restore=can_restore)
+    )
 
 
 def _handle_check_email_page() -> Response:

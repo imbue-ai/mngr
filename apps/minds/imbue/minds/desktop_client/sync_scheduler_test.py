@@ -47,7 +47,7 @@ def _make_fresh_device_scheduler(base: Path, cli: FakeImbueCloudCli) -> Workspac
 
 
 def _push_remote_workspace_record(base: Path, cli: FakeImbueCloudCli, user_id: str, name: str) -> None:
-    """Simulate another device having synced one active workspace for the account."""
+    """Simulate another device having synced one active machine for the account."""
     _, session_store = _make_device(base, f"pusher-{uuid4().hex}", cli)
     agent_id = AgentId.generate()
     host_id = HostId.generate()

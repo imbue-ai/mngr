@@ -25,7 +25,7 @@
   The titlebar CONTEXT can likewise be rendered server-side so the first paint
   already shows the right breadcrumb instead of flashing the bare home state
   until chrome.js derives it: ``crumb_workspace_name`` + ``crumb_agent_id`` +
-  ``active_tab`` ('workspace' | 'settings') pre-open the workspace crumb, or
+  ``active_tab`` ('share' | 'settings') pre-open the workspace crumb, or
   ``page_label`` pre-fills the "/ page-name" crumb; ``show_back`` unhides the
   contextual back arrow. chrome.js re-derives the same values from the URL at
   boot (idempotent -- no visual change), and owns every later update.
@@ -89,6 +89,12 @@
      `modal-state-changed` over IPC and chrome.js toggles the
      ``modal-open`` body class accordingly. */
   body.modal-open #minds-titlebar { -webkit-app-region: no-drag; }
+  /* The docked workspace-options panel renders its own tab strip at this
+     strip's exact window rect (chrome.js measures it and main packs it into
+     the panel's URL). Hide ours while that panel is up or the two would
+     ghost through each other -- by visibility, so the crumb keeps its box
+     and the rect the panel was given stays true. */
+  body.ws-options-open #ws-tab-strip > button { visibility: hidden; }
 </style>
 {%- if head %}
 {{ head }}
@@ -162,13 +168,22 @@
       </TitlebarButton>
       <div id="ws-crumb" class="flex items-center min-w-0"{% if not crumb_agent_id %} hidden{% endif %}>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>
-        <TitlebarButton id="workspace-switcher-btn" aria-label="Switch workspace" data-tooltip="Switch workspace" variant="crumb" extra="gap-1 min-w-0">
+        <TitlebarButton id="workspace-switcher-btn" aria-label="Switch machine" data-tooltip="Switch machine" variant="crumb" extra="gap-1 min-w-0">
           <span id="workspace-switcher-name" class="type-label truncate max-w-[180px]"{% if crumb_agent_id %} data-agent-id="{{ crumb_agent_id }}"{% endif %}>{{ crumb_workspace_name }}</span>
           <Icon16 name="chevron-down-small" extra="shrink-0 text-tertiary" />
         </TitlebarButton>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>
-        <TitlebarButton id="ws-tab-workspace" aria-label="Workspace" data-tooltip="Workspace" :tone="'default' if active_tab == 'workspace' else 'muted'" :extra="'ml-1 bg-fill-active' if active_tab == 'workspace' else 'ml-1'" :aria-current="'page' if active_tab == 'workspace' else false"><Icon16 name="panels-top-left" /></TitlebarButton>
-        <TitlebarButton id="ws-tab-settings" aria-label="Workspace Settings" data-tooltip="Workspace Settings" :tone="'default' if active_tab == 'settings' else 'muted'" :extra="'ml-1 bg-fill-active' if active_tab == 'settings' else 'ml-1'" :aria-current="'page' if active_tab == 'settings' else false"><Icon16 name="settings" /></TitlebarButton>
+        {# The two icon-tabs open the docked workspace-options panel (Share
+           machine / Machine settings). They live in one measurable wrapper
+           because the panel draws its own tab strip at this strip's exact
+           window rect -- chrome.js measures #ws-tab-strip and hands the rect
+           to main, which packs it into the panel's URL. While that panel is
+           open the buttons here are hidden (visibility, so the crumb does not
+           reflow) or they would ghost through behind the panel's own tabs. #}
+        <div id="ws-tab-strip" class="flex items-center gap-1 ml-1">
+          <TitlebarButton id="ws-tab-share" aria-label="Share machine" data-tooltip="Share machine" :tone="'default' if active_tab == 'share' else 'muted'" :extra="'bg-fill-active' if active_tab == 'share' else ''" :aria-current="'page' if active_tab == 'share' else false"><Icon16 name="share" /></TitlebarButton>
+          <TitlebarButton id="ws-tab-settings" aria-label="Machine settings" data-tooltip="Machine settings" :tone="'default' if active_tab == 'settings' else 'muted'" :extra="'bg-fill-active' if active_tab == 'settings' else ''" :aria-current="'page' if active_tab == 'settings' else false"><Icon16 name="settings" /></TitlebarButton>
+        </div>
       </div>
       <div id="page-crumb" class="flex items-center gap-0.5 min-w-0"{% if not page_label %} hidden{% endif %}>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>

@@ -210,7 +210,7 @@ def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_
 
 
 def _make_workspace_agent(provider_name: str, extra_labels: dict[str, str] | None = None) -> DiscoveredAgent:
-    """A primary workspace agent (carries the workspace + is_primary labels)."""
+    """A primary machine agent (carries the machine + is_primary labels)."""
     labels = {"workspace": "my-workspace", "is_primary": "true", **(extra_labels or {})}
     return DiscoveredAgent(
         host_id=HostId("host-" + "0" * 31 + "1"),
@@ -222,7 +222,7 @@ def _make_workspace_agent(provider_name: str, extra_labels: dict[str, str] | Non
 
 
 def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() -> None:
-    """A retained workspace whose provider's last poll errored is flagged ``is_stale``; healthy ones are not."""
+    """A retained machine whose provider's last poll errored is flagged ``is_stale``; healthy ones are not."""
     resolver = MngrCliBackendResolver()
     provider_name = "imbue_cloud_acct"
     agent = _make_workspace_agent(provider_name)
@@ -249,7 +249,7 @@ def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() 
 
 
 def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error() -> None:
-    """An error on a different provider must not flag a healthy provider's workspace stale."""
+    """An error on a different provider must not flag a healthy provider's machine stale."""
     resolver = MngrCliBackendResolver()
     agent = _make_workspace_agent("imbue_cloud_acct")
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
@@ -288,10 +288,10 @@ def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
 
 
 def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -> None:
-    """Workspaces without a ``color`` label (created before the picker
+    """Machines without a ``color`` label (created before the picker
     shipped, or backfilled but not yet written through ``mngr label``)
     render as ``DEFAULT_WORKSPACE_COLOR`` -- the same value new
-    workspaces get pre-selected in the picker."""
+    machines get pre-selected in the picker."""
     resolver = MngrCliBackendResolver()
     agent = _make_workspace_agent("imbue_cloud_acct")
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))

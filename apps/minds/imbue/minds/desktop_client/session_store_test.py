@@ -89,7 +89,7 @@ def test_remove_account_disappears_after_invalidate(tmp_path: Path) -> None:
 
 
 def test_associate_and_disassociate_workspace(tmp_path: Path) -> None:
-    """Association creates a workspace record; disassociation removes it."""
+    """Association creates a machine record; disassociation removes it."""
     store, cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
     resolver = _resolver_for_agents(_AGENT_A, _AGENT_B)
 
@@ -110,7 +110,7 @@ def test_associate_and_disassociate_workspace(tmp_path: Path) -> None:
 
 
 def test_get_account_for_workspace(tmp_path: Path) -> None:
-    """Can look up which account a workspace belongs to."""
+    """Can look up which account a machine belongs to."""
     store, _cli = _make_store_with_users(
         tmp_path,
         [("user-1", "one@example.com", None), ("user-2", "two@example.com", None)],
@@ -131,7 +131,7 @@ def test_get_account_for_workspace(tmp_path: Path) -> None:
 
 
 def test_duplicate_associate_is_idempotent(tmp_path: Path) -> None:
-    """Associating the same workspace twice doesn't create duplicates."""
+    """Associating the same machine twice doesn't create duplicates."""
     store, _cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
     resolver = _resolver_for_agents(_AGENT_A)
     store.associate_workspace("user-1", _AGENT_A, resolver)
@@ -161,7 +161,7 @@ def test_associate_created_workspace_seeds_a_queued_record(tmp_path: Path) -> No
         user_id="user-1",
         agent_id="agent-new",
         host_id="host-new",
-        display_name="my new workspace",
+        display_name="my new machine",
         color="#112233",
         is_cloud_row=False,
     )
@@ -170,7 +170,7 @@ def test_associate_created_workspace_seeds_a_queued_record(tmp_path: Path) -> No
     assert session is not None
     assert session.workspace_ids == ["agent-new"]
     pushed = cli.sync_records_by_email["a@b.com"]["host-new"]
-    assert pushed["display_name"] == "my new workspace"
+    assert pushed["display_name"] == "my new machine"
     assert pushed["color"] == "#112233"
     assert pushed["hosting_device_id"] == "device-test"
 
@@ -233,7 +233,7 @@ def test_disassociate_from_unknown_user_raises(tmp_path: Path) -> None:
 
 
 def test_disassociate_nonexistent_workspace_is_noop(tmp_path: Path) -> None:
-    """Disassociating a workspace that isn't associated does nothing."""
+    """Disassociating a machine that isn't associated does nothing."""
     store, _cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
     store.disassociate_workspace("user-1", "agent-not-associated")
     session = store.get_session("user-1")
@@ -269,7 +269,7 @@ def test_get_user_info_nonexistent_returns_none(tmp_path: Path) -> None:
 
 
 def test_persistence_across_store_instances(tmp_path: Path) -> None:
-    """Workspace records written by one store instance are readable by another."""
+    """Machine records written by one store instance are readable by another."""
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="persist@test.com")
     store1 = make_session_store_for_test(tmp_path, cli=cli)

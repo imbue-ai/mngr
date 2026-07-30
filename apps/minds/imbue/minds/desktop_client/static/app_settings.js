@@ -129,7 +129,7 @@
       var accountLabel = accountSection.getAttribute('data-account-label');
       openRevokeDialog(
         'Remove all ' + serviceLabel + ' authorizations for ' + accountLabel + '?',
-        'This removes ' + serviceLabel + ' permissions for ' + accountLabel + ' from every workspace. '
+        'This removes ' + serviceLabel + ' permissions for ' + accountLabel + ' from every machine. '
           + 'Agents can request them again later.',
         {
           url: '/settings/permissions/revoke-all',
@@ -222,7 +222,7 @@
     btn.addEventListener('click', function () {
       openRevokeDialog(
         'Remove all file sharing?',
-        'This removes shared file access from every workspace. Agents can request it again later.',
+        'This removes shared file access from every machine. Agents can request it again later.',
         { url: '/settings/permissions/file-sharing/revoke-all', body: {} }
       );
     });
@@ -239,7 +239,7 @@
       var verbLabel = row.getAttribute('data-verb-label');
       openRevokeDialog(
         'Revoke ' + verbLabel + ' access?',
-        'This removes ' + workspaceName + "'s " + verbLabel + ' access to other workspaces. The agent can request it again later.',
+        'This removes ' + workspaceName + "'s " + verbLabel + ' access to other machines. The agent can request it again later.',
         {
           url: '/settings/permissions/workspace/revoke',
           body: {

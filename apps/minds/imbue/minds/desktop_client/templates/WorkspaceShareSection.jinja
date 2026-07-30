@@ -1,0 +1,191 @@
+{#def agent_id, ws_name, account_email="", has_account=True, accounts=[], app_services=[], whole_service="system_interface", selected_target="", panel_scroll=False #}
+{#
+  The "Share machine" pane: pick a share target on the left, manage who can
+  reach it on the right.
+
+  A target is either one of the workspace's registered services (share just
+  that app) or the whole machine, which is the workspace's own web UI service
+  (``whole_service``, i.e. system_interface -- what the desktop client itself
+  shows). Both go through the same per-service Cloudflare tunnel + Access
+  policy, so "Whole machine" is a real share target, not a special case.
+
+  ``app_services`` is the workspace's registered services WITHOUT
+  ``whole_service`` (that one is always rendered as the Whole machine entry,
+  whether or not it is registered yet). ``selected_target`` is the service to
+  open on; it defaults to the whole machine.
+
+  Each target keeps its own sharing state, so the right-hand pane is filled in
+  by /_static/workspace_options.js: it fetches a target's status the first time
+  that target is selected (each status read shells out to the imbue_cloud
+  connector, so reading every target up front would be several subprocesses
+  per open) and caches it for the rest of the panel's life.
+
+  The workspace must be associated with an account before anything can be
+  shared -- the Cloudflare tunnel is owned by that account -- so an
+  unassociated workspace gets the Associate prompt instead of the editor.
+
+  ``panel_scroll`` makes the right-hand panel the scroller (and pulls its
+  scrollbar out to the card's edge with -mr-6, restoring the gutter with
+  pr-6 -- both keyed to the card's own px-6), so the title and the nav
+  beside it stay put while it moves. The
+  options panel is a fixed-height card and wants that; the browser-mode page
+  is an ordinary scrolling page and does not, hence the flag rather than a
+  hardcoded class. Mirrors AppSettingsSections' prop of the same name.
+  The nav beside it scrolls on the same flag and by the same rule, so a
+  machine with twenty entries does not run them off the bottom of the card.
+#}
+<h1 class="type-heading text-primary flex items-center gap-2 min-w-0 shrink-0">
+  <Icon16 name="share" size="lg" extra="shrink-0" />
+  <span class="shrink-0">Share machine:</span>
+  <span class="truncate max-w-[280px]">{{ ws_name }}</span>
+</h1>
+<p class="mt-2 max-w-[760px] type-body text-primary shrink-0">
+  Sharing lets you and others access the tools or all of <span class="font-semibold">{{ ws_name }}</span>
+  from a browser. Share with just yourself to use this machine on a mobile phone.
+</p>
+
+{% if not has_account %}
+  <div class="mt-6 flex-1 min-h-0 {{ 'overflow-y-auto min-h-0 pt-1.5 pb-1.5 pl-1.5 pr-6 -mt-1.5 -mb-1.5 -ml-1.5 -mr-6' if panel_scroll else '' }}">
+    {# Both panes are rendered up front, and an unassociated workspace also
+       puts an Associate in Machine settings' account group -- so this instance
+       needs its own element ids. No redirect: Associate's reload fallback
+       re-renders this surface at its own URL, which on the docked panel keeps
+       the tab and anchor params. #}
+    <Associate :agent_id="agent_id" :accounts="accounts" id_suffix="-share" :can_add_account="True" />
+  </div>
+{% else %}
+<div class="mt-8 flex gap-8 flex-1 min-h-0">
+  <nav class="shrink-0 w-52 {{ 'overflow-y-auto min-h-0 p-1.5 -m-1.5' if panel_scroll else '' }}" aria-label="Share targets">
+    {% if app_services %}
+    <div class="flex flex-col gap-0.5">
+      {% for service in app_services %}
+      {% set _selected = service == selected_target %}
+      <button type="button"
+              data-share-target="{{ service }}"
+              aria-pressed="{{ 'true' if _selected else 'false' }}"
+              class="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left type-body cursor-pointer transition-colors text-primary hover:bg-fill-hover{{ ' bg-fill-hover font-semibold' if _selected else '' }}">
+        <Icon16 name="box" extra="shrink-0" />
+        <span class="truncate">{{ service }}</span>
+      </button>
+      {% endfor %}
+    </div>
+    <div class="my-1.5 h-px bg-subtle"></div>
+    {% endif %}
+    {% set _whole_selected = whole_service == selected_target %}
+    <button type="button"
+            data-share-target="{{ whole_service }}"
+            aria-pressed="{{ 'true' if _whole_selected else 'false' }}"
+            class="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left type-body cursor-pointer transition-colors text-primary hover:bg-fill-hover{{ ' bg-fill-hover font-semibold' if _whole_selected else '' }}">
+      <Icon16 name="panels-top-left" extra="shrink-0" />
+      <span class="truncate">Whole machine</span>
+    </button>
+  </nav>
+
+  <div class="flex-1 min-w-0 {{ 'overflow-y-auto min-h-0 pt-1.5 pb-1.5 pl-1.5 pr-6 -mt-1.5 -mb-1.5 -ml-1.5 -mr-6' if panel_scroll else '' }}">
+    <div class="flex items-center gap-2">
+      {# Both target glyphs are rendered up front and toggled by the pane JS --
+         the icon path data lives in templates.py and cannot be built in JS. #}
+      <span id="ws-share-icon-app" class="hidden shrink-0 text-primary"><Icon16 name="box" size="lg" /></span>
+      <span id="ws-share-icon-whole" class="hidden shrink-0 text-primary"><Icon16 name="panels-top-left" size="lg" /></span>
+      <h2 id="ws-share-target-name" class="type-heading text-primary"></h2>
+    </div>
+    <p id="ws-share-target-subtitle" class="mt-1 type-helper text-tertiary"></p>
+
+    <div class="mt-6 flex flex-col gap-6">
+      <section>
+        <h3 class="type-body font-semibold text-primary">Who are you sharing with?</h3>
+        {# Filled by workspace_options.js: the owner row first (never
+           removable -- the account owns the tunnel), then one row per
+           additional email. #}
+        <div id="ws-share-emails" class="mt-3 flex flex-col gap-1.5"></div>
+        <div class="mt-2 flex items-center gap-2">
+          <TextInput type="email" name="ws_share_new_email" id="ws-share-new-email"
+                     placeholder="Add email address" extra="flex-1"
+                     onkeydown="if (event.key === 'Enter') { event.preventDefault(); wsShareAddEmail(); }" />
+          <Button variant="secondary" id="ws-share-add-btn" onclick="wsShareAddEmail()">Add</Button>
+        </div>
+      </section>
+
+      <div>
+        {# Reading a target's status shells out to the imbue_cloud connector,
+           which can take seconds. Name the step rather than saying "Loading":
+           the wait is long enough that an unexplained one reads as a hang. #}
+        <p id="ws-share-loading" class="flex items-center gap-1.5 type-body text-secondary">
+          <Spinner size="sm" /><span id="ws-share-loading-label">Checking who this is shared with...</span>
+        </p>
+
+        {# The Enable button has the line to itself, so what it is doing is
+           spelled out beside it. The button says the verb ("Enabling..."); this
+           says the work, which takes long enough to need explaining. #}
+        <div id="ws-share-enable-row" class="hidden items-center gap-3">
+          <Button variant="primary" id="ws-share-enable-btn" onclick="wsShareEnable()">Enable sharing</Button>
+          <p id="ws-share-enable-status" class="hidden type-body text-secondary">Creating the link and granting access...</p>
+        </div>
+
+        <div id="ws-share-url-row" class="hidden items-center gap-2">
+          {# The pill is wrapped so the copy confirmation can be positioned
+             against it: an absolute child of the pill itself would be laid out
+             inside the button's own padding box. #}
+          <div class="relative min-w-0 flex-1">
+            {# Confirms the copy above the pill, where it cannot be mistaken for
+               part of the link. The inner span carries .minds-tooltip so it is
+               the same bubble the hover tooltips draw; the outer one owns the
+               positioning and the hidden toggle (``hidden`` and the class's own
+               inline-flex would otherwise fight over display). #}
+            <span id="ws-share-copied-bubble" class="hidden absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2">
+              <span class="minds-tooltip">Copied</span>
+            </span>
+            <button type="button" id="ws-share-url-btn" data-tooltip="Click to copy"
+                    onclick="wsShareCopyUrl()"
+                    class="group relative flex w-full min-w-0 items-center gap-2 rounded-md border border-default bg-fill-subtle px-3 py-2 text-left cursor-pointer transition-colors hover:bg-fill-hover">
+              <Icon16 name="link" size="sm" extra="shrink-0 text-tertiary" />
+              <span id="ws-share-url" class="min-w-0 flex-1 truncate type-body font-mono text-primary"></span>
+              {# Two icons in one slot: the copy glyph swaps to a green check for
+                 a beat after a successful copy. Pre-rendered and toggled rather
+                 than built in JS, so the markup stays the source of truth. #}
+              <span id="ws-share-copy-icon" class="shrink-0 text-tertiary group-hover:text-secondary">
+                <Icon16 name="copy" size="sm" />
+              </span>
+              <span id="ws-share-copied-icon" class="hidden shrink-0 text-success">
+                <Icon16 name="check" size="sm" />
+              </span>
+            </button>
+          </div>
+          {# Not built from Button.jinja (it is a quiet text action, not a
+             control), so it carries the base's :disabled treatment itself --
+             faded, not-allowed cursor, and no hover response -- because it goes
+             disabled while its own request runs. #}
+          <button type="button" id="ws-share-disable-btn" onclick="wsShareDisable()"
+                  data-tooltip="Stop sharing: the link stops working for everyone above"
+                  class="shrink-0 inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 type-label text-secondary hover:bg-fill-hover hover:text-important cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-secondary">Disable</button>
+        </div>
+
+        {# Cloudflare publishes a new hostname at its edge a minute or two after
+           the tunnel accepts it, so a freshly-enabled link 404s if opened right
+           away. workspace_options.js polls the readiness endpoint and shows
+           this until the link actually resolves. #}
+        <p id="ws-share-provisioning" class="hidden mt-2 type-helper text-secondary">
+          This link is not live yet. Cloudflare is still publishing it (usually 1-2 minutes).
+        </p>
+        <p id="ws-share-busy" class="hidden items-center gap-1.5 type-body text-secondary">
+          <Spinner size="sm" /><span id="ws-share-busy-label">Saving changes...</span>
+        </p>
+        <p id="ws-share-error" class="hidden mt-2 type-body text-important" role="alert"></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+{#
+  Page data for workspace_options.js. Serialized through Jinja's tojson so
+  the payload is valid JSON and cannot break out into active code.
+#}
+<script id="ws-share-config" type="application/json">
+{
+  "agentId": {{ agent_id | tojson }},
+  "accountEmail": {{ (account_email or '') | tojson }},
+  "wholeService": {{ whole_service | tojson }},
+  "selectedTarget": {{ (selected_target or whole_service) | tojson }}
+}
+</script>
+{% endif %}

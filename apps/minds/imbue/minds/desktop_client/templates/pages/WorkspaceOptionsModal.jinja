@@ -1,0 +1,56 @@
+{#def agent_id, ws_name, tab="share", anchor_x=240, anchor_y=5, anchor_height=28, current_account=None, accounts=[], app_services=[], whole_service="system_interface", selected_target="", account_email="", has_account=False, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={}, selected_group="general" #}
+{#
+  The workspace options panel as an overlay-hosted modal: the Share machine and
+  Machine settings tabs, docked under the titlebar's workspace icon-tabs.
+  Opened from those icon-tabs (chrome.js -> main.js openModal); the full
+  /workspace/<id>/options page is the browser-mode fallback.
+
+  Both tabs are rendered up front and toggled in place by workspace_options.js,
+  so switching tabs never reloads this overlay iframe.
+
+  No link in here may navigate the iframe: a full-page flow completed inside
+  the overlay would strand the app in the modal. Anything that must leave goes
+  through window.minds.navigateContent (see workspace_settings_page.js).
+
+  data-mngr-forward-origin carries the plugin origin that serves /goto/<agent>/
+  (minds' own origin does not), so workspace_options.js can build the workspace
+  URL it falls back to when this page is loaded without the shell bridge.
+  OverlaySurface wraps Base, which -- unlike ChromeShell -- adds no body
+  attributes of its own, so it is set here.
+#}
+{% set _body_attrs %}data-mngr-forward-origin="{{ chrome_mngr_forward_origin() }}"{% endset %}
+{% set _scripts %}
+<script src="/_static/api_errors.js" defer></script>
+<script src="/_static/button_busy.js" defer></script>
+<script src="/_static/associate.js" defer></script>
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/workspace_settings.js" defer></script>
+<script src="/_static/backup_table.js" defer></script>
+<script src="/_static/backup_operation_ui.js" defer></script>
+<script src="/_static/workspace_backups.js" defer></script>
+<script src="/_static/workspace_settings_page.js" defer></script>
+<script src="/_static/workspace_options.js" defer></script>
+{% endset %}
+<OverlaySurface title="Machine options"
+                body_style="-webkit-app-region: no-drag;"
+                body_attrs={{ _body_attrs }}
+                scripts={{ _scripts }}>
+  <WorkspaceOptionsShell :agent_id="agent_id" :tab="tab"
+                         :anchor_x="anchor_x" :anchor_y="anchor_y" :anchor_height="anchor_height"
+                         :accent="current_color">
+    <div data-wsopt-panel="share" class="flex-1 min-h-0 flex-col {{ 'flex' if tab == 'share' else 'hidden' }}">
+      <WorkspaceShareSection :panel_scroll="True" :agent_id="agent_id" :ws_name="ws_name"
+                             :account_email="account_email" :has_account="has_account"
+                             :accounts="accounts" :app_services="app_services"
+                             :whole_service="whole_service" :selected_target="selected_target" />
+    </div>
+    <div data-wsopt-panel="settings" class="flex-1 min-h-0 flex-col {{ 'flex' if tab == 'settings' else 'hidden' }}">
+      <WorkspaceSettingsSections :panel_scroll="True" :agent_id="agent_id" :ws_name="ws_name"
+                                 :current_account="current_account" :accounts="accounts"
+                                 :is_leased_imbue_cloud="is_leased_imbue_cloud"
+                                 :current_color="current_color" :is_stale="is_stale"
+                                 :has_account="has_account" :palette="palette"
+                                 :selected_group="selected_group" />
+    </div>
+  </WorkspaceOptionsShell>
+</OverlaySurface>

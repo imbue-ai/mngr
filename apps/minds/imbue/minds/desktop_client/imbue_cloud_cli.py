@@ -309,8 +309,16 @@ class ImbueCloudCli(MutableModel):
             exit_code,
             result.stderr or result.stdout or "(no output)",
         )
+        # The plugin reports failures as a JSON body with an ``error`` string --
+        # a written sentence ("Session missing in db or has expired"), not a
+        # traceback. That is the one thing the user can act on, so carry it.
+        # Only when there is no such body (a crash, a non-JSON death) does the
+        # message fall back to pointing at the logs, which is all we have.
+        error_message = _parse_stderr_error_message(result.stderr)
         plain_exc = ImbueCloudCliError(
-            f"{command_repr} failed (exit {exit_code}); see the desktop client logs for details"
+            f"{command_repr} failed: {error_message}"
+            if error_message
+            else f"{command_repr} failed (exit {exit_code}); see the desktop client logs for details"
         )
         plain_exc.exit_code = exit_code
         plain_exc.stdout = result.stdout

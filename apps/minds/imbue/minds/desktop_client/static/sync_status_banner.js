@@ -4,7 +4,7 @@
 // before the first record fetch completes, so a returning user can land on
 // the create form while their remote workspaces are still in flight. This
 // banner surfaces that window by polling /_chrome/sync-initial-status:
-//   PENDING -> "Fetching synced workspaces..."
+//   PENDING -> "Fetching synced machines..."
 //   FAILED  -> "Couldn't fetch... retrying" (the scheduler loop retries)
 //   DONE n>0 -> "Found n synced workspace(s) -- View" (dismissible)
 //   DONE n=0 -> nothing (a genuinely record-less account; the common case)
@@ -53,13 +53,13 @@
 
   function messageFor(entry) {
     if (entry.state === 'PENDING') {
-      return 'Fetching synced workspaces for ' + entry.email + '…';
+      return 'Fetching synced machines for ' + entry.email + '…';
     }
     if (entry.state === 'FAILED') {
-      return 'Couldn’t fetch synced workspaces for ' + entry.email + ' — retrying…';
+      return 'Couldn’t fetch synced machines for ' + entry.email + ' — retrying…';
     }
     var count = entry.workspace_count || 0;
-    return 'Found ' + count + ' synced workspace' + (count === 1 ? '' : 's') + ' for ' + entry.email + '.';
+    return 'Found ' + count + ' synced machine' + (count === 1 ? '' : 's') + ' for ' + entry.email + '.';
   }
 
   // Pick the single entry to show: any PENDING first (fetch under way), then

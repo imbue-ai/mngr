@@ -76,9 +76,7 @@
 <OverlaySurface title="Plan & Usage"
                 body_style="-webkit-app-region: no-drag;"
                 scripts={{ _scripts }}>
-  <div id="account-plan-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
-    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-lg w-full p-8 max-h-[85vh] overflow-y-auto text-left">
-      <DialogCloseButton onclick="dismissAccountPlanModal()" />
+  <OverlayDialog backdrop_id="account-plan-modal-backdrop" dismiss="dismissAccountPlanModal()" max_width="max-w-lg" card_extra="max-h-[85vh] overflow-y-auto">
       <button type="button" onclick="backToAccountsModal()" class="type-label text-secondary hover:text-primary mb-4 -ml-1">&lsaquo; Accounts</button>
       <h1 class="type-heading-lg text-primary mb-1">Plan &amp; Usage</h1>
       <div class="type-helper text-tertiary mb-6">{{ account_email }}</div>
@@ -87,6 +85,5 @@
           <Spinner size="sm" /> Loading plan and usage&hellip;
         </div>
       </div>
-    </div>
-  </div>
+  </OverlayDialog>
 </OverlaySurface>

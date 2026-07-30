@@ -359,7 +359,7 @@ def test_get_last_restart_error_is_none_for_untracked_agent() -> None:
 def test_get_restart_is_start_only_reflects_flavor_and_is_scoped_to_restarting() -> None:
     """The restart flavor is readable only while RESTARTING and survives a deduped claim.
 
-    The recovery page renders "Restarting your workspace" vs "Loading workspace"
+    The recovery page renders "Restarting your machine" vs "Loading machine"
     off this flavor. A full manual bounce (``start_only=False``) must not be
     rewritten by a deduped later start-only request, and the flavor must not leak
     out of the restart (a subsequent HEALTHY reads None again).
@@ -450,7 +450,7 @@ def test_snapshot_probe_targets_excludes_restarting_agents() -> None:
     the restart worker's ``mngr stop`` actually tearing down the backend would
     see the old system interface as healthy and call ``record_probe_success``,
     flipping the agent prematurely to HEALTHY -- which the recovery page then
-    302'd back to the about-to-disappear workspace.
+    302'd back to the about-to-disappear machine.
     """
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
@@ -604,7 +604,7 @@ def test_end_create_attempt_grace_restores_normal_probe_accounting() -> None:
 
 
 def test_probe_success_clears_create_attempt_grace() -> None:
-    """A reachable workspace drops its grace: later failures count normally."""
+    """A reachable machine drops its grace: later failures count normally."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     agent_id = AgentId.generate()
     tracker.begin_create_attempt_grace(agent_id, time.monotonic() + 60.0)

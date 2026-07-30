@@ -335,7 +335,7 @@ def test_read_legacy_associations_prefers_the_newer_file_over_sessions_json(path
 
 
 def test_reconcile_keeps_legacy_file_until_every_entry_converts(paths: WorkspacePaths) -> None:
-    """A failed poll proves nothing: a legacy association whose workspace was
+    """A failed poll proves nothing: a legacy association whose machine was
     not discoverable (its provider errored) must survive for a later pass
     instead of being dropped when the file retires."""
     cli = make_fake_imbue_cloud_cli()
@@ -370,7 +370,7 @@ def test_reconcile_keeps_legacy_file_until_every_entry_converts(paths: Workspace
 
 def test_reconcile_drops_legacy_association_when_only_unauthorized_providers_error(paths: WorkspacePaths) -> None:
     """Providers without credentials error on every poll, so treating them as
-    failed polls would keep a gone workspace's legacy association in limbo
+    failed polls would keep a gone machine's legacy association in limbo
     forever; only a genuinely failed poll may block the drop."""
     cli = make_fake_imbue_cloud_cli()
     store = _make_store(paths, cli)
@@ -506,7 +506,7 @@ def test_locked_device_push_preserves_server_secrets(paths: WorkspacePaths) -> N
 
 def test_reconcile_does_not_tombstone_unenriched_create_seed_rows(paths: WorkspacePaths) -> None:
     """A create-path seed row (empty provider_kind) must survive a reconcile
-    that runs before discovery has seen the new workspace -- 'absent from
+    that runs before discovery has seen the new machine -- 'absent from
     discovery' says nothing about a host discovery never enumerated."""
     cli = make_fake_imbue_cloud_cli()
     store = _make_store(paths, cli)

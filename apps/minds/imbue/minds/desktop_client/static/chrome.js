@@ -71,6 +71,7 @@
       || pathname === '/accounts'
       || pathname === '/_chrome'
       || /^\/workspace\/agent-[a-f0-9]+\/settings$/i.test(pathname)
+      || /^\/workspace\/agent-[a-f0-9]+\/options$/i.test(pathname)
       // Recovery is swappable: its poll loops are minds:page-teardown-guarded
       // and its card CSS lives in the page body, so hub <-> recovery hops (a
       // flapping workspace's most common transition) keep the titlebar intact.
@@ -330,7 +331,7 @@
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
   // Whether the displayed workspace's content is actually reachable (a real
-  // workspace) rather than the "Loading workspace" proxy loader that
+  // workspace) rather than the "Loading machine" proxy loader that
   // mngr_forward serves at the workspace URL while the backend is unreachable.
   // Pushed by main.js over ``current-workspace-changed`` (from the content
   // view's HTTP status) so the get-help modal keeps "have an agent help"
@@ -370,8 +371,10 @@
   //
   // The left cluster's shape is a pure function of the content view's current
   // URL: a workspace-scoped screen shows the "/ workspace-name" breadcrumb
-  // plus the Workspace / Workspace Settings icon-tabs (with the
-  // tab for the visible screen highlighted); a non-workspace full page shows
+  // plus the Share machine / Machine settings icon-tabs, highlighted only when
+  // the visible screen IS one of those panes (on the workspace itself neither
+  // is, since the tabs open the docked options panel over it rather than
+  // navigating); a non-workspace full page shows
   // a "/ page-name" crumb and, for pages that opted in, the contextual back
   // arrow; the home screen shows just the home button. Electron pushes the
   // URL over ``content-url-changed``; browser mode reads the iframe's
@@ -391,10 +394,16 @@
     }
     var host = parsed.hostname;
     var path = parsed.pathname;
+    // The workspace itself is not one of the icon-tabs' panes -- they open the
+    // options panel over it -- so neither tab is highlighted here.
     var m = host.match(/^(agent-[a-f0-9]+)\.localhost$/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'workspace' };
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
     m = path.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'workspace' };
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
+    // The browser-mode options page carries its pane in ?tab=; the standalone
+    // settings page is always the settings pane.
+    m = path.match(/^\/workspace\/(agent-[a-f0-9]+)\/options$/i);
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: parsed.searchParams.get('tab') === 'settings' ? 'settings' : 'share' };
     m = path.match(/^\/workspace\/(agent-[a-f0-9]+)(?:\/|$)/i);
     if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'settings' };
     // Sharing is reached from workspace settings, so it gets the back arrow.
@@ -406,9 +415,9 @@
     if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
     // No back arrow on the create form: the titlebar home button is the
     // escape (back to the workspace list / welcome splash).
-    if (path === '/create') return { kind: 'page', pageLabel: 'New workspace' };
-    if (path === '/create/inspiration') return { kind: 'page', pageLabel: 'New workspace' };
-    if (/^\/creating\//.test(path)) return { kind: 'page', pageLabel: 'New workspace' };
+    if (path === '/create') return { kind: 'page', pageLabel: 'New machine' };
+    if (path === '/create/inspiration') return { kind: 'page', pageLabel: 'New machine' };
+    if (/^\/creating\//.test(path)) return { kind: 'page', pageLabel: 'New machine' };
     // Browser-mode full-page fallbacks (Electron shows these as modals).
     if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
     if (path === '/accounts') return { kind: 'page', pageLabel: 'Accounts', showBack: true };
@@ -491,7 +500,7 @@
         }
         nameEl.dataset.agentId = ctx.agentId;
       }
-      ['workspace', 'settings'].forEach(function (tab) {
+      ['share', 'settings'].forEach(function (tab) {
         var btn = document.getElementById('ws-tab-' + tab);
         if (!btn) return;
         var isActive = ctx.activeTab === tab;
@@ -543,7 +552,7 @@
     document.documentElement.style.setProperty('--titlebar-bg', cached.accent);
     setTitlebarSurface(true);
   }
-  // Update the "displayed workspace" tracker and trigger the recovery
+  // Update the "displayed machine" tracker and trigger the recovery
   // redirect when warranted. Called from the displayed-workspace sources
   // (``onCurrentWorkspaceChanged`` in Electron, the URL-poll in browser mode)
   // but NOT from the accent-only call paths.
@@ -627,12 +636,27 @@
   document.getElementById('workspace-switcher-btn').onclick = toggleSidebar;
   document.getElementById('home-btn').onclick = function () { navigateContent('/'); };
   document.getElementById('back-btn').onclick = goBack;
-  document.getElementById('ws-tab-workspace').onclick = function () {
-    if (currentCrumbAgentId) selectWorkspace(currentCrumbAgentId);
-  };
-  document.getElementById('ws-tab-settings').onclick = function () {
-    if (currentCrumbAgentId) navigateContent('/workspace/' + currentCrumbAgentId + '/settings');
-  };
+  // The two workspace icon-tabs open the docked options panel. In Electron the
+  // panel is an overlay that draws its own tab strip exactly over this one, so
+  // it needs the strip's viewport rect (same anchor trick as the workspace
+  // switcher). In browser mode there is no overlay surface, so they navigate
+  // to the full-page twin instead.
+  function computeWorkspaceOptionsAnchor() {
+    var strip = document.getElementById('ws-tab-strip');
+    if (!strip) return null;
+    var rect = strip.getBoundingClientRect();
+    return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+  }
+  function openWorkspaceOptions(tab) {
+    if (!currentCrumbAgentId) return;
+    if (isElectron) {
+      window.minds.openWorkspaceOptions(currentCrumbAgentId, tab, computeWorkspaceOptionsAnchor());
+    } else {
+      navigateContent('/workspace/' + currentCrumbAgentId + '/options?tab=' + tab);
+    }
+  }
+  document.getElementById('ws-tab-share').onclick = function () { openWorkspaceOptions('share'); };
+  document.getElementById('ws-tab-settings').onclick = function () { openWorkspaceOptions('settings'); };
 
   document.getElementById('requests-toggle').onclick = function () {
     // ``keep_open=1`` marks this as an intentional open of the whole inbox,
@@ -696,7 +720,11 @@
     // case this is a no-op repaint); swapped-in pages get the equivalent from
     // the swap engine, and (in Electron) the SSE ``workspaces`` tick replays
     // the accent once its color cache is primed (see handleChromeEvent).
-    lastContentUrl = window.location.pathname;
+    // Path AND query: classifyContent reads ?tab= to tell the options page's
+    // two panes apart, so dropping the query here would paint the wrong
+    // icon-tab active for the life of the page (nothing recomputes it from a
+    // fuller URL later). swapLocalPage already stores both.
+    lastContentUrl = window.location.pathname + window.location.search;
     applyTitlebarContext();
     applyTitleAccent(accentSourceFromPath(window.location.pathname));
   }
@@ -761,12 +789,17 @@
     setInterval(function () {
       try {
         if (isLocalPage()) return;
-        var loc = document.getElementById('content-frame').contentWindow.location.pathname;
+        var contentLocation = document.getElementById('content-frame').contentWindow.location;
+        var contentPath = contentLocation.pathname;
+        // classifyContent needs the query (?tab= picks the options pane), so
+        // the tracked URL carries it; the agent-id match below must NOT see it,
+        // or a query on a slashless /goto/<id> would be captured into the id.
+        var loc = contentPath + contentLocation.search;
         if (lastContentUrl !== loc) {
           lastContentUrl = loc;
           applyTitlebarContext();
         }
-        var m = loc.match(/^\/goto\/([^/]+)/);
+        var m = contentPath.match(/^\/goto\/([^/]+)/);
         var derivedAgentId = m ? m[1] : null;
         // Re-render the inline workspace list only when the displayed
         // workspace actually changes; otherwise the 500ms tick would
@@ -806,7 +839,7 @@
     // that workspace is actually reachable: on a loading/stuck workspace the new chat couldn't be
     // seen or reached (and the spawn would fail). Gate the option on BOTH signals -- a truthy
     // systemInterfaceStatusByAgent entry means stuck/restarting, and currentWorkspaceContentReady is
-    // false while the content view shows the "Loading workspace" proxy loader (which the stuck signal
+    // false while the content view shows the "Loading machine" proxy loader (which the stuck signal
     // doesn't cover during startup) -- while still passing the workspace id so a bug report stays
     // scoped to it even when it's down.
     var assistAvailable = !!aid && !systemInterfaceStatusByAgent[aid] && currentWorkspaceContentReady;
@@ -985,6 +1018,11 @@
         if (!data) return;
         if (data.open) document.body.classList.add('modal-open');
         else document.body.classList.remove('modal-open');
+        // The options panel draws its own copy of the workspace icon-tabs at
+        // this strip's exact rect, so ours must get out of the way -- but by
+        // visibility, not display, or the crumb would reflow and the panel's
+        // (already-packed) anchor would point at the wrong place.
+        document.body.classList.toggle('ws-options-open', !!data.open && data.id === 'ws-options');
       });
     }
   } else {

@@ -37,16 +37,18 @@ def render_auth_page(
 # Copy shown above the sign-in modal's tabs explaining why the user is being
 # asked to sign in (the create screen needs an Imbue account for Imbue Cloud).
 _SIGNIN_MODAL_CREATE_INTRO: str = (
-    "To run your workspace on Imbue Cloud, sign in or create an Imbue account. "
+    "To run your machine on Imbue Cloud, sign in or create an Imbue account. "
     "You can also close this and run it directly on your computer instead."
 )
 
 # Generic copy for sign-ins launched outside the create flow (the home
 # screen's account launcher, the Manage Accounts modal's "Add account").
-_SIGNIN_MODAL_GENERIC_INTRO: str = "Sign in to enable sharing and run workspaces on Imbue Cloud."
+_SIGNIN_MODAL_GENERIC_INTRO: str = "Sign in to enable sharing and run machines on Imbue Cloud."
 
 
-def render_signin_modal_page(return_to: str = "/create", default_to_signup: bool = True) -> str:
+def render_signin_modal_page(
+    return_to: str = "/create", default_to_signup: bool = True, can_restore: bool = False
+) -> str:
     """Render the sign-in modal page served by ``GET /auth/signin-modal``.
 
     Loaded into the desktop client's shared modal WebContentsView so it covers
@@ -60,9 +62,20 @@ def render_signin_modal_page(return_to: str = "/create", default_to_signup: bool
     create flow keeps its dedicated intro copy. ``default_to_signup`` picks
     which AuthForm tab leads on first paint (callers that say "Log In" pass
     False so the sign-in tab shows).
+
+    ``can_restore`` says the shell has a modal waiting behind this one (the
+    workspace options panel sent the user here to link an account), so a
+    finished sign-in should hand back to it instead of navigating the content
+    view out from under it.
     """
     intro = _SIGNIN_MODAL_CREATE_INTRO if return_to == "/create" else _SIGNIN_MODAL_GENERIC_INTRO
-    return CATALOG.render("pages.SigninModal", intro=intro, return_to=return_to, default_to_signup=default_to_signup)
+    return CATALOG.render(
+        "pages.SigninModal",
+        intro=intro,
+        return_to=return_to,
+        default_to_signup=default_to_signup,
+        can_restore=can_restore,
+    )
 
 
 def render_check_email_page(email: str) -> str:

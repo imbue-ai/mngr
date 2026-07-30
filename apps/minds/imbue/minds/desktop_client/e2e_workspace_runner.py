@@ -755,14 +755,14 @@ def _drive_create_flow(
     # navigation budget. The ready workspace opens on the content view (a separate
     # page); this chrome-view page returns to /_chrome.
     workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
-    logger.info("Workspace ready at {}", workspace_page.url)
+    logger.info("Machine ready at {}", workspace_page.url)
 
     workspace_page.wait_for_selector(
         _DOCKVIEW_WORKSPACE_SELECTOR,
         state="visible",
         timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
     )
-    logger.info("system_interface dockview rendered; workspace create attempt complete")
+    logger.info("system_interface dockview rendered; machine create attempt complete")
     return workspace_page
 
 
@@ -1079,7 +1079,7 @@ def drive_create_docker_imbue_workspace(
     page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
     workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
-    logger.info("Workspace ready at {}", workspace_page.url)
+    logger.info("Machine ready at {}", workspace_page.url)
     workspace_page.wait_for_selector(
         _DOCKVIEW_WORKSPACE_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
     )
@@ -1197,7 +1197,7 @@ def _navigate_home(browser: Browser, content_page: Page, backend_origin: str, wo
                     arg=workspace_name,
                     timeout=20_000,
                 )
-                logger.info("Landed on home; workspace {!r} is listed", workspace_name)
+                logger.info("Landed on home; machine {!r} is listed", workspace_name)
                 _flow_screenshot(content_page, "06-home-landing")
                 return
             threading.Event().wait(timeout=0.5)
@@ -1219,7 +1219,7 @@ def _resolve_workspace_agent_id(content_page: Page, workspace_name: str) -> str:
     )
     if not agent_id:
         raise WorkspaceFlowError(f"No landing row with data-agent-id for workspace {workspace_name!r}")
-    logger.info("Resolved workspace {!r} -> agent id {}", workspace_name, agent_id)
+    logger.info("Resolved machine {!r} -> agent id {}", workspace_name, agent_id)
     return agent_id
 
 
@@ -1239,12 +1239,12 @@ def _destroy_via_settings(content_page: Page, backend_origin: str, agent_id: str
     content_page.click("#destroy-btn")
     content_page.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
     content_page.click("#destroy-confirm-btn")
-    logger.info("Confirmed destroy (v1 POST fired); polling for the workspace to leave the landing list")
+    logger.info("Confirmed destroy (v1 POST fired); polling for the machine to leave the landing list")
     _flow_screenshot(content_page, "08-after-destroy-initiated")
     # Brief settle so the detached destroy is registered before the first poll
     # (and so we don't navigate away before the confirm handler's POST is sent).
     threading.Event().wait(timeout=3)
-    logger.info("Waiting up to {}s for the workspace to leave the landing list", _DESTROY_TIMEOUT_SECONDS)
+    logger.info("Waiting up to {}s for the machine to leave the landing list", _DESTROY_TIMEOUT_SECONDS)
     landing_url = backend_origin + "/"
     deadline = time.monotonic() + _DESTROY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -1255,7 +1255,7 @@ def _destroy_via_settings(content_page: Page, backend_origin: str, agent_id: str
             agent_id,
         )
         if not still_present:
-            logger.info("Workspace {} no longer on the landing page; destroy complete", agent_id)
+            logger.info("Machine {} no longer on the landing page; destroy complete", agent_id)
             _flow_screenshot(content_page, "09-destroy-complete")
             return
         threading.Event().wait(timeout=5)
@@ -1300,7 +1300,7 @@ def run_full_workspace_flow(
                 content_page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
                 backend_origin = _backend_origin_from_page(content_page)
 
-                logger.info("=== STEP 1: create local Docker workspace ===")
+                logger.info("=== STEP 1: create local Docker machine ===")
                 # The create form is driven on the chrome view (content_page); the
                 # ready workspace opens on the content view (workspace_page). The
                 # dockview steps (message, terminal) and the agent-id read run on
@@ -1311,7 +1311,7 @@ def run_full_workspace_flow(
                 )
                 results["STEP 1 create"] = "PASS"
                 agent_id = _agent_id_from_subdomain(workspace_page.url)
-                logger.info("Workspace agent id (from subdomain): {}", agent_id)
+                logger.info("Machine agent id (from subdomain): {}", agent_id)
 
                 _run_flow_step(
                     results,

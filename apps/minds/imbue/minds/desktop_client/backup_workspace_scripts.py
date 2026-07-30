@@ -618,7 +618,7 @@ def _main():
     else:
         # The tag stores the code at a different layout era's path; a same-path
         # checkout can never match its tree. Stage the tag's subtree at the
-        # workspace's path, then materialize the staged entries.
+        # machine's path, then materialize the staged entries.
         checked_out = _git(["read-tree", "--prefix=%s/" % BACKUP_CODE_PATH, "%s:%s" % (tag, tag_path)])
         if checked_out.returncode == 0:
             checked_out = _git(["checkout", "--", BACKUP_CODE_PATH])
@@ -694,7 +694,7 @@ import urllib.request as _urllib_request
 
 _RESTIC_TIMEOUT_SECONDS = 3000.0
 # The in-place restore needs `restic restore --delete` / `--overwrite`,
-# which landed in restic 0.17. When the workspace's restic is older (Debian
+# which landed in restic 0.17. When the machine's restic is older (Debian
 # bookworm ships 0.14), the pinned build below is downloaded, sha256-verified
 # and installed persistently.
 _MINIMUM_RESTIC_VERSION = (0, 17, 0)
@@ -710,7 +710,7 @@ _FALLBACK_RESTIC_DIR_NAME = ".minds-restic"
 # Forward at most one restic --json status line per interval: restic emits
 # them far faster than a human (or the SSE log stream) needs.
 _PROGRESS_INTERVAL_SECONDS = 2.0
-# Fallback excludes for the safety/restored snapshots when the workspace has
+# Fallback excludes for the safety/restored snapshots when the machine has
 # no readable backup.toml excludes. Matches host_backup's built-in
 # defaults so those snapshots look like every hourly snapshot; when the user
 # customized excludes in backup.toml, theirs are used instead (read below).
@@ -808,7 +808,7 @@ def _download_pinned_restic(fallback_path):
     except (OSError, ValueError) as e:
         return "", "could not decompress the restic download: %s" % e
     # Persist: prefer /usr/local/bin (shadows the distro binary on PATH, so
-    # the whole workspace -- including the hourly host-backup service --
+    # the whole machine -- including the hourly host-backup service --
     # converges on the pinned version); fall back to a host-dir location when
     # that is not writable. Written via a temp file + rename so a concurrent
     # reader never sees a half-written binary.
@@ -847,8 +847,8 @@ def _read_snapshot_excludes(code_dir):
     # The user's current backup.toml excludes, or host_backup's defaults when
     # absent/unreadable. The file lives at data/system/backup.toml on the
     # decluttered template layout and runtime/backup.toml on pre-declutter
-    # workspaces; read whichever exists so the safety/restored snapshots
-    # honor the same excludes as the workspace's own hourly snapshots.
+    # machines; read whichever exists so the safety/restored snapshots
+    # honor the same excludes as the machine's own hourly snapshots.
     toml_path = _os.path.join(code_dir, "data", "system", "backup.toml")
     if not _os.path.isfile(toml_path):
         toml_path = _os.path.join(code_dir, "runtime", "backup.toml")
@@ -1011,10 +1011,10 @@ def _main():
     if not snapshot_subpath:
         _finish(result, "failed", "no --snapshot-subpath provided")
 
-    # Gate before anything mutates. The chat half needs the current workspace
+    # Gate before anything mutates. The chat half needs the current machine
     # code (`uv run mngr`); a forced restore skips only that half -- the tick
     # wait is self-healing (a stopped host-backup service means no live tick)
-    # and needs no workspace code.
+    # and needs no machine code.
     if is_chat_gate_skipped:
         _progress("Skipping the running-chats check (forced restore).")
     gate_status, gate_extra, gate_detail = _gate_chats_and_wait_for_tick(
@@ -1027,7 +1027,7 @@ def _main():
     code_dir = _os.path.realpath(_os.getcwd())
     # The restore target is the BACKUP ROOT -- the whole persistent tree the
     # host-backup service snapshots. Current layout: /home/user, of which
-    # MNGR_HOST_DIR is the hidden .mngr child; legacy workspaces backed up the
+    # MNGR_HOST_DIR is the hidden .mngr child; legacy machines backed up the
     # host dir itself, so there the target stays MNGR_HOST_DIR.
     mngr_host_dir = _os.path.realpath(_os.environ.get("MNGR_HOST_DIR", "/home/user/.mngr"))
     if _os.path.basename(mngr_host_dir) == ".mngr":
@@ -1046,13 +1046,13 @@ def _main():
 
     # Resolve a usable restic (downloading the pinned build if the installed
     # one is too old) and the snapshot excludes before anything is stopped or
-    # mutated, so these failures are cheap and leave the workspace untouched.
+    # mutated, so these failures are cheap and leave the machine untouched.
     restic_binary, restic_error = _resolve_restic_binary(backup_root, result)
     if not restic_binary:
         _finish(result, "failed", restic_error)
     excludes = _read_snapshot_excludes(code_dir)
 
-    # Quiesce the workspace: every supervisord service runs from (and writes
+    # Quiesce the machine: every supervisord service runs from (and writes
     # into) the backup root this restore rewrites, so a service left running
     # could recreate or hold files mid-restore. Stop them all -- the exec
     # channel this script runs through is not supervisord-managed, so it
@@ -1060,7 +1060,7 @@ def _main():
     # abort the restore. From here on, every exit owes a `restart all` --
     # registered as a debt that _finish itself pays, so no failure path can
     # forget it.
-    _progress("Stopping the workspace services...")
+    _progress("Stopping the machine services...")
     _run(["supervisorctl", "stop", "all"], timeout=300)
     _DEBTS["is_resume_owed"] = True
 
@@ -1099,11 +1099,11 @@ def _main():
     restored, restore_output = _restic_step_with_unlock_retry(restore_args, env_map, restic_binary)
     if restored != 0:
         detail = (
-            "the in-place restore failed (%s); the workspace may be mixed between versions -- "
+            "the in-place restore failed (%s); the machine may be mixed between versions -- "
             "running the restore again picks up where this one stopped." % restore_output[-500:]
         )
         _finish(result, "failed", detail)
-    # Sanity-check the restored tree by its repo checkout: workspace/ in the
+    # Sanity-check the restored tree by its repo checkout: machine/ in the
     # current layout, code/ in legacy snapshots.
     if not _os.path.isdir(_os.path.join(backup_root, "workspace")) and not _os.path.isdir(
         _os.path.join(backup_root, "code")
@@ -1154,7 +1154,7 @@ def _main():
     # This pays the resume debt directly (and clears it first, so a failed
     # restart is not blindly retried by _finish) because the success path
     # must also verify the service actually came back.
-    _progress("Restarting the workspace services...")
+    _progress("Restarting the machine services...")
     _DEBTS["is_resume_owed"] = False
     # `restart all` also re-runs the env-converge one-shot, which converges the
     # (untouched) rootfs back to the restored environment record -- that is

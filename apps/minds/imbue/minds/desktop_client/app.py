@@ -111,6 +111,7 @@ from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sharing_handler import delete_tunnel_for_agent
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
@@ -156,6 +157,8 @@ from imbue.minds.desktop_client.templates import render_sharing_modal_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_backup_history
+from imbue.minds.desktop_client.templates import render_workspace_options_modal_page
+from imbue.minds.desktop_client.templates import render_workspace_options_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -251,6 +254,24 @@ def _get_is_mac() -> bool:
     """
     user_agent = request.headers.get("user-agent", "")
     return "Macintosh" in user_agent or "Mac OS" in user_agent
+
+
+def _optional_int_query_param(name: str) -> int | None:
+    """Read an integer query param, or None when it is absent or unparseable.
+
+    Distinct from :func:`_int_query_param`: here the param's ABSENCE is
+    meaningful rather than something to paper over with a default. The options
+    panel is docked under the titlebar's icon-tab strip when it is given that
+    strip's position and centered when it is not, so a guessed position would
+    dock it against a strip that is not there.
+    """
+    raw = request.args.get(name)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _int_query_param(name: str, default: int) -> int:
@@ -780,7 +801,7 @@ def _handle_help_assist() -> Response:
     if not workspace_agent_id_raw:
         return make_response(
             status_code=400,
-            content='{"error": "Agent help is only available inside a workspace"}',
+            content='{"error": "Agent help is only available inside a machine"}',
             media_type="application/json",
         )
     try:
@@ -805,7 +826,7 @@ def _handle_help_assist() -> Response:
         return make_response(
             status_code=409,
             content=json.dumps(
-                {"error": "This workspace doesn't have the agent-assist skill, so an agent can't help here yet."}
+                {"error": "This machine doesn't have the agent-assist skill, so an agent can't help here yet."}
             ),
             media_type="application/json",
         )
@@ -813,7 +834,7 @@ def _handle_help_assist() -> Response:
         return make_response(
             status_code=502,
             content=json.dumps(
-                {"error": "Couldn't reach this workspace to start an agent. It may be starting up or unavailable."}
+                {"error": "Couldn't reach this machine to start an agent. It may be starting up or unavailable."}
             ),
             media_type="application/json",
         )
@@ -829,7 +850,7 @@ def _handle_help_assist() -> Response:
     if not started:
         return make_response(
             status_code=502,
-            content=json.dumps({"error": "Could not start an agent in this workspace. Please try again."}),
+            content=json.dumps({"error": "Could not start an agent in this machine. Please try again."}),
             media_type="application/json",
         )
     return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
@@ -1058,7 +1079,9 @@ def _handle_landing_page() -> Response:
     all_agent_ids = backend_resolver.list_active_workspace_ids()
     paths: WorkspacePaths | None = get_state().api_v1_paths
     landing_session_store: MultiAccountSessionStore | None = get_state().session_store
-    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(
+        paths, backend_resolver, landing_session_store, get_state().imbue_cloud_cli
+    )
     launcher_email, launcher_extra_count = _account_launcher_context(landing_session_store)
     remote_workspaces = _collect_remote_workspace_tiles(backend_resolver, landing_session_store)
     locked_account_emails = _collect_locked_account_emails(landing_session_store)
@@ -1329,7 +1352,9 @@ def _handle_inspiration_create_page() -> Response:
     # the deliberate small duplication). Destroying workspaces are excluded --
     # there is nothing to paste a message into.
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, session_store)
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(
+        paths, backend_resolver, session_store, get_state().imbue_cloud_cli
+    )
     liveness_by_agent_id = {
         aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
     }
@@ -1449,6 +1474,7 @@ def _resolve_destroying_for_landing(
     paths: WorkspacePaths | None,
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
+    imbue_cloud_cli: ImbueCloudCli | None,
 ) -> dict[str, str]:
     """Walk ``<paths.data_dir>/destroying/``, finalize DONE records, return marker map.
 
@@ -1470,7 +1496,7 @@ def _resolve_destroying_for_landing(
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
-            _finalize_destroyed_workspace(agent_id, paths, session_store)
+            _finalize_destroyed_workspace(agent_id, paths, session_store, imbue_cloud_cli)
             continue
         marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
     return marker
@@ -1480,6 +1506,7 @@ def _finalize_destroyed_workspace(
     agent_id: AgentId,
     paths: WorkspacePaths,
     session_store: MultiAccountSessionStore | None,
+    imbue_cloud_cli: ImbueCloudCli | None,
 ) -> None:
     """Tombstone a fully-destroyed workspace's record, then delete the destroying marker.
 
@@ -1496,6 +1523,12 @@ def _finalize_destroyed_workspace(
             owner_user_id, _record = found
             owner_email = session_store.get_account_email(owner_user_id)
             if owner_email is not None:
+                # Destroying the host does not touch the account's Cloudflare
+                # tunnel -- nothing downstream of `mngr destroy` knows it
+                # exists. Left behind it keeps a proxied hostname answering and
+                # counts against a quota measured in workspaces ever created,
+                # so it must go before the record that names it is tombstoned.
+                delete_tunnel_for_agent(imbue_cloud_cli, owner_email, agent_id)
                 session_store.record_store.tombstone_record(owner_user_id, owner_email, str(agent_id))
             else:
                 logger.warning(
@@ -2325,7 +2358,7 @@ def _handle_recovery_page(
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
     # Whether an in-flight restart is start-only (a possible-no-op entry
     # dispatch) vs a full manual bounce; None outside a restart. Selects the
-    # restarting-state copy on the page ("Loading workspace" vs "Restarting
+    # restarting-state copy on the page ("Loading machine" vs "Restarting
     # your workspace"). Read only while RESTARTING, so it never gates dispatch.
     restart_is_start_only = tracker.get_restart_is_start_only(aid) if tracker is not None else None
     return_to = _sanitize_recovery_return_to(request.args.get("return_to", ""))
@@ -2357,7 +2390,7 @@ def _handle_recovery_page(
             pass
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
     # Display-only offline hint: whether the resolver currently reads the
-    # workspace's host as offline. Selects the "Bringing your workspace back
+    # workspace's host as offline. Selects the "Bringing your machine back
     # online" copy for the restarting state (and rides along on every poll
     # tick as a header, so a stale reading at a cold launch self-corrects once
     # discovery lands). Never gates what is dispatched.
@@ -2682,7 +2715,7 @@ def _handle_destroyed_workspace_delete_backup(agent_id: str) -> Response:
         None,
     )
     if row is None:
-        return _handle_destroyed_workspaces_page(error=f"No destroyed workspace found for {agent_id}.")
+        return _handle_destroyed_workspaces_page(error=f"No destroyed machine found for {agent_id}.")
     if row["user_id"]:
         destroyed_at = row["destroyed_at"] if row["destroyed_at"] is not None else datetime.now(timezone.utc)
         candidate = ReapCandidate(
@@ -2741,8 +2774,8 @@ def _handle_ai_keys_page() -> Response:
             workspace_display_name="",
             account_email="",
             error_message=(
-                "This page needs to be opened from a workspace: use the Sign in with Imbue "
-                "option in the workspace's Claude sign-in dialog."
+                "This page needs to be opened from a machine: use the Sign in with Imbue "
+                "option in the machine's Claude sign-in dialog."
             ),
         )
         return make_html_response(content=html)
@@ -2753,8 +2786,8 @@ def _handle_ai_keys_page() -> Response:
             workspace_display_name="",
             account_email="",
             error_message=(
-                "This workspace has no associated Imbue account. Associate an account on the "
-                "workspace's settings page, then come back here."
+                "This machine has no associated Imbue account. Associate an account on the "
+                "machine's settings page, then come back here."
             ),
         )
         return make_html_response(content=html)
@@ -2781,7 +2814,7 @@ def _handle_mint_ai_key() -> Response:
     if not workspace_host_id:
         return make_response(
             status_code=400,
-            content=json.dumps({"error": "Missing 'workspace' (the workspace host id)"}),
+            content=json.dumps({"error": "Missing 'workspace' (the machine host id)"}),
             media_type="application/json",
         )
     resolved = resolve_workspace_account(workspace_host_id, _workspace_record_store(), get_state().session_store)
@@ -2790,8 +2823,8 @@ def _handle_mint_ai_key() -> Response:
             status_code=400,
             content=json.dumps(
                 {
-                    "error": "This workspace has no associated Imbue account. Associate one on the "
-                    "workspace's settings page first."
+                    "error": "This machine has no associated Imbue account. Associate one on the "
+                    "machine's settings page first."
                 }
             ),
             media_type="application/json",
@@ -2810,7 +2843,7 @@ def _handle_mint_ai_key() -> Response:
             imbue_cloud_cli=imbue_cloud_cli,
         )
     except AiKeyMintError as exc:
-        logger.warning("LiteLLM key mint failed for workspace {}: {}", workspace_host_id, exc)
+        logger.warning("LiteLLM key mint failed for machine {}: {}", workspace_host_id, exc)
         return make_response(status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json")
     return make_response(
         status_code=200, content=json.dumps({"credentials": credential_blob}), media_type="application/json"
@@ -2892,7 +2925,7 @@ def _handle_settings_modal() -> Response:
     Served into the shared modal WebContentsView; opened from the home
     screen's bottom-left "Minds Settings" launcher and the workspace
     switcher's "Minds Settings" entry. Shows the same sections as the full
-    settings page, minus the "back to workspaces" link.
+    settings page, minus the "back to machines" link.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
@@ -3235,45 +3268,179 @@ def _is_leased_imbue_cloud_workspace(backend_resolver: BackendResolverInterface,
     return info.provider_name.startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
 
 
-def _handle_workspace_settings(
-    agent_id: str,
-) -> Response:
-    """Render workspace settings page with account, sharing, and delete options."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
+class _WorkspaceContext(FrozenModel):
+    """Everything the per-workspace page surfaces need about one workspace."""
+
+    ws_name: str = Field(description="The workspace's display name, falling back to its agent id.")
+    current_account: object | None = Field(description="The account this workspace is associated with, if any.")
+    accounts: tuple[object, ...] = Field(description="Every signed-in account, offered by the Associate prompt.")
+    servers: tuple[str, ...] = Field(description="The service names this workspace has registered.")
+    account_email: str = Field(description="The associated account's email, empty when unassociated.")
+    has_account: bool = Field(description="Whether the workspace is associated with an account at all.")
+    is_leased_imbue_cloud: bool = Field(
+        description="Whether the host is leased from Imbue Cloud, which fixes the association."
+    )
+    current_color: str = Field(
+        description="The workspace's stored color hex, or the default when it has no color label yet."
+    )
+    is_stale: bool = Field(
+        description=(
+            "Whether the owning provider's last discovery poll errored. Writes against an unreachable host "
+            "would not be observable until it recovers, so the pickers disable themselves."
+        )
+    )
+
+
+def _recorded_workspace_name(session_store: MultiAccountSessionStore | None, agent_id: str) -> str:
+    """The name the workspace record carries, falling back to the agent id.
+
+    Prefers a still-active record: a destroyed one may share its agent id with
+    the replacement that restored it.
+    """
+    record_store = session_store.record_store if session_store else None
+    if record_store is None:
+        return agent_id
+    fallback_name = ""
+    for records in record_store.list_all_records().values():
+        for record in records:
+            if record.agent_id != agent_id or not record.display_name:
+                continue
+            if record.state == RECORD_STATE_ACTIVE:
+                return record.display_name
+            fallback_name = record.display_name
+    return fallback_name or agent_id
+
+
+def _build_workspace_context(agent_id: str) -> _WorkspaceContext:
+    """Gather the context shared by every per-workspace surface.
+
+    Used by the settings page, the docked options panel and the panel's
+    full-page twin so those surfaces cannot drift.
+    """
     backend_resolver = get_state().backend_resolver
     session_store: MultiAccountSessionStore | None = get_state().session_store
     current_account = session_store.get_account_for_workspace(agent_id) if session_store else None
     accounts = session_store.list_accounts() if session_store else []
-    is_leased_imbue_cloud = _is_leased_imbue_cloud_workspace(backend_resolver, agent_id)
 
     parsed_agent_id = AgentId(agent_id)
-    ws_name = backend_resolver.get_workspace_name(parsed_agent_id)
     info = backend_resolver.get_agent_display_info(parsed_agent_id)
+    ws_name = backend_resolver.get_workspace_name(parsed_agent_id) or ""
+    if not ws_name and info is not None:
+        ws_name = info.agent_name
     if not ws_name:
-        ws_name = info.agent_name if info else agent_id
+        # The resolver only knows a workspace it has discovered, so a stopped
+        # one resolves to nothing and used to fall straight through to the raw
+        # agent id -- which the Share pane then reads out mid-sentence ("all of
+        # agent-ad350ca0..."). The workspace record keeps the name the user
+        # gave it whatever the workspace's state, and is what the landing page
+        # and the titlebar crumb already show.
+        ws_name = _recorded_workspace_name(session_store, agent_id)
 
-    servers = [str(s) for s in backend_resolver.list_services_for_agent(parsed_agent_id)]
-
-    # Pre-fill the color picker with the workspace's stored color (or the
-    # default when the workspace has no color label yet). Disable
-    # the picker controls when the provider that owns this workspace is
-    # in error state -- writes against an unreachable host would not be
-    # observable until the provider recovers.
-    current_color = _resolved_workspace_color(backend_resolver, parsed_agent_id)
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
-    is_stale = _is_workspace_provider_errored(info, errored_provider_names)
-
-    html = render_workspace_settings(
-        agent_id=agent_id,
+    return _WorkspaceContext(
         ws_name=ws_name,
         current_account=current_account,
-        accounts=accounts,
-        servers=servers,
-        is_leased_imbue_cloud=is_leased_imbue_cloud,
-        current_color=current_color,
-        is_stale=is_stale,
+        accounts=tuple(accounts),
+        servers=tuple(str(service) for service in backend_resolver.list_services_for_agent(parsed_agent_id)),
+        account_email=current_account.email if current_account else "",
         has_account=current_account is not None,
+        is_leased_imbue_cloud=_is_leased_imbue_cloud_workspace(backend_resolver, agent_id),
+        current_color=_resolved_workspace_color(backend_resolver, parsed_agent_id),
+        is_stale=_is_workspace_provider_errored(info, errored_provider_names),
+    )
+
+
+def _handle_workspace_settings(
+    agent_id: str,
+) -> Response:
+    """Render the standalone workspace settings page (the Machine settings pane)."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    context = _build_workspace_context(agent_id)
+    html = render_workspace_settings(
+        agent_id=agent_id,
+        ws_name=context.ws_name,
+        current_account=context.current_account,
+        accounts=context.accounts,
+        is_leased_imbue_cloud=context.is_leased_imbue_cloud,
+        current_color=context.current_color,
+        is_stale=context.is_stale,
+        has_account=context.has_account,
+    )
+    return make_html_response(content=html)
+
+
+def _requested_options_tab() -> str:
+    """The pane the options surfaces should open on. Anything unrecognized is Share."""
+    return "settings" if request.args.get("tab") == "settings" else "share"
+
+
+# The Machine settings groups, as WorkspaceSettingsSections renders them.
+_SETTINGS_GROUPS: Final[frozenset[str]] = frozenset({"general", "account", "backup"})
+
+
+def _requested_settings_group() -> str:
+    """The Machine settings group to open on. Anything unrecognized is General.
+
+    Carried in the URL so the controls that finish by reloading the panel
+    (linking an account, renaming) come back to the group the user was in
+    rather than dropping them on General.
+    """
+    group = request.args.get("group", "")
+    return group if group in _SETTINGS_GROUPS else "general"
+
+
+def _handle_workspace_options(agent_id: str) -> Response:
+    """Render the browser-mode workspace options page (Share machine / Machine settings)."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    context = _build_workspace_context(agent_id)
+    html = render_workspace_options_page(
+        agent_id=agent_id,
+        ws_name=context.ws_name,
+        current_account=context.current_account,
+        accounts=context.accounts,
+        servers=context.servers,
+        tab=_requested_options_tab(),
+        selected_group=_requested_settings_group(),
+        selected_target=request.args.get("target", ""),
+        account_email=context.account_email,
+        is_leased_imbue_cloud=context.is_leased_imbue_cloud,
+        current_color=context.current_color,
+        is_stale=context.is_stale,
+        has_account=context.has_account,
+    )
+    return make_html_response(content=html)
+
+
+def _handle_workspace_options_modal(agent_id: str) -> Response:
+    """Render the docked workspace options panel hosted on the overlay surface.
+
+    The titlebar-anchor pixels come from a rect chrome.js measured and the
+    Electron main process packed into the URL, the same way the sidebar's
+    trigger anchor arrives; a hand-typed or truncated URL falls back to the
+    defaults rather than a broken layout.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    context = _build_workspace_context(agent_id)
+    html = render_workspace_options_modal_page(
+        agent_id=agent_id,
+        ws_name=context.ws_name,
+        current_account=context.current_account,
+        accounts=context.accounts,
+        servers=context.servers,
+        tab=_requested_options_tab(),
+        selected_group=_requested_settings_group(),
+        selected_target=request.args.get("target", ""),
+        account_email=context.account_email,
+        anchor_x=_optional_int_query_param("x"),
+        anchor_y=_optional_int_query_param("y"),
+        anchor_height=_optional_int_query_param("h"),
+        is_leased_imbue_cloud=context.is_leased_imbue_cloud,
+        current_color=context.current_color,
+        is_stale=context.is_stale,
+        has_account=context.has_account,
     )
     return make_html_response(content=html)
 
@@ -3922,6 +4089,8 @@ def create_desktop_client(
     # Workspace settings page (the account-association and color writes it drives
     # now go through PATCH /api/v1/workspaces/<id>).
     app.add_url_rule("/workspace/<agent_id>/settings", view_func=_handle_workspace_settings)
+    app.add_url_rule("/workspace/<agent_id>/options", view_func=_handle_workspace_options)
+    app.add_url_rule("/workspace/<agent_id>/options/modal", view_func=_handle_workspace_options_modal)
     # Full backup-history page, reached from the settings page's
     # "View all N backups" footer.
     app.add_url_rule("/workspace/<agent_id>/backups", view_func=_handle_workspace_backup_history)

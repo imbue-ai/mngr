@@ -34,7 +34,7 @@ from imbue.minds.testing import write_stub_supervisorctl
 
 
 def _make_workspace_repo(tmp_path: Path, *, code_path: str = "libs/host_backup") -> Path:
-    """A git repo shaped like a workspace: the backup-service code dir + an unrelated file.
+    """A git repo shaped like a machine: the backup-service code dir + an unrelated file.
 
     ``code_path`` is the repo-relative backup-service directory (pass
     ``system/services/host_backup`` for a repo shaped like the creation-rename
@@ -82,11 +82,11 @@ def _make_stub_bin(
     list_ok: bool = True,
     supervisorctl_call_log: Path | None = None,
 ) -> Path:
-    """A PATH dir with stub `uv` and `supervisorctl` acting like a healthy workspace.
+    """A PATH dir with stub `uv` and `supervisorctl` acting like a healthy machine.
 
     ``sync_ok=False`` fails `uv sync` (a post-restore failpoint for the
     restore script); ``list_ok=False`` fails `uv run mngr list` (a broken
-    workspace whose chat gate cannot answer); ``supervisorctl_call_log`` is
+    machine whose chat gate cannot answer); ``supervisorctl_call_log`` is
     forwarded to the supervisorctl stub for lifecycle-order assertions.
     """
     stub_bin = tmp_path / "stub-bin"
@@ -878,7 +878,7 @@ def test_restore_script_reports_failure_when_the_restored_tree_lacks_a_checkout(
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     junk = (tmp_path / "junk").resolve()
     junk.mkdir()
-    (junk / "unrelated.txt").write_text("not a workspace\n")
+    (junk / "unrelated.txt").write_text("not a machine\n")
     _restic_for_test(restic_repo, "backup", str(junk))
     snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
 

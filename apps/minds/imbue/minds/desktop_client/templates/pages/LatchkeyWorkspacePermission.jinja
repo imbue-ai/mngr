@@ -25,13 +25,13 @@
   <PermissionsForm :request_id="request_id">
     <p class="type-body text-primary mb-3">
       Approving will grant {{ ws_name or agent_id }} and its sibling agents the selected
-      cross-workspace permissions below.
+      cross-machine permissions below.
     </p>
 
     {# General (non-targeted) permissions: apply across all workspaces (current
        and future), so they carry no target and always appear. #}
     <h2 class="type-label text-primary mb-2">General permissions</h2>
-    <p class="type-body text-primary mb-2">These apply across all workspaces (current and future).</p>
+    <p class="type-body text-primary mb-2">These apply across all machines (current and future).</p>
     <Card extra="space-y-3">
       {% for verb in verbs if not verb.is_targeted %}
         <label class="flex items-start gap-2 cursor-pointer">
@@ -58,17 +58,17 @@
        * without a named target there is no workspace to pin, so the only
          possible scope is broad -- we say so with a caution notice and offer a
          single, pre-selected "All workspaces" option. #}
-    <h2 class="type-label text-primary mt-6 mb-2">Workspace-specific permissions</h2>
+    <h2 class="type-label text-primary mt-6 mb-2">Machine-specific permissions</h2>
     {% if show_target_choice %}
-      <p class="type-body text-primary mb-2">These act on individual workspaces.</p>
+      <p class="type-body text-primary mb-2">These act on individual machines.</p>
     {% else %}
       {# The request named no target workspace, so any of these the user grants
          necessarily apply to all workspaces. Shown in place of the usual hint,
          the caution makes that explicit. #}
       <Notice variant="warn">
-        This request did not name a specific workspace, so any
-        workspace-specific permissions you grant will apply to
-        <span class="font-semibold">all workspaces</span> (current and future).
+        This request did not name a specific machine, so any
+        machine-specific permissions you grant will apply to
+        <span class="font-semibold">all machines</span> (current and future).
         Grant them only if you intend that broad access.
       </Notice>
     {% endif %}
@@ -88,22 +88,22 @@
       {% endfor %}
     </Card>
 
-    <h2 class="type-label text-primary mt-6 mb-2">Apply workspace-specific permissions to:</h2>
+    <h2 class="type-label text-primary mt-6 mb-2">Apply machine-specific permissions to:</h2>
     {% if show_target_choice %}
       <Card extra="space-y-2">
         <label class="flex items-start gap-2 cursor-pointer">
           <input type="radio" name="target_scope" value="selected" class="mt-1 shrink-0" checked>
           <span class="min-w-0">
-            <span class="type-body text-primary">Only this workspace</span>
+            <span class="type-body text-primary">Only this machine</span>
             <code class="block type-body font-mono text-primary mt-0.5">{{ target_workspace_name or target_workspace_id }}</code>
           </span>
         </label>
         <label class="flex items-start gap-2 cursor-pointer">
           <input type="radio" name="target_scope" value="all" class="mt-1 shrink-0">
           <span class="min-w-0">
-            <span class="type-body text-primary">All workspaces</span>
+            <span class="type-body text-primary">All machines</span>
             <span class="block type-body text-primary mt-0.5">
-              Grant the selected actions for every workspace (current and future).
+              Grant the selected actions for every machine (current and future).
             </span>
           </span>
         </label>
@@ -116,9 +116,9 @@
         <label class="flex items-start gap-2 cursor-pointer">
           <input type="radio" name="target_scope" value="all" class="mt-1 shrink-0" checked>
           <span class="min-w-0">
-            <span class="type-body text-primary">All workspaces</span>
+            <span class="type-body text-primary">All machines</span>
             <span class="block type-body text-primary mt-0.5">
-              Grant the selected actions for every workspace (current and future).
+              Grant the selected actions for every machine (current and future).
             </span>
           </span>
         </label>

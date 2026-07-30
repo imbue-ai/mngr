@@ -176,6 +176,22 @@
       }
     };
 
+    window.landingOpenWorkspaceOptions = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      if (window.minds && window.minds.openWorkspaceOptions) {
+        // Trusted local page on the chrome surface: open the docked options
+        // panel over the workspace list rather than navigating into the
+        // workspace's own settings page. No anchor -- the titlebar's icon-tab
+        // strip only exists on workspace-scoped screens, and the panel falls
+        // back to its default position when none is supplied.
+        window.minds.openWorkspaceOptions(agentId, 'settings', null);
+      } else {
+        window.location = '/workspace/' + encodeURIComponent(agentId) + '/options?tab=settings';
+      }
+    };
+
     // Re-label the account launcher from the chrome SSE's account fields. The
     // launcher is server-rendered, but a sign-out / sign-in / "Set default"
     // happens in an overlay modal on top of this page, which is never
@@ -913,11 +929,11 @@
   })();
 </script>
 {% endset %}
-<ChromeShell title="Workspaces" scripts={{ _scripts }}>
+<ChromeShell title="Machines" scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids or remote_workspaces or create_attempt_rows %}
       <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (create_attempt_rows | map(attribute='id') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}" data-landing-create-attempt-states="{% for create_attempt in create_attempt_rows %}{{ create_attempt.id }}={{ create_attempt.state }}{% if not loop.last %},{% endif %}{% endfor %}">
-        <h1 class="type-heading text-primary">Workspaces</h1>
+        <h1 class="type-heading text-primary">Machines</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
 
@@ -928,7 +944,7 @@
       <Notice class="mb-4" id="sync-unlock-banner">
         <div class="flex flex-col gap-2">
           <span class="type-body text-primary">
-            Enter your master password to unlock synced workspaces for
+            Enter your master password to unlock synced machines for
             {{ locked_account_emails | join(', ') }}.
           </span>
           <div class="flex items-center gap-2">
@@ -964,7 +980,7 @@
                   extra="accent-spine relative overflow-hidden"
                   :href="destroying_href"
                   :style="accent_style">
-              <span class="flex-1 font-semibold text-secondary pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="flex-1 min-w-0 truncate font-semibold text-secondary pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               {% if destroying_status == 'running' %}
                 <StatusBadge extra="gap-2">
                   <Spinner size="sm" />
@@ -982,7 +998,7 @@
                   :data-default-href="goto_href"
                   :data-mind-name="agent_names.get(agent_id | string, agent_id)"
                   onclick="window.landingRowClick(event, this)">
-              <span class="flex-1 font-semibold text-primary pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="flex-1 min-w-0 truncate font-semibold text-primary pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               {% set provider_label = agent_providers.get(agent_id | string, "") %}
               {% if provider_label %}
                 <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">{{ provider_label }}</span>
@@ -1003,36 +1019,36 @@
                         extra="landing-start-btn"
                         :style="start_btn_style"
                         onclick="event.stopPropagation(); window.landingStartClick(this)"
-                        data-tooltip="Start workspace"
-                        aria-label="Start workspace">
+                        data-tooltip="Start machine"
+                        aria-label="Start machine">
                   <Icon16 name="play" />
                 </Button>
                 <Button variant="ghost" size="icon"
                         extra="landing-stop-btn"
                         :style="stop_btn_style"
                         onclick="event.stopPropagation(); window.landingStopClick(this)"
-                        data-tooltip="Stop workspace"
-                        aria-label="Stop workspace">
+                        data-tooltip="Stop machine"
+                        aria-label="Stop machine">
                   <Icon16 name="pause" />
                 </Button>
               {% else %}
                 <Button variant="ghost" size="icon"
                         onclick="event.stopPropagation(); window.landingRestartClick(this)"
-                        data-tooltip="Restart workspace"
-                        aria-label="Restart workspace">
+                        data-tooltip="Restart machine"
+                        aria-label="Restart machine">
                   <Icon16 name="restart" />
                 </Button>
               {% endif %}
               <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.landingOpenInNewWindow(this)"
                       data-tooltip="Open in new window"
-                      aria-label="Open workspace in new window">
+                      aria-label="Open machine in new window">
                 <Icon16 name="arrow-up-right" />
               </Button>
               <Button variant="ghost" size="icon"
-                      onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
+                      onclick="event.stopPropagation(); window.landingOpenWorkspaceOptions(this)"
                       data-tooltip="Settings"
-                      aria-label="Workspace settings">
+                      aria-label="Machine settings">
                 <Icon16 name="settings" />
               </Button>
             </Card>
@@ -1051,7 +1067,7 @@
                 extra="accent-spine relative overflow-hidden"
                 :href="create_attempt_href"
                 :style="create_attempt_accent_style">
-            <span class="flex-1 font-semibold text-secondary pl-1">{{ create_attempt.name }}</span>
+            <span class="flex-1 min-w-0 truncate font-semibold text-secondary pl-1">{{ create_attempt.name }}</span>
             {% if create_attempt.provider_label %}
               <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">{{ create_attempt.provider_label }}</span>
             {% endif %}
@@ -1079,7 +1095,7 @@
                 extra="accent-spine relative overflow-hidden opacity-60"
                 :style="remote_accent_style"
                 :data-agent-id="remote.agent_id">
-            <span class="flex-1 font-semibold text-secondary pl-1">{{ remote.name }}</span>
+            <span class="flex-1 min-w-0 truncate font-semibold text-secondary pl-1">{{ remote.name }}</span>
             <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">on {{ remote.location }}</span>
             {# Derived access state for cloud rows: connecting (synced key
                materialized, discovery hasn't resolved it yet), unreachable
@@ -1123,7 +1139,7 @@
         </script>
       {% else %}
         <div class="text-center py-12">
-          <p class="text-tertiary mb-6">No workspaces yet</p>
+          <p class="text-tertiary mb-6">No machines yet</p>
           <ButtonLink href="/create" variant="primary">Create</ButtonLink>
         </div>
       {% endif %}
@@ -1135,7 +1151,7 @@
     <div class="mt-6">
       <a href="/workspaces/destroyed" id="landing-destroyed"
          class="inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline">
-        <span>Recently destroyed workspaces</span>
+        <span>Recently destroyed machines</span>
       </a>
     </div>
 

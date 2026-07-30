@@ -156,7 +156,7 @@ class StartupHostReconciler(MutableModel):
 
     def reconcile_now(self) -> None:
         """Reconcile every Lima / Docker host, then gc stale host records."""
-        with log_span("Reconciling Lima/Docker workspace hosts at startup"):
+        with log_span("Reconciling Lima/Docker machine hosts at startup"):
             for provider_name in RECONCILED_PROVIDER_NAMES:
                 hosts = self._list_hosts(provider_name)
                 for host in hosts:
@@ -234,7 +234,7 @@ class StartupHostReconciler(MutableModel):
         services_agent_id = next(agent.id for agent in host.agents if agent.name == SYSTEM_SERVICES_AGENT_NAME)
         if record is None:
             logger.info(
-                "Adopting completed {} host '{}' ({}) with no pending-create-attempt record as a private workspace",
+                "Adopting completed {} host '{}' ({}) with no pending-create-attempt record as a private machine",
                 host.provider,
                 host.name,
                 host.id,
@@ -256,13 +256,13 @@ class StartupHostReconciler(MutableModel):
                 except WorkspaceSyncError as e:
                     # Keep the record: the next startup's reconcile retries.
                     logger.warning(
-                        "Could not restore the account association for adopted workspace {}: {}",
+                        "Could not restore the account association for adopted machine {}: {}",
                         services_agent_id,
                         e,
                     )
                     return
                 logger.info(
-                    "Adopted completed {} host '{}' ({}): re-associated workspace {} with its account",
+                    "Adopted completed {} host '{}' ({}): re-associated machine {} with its account",
                     host.provider,
                     host.name,
                     host.id,

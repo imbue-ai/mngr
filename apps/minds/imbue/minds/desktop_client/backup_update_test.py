@@ -1,8 +1,8 @@
 """Tests for the desktop-side backup operation workers.
 
 The restore worker resolves its target snapshot from minds' own view of the
-repository before it touches the workspace, so these run against a real local
-restic repo and never need a reachable workspace.
+repository before it touches the machine, so these run against a real local
+restic repo and never need a reachable machine.
 """
 
 from datetime import datetime
@@ -158,7 +158,7 @@ def test_resolve_restore_subpath_rejects_a_snapshot_without_a_workspace(tmp_path
     _write_env_for_local_repo(paths, agent_id, repository)
     junk = (tmp_path / "junk").resolve()
     junk.mkdir()
-    (junk / "unrelated.txt").write_text("not a workspace\n")
+    (junk / "unrelated.txt").write_text("not a machine\n")
     _backup_tree(repository, junk)
 
     snapshot = _resolve_restore_snapshot(

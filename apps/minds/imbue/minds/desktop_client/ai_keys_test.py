@@ -1,4 +1,4 @@
-"""Tests for the workspace AI-key mint helpers and routes (see ai_keys.py)."""
+"""Tests for the machine AI-key mint helpers and routes (see ai_keys.py)."""
 
 from collections.abc import Mapping
 from pathlib import Path
@@ -113,7 +113,7 @@ def test_build_credential_blob_is_env_var_lines() -> None:
 
 
 def test_mint_workspace_credential_blob_fixes_workspace_identity_on_the_key(tmp_path: Path) -> None:
-    """The key's alias/metadata carry the workspace host id server-side; there is
+    """The key's alias/metadata carry the machine host id server-side; there is
     no user-editable naming input by design."""
     cli = RecordingImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
 
@@ -237,7 +237,7 @@ def test_ai_keys_page_without_workspace_explains_how_to_get_there(tmp_path: Path
     response = client.get("/settings/ai-keys")
 
     assert response.status_code == 200
-    assert "opened from a workspace" in response.text
+    assert "opened from a machine" in response.text
     assert 'id="mint-key"' not in response.text
 
 

@@ -406,7 +406,7 @@ def resolve_ready_prebaked_lima_image(
 
 def _fall_back_to_in_vm(reason: str, on_fallback_to_in_vm: Callable[[str], None] | None) -> None:
     """Report why the create is building in-VM rather than using the pre-baked image, and return None."""
-    logger.info("Building the workspace in-VM: {}", reason)
+    logger.info("Building the machine in-VM: {}", reason)
     if on_fallback_to_in_vm is not None:
         on_fallback_to_in_vm(reason)
     return None

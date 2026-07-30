@@ -139,7 +139,7 @@ def _exec_git_in_workspace(
     )
     if result.is_timed_out or result.returncode != 0:
         logger.debug(
-            "git {} in workspace {} failed (timed_out={}, rc={})",
+            "git {} in machine {} failed (timed_out={}, rc={})",
             git_args,
             agent_id,
             result.is_timed_out,
@@ -153,7 +153,7 @@ def _exec_git_in_workspace(
         # Warning (not debug): a zero-exit exec whose ``--format json`` envelope
         # does not parse is a broken mngr output contract, not a normal
         # offline/no-tags fallback.
-        logger.warning("git {} in workspace {} produced an unparseable exec envelope: {}", git_args, agent_id, e)
+        logger.warning("git {} in machine {} produced an unparseable exec envelope: {}", git_args, agent_id, e)
         return None
 
 

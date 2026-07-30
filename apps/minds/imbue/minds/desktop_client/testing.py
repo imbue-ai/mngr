@@ -1,6 +1,7 @@
 """Shared non-fixture test helpers for desktop_client tests."""
 
 import os
+import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,6 +10,32 @@ from pathlib import Path
 from loguru import logger as loguru_logger
 
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
+
+
+def is_workspace_options_pane_hidden(html: str, pane: str) -> bool:
+    """Whether the workspace options panel ships ``pane`` hidden (it must ship both).
+
+    Reads the ``hidden`` class off the pane rather than matching its whole class
+    attribute, which also carries the layout that lets the pane pin its title
+    and nav and scroll its right side. Explodes if the pane is not in the HTML
+    at all, so a test cannot pass by asserting a missing pane is not shown.
+    """
+    match = re.search(rf'data-wsopt-panel="{re.escape(pane)}" class="([^"]*)"', html)
+    assert match is not None, f"no {pane!r} pane in the rendered options panel"
+    return "hidden" in match.group(1).split()
+
+
+def workspace_options_pane_html(html: str, pane: str) -> str:
+    """The markup of one pane of the workspace options panel, for asserting on its layout.
+
+    The panel ships both panes, so a naive substring search cannot tell which
+    one it matched. This slices from the pane's own element to the start of the
+    next pane (or the end), which is enough because the two are siblings.
+    """
+    start = html.find(f'data-wsopt-panel="{pane}"')
+    assert start != -1, f"no {pane!r} pane in the rendered options panel"
+    next_pane = html.find("data-wsopt-panel=", start + 1)
+    return html[start:] if next_pane == -1 else html[start:next_pane]
 
 
 @contextmanager

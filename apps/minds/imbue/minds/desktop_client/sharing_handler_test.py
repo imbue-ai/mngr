@@ -7,7 +7,9 @@ from pydantic import Field
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
+from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
 from imbue.minds.desktop_client.sharing_handler import disable_sharing
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
@@ -175,3 +177,25 @@ def test_probe_not_ready_without_edge_redirect() -> None:
 
     client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
     assert probe_share_url_readiness(client, _SHARE_URL) is False
+
+
+def test_describe_connector_failure_reports_an_expired_session() -> None:
+    # Not "signed out": the account is still in this device's credential list,
+    # so the app goes on showing it as signed in.
+    exc = ImbueCloudCliError("tunnels enable-sharing failed: Refresh rejected by connector: Session missing in db")
+    message = describe_connector_failure(exc)
+    assert message == "Your Imbue Cloud session has expired. You may need to log out and log in again."
+    assert "signed out" not in message
+
+
+def test_describe_connector_failure_reports_an_unverified_email() -> None:
+    exc = ImbueCloudCliError('sync records push failed: Unauthenticated (401): {"detail":"Email not verified"}')
+    assert describe_connector_failure(exc) == (
+        "Imbue Cloud has not verified this account's email address. Verify it, then retry."
+    )
+
+
+def test_describe_connector_failure_keeps_an_unrecognized_message() -> None:
+    # Better the connector's own wording than a pointer to a log file.
+    exc = ImbueCloudCliError("tunnels create failed: Connector error 500: upstream exploded")
+    assert describe_connector_failure(exc) == "tunnels create failed: Connector error 500: upstream exploded"

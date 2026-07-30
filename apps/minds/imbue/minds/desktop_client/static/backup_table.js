@@ -148,7 +148,7 @@
     return row;
   }
 
-  // The Restore action's config from one workspace's backup-check verdict
+  // The Restore action's config from one machine's backup-check verdict
   // (the /backup-check route's check_state; the snapshot-only /backups
   // response doesn't carry it), shared by both tables so they cannot
   // disagree about when Restore is offered. A restore execs into the
@@ -159,7 +159,7 @@
   // the workspace turns out unreachable.
   function restoreConfigFor(checkState, onRestore) {
     if (checkState === 'OFFLINE') {
-      return { disabledReason: 'This workspace is offline; start it to restore a backup.' };
+      return { disabledReason: 'This machine is offline; start it to restore a backup.' };
     }
     return { onRestore: onRestore };
   }

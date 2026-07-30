@@ -124,6 +124,10 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # border-stronger on hover (a quieter cue than a fill tint), with a focus ring
 # drawn OUTSIDE the field (outline-offset) so it keeps the border rather than
 # recoloring it.
+# Sentinel value for Associate's "Add account" picker entry. Not a user id,
+# so the association submit must reject it -- see Associate.jinja.
+ADD_ACCOUNT_OPTION_VALUE: Final[str] = "__add_account__"
+
 _INPUT_BASE: Final[str] = (
     "p-2 type-body border border-strong bg-surface-primary text-primary "
     "placeholder:text-tertiary hover:border-stronger focus:border-stronger "
@@ -155,6 +159,12 @@ _ICONS_16: Final[Mapping[str, str]] = {
     # the inner stroke-width of 1.8 renders at the set's visual 1.2 after the
     # 2/3 scale). Used by the workspace icon-tab in the titlebar breadcrumb.
     "panels-top-left": '<g transform="scale(0.66667)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></g>',
+    "share": '<path d="M9.78225 1.44141C10.0122 1.35145 10.2738 1.4114 10.4414 1.59278L15.4405 7.00391C15.6532 7.23415 15.6527 7.58953 15.4395 7.81934L10.4405 13.208C10.2726 13.3889 10.011 13.4485 9.78127 13.3584C9.55172 13.2682 9.40041 13.0465 9.40041 12.7998V10.04C7.84575 10.1878 6.30604 10.8831 4.98537 11.7168C3.50242 12.653 2.35808 13.7236 1.87209 14.2412L1.87112 14.2402C1.75059 14.3697 1.59344 14.4597 1.41994 14.4951C1.2432 14.5312 1.05947 14.5098 0.895531 14.4346C0.731549 14.3593 0.595769 14.2337 0.507836 14.0762C0.419903 13.9186 0.384182 13.7367 0.406273 13.5576H0.40725C0.667763 11.3166 2.21196 9.13775 4.04592 7.54297C5.68193 6.12036 7.67022 5.05919 9.40041 4.85059V2C9.40041 1.75301 9.55223 1.53141 9.78225 1.44141ZM10.6006 5.41114C10.6006 5.74242 10.3323 6.01061 10.001 6.01075C8.5585 6.01075 6.56212 6.94567 4.83401 8.44825C3.45889 9.644 2.35133 11.1163 1.85354 12.5898C2.48514 12.023 3.34266 11.3348 4.34475 10.7022C5.92057 9.70737 7.91948 8.81055 10.001 8.81055C10.3321 8.81069 10.6004 9.07906 10.6006 9.41016V11.2705L14.1817 7.41016L10.6006 3.53321V5.41114Z"/>',
+    "box": '<g transform="scale(0.66667)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></g>',
+    "link": '<g transform="scale(0.66667)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><path d="M8 12h8"/></g>',
+    "copy": '<g transform="scale(0.66667)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>',
+    "info": '<g transform="scale(0.66667)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></g>',
+    "cloud": '<g transform="scale(0.66667)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></g>',
     "settings": '<g transform="translate(0.5 0.5)"><path d="M8.33765 2.50001C8.33765 2.31436 8.26384 2.13617 8.13257 2.00489C8.0013 1.87363 7.82309 1.79981 7.63745 1.79981H7.36206C7.17669 1.79993 6.99907 1.87389 6.86792 2.00489C6.73664 2.13617 6.66284 2.31436 6.66284 2.50001V2.61329C6.66248 2.92882 6.57854 3.23854 6.42065 3.51173C6.263 3.78448 6.03608 4.01019 5.76343 4.16798L5.7644 4.16895L5.49487 4.3252L5.4939 4.32618C5.22026 4.48416 4.90947 4.56739 4.59351 4.56739C4.28352 4.56735 3.97951 4.48625 3.70972 4.33399V4.33497L3.61597 4.28517C3.61069 4.28235 3.60552 4.27936 3.60034 4.27638C3.43989 4.18382 3.24904 4.15837 3.07007 4.20606C2.89093 4.25397 2.73723 4.37177 2.64429 4.53224L2.50757 4.76954C2.41531 4.92995 2.39048 5.12004 2.43823 5.29884C2.47414 5.43311 2.54837 5.553 2.65112 5.64356L2.76343 5.72364L2.79272 5.7422L2.88647 5.8047H2.8855C3.14427 5.9608 3.36037 6.17885 3.51245 6.44044C3.67027 6.71193 3.75466 7.01998 3.75659 7.33399V7.65431L3.75269 7.77247C3.73559 8.04849 3.65566 8.31791 3.51733 8.5586C3.3607 8.83108 3.13439 9.05648 2.86304 9.21485L2.86401 9.21583L2.77026 9.27149L2.76343 9.27638C2.60297 9.36932 2.48613 9.52204 2.43823 9.70118C2.39048 9.87998 2.41531 10.0701 2.50757 10.2305L2.64429 10.4678C2.73723 10.6282 2.89093 10.7461 3.07007 10.794C3.24904 10.8417 3.43989 10.8162 3.60034 10.7236L3.61597 10.7149L3.70972 10.665C3.97941 10.5129 4.28368 10.4327 4.59351 10.4326C4.86998 10.4326 5.14235 10.4964 5.3894 10.6182L5.4939 10.6738L5.49487 10.6748L5.76245 10.8301L5.86304 10.8926C6.09166 11.0455 6.28249 11.2493 6.42065 11.4883C6.57854 11.7615 6.66248 12.0712 6.66284 12.3867V12.5C6.66284 12.6857 6.73664 12.8639 6.86792 12.9951C6.99907 13.1261 7.17669 13.2001 7.36206 13.2002H7.63745C7.82309 13.2002 8.0013 13.1264 8.13257 12.9951C8.26384 12.8639 8.33765 12.6857 8.33765 12.5V12.3867C8.33801 12.0713 8.42105 11.7614 8.57886 11.4883C8.71709 11.2492 8.90868 11.0455 9.13745 10.8926L9.23706 10.8301L9.50464 10.6748L9.50659 10.6738C9.78011 10.516 10.0902 10.4327 10.406 10.4326C10.7158 10.4326 11.0201 10.513 11.2898 10.665L11.3835 10.7149L11.4001 10.7236C11.5607 10.8162 11.7514 10.8418 11.9304 10.794C12.1096 10.7461 12.2623 10.6282 12.3552 10.4678L12.49 10.2295L12.4919 10.2256C12.5846 10.065 12.6102 9.87349 12.5623 9.69435C12.5148 9.51717 12.3998 9.36564 12.2419 9.27247L12.1599 9.2295C12.1545 9.2266 12.1487 9.22282 12.1433 9.21974C11.869 9.06123 11.6411 8.83328 11.4832 8.5586C11.3251 8.28367 11.2427 7.9714 11.2439 7.65431V7.34376C11.243 7.02734 11.3255 6.71579 11.4832 6.44142C11.6397 6.16926 11.8645 5.9425 12.1355 5.78419L12.2292 5.72853L12.2371 5.72364C12.3973 5.63068 12.5144 5.47785 12.5623 5.29884C12.61 5.11979 12.5845 4.92909 12.4919 4.76856V4.76759L12.3552 4.53224C12.2623 4.37177 12.1096 4.25397 11.9304 4.20606C11.7514 4.15823 11.5607 4.18386 11.4001 4.27638C11.3949 4.27942 11.3889 4.2823 11.3835 4.28517L11.3054 4.3252L11.3064 4.32618C11.0328 4.48416 10.722 4.56739 10.406 4.56739C10.0902 4.56735 9.78011 4.48405 9.50659 4.32618L9.50464 4.3252L9.23706 4.16895V4.16993C8.96387 4.01211 8.73675 3.78488 8.57886 3.51173C8.42105 3.23859 8.33801 2.92874 8.33765 2.61329V2.50001ZM8.82495 7.50001C8.82495 6.76823 8.23153 6.17481 7.49976 6.17481C6.76809 6.17495 6.17456 6.76831 6.17456 7.50001C6.17456 8.23171 6.76809 8.82507 7.49976 8.8252C8.23153 8.8252 8.82495 8.23179 8.82495 7.50001ZM9.92456 7.50001C9.92456 8.8393 8.83905 9.92481 7.49976 9.92481C6.16058 9.92468 5.07495 8.83922 5.07495 7.50001C5.07495 6.1608 6.16058 5.07534 7.49976 5.0752C8.83905 5.0752 9.92456 6.16072 9.92456 7.50001ZM9.43726 2.61231L9.44312 2.70313C9.45513 2.79393 9.48488 2.88212 9.53101 2.96192C9.57708 3.0416 9.63913 3.11035 9.71167 3.16603L9.78784 3.21778L9.78882 3.21876L10.0554 3.37403H10.0564C10.1627 3.43533 10.2833 3.46774 10.406 3.46778C10.5289 3.46778 10.6502 3.43547 10.7566 3.37403L10.7722 3.36427L10.866 3.31446C11.2757 3.08362 11.7598 3.02198 12.2146 3.14356C12.6753 3.26674 13.0684 3.56786 13.3074 3.98048L13.4451 4.21778V4.21876C13.6833 4.63172 13.7478 5.12244 13.6248 5.58302C13.5023 6.04104 13.2037 6.43153 12.7947 6.67091L12.7019 6.72755L12.6941 6.73243C12.5873 6.79411 12.4987 6.8833 12.4373 6.99024C12.3758 7.09719 12.343 7.21846 12.3435 7.34181V7.65821C12.343 7.78156 12.3758 7.90283 12.4373 8.00978C12.4987 8.11672 12.5873 8.20591 12.6941 8.26759L12.7712 8.3086L12.7878 8.31739C13.2004 8.55634 13.5015 8.94964 13.6248 9.41017C13.7475 9.86904 13.683 10.3575 13.447 10.7695L13.3103 11.0137L13.3074 11.0195C13.0684 11.4322 12.6753 11.7333 12.2146 11.8565C11.7597 11.9781 11.2758 11.9156 10.866 11.6846L10.7722 11.6358C10.7668 11.6329 10.7619 11.629 10.7566 11.626C10.6502 11.5645 10.5289 11.5322 10.406 11.5322C10.2833 11.5323 10.1627 11.5647 10.0564 11.626L10.0554 11.625L9.78882 11.7813L9.78784 11.7822C9.68156 11.8436 9.59244 11.9319 9.53101 12.0381C9.46964 12.1443 9.43745 12.2651 9.43726 12.3877V12.5C9.43726 12.9774 9.24748 13.4349 8.90991 13.7725C8.57235 14.11 8.11483 14.2998 7.63745 14.2998H7.36206C6.88483 14.2997 6.42706 14.1099 6.0896 13.7725C5.75217 13.4349 5.56226 12.9773 5.56226 12.5V12.3877C5.56207 12.2651 5.52988 12.1443 5.46851 12.0381C5.40708 11.932 5.31885 11.8436 5.21265 11.7822L5.21069 11.7813L4.94409 11.626L4.86108 11.5859C4.77655 11.551 4.68557 11.5322 4.59351 11.5322C4.47081 11.5323 4.35018 11.5647 4.2439 11.626C4.23855 11.6291 4.23274 11.6328 4.22729 11.6358L4.13354 11.6856L4.13257 11.6846C3.72316 11.915 3.24026 11.9778 2.78589 11.8565C2.32532 11.7333 1.93212 11.4321 1.69312 11.0195L1.55542 10.7822L1.55444 10.7813C1.31626 10.3683 1.25172 9.87753 1.37476 9.417C1.49724 8.95896 1.79581 8.56751 2.20483 8.32813L2.29858 8.27247L2.3064 8.26759C2.4132 8.20592 2.50178 8.11671 2.56323 8.00978C2.62462 7.90288 2.6565 7.78148 2.65601 7.65821V7.34083L2.65015 7.25001C2.63778 7.15974 2.60737 7.07245 2.56128 6.99317C2.49994 6.88771 2.41203 6.80032 2.3064 6.73927C2.29617 6.73336 2.28595 6.72629 2.27612 6.71974L2.18237 6.65724V6.65626C1.78541 6.4158 1.49488 6.03226 1.37476 5.58302C1.25172 5.12249 1.31626 4.63168 1.55444 4.21876L1.55542 4.21778L1.69312 3.98048C1.93212 3.56797 2.32532 3.26672 2.78589 3.14356C3.2401 3.02225 3.72325 3.08422 4.13257 3.31446H4.13354L4.22729 3.36427C4.23274 3.36717 4.23855 3.37095 4.2439 3.37403C4.35018 3.43533 4.47081 3.46774 4.59351 3.46778C4.71638 3.46778 4.83768 3.43547 4.94409 3.37403L5.21069 3.21876L5.21265 3.21778C5.31885 3.15646 5.40708 3.06806 5.46851 2.96192C5.51463 2.88214 5.54437 2.79391 5.5564 2.70313L5.56226 2.61231V2.50001C5.56226 2.02272 5.75217 1.56509 6.0896 1.22755C6.42706 0.890087 6.88483 0.700322 7.36206 0.700205H7.63745C8.11483 0.700205 8.57235 0.889999 8.90991 1.22755C9.24748 1.56511 9.43726 2.02262 9.43726 2.50001V2.61231Z"/></g>',
     "chevron-right": '<path d="M5.57617 3.57617C5.81049 3.34186 6.18951 3.34186 6.42383 3.57617L10.4238 7.57617C10.6581 7.81049 10.6581 8.18951 10.4238 8.42383L6.42383 12.4238C6.18951 12.6581 5.81049 12.6581 5.57617 12.4238C5.34186 12.1895 5.34186 11.8105 5.57617 11.5762L9.15234 8L5.57617 4.42383C5.34186 4.18951 5.34186 3.81049 5.57617 3.57617Z"/>',
     "chevron-left": '<path d="M9.57617 3.57617C9.81049 3.34186 10.1895 3.34186 10.4238 3.57617C10.6581 3.81049 10.6581 4.18951 10.4238 4.42383L6.84766 8L10.4238 11.5762C10.6581 11.8105 10.6581 12.1895 10.4238 12.4238C10.1895 12.6581 9.81049 12.6581 9.57617 12.4238L5.57617 8.42383C5.34186 8.18951 5.34186 7.81049 5.57617 7.57617L9.57617 3.57617Z"/>',
@@ -260,6 +270,7 @@ def _build_catalog() -> Catalog:
             "BTN_SIZES": _BTN_SIZES,
             "BTN_VARIANTS": _BTN_VARIANTS,
             "INPUT_BASE": _INPUT_BASE,
+            "ADD_ACCOUNT_OPTION_VALUE": ADD_ACCOUNT_OPTION_VALUE,
             "ICONS_16": _ICONS_16,
             "ICONS_12": _ICONS_12,
             # Resolved per render so the page only boots the frontend Sentry SDK
@@ -481,7 +492,7 @@ def normalize_host_name_slug(text: str) -> HostName:
     collapsed = _NON_SLUG_CHARS_RE.sub("-", lowered).strip("-")
     truncated = collapsed[:_MINDS_HOST_NAME_SLUG_MAX_LENGTH].strip("-")
     if not truncated:
-        raise InvalidName("Workspace name must include at least one letter or number.")
+        raise InvalidName("Machine name must include at least one letter or number.")
     return HostName(truncated)
 
 
@@ -603,7 +614,7 @@ def render_create_form(
     ``/`` once a workspace appears, so a user who was shown the create form on a
     cold-start race (discovery hadn't re-surfaced their workspace yet) is taken
     to their workspace list instead of being trapped. It is left False on the
-    explicit ``/create`` page so a deliberate "create another workspace" flow is
+    explicit ``/create`` page so a deliberate "create another machine" flow is
     never bounced away by the user's existing workspaces.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
@@ -740,8 +751,8 @@ _STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {
     "INITIALIZING": "Starting...",
     "CLONING_REPO": "Cloning repository...",
     "CHECKING_OUT_BRANCH": "Checking out branch...",
-    "CREATING_WORKSPACE": "Creating workspace...",
-    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
+    "CREATING_WORKSPACE": "Creating machine...",
+    "WAITING_FOR_READY": "Waiting for machine to be ready...",
     "DONE": "Done. Redirecting...",
 }
 
@@ -753,7 +764,7 @@ _STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
     "CLONING_REPO": "Connecting to host...",
     "CHECKING_OUT_BRANCH": "Checking out branch...",
     "CREATING_WORKSPACE": "Setting up agent...",
-    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
+    "WAITING_FOR_READY": "Waiting for machine to be ready...",
     "DONE": "Done. Redirecting...",
 }
 
@@ -1201,7 +1212,7 @@ _RECOVERY_STYLE: Final[str] = """\
 
       /* A quiet "Report a problem" link under the primary action, shown only on
          the terminal recovery states that offer a restart/retry (not the
-         transient "Loading workspace" spinner, where there is nothing to report
+         transient "Loading machine" spinner, where there is nothing to report
          yet). Kept de-emphasized (text-only) so it never competes with the
          restart/retry button above it. */
       #recovery-report-btn {
@@ -1469,7 +1480,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
 
 
         function renderLoading() {
-          titleEl.textContent = 'Loading workspace';
+          titleEl.textContent = 'Loading machine';
           messageEl.textContent = '';
           show(spinnerEl, true);
           show(errorEl, false);
@@ -1489,15 +1500,15 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // workspace" click). Names the action so the wait reads as a
         // deliberate recovery, not a hang. The entry dispatch does NOT use
         // this copy: it fires without knowing whether the start will do
-        // anything, so it stays on the neutral "Loading workspace" spinner
+        // anything, so it stays on the neutral "Loading machine" spinner
         // (or the offline copy, when the host is known offline) rather than
         // claiming a restart. scheduleRefresh (armed by the caller) sends the
         // user home the moment the tracker flips HEALTHY, so this state needs
         // no separate homeward poll.
         function renderRestarting() {
-          titleEl.textContent = 'Restarting your workspace';
+          titleEl.textContent = 'Restarting your machine';
           messageEl.textContent =
-            'We\\'ll return you to your workspace automatically as soon as it is back.';
+            'We\\'ll return you to your machine automatically as soon as it is back.';
           show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);
@@ -1517,9 +1528,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // mid-restart by maybeUpgradeToOfflineCopy when the hint was stale.
         function renderRestartingOffline() {
           offlineCopyShown = true;
-          titleEl.textContent = 'Bringing your workspace back online';
+          titleEl.textContent = 'Bringing your machine back online';
           messageEl.textContent =
-            'This workspace was offline. We\\'re starting it back up and will '
+            'This machine was offline. We\\'re starting it back up and will '
             + 'return you to it automatically.';
           show(spinnerEl, true);
           show(errorEl, false);
@@ -1547,18 +1558,18 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if ((resp.headers.get('X-Workspace-Offline') || '') !== '1') return;
           renderRestartingOffline();
         }
-        // The shared "Workspace unresponsive" state -- shown after a restart
+        // The shared "Machine unresponsive" state -- shown after a restart
         // failure and for the host_unresponsive tier (container observed
         // running but unreachable: bouncing it would interrupt user agents, so
         // we want explicit consent before doing so).
         function renderUnresponsive() {
-          titleEl.textContent = 'Workspace unresponsive';
+          titleEl.textContent = 'Machine unresponsive';
           messageEl.textContent =
-            'This workspace needs a restart to recover. In-progress work in all agents will be '
+            'This machine needs a restart to recover. In-progress work in all agents will be '
             + 'interrupted. If the problem persists, contact support.';
           show(spinnerEl, false);
           show(errorEl, true);
-          hostBtn.textContent = 'Restart workspace';
+          hostBtn.textContent = 'Restart machine';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
           // Reset the backend-unreachable state's elements: the page can move
@@ -1585,10 +1596,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // later lands. A live GET / 200 short-circuits to HEALTHY upstream, so we
         // only reach here without direct positive evidence.
         function renderReconnecting() {
-          titleEl.textContent = 'Reconnecting to your workspace';
+          titleEl.textContent = 'Reconnecting to your machine';
           messageEl.textContent =
             'This is taking longer than usual. We\\'ll reconnect you automatically as soon '
-            + 'as your workspace responds.';
+            + 'as your machine responds.';
           show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);
@@ -1598,11 +1609,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
           armHealthyPoll();
         }
         function renderDispatchError() {
-          titleEl.textContent = 'Workspace unresponsive';
+          titleEl.textContent = 'Machine unresponsive';
           messageEl.textContent = 'Could not start the restart. Check your connection and try again.';
           show(spinnerEl, false);
           show(errorEl, false);
-          hostBtn.textContent = 'Restart workspace';
+          hostBtn.textContent = 'Restart machine';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
           // Same residual-state reset as renderUnresponsive: this state can
@@ -1623,11 +1634,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // ``unreachable_reason``, surfaced verbatim below so we never have to
         // hand-author a message per provider.
         function renderBackendUnreachable(data) {
-          var label = (data && data.provider_label) || 'the workspace backend';
+          var label = (data && data.provider_label) || 'the machine backend';
           var reason = (data && data.unreachable_reason) || '';
           titleEl.textContent = "Can't connect to " + label;
           messageEl.textContent =
-            'This page will reconnect you automatically the moment your workspace '
+            'This page will reconnect you automatically the moment your machine '
             + 'is reachable again.';
           if (providerReasonEl) {
             providerReasonEl.textContent = reason;
@@ -1805,16 +1816,16 @@ _RECOVERY_SCRIPT: Final[str] = """\
         var hostOffline = root.dataset.hostOffline === '1';
         // The flavor of an in-flight restart, from the tracker: start-only (the
         // page's own entry dispatch, a possible no-op) vs a full manual bounce
-        // (the right-click "Restart workspace" click, which POSTs the restart and
+        // (the right-click "Restart machine" click, which POSTs the restart and
         // then navigates here fresh). Display-only.
         var restartStartOnly = root.dataset.restartStartOnly === '1';
         if (initialStatus === 'restarting') {
           // A restart is in flight (a reload lands here for the entry dispatch
           // and the manual bounce alike). The offline hint wins -- a cold boot
-          // reads as "Bringing your workspace back online". Otherwise the flavor
+          // reads as "Bringing your machine back online". Otherwise the flavor
           // decides: a full manual bounce is a deliberate, known restart, so name
-          // it "Restarting your workspace"; a start-only entry dispatch may be a
-          // no-op, so it stays on the neutral "Loading workspace" spinner.
+          // it "Restarting your machine"; a start-only entry dispatch may be a
+          // no-op, so it stays on the neutral "Loading machine" spinner.
           (hostOffline
             ? renderRestartingOffline
             : (restartStartOnly ? renderLoading : renderRestarting))();
@@ -1846,8 +1857,8 @@ _RECOVERY_SCRIPT: Final[str] = """\
           // stop+start bounce is never dispatched without a click). The
           // pending copy claims only what is known: the offline copy when the
           // host reads offline (a real cold boot is coming), else the neutral
-          // "Loading workspace" spinner -- the dispatch may well be a no-op,
-          // and "Restarting your workspace" would overclaim (the header
+          // "Loading machine" spinner -- the dispatch may well be a no-op,
+          // and "Restarting your machine" would overclaim (the header
           // upgrade switches to the offline copy if a STOPPED observation
           // lands mid-dispatch).
           armHealthyPoll();
@@ -1880,15 +1891,15 @@ def render_recovery_page(
     ``return_to`` is the URL the page navigates back to once the workspace is
     healthy again. ``initial_offline`` is the display-only hint that the host
     currently reads as offline (STOPPED/CRASHED), which selects the "Bringing
-    your workspace back online" copy for the restarting state; it never
+    your machine back online" copy for the restarting state; it never
     affects what is dispatched.
 
     ``restart_is_start_only`` is the display-only flavor of an in-flight restart
     when ``initial_status`` is ``"restarting"``: True for the recovery page's own
-    start-only entry dispatch (a possible no-op -> the neutral "Loading workspace"
+    start-only entry dispatch (a possible no-op -> the neutral "Loading machine"
     spinner), False for a full manual bounce reloaded here (the right-click
-    "Restart workspace" click POSTs the restart and then navigates to this page
-    fresh -> the known "Restarting your workspace" copy). Ignored unless the host
+    "Restart machine" click POSTs the restart and then navigates to this page
+    fresh -> the known "Restarting your machine" copy). Ignored unless the host
     reads offline (the offline copy wins) and unless the status is restarting.
 
     ``ssh_command`` is the copy-pasteable SSH command for the agent's host. When
@@ -1931,7 +1942,7 @@ def render_recovery_page(
     # whenever neither disclosure is currently visible.
     card_extra = (
         '      <p id="recovery-provider-reason" class="recovery-provider-reason hidden"></p>\n'
-        '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
+        '      <button id="recovery-host-btn" class="hidden">Restart machine</button>\n'
         '      <button id="recovery-retry-btn" class="hidden">Retry</button>\n'
         '      <button type="button" id="recovery-report-btn" class="hidden">Report a problem</button>\n'
         '      <div class="recovery-troubleshooting">\n'
@@ -2201,7 +2212,6 @@ def render_workspace_settings(
     ws_name: str,
     current_account: object | None,
     accounts: Sequence[object],
-    servers: Sequence[str],
     is_leased_imbue_cloud: bool = False,
     current_color: str = DEFAULT_WORKSPACE_COLOR,
     is_stale: bool = False,
@@ -2231,12 +2241,144 @@ def render_workspace_settings(
         ws_name=ws_name,
         current_account=current_account,
         accounts=accounts,
-        servers=servers,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
         has_account=has_account,
         palette=WORKSPACE_PALETTE,
+    )
+
+
+# The workspace's own web UI service -- what the desktop client shows as "the
+# workspace" and the default target of ``mngr forward``. Sharing it is what the
+# options panel offers as "Whole machine": it is an ordinary service as far as
+# the tunnel and the Cloudflare Access policy are concerned, so it needs no
+# special handling beyond being named here.
+_WHOLE_MACHINE_SERVICE: Final[str] = "system_interface"
+
+# Registered services that are the workspace's own interfaces rather than apps
+# someone would share on their own, so the Share machine list leaves them out
+# (see _split_share_targets). Singular and plural are both listed because the
+# name is whatever the in-workspace process registered, not a fixed vocabulary.
+_NON_APP_SHARE_SERVICES: Final[frozenset[str]] = frozenset(
+    {"chat", "chats", "terminal", "terminals", "browser", "browsers", "web"}
+)
+
+
+@pure
+def _split_share_targets(servers: Sequence[str]) -> tuple[list[str], str]:
+    """Split a workspace's services into the per-app targets and the whole-machine one.
+
+    The whole-machine entry is always offered, whether or not the workspace has
+    registered that service yet -- a workspace that has not finished booting
+    would otherwise silently lose the option it most likely wants.
+
+    Everything the workspace registers shows up in that service list, including
+    the interfaces the workspace is built out of rather than apps built on top
+    of it. Those are excluded: handing someone a chat, a terminal, a browser or
+    the raw web surface is not the same act as handing them one app, and
+    offering them in the same flat list invites it by accident. The whole
+    machine remains the deliberate way to grant everything.
+    """
+    app_services = [
+        str(service)
+        for service in servers
+        if str(service) != _WHOLE_MACHINE_SERVICE and str(service).lower() not in _NON_APP_SHARE_SERVICES
+    ]
+    return app_services, _WHOLE_MACHINE_SERVICE
+
+
+@pure
+def render_workspace_options_page(
+    agent_id: str,
+    ws_name: str,
+    current_account: object | None,
+    accounts: Sequence[object],
+    servers: Sequence[str],
+    tab: str = "share",
+    selected_target: str = "",
+    account_email: str = "",
+    is_leased_imbue_cloud: bool = False,
+    current_color: str = DEFAULT_WORKSPACE_COLOR,
+    is_stale: bool = False,
+    has_account: bool = False,
+    selected_group: str = "general",
+) -> str:
+    """Render the browser-mode workspace options page (``GET /workspace/<agent_id>/options``).
+
+    The full-page twin of the docked panel: the same Share machine / Machine
+    Settings panes without the overlay chrome, since outside Electron the
+    titlebar's icon-tabs navigate instead of opening an overlay.
+    """
+    app_services, whole_service = _split_share_targets(servers)
+    return CATALOG.render(
+        "pages.WorkspaceOptions",
+        agent_id=agent_id,
+        ws_name=ws_name,
+        tab=tab,
+        current_account=current_account,
+        accounts=accounts,
+        app_services=app_services,
+        whole_service=whole_service,
+        selected_target=selected_target or whole_service,
+        account_email=account_email,
+        has_account=has_account,
+        is_leased_imbue_cloud=is_leased_imbue_cloud,
+        current_color=current_color,
+        is_stale=is_stale,
+        palette=WORKSPACE_PALETTE,
+        selected_group=selected_group,
+    )
+
+
+@pure
+def render_workspace_options_modal_page(
+    agent_id: str,
+    ws_name: str,
+    current_account: object | None,
+    accounts: Sequence[object],
+    servers: Sequence[str],
+    tab: str = "share",
+    selected_target: str = "",
+    account_email: str = "",
+    anchor_x: int | None = None,
+    anchor_y: int | None = None,
+    anchor_height: int | None = None,
+    is_leased_imbue_cloud: bool = False,
+    current_color: str = DEFAULT_WORKSPACE_COLOR,
+    is_stale: bool = False,
+    has_account: bool = False,
+    selected_group: str = "general",
+) -> str:
+    """Render the workspace options panel (``GET /workspace/<agent_id>/options/modal``).
+
+    Hosted in the shared modal WebContentsView. The anchor is the titlebar's
+    workspace icon-tab strip, measured by chrome.js and packed into the URL by
+    the Electron main process. Supplying it docks the panel under that strip and
+    draws the tab strip in its place; omitting it -- there is no such strip
+    outside a workspace -- centers the panel and drops the tabs.
+    """
+    app_services, whole_service = _split_share_targets(servers)
+    return CATALOG.render(
+        "pages.WorkspaceOptionsModal",
+        agent_id=agent_id,
+        ws_name=ws_name,
+        tab=tab,
+        anchor_x=anchor_x,
+        anchor_y=anchor_y,
+        anchor_height=anchor_height,
+        current_account=current_account,
+        accounts=accounts,
+        app_services=app_services,
+        whole_service=whole_service,
+        selected_target=selected_target or whole_service,
+        account_email=account_email,
+        has_account=has_account,
+        is_leased_imbue_cloud=is_leased_imbue_cloud,
+        current_color=current_color,
+        is_stale=is_stale,
+        palette=WORKSPACE_PALETTE,
+        selected_group=selected_group,
     )
 
 
@@ -2369,7 +2511,7 @@ def render_settings_modal_page(
     """Render the centered "Minds Settings" modal page (``GET /settings/modal``).
 
     Hosted in the shared modal WebContentsView; shows the same shared sections
-    as :func:`render_settings_page`, minus the "back to workspaces" link (the
+    as :func:`render_settings_page`, minus the "back to machines" link (the
     modal is dismissed via its X or a backdrop click).
     """
     return CATALOG.render(

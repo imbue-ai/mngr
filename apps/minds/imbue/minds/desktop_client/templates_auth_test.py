@@ -32,13 +32,13 @@ def test_render_auth_page_includes_message() -> None:
 
 def test_render_auth_page_with_return_to_shows_back_link() -> None:
     html = render_auth_page(return_to="/create")
-    assert "Back to workspace setup" in html
+    assert "Back to machine setup" in html
     assert 'href="/create"' in html
 
 
 def test_render_auth_page_without_return_to_has_no_back_link() -> None:
     html = render_auth_page()
-    assert "Back to workspace setup" not in html
+    assert "Back to machine setup" not in html
 
 
 def test_render_auth_page_includes_oauth_buttons() -> None:
@@ -152,7 +152,7 @@ def test_render_signin_modal_page_shows_imbue_cloud_intro() -> None:
     # The intro copy explains why signing in is required (Imbue Cloud needs an
     # account) and that closing the modal falls back to running locally.
     html = render_signin_modal_page()
-    assert "run your workspace on Imbue Cloud" in html
+    assert "run your machine on Imbue Cloud" in html
     assert "run it directly on your computer" in html
 
 

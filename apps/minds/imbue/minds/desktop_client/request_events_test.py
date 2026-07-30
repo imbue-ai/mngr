@@ -21,7 +21,7 @@ def test_parse_invalid_json_returns_none() -> None:
 
 
 def test_parse_workspace_permission_request_round_trips() -> None:
-    """A serialized workspace request parses back into the typed event."""
+    """A serialized machine request parses back into the typed event."""
     event = create_latchkey_workspace_permission_request_event(
         agent_id="agent-" + "0" * 32,
         rationale="manage my sibling",

@@ -309,7 +309,7 @@ def test_dispatch_tier_host_unresponsive_when_exec_works_but_interface_not_answe
 
     There is no in-place (surgical) restart tier anymore: an interface that is
     not answering, with supervisord not reporting a self-heal in progress, gets
-    the consent-gated "Workspace unresponsive" page. The page's liveness poll
+    the consent-gated "Machine unresponsive" page. The page's liveness poll
     still returns the user home the moment the interface self-heals, so no
     restart fires without a click.
     """
@@ -380,8 +380,8 @@ def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
 
     The live in-container HTTP 200 is direct proof the interface is responding, so
     the classifier must report HEALTHY (the recovery page returns the user to the
-    workspace) rather than a by-elimination unresponsive verdict -- this is
-    the fix for a healthy workspace being misclassified (and needlessly
+    machine) rather than a by-elimination unresponsive verdict -- this is
+    the fix for a healthy machine being misclassified (and needlessly
     restarted) just because container+exec were up.
     """
     response = _response(
@@ -414,7 +414,7 @@ def test_dispatch_tier_host_unresponsive_for_failed_host_state() -> None:
     """FAILED renders the consent page, not the offline verdict.
 
     A failed-to-create host is observed not running, but a plain start on it
-    mostly re-fails -- so it renders the "Workspace unresponsive" page (manual
+    mostly re-fails -- so it renders the "Machine unresponsive" page (manual
     stop+start on offer) instead of HOST_OFFLINE's offline framing.
     """
     response = _response(host_state="FAILED", in_container_stdout=None)
@@ -510,7 +510,7 @@ def test_dispatch_tier_indeterminate_when_probe_timed_out() -> None:
 
     This is the macOS-sleep case: the probe was killed by its own timeout (the
     laptop suspended across it), which is absence of evidence -- not proof the
-    workspace is down. It must classify as INDETERMINATE ("keep checking"), not
+    machine is down. It must classify as INDETERMINATE ("keep checking"), not
     the HOST_UNRESPONSIVE verdict a clean-exit ssh-dead probe earns.
     """
     response = _response(host_state="RUNNING", in_container_stdout=None, probe_timed_out=True)
@@ -685,7 +685,7 @@ def test_dispatch_tier_healthy_direct_evidence_beats_a_stale_snapshot() -> None:
 
     Positive in-container evidence short-circuits the INDETERMINATE guard: even
     with an untrustworthy snapshot (and a host_state that stale-reads STOPPED), an
-    exec that reached the container and got a 200 proves the workspace is up, so
+    exec that reached the container and got a 200 proves the machine is up, so
     the user is sent home (HEALTHY) rather than parked on "reconnecting".
     """
     response = _response(

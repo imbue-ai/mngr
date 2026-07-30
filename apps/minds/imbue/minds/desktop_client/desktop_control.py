@@ -39,7 +39,7 @@ class ProviderHasActiveWorkspacesError(RuntimeError):
 
     def __init__(self, provider_name: str, active_agent_ids: Sequence[AgentId]) -> None:
         super().__init__(
-            f"Provider '{provider_name}' has {len(active_agent_ids)} active workspace(s) and cannot be disabled."
+            f"Provider '{provider_name}' has {len(active_agent_ids)} active machine(s) and cannot be disabled."
         )
         self.provider_name = provider_name
         self.active_agent_ids = tuple(active_agent_ids)

@@ -623,7 +623,7 @@ def test_workspaces_backups_stream_degrades_non_agent_ids_without_failing_the_ba
     row_by_id = {row["agent_id"]: row for row in lines}
     assert set(row_by_id) == {str(agent_id), create_attempt_id}
     assert row_by_id[str(agent_id)]["error"] is None
-    assert row_by_id[create_attempt_id]["error"] == "not a workspace agent id"
+    assert row_by_id[create_attempt_id]["error"] == "not a machine agent id"
 
 
 def test_workspaces_backups_stream_degrades_unresolved_rows_on_row_timeout() -> None:
@@ -1650,7 +1650,7 @@ def test_patch_provider_disable_with_active_workspaces_conflicts(tmp_path: Path)
     response = client.patch("/api/v1/desktop/providers/local", headers=_auth_header(), json={"enabled": False})
 
     assert response.status_code == 409
-    assert "active workspace" in json.loads(response.data)["error"].lower()
+    assert "active machine" in json.loads(response.data)["error"].lower()
 
 
 @pytest.mark.parametrize(
@@ -1959,7 +1959,7 @@ def test_sharing_readiness_not_ready_without_http_client(tmp_path: Path) -> None
 def _resolver_with_services_agent(agent_id: AgentId, services_id: AgentId) -> BackendResolverInterface:
     """Build a resolver where ``agent_id`` and a ``system-services`` peer share a host.
 
-    The restart worker resolves the system-services agent on the workspace's host;
+    The restart worker resolves the system-services agent on the machine's host;
     a single-agent resolver returns None there (so the restart fails fast). This
     registers both agents on the same host so ``get_system_services_agent_id``
     resolves and the worker can run its stop/start steps.
@@ -2157,13 +2157,13 @@ def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: Agent
 def test_restart_dispatches_for_never_probed_workspace(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """A recovery-page dispatch for a never-probed workspace must actually restart.
+    """A recovery-page dispatch for a never-probed machine must actually restart.
 
-    A workspace whose host has been offline since before this process started is
+    A machine whose host has been offline since before this process started is
     never enrolled as a probe suspect, so the tracker reports default-HEALTHY for
     it. A veto keyed on that reading would drop the recovery page's
     unconditional entry dispatch (host scope + ``start_only``), stranding the
-    workspace on the loader forever. The dispatch must proceed to a real restart
+    machine on the loader forever. The dispatch must proceed to a real restart
     operation -- self-recovery races are absorbed by ``mngr start`` only
     targeting STOPPED agents, not by an endpoint-side veto.
     """
@@ -2877,7 +2877,7 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
         account_id: str = "",
     ) -> CreateAttemptId:
         raise WorkspaceNameInUseError(
-            "A workspace named 'contended' is already being created. "
+            "A machine named 'contended' is already being created. "
             "Wait for that create attempt to finish or pick a different name."
         )
 

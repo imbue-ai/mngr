@@ -256,9 +256,9 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
 def test_streamed_request_payload_selected_by_request_type() -> None:
     """The payload variant is chosen from ``request_type``, not pydantic shape.
 
-    The ``accounts`` and ``workspace`` payloads are both satisfiable by an empty
+    The ``accounts`` and ``machine`` payloads are both satisfiable by an empty
     object, so without ``request_type`` discrimination an accounts request would
-    mis-parse as a workspace one. This pins the deterministic selection.
+    mis-parse as a machine one. This pins the deterministic selection.
     """
     base = {"request_id": "r", "agent_id": "a", "rationale": "why", "target": "/tmp/p.json", "effect": {}}
 

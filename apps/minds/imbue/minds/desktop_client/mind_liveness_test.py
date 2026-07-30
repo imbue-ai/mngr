@@ -47,7 +47,7 @@ def _resolver_with_capable_agent(
     host_state: HostState | None,
     host: HostId = _HOST_A,
 ) -> MngrCliBackendResolver:
-    """Build a resolver carrying one docker-backed workspace whose host has ``host_state``."""
+    """Build a resolver carrying one docker-backed machine whose host has ``host_state``."""
     resolver = MngrCliBackendResolver()
     seed_provider_snapshots(
         resolver,

@@ -72,12 +72,12 @@ def test_version_read_exec_never_starts_a_stopped_host() -> None:
     """The version read is best-effort diagnostics; its execs must pass --no-start.
 
     ``mngr exec`` auto-starts a stopped host by default, so without the flag a
-    mere version read of an offline workspace cold-boots its container as a side
+    mere version read of an offline machine cold-boots its container as a side
     effect (observed live: a background exec silently started a container the
     recovery flow believed was stopped). The git command must also be a single
     COMMAND token: ``mngr exec`` parses extra positional tokens as agent names
     (there is no ``-- ARGS...`` form), so a multi-token git command errors out
-    before ever reaching the workspace.
+    before ever reaching the machine.
     """
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1))
     agent_id = AgentId.generate()

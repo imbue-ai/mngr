@@ -1,63 +1,53 @@
-{#def agent_id, accounts, redirect_url="" #}
+{#def agent_id, accounts, redirect_url="", id_suffix="", can_add_account=False #}
 {#
   Renders inside the sharing editor / workspace settings when the workspace
   has no associated account yet. Either prompts the user to pick an account
   to associate (if any are signed in) or links to sign-in/create-account.
+
+  Behavior lives in /_static/associate.js, which binds every ``data-associate``
+  prompt on the page independently. It is a static file, not an inline script,
+  because the shell's page-swap engine only re-executes scripts from
+  #local-page-scripts -- an inline one would be adopted and never run, leaving
+  the form to do a native GET that looks like the button doing nothing. Any
+  page that renders this component must load that script.
+
+  ``id_suffix`` keeps element ids unique on a surface that renders MORE THAN
+  ONE Associate -- the workspace options panel shows both the Share pane's
+  prompt and the Machine settings account group at once. (The script scopes
+  itself per prompt, so it does not depend on the suffix; the ids are still
+  the contract other code and tests select on.)
+
+
+  ``can_add_account`` adds an "Add account" entry to the account picker, for
+  surfaces where signing in with another account is a reasonable next step
+  rather than a detour. Off by default so existing callers are unchanged.
 #}
-<Card extra="my-3">
-  <p class="font-semibold mb-2">This workspace needs to be associated with an account before sharing can be configured.</p>
+{# Deliberately not a Card: this is a message and a button, and boxing it in a
+   bordered surface framed it as a separate panel inside whichever pane it
+   already sits in. #}
+<div class="my-3">
+  <p class="font-semibold mb-2">Link your machine to an Imbue account to enable sharing and cloud backups.</p>
   {% if accounts %}
     {# Associate the workspace with an account via a JSON PATCH to the v1
        workspace resource (account_id), then return to redirect_url (if set)
        or reload to show the associated state. #}
-    <form id="associate-form"
-          data-agent-id="{{ agent_id }}"
-          data-redirect-url="{{ redirect_url }}"
-          class="flex gap-2 items-center mt-2">
-      <Select name="user_id" width="w-auto">
-        {% for acct in accounts %}
-          <option value="{{ acct.user_id }}">{{ acct.email }}</option>
-        {% endfor %}
-      </Select>
-      <ButtonSubmit variant="primary">Associate</ButtonSubmit>
-    </form>
-    <p id="associate-error" class="hidden type-body text-important mt-2" role="alert"></p>
-    <script>
-      (function () {
-        var form = document.getElementById('associate-form');
-        if (!form) return;
-        var agentId = form.getAttribute('data-agent-id');
-        var redirectUrl = form.getAttribute('data-redirect-url');
-        var errorEl = document.getElementById('associate-error');
-        form.addEventListener('submit', function (event) {
-          event.preventDefault();
-          var select = form.querySelector('[name="user_id"]');
-          var accountId = select && select.value;
-          if (!accountId) return;
-          var submitBtn = form.querySelector('button[type="submit"], button');
-          if (submitBtn) submitBtn.disabled = true;
-          if (errorEl) errorEl.classList.add('hidden');
-          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId), {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ account_id: accountId }),
-          })
-            .then(function (resp) {
-              if (!resp.ok) throw new Error('HTTP ' + resp.status);
-              if (redirectUrl) window.location.href = redirectUrl;
-              else window.location.reload();
-            })
-            .catch(function (err) {
-              if (submitBtn) submitBtn.disabled = false;
-              if (errorEl) {
-                errorEl.textContent = 'Could not associate account: ' + err.message;
-                errorEl.classList.remove('hidden');
-              }
-            });
-        });
-      })();
-    </script>
+    <div data-associate data-agent-id="{{ agent_id }}" data-redirect-url="{{ redirect_url }}">
+      <form id="associate-form{{ id_suffix }}" data-associate-form class="flex gap-2 items-center mt-2">
+        <Select name="user_id" width="w-auto">
+          {% for acct in accounts %}
+            <option value="{{ acct.user_id }}">{{ acct.email }}</option>
+          {% endfor %}
+          {% if can_add_account %}
+            <option value="{{ ADD_ACCOUNT_OPTION_VALUE }}">Add account...</option>
+          {% endif %}
+        </Select>
+        <ButtonSubmit variant="primary">Link</ButtonSubmit>
+      </form>
+      <p id="associate-error{{ id_suffix }}" data-associate-error class="hidden type-body text-important mt-2" role="alert"></p>
+    </div>
   {% else %}
-    <p class="mt-2"><Link href="/auth/login">Sign in or create an account</Link> to enable sharing.</p>
+    <div class="mt-3">
+      <ButtonLink href="/auth/login" variant="primary">Sign in or create an account</ButtonLink>
+    </div>
   {% endif %}
-</Card>
+</div>

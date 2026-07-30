@@ -114,5 +114,5 @@ def mint_workspace_credential_blob(
         )
     except ImbueCloudCliError as exc:
         raise AiKeyMintError(f"Failed to create the key: {exc}") from exc
-    logger.info("Minted LiteLLM key for workspace {} (account {})", workspace_host_id, account_email)
+    logger.info("Minted LiteLLM key for machine {} (account {})", workspace_host_id, account_email)
     return build_credential_blob(api_key=key_material.key.get_secret_value(), base_url=str(key_material.base_url))

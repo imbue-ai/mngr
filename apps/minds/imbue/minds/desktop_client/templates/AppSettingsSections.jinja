@@ -51,7 +51,7 @@
     </button>
     <button type="button" data-settings-nav="workspace-delegation"
             class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
-      Workspaces
+      Machines
     </button>
     <p class="type-section text-tertiary px-2 mt-4 mb-1">Other</p>
     <button type="button" data-settings-nav="error-reporting"
@@ -70,7 +70,7 @@
       <h2 class="type-heading-lg text-primary mb-2">Connectors</h2>
       <p class="type-body text-secondary mb-6">
         Third-party services your agents have connected to. To connect a new one, just ask an
-        agent in a workspace to use it. Revoking here removes access -- your saved sign-in is
+        agent in a machine to use it. Revoking here removes access -- your saved sign-in is
         kept, so agents can reconnect later.
       </p>
       {% if permissions_unavailable %}
@@ -98,7 +98,7 @@
                       <p class="type-body text-primary font-semibold truncate">
                         {{ account.label }}
                         <span class="type-helper text-tertiary font-normal">
-                          &middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}{% if not account.is_connected %} &middot; not connected{% endif %}
+                          &middot; {{ ws_count }} machine{{ '' if ws_count == 1 else 's' }}{% if not account.is_connected %} &middot; not connected{% endif %}
                         </span>
                       </p>
                       <div class="flex items-center gap-2 shrink-0">
@@ -135,7 +135,7 @@
                         {% endfor %}
                       </div>
                     {% else %}
-                      <p class="type-helper text-tertiary">Not allowed in any workspace yet.</p>
+                      <p class="type-helper text-tertiary">Not allowed in any machine yet.</p>
                     {% endif %}
                   </div>
                 {% endfor %}
@@ -157,8 +157,8 @@
         {% endif %}
       </div>
       <p class="type-body text-secondary mb-6">
-        Files and folders on this machine that your agents can read or write. To share a new
-        location, ask an agent in a workspace to access it or to write data in there.
+        Files and folders on this computer that your agents can read or write. To share a new
+        location, ask an agent in a machine to access it or to write data in there.
         Revoking removes access; agents can ask again later.
       </p>
       {% if permissions_unavailable %}
@@ -200,16 +200,16 @@
 
     {# -- Workspaces (cross-workspace delegation), grouped by granting workspace -- #}
     <section data-settings-panel="workspace-delegation" class="hidden">
-      <h2 class="type-heading-lg text-primary mb-2">Workspaces</h2>
+      <h2 class="type-heading-lg text-primary mb-2">Machines</h2>
       <p class="type-body text-secondary mb-6">
-        Access you've granted agents in one workspace to manage other workspaces (listing,
-        creating, destroying, SSH, health checks, and more), grouped by the workspace being
-        managed. To grant more, ask an agent to perform the operation on the target workspace.
+        Access you've granted agents in one machine to manage other machines (listing,
+        creating, destroying, SSH, health checks, and more), grouped by the machine being
+        managed. To grant more, ask an agent to perform the operation on the target machine.
         Revoking removes it; agents can ask again later.
       </p>
       {% if permissions_unavailable %}
         <Notice variant="warn">
-          Workspace delegation can't be loaded right now.
+          Machine delegation can't be loaded right now.
           Try again in a moment.
         </Notice>
       {% elif workspace_delegation_grants %}
@@ -228,7 +228,7 @@
                     <div class="flex items-center gap-2 min-w-0 flex-wrap">
                       <code class="code-pill" data-tooltip="{{ verb.description }}">{{ verb.label }}</code>
                       <span class="type-helper text-tertiary">on:</span>
-                      <span class="type-body text-secondary truncate">{{ "All workspaces" if verb.is_all_workspaces else verb.target_names | join(", ") }}</span>
+                      <span class="type-body text-secondary truncate">{{ "All machines" if verb.is_all_workspaces else verb.target_names | join(", ") }}</span>
                     </div>
                     <Button variant="ghost" size="md" class="revoke-verb-btn shrink-0">Revoke</Button>
                   </div>
@@ -238,7 +238,7 @@
           {% endfor %}
         </div>
       {% else %}
-        <Notice variant="info">No workspace management has been delegated to agents yet.</Notice>
+        <Notice variant="info">No machine management has been delegated to agents yet.</Notice>
       {% endif %}
     </section>
 
@@ -262,7 +262,7 @@
         (for example, your signed-in account email).
       </p>
       <p class="type-helper text-tertiary">
-        Imbue will never look into your workspaces without your consent.
+        Imbue will never look into your machines without your consent.
       </p>
     </section>
 
@@ -273,11 +273,11 @@
     <section data-settings-panel="backups" class="hidden">
       <h2 class="type-heading-lg text-primary mb-2">Master password</h2>
       <p class="type-body text-secondary mb-6">
-        Protects the synced copy of your workspaces' access keys and backup credentials
+        Protects the synced copy of your machines' access keys and backup credentials
         (initially empty -- nothing secret syncs until one is set). You'll type it once on
-        each new device to unlock your workspaces there.
+        each new device to unlock your machines there.
         {% if is_master_password_set %} A master password is currently set.{% else %} No master
-        password is set yet, so only workspace names and metadata sync.{% endif %}
+        password is set yet, so only machine names and metadata sync.{% endif %}
       </p>
       <div class="flex flex-col gap-2 max-w-md">
         <input type="password" id="backup-new-password" autocomplete="new-password"

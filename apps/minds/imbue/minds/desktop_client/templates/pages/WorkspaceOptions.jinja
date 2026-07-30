@@ -1,0 +1,44 @@
+{#def agent_id, ws_name, tab="share", current_account=None, accounts=[], app_services=[], whole_service="system_interface", selected_target="", account_email="", has_account=False, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={}, selected_group="general" #}
+{#
+  Browser-mode twin of the docked options panel (pages.WorkspaceOptionsModal):
+  the same two panes, rendered as an ordinary page inside the chrome shell.
+  There is no tab strip and no backdrop here -- the titlebar's own icon-tabs
+  are the navigation, and outside Electron they navigate rather than open an
+  overlay.
+#}
+{% set _scripts %}
+<script src="/_static/api_errors.js" defer></script>
+<script src="/_static/button_busy.js" defer></script>
+<script src="/_static/associate.js" defer></script>
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/workspace_settings.js" defer></script>
+<script src="/_static/backup_table.js" defer></script>
+<script src="/_static/backup_operation_ui.js" defer></script>
+<script src="/_static/workspace_backups.js" defer></script>
+<script src="/_static/workspace_settings_page.js" defer></script>
+<script src="/_static/workspace_options.js" defer></script>
+{% endset %}
+<ChromeShell title={{ ws_name ~ " options" }}
+      :accent="current_color"
+      :crumb_workspace_name="ws_name"
+      :crumb_agent_id="agent_id"
+      :active_tab="tab"
+      body_class="bg-surface-primary text-primary font-sans antialiased"
+      scripts={{ _scripts }}>
+  <PageContainer>
+    <div data-wsopt-panel="share" class="{{ '' if tab == 'share' else 'hidden' }}">
+      <WorkspaceShareSection :agent_id="agent_id" :ws_name="ws_name"
+                             :account_email="account_email" :has_account="has_account"
+                             :accounts="accounts" :app_services="app_services"
+                             :whole_service="whole_service" :selected_target="selected_target" />
+    </div>
+    <div data-wsopt-panel="settings" class="{{ '' if tab == 'settings' else 'hidden' }}">
+      <WorkspaceSettingsSections :agent_id="agent_id" :ws_name="ws_name"
+                                 :current_account="current_account" :accounts="accounts"
+                                 :is_leased_imbue_cloud="is_leased_imbue_cloud"
+                                 :current_color="current_color" :is_stale="is_stale"
+                                 :has_account="has_account" :palette="palette"
+                                 :selected_group="selected_group" />
+    </div>
+  </PageContainer>
+</ChromeShell>

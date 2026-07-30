@@ -125,7 +125,7 @@
           return;
         }
         if (!entry.is_configured) {
-          showStatus('Backups are turned off for this workspace.');
+          showStatus('Backups are turned off for this machine.');
           return;
         }
         if (entry.snapshots_error) {

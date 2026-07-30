@@ -233,7 +233,7 @@
         {# Agent escalation: a report is already underway, so frame it as the agent's submission and
            drop the mode choice below. The workspace name is best-effort (falls back to generic copy). #}
         <p class="type-body text-primary mb-4">
-          {% if workspace_name %}An agent in workspace <span class="font-semibold">{{ workspace_name }}</span> wants to submit this report:{% else %}An agent in this workspace wants to submit this report:{% endif %}
+          {% if workspace_name %}An agent in machine <span class="font-semibold">{{ workspace_name }}</span> wants to submit this report:{% else %}An agent in this machine wants to submit this report:{% endif %}
         </p>
         {% else %}
         <p class="type-body text-primary mb-4">Here's how we can help:</p>
@@ -252,7 +252,7 @@
             <input type="radio" name="help-mode" value="agent" class="mt-1 shrink-0" {% if not description %}checked{% endif %}>
             <span>
               <span class="type-body text-primary font-semibold">Have an agent help fix the problem</span>
-              <span class="block type-helper text-tertiary">Opens a new chat in this workspace that diagnoses the issue and fixes what it can.</span>
+              <span class="block type-helper text-tertiary">Opens a new chat in this machine that diagnoses the issue and fixes what it can.</span>
             </span>
           </label>
           {% else %}
@@ -263,9 +263,9 @@
             <span>
               <span class="type-body text-primary font-semibold">Have an agent help fix the problem</span>
               {% if workspace_agent_id %}
-              <span class="block type-helper text-tertiary">Available once this workspace is responding.</span>
+              <span class="block type-helper text-tertiary">Available once this machine is responding.</span>
               {% else %}
-              <span class="block type-helper text-tertiary">Open a workspace to use this.</span>
+              <span class="block type-helper text-tertiary">Open a machine to use this.</span>
               {% endif %}
             </span>
           </label>
@@ -294,9 +294,9 @@
             </label>
           </div>
           <p class="type-helper text-tertiary mt-3">
-            Recent logs and app diagnostics (app version, signed-in accounts, your list of workspaces,
-            details of the workspace you're reporting from, and system info) are always attached to help
-            us diagnose the problem. Imbue will never look into your workspaces without your consent.
+            Recent logs and app diagnostics (app version, signed-in accounts, your list of machines,
+            details of the machine you're reporting from, and system info) are always attached to help
+            us diagnose the problem. Imbue will never look into your machines without your consent.
           </p>
         </div>
 
@@ -307,7 +307,7 @@
       <div id="help-loading" class="p-8 hidden text-center">
         <div class="flex justify-center mb-4"><Spinner size="lg" /></div>
         <p class="type-body text-primary">Starting an agent to help&hellip;</p>
-        <p class="type-helper text-tertiary mt-1">Setting up a new chat in this workspace. This can take a few seconds.</p>
+        <p class="type-helper text-tertiary mt-1">Setting up a new chat in this machine. This can take a few seconds.</p>
       </div>
 
       <div id="help-error" class="p-4 hidden text-center">

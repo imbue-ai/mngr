@@ -25,7 +25,7 @@ def _make_record(
         request=PendingCreateAttemptRequest(
             repo_source="https://example.com/repo.git",
             host_name="workspace-1",
-            display_name="Workspace 1",
+            display_name="Machine 1",
             launch_mode=LaunchMode.LIMA,
             account_id="user-1",
             account_email="user-1@example.com",

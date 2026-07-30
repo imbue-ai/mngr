@@ -40,7 +40,7 @@ def _record(
     state: PendingCreateAttemptState,
     *,
     host_name: str = "my-workspace",
-    display_name: str = "My Workspace",
+    display_name: str = "My Machine",
     agent_id: str | None = None,
     error: str | None = None,
     created_at: datetime | None = None,
@@ -78,7 +78,7 @@ def test_live_create_attempt_prefers_the_record_display_name_and_color() -> None
     info = _live_info(AgentCreateAttemptStatus.CLONING_REPO)
     record = _record(str(info.create_attempt_id), PendingCreateAttemptState.IN_FLIGHT)
     rows = derive_create_attempt_rows([info], [record], frozenset())
-    assert rows[0].display_name == "My Workspace"
+    assert rows[0].display_name == "My Machine"
     assert rows[0].color == "#a1b2c3"
     assert rows[0].account_email == "owner@example.com"
 

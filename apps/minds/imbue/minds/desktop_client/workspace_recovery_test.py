@@ -70,7 +70,7 @@ def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
 def _resolver_with_system_services(
     workspace_agent: AgentId, services_agent: AgentId, host_state: HostState | None = None
 ) -> MngrCliBackendResolver:
-    """Build a resolver where the workspace agent and system-services agent share a host.
+    """Build a resolver where the machine agent and system-services agent share a host.
 
     ``host_state`` records an observed lifecycle state for that shared host in
     the snapshot; None leaves the host state undiscovered.
@@ -133,7 +133,7 @@ def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider()
 
     This is the per-provider keying that keeps a docker mind's recovery from
     being misclassified during a simultaneous imbue_cloud outage: only an error
-    whose provider name matches this workspace's is used.
+    whose provider name matches this machine's is used.
     """
     errors = {
         ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
@@ -147,7 +147,7 @@ def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider()
 
 
 def test_provider_error_message_for_workspace_ignores_other_providers() -> None:
-    """An error for a different provider is never blamed on this workspace."""
+    """An error for a different provider is never blamed on this machine."""
     errors = {
         ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
             type_name="ProviderUnavailableError",
@@ -159,7 +159,7 @@ def test_provider_error_message_for_workspace_ignores_other_providers() -> None:
 
 
 def test_provider_error_message_for_workspace_is_none_when_provider_unknown() -> None:
-    """Pre-discovery (provider unknown), we cannot attribute any error to this workspace."""
+    """Pre-discovery (provider unknown), we cannot attribute any error to this machine."""
     errors = {
         ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
             type_name="ProviderUnavailableError",
@@ -464,9 +464,9 @@ def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: 
 
 
 def _register_workspace_agent(resolver: MngrCliBackendResolver, agent_id: AgentId, provider_name: str) -> None:
-    """Register one workspace agent on ``provider_name`` so its display info resolves a provider.
+    """Register one machine agent on ``provider_name`` so its display info resolves a provider.
 
-    Trustworthiness is scoped to the workspace's own provider's last snapshot, so
+    Trustworthiness is scoped to the machine's own provider's last snapshot, so
     the agent must be discoverable with a provider for the predicate to find a
     per-provider snapshot time.
     """
@@ -506,7 +506,7 @@ def test_classification_trustworthy_only_after_a_post_onset_snapshot() -> None:
     A snapshot that predates the outage still carries the pre-outage host state (a
     just-stopped container still reads RUNNING), so it must not make the
     classification trustworthy -- only a snapshot at or after the outage onset
-    does. Freshness is scoped to the workspace's own provider's snapshot time.
+    does. Freshness is scoped to the machine's own provider's snapshot time.
     """
     resolver = MngrCliBackendResolver()
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
@@ -528,7 +528,7 @@ def test_classification_trustworthy_only_after_a_post_onset_snapshot() -> None:
 def test_classification_trustworthiness_is_scoped_to_the_workspaces_own_provider() -> None:
     """A fresh snapshot of an *unrelated* provider must not make the verdict trustworthy.
 
-    Each provider is discovered on its own loop, so only the workspace's own
+    Each provider is discovered on its own loop, so only the machine's own
     provider's snapshot can establish that its host was re-observed post-onset.
     """
     resolver = MngrCliBackendResolver()
@@ -594,7 +594,7 @@ class _HostStateFlipResolver(MngrCliBackendResolver):
 def _register_workspace_with_services(
     resolver: MngrCliBackendResolver, workspace_agent: AgentId, services_agent: AgentId, provider_name: str
 ) -> None:
-    """Register a workspace agent and its system-services agent on one shared host."""
+    """Register a machine agent and its system-services agent on one shared host."""
     host_id = HostId.generate()
     resolver.update_agents(
         ParsedAgentsResult(
@@ -658,7 +658,7 @@ def test_probe_pairs_the_classified_host_state_with_the_freshness_gate(tmp_path:
 def test_probe_attempts_exec_and_resolves_when_discovery_is_stalled(tmp_path: Path) -> None:
     """With a stalled discovery stream, the probe gathers direct evidence instead of waiting.
 
-    The dead-producer dead-end: no snapshot for the workspace's provider means
+    The dead-producer dead-end: no snapshot for the machine's provider means
     the resolver has no (trusted) host state and the freshness gate can never
     open, so the old behavior re-classified INDETERMINATE forever. The probe must
     attempt the in-container exec despite the host not reading RUNNING; the

@@ -21,6 +21,7 @@ const {
   isSwappableLocalPath,
   SURFACE_CONTENT,
 } = require('./surface-routing');
+const { rememberDisplacedModal, forgetDisplacedModal, planDismissal } = require('./modal-restore.js');
 const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
 
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
@@ -1893,6 +1894,7 @@ function overlayIdForUrl(url) {
   if (pathname === '/accounts/modal') return 'accounts';
   if (/^\/accounts\/[A-Za-z0-9._-]+\/plan-modal$/.test(pathname)) return 'account-plan';
   if (/^\/sharing\/agent-[a-f0-9]+\/[^/]+\/modal$/i.test(pathname)) return 'sharing';
+  if (/^\/workspace\/agent-[a-f0-9]+\/options\/modal$/i.test(pathname)) return 'ws-options';
   return null;
 }
 
@@ -2001,7 +2003,7 @@ function createBundleOverlayView(bundle) {
   modal.webContents.on('before-input-event', (event, input) => {
     if (input.type === 'keyDown' && input.key === 'Escape') {
       event.preventDefault();
-      closeModal(bundle);
+      dismissModal(bundle);
     }
   });
   // Lock the overlay view to the backend origin. ``nodeIntegrationInSubFrames``
@@ -2064,11 +2066,21 @@ function createBundleOverlayView(bundle) {
   updateBundleBounds(bundle);
 }
 
-function openModal(bundle, url) {
+function openModal(bundle, url, shouldStack) {
   if (!bundle || bundle.window.isDestroyed() || !url || !bundle.modalView) return;
   const id = overlayIdForUrl(url);
   if (!id) return;
   if (bundle.modalView.webContents.isDestroyed()) return;
+  // Reopening the modal that is already up (the other titlebar tab) hands it
+  // the new URL instead of remounting: a remount threw away a frame that was
+  // often still loading and started the page over, which is what made the
+  // second click take seconds instead of milliseconds. Stacking is excluded --
+  // that deliberately wants a second frame.
+  if (!shouldStack && bundle.modalVisible && bundle.modalUrl && overlayIdForUrl(bundle.modalUrl) === id) {
+    bundle.modalUrl = url;
+    sendOverlayCommand(bundle, { type: 'update-modal', id, url });
+    return;
+  }
   // Raise the warm overlay view to the top of z-order.
   bundle.window.contentView.removeChildView(bundle.modalView);
   bundle.window.contentView.addChildView(bundle.modalView);
@@ -2096,12 +2108,17 @@ function openModal(bundle, url) {
   // the y=0..TITLEBAR strip and intercepts clicks (e.g. the inbox X).
   // Deferred to overlay-modal-loaded on a fresh open (see above): while the
   // sheet is hidden the titlebar must keep its normal drag behavior.
+  //
+  // ``id`` rides along so the titlebar can reflect WHICH overlay is up, not just
+  // that one is (the workspace options panel paints its icon-tab strip active
+  // while it owns the screen); chrome.js still keys its drag-region handling off
+  // ``open`` alone.
   if (!freshOpen && bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
     try {
-      bundle.chromeView.webContents.send('modal-state-changed', { open: true });
+      bundle.chromeView.webContents.send('modal-state-changed', { open: true, id });
     } catch { /* noop */ }
   }
-  sendOverlayCommand(bundle, { type: 'show-modal', id, url });
+  sendOverlayCommand(bundle, { type: 'show-modal', id, url, stack: !!shouldStack });
   updateBundleBounds(bundle);
   // Diagnostics + stall failsafe. From this moment the overlay view is
   // full-window and captures every pointer event while showing NOTHING until
@@ -2129,13 +2146,16 @@ function closeModal(bundle) {
   }
   bundle.modalOpenedAt = null;
   bundle.modalAwaitingLoad = false;
+  // Closing outright abandons the detour: whatever it displaced is not coming
+  // back, and a left-over memory would reopen it at the next dismissal.
+  forgetDisplacedModal(bundle);
   bundle.modalView.setVisible(false);
   bundle.modalVisible = false;
   bundle.modalUrl = null;
   // Restore the chrome titlebar's drag region.
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
     try {
-      bundle.chromeView.webContents.send('modal-state-changed', { open: false });
+      bundle.chromeView.webContents.send('modal-state-changed', { open: false, id: null });
     } catch { /* noop */ }
   }
   // Tell the warm overlay host to hide its overlays. The host page itself stays
@@ -2158,9 +2178,12 @@ function inboxUrlFor(query) {
 // server default (the create screen).
 const SIGNIN_RETURN_TO_PATTERN = /^\/(?!\/)[A-Za-z0-9\-._~/?=&%]*$/;
 
-function signinModalUrlFor(returnTo, mode) {
+function signinModalUrlFor(returnTo, mode, hasDisplacedModal) {
   if (!backendBaseUrl) return null;
   const params = new URLSearchParams();
+  // Tells the page a modal is waiting behind this detour, so a completed
+  // sign-in can hand back to it instead of navigating the content view.
+  if (hasDisplacedModal) params.set('restore', '1');
   if (typeof returnTo === 'string' && returnTo && SIGNIN_RETURN_TO_PATTERN.test(returnTo)) {
     params.set('return_to', returnTo);
   }
@@ -2171,11 +2194,51 @@ function signinModalUrlFor(returnTo, mode) {
   return backendBaseUrl + '/auth/signin-modal' + (query ? '?' + query : '');
 }
 
+// Signing in is a detour, never a destination. A modal that sent the user here
+// -- the workspace options panel's Link prompt -- is remembered so the detour
+// can put it back, rather than dropping the user on whatever sat behind the
+// overlay and losing the panel's tab and anchor.
 function openSigninModal(bundle, returnTo, mode) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = signinModalUrlFor(returnTo, mode);
+  // Never remember the sign-in modal as its own displaced modal: opening it
+  // while it is already up (a second click on Sign in) would otherwise make
+  // every later dismissal reopen it instead of closing it.
+  const openUrl = bundle.modalVisible ? bundle.modalUrl : null;
+  const displacedUrl = openUrl && overlayIdForUrl(openUrl) !== 'signin' ? openUrl : null;
+  const url = signinModalUrlFor(returnTo, mode, !!displacedUrl);
   if (!url) return;
-  openModal(bundle, url);
+  rememberDisplacedModal(bundle, displacedUrl);
+  // Stacked, not swapped: the panel stays on screen under the sign-in's own dim
+  // backdrop rather than vanishing the instant the detour starts.
+  openModal(bundle, url, !!displacedUrl);
+}
+
+// Dismiss the open modal, putting back whatever it displaced if anything. Only
+// the dismissal paths route here (the X, a backdrop click, Escape); the many
+// other closeModal callers -- navigation, workspace switches, teardown -- must
+// keep closing outright, or the panel would reappear over unrelated surfaces.
+// ``shouldReload`` re-renders the revealed modal, for a detour that changed what
+// it would show -- a completed sign-in leaves the panel's Link prompt asking for
+// an account that now exists.
+function dismissModal(bundle, shouldReload) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const plan = planDismissal(bundle);
+  if (plan.action !== 'restore') {
+    closeModal(bundle);
+    return;
+  }
+  // The panel is still mounted underneath, so this reveals the live frame --
+  // its selected share target, fetched statuses and scroll survive, which
+  // reopening it by URL would have thrown away. The URL is only carried so the
+  // shell knows what it is showing again.
+  bundle.modalUrl = plan.url;
+  sendOverlayCommand(bundle, { type: 'pop-modal', reload: !!shouldReload });
+  const id = overlayIdForUrl(plan.url);
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: true, id });
+    } catch { /* noop */ }
+  }
 }
 
 function openMindsSettingsModal(bundle) {
@@ -2206,6 +2269,52 @@ function openSharingModal(bundle, agentId, serviceName) {
   if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
   if (typeof serviceName !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(serviceName)) return;
   openModal(bundle, backendBaseUrl + '/sharing/' + agentId + '/' + serviceName + '/modal');
+}
+
+// URL for the workspace options panel -- the tabbed Share / Settings overlay
+// docked under the titlebar, hosted on the shared warm overlay surface like
+// every other modal. The agent id is validated to the same server-issued shape
+// openSharingModal enforces (never trust the renderer), and ``tab`` to the two
+// tabs the panel actually has; anything else falls back to 'share' rather than
+// forwarding renderer text into the URL.
+//
+// ``anchor`` is the titlebar icon-tab strip's viewport-relative rect. The chrome
+// view (where the strip lives) and the overlay view share window coordinate
+// space, so the rect translates directly into the panel's coordinate system and
+// the server can render its own tab strip exactly on top of the titlebar's --
+// the same trick sidebarUrlFor uses for the workspace menu. A malformed anchor
+// drops the position params ENTIRELY (rather than sending NaN, which the server
+// would have to defend against) so the server's own defaults apply.
+//
+// Only x/y/h are sent: the panel's strip is laid out from its own tabs, so the
+// measured strip WIDTH tells the server nothing it can use.
+function workspaceOptionsUrlFor(agentId, tab, anchor) {
+  if (!backendBaseUrl) return null;
+  if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return null;
+  const params = new URLSearchParams();
+  params.set('tab', tab === 'settings' ? 'settings' : 'share');
+  if (isUsableAnchorRect(anchor)) {
+    params.set('x', Math.round(anchor.x).toString());
+    params.set('y', Math.round(anchor.y).toString());
+    params.set('h', Math.round(anchor.height).toString());
+  }
+  return backendBaseUrl + '/workspace/' + agentId + '/options/modal?' + params.toString();
+}
+
+// A renderer-supplied rect is usable only if it describes a strip that was
+// actually on screen when it was measured. Two ways it can fail: a malformed
+// payload (missing field, non-number) would be packed into the URL as "NaN",
+// and an element measured while hidden or detached yields an all-ZERO rect --
+// finite, so a plain Number.isFinite check waves it through and the panel then
+// draws its tab strip at the window origin with zero height and a card wider
+// than the window. Hence the size test: only a rect with real extent is an
+// anchor. x/y stay finite-only, since a visible strip may legitimately sit at
+// any coordinate. Width is tested even though it is not sent -- it is half the
+// evidence that the strip had a box at all.
+function isUsableAnchorRect(rect) {
+  if (!rect || typeof rect !== 'object') return false;
+  if (!['x', 'y', 'width', 'height'].every((key) => Number.isFinite(rect[key]))) return false;
+  return rect.width > 0 && rect.height > 0;
 }
 
 function isInboxModalOpen(bundle) {
@@ -3095,7 +3204,10 @@ function primeViewWithCachedChromeState(bundle, wc) {
   // (sidebar, inbox) don't listen for this event, so we scope the send to
   // the chrome view.
   if (bundle && bundle.chromeView && wc === bundle.chromeView.webContents) {
-    wc.send('modal-state-changed', { open: !!bundle.modalVisible });
+    wc.send('modal-state-changed', {
+      open: !!bundle.modalVisible,
+      id: bundle.modalVisible ? overlayIdForUrl(bundle.modalUrl) : null,
+    });
     // Paint the titlebar accent on (re)load. The per-navigation
     // ``accent-changed`` send can land before this view's chrome.js has
     // registered its listener (Electron drops listener-less IPC), so a fresh
@@ -4592,8 +4704,28 @@ ipcMain.on('open-sharing-modal', (event, agentId, serviceName) => {
   if (sender) openSharingModal(sender, agentId, serviceName);
 });
 
+// Open the tabbed workspace options panel (Share / Settings) as an overlay
+// modal. The titlebar's icon-tab strip -- a trusted chrome-surface page calling
+// window.minds -- sends the agent id, the tab to lead with, and the strip's own
+// viewport rect so the panel can draw its tab strip over the titlebar's;
+// workspaceOptionsUrlFor re-validates all three (never trust the renderer).
+ipcMain.on('open-workspace-options', (event, agentId, tab, anchor) => {
+  const sender = getBundleFromEvent(event);
+  if (!sender || sender.window.isDestroyed()) return;
+  const url = workspaceOptionsUrlFor(agentId, tab, anchor);
+  if (!url) return;
+  openModal(sender, url);
+});
+
 ipcMain.on('close-modal', (event) => {
-  closeModal(getBundleFromEvent(event));
+  dismissModal(getBundleFromEvent(event));
+});
+
+// A detour finished having CHANGED something the modal underneath renders (the
+// sign-in that the workspace options panel sent the user on). Same dismissal,
+// but the revealed panel re-renders so it reflects the new state.
+ipcMain.on('complete-modal-detour', (event) => {
+  dismissModal(getBundleFromEvent(event), true);
 });
 
 // The overlay host fires this once a hosted modal iframe (workspace menu /
@@ -4602,6 +4734,16 @@ ipcMain.on('close-modal', (event) => {
 // paints its workspace list / request count immediately instead of waiting for
 // the next SSE push. (Pre-migration, this priming happened on the modal view's
 // own did-finish-load; now each hosted iframe signals when it's ready.)
+// The overlay host reports what a pop revealed. A pop is only ever sent when a
+// modal was stacked underneath, so an empty answer means that frame went away
+// behind our back -- close the overlay rather than leaving a full-window view
+// up with nothing painted in it, which would eat every click.
+ipcMain.on('overlay-modal-popped', (event, revealedId) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle) return;
+  if (!revealedId) closeModal(bundle);
+});
+
 ipcMain.on('overlay-modal-loaded', (event) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle) return;
@@ -4628,7 +4770,13 @@ ipcMain.on('overlay-modal-loaded', (event) => {
     }
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       try {
-        bundle.chromeView.webContents.send('modal-state-changed', { open: true });
+        // The overlay id is re-derived from main's OWN record of what it opened
+        // (bundle.modalUrl), not from the sender's payload -- same reason every
+        // other renderer-supplied value here is re-validated.
+        bundle.chromeView.webContents.send('modal-state-changed', {
+          open: true,
+          id: overlayIdForUrl(bundle.modalUrl),
+        });
       } catch { /* noop */ }
     }
   }

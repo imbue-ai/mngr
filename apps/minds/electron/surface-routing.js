@@ -91,6 +91,11 @@ function isSwappableLocalPath(pathname) {
     || pathname === '/accounts'
     || pathname === '/_chrome'
     || /^\/workspace\/agent-[a-f0-9]+\/settings$/i.test(pathname)
+    // The workspace options panel's browser-mode twin: the same tabbed Share /
+    // Settings content the desktop client shows as an overlay modal, rendered
+    // as a full page for browsers that have no overlay surface. Static content
+    // with no live machinery, so it swaps like the settings page it sits beside.
+    || /^\/workspace\/agent-[a-f0-9]+\/options$/i.test(pathname)
     // Recovery flips to/from the workspace wrapper constantly while a
     // workspace flaps; swapping it keeps the titlebar from blinking on every
     // hop. Its poll loops carry minds:page-teardown guards (see

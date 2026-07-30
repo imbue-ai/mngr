@@ -443,7 +443,7 @@ def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
     """The SSE badge payload counts only requests whose host is resolvable.
 
     The badge count and the rendered cards are driven off the same filter,
-    so a request from a since-stopped workspace neither inflates the badge
+    so a request from a since-stopped machine neither inflates the badge
     nor appears in the panel.
     """
     known_agent = AgentId()

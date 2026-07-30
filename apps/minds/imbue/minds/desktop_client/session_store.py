@@ -95,6 +95,14 @@ class MultiAccountSessionStore(MutableModel):
     )
     _cache_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _identity_cache: dict[str, ImbueCloudAuthAccount] | None = PrivateAttr(default=None)
+    # Whether the cache has already been force-refreshed since it was last
+    # invalidated. The refresh exists to recover from a signin that rotated to a
+    # new user_id, which can only have happened once per invalidation -- without
+    # this, a record naming an account that is NOT signed in (a stale ACTIVE row
+    # left by a sign-out) re-ran `mngr imbue_cloud auth list` on EVERY read. That
+    # subprocess costs ~1.7s, and it sits on the page-render path, so opening the
+    # options panel took seconds whenever such a record existed.
+    _has_force_refreshed: bool = PrivateAttr(default=False)
     _is_last_identity_read_failed: bool = PrivateAttr(default=False)
 
     # -- Identity cache (sourced from the plugin) ---------------------------
@@ -138,6 +146,8 @@ class MultiAccountSessionStore(MutableModel):
                 self._is_last_identity_read_failed = True
                 return {}
             self._is_last_identity_read_failed = False
+            if refresh:
+                self._has_force_refreshed = True
             self._identity_cache = {account.user_id: account for account in accounts}
             return dict(self._identity_cache)
 
@@ -149,7 +159,7 @@ class MultiAccountSessionStore(MutableModel):
     def _require_account(self, user_id: str) -> ImbueCloudAuthAccount:
         """Resolve a signed-in account by user_id, refreshing the cache once on a miss."""
         account = self._identity_by_user_id().get(user_id)
-        if account is None:
+        if account is None and not self._has_force_refreshed:
             account = self._identity_by_user_id(refresh=True).get(user_id)
         if account is None:
             raise WorkspaceSyncError(f"No signed-in account matches user id {user_id[:8]}")
@@ -202,7 +212,7 @@ class MultiAccountSessionStore(MutableModel):
             if agent_id in workspace_ids:
                 identity = self._identity_by_user_id()
                 account = identity.get(user_id)
-                if account is None:
+                if account is None and not self._has_force_refreshed:
                     identity = self._identity_by_user_id(refresh=True)
                     account = identity.get(user_id)
                 if account is None:
@@ -224,10 +234,10 @@ class MultiAccountSessionStore(MutableModel):
         is owned by another account (disassociate first, then associate).
         """
         if self.record_store is None:
-            raise WorkspaceSyncError("Workspace sync is not configured; cannot associate workspaces")
+            raise WorkspaceSyncError("Machine sync is not configured; cannot associate machines")
         account = self._require_account(user_id)
         self.record_store.associate_workspace_or_raise(user_id, account.email, agent_id, resolver)
-        logger.info("Associated workspace {} with user {}", agent_id, user_id[:8])
+        logger.info("Associated machine {} with user {}", agent_id, user_id[:8])
 
     def associate_created_workspace(
         self,
@@ -247,7 +257,7 @@ class MultiAccountSessionStore(MutableModel):
         a push failure just leaves the row dirty for the reconcile.
         """
         if self.record_store is None:
-            logger.warning("Workspace sync is not configured; created workspace {} stays private", agent_id)
+            logger.warning("Machine sync is not configured; created machine {} stays private", agent_id)
             return
         account = self._require_account(user_id)
         seed = ReplicaRecord(
@@ -260,7 +270,7 @@ class MultiAccountSessionStore(MutableModel):
             device_label=self.record_store.device_label,
         )
         self.record_store.upsert_local_record(user_id, account.email, seed)
-        logger.info("Associated created workspace {} with user {}", agent_id, user_id[:8])
+        logger.info("Associated created machine {} with user {}", agent_id, user_id[:8])
 
     def disassociate_workspace(self, user_id: str, agent_id: str) -> None:
         """Remove ``agent_id``'s record (the workspace becomes private; requires connectivity)."""
@@ -268,7 +278,7 @@ class MultiAccountSessionStore(MutableModel):
             return
         account = self._require_account(user_id)
         self.record_store.disassociate_workspace_or_raise(user_id, account.email, agent_id)
-        logger.info("Disassociated workspace {} from user {}", agent_id, user_id[:8])
+        logger.info("Disassociated machine {} from user {}", agent_id, user_id[:8])
 
 
 def _build_session(account: ImbueCloudAuthAccount, workspace_ids: list[str]) -> AccountSession:

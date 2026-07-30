@@ -359,7 +359,7 @@ def test_build_mngr_create_command_modal_has_no_overlay_when_env_unset(monkeypat
 def test_build_mngr_create_command_stamps_original_minds_version_label() -> None:
     """The resolved template ref is stamped as an immutable
     ``original_minds_version`` label so the version API can report what
-    version the workspace was created at even when it is offline."""
+    version the machine was created at even when it is offline."""
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
@@ -380,8 +380,8 @@ def test_build_mngr_create_command_omits_version_label_when_unset() -> None:
 
 def test_build_mngr_create_command_stamps_original_branch_label() -> None:
     """The create-time branch/tag is stamped as an immutable ``original_branch``
-    label so the workspace detail API can report which branch it was created
-    from even when the workspace is offline."""
+    label so the machine detail API can report which branch it was created
+    from even when the machine is offline."""
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
@@ -663,7 +663,7 @@ def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse
 
     mngr's ``--reuse`` matches on agent name only (``system-services``
     here) without scoping to a host, so passing it from the create-form
-    would adopt the wrong host's agent whenever any other workspace
+    would adopt the wrong host's agent whenever any other machine
     shared the constant agent name. ``--new-host`` already encodes
     fresh-host intent; ``--reuse`` is reserved for IMBUE_CLOUD where the
     pool host comes pre-baked with a ``system-services`` agent.
@@ -1267,7 +1267,7 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
     """The probe hits ``/``, carrying the agent vhost in the Host header.
 
     Probing ``/`` deliberately decouples readiness from any particular app
-    running inside the workspace: a 200 only confirms that some web server is
+    running inside the machine: a 200 only confirms that some web server is
     answering on the inner port, with no assumption about which routes it
     implements.
     """
@@ -1300,7 +1300,7 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
 
     When the inner port answers but not with a 200 (e.g. a 503 while the server
     is still warming up), the probe returns that status so the caller's
-    ``== 200`` check treats the workspace as unready and the background loop
+    ``== 200`` check treats the machine as unready and the background loop
     records a probe failure, driving the agent toward STUCK.
     """
 
@@ -1433,7 +1433,7 @@ def _wait_until_finished(
 def test_start_create_attempt_never_mints_a_litellm_key(tmp_path: Path) -> None:
     """CreateAttempt injects no Anthropic credentials: even with an imbue_cloud
     account supplied (for compute/backups), no LiteLLM key is minted -- the
-    workspace signs in through its own modal after boot."""
+    machine signs in through its own modal after boot."""
     cli = RecordingImbueCloudCli(
         connector_url=FAKE_CONNECTOR_URL,
     )
@@ -1520,7 +1520,7 @@ def test_checkout_existing_branch_raises_for_missing_branch(tmp_path: Path) -> N
 
 def test_build_mngr_create_command_forwards_extra_pass_host_env(monkeypatch) -> None:
     """MINDS_EXTRA_PASS_HOST_ENV (space-separated var names) becomes one --pass-host-env per name, so a
-    creating host (e.g. the eval box) can push env vars onto every workspace it creates."""
+    creating host (e.g. the eval box) can push env vars onto every machine it creates."""
     monkeypatch.setenv("MINDS_EXTRA_PASS_HOST_ENV", "FEATURE_X FEATURE_Y")
     joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
     assert "--pass-host-env FEATURE_X" in joined

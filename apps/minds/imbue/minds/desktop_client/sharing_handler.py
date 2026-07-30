@@ -92,6 +92,32 @@ def is_probeable_share_url(url: str) -> bool:
     return not (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved)
 
 
+# Signals in the plugin's JSON error body for the two failures a user can
+# actually do something about. Matched on the message text because the plugin
+# reports both under the same ``ImbueCloudAuthError`` class.
+_EXPIRED_SESSION_SIGNALS: Final[tuple[str, ...]] = (
+    "Session missing in db or has expired",
+    "Refresh rejected by connector",
+)
+_UNVERIFIED_EMAIL_SIGNAL: Final[str] = "Email not verified"
+
+
+def describe_connector_failure(exc: Exception) -> str:
+    """Turn a connector failure into a sentence the user can act on.
+
+    The plugin's own message is written for whoever is reading the logs
+    ("Refresh rejected by connector: Session missing in db or has expired").
+    The two failures a user can resolve get a plain sentence instead; anything
+    else keeps the plugin's message, which still beats pointing at a log file.
+    """
+    detail = str(exc)
+    if any(signal in detail for signal in _EXPIRED_SESSION_SIGNALS):
+        return "Your Imbue Cloud session has expired. You may need to log out and log in again."
+    if _UNVERIFIED_EMAIL_SIGNAL in detail:
+        return "Imbue Cloud has not verified this account's email address. Verify it, then retry."
+    return detail
+
+
 class SharingError(RuntimeError):
     """Raised by :func:`enable_sharing_via_cloudflare` on a soft failure.
 
@@ -132,8 +158,8 @@ def resolve_account_email_for_workspace(
     account = session_store.get_account_for_workspace(str(agent_id))
     if account is None:
         raise SharingError(
-            f"Workspace {agent_id} is not associated with any signed-in account; "
-            "associate one from the workspace settings page first."
+            f"Workspace {agent_id} is not linked to any signed-in account; "
+            "link one from the machine settings page first."
         )
     return str(account.email)
 
@@ -190,7 +216,7 @@ def enable_sharing_via_cloudflare(
                 "Cloudflare had a temporary problem publishing this share (its Access API "
                 "sometimes hiccups right after a share is disabled). Wait a few seconds and try again."
             ) from exc
-        raise SharingError(f"Failed to enable sharing for '{service_name}': {exc}") from exc
+        raise SharingError(f"Could not share '{service_name}': {describe_connector_failure(exc)}") from exc
     if tunnel.token is None:
         raise SharingError("Sharing enabled but the connector did not return a Cloudflare token.")
     inject_tunnel_token_into_agent(agent_id, tunnel.token.get_secret_value(), cli.mngr_caller)
@@ -261,6 +287,29 @@ def get_sharing_status(
     }
 
 
+def delete_tunnel_for_agent(cli: ImbueCloudCli | None, account_email: str, agent_id: AgentId) -> None:
+    """Delete the account's Cloudflare tunnel for ``agent_id``, if it has one.
+
+    Deleting the tunnel is what cascades its DNS record and Access app away; a
+    tunnel left behind keeps a proxied hostname answering forever and counts
+    against the account's tunnel quota, which is a ceiling on workspaces ever
+    created rather than on live ones.
+
+    Never raises: this runs on teardown paths (disassociation, destroy
+    finalization) where a Cloudflare hiccup must not block retiring the
+    workspace. A tunnel that survives is litter; a workspace that cannot be
+    retired is a stuck UI.
+    """
+    if cli is None:
+        return
+    try:
+        tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(agent_id))
+        if tunnel is not None:
+            cli.delete_tunnel(account=account_email, tunnel_name=tunnel.tunnel_name)
+    except ImbueCloudCliError as exc:
+        logger.warning("Failed to delete the tunnel for {}: {}", agent_id, exc)
+
+
 def disable_sharing(
     agent_id: AgentId,
     service_name: ServiceName,
@@ -280,7 +329,7 @@ def disable_sharing(
     try:
         tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(agent_id))
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Failed to look up the tunnel: {exc}") from exc
+        raise SharingError(f"Could not look up the tunnel: {describe_connector_failure(exc)}") from exc
     if tunnel is None or str(service_name) not in tunnel.services:
         # Nothing to disable: either no tunnel exists yet, or the service is
         # already absent from it (e.g. a repeated disable). Idempotent success --
@@ -290,7 +339,7 @@ def disable_sharing(
     try:
         cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=str(service_name))
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Failed to disable sharing: {exc}") from exc
+        raise SharingError(f"Could not stop sharing: {describe_connector_failure(exc)}") from exc
 
 
 # Body marker of Cloudflare Access's transient error page: the edge can start

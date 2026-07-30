@@ -232,7 +232,7 @@ def render_workspace_permission_dialog(
         request_id=request_id,
         ws_name=ws_name,
         rationale=rationale,
-        display_name=target_workspace_name or "workspaces",
+        display_name=target_workspace_name or "machines",
         verbs=verbs,
         checked_permissions=set(checked_permissions),
         target_workspace_id=target_workspace_id or "",

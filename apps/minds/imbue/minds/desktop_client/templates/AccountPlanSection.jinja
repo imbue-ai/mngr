@@ -49,7 +49,7 @@
         {% if trim_status %}
           <span class="type-helper text-tertiary">{{ trim_status.detail }}</span>
         {% elif plan_view.is_over_storage_quota %}
-          <span class="type-helper text-tertiary">Removes the oldest backups (each workspace keeps its latest) until you are back under the limit.</span>
+          <span class="type-helper text-tertiary">Removes the oldest backups (each machine keeps its latest) until you are back under the limit.</span>
         {% endif %}
       </div>
     {% endif %}
@@ -57,7 +57,7 @@
       {# Destroyed workspaces' backups keep consuming quota until reaped;
          reviewing (and deleting) them is the second reclaim lever. #}
       <div class="mt-2">
-        <Link href="/workspaces/destroyed" extra="type-helper">Review destroyed workspace backups &rarr;</Link>
+        <Link href="/workspaces/destroyed" extra="type-helper">Review destroyed machine backups &rarr;</Link>
       </div>
     {% endif %}
   {% else %}

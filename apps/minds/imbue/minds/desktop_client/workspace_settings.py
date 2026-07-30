@@ -24,6 +24,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sharing_handler import delete_tunnel_for_agent
+from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.errors import MngrCommandError
@@ -137,7 +139,7 @@ def associate_workspace_account(
     record is the association, and it lives on the connector).
     """
     if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        raise WorkspaceAssociationError("Cannot change the account association of a host leased from imbue_cloud", 403)
+        raise WorkspaceAssociationError("Cannot change the account link of a host leased from imbue_cloud", 403)
     if session_store is None:
         raise WorkspaceAssociationError("Session store is not configured", 409)
     matched = next(
@@ -152,7 +154,9 @@ def associate_workspace_account(
     try:
         session_store.associate_workspace(matched.user_id, str(agent_id), backend_resolver)
     except WorkspaceSyncError as exc:
-        raise WorkspaceAssociationError(f"Could not associate the workspace: {exc}", 502) from exc
+        raise WorkspaceAssociationError(
+            f"Could not link this machine to the account: {describe_connector_failure(exc)}", 502
+        ) from exc
     # Wake the chrome SSE so the tile picks up its new 'account' field
     # immediately rather than at the next discovery heartbeat.
     if isinstance(backend_resolver, MngrCliBackendResolver):
@@ -174,7 +178,7 @@ def disassociate_workspace_account(
     requires connectivity).
     """
     if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        raise WorkspaceAssociationError("Cannot disassociate a host leased from imbue_cloud", 403)
+        raise WorkspaceAssociationError("Cannot unlink a host leased from imbue_cloud", 403)
     if session_store is None:
         return
     account = session_store.get_account_for_workspace(str(agent_id))
@@ -184,16 +188,18 @@ def disassociate_workspace_account(
     # tunnel state; after deleting it server-side, also clear the token file
     # inside the agent so its cloudflare-tunnel service stops cloudflared.
     if imbue_cloud_cli is not None:
+        delete_tunnel_for_agent(imbue_cloud_cli, str(account.email), agent_id)
+        # Unlike the destroy path, the agent is still running here, so its
+        # cloudflared has to be told to stop as well.
         try:
-            tunnel = imbue_cloud_cli.find_tunnel_for_agent(account=str(account.email), agent_id=str(agent_id))
-            if tunnel is not None:
-                imbue_cloud_cli.delete_tunnel(account=str(account.email), tunnel_name=tunnel.tunnel_name)
-                clear_tunnel_token_from_agent(agent_id, imbue_cloud_cli.mngr_caller)
+            clear_tunnel_token_from_agent(agent_id, imbue_cloud_cli.mngr_caller)
         except ImbueCloudCliError as exc:
-            logger.warning("Failed to delete tunnel during disassociation: {}", exc)
+            logger.warning("Failed to clear the tunnel token during disassociation: {}", exc)
     try:
         session_store.disassociate_workspace(str(account.user_id), str(agent_id))
     except WorkspaceSyncError as exc:
-        raise WorkspaceAssociationError(f"Could not disassociate the workspace: {exc}", 502) from exc
+        raise WorkspaceAssociationError(
+            f"Could not unlink this machine: {describe_connector_failure(exc)}", 502
+        ) from exc
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.notify_change()

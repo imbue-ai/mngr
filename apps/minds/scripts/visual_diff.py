@@ -82,6 +82,7 @@ from imbue.minds.desktop_client.templates import render_settings_page as render_
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
+from imbue.minds.desktop_client.templates import render_workspace_options_modal_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
@@ -308,7 +309,6 @@ def _build_scenarios() -> list[Scenario]:
                 ws_name="alpha",
                 current_account=None,
                 accounts=(account_a,),
-                servers=("system_interface",),
             ),
         ),
         Scenario(
@@ -318,17 +318,48 @@ def _build_scenarios() -> list[Scenario]:
                 ws_name="alpha",
                 current_account=account_a,
                 accounts=(account_a,),
-                servers=("system_interface", "frontend"),
             ),
         ),
+        # -- Workspace options panel -------------------------------------
         Scenario(
-            name="workspace_settings_no_servers",
-            builder=lambda: render_workspace_settings(
+            name="workspace_options_share",
+            builder=lambda: render_workspace_options_modal_page(
                 agent_id=str(agent_a),
                 ws_name="alpha",
                 current_account=account_a,
                 accounts=(account_a,),
-                servers=(),
+                servers=("frontend", "newsreader", "system_interface"),
+                tab="share",
+                account_email=account_a.email,
+                has_account=True,
+                anchor_x=214,
+            ),
+        ),
+        Scenario(
+            name="workspace_options_share_no_account",
+            builder=lambda: render_workspace_options_modal_page(
+                agent_id=str(agent_a),
+                ws_name="alpha",
+                current_account=None,
+                accounts=(account_a,),
+                servers=("frontend",),
+                tab="share",
+                has_account=False,
+                anchor_x=214,
+            ),
+        ),
+        Scenario(
+            name="workspace_options_settings",
+            builder=lambda: render_workspace_options_modal_page(
+                agent_id=str(agent_a),
+                ws_name="alpha",
+                current_account=account_a,
+                accounts=(account_a,),
+                servers=("frontend", "system_interface"),
+                tab="settings",
+                account_email=account_a.email,
+                has_account=True,
+                anchor_x=214,
             ),
         ),
         # -- Sharing editor ----------------------------------------------

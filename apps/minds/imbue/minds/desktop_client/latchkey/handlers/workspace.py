@@ -58,7 +58,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 # Label shown on the inbox list card (lower-case, short).
-_KIND_LABEL: Final[str] = "workspace access"
+_KIND_LABEL: Final[str] = "machine access"
 
 # Form fields. ``permissions`` carries the checked verb names (shared with the
 # other dialogs so the inbox shell's Approve gating works). ``target_scope``
@@ -153,7 +153,7 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
             return ""
         backend_resolver: BackendResolverInterface = get_state().backend_resolver
         target_name = _resolve_target_name(backend_resolver, req_event.target_workspace_id)
-        return f"Workspace access: {target_name}" if target_name else "Workspace access"
+        return f"Workspace access: {target_name}" if target_name else "Machine access"
 
     def render_request_detail_fragment(
         self,
@@ -235,9 +235,9 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
             )
 
         target_label = (
-            _resolve_target_name(backend_resolver, req_event.target_workspace_id) or "the selected workspace"
+            _resolve_target_name(backend_resolver, req_event.target_workspace_id) or "the selected machine"
             if target_workspace_id is not None
-            else "all workspaces"
+            else "all machines"
         )
         message = _format_granted_message(granted_permissions, target_label)
         response_event = self._write_response_and_notify(
@@ -267,7 +267,7 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
             self.gateway_client.delete_permission_request(request_event_id)
         except LatchkeyGatewayClientError as e:
             logger.warning(
-                "Could not DELETE workspace permission request {} from gateway; will rely on next-restart cleanup: {}",
+                "Could not DELETE machine permission request {} from gateway; will rely on next-restart cleanup: {}",
                 request_event_id,
                 e,
             )

@@ -351,7 +351,7 @@ def convert_legacy_password_files(paths: WorkspacePaths, user_ids: Sequence[str]
     if legacy_password is None:
         logger.warning(
             "The legacy backup master password could not be recovered (hash present, no saved copy); "
-            "existing repos stay reachable via their workspace keys, but a fresh master password must be set "
+            "existing repos stay reachable via their machine keys, but a fresh master password must be set "
             "on the Settings page before secrets can sync."
         )
     _retire_legacy_file(_legacy_password_path(paths))

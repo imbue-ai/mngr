@@ -101,7 +101,7 @@
     function isChatGateFailure(message) {
       var text = message || '';
       return text.indexOf('cannot determine running chats') !== -1
-        || text.indexOf('Could not probe the workspace') !== -1;
+        || text.indexOf('Could not probe the machine') !== -1;
     }
 
     function setShown(el, isShown) {
@@ -303,7 +303,7 @@
           }
           if (op.blocked_chats && op.blocked_chats.length > 0) {
             showError(
-              'Chats are running in this workspace (' + op.blocked_chats.join(', ') +
+              'Chats are running in this machine (' + op.blocked_chats.join(', ') +
               '). Stop them before continuing; they resume on your next message.'
             );
             // A reattached poller has no retry closure, so it offers no button.
@@ -384,7 +384,7 @@
           snapshotId: snapshotId,
           isCancellable: true,
           successMessage: timeText
-            ? 'Workspace restored to the backup from ' + timeText + '. A safety backup of your previous state was saved first.'
+            ? 'Machine restored to the backup from ' + timeText + '. A safety backup of your previous state was saved first.'
             : OPERATION_SUCCESS_MESSAGES.backup_restore,
           retryWithStopChats: function () {
             startRestore(snapshotId, timeText, Object.assign({}, opts, { stopChats: true }));

@@ -400,7 +400,7 @@ def build_backup_request_or_error(
     # if a user puts one in the api_key env block.
     if backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(api_key_env):
         return None, (
-            "Don't set RESTIC_PASSWORD in the backup env -- minds assigns each workspace its own random "
+            "Don't set RESTIC_PASSWORD in the backup env -- minds assigns each machine its own random "
             "repository password. Provide RESTIC_REPOSITORY and any backend credentials only."
         )
     return (

@@ -17,7 +17,7 @@
 <script src="/_static/creating.js" defer></script>
 <script src="/_static/onboarding.js" defer></script>
 {% endset %}
-<ChromeShell title="Creating your workspace..."
+<ChromeShell title="Creating your machine..."
       page_label="New workspace"
       scripts={{ _scripts }}>
   {# Center inside the local-page card (see PageNarrowContainer / ChromeShell):
@@ -484,8 +484,8 @@
       {# Failure sub-view: revealed by creating.js the moment the create attempt fails. #}
       <div id="failure-view" class="hidden">
         <div class="text-center pt-2 pb-1">
-          <div class="type-heading mb-1.5 text-important">We couldn't set up your workspace</div>
-          <p class="type-body text-secondary">Setup stopped before your workspace was ready.</p>
+          <div class="type-heading mb-1.5 text-important">We couldn't set up your machine</div>
+          <p class="type-body text-secondary">Setup stopped before your machine was ready.</p>
         </div>
         <Notice variant="error">
           <span id="error-message" class="font-mono type-helper break-words whitespace-pre-wrap"></span>

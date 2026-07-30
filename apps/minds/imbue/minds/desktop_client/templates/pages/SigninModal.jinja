@@ -1,12 +1,56 @@
-{#def intro="", return_to="/create", default_to_signup=True #}
+{#def intro="", return_to="/create", default_to_signup=True, can_restore=False #}
+{#
+  Sign-in modal page, hosted in the desktop client's shared modal
+  WebContentsView -- the same overlay layer as the other centered modals -- so
+  it covers the whole window including the title bar (rather than sitting
+  inside the content view like an in-page dialog). Opened from the create
+  screen when a signed-out user presses "Create" with the Imbue Cloud preset
+  selected, from the welcome splash's Sign Up / Log In buttons, from the home
+  screen's account launcher when signed out, and from the Manage Accounts
+  modal's "Add account".
+
+  ``default_to_signup`` picks which AuthForm tab is visible on first paint
+  (the inline links still flip between them client-side); callers that say
+  "Log In" pass mode=signin through the route so the sign-in tab leads.
+
+  Transparent body + a dim backdrop reveal the screen behind it; the
+  centered card holds the shared auth form (``auth.AuthForm``). All form
+  interactivity lives in ``static/auth.js``; the inline script below tells it
+  how to route post-auth navigations: they must land in the *content* view
+  behind this overlay and dismiss the modal -- not reload the overlay itself.
+  In Electron that goes through ``window.minds``; as a plain standalone page
+  (browser fallback) it navigates normally.
+
+  ``intro`` is the explanatory copy shown under each tab heading (why the user
+  is being asked to sign in). ``return_to`` is where a successful sign-in (or
+  a dismissal without signing in) lands the content view; the route validates
+  it as a safe local path before it reaches this template.
+#}
 {% set _scripts %}
 <script src="/_static/auth.js" defer></script>
 <script>
   (function () {
     window.MINDS_AUTH_RETURN_TO = {{ return_to | tojson }};
-    // navigateContent lands the page in the content view behind this overlay and
-    // dismisses the modal.
+    // Whether a modal is waiting behind this one (the workspace options panel
+    // sent the user here to link an account). The shell puts it back on any
+    // dismissal; this makes a COMPLETED sign-in hand back the same way.
+    window.MINDS_AUTH_CAN_RESTORE = {{ can_restore | tojson }};
+
+    // How auth.js performs those navigations. In the Electron modal overlay the
+    // form runs in its own WebContentsView, so navigations must target the
+    // content view behind the modal (navigateContent also dismisses the modal).
+    // Without the bridge (standalone page) we just navigate this page.
     window.MINDS_AUTH_NAV = function (url) {
+      // Signing in was a detour from a panel the user was working in, so hand
+      // back to it rather than navigating the content view out from under it.
+      // completeModalDetour reveals the panel AND re-renders it: the panel was
+      // rendered before this sign-in, so its prompt is still asking for the
+      // account that now exists. A plain dismissal (the X, Escape) goes through
+      // closeModal instead and keeps the panel's live state untouched.
+      if (window.MINDS_AUTH_CAN_RESTORE && window.minds && window.minds.completeModalDetour) {
+        window.minds.completeModalDetour();
+        return;
+      }
       if (window.minds && window.minds.navigateContent) window.minds.navigateContent(url);
       else window.location.href = url;
     };
@@ -39,10 +83,7 @@
 <OverlaySurface title="Sign in"
                 body_style="-webkit-app-region: no-drag;"
                 scripts={{ _scripts }}>
-  <div id="signin-modal-backdrop" class="fixed inset-0 flex items-start justify-center overflow-y-auto bg-surface-overlay p-4">
-    <div class="relative my-auto bg-surface-primary rounded-lg shadow-overlay max-w-md w-full p-8 text-left">
-      <DialogCloseButton onclick="dismissSigninModal()" />
-      <auth.AuthForm :default_to_signup="default_to_signup" :intro="intro" />
-    </div>
-  </div>
+  <OverlayDialog backdrop_id="signin-modal-backdrop" dismiss="dismissSigninModal()" max_width="max-w-md">
+    <auth.AuthForm :default_to_signup="default_to_signup" :intro="intro" />
+  </OverlayDialog>
 </OverlaySurface>

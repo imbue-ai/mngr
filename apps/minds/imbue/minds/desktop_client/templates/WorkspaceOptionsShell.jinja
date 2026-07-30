@@ -1,0 +1,93 @@
+{#def agent_id, tab, anchor_x=None, anchor_y=None, anchor_height=None, accent="" #}
+{#
+  The workspace-options panel: the overlay chrome shared by the Share machine
+  and Machine settings tabs. Hosted in the shared overlay WebContentsView by
+  pages.WorkspaceOptionsModal.
+
+  It has two presentations, chosen by whether an anchor was supplied.
+
+  DOCKED (an anchor: opened from a workspace, where the titlebar carries the
+  workspace icon-tab strip). The panel hangs from that strip: the card's top
+  edge sits at the strip's BOTTOM (anchor_y + anchor_height, 33px for the 38px
+  titlebar's centered 28px buttons), and a matching strip of tabs is drawn
+  immediately above it, bottom-flush, at the same window-x. The selected tab is
+  filled with the card's own surface and square-bottomed, so it reads as
+  physically joined to the panel below it. The card's width leaves the same
+  margin on the right that the anchor leaves on the left, so the whole thing
+  reads as hanging from the tabs.
+
+  The anchor is measured by chrome.js on that strip and packed into this page's
+  URL by the Electron main process -- the same trick the workspace switcher menu
+  uses. The chrome view hides its own icon-tabs (body.ws-options-open) while the
+  panel is up, so the strip here stands in for them rather than doubling them.
+
+  CENTERED (no anchor: opened from the workspace list, where there is no strip
+  to hang from). An ordinary centered dialog, and NO tab strip -- tabs drawn
+  away from the buttons they stand in for would be a floating control anchored
+  to nothing. The panel then shows the tab it was opened on.
+
+  Tab switching does not reload this page: both panes are rendered and
+  workspace_options.js toggles them (and the tab styling) in place, so
+  switching keeps the pane state and never flashes the overlay.
+#}
+{%- set _tabs = [
+  ("share", "share", "Share machine"),
+  ("settings", "settings", "Machine settings"),
+] -%}
+{%- set _is_docked = anchor_x is not none and anchor_y is not none and anchor_height is not none -%}
+<div id="ws-options-backdrop"
+     data-agent-id="{{ agent_id }}"
+     class="fixed inset-0 bg-surface-overlay"></div>
+{# pointer-events are off on the region so clicks around the card (and, when
+   docked, between it and the tabs) fall through to the backdrop's dismiss
+   handler; the strip and the card turn them back on. #}
+{%- if _is_docked %}
+<div class="fixed left-0 right-0 bottom-3 flex items-start justify-center pointer-events-none"
+     style="top: {{ anchor_y + anchor_height }}px">
+  {# An unselected tab sits on the (dimmed) titlebar, which carries the
+     workspace accent -- so it self-themes exactly like the real titlebar
+     buttons do: ``titlebar-surface`` derives a black/white contrast base from
+     ``--titlebar-bg`` in pure CSS, and the normal text tokens then read on any
+     workspace color. The SELECTED tab must not: it is filled with the card's
+     own surface, so it keeps the app's ordinary tokens. #}
+  <div role="tablist" aria-label="Machine options"
+       class="pointer-events-auto absolute z-10 flex items-center gap-1"
+       style="left: {{ anchor_x }}px; top: -{{ anchor_height }}px; height: {{ anchor_height }}px{% if accent %}; --titlebar-bg: {{ accent }}{% endif %}">
+    {%- for tab_id, icon_name, label in _tabs %}
+    {%- set _selected = tab_id == tab %}
+    <button type="button" role="tab"
+            id="ws-options-tab-{{ tab_id }}"
+            data-wsopt-tab="{{ tab_id }}"
+            aria-selected="{{ 'true' if _selected else 'false' }}"
+            aria-label="{{ label }}"
+            data-tooltip="{{ label }}"
+            class="inline-flex items-center justify-center p-1.5 rounded-md focus-visible:outline-2 focus-visible:outline-accent {{ 'bg-surface-primary rounded-b-none text-primary' if _selected else 'titlebar-surface cursor-pointer text-secondary hover:bg-fill-hover active:bg-fill-active hover:text-primary' }}">
+      <Icon16 :name="icon_name" />
+    </button>
+    {%- endfor %}
+  </div>
+
+  <div class="pointer-events-auto relative flex flex-col h-[660px] max-h-full overflow-hidden rounded-xl bg-surface-primary text-primary shadow-overlay"
+       style="width: max(880px, calc(100% - 2 * ({{ anchor_x }}px - 20px)))">
+    <DialogCloseButton id="ws-options-close" onclick="dismissWorkspaceOptions()" />
+    <div class="flex-1 min-h-0 flex flex-col">
+      {# A column, not a scroller: the pane inside decides what stays pinned
+         and what scrolls, so a long right-hand panel never drags the title
+         and tabs off the top with it. #}
+      <div class="flex-1 min-h-0 flex flex-col px-6 py-4">{{ content }}</div>
+    </div>
+  </div>
+</div>
+{%- else %}
+<div class="fixed inset-0 flex items-center justify-center p-4 pointer-events-none">
+  <div class="pointer-events-auto relative flex flex-col w-full max-w-[880px] h-[660px] max-h-full overflow-hidden rounded-xl bg-surface-primary text-primary shadow-overlay">
+    <DialogCloseButton id="ws-options-close" onclick="dismissWorkspaceOptions()" />
+    <div class="flex-1 min-h-0 flex flex-col">
+      {# A column, not a scroller: the pane inside decides what stays pinned
+         and what scrolls, so a long right-hand panel never drags the title
+         and tabs off the top with it. #}
+      <div class="flex-1 min-h-0 flex flex-col px-6 py-4">{{ content }}</div>
+    </div>
+  </div>
+</div>
+{%- endif %}

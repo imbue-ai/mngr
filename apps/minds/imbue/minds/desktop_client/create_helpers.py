@@ -79,5 +79,5 @@ def color_for_new_workspace(raw_color: object) -> str:
     if normalized is not None:
         return normalized
     if stripped:
-        logger.warning("Ignoring malformed create-request color {!r}; using the default workspace color.", stripped)
+        logger.warning("Ignoring malformed create-request color {!r}; using the default machine color.", stripped)
     return DEFAULT_WORKSPACE_COLOR

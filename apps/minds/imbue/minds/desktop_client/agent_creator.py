@@ -2471,7 +2471,7 @@ class AgentCreator(MutableModel):
                 # no pre-created scaffolding at all.
 
                 parsed_host = HostName(host_name)
-                log_sink.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
+                log_sink.put("[minds] Creating machine '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # A dead (interrupted / failed) earlier create attempt holding this
                 # same name on this provider is implicitly discarded before the
@@ -2937,7 +2937,7 @@ class AgentCreator(MutableModel):
         retry page, which is better than spinning forever in the create attempt UI.
         """
         if self.mngr_forward_port == 0 or not self.mngr_forward_preauth_cookie:
-            logger.debug("Workspace readiness probe disabled (port=0 or empty preauth); skipping")
+            logger.debug("Machine readiness probe disabled (port=0 or empty preauth); skipping")
             return
 
         deadline = time.monotonic() + timeout_seconds
@@ -2960,7 +2960,7 @@ class AgentCreator(MutableModel):
                 if status is not None:
                     last_status = status
                     if status == 200:
-                        logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
+                        logger.debug("Machine ready for {} after {} probe(s)", agent_id, attempt)
                         log_sink.put("[minds] System interface is ready.")
                         # Propagate the success into the shared health tracker,
                         # clearing the suspect flag and probe-failure run that
@@ -2973,12 +2973,12 @@ class AgentCreator(MutableModel):
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(
-            "Workspace readiness probe for {} timed out after {:.0f}s (last status={}); publishing redirect anyway",
+            "Machine readiness probe for {} timed out after {:.0f}s (last status={}); publishing redirect anyway",
             agent_id,
             timeout_seconds,
             last_status,
         )
         log_sink.put(
-            "[minds] Warning: workspace did not become ready within "
+            "[minds] Warning: machine did not become ready within "
             f"{timeout_seconds:.0f}s; you may see a retry page on first load."
         )

@@ -102,7 +102,7 @@ def _make_file_sharing_handler(
 
 
 class _NamedWorkspaceResolver(StaticBackendResolver):
-    """Static resolver that reports every configured agent as a named workspace."""
+    """Static resolver that reports every configured agent as a named machine."""
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
         return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")

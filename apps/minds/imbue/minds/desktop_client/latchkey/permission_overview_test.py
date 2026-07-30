@@ -54,7 +54,7 @@ _CATALOG_PAYLOAD: dict[str, object] = {
 
 
 class _MultiHostResolver(StaticBackendResolver):
-    """Static resolver that maps each agent to a specific host and marks them active workspaces."""
+    """Static resolver that maps each agent to a specific host and marks them active machines."""
 
     host_by_agent: dict[str, str] = Field(default_factory=dict)
     name_by_agent: dict[str, str] = Field(default_factory=dict)
@@ -487,7 +487,7 @@ def test_revoke_workspace_verb_unknown_verb_raises(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     resolver = _resolver({agent: host}, {agent: "Ops Bot"})
 
-    with pytest.raises(PermissionOverviewError, match="Unknown workspace verb"):
+    with pytest.raises(PermissionOverviewError, match="Unknown machine verb"):
         revoke_workspace_verb_for_workspace(
             resolver, build_fake_gateway_client(), latchkey, agent, "minds-workspaces-nope"
         )

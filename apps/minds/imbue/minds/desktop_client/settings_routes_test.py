@@ -51,7 +51,7 @@ _CATALOG_PAYLOAD: dict[str, object] = {
 
 
 class _WorkspaceResolver(StaticBackendResolver):
-    """Static resolver that reports active workspaces mapped to hosts, with names."""
+    """Static resolver that reports active machines mapped to hosts, with names."""
 
     host_by_agent: dict[str, str] = Field(default_factory=dict)
     name_by_agent: dict[str, str] = Field(default_factory=dict)
@@ -209,7 +209,7 @@ def _plugin_dir(tmp_path: Path) -> Path:
 
 def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
     """The app-level Settings page hosts the permission sections: a granted
-    connector shows up with its workspace and permissions, alongside the
+    connector shows up with its machine and permissions, alongside the
     device settings (error reporting, backup password)."""
     agent, host = str(AgentId()), HostId()
     save_permissions(
@@ -217,34 +217,34 @@ def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
         _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.get("/settings")
 
     assert response.status_code == 200
     body = response.text
     # The permission sections are back on the app-level settings page.
-    for section in ("Connectors", "Local files", "Workspaces", "Error reporting", "Master password"):
+    for section in ("Connectors", "Local files", "Machines", "Error reporting", "Master password"):
         assert section in body
     # The granted connector renders with its workspace + permission label.
     assert "Slack" in body
-    assert "My Workspace" in body
+    assert "My Machine" in body
     assert "slack-read-all" in body
     assert 'data-service-name="slack"' in body
     # The full page keeps its "back to workspaces" link (the modal drops it).
-    assert "Back to workspaces" in body
+    assert "Back to machines" in body
 
 
 def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path) -> None:
     """The centered settings modal renders the same permission sections as the
-    full page, minus the "back to workspaces" link."""
+    full page, minus the "back to machines" link."""
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
         _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.get("/settings/modal")
 
@@ -253,7 +253,7 @@ def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path
     assert "Connectors" in body
     assert "slack-read-all" in body
     assert 'data-service-name="slack"' in body
-    assert "Back to workspaces" not in body
+    assert "Back to machines" not in body
     assert 'id="settings-modal-backdrop"' in body
 
 
@@ -263,7 +263,7 @@ def test_settings_page_empty_state_when_no_accounts_and_no_grants(tmp_path: Path
         tmp_path,
         latchkey=_ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
     )
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.get("/settings")
 
@@ -280,7 +280,7 @@ def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:
         _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
     )
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post(
         "/settings/permissions/revoke",
@@ -321,7 +321,7 @@ def test_revoke_all_removes_rule_across_workspaces(tmp_path: Path) -> None:
 def test_revoke_unknown_service_returns_400(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post(
         "/settings/permissions/revoke",
@@ -334,7 +334,7 @@ def test_revoke_unknown_service_returns_400(tmp_path: Path) -> None:
 def test_revoke_missing_fields_returns_400(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post("/settings/permissions/revoke", json={"service_name": "slack"})
 
@@ -356,7 +356,7 @@ def test_settings_page_lists_service_accounts_and_add_button(tmp_path: Path) -> 
         accounts_by_service={"slack": ["hynek@imbue-ai", "hynek@glebs-corner"]},
     )
     handler = _build_handler(tmp_path, latchkey=latchkey)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.get("/settings")
 
@@ -386,7 +386,7 @@ def test_settings_page_flags_an_account_with_no_stored_credentials(tmp_path: Pat
     )
     latchkey = _ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
     handler = _build_handler(tmp_path, latchkey=latchkey)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.get("/settings")
 
@@ -395,14 +395,14 @@ def test_settings_page_flags_an_account_with_no_stored_credentials(tmp_path: Pat
     assert 'data-account="gone@x"' in body
     assert "not connected" in body
     # It is still revocable: the workspace card (and its Revoke button) render.
-    assert "My Workspace" in body
+    assert "My Machine" in body
 
 
 def test_add_account_invokes_latchkey_add_account(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     latchkey = _ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
     handler = _build_handler(tmp_path, latchkey=latchkey)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post("/settings/connectors/add-account", json={"service_name": "slack"})
 
@@ -418,7 +418,7 @@ def test_add_account_reports_failure_as_502(tmp_path: Path) -> None:
         add_account_result=(False, "user cancelled"),
     )
     handler = _build_handler(tmp_path, latchkey=latchkey)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post("/settings/connectors/add-account", json={"service_name": "slack"})
 
@@ -429,7 +429,7 @@ def test_add_account_reports_failure_as_502(tmp_path: Path) -> None:
 def test_add_account_missing_service_name_returns_400(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path, latchkey=_ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/x"))
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post("/settings/connectors/add-account", json={})
 
@@ -453,7 +453,7 @@ def test_disconnect_account_revokes_only_that_accounts_grants(tmp_path: Path) ->
         accounts_by_service={"slack": ["a@x", "b@x"]},
     )
     handler = _build_handler(tmp_path, latchkey=latchkey)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post("/settings/connectors/disconnect-account", json={"service_name": "slack", "account": "a@x"})
 
@@ -511,7 +511,7 @@ def test_revoke_file_sharing_for_workspace_keeps_other_permissions(tmp_path: Pat
     agent, host = str(AgentId()), HostId()
     path = _seed_file_sharing(tmp_path, host, read_paths=("/home/docs",), write_paths=("/home/out",))
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post("/settings/permissions/file-sharing/revoke", json={"workspace_agent_id": agent})
 
@@ -539,7 +539,7 @@ def test_revoke_file_sharing_all_removes_across_workspaces(tmp_path: Path) -> No
 def test_revoke_file_sharing_missing_workspace_returns_400(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
 
     response = client.post("/settings/permissions/file-sharing/revoke", json={})
 
@@ -549,7 +549,7 @@ def test_revoke_file_sharing_missing_workspace_returns_400(tmp_path: Path) -> No
 def test_revoke_file_sharing_requires_authentication(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
     client.delete_cookie(SESSION_COOKIE_NAME)
 
     response = client.post("/settings/permissions/file-sharing/revoke-all", json={})
@@ -611,7 +611,7 @@ def test_revoke_workspace_delegation_missing_fields_returns_400(tmp_path: Path) 
 def test_revoke_requires_authentication(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
     client.delete_cookie(SESSION_COOKIE_NAME)
 
     response = client.post(

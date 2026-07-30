@@ -109,7 +109,7 @@ def test_streamed_request_to_event_maps_file_sharing_fields() -> None:
 
 
 def test_streamed_request_to_event_maps_workspace_fields() -> None:
-    """Workspace-type streamed records translate to LatchkeyWorkspacePermissionRequestEvent."""
+    """Machine-type streamed records translate to LatchkeyWorkspacePermissionRequestEvent."""
     target = "agent-" + "2" * 32
     event = streamed_request_to_event(_make_streamed_workspace(target_workspace_id=target))
     assert isinstance(event, LatchkeyWorkspacePermissionRequestEvent)

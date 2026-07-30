@@ -72,10 +72,10 @@ _WORKSPACE_PASSWORD_ENTROPY_BYTES = 32
 _MNGR_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 
 _CANONICAL_ENV_HEADER = (
-    "# Managed by minds. Definitive copy of this workspace's restic backup\n"
-    "# configuration (repository + credentials + the workspace's random\n"
-    "# password). The copy inside the workspace is injected from this file;\n"
-    "# edit here and re-inject rather than editing the workspace copy.\n"
+    "# Managed by minds. Definitive copy of this machine's restic backup\n"
+    "# configuration (repository + credentials + the machine's random\n"
+    "# password). The copy inside the machine is injected from this file;\n"
+    "# edit here and re-inject rather than editing the machine copy.\n"
 )
 
 
@@ -298,7 +298,7 @@ def _create_or_reuse_bucket(
         except ImbueCloudQuotaExceededCliError:
             if quota_evictor is None or not quota_evictor():
                 raise
-            logger.info("Evicted a destroyed workspace's backup to free quota; retrying bucket create")
+            logger.info("Evicted a destroyed machine's backup to free quota; retrying bucket create")
         except ImbueCloudCliError as e:
             if not _is_bucket_already_exists_error(e):
                 raise
@@ -349,7 +349,7 @@ def _resolve_repository_and_backend_env(
         env = parse_restic_env(request.api_key_env_text)
         if "RESTIC_PASSWORD" in env:
             raise BackupProvisioningError(
-                "RESTIC_PASSWORD must not be set for api_key backups; minds assigns each workspace its own password"
+                "RESTIC_PASSWORD must not be set for api_key backups; minds assigns each machine its own password"
             )
         repository = env.pop("RESTIC_REPOSITORY", "")
         if not repository:

@@ -73,7 +73,7 @@ def _docker_provider() -> DiscoveredProvider:
 
 
 def _resolver_with_capable_agents(host_state_by_agent: dict[AgentId, HostState | None]) -> MngrCliBackendResolver:
-    """Build a resolver carrying one docker workspace per entry, each on its own host.
+    """Build a resolver carrying one docker machine per entry, each on its own host.
 
     Each agent's host gets the supplied ``HostState`` (or none, to model "discovery
     has not learned the state yet"). At most two agents are supported (two hosts).
@@ -220,7 +220,7 @@ def test_landing_page_stopped_mind_shows_only_start(tmp_path: Path) -> None:
     # Exactly one control is visible: Start (the container is stopped), not Stop.
     assert _button_display(html, "landing-start-btn") == ""
     assert _button_display(html, "landing-stop-btn") == "none"
-    assert "Restart workspace" not in html
+    assert "Restart machine" not in html
 
 
 def test_landing_page_running_mind_shows_only_stop(tmp_path: Path) -> None:

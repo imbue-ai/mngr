@@ -39,7 +39,7 @@
           {% if row.is_locked %}
             <div class="type-helper text-tertiary mt-1">Unlock this account's sync password to download.</div>
           {% elif not row.has_backup %}
-            <div class="type-helper text-tertiary mt-1">No backup was configured for this workspace.</div>
+            <div class="type-helper text-tertiary mt-1">No backup was configured for this machine.</div>
           {% endif %}
           {% if row.delete_hint %}
             <div class="type-helper text-tertiary mt-1">{{ row.delete_hint }}</div>
@@ -67,7 +67,7 @@
                leaves the confirm permanently visible. Stacked (prompt above the
                buttons, width-capped) so it never forces the row wider. #}
             <span data-delete-armed class="hidden flex flex-col items-end gap-1">
-              <span class="type-helper text-secondary text-right max-w-xs">Remove this workspace? This can't be undone.</span>
+              <span class="type-helper text-secondary text-right max-w-xs">Remove this machine? This can't be undone.</span>
               <span class="flex items-center gap-2">
                 <form method="POST" action={{ "/workspaces/destroyed/" ~ row.agent_id ~ "/delete-backup" }} class="inline" data-delete-backup-form>
                   <ButtonSubmit variant="danger">Delete forever</ButtonSubmit>
@@ -81,5 +81,5 @@
     {% endfor %}
   </div>
 {% else %}
-  <p class="text-secondary">No recently destroyed workspaces.</p>
+  <p class="text-secondary">No recently destroyed machines.</p>
 {% endif %}

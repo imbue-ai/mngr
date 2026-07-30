@@ -25,7 +25,7 @@ function shellPage({ title, label, script = '', bodyClass = 'page-surface' }) {
     <button id="home-btn"></button>
     <div id="ws-crumb" hidden>
       <button id="workspace-switcher-btn"><span id="workspace-switcher-name"></span></button>
-      <button id="ws-tab-workspace"></button><button id="ws-tab-settings"></button>
+      <div id="ws-tab-strip"><button id="ws-tab-share"></button><button id="ws-tab-settings"></button></div>
     </div>
     <div id="page-crumb" hidden><span id="page-crumb-name"></span></div>
     <button id="requests-toggle"><span id="requests-badge" hidden></span></button>

@@ -32,12 +32,10 @@
 <OverlaySurface title="Minds Settings"
                 body_style="-webkit-app-region: no-drag;"
                 scripts={{ _scripts }}>
-  <div id="settings-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
+  <OverlayDialog backdrop_id="settings-modal-backdrop" dismiss="dismissSettingsModal()" max_width="max-w-4xl" card_extra="h-[85vh] flex flex-col">
     {# Fixed height (not max-height): the card fills 85% of the window
        regardless of how much each section holds, so switching tabs never
        resizes it. The header is pinned and the sections scroll inside. #}
-    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-4xl w-full p-8 h-[85vh] flex flex-col text-left">
-      <DialogCloseButton onclick="dismissSettingsModal()" />
       <h1 class="type-heading-lg text-primary mb-8 shrink-0">Settings</h1>
       {# Only the right pane scrolls (panel_scroll): the nav stays pinned, and
          the -mr-8 cancels the card's p-8 so the pane's native scrollbar sits
@@ -53,6 +51,5 @@
           :is_master_password_set="is_master_password_set"
           :report_unexpected_errors="report_unexpected_errors" />
       </div>
-    </div>
-  </div>
+  </OverlayDialog>
 </OverlaySurface>

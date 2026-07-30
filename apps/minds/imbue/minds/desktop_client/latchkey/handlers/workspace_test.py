@@ -46,7 +46,7 @@ class _RecordingMessageSender(MngrMessageSender):
 
 
 class _NamingBackendResolver(StaticBackendResolver):
-    """Static resolver that maps agent ids to workspace names (for display)."""
+    """Static resolver that maps agent ids to machine names (for display)."""
 
     workspace_name_by_agent: dict[str, str] = Field(default_factory=dict)
 
@@ -108,7 +108,7 @@ def _build_authenticated_client(
 def test_handler_claims_workspace_request_type(tmp_path: Path) -> None:
     handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
     assert handler.handles_request_type() == str(RequestType.WORKSPACE_PERMISSION)
-    assert handler.kind_label() == "workspace access"
+    assert handler.kind_label() == "machine access"
 
 
 # -- render_request_detail_fragment --
@@ -119,7 +119,7 @@ def test_render_fragment_shows_verbs_rationale_and_target_choice(tmp_path: Path)
     target = AgentId()
     event = create_latchkey_workspace_permission_request_event(
         agent_id=str(AgentId()),
-        rationale="manage my sibling workspace",
+        rationale="manage my sibling machine",
         permissions=(PERM_WORKSPACES_DESTROY,),
         target_workspace_id=str(target),
     )
@@ -132,11 +132,11 @@ def test_render_fragment_shows_verbs_rationale_and_target_choice(tmp_path: Path)
         backend_resolver=resolver,
         mngr_forward_origin="http://localhost:8421",
     )
-    assert "manage my sibling workspace" in body
+    assert "manage my sibling machine" in body
     assert PERM_WORKSPACES_DESTROY in body
     assert 'name="target_scope"' in body
     assert "Target WS" in body
-    assert "All workspaces" in body
+    assert "All machines" in body
     assert "Approve" in body and "Deny" in body
     assert "<html" not in body
     # Targeted request: both the general and the workspace-specific groups show,
@@ -144,9 +144,9 @@ def test_render_fragment_shows_verbs_rationale_and_target_choice(tmp_path: Path)
     # targeted destroy verb. The workspace-specific group shows the plain hint,
     # not the broad-scope caution (which is reserved for target-less requests).
     assert "General permissions" in body
-    assert "Workspace-specific permissions" in body
+    assert "Machine-specific permissions" in body
     assert PERM_WORKSPACES_READ in body
-    assert "These act on individual workspaces." in body
+    assert "These act on individual machines." in body
     assert "c-warning-surface" not in body
 
 
@@ -154,7 +154,7 @@ def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> Non
     handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
     event = create_latchkey_workspace_permission_request_event(
         agent_id=str(AgentId()),
-        rationale="create and list workspaces",
+        rationale="create and list machines",
         permissions=(PERM_WORKSPACES_READ,),
         target_workspace_id=None,
     )
@@ -168,14 +168,14 @@ def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> Non
     # pre-selected "All workspaces" radio and no per-workspace ("selected")
     # option. The broad-scope caution is shown in place of the plain hint.
     assert "General permissions" in body
-    assert "Workspace-specific permissions" in body
+    assert "Machine-specific permissions" in body
     assert PERM_WORKSPACES_READ in body
     assert PERM_WORKSPACES_DESTROY in body
     assert 'name="target_scope" value="all"' in body
     assert 'value="selected"' not in body
     assert "c-warning-surface" in body
-    assert "all workspaces" in body
-    assert "These act on individual workspaces." not in body
+    assert "all machines" in body
+    assert "These act on individual machines." not in body
 
 
 # -- apply_grant_request --
@@ -259,7 +259,7 @@ def test_grant_all_sends_override_with_null_target(tmp_path: Path) -> None:
         "permissions": [PERM_WORKSPACES_DESTROY],
         "target_workspace_id": None,
     }
-    assert "all workspaces" in response.get_json()["message"]
+    assert "all machines" in response.get_json()["message"]
 
 
 def test_grant_rejects_empty_permissions(tmp_path: Path) -> None:

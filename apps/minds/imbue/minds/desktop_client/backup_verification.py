@@ -316,6 +316,6 @@ def check_backup_service_for_workspace(
         # Adopt an externally-configured env into the canonical store so
         # status and management start working (also covers a second minds
         # install managing the same workspace).
-        logger.info("Adopting externally-configured restic.env for workspace {}", agent_id)
+        logger.info("Adopting externally-configured restic.env for machine {}", agent_id)
         write_canonical_env(paths, agent_id, env_to_adopt)
     return check

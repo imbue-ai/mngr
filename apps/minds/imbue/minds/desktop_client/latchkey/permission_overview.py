@@ -216,7 +216,7 @@ def _list_active_workspace_hosts(backend_resolver: BackendResolverInterface) -> 
         try:
             host_id = HostId(info.host_id)
         except ValueError:
-            logger.debug("Skipping workspace {} with non-HostId host {!r}", agent_id, info.host_id)
+            logger.debug("Skipping machine {} with non-HostId host {!r}", agent_id, info.host_id)
             continue
         if host_id in seen_host_ids:
             continue
@@ -678,7 +678,7 @@ def revoke_workspace_verb_for_workspace(
     granting workspace. Unrelated ``latchkey-self`` permissions are preserved.
     """
     if verb_permission not in _WORKSPACE_VERB_BY_PERMISSION:
-        raise PermissionOverviewError(f"Unknown workspace verb '{verb_permission}'.")
+        raise PermissionOverviewError(f"Unknown machine verb '{verb_permission}'.")
     host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
         raise PermissionOverviewError(

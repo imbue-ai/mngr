@@ -290,7 +290,7 @@ def _cloud_resolver_with_workspace(agent_id: AgentId, host_id: HostId, name: str
 
 
 def _provision_cloud_workspace_on_device_a(tmp_path: Path, cli: FakeImbueCloudCli) -> tuple[AgentId, HostId, str, str]:
-    """Device A leases a cloud workspace: per-host key on disk, record pushed with full secrets."""
+    """Device A leases a cloud machine: per-host key on disk, record pushed with full secrets."""
     paths_a, _, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
     bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
     assert bundle is not None

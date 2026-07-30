@@ -259,7 +259,7 @@ class HostHealthResponse(FrozenModel):
 # -- Probe questions (canonical wording, shared with tests) ----------------
 
 
-_QUESTION_CONTAINER_RUNNING: Final[str] = "Is the workspace's container running?"
+_QUESTION_CONTAINER_RUNNING: Final[str] = "Is the machine's container running?"
 _QUESTION_SERVICES_AGENT_REGISTERED: Final[str] = "Is the system-services agent registered?"
 _QUESTION_CAN_RUN_COMMANDS_INSIDE: Final[str] = "Can we run a command inside the container?"
 _QUESTION_SERVICES_AGENT_RUNNING: Final[str] = "Is the system-services agent running?"
@@ -378,8 +378,7 @@ _UNAUTHENTICATED_STATE: Final[str] = "UNAUTHENTICATED"
 # field), so the page cannot show the provider's verbatim error; this canned
 # text covers the class of causes instead.
 HOST_ACCESS_REJECTED_REASON: Final[str] = (
-    "This machine's access to the workspace host was rejected. You may need to "
-    "recreate the workspace or contact support."
+    "This machine's access to the machine host was rejected. You may need to recreate the machine or contact support."
 )
 
 

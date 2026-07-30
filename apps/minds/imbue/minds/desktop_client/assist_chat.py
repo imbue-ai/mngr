@@ -93,7 +93,7 @@ def check_assist_support(mngr_caller: MngrCaller, workspace_agent_id: AgentId) -
     if _ASSIST_ABSENT_SENTINEL in result.stdout:
         return AssistSupport.UNSUPPORTED
     logger.warning(
-        "Assist-support probe for workspace {} produced no sentinel (exit {}): {}",
+        "Assist-support probe for machine {} produced no sentinel (exit {}): {}",
         workspace_agent_id,
         result.returncode,
         result.stderr.strip(),
@@ -177,7 +177,7 @@ def spawn_assist_chat(
     result = mngr_caller.call(args, timeout=_ASSIST_SPAWN_TIMEOUT_SECONDS)
     if result.returncode != 0:
         logger.error(
-            "Spawning /assist chat in workspace {} exited {}: {}",
+            "Spawning /assist chat in machine {} exited {}: {}",
             workspace_agent_id,
             result.returncode,
             result.stderr.strip(),

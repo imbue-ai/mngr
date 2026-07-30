@@ -72,13 +72,13 @@
   var RECENT_LIMIT = 5;
 
   var PROBLEM_LABELS = {
-    NOT_CONFIGURED: 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.',
-    CODE_OUTDATED: 'The backup software in this workspace is out of date. Click "Update backup software" to fix this.',
-    ENV_MISSING: 'This workspace has lost its backup storage settings. Click "Update backup software" to restore them.',
-    ENV_MISMATCH: 'This workspace is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
-    SERVICE_NOT_RUNNING: 'The backup software in this workspace is not running. Click "Update backup software" to restart it.',
-    UNVERIFIABLE: "minds couldn't check on this workspace's backups. Click \"Update backup software\" to reset them.",
-    BACKUPS_STALE: 'This workspace has not backed up recently even though it is running. Click "Update backup software" to fix this.',
+    NOT_CONFIGURED: 'Backups are turned off for this machine. Use "Change storage location" to turn them on.',
+    CODE_OUTDATED: 'The backup software in this machine is out of date. Click "Update backup software" to fix this.',
+    ENV_MISSING: 'This machine has lost its backup storage settings. Click "Update backup software" to restore them.',
+    ENV_MISMATCH: 'This machine is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
+    SERVICE_NOT_RUNNING: 'The backup software in this machine is not running. Click "Update backup software" to restart it.',
+    UNVERIFIABLE: "minds couldn't check on this machine's backups. Click \"Update backup software\" to reset them.",
+    BACKUPS_STALE: 'This machine has not backed up recently even though it is running. Click "Update backup software" to fix this.',
   };
 
   function setShown(el, isShown) {
@@ -129,7 +129,7 @@
     historyEmptyEl.classList.add('hidden');
 
     if (!entry.is_configured) {
-      historyEmptyEl.textContent = 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.';
+      historyEmptyEl.textContent = 'Backups are turned off for this machine. Use "Change storage location" to turn them on.';
       historyEmptyEl.classList.remove('hidden');
       return;
     }
@@ -204,7 +204,7 @@
     checkStatusSuffix = '';
 
     if (entry.check_state === 'DISABLED') {
-      checkStatusSuffix = 'Backup service verification is disabled for this workspace.';
+      checkStatusSuffix = 'Backup service verification is disabled for this machine.';
       renderStatusLine();
       // The update is an idempotent converge and does not depend on
       // verification, so it stays available.
@@ -212,7 +212,7 @@
       return;
     }
     if (entry.check_state === 'OFFLINE') {
-      checkStatusSuffix = 'This workspace is offline; its backups will be checked when it is back online.';
+      checkStatusSuffix = 'This machine is offline; its backups will be checked when it is back online.';
       renderStatusLine();
       return;
     }
@@ -258,7 +258,7 @@
       .then(function (resp) { return resp.ok ? resp.json() : null; })
       .then(function (entry) {
         if (!entry) {
-          snapshotStatusText = 'Backup status unavailable for this workspace.';
+          snapshotStatusText = 'Backup status unavailable for this machine.';
           renderStatusLine();
           return;
         }
@@ -394,7 +394,7 @@
     if (providerSelect.value === 'NONE') {
       opUi.start(
         '/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/disable', {},
-        { label: 'Turning backups off...', successMessage: 'Backups are now turned off for this workspace.' }
+        { label: 'Turning backups off...', successMessage: 'Backups are now turned off for this machine.' }
       );
       return;
     }

@@ -689,6 +689,34 @@
           <Icon16 name="badge-check-filled" />
           <code class="type-helper font-mono text-secondary">badge-check-filled</code>
         </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="panels-top-left" />
+          <code class="type-helper font-mono text-secondary">panels-top-left</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="share" />
+          <code class="type-helper font-mono text-secondary">share</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="box" />
+          <code class="type-helper font-mono text-secondary">box</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="link" />
+          <code class="type-helper font-mono text-secondary">link</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="copy" />
+          <code class="type-helper font-mono text-secondary">copy</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="info" />
+          <code class="type-helper font-mono text-secondary">info</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="cloud" />
+          <code class="type-helper font-mono text-secondary">cloud</code>
+        </div>
       </div>
       <p class="mt-1 type-helper text-secondary">
         Icons inherit color from the parent via ``currentColor`` (most are
@@ -724,7 +752,7 @@
       <div id="patterns" class="scroll-mt-8 mt-16 pt-12 border-t border-default mb-8">
         <h2 class="type-heading-lg text-primary">Patterns &amp; Components</h2>
         <p class="type-helper text-secondary mt-1">
-          Common chrome and workspace UI patterns, composed from the tokens
+          Common chrome and machine UI patterns, composed from the tokens
           above. Source files linked under each example.
         </p>
       </div>
@@ -763,13 +791,13 @@
         <div class="titlebar-surface rounded-lg overflow-hidden border border-default h-[38px] flex items-center select-none px-1"
              style="--titlebar-bg: {{ _bg }}; background-color: var(--titlebar-bg);">
           <div class="flex-1 flex items-center gap-0.5 min-w-0">
-            <TitlebarButton title="Workspaces"><Icon16 name="menu" /></TitlebarButton>
+            <TitlebarButton title="Machines"><Icon16 name="menu" /></TitlebarButton>
             <TitlebarButton title="Home"><Icon16 name="home" /></TitlebarButton>
             <TitlebarButton title="Back"><Icon16 name="chevron-left" /></TitlebarButton>
             <TitlebarButton title="Forward"><Icon16 name="chevron-right" /></TitlebarButton>
           </div>
           <div class="flex-[2] flex items-center justify-center px-2 min-w-0">
-            <span class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
+            <span class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">my-machine</span>
           </div>
           <div class="flex-1 flex items-center justify-end min-w-0">
             <TitlebarButton title="Requests" extra="gap-[3px]"><Icon16 name="inbox" /></TitlebarButton>
@@ -841,7 +869,7 @@
       <h2 class="type-heading text-primary mb-2">Sidebar items</h2>
       <div id="styleguide-sidebar-rows"
            class="dark w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary overflow-hidden"></div>
-      <div class="mt-1 type-helper text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
+      <div class="mt-1 type-helper text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New machine" / "Manage account(s)" rows below the machine list.</div>
     </section>
 
     {# Accent spine. The left stripe is the only surface in the catalog that
@@ -850,7 +878,7 @@
     <section id="accent-spine" class="scroll-mt-8 mb-6">
       <h2 class="type-heading text-primary mb-2">Accent spine</h2>
       <div class="accent-spine relative flex items-center gap-3 bg-surface-primary border border-default rounded-lg px-4 py-3 overflow-hidden">
-        <div class="type-body text-primary">Card with workspace accent stripe on the left edge.</div>
+        <div class="type-body text-primary">Card with machine accent stripe on the left edge.</div>
       </div>
       <div class="mt-2 flex items-center gap-3">
         <label for="styleguide-accent-color" class="type-helper text-secondary">accent hex</label>
@@ -949,7 +977,7 @@
     <section id="links" class="scroll-mt-8 mb-6">
       <h2 class="type-heading text-primary mb-2">Links</h2>
       <div class="flex flex-wrap items-center gap-4">
-        <Link href="#">Back to workspaces</Link>
+        <Link href="#">Back to machines</Link>
         <Link href="#" weight="medium">Sign in</Link>
         <Link href="#" extra="type-helper">Forgot password</Link>
       </div>

@@ -7,7 +7,15 @@
 // here as in-page DOM driven over IPC, so opens are instant.
 //
 // IPC contract (main -> host), delivered on window.minds.onOverlayCommand:
-//   { type: 'show-modal', id, url }       -- mount a fresh modal iframe,
+//   { type: 'show-modal', id, url, stack } -- mount a fresh modal iframe; with
+//                                         ``stack`` the modal it opens over is
+//                                         kept mounted underneath, not destroyed,
+//   { type: 'update-modal', id, url }     -- hand the already-open modal a new
+//                                         URL instead of remounting it,
+//   { type: 'pop-modal', reload }         -- close the front modal and reveal the
+//                                         one it was opened over, re-rendering it
+//                                         when ``reload`` (the detour changed
+//                                         what it would show),
 //                                            destroying any previously-shown one.
 //   { type: 'hide-modal', id }            -- destroy the named modal iframe.
 //   { type: 'hide-all' }                  -- destroy every modal (close/takeover).
@@ -51,12 +59,20 @@
   // switching modals is flash-free.
   var modalFrame = null; // the currently-visible modal iframe (front buffer)
   var incomingFrame = null; // a modal iframe still loading (back buffer)
+  // Modals a detour opened over, kept mounted underneath instead of destroyed.
+  // Signing in from the workspace options panel is the case: the panel stays on
+  // screen (dimmed by the sign-in's own backdrop) rather than vanishing, and
+  // popping back to it keeps its LIVE state -- the selected share target, the
+  // statuses already fetched, the scroll position -- which reopening it by URL
+  // could not. Later frames are appended after the retained ones, so DOM order
+  // already puts the detour on top.
+  var stackedFrames = [];
 
   function destroyFrame(frame) {
     if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
   }
 
-  function showModal(id, url) {
+  function showModal(id, url, shouldStack) {
     // Drop any earlier incoming frame that never became visible -- this show
     // supersedes it, and it was never shown, so there's no flash.
     destroyFrame(incomingFrame);
@@ -100,13 +116,76 @@
         return;
       }
       frame.style.visibility = 'visible';
-      destroyFrame(modalFrame); // swap: remove the modal this one replaced
+      if (shouldStack && modalFrame) stackedFrames.push(modalFrame); // keep it underneath
+      else destroyFrame(modalFrame); // swap: remove the modal this one replaced
       modalFrame = frame;
       incomingFrame = null;
+      if (pendingUpdateUrl) {
+        var queued = pendingUpdateUrl;
+        pendingUpdateUrl = null;
+        if (!applyInPlaceUpdate(frame, queued)) showModal(id, queued, false);
+      }
     });
     frame.src = url;
     incomingFrame = frame;
     root.appendChild(frame);
+  }
+
+  // Close the front modal and reveal the one it was opened over. Returns the
+  // revealed modal's id, or '' when nothing was stacked (the caller then closes
+  // the overlay outright).
+  // A same-modal reopen that arrived while the frame was still loading. Applied
+  // when that load lands, instead of throwing the nearly-ready frame away.
+  var pendingUpdateUrl = null;
+
+  // Hand a loaded modal a new URL instead of remounting it. The hosted page
+  // opts in by defining ``window.mindsOverlayUpdate(url)`` and answering true
+  // when it handled the change; anything else falls back to a fresh mount, so
+  // pages that do not opt in behave exactly as before.
+  function applyInPlaceUpdate(frame, url) {
+    try {
+      var update = frame.contentWindow && frame.contentWindow.mindsOverlayUpdate;
+      return typeof update === 'function' && update(url) === true;
+    } catch (e) {
+      return false;  // cross-document access failed; remount instead
+    }
+  }
+
+  // Reopening the modal that is already up (clicking the other titlebar tab)
+  // used to destroy the current frame and load the page again from scratch --
+  // and if the first load had not finished, it was discarded outright and the
+  // second started over, which is what made the panel take seconds to appear.
+  function updateModal(id, url) {
+    if (modalFrame && modalFrame.getAttribute('data-overlay-id') === id && applyInPlaceUpdate(modalFrame, url)) {
+      return;
+    }
+    if (incomingFrame && incomingFrame.getAttribute('data-overlay-id') === id) {
+      pendingUpdateUrl = url;  // let the in-flight load finish, then apply it
+      return;
+    }
+    showModal(id, url, false);
+  }
+
+  function popModal(shouldReload) {
+    var beneath = stackedFrames.pop() || null;
+    destroyFrame(incomingFrame);
+    incomingFrame = null;
+    destroyFrame(modalFrame);
+    modalFrame = beneath;
+    if (!beneath) return '';
+    // The revealed frame rendered BEFORE the detour, so a detour that changed
+    // what it would render (signing in adds the account its prompt was asking
+    // for) has to re-render it -- otherwise it still shows the state that sent
+    // the user away. A plain dismissal skips this and keeps the live frame.
+    if (shouldReload) {
+      try {
+        beneath.contentWindow.location.reload();
+      } catch (e) {
+        // Same-origin, so this should not throw; if it does, the stale frame is
+        // still better than a blank overlay.
+      }
+    }
+    return beneath.getAttribute('data-overlay-id') || '';
   }
 
   function hideModal(id) {
@@ -124,8 +203,11 @@
   function hideAllModals() {
     destroyFrame(incomingFrame);
     destroyFrame(modalFrame);
+    stackedFrames.forEach(destroyFrame);
+    stackedFrames = [];
     incomingFrame = null;
     modalFrame = null;
+    pendingUpdateUrl = null;
   }
 
   // -- Tooltips ----------------------------------------------------------
@@ -249,7 +331,9 @@
 
   window.minds.onOverlayCommand(function (cmd) {
     if (!cmd || typeof cmd !== 'object') return;
-    if (cmd.type === 'show-modal' && cmd.id && cmd.url) showModal(cmd.id, cmd.url);
+    if (cmd.type === 'show-modal' && cmd.id && cmd.url) showModal(cmd.id, cmd.url, !!cmd.stack);
+    else if (cmd.type === 'update-modal' && cmd.id && cmd.url) updateModal(cmd.id, cmd.url);
+    else if (cmd.type === 'pop-modal') window.minds.overlayModalPopped(popModal(!!cmd.reload));
     else if (cmd.type === 'hide-modal' && cmd.id) hideModal(cmd.id);
     else if (cmd.type === 'hide-all') { hideAllModals(); hideTooltip(); }
     else if (cmd.type === 'show-tooltip') showTooltip(cmd);

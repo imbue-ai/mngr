@@ -287,13 +287,13 @@ def run_restart_sequence(
     state: the sequence must then never bounce a live container, and ``mngr
     start`` alone guarantees that -- it checks ground truth at commit time,
     no-ops on a running host, and cold-boots a stopped one. The manual
-    "Restart workspace" click keeps the stop step, since it may target a
+    "Restart machine" click keeps the stop step, since it may target a
     running-but-wedged container that only a bounce fixes.
     """
     registry.append_log(workspace_agent_id, "Starting host restart.")
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
-        message = "Could not locate the system-services agent for this workspace."
+        message = "Could not locate the system-services agent for this machine."
         logger.error("Host restart of {} failed: {}", workspace_agent_id, message)
         tracker.mark_restart_failed(workspace_agent_id, message)
         registry.fail(workspace_agent_id, message)
@@ -434,7 +434,7 @@ def probe_workspace_health(
     display_info = backend_resolver.get_agent_display_info(agent_id)
     provider_name = display_info.provider_name if display_info is not None else None
     # Friendly provider name for the "Can't connect to ..." page title.
-    provider_label = friendly_provider_label(provider_name) or "the workspace backend"
+    provider_label = friendly_provider_label(provider_name) or "the machine backend"
 
     # Read host/provider state from the passive discovery resolver.
     host_state_enum = (

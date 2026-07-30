@@ -1,4 +1,7 @@
-// Workspace settings page: handles the color picker and disassociate.
+// Color picker + disassociate for the workspace settings sections. Loaded by
+// every page that renders WorkspaceSettingsSections: the standalone settings
+// page and the docked options panel's Machine settings tab (plus its
+// browser-mode twin).
 // Reads the agent id from the #workspace-settings container's
 // data-agent-id attribute so the template does not have to interpolate
 // anything into JS.
@@ -133,12 +136,12 @@
           if (err === 'invalid_hex') {
             showError('That hex value is not valid. Use #rrggbb or #rgb.');
           } else if (err === 'not_primary') {
-            showError("This agent isn't a primary workspace; color can't be set.");
+            showError("This agent isn't a primary machine; color can't be set.");
           } else if (err === 'stale_provider') {
-            showError('This workspace is currently unreachable; try again later.');
+            showError('This machine is currently unreachable; try again later.');
             setControlsDisabled(true);
           } else if (err === 'host_unreachable') {
-            showError('Could not reach the workspace host. Try again in a moment.');
+            showError('Could not reach the machine host. Try again in a moment.');
           } else {
             showError('Save failed (HTTP ' + result.status + ').');
           }
@@ -217,30 +220,29 @@
   }
   // -- End color picker ---------------------------------------------------
 
-  // -- Manage sharing -------------------------------------------------------
-  //
-  // In the desktop shell the sharing editor opens as a centered overlay modal
-  // via the shell bridge -- the workspace-settings page is a trusted local page
-  // on the chrome surface; the links' hrefs stay as the browser-mode full-page
-  // fallback.
-  if (window.minds && window.minds.openSharingModal) {
-    var sharingLinks = document.querySelectorAll('a[data-sharing-service]');
-    for (var j = 0; j < sharingLinks.length; j++) {
-      (function (link) {
-        link.addEventListener('click', function (event) {
-          event.preventDefault();
-          window.minds.openSharingModal(agentId, link.getAttribute('data-sharing-service'));
-        });
-      })(sharingLinks[j]);
-    }
-  }
-
   var disassociateBtn = document.getElementById('disassociate-btn');
-  if (disassociateBtn) {
+  var unlinkDialog = document.getElementById('unlink-dialog');
+  var unlinkCancelBtn = document.getElementById('unlink-cancel-btn');
+  var unlinkConfirmBtn = document.getElementById('unlink-confirm-btn');
+  if (disassociateBtn && unlinkDialog && unlinkCancelBtn && unlinkConfirmBtn) {
+    // Unlinking tears down every tunnel for this machine and cannot be undone
+    // by linking again, so it is confirmed first -- the same shape the destroy
+    // control uses.
     disassociateBtn.addEventListener('click', function () {
-      var spinner = document.getElementById('disassociate-spinner');
-      disassociateBtn.disabled = true;
-      if (spinner) spinner.classList.remove('hidden');
+      unlinkDialog.classList.remove('hidden');
+    });
+    unlinkCancelBtn.addEventListener('click', function () {
+      unlinkDialog.classList.add('hidden');
+    });
+    unlinkDialog.addEventListener('click', function (e) {
+      if (e.target === unlinkDialog) unlinkDialog.classList.add('hidden');
+    });
+
+    unlinkConfirmBtn.addEventListener('click', function () {
+      // The confirm button reports the wait: "Unlinking..." plus a spinner, in
+      // place of its label. The inverse tone keeps the spinner legible on the
+      // danger variant's solid fill.
+      window.mindsButtonBusy.set(unlinkConfirmBtn, 'Unlinking...', 'inverse');
       var section = document.getElementById('account-section');
       if (section) {
         section.style.opacity = '0.5';
@@ -251,14 +253,37 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ account_id: null }),
       })
-        .then(function () { window.location.reload(); })
+        .then(function (response) {
+          if (response.ok) {
+            window.location.reload();
+            return null;
+          }
+          // ``fetch`` resolves for 4xx/5xx too, so reloading here unconditionally
+          // replayed a refusal as a page that came back unchanged -- which reads
+          // exactly like the button doing nothing. The server explains itself
+          // (an expired session, a connector that would not answer); show that.
+          return response.text().then(function (text) {
+            var detail = '';
+            try {
+              var parsed = JSON.parse(text);
+              detail = parsed.error || parsed.detail || parsed.message || '';
+            } catch (parseError) {
+              detail = text;
+            }
+            throw new Error(detail || 'HTTP ' + response.status);
+          });
+        })
         .catch(function (err) {
-          alert('Failed: ' + err.message);
-          disassociateBtn.disabled = false;
-          if (spinner) spinner.classList.add('hidden');
+          window.mindsButtonBusy.clear(unlinkConfirmBtn);
+          unlinkDialog.classList.add('hidden');
           if (section) {
             section.style.opacity = '1';
             section.style.pointerEvents = 'auto';
+          }
+          var errorEl = document.getElementById('disassociate-error');
+          if (errorEl) {
+            errorEl.textContent = 'Could not unlink: ' + err.message;
+            errorEl.classList.remove('hidden');
           }
         });
     });

@@ -71,7 +71,7 @@
   })();
 </script>
 {% endset %}
-<OverlaySurface title="Workspace AI key" scripts={{ _scripts }}>
+<OverlaySurface title="Machine AI key" scripts={{ _scripts }}>
   <div id="ai-keys-backdrop"
        class="fixed inset-0 bg-surface-overlay flex items-center justify-center p-4"
        onclick="onAiKeysBackdropClick(event)">
@@ -88,7 +88,7 @@
         {% if error_message %}
           <Notice variant="error">{{ error_message }}</Notice>
         {% else %}
-          <h2 class="type-heading-sm text-primary text-center mb-2">Get AI credentials for your workspace</h2>
+          <h2 class="type-heading-sm text-primary text-center mb-2">Get AI credentials for your machine</h2>
           <p class="type-body text-secondary text-center mb-2">
             This creates an AI key for
             <span class="text-primary font-semibold">{{ workspace_display_name }}</span>,

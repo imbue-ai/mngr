@@ -180,9 +180,7 @@
 <OverlaySurface title="Manage Accounts"
                 body_style="-webkit-app-region: no-drag;"
                 scripts={{ _scripts }}>
-  <div id="accounts-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
-    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-lg w-full p-8 max-h-[85vh] overflow-y-auto text-left">
-      <DialogCloseButton onclick="dismissAccountsModal()" />
+  <OverlayDialog backdrop_id="accounts-modal-backdrop" dismiss="dismissAccountsModal()" max_width="max-w-lg" card_extra="max-h-[85vh] overflow-y-auto">
       <h1 class="type-heading-lg text-primary mb-6">Manage Accounts</h1>
 
       {# Surfaces a failed set-default / log-out. Without it a failure just
@@ -202,7 +200,7 @@
                 {% endif %}
               </div>
               <div class="type-helper text-tertiary">
-                {{ acct.workspace_ids | length }} workspace(s)
+                {{ acct.workspace_ids | length }} machine(s)
                 {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
               </div>
             </div>
@@ -231,6 +229,5 @@
       <div class="mt-4">
         <Button variant="primary" onclick="openAddAccount()">Add account</Button>
       </div>
-    </div>
-  </div>
+  </OverlayDialog>
 </OverlaySurface>

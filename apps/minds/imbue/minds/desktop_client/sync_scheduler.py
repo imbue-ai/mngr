@@ -237,7 +237,7 @@ class WorkspaceSyncScheduler(MutableModel):
         try:
             self.run_one_pass()
         except (ImbueCloudCliError, WorkspaceSyncError, SyncCryptoError, SecretWrappingError, OSError) as e:
-            logger.opt(exception=e).error("Workspace-record sync pass failed")
+            logger.opt(exception=e).error("Machine-record sync pass failed")
             self._mark_pending_initial_syncs_failed(str(e))
 
     def _loop(self) -> None:

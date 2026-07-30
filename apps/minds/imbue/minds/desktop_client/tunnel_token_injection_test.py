@@ -16,7 +16,7 @@ def test_tunnel_token_file_is_per_secret_env_in_data_secrets() -> None:
 
 
 def test_clear_tunnel_token_never_starts_a_stopped_host() -> None:
-    """Clearing the token file must not boot a stopped workspace.
+    """Clearing the token file must not boot a stopped machine.
 
     ``mngr exec`` auto-starts the host by default; deleting a token file from a
     stopped container is pointless (the stale file is explicitly harmless while

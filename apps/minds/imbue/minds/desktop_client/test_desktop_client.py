@@ -65,6 +65,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import is_workspace_options_pane_hidden
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import CreateAttemptId
@@ -261,7 +262,7 @@ def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
 
 
 def test_post_login_redirects_to_create_when_no_workspaces(tmp_path: Path) -> None:
-    """A just-signed-in user with no workspaces lands on the create screen (/)."""
+    """A just-signed-in user with no machines lands on the create screen (/)."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
@@ -274,7 +275,7 @@ def test_post_login_redirects_to_create_when_no_workspaces(tmp_path: Path) -> No
 
 
 def test_post_login_redirects_to_accounts_when_workspaces_exist(tmp_path: Path) -> None:
-    """A returning user who already has workspaces lands on the accounts page."""
+    """A returning user who already has machines lands on the accounts page."""
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_service={str(agent_id): {"web": "http://backend"}},
@@ -469,10 +470,10 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
 
 def _make_cold_start_resolver_with_only_restorable_workspace() -> MngrCliBackendResolver:
-    """A resolver whose live snapshot is empty but whose last-good topology remembers a workspace.
+    """A resolver whose live snapshot is empty but whose last-good topology remembers a machine.
 
     Models the cold-start race the landing fallback must survive: a complete
-    enumeration lands the workspace in the last-good topology, then a subsequent
+    enumeration lands the machine in the last-good topology, then a subsequent
     empty snapshot (a slow provider hasn't re-listed it yet) drops it from the
     live/active set while keeping it in the restorable set. Discovery has
     completed, so the raw fallback would wrongly show the terminal create form.
@@ -493,11 +494,11 @@ def _make_cold_start_resolver_with_only_restorable_workspace() -> MngrCliBackend
 
 
 def test_landing_page_shows_discovering_when_only_restorable_workspaces_remain(tmp_path: Path) -> None:
-    """A cold-start race (live empty, last-good remembers a workspace) shows the discovering page.
+    """A cold-start race (live empty, last-good remembers a machine) shows the discovering page.
 
-    The user HAS a workspace (known via the persisted last-good topology), so
+    The user HAS a machine (known via the persisted last-good topology), so
     the auto-refreshing "Discovering agents..." page -- which self-heals into the
-    workspace list -- must be shown instead of the terminal create form.
+    machine list -- must be shown instead of the terminal create form.
     """
     backend_resolver = _make_cold_start_resolver_with_only_restorable_workspace()
     # Precondition: active/known live set is empty but the workspace is restorable.
@@ -615,15 +616,15 @@ def test_landing_row_buttons_have_tooltips(tmp_path: Path) -> None:
     response = client.get("/")
     assert response.status_code == 200
     # A normal (non-shutdown-capable) row shows Restart / Open / Settings.
-    assert 'data-tooltip="Restart workspace"' in response.text
+    assert 'data-tooltip="Restart machine"' in response.text
     assert 'data-tooltip="Open in new window"' in response.text
     assert 'data-tooltip="Settings"' in response.text
     # No native title= tooltips remain on the row buttons.
-    assert 'title="Restart workspace"' not in response.text
+    assert 'title="Restart machine"' not in response.text
     assert 'title="Settings"' not in response.text
     # data-tooltip is not exposed to assistive tech, so the aria-labels stay.
-    assert 'aria-label="Restart workspace"' in response.text
-    assert 'aria-label="Workspace settings"' in response.text
+    assert 'aria-label="Restart machine"' in response.text
+    assert 'aria-label="Machine settings"' in response.text
     # The shared trigger script is loaded (via Base), which wires these up and
     # -- absent the window.minds bridge -- renders them in-page.
     assert "/_static/tooltip_triggers.js" in response.text
@@ -694,7 +695,7 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
 
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
-    assert "Creating your workspace" in response.text
+    assert "Creating your machine" in response.text
     assert "Setting up your machine" in response.text
     assert 'id="bar-fill"' in response.text
     # The walkthrough plays itself, so nothing asks the user to start it.
@@ -763,7 +764,7 @@ def test_inspiration_page_shows_chooser(tmp_path: Path) -> None:
     response = client.get("/create/inspiration?git_url=https://github.com/acme/inspiration")
     assert response.status_code == 200
     assert "You've opened an Inspiration" in response.text
-    assert "Add to an existing workspace" in response.text
+    assert "Add to an existing machine" in response.text
     assert "/use-inspiration https://github.com/acme/inspiration" in response.text
     assert "Create from Inspiration" in response.text
 
@@ -797,7 +798,7 @@ def test_inspiration_page_rejects_unauthenticated(tmp_path: Path) -> None:
 
 
 def test_inspiration_page_lists_workspaces(tmp_path: Path) -> None:
-    """The add-to-existing step offers the known workspaces as pickable rows."""
+    """The add-to-existing step offers the known machines as pickable rows."""
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
     backend_resolver = StaticBackendResolver(
@@ -861,7 +862,7 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
 def test_create_form_has_no_ai_provider_dropdown(tmp_path: Path) -> None:
     """GET /create form no longer offers an AI-provider choice or key input.
 
-    AI credentials are configured through the workspace's own Claude sign-in
+    AI credentials are configured through the machine's own Claude sign-in
     modal after boot, not at create time.
     """
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
@@ -935,11 +936,11 @@ def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
 
     response = client.get("/_chrome")
     assert response.status_code == 200
-    assert 'data-tooltip="Switch workspace"' in response.text
+    assert 'data-tooltip="Switch machine"' in response.text
     assert 'data-tooltip="Report a bug"' in response.text
     # data-tooltip is not exposed to assistive tech, so each icon-only titlebar
     # button also needs an aria-label to keep an accessible name.
-    assert 'aria-label="Switch workspace"' in response.text
+    assert 'aria-label="Switch machine"' in response.text
     assert 'aria-label="Report a bug"' in response.text
 
 
@@ -1086,7 +1087,7 @@ def test_chrome_events_sse_omits_discovery_health_when_healthy(tmp_path: Path) -
 def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> None:
     """An agent with an alive destroy pid + still in the resolver shows up as running.
 
-    main.js keys its "ok to navigate the user away from this workspace"
+    main.js keys its "ok to navigate the user away from this machine"
     decision off this list, so the helper must surface every in-flight or
     failed destroy id whose marker dir exists on disk.
     """
@@ -1133,8 +1134,8 @@ def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path)
 
     Finalization happens only once the host is actually gone, not
     synchronously on click. The record is kept (state=DESTROYED, secrets
-    intact) so the workspace's backups stay reachable, but it no longer
-    reads as the workspace's owner.
+    intact) so the machine's backups stay reachable, but it no longer
+    reads as the machine's owner.
     """
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
@@ -1154,7 +1155,7 @@ def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path)
     # gone -> the destroy is DONE.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store)
+    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store, cli)
 
     assert marker == {}
     assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
@@ -1169,7 +1170,7 @@ def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path)
 def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path: Path) -> None:
     """A finished destroy whose host is still up is FAILED: kept + stays associated.
 
-    The workspace must remain visible and owned so the user can retry, instead
+    The machine must remain visible and owned so the user can retry, instead
     of vanishing while its host keeps running (and billing).
     """
     paths = WorkspacePaths(data_dir=tmp_path)
@@ -1189,7 +1190,7 @@ def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path
     # Resolver still lists the workspace agent as active -> host still up -> FAILED.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
 
-    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store)
+    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store, cli)
 
     assert marker == {str(agent_id): "failed"}
     assert (paths.data_dir / "destroying" / str(agent_id)).exists()
@@ -1200,7 +1201,7 @@ def test_remote_tiles_wait_for_the_initial_discovery_snapshot(tmp_path: Path) ->
     """No record renders as a remote tile until discovery has produced its first snapshot.
 
     Before that, local knowledge is empty and every record -- including this
-    device's own workspaces -- would misclassify as a greyed remote tile.
+    device's own machines -- would misclassify as a greyed remote tile.
     """
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
@@ -1335,13 +1336,18 @@ def _create_test_client_with_stores(
     return client, auth_store
 
 
-def _create_test_client_with_auth_routes(tmp_path: Path, has_signed_in_before: bool = False) -> FlaskClient:
+def _create_test_client_with_auth_routes(
+    tmp_path: Path, has_signed_in_before: bool = False, minds_config: MindsConfig | None = None
+) -> FlaskClient:
     """Create a desktop client with the /auth blueprint mounted.
 
     The auth blueprint is only registered when both a session store and an
     imbue_cloud CLI are wired, so this passes both. ``has_signed_in_before``
     registers a fake plugin account so the session store reports a prior
     sign-in, which the auth pages must ignore when picking the leading tab.
+    ``minds_config`` is only needed by tests that depend on a config-gated
+    decision (e.g. the sign-in modal's hand-back, which the error-reporting
+    consent gate overrides).
     """
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     cli = make_fake_imbue_cloud_cli()
@@ -1354,6 +1360,7 @@ def _create_test_client_with_auth_routes(tmp_path: Path, has_signed_in_before: b
         http_client=None,
         imbue_cloud_cli=cli,
         session_store=session_store,
+        minds_config=minds_config,
     )
     return app.test_client()
 
@@ -1441,6 +1448,46 @@ def test_signin_api_replaces_an_unstructured_cli_failure_with_actionable_copy(tm
     assert "check your internet connection" in body["message"].lower()
 
 
+def test_signin_modal_hands_back_to_the_modal_it_displaced(tmp_path: Path) -> None:
+    """``?restore=1`` tells the page a modal is waiting behind it.
+
+    The shell sets it when the sign-in replaced another modal (the machine
+    options panel's Link prompt), so a completed sign-in returns to that panel
+    instead of navigating the content view out from under it.
+    """
+    config = MindsConfig(data_dir=tmp_path)
+    config.set_error_reporting_consent_given(True)
+    client = _create_test_client_with_auth_routes(tmp_path, minds_config=config)
+    response = client.get("/auth/signin-modal", query_string={"restore": "1"})
+    assert response.status_code == 200
+    assert "window.MINDS_AUTH_CAN_RESTORE = true" in response.text
+
+
+def test_signin_modal_does_not_hand_back_when_nothing_was_displaced(tmp_path: Path) -> None:
+    """Without ``?restore=1`` a sign-in lands the content view as it always did."""
+    config = MindsConfig(data_dir=tmp_path)
+    config.set_error_reporting_consent_given(True)
+    client = _create_test_client_with_auth_routes(tmp_path, minds_config=config)
+    response = client.get("/auth/signin-modal")
+    assert response.status_code == 200
+    assert "window.MINDS_AUTH_CAN_RESTORE = false" in response.text
+
+
+def test_signin_modal_hand_back_yields_to_the_unanswered_consent_gate(tmp_path: Path) -> None:
+    """An outstanding error-reporting consent beats the hand-back.
+
+    /post-login forces every destination to "/" while that one-time gate is
+    unanswered so it gets answered first; restoring a panel over it would cover
+    the very screen the user has to act on.
+    """
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_error_reporting_consent_given() is False
+    client = _create_test_client_with_auth_routes(tmp_path, minds_config=config)
+    response = client.get("/auth/signin-modal", query_string={"restore": "1"})
+    assert response.status_code == 200
+    assert "window.MINDS_AUTH_CAN_RESTORE = false" in response.text
+
+
 def test_auth_login_page_renders_message_query_param(tmp_path: Path) -> None:
     """GET /auth/login?message=... renders the banner (e.g. the Electron shell's
     'You need to sign in...' prompt on the auth_required event)."""
@@ -1464,10 +1511,10 @@ def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) 
     response = client.get("/auth/signup", query_string={"return_to": "/create"})
     assert response.status_code == 200
     # Back link to the picker.
-    assert "Back to workspace setup" in response.text
+    assert "Back to machine setup" in response.text
     assert 'href="/create"' in response.text
     # Default explainer banner (no explicit message supplied).
-    assert "run your workspace on Imbue Cloud" in response.text
+    assert "run your machine on Imbue Cloud" in response.text
 
 
 def test_signin_modal_defaults_to_signup_and_mode_signin_leads_with_signin(tmp_path: Path) -> None:
@@ -1521,7 +1568,7 @@ def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -
     assert response.status_code == 200
     assert 'id="signin-modal-backdrop"' in response.text
     assert 'id="signin-form"' in response.text
-    assert "run your workspace on Imbue Cloud" in response.text
+    assert "run your machine on Imbue Cloud" in response.text
 
 
 def test_signin_modal_honors_valid_return_to(tmp_path: Path) -> None:
@@ -1531,7 +1578,7 @@ def test_signin_modal_honors_valid_return_to(tmp_path: Path) -> None:
     response = client.get("/auth/signin-modal", query_string={"return_to": "/"})
     assert response.status_code == 200
     assert 'window.MINDS_AUTH_RETURN_TO = "/";' in response.text
-    assert "run your workspace on Imbue Cloud" not in response.text
+    assert "run your machine on Imbue Cloud" not in response.text
 
 
 def test_signin_modal_rejects_unsafe_return_to(tmp_path: Path) -> None:
@@ -1563,9 +1610,9 @@ def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
     client = _create_test_client_with_auth_routes(tmp_path)
     response = client.get("/auth/signup", query_string={"return_to": "https://evil.com"})
     assert response.status_code == 200
-    assert "Back to workspace setup" not in response.text
+    assert "Back to machine setup" not in response.text
     assert "evil.com" not in response.text
-    assert "run your workspace on Imbue Cloud" not in response.text
+    assert "run your machine on Imbue Cloud" not in response.text
 
 
 def test_accounts_page_requires_auth(tmp_path: Path) -> None:
@@ -1776,7 +1823,7 @@ def test_settings_modal_renders_app_settings_in_overlay(tmp_path: Path) -> None:
     """GET /settings/modal renders the same app-level settings sections as the
     /settings page (Connectors, Error reporting, Master password) inside the
     centered overlay chrome (backdrop + closeModal-based dismissal), with no
-    "back to workspaces" link."""
+    "back to machines" link."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get("/settings/modal")
@@ -1790,7 +1837,7 @@ def test_settings_modal_renders_app_settings_in_overlay(tmp_path: Path) -> None:
     assert 'id="report-errors-toggle"' in body
     assert "/_static/app_settings.js" in body
     # The modal drops the back link (X + backdrop click dismiss instead).
-    assert "Back to workspaces" not in body
+    assert "Back to machines" not in body
     # Modal chrome: dim backdrop over a transparent body, dismissed through
     # the Electron modal host (with a plain-page fallback).
     assert 'id="settings-modal-backdrop"' in body
@@ -1822,10 +1869,10 @@ def test_accounts_modal_lists_logged_in_accounts(tmp_path: Path) -> None:
 
 
 def _create_sharing_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore, str]:
-    """Client whose session store has a workspace associated with a signed-in account.
+    """Client whose session store has a machine associated with a signed-in account.
 
     The sharing editor only renders its editor body (rather than the Associate
-    prompt) when the workspace has an account, so the association is seeded
+    prompt) when the machine has an account, so the association is seeded
     through a record store over the same data dir before the app's own store
     is built.
     """
@@ -1882,7 +1929,7 @@ def test_sharing_modal_renders_editor_in_overlay(tmp_path: Path) -> None:
 
 def test_sharing_page_renders_full_page_fallback(tmp_path: Path) -> None:
     """The full /sharing page (the browser-mode fallback) still renders the
-    editor with its linked heading and the Cancel link to workspace settings."""
+    editor with its linked heading and the Cancel link to machine settings."""
     client, auth_store, agent_id = _create_sharing_test_client(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get(f"/sharing/{agent_id}/web")
@@ -1896,20 +1943,131 @@ def test_sharing_page_renders_full_page_fallback(tmp_path: Path) -> None:
 
 
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
-    """The workspace settings page requires authentication."""
+    """The machine settings page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/workspace/agent-123/settings")
     assert response.status_code == 403
 
 
-def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None:
-    """A workspace not associated with any account shows the associate prompt."""
+def test_workspace_settings_shows_a_machine_with_no_account_the_link_prompt(tmp_path: Path) -> None:
+    """A machine with no account linked shows the prompt to link one."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     test_agent_id = AgentId()
     response = client.get(f"/workspace/{test_agent_id}/settings")
     assert response.status_code == 200
-    assert "associated with an account" in response.text.lower()
+    assert "link your machine to an imbue account" in response.text.lower()
+
+
+# -- Workspace options panel routes --
+
+
+def test_workspace_options_routes_require_auth(tmp_path: Path) -> None:
+    """Neither the options page nor its docked panel renders unauthenticated."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    assert client.get("/workspace/agent-123/options").status_code == 403
+    assert client.get("/workspace/agent-123/options/modal").status_code == 403
+
+
+def test_workspace_options_modal_docks_at_the_anchor_from_the_url(tmp_path: Path) -> None:
+    """The panel is drawn at the titlebar rect the URL carries, on the requested tab.
+
+    chrome.js measures the icon-tab strip and the Electron main process packs
+    that rect into these params, so this is the contract between the three:
+    a renamed param would silently fall back to the default position.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+    response = client.get(f"/workspace/{agent_id}/options/modal?tab=settings&x=214&y=5&h=28")
+    assert response.status_code == 200
+    body = response.text
+    assert "left: 214px" in body
+    # The card region starts at the strip's bottom edge (y + h).
+    assert "top: 33px" in body
+    assert not is_workspace_options_pane_hidden(body, "settings")
+    assert is_workspace_options_pane_hidden(body, "share")
+
+
+def test_workspace_options_modal_without_an_anchor_is_centered_and_untabbed(tmp_path: Path) -> None:
+    """No anchor params means no titlebar strip to hang from: center it, drop the tabs."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+    response = client.get(f"/workspace/{agent_id}/options/modal")
+    assert response.status_code == 200
+    body = response.text
+    assert 'role="tablist"' not in body
+    assert "items-center justify-center" in body
+    assert not is_workspace_options_pane_hidden(body, "share")
+
+
+def test_workspace_options_modal_ignores_an_unparseable_anchor(tmp_path: Path) -> None:
+    """A junk anchor is no anchor -- centered, not docked against a guessed position."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+    response = client.get(f"/workspace/{agent_id}/options/modal?x=nope&y=5&h=28")
+    assert response.status_code == 200
+    assert 'role="tablist"' not in response.text
+
+
+def test_workspace_options_modal_carries_the_forward_origin_for_its_workspace_fallback(
+    tmp_path: Path,
+) -> None:
+    """The panel body names the plugin origin, so its dismiss fallback can reach the workspace.
+
+    Loaded without the shell bridge the panel has no overlay to close and falls
+    back to the workspace's ``/goto/<agent>/`` URL -- a route the mngr forward
+    plugin serves on its own origin, never minds' bare origin. The origin has to
+    reach workspace_options.js through the body attribute because OverlaySurface
+    (unlike ChromeShell) adds none of its own.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get(f"/workspace/{AgentId()}/options/modal")
+    assert response.status_code == 200
+    assert 'data-mngr-forward-origin="https://localhost:' in response.text
+
+
+def test_workspace_options_opens_on_the_requested_settings_group(tmp_path: Path) -> None:
+    """``?group=`` picks the Machine settings group, so a reload comes back to it.
+
+    Linking an account finishes by reloading the panel. Without the group in the
+    URL that reload landed on General -- away from the Account controls the user
+    had just used.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+    response = client.get(f"/workspace/{agent_id}/options/modal", query_string={"tab": "settings", "group": "account"})
+    assert response.status_code == 200
+    assert 'data-settings-pane="account" class=""' in response.text
+    assert 'data-settings-pane="general" class="hidden"' in response.text
+
+
+def test_workspace_options_falls_back_to_general_for_an_unknown_group(tmp_path: Path) -> None:
+    """An unrecognized group is not an error -- it lands on General."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+    response = client.get(f"/workspace/{agent_id}/options/modal", query_string={"tab": "settings", "group": "nope"})
+    assert response.status_code == 200
+    assert 'data-settings-pane="general" class=""' in response.text
+
+
+def test_workspace_options_page_is_the_browser_fallback(tmp_path: Path) -> None:
+    """The full page renders both panes without the overlay chrome, defaulting to Share."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+    # An unrecognized tab is not an error -- it lands on Share.
+    response = client.get(f"/workspace/{agent_id}/options?tab=permissions")
+    assert response.status_code == 200
+    body = response.text
+    assert not is_workspace_options_pane_hidden(body, "share")
+    assert is_workspace_options_pane_hidden(body, "settings")
+    assert 'id="ws-options-backdrop"' not in body
 
 
 def test_inbox_requires_auth(tmp_path: Path) -> None:
@@ -2251,7 +2409,7 @@ def test_landing_shows_login_not_consent_when_unauthenticated(tmp_path: Path) ->
 
 
 def test_landing_bounces_to_welcome_until_account_choice(tmp_path: Path) -> None:
-    """Signed out with no workspaces, "/" bounces to the welcome splash until an option is chosen.
+    """Signed out with no machines, "/" bounces to the welcome splash until an option is chosen.
 
     The titlebar home button always navigates "/", so this is what sends a
     mid-onboarding user (e.g. on the sign-up page) back to the Sign Up /
@@ -2340,7 +2498,7 @@ def test_welcome_self_advances_when_an_account_appears(tmp_path: Path) -> None:
     A sign-in can complete without the splash navigating (an OAuth flow
     finished in the external browser after the modal was dismissed), so the
     page subscribes to /_chrome/events and navigates to "/" when a
-    ``workspaces`` payload reports ``has_accounts``.
+    ``machines`` payload reports ``has_accounts``.
     """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
@@ -2581,7 +2739,7 @@ def test_help_page_close_button_has_tooltip(tmp_path: Path) -> None:
 
 
 def test_help_page_enables_agent_option_for_a_healthy_workspace(tmp_path: Path) -> None:
-    """Opened from a reachable workspace (assist=1), the agent-help option is enabled and the default."""
+    """Opened from a reachable machine (assist=1), the agent-help option is enabled and the default."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get(f"/help?workspace={AgentId()}&assist=1")
     assert response.status_code == 200
@@ -2591,7 +2749,7 @@ def test_help_page_enables_agent_option_for_a_healthy_workspace(tmp_path: Path) 
 
 
 def test_help_page_disables_agent_option_when_workspace_not_reachable(tmp_path: Path) -> None:
-    """With a workspace id but no assist=1 (e.g. a loading/stuck workspace), the agent-help option is
+    """With a machine id but no assist=1 (e.g. a loading/stuck machine), the agent-help option is
     disabled -- spawning a chat there couldn't be seen or used -- while a bug report stays available."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get(f"/help?workspace={AgentId()}")
@@ -2601,11 +2759,11 @@ def test_help_page_disables_agent_option_when_workspace_not_reachable(tmp_path: 
     # Report is the default when agent help isn't available.
     report_radio = response.text.split('value="report"')[1].split(">")[0]
     assert "checked" in report_radio
-    assert "Available once this workspace is responding." in response.text
+    assert "Available once this machine is responding." in response.text
 
 
 def test_help_assist_requires_a_workspace(tmp_path: Path) -> None:
-    """Agent help is only available inside a workspace, so a request without one is rejected."""
+    """Agent help is only available inside a machine, so a request without one is rejected."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.post("/help/assist", json={"description": "it broke"})
     assert response.status_code == 400
@@ -2618,7 +2776,7 @@ def test_help_assist_requires_a_description(tmp_path: Path) -> None:
 
 
 def test_help_assist_refuses_a_workspace_without_the_assist_skill(tmp_path: Path) -> None:
-    """A workspace from an older DEFAULT_WORKSPACE_TEMPLATE (no /assist skill) is refused up front (409) rather than spawning
+    """A machine from an older DEFAULT_WORKSPACE_TEMPLATE (no /assist skill) is refused up front (409) rather than spawning
     a chat that would hang on the unknown ``/assist`` command -- and no ``mngr create`` is attempted."""
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_ABSENT\n"))
     client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
@@ -2640,7 +2798,7 @@ def test_help_assist_reports_unreachable_workspace(tmp_path: Path) -> None:
 
 
 def test_help_assist_spawns_when_the_skill_is_present(tmp_path: Path) -> None:
-    """A supported workspace probes clean, then the chat is created (probe call + create call)."""
+    """A supported machine probes clean, then the chat is created (probe call + create call)."""
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_PRESENT\n"))
     client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
@@ -2661,7 +2819,7 @@ def test_help_page_prefills_description_from_query(tmp_path: Path) -> None:
 
 
 def test_help_page_with_prefilled_description_defaults_to_report_mode(tmp_path: Path) -> None:
-    """An agent escalation opens the modal with a healthy workspace (assist=1) AND a description; even
+    """An agent escalation opens the modal with a healthy machine (assist=1) AND a description; even
     though agent help is available, it must default to the report form (so a human reviews and submits)
     rather than agent-help mode (which would spawn another /assist chat)."""
     client, _ = _create_test_client_with_stores(tmp_path)
@@ -2701,7 +2859,7 @@ def test_help_page_auto_includes_logs_and_diagnostics(tmp_path: Path) -> None:
     assert 'id="help-include-logs"' not in response.text
     assert 'id="help-app-diagnostics"' not in response.text
     assert "always attached" in response.text
-    assert "Imbue will never look into your workspaces without your consent." in response.text
+    assert "Imbue will never look into your machines without your consent." in response.text
 
 
 def test_help_page_shows_optional_checkboxes_inline_and_report_id_affordance(tmp_path: Path) -> None:
@@ -2788,7 +2946,7 @@ def test_api_v1_bug_report_requires_bearer_token(tmp_path: Path) -> None:
 
 def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path: Path) -> None:
     """The agent report route does not submit to Sentry: it asks the app to open the report modal
-    pre-filled with the agent's description, scoped to the caller's own workspace."""
+    pre-filled with the agent's description, scoped to the caller's own machine."""
     client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
     agent_id = AgentId()
     event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
@@ -2854,7 +3012,7 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     # The recovery page chrome rendered: the host-restart button and the
     # versioned health + restart endpoints the page's JS drives once the probe
     # reports the container reachable.
-    assert "Restart workspace" in response.text
+    assert "Restart machine" in response.text
     assert "/api/v1/workspaces/" in response.text
     assert "/health" in response.text
     assert "/restart" in response.text
@@ -3102,7 +3260,7 @@ def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_pat
     chrome JS navigates to /recovery, but the background probe loop flips
     the tracker back to HEALTHY in the brief window before the GET lands.
     Without the redirect, ``initial_status="healthy"`` would render the
-    "Workspace unresponsive" page and the JS would never auto-reload
+    "Machine unresponsive" page and the JS would never auto-reload
     (the SSE doesn't push events for HEALTHY agents).
     """
     tracker = SystemInterfaceHealthTracker()
@@ -3374,7 +3532,7 @@ def test_destroyed_workspaces_rows_empty_state(tmp_path: Path) -> None:
     response = client.get("/workspaces/destroyed/rows")
 
     assert response.status_code == 200
-    assert "No recently destroyed workspaces" in response.text
+    assert "No recently destroyed machines" in response.text
 
 
 def _make_destroyed_delete_client(
@@ -3428,4 +3586,67 @@ def test_destroyed_workspaces_delete_backup_unknown_agent_shows_error(tmp_path: 
     response = client.post("/workspaces/destroyed/agent-doesnotexist/delete-backup")
 
     assert response.status_code == 200
-    assert "No destroyed workspace found" in response.text
+    assert "No destroyed machine found" in response.text
+
+
+def test_resolve_destroying_for_landing_deletes_the_workspaces_tunnel(tmp_path: Path) -> None:
+    """Destroying a machine tears down its Cloudflare tunnel.
+
+    Nothing downstream of ``mngr destroy`` knows the tunnel exists, so without
+    this the tunnel outlives every identifier that could find it: it keeps a
+    proxied hostname answering and counts against a quota measured in
+    machines ever created rather than live ones.
+    """
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    _write_dead_destroy_dir(paths, agent_id, HostId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    cli.add_tunnel(account="a@b.com", agent_id=str(agent_id))
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="doomed",
+        color=None,
+        is_cloud_row=False,
+    )
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+
+    _resolve_destroying_for_landing(paths, backend_resolver, session_store, cli)
+
+    assert cli.deleted_tunnel_names == [f"fake--{str(agent_id)[:16]}"]
+    assert cli.find_tunnel_for_agent(account="a@b.com", agent_id=str(agent_id)) is None
+
+
+def test_resolve_destroying_for_landing_tombstones_even_if_the_tunnel_delete_fails(tmp_path: Path) -> None:
+    """A Cloudflare hiccup must not leave the machine stuck in the UI.
+
+    A tunnel that survives is litter; a machine that cannot be retired is a
+    stuck row the user cannot clear.
+    """
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    _write_dead_destroy_dir(paths, agent_id, HostId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    # No tunnel registered, and the lookup itself blows up.
+    cli.is_auth_list_failing = False
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="doomed",
+        color=None,
+        is_cloud_row=False,
+    )
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+
+    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store, cli)
+
+    assert marker == {}
+    assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
+    assert session_store.record_store is not None
+    assert session_store.record_store.list_records("user-1")[0].state == "destroyed"

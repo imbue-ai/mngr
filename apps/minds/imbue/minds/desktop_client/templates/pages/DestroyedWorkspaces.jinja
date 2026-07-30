@@ -91,10 +91,10 @@
 {% endset %}
 <ChromeShell title="Recently destroyed" page_label="Recently destroyed" :show_back="True" scripts={{ _scripts }}>
   <PageContainer>
-    <h1 class="type-heading-lg text-primary mb-2">Recently destroyed workspaces</h1>
+    <h1 class="type-heading-lg text-primary mb-2">Recently destroyed machines</h1>
     <p class="type-helper text-tertiary mb-8">
-      Backups of destroyed workspaces are kept for {{ retention_days }} days, then deleted automatically.
-      Until then you can download them here (the workspaces themselves no longer exist and cannot be
+      Backups of destroyed machines are kept for {{ retention_days }} days, then deleted automatically.
+      Until then you can download them here (the machines themselves no longer exist and cannot be
       restarted). Deleting a backup early frees your storage and bucket quota.
     </p>
     {% if error %}
@@ -102,9 +102,9 @@
     {% endif %}
     <div data-destroyed-rows>
       <div class="flex items-center gap-2 type-helper text-tertiary">
-        <Spinner size="sm" /> Loading recently destroyed workspaces&hellip;
+        <Spinner size="sm" /> Loading recently destroyed machines&hellip;
       </div>
     </div>
-    <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
+    <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to machines</Link></div>
   </PageContainer>
 </ChromeShell>

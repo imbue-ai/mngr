@@ -17,7 +17,7 @@
 <script>
 {{ script_html | safe }}</script>
 {% endset %}
-<ChromeShell title="Loading workspace" scripts={{ _scripts }}>
+<ChromeShell title="Loading machine" scripts={{ _scripts }}>
   {# The card stylesheet lives INSIDE the swappable page body (not the head):
      recovery is a swappable page, and the swap engine replaces only
      #local-page-root + #local-page-scripts -- head content would be left

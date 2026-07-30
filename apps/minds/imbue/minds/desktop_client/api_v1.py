@@ -863,7 +863,7 @@ def _handle_workspaces_backups_stream() -> Response:
             info.create_time.isoformat() if info is not None and info.create_time is not None else None
         )
     invalid_rows = (
-        json.dumps(_degraded_backup_summary(invalid_id, None, "not a workspace agent id")) + "\n"
+        json.dumps(_degraded_backup_summary(invalid_id, None, "not a machine agent id")) + "\n"
         for invalid_id in invalid_agent_ids
     )
     valid_rows = _stream_workspace_backup_summaries(
@@ -1134,7 +1134,7 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
     parsed_id = AgentId(agent_id)
     paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
-        return _json_error("Workspace management not configured", 501)
+        return _json_error("Machine management not configured", 501)
     backend_resolver = get_state().backend_resolver
     info = backend_resolver.get_agent_display_info(parsed_id)
     if info is None:
@@ -1164,7 +1164,7 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
     parsed_id = AgentId(agent_id)
     parent_cg = get_state().root_concurrency_group
     if parent_cg is None:
-        return _json_error("Workspace lifecycle not configured", 501)
+        return _json_error("Machine lifecycle not configured", 501)
     backend_resolver = get_state().backend_resolver
     if parsed_id not in backend_resolver.list_known_workspace_ids():
         return _json_error(f"Unknown workspace {agent_id}", 404)
@@ -1252,11 +1252,11 @@ def _handle_workspace_rename(agent_id: str) -> Response:
         return _json_error(f"Unknown workspace {agent_id}", 404)
     parent_cg = state.root_concurrency_group
     if parent_cg is None:
-        return _json_error("Workspace rename is unavailable in this configuration", 503)
+        return _json_error("Machine rename is unavailable in this configuration", 503)
 
     raw_name = str((request.get_json(silent=True) or {}).get("name", "")).strip()
     if not raw_name:
-        return _json_field_error("A workspace name is required.", "name")
+        return _json_field_error("A machine name is required.", "name")
     try:
         new_slug = normalize_host_name_slug(raw_name)
     except InvalidName as exc:
@@ -1307,7 +1307,7 @@ def _handle_workspace_health(agent_id: str) -> Response:
         return _json_error(f"Unknown workspace {agent_id}", 404)
     parent_cg = state.root_concurrency_group
     if parent_cg is None:
-        return _json_error("Workspace health probe is unavailable in this configuration", 503)
+        return _json_error("Machine health probe is unavailable in this configuration", 503)
     response = probe_workspace_health(
         parsed_id,
         backend_resolver=backend_resolver,
@@ -1322,13 +1322,13 @@ def _handle_workspace_health(agent_id: str) -> Response:
     # nothing about WHICH provider failure produced the verdict).
     if response.unreachable_reason:
         logger.info(
-            "Workspace health probe for {}: dispatch_tier={} (reason: {})",
+            "Machine health probe for {}: dispatch_tier={} (reason: {})",
             parsed_id,
             response.dispatch_tier.value,
             response.unreachable_reason,
         )
     else:
-        logger.info("Workspace health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
+        logger.info("Machine health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
     return make_response(content=response.model_dump_json(), media_type="application/json")
 
 
@@ -1365,7 +1365,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     tracker: SystemInterfaceHealthTracker | None = state.system_interface_health_tracker
     parent_cg = state.root_concurrency_group
     if tracker is None or parent_cg is None:
-        return _json_error("Workspace restart is unavailable in this configuration", 503)
+        return _json_error("Machine restart is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
     # The recovery page dispatches its restart unconditionally on entry, with
@@ -2129,7 +2129,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     # bare local provider, which minds workspaces never use, lacks one.
     ssh_info = backend_resolver.get_ssh_info(parsed_id)
     if ssh_info is None:
-        return _json_error("Target workspace has no SSH endpoint that this desktop client can resolve", 501)
+        return _json_error("Target machine has no SSH endpoint that this desktop client can resolve", 501)
 
     now = datetime.now(timezone.utc)
     try:
@@ -2209,7 +2209,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
         caller_ssh = backend_resolver.get_ssh_info(AgentId(requester_workspace_id))
         if caller_ssh is None:
             return _json_error(
-                "Cannot broker SSH to a local target: the requesting workspace has no "
+                "Cannot broker SSH to a local target: the requesting machine has no "
                 "hub-reachable SSH endpoint (is it online and known to this desktop client?).",
                 502,
             )
@@ -2853,7 +2853,7 @@ def _handle_stop_hosts() -> Response:
     state = get_state()
     parent_cg = state.root_concurrency_group
     if parent_cg is None:
-        return _json_error("Workspace host control is unavailable in this configuration", 503)
+        return _json_error("Machine host control is unavailable in this configuration", 503)
     requested_ids = request.args.getlist("agent_id")
     still_running = desktop_control.stop_workspace_hosts(
         requested_ids, state.backend_resolver, state.mngr_binary, state.mngr_host_dir, parent_cg

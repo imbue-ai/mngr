@@ -1,6 +1,6 @@
 // Electron workspace-switcher page: loaded into the shared modal
 // WebContentsView when the user opens the switcher from the titlebar
-// breadcrumb. Renders the floating menu (workspace list + "New workspace").
+// breadcrumb. Renders the floating menu (workspace list + "New machine").
 // Clicks + context menus go through window.minds IPC. In browser mode the
 // chrome.js embedded menu handles the same job inline.
 (function () {
@@ -19,7 +19,7 @@
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
   // The floating sidebar auto-closes after the user makes a selection
-  // (workspace row, "New workspace", "Manage account(s)" / "Log in", and
+  // (workspace row, "New machine", "Manage account(s)" / "Log in", and
   // "Open in new window"). The close happens entirely on the
   // main process side: `navigate-content` and `open-workspace-in-new-window`
   // in apps/minds/electron/main.js both call closeModal(bundle) before
