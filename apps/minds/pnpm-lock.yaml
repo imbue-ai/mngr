@@ -15,8 +15,8 @@ importers:
         specifier: ^1.6.0
         version: 1.6.4
       latchkey:
-        specifier: ^3.2.1
-        version: 3.2.1
+        specifier: ^3.2.2
+        version: 3.2.2
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1
@@ -1970,8 +1970,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@3.2.1:
-    resolution: {integrity: sha512-zFBLOORQ83c9pKvdI1iIJiQKzej3FJ6jUwBjCOAL+vD24UxsxFhx8YS8dyOmCgeKfaCqZFZHLXo1OMyHcpW15Q==}
+  latchkey@3.2.2:
+    resolution: {integrity: sha512-tp3Z5IN2s+YN2u5tfK0D3G1q/rmRIdxGCfeJjnukIqiKZ1QOx/sI9MNfkihPU6DAxs/+MJ7HwZCsSG5S1CJgJg==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -5137,7 +5137,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@3.2.1:
+  latchkey@3.2.2:
     dependencies:
       '@imbue-ai/detent': 1.11.2
       '@napi-rs/keyring': 1.2.0
