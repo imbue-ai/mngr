@@ -72,7 +72,11 @@ class AuthResult(FrozenModel):
     identity (rendered in the UI) and whether email verification is pending.
     """
 
-    status: str = Field(description="OK, WRONG_CREDENTIALS, EMAIL_ALREADY_EXISTS, FIELD_ERROR, or ERROR")
+    status: str = Field(
+        description=(
+            "OK, WRONG_CREDENTIALS, EMAIL_ALREADY_EXISTS, ACCOUNT_EXISTS_WITH_OTHER_METHOD, FIELD_ERROR, or ERROR"
+        )
+    )
     message: str | None = Field(default=None)
     user: AuthUser | None = Field(default=None)
     needs_email_verification: bool = Field(default=False)
