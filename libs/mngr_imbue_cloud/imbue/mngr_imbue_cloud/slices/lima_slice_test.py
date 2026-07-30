@@ -53,6 +53,14 @@ def test_slice_yaml_sets_explicit_boot_disk_size() -> None:
     assert config["disk"] == "16GiB"
 
 
+def test_slice_yaml_disables_lima_containerd() -> None:
+    # Slices only ever use Docker; lima's own containerd/nerdctl bundle would drop
+    # a version-mismatched containerd-shim-runc-v2 into /usr/local/bin that breaks
+    # every `docker run` when the image pre-installs docker.
+    config = _build()
+    assert config["containerd"] == {"system": False, "user": False}
+
+
 def test_slice_yaml_forwards_exactly_vm_and_container_sshd_externally() -> None:
     config = _build()
     forwards = config["portForwards"]
@@ -74,7 +82,9 @@ def test_slice_yaml_authorizes_root_client_key_and_installs_docker() -> None:
     # Root client key authorized (so mngr can SSH the VM as root, VPS-style).
     assert _ROOT_PUBKEY in joined
     # Docker gets installed so the vps_docker bake can run a container on the VM.
-    assert "get.docker.com" in joined
+    assert "get.docker.com" not in joined
+    assert 'docker-ce="${DOCKER_APT_VERSION}"' in joined
+    assert 'containerd.io="${CONTAINERD_APT_VERSION}"' in joined
     # The pre-injected sshd host key avoids a TOFU race on first connect.
     assert "ssh_host_ed25519_key" in joined
     # sshd is made to listen on the extra forwardable port (Lima keeps 22 for itself).
@@ -86,7 +96,7 @@ def test_slice_yaml_provision_runs_base_setup_before_docker() -> None:
     scripts = [step["script"] for step in config["provision"]]
     # The base setup (which mounts the btrfs disk and installs the host key) must
     # run before the docker install that the vps_docker bake depends on.
-    docker_index = next(i for i, script in enumerate(scripts) if "get.docker.com" in script)
+    docker_index = next(i for i, script in enumerate(scripts) if 'docker-ce="${DOCKER_APT_VERSION}"' in script)
     assert any("btrfs" in script.lower() for script in scripts[:docker_index])
 
 

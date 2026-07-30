@@ -15,7 +15,7 @@ from imbue.mngr_vps.errors import VpsProvisioningError
 #
 # The full apt version string is ``<core>~<id>.<version_id>~<codename>`` where the
 # trailing distro suffix is repo-specific. ``_PINNED_DOCKER_APT_VERSION_CORE`` is
-# the distro-independent prefix; ``_DOCKER_INSTALL_SCRIPT`` derives the suffix
+# the distro-independent prefix; ``PINNED_DOCKER_INSTALL_SCRIPT`` derives the suffix
 # from ``/etc/os-release`` at run time so the same step works on every Debian-
 # family outer (Debian 12 "bookworm" across all providers; the os-release
 # derivation also covers Ubuntu LTS images for anyone overriding the GCP image).
@@ -23,9 +23,27 @@ from imbue.mngr_vps.errors import VpsProvisioningError
 # ``PINNED_DOCKER_APT_VERSION`` is the fully-rendered Debian 12 apt version
 # string, exported for any caller or test that needs the exact Debian value
 # rather than the runtime-derived suffix.
-PINNED_DOCKER_VERSION: Final[str] = "29.5.1"
-_PINNED_DOCKER_APT_VERSION_CORE: Final[str] = "5:29.5.1-1"
+# 29.6.2 (not 29.5.1): under lima 2.2.0-carved slice VMs, docker-ce 29.5.1 with
+# current containerd.io fails every `docker run` with a corrupted shim bootstrap
+# ("failed to create TTRPC connection: unsupported protocol: Yunix"), while
+# 29.6.2 with the same containerd.io 2.2.6 works -- verified on the dev and
+# staging slice fleets (whose docker-less images had landed on 29.6.2 via the
+# unpinned get.docker.com first-boot path that this pinned script has since
+# replaced). Images pre-baked with the old pin must be re-staged (delete the
+# box's debian-base.qcow2 + re-run prep).
+PINNED_DOCKER_VERSION: Final[str] = "29.6.2"
+_PINNED_DOCKER_APT_VERSION_CORE: Final[str] = "5:29.6.2-1"
 PINNED_DOCKER_APT_VERSION: Final[str] = f"{_PINNED_DOCKER_APT_VERSION_CORE}~debian.12~bookworm"
+
+# containerd.io is pinned alongside docker-ce: the daemon/shim pairing between
+# the two is exactly the axis the lima-2.2.0 "unsupported protocol: Yunix" class
+# of failure lives on, so letting containerd.io float with the repo while
+# docker-ce is pinned reintroduces silent drift between hosts staged at
+# different times. 2.2.6 is the version verified working with docker-ce 29.6.2
+# across the dev, staging, and production slice fleets. Same core/suffix split
+# as the docker pin (no epoch in containerd.io's version).
+_PINNED_CONTAINERD_APT_VERSION_CORE: Final[str] = "2.2.6-1"
+PINNED_CONTAINERD_APT_VERSION: Final[str] = f"{_PINNED_CONTAINERD_APT_VERSION_CORE}~debian.12~bookworm"
 
 # gVisor publishes date-stamped releases under
 # ``https://storage.googleapis.com/gvisor/releases/release/<yyyymmdd>/<arch>/``.
@@ -75,14 +93,18 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y curl ca-certificates gnupg rsync inotify-tools jq"""
 
-# Pin Docker via the official apt repo. ``--allow-downgrades`` plus an exact
-# ``=version`` pin makes the pinned version authoritative in both directions, so
-# re-provisioning an old host upgrades (or downgrades) it to match. containerd.io
-# / buildx / compose track the repo's current build, matching Docker's own docs.
-_DOCKER_INSTALL_SCRIPT: Final[str] = f"""set -e
+# Pin Docker + containerd via the official apt repo. ``--allow-downgrades`` plus
+# an exact ``=version`` pin makes the pinned versions authoritative in both
+# directions, so re-provisioning an old host upgrades (or downgrades) it to
+# match. buildx / compose still track the repo's current build (client-side
+# plugins with no daemon pairing to protect). Public so the slice VM
+# provisioning (``mngr_imbue_cloud.slices.lima_slice``) installs the identical
+# pinned stack instead of ``get.docker.com``'s floating latest.
+PINNED_DOCKER_INSTALL_SCRIPT: Final[str] = f"""set -e
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
 DOCKER_APT_VERSION="{_PINNED_DOCKER_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
+CONTAINERD_APT_VERSION="{_PINNED_CONTAINERD_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/${{ID}}/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
@@ -91,7 +113,7 @@ https://download.docker.com/linux/${{ID}} ${{VERSION_CODENAME}} stable" > /etc/a
 apt-get update
 apt-get install -y --allow-downgrades \
 docker-ce="${{DOCKER_APT_VERSION}}" docker-ce-cli="${{DOCKER_APT_VERSION}}" \
-containerd.io docker-buildx-plugin docker-compose-plugin
+containerd.io="${{CONTAINERD_APT_VERSION}}" docker-buildx-plugin docker-compose-plugin
 systemctl enable docker
 systemctl start docker"""
 
@@ -177,7 +199,7 @@ def build_host_setup_steps(
         ),
         HostSetupStep(
             description=f"Install pinned Docker Engine {PINNED_DOCKER_VERSION}",
-            script=_DOCKER_INSTALL_SCRIPT,
+            script=PINNED_DOCKER_INSTALL_SCRIPT,
         ),
     ]
     if install_gvisor_runtime:

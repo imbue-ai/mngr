@@ -3,6 +3,7 @@ from typing import Final
 from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.slices.bare_metal import box_default_workspace_template_cache_dir
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_base_image_path
+from imbue.mngr_vps.host_setup import PINNED_CONTAINERD_APT_VERSION
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_APT_VERSION
 
 # Lima release to install on the box. Must stay >= 2.2.0: earlier guestagents leak
@@ -144,7 +145,7 @@ curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/doc
 chmod a+r /etc/apt/keyrings/docker.asc
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
 apt-get update
-apt-get install -y --allow-downgrades docker-ce="{PINNED_DOCKER_APT_VERSION}" docker-ce-cli="{PINNED_DOCKER_APT_VERSION}" containerd.io docker-buildx-plugin docker-compose-plugin inotify-tools
+apt-get install -y --allow-downgrades docker-ce="{PINNED_DOCKER_APT_VERSION}" docker-ce-cli="{PINNED_DOCKER_APT_VERSION}" containerd.io="{PINNED_CONTAINERD_APT_VERSION}" docker-buildx-plugin docker-compose-plugin inotify-tools
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 MNGR_SLICE_CUSTOMIZE

@@ -90,13 +90,14 @@ runcmd:
       set -e
       export DEBIAN_FRONTEND=noninteractive
       . /etc/os-release
-      DOCKER_APT_VERSION="5:29.5.1-1~${ID}.${VERSION_ID}~${VERSION_CODENAME}"
+      DOCKER_APT_VERSION="5:29.6.2-1~${ID}.${VERSION_ID}~${VERSION_CODENAME}"
+      CONTAINERD_APT_VERSION="2.2.6-1~${ID}.${VERSION_ID}~${VERSION_CODENAME}"
       install -m 0755 -d /etc/apt/keyrings
       curl -fsSL https://download.docker.com/linux/${ID}/gpg -o /etc/apt/keyrings/docker.asc
       chmod a+r /etc/apt/keyrings/docker.asc
       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
       apt-get update
-      apt-get install -y --allow-downgrades docker-ce="${DOCKER_APT_VERSION}" docker-ce-cli="${DOCKER_APT_VERSION}" containerd.io docker-buildx-plugin docker-compose-plugin
+      apt-get install -y --allow-downgrades docker-ce="${DOCKER_APT_VERSION}" docker-ce-cli="${DOCKER_APT_VERSION}" containerd.io="${CONTAINERD_APT_VERSION}" docker-buildx-plugin docker-compose-plugin
       systemctl enable docker
       systemctl start docker
   - |

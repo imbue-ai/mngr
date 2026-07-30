@@ -7,8 +7,10 @@ parse args, call ``require_activated_env_name``, and run the result --
 we test that with :class:`click.testing.CliRunner`.
 """
 
+import tomllib
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from imbue.minds.cli.pool import _SECRET_BEARING_FLAGS
@@ -20,7 +22,9 @@ from imbue.minds.cli.pool import build_teardown_slices_admin_args
 from imbue.minds.cli.pool import merge_extra_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
 from imbue.minds.cli.pool import resolve_host_pool_dsn
+from imbue.minds.cli.pool import seed_activated_env_agent_types
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
+from imbue.mngr.config.loader import get_or_create_profile_dir
 
 
 def _slice_args(
@@ -320,3 +324,26 @@ def test_build_teardown_slices_admin_args_forwards_dsn_when_present() -> None:
     assert build_teardown_slices_admin_args(database_url=None) == ["teardown-slices"]
     args = build_teardown_slices_admin_args(database_url="postgres://example")
     assert args == ["teardown-slices", "--database-url", "postgres://example"]
+
+
+def test_seed_activated_env_agent_types_migrates_stale_profile_under_mngr_host_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bake-side seed targets the activated env's MNGR_HOST_DIR and migrates a stale profile.
+
+    A profile last seeded by a pre-cutover minds build fails every bake with
+    "Cannot merge AgentTypeConfig with ClaudeAgentConfig"; the pool-create path
+    must run the same migration minds.app runs at startup so a bake-only
+    operator machine never hits it.
+    """
+    host_dir = tmp_path / "mngr"
+    settings_path = get_or_create_profile_dir(host_dir) / "settings.toml"
+    settings_path.write_text('is_allowed_in_pytest = true\n\n[agent_types.main]\nparent_type = "claude"\n')
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
+
+    seed_activated_env_agent_types()
+
+    raw = tomllib.loads(settings_path.read_text())
+    assert raw["agent_types"]["main"]["parent_type"] == "command"
+    assert raw["agent_types"]["chat"]["parent_type"] == "claude"
+    assert raw["agent_types"]["worker"]["parent_type"] == "claude"

@@ -6,6 +6,7 @@ from typing import Final
 from imbue.mngr_imbue_cloud.errors import SliceReserveOutputError
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_LIMA_INSTANCE_PREFIX
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
+from imbue.mngr_vps.host_setup import PINNED_DOCKER_INSTALL_SCRIPT
 
 # Placeholder tokens for the two box host ports in a slice YAML *template*. The
 # real ports are chosen on the box under the reservation lock and substituted for
@@ -55,12 +56,17 @@ fi
 
 
 # Installs Docker on the VM so the shared vps_docker bake can run its container.
-# Idempotent: get.docker.com no-ops when docker is already present.
-_DOCKER_INSTALL_SCRIPT: Final[str] = """\
+# Presence-guarded: the staged guest image normally pre-installs the pinned stack
+# (see ``bare_metal_prep``'s virt-customize step), so this only runs for images
+# staged before that step existed -- and then it installs the SAME pinned
+# docker-ce + containerd.io the rest of the fleet runs, not ``get.docker.com``'s
+# floating latest. The unpinned fallback let dev/staging slices silently drift
+# from production's pinned stack (they only agreed by release-timing luck).
+_DOCKER_INSTALL_SCRIPT: Final[str] = f"""\
 #!/bin/bash
 set -eux -o pipefail
 if ! command -v docker >/dev/null 2>&1; then
-    curl -fsSL https://get.docker.com | sh
+{PINNED_DOCKER_INSTALL_SCRIPT}
 fi
 systemctl enable --now docker 2>/dev/null || true
 """
@@ -153,6 +159,20 @@ def build_slice_lima_yaml(
     )
     config["cpus"] = vcpus
     config["memory"] = f"{memory_mib}MiB"
+    # Disable lima's own guest containerd/nerdctl toolchain outright. Slices run
+    # Docker (installed below / pre-baked into the guest image), and lima's
+    # bundle drops a *newer* containerd-shim-runc-v2 into /usr/local/bin, which
+    # shadows the apt shim on systemd's PATH. When docker's apt containerd
+    # daemon then spawns its first shim after the bundle lands, the version-
+    # mismatched shim answers the start request with the newer protobuf
+    # bootstrap the daemon cannot parse, and every `docker run` fails with
+    # `failed to create TTRPC connection: unsupported protocol: Yunix` (hit on
+    # every production bake after the lima 2.2.0 upgrade). Which daemon owns
+    # /run/containerd/containerd.sock -- and therefore whether the cross-pairing
+    # bites -- depends on whether the image pre-installs docker, so the only
+    # sane configuration is to not install lima's containerd at all (also
+    # skipping the nerdctl archive download at every carve).
+    config["containerd"] = {"system": False, "user": False}
     # Size the boot disk explicitly (OS + Docker storage). Without this lima would
     # default it to 100GiB, which -- unaccounted against the per-slice budget --
     # would massively overcommit the box's disk.

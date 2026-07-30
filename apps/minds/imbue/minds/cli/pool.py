@@ -33,6 +33,7 @@ import shlex
 import sys
 from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Final
 
 import click
@@ -45,6 +46,7 @@ from imbue.minds.cli._activated_env import STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.config.loader import load_deploy_config
+from imbue.minds.desktop_client.laptop_agent_types_seed import seed_laptop_agent_types_for_minds
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
@@ -383,6 +385,24 @@ def raise_on_admin_command_failure(subgroup: str, label: str, result: FinishedPr
         raise click.ClickException(f"mngr imbue_cloud admin {subgroup} {label} failed (exit {result.returncode}).")
 
 
+def seed_activated_env_agent_types() -> None:
+    """Run the laptop-side agent-type seed/migration against the activated env's mngr host dir.
+
+    The bake's inner ``mngr create`` cross-scope-merges the user-scope
+    ``[agent_types.X]`` blocks with the workspace template's, and a profile last
+    seeded by a pre-cutover minds build carries a claude-parented ``main`` that
+    makes every bake fail with ``Cannot merge AgentTypeConfig with
+    ClaudeAgentConfig`` until the current app's seed migration runs. minds.app
+    only runs that migration at desktop startup, which an operator machine used
+    purely for bakes may never do -- so run it here too, against the same host
+    dir the admin subprocess will read (mirroring ``minds run``'s derivation).
+    Idempotent and cheap.
+    """
+    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
+    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+    seed_laptop_agent_types_for_minds(mngr_host_dir)
+
+
 def _run_slice_pool_create(
     *,
     env_name: str,
@@ -410,6 +430,9 @@ def _run_slice_pool_create(
         raise click.UsageError(
             "--server-id is required (the bare-metal box to bake onto; see `mngr imbue_cloud admin server list`)"
         )
+    # Migrate/seed the laptop-side agent types before the inner `mngr create`
+    # reads them, so a stale pre-cutover profile cannot fail the bake.
+    seed_activated_env_agent_types()
     try:
         pool_private_key = read_pool_private_key_from_vault(env_name)
     except VaultReadError as exc:
