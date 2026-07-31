@@ -158,6 +158,7 @@ def submit_bug_report(
     )
     return submit_manual_bug_report(
         title=_report_title(description),
+        description=description,
         report=report,
         logs_folder=logs_folder,
     )

@@ -75,6 +75,19 @@ MAX_SENTRY_LIST_SIZE = 10
 _SENTRY_CONFIG_CONTEXT_KEY = "_config"
 
 
+# S3 key prefix, and the ``event["extra"]`` key, for the verbatim copy of a manual bug report's
+# description. It shares the ``uploaded_files_`` naming of the log attachments so it sorts alongside
+# them in the Sentry UI. See ``submit_manual_bug_report`` for why the description is sent out of band.
+BUG_REPORT_DESCRIPTION_KEY_PREFIX = "bug_report_description"
+BUG_REPORT_DESCRIPTION_EXTRA_KEY = f"{EXTRAS_UPLOADED_FILES_KEY}_{BUG_REPORT_DESCRIPTION_KEY_PREFIX}"
+
+# First fingerprint component on every manually-submitted bug report; the second is what makes each
+# report its own issue. Sentry does not surface fingerprints in the issue list, so this does nothing
+# for findability (the ``MANUALLY_SUBMITTED_TAG`` tag is what these are searchable by) -- it is there
+# to namespace the uuid when reading raw event JSON.
+_MANUAL_BUG_REPORT_FINGERPRINT_PREFIX = "manual-bug-report"
+
+
 class SentryEventRejected(Exception):
     pass
 
@@ -769,7 +782,8 @@ def get_sentry_event_handler() -> SentryEventHandler | None:
 _ATTACHMENTS_UPLOADER: "ErrorAttachmentsS3Uploader | None" = None
 
 
-def register_attachments_uploader(uploader: "ErrorAttachmentsS3Uploader") -> None:
+def register_attachments_uploader(uploader: "ErrorAttachmentsS3Uploader | None") -> None:
+    """Set (or, with None, clear) the process-wide uploader that attachments are collected through."""
     global _ATTACHMENTS_UPLOADER
     _ATTACHMENTS_UPLOADER = uploader
 
@@ -838,8 +852,20 @@ def _n_newest_files(files: Iterable[Path], n: int) -> Iterable[Path]:
 _UploadCallback = Callable[[], None]
 
 
+def _bug_report_description_bytes(description: str) -> bytes:
+    """Encode a bug report description for its out-of-band upload.
+
+    ``backslashreplace`` because JSON can carry a lone surrogate that plain utf-8 refuses to encode:
+    it would raise ``UnicodeEncodeError``, which -- on the path where the uploads run inline rather
+    than on the handler's executor -- propagates out of the submit and costs the whole report.
+    Escaping also keeps the character legible instead of flattening it to ``?``.
+    """
+    return description.encode("utf-8", errors="backslashreplace")
+
+
 class ErrorAttachmentsS3Uploader(MutableModel):
-    """Collects (and uploads) the log files + traceback attached to an error report.
+    """Collects (and uploads) everything an error report carries out of band: its log files, its
+    traceback, and -- for a manual bug report -- the user's own description.
 
     The set of log files is driven by ``log_attachment_groups``: each group's glob
     is matched under the process's log folder (or the group's ``base_dir``, when
@@ -874,6 +900,21 @@ class ErrorAttachmentsS3Uploader(MutableModel):
             with self._lock:
                 # we assume that uri and key are in sync
                 self._immutable_logs_keys[file_path] = key
+
+    @staticmethod
+    def _upload_description_cb(key: str, description: str) -> None:
+        upload_to_s3_with_key(key, _bug_report_description_bytes(description))
+
+    def prepare_description_upload(self, description: str) -> tuple[str | None, _UploadCallback]:
+        """Prepare the verbatim, out-of-band upload of a manual bug report's description.
+
+        Returns the ``s3://`` URI the text will be readable at (None when S3 uploads are not
+        configured) and the callback that performs the upload. Unlike the log attachments, this is
+        never compressed -- it is short, and a reader following the URI from the Sentry event wants to
+        read it directly.
+        """
+        key = get_s3_upload_key(BUG_REPORT_DESCRIPTION_KEY_PREFIX, ".txt")
+        return get_s3_upload_url(key), partial(self._upload_description_cb, key=key, description=description)
 
     def collect_external_attachments(
         self, *, exception: BaseException | None, logs_folder: Path | None
@@ -979,6 +1020,7 @@ def add_extra_info_hook(
 def submit_manual_bug_report(
     *,
     title: str,
+    description: str,
     report: Mapping[str, Any],
     logs_folder: Path | None,
 ) -> str | None:
@@ -989,7 +1031,16 @@ def submit_manual_bug_report(
     automatic error reporting is turned off. It is not tied to an exception -- ``title`` becomes the
     event message and ``report`` is attached as structured context.
 
-    When a ``logs_folder`` is given, recent log files are always uploaded via the same S3-attachment
+    ``description`` is the user's own prose. It travels twice: inline inside ``report``, and -- where
+    S3 uploads are configured -- as an upload of its own, whose URI the event carries. The inline copy
+    is the convenient one to read but cannot be relied on, for two independent reasons. Sentry's
+    default data scrubber replaces a whole string value with ``[Filtered]`` whenever the built-in
+    password pattern matches anywhere in that value, and because that pattern is a set of plain
+    substrings (``auth``, ``secret``, ``token...=``, ...), ordinary prose trips it: the word "authored"
+    alone destroyed a 9,705-character report. Separately, ``max_value_length`` truncates it at 10,000
+    characters. The uploaded copy is subject to neither.
+
+    When a ``logs_folder`` is given, recent log files are uploaded through the same S3-attachment
     mechanism as automatic errors (a no-op in environments without an S3 bucket). No traceback is
     collected (a manual report has no meaningful one).
 
@@ -1001,22 +1052,45 @@ def submit_manual_bug_report(
         logger.info("Sentry is not active; manual bug report was not sent")
         return None
 
-    # Build ``extra`` as a local dict (also referenced by the event) so log-attachment URLs can be
-    # added without re-subscripting the loosely-typed Event TypedDict.
+    # Build ``extra`` as a local dict (also referenced by the event) so attachment URLs can be added
+    # without re-subscripting the loosely-typed Event TypedDict.
     extra: dict[str, Any] = {"bug_report": dict(report)}
     event: Event = {
         "message": title,
         "level": "info",
         "tags": {MANUALLY_SUBMITTED_TAG: "true"},
         "extra": extra,
+        # A random fingerprint gives every report its own Sentry issue. Sentry's default grouping is
+        # driven by the stack trace, which here is the submitting code path and therefore identical
+        # for every report, so distinct titles do not split them: all reports land in one catch-all
+        # issue whose per-issue verbs (assign, resolve, comment, link) cannot address a single report.
+        # Grouping genuine duplicates would buy nothing either -- two reports of one underlying bug
+        # are still two people to answer. The cost: a submit whose response is lost after the event
+        # was captured (a dropped connection, or a later 500) leaves the form resubmittable, so a
+        # retry files a second issue where it used to join the first.
+        "fingerprint": [_MANUAL_BUG_REPORT_FINGERPRINT_PREFIX, uuid.uuid4().hex],
     }
 
+    callbacks: tuple[_UploadCallback, ...] = ()
     uploader = get_attachments_uploader()
-    if logs_folder is not None and uploader is not None:
-        # exception=None -> only log files are prepared (no synthesized traceback).
-        s3_uri_groups, callbacks = uploader.collect_external_attachments(exception=None, logs_folder=logs_folder)
-        for group_name, s3_uris in s3_uri_groups.items():
-            extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"] = list(s3_uris)
+    if uploader is not None:
+        if description:
+            description_uri, description_callback = uploader.prepare_description_upload(description)
+            # A URI is only produced once an S3 bucket is configured, and that is the same condition
+            # the upload itself needs -- so with no URI to reference there is nothing to schedule.
+            if description_uri is not None:
+                extra[BUG_REPORT_DESCRIPTION_EXTRA_KEY] = [description_uri]
+                callbacks += (description_callback,)
+        if logs_folder is not None:
+            # exception=None -> only log files are prepared (no synthesized traceback).
+            s3_uri_groups, log_callbacks = uploader.collect_external_attachments(
+                exception=None, logs_folder=logs_folder
+            )
+            for group_name, s3_uris in s3_uri_groups.items():
+                extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"] = list(s3_uris)
+            callbacks += log_callbacks
+
+    if callbacks:
         handler = get_sentry_event_handler()
         if handler is not None:
             handler.schedule_callbacks(callbacks)

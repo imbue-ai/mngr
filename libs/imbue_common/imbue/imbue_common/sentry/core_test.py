@@ -1,34 +1,39 @@
 import logging
 import sys
+from collections.abc import Callable
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 from typing import cast
 
 import pytest
 import sentry_sdk
 from loguru import logger
-from sentry_sdk import Client
-from sentry_sdk import isolation_scope
-from sentry_sdk.envelope import Envelope
+from pydantic import Field
 from sentry_sdk.integrations.logging import EventHandler
 from sentry_sdk.integrations.logging import unignore_logger
-from sentry_sdk.transport import Transport
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
 
+from imbue.imbue_common.sentry.core import BUG_REPORT_DESCRIPTION_EXTRA_KEY
 from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.imbue_common.sentry.core import MANUALLY_SUBMITTED_TAG
 from imbue.imbue_common.sentry.core import _before_send_wrapper
+from imbue.imbue_common.sentry.core import _bug_report_description_bytes
 from imbue.imbue_common.sentry.core import _drop_interrupt_events
 from imbue.imbue_common.sentry.core import _make_automatic_reporting_gate
 from imbue.imbue_common.sentry.core import _register_ignored_loggers
 from imbue.imbue_common.sentry.core import add_extra_info_hook
 from imbue.imbue_common.sentry.core import fixup_release_id
 from imbue.imbue_common.sentry.core import get_or_create_anonymous_user_id
-from imbue.imbue_common.sentry.core import register_attachments_uploader
 from imbue.imbue_common.sentry.core import submit_manual_bug_report
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
 from imbue.imbue_common.sentry.loguru_handler import should_record_sentry_event
+from imbue.imbue_common.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
+from imbue.imbue_common.sentry.testing import TEST_S3_BUCKET
+from imbue.imbue_common.sentry.testing import capturing_sentry_client
+from imbue.imbue_common.sentry.testing import recording_s3_bucket
+from imbue.imbue_common.sentry.testing import registered_attachments_uploader
 
 _LIVE_LOG_GROUP = LogAttachmentGroup(
     group_name="live_logs", glob="*.jsonl", max_file_count=10, is_compressed=True, is_immutable=False
@@ -194,22 +199,10 @@ def test_before_send_failure_reporting_does_not_recurse() -> None:
         call_count += 1
         raise ValueError("always broken before_send")
 
-    class _NoOpTransport(Transport):
-        def capture_envelope(self, envelope: Envelope) -> None:
-            pass
-
     def before_send(event: Event, hint: Hint) -> Event | None:
         return _before_send_wrapper(event, hint, [always_broken])
 
-    client = Client(
-        dsn="https://public@example.com/1",
-        before_send=before_send,
-        transport=_NoOpTransport(),
-        default_integrations=False,
-        auto_enabling_integrations=False,
-    )
-    with isolation_scope() as scope:
-        scope.set_client(client)
+    with capturing_sentry_client(before_send=before_send):
         # must terminate (no RecursionError) thanks to the guard.
         sentry_sdk.capture_event({"message": "trigger"})
 
@@ -276,9 +269,9 @@ def test_drop_interrupt_events_keeps_ordinary_exception_and_eventless_hints() ->
 def test_add_extra_info_hook_skips_attachments_when_reporting_disabled() -> None:
     # With reporting off (the event will be dropped anyway), no upload callbacks are prepared and no
     # uploaded-files extras are added, but the lightweight ``platform`` extra is still attached.
-    register_attachments_uploader(ErrorAttachmentsS3Uploader())
     event: Event = {"extra": {}}
-    result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_error_reporting_enabled=lambda: False)
+    with registered_attachments_uploader(ErrorAttachmentsS3Uploader()):
+        result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_error_reporting_enabled=lambda: False)
     assert callbacks == ()
     assert "platform" in result_event["extra"]
     assert not any(key.startswith("uploaded_files") for key in result_event["extra"])
@@ -287,9 +280,9 @@ def test_add_extra_info_hook_skips_attachments_when_reporting_disabled() -> None
 def test_add_extra_info_hook_collects_traceback_when_reporting_enabled() -> None:
     # With reporting on and no scope-configured log folder, the only attachment prepared is the
     # synthesized-traceback upload (one callback). Callbacks are partials, so nothing is uploaded here.
-    register_attachments_uploader(ErrorAttachmentsS3Uploader())
     event: Event = {"extra": {}}
-    _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_error_reporting_enabled=lambda: True)
+    with registered_attachments_uploader(ErrorAttachmentsS3Uploader()):
+        _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_error_reporting_enabled=lambda: True)
     assert len(callbacks) == 1
 
 
@@ -297,26 +290,12 @@ def test_scope_user_id_is_attached_to_events_even_with_send_default_pii_off() ->
     # The feature relies on an explicitly-set anonymous user id being sent to Sentry even though
     # send_default_pii is False (which only suppresses auto-collected PII like IP addresses). Verify
     # the id set on the scope (exactly what setup_sentry does) lands on a captured event's user.
-    captured_events: list[Event] = []
-
-    class _CapturingTransport(Transport):
-        def capture_envelope(self, envelope: Envelope) -> None:
-            event = envelope.get_event()
-            if event is not None:
-                captured_events.append(event)
-
-    client = Client(
-        dsn="https://public@example.com/1",
-        transport=_CapturingTransport(),
-        default_integrations=False,
-        auto_enabling_integrations=False,
-        send_default_pii=False,
-    )
-    with isolation_scope() as scope:
-        scope.set_client(client)
-        scope.set_user({"id": "0123456789abcdef0123456789abcdef"})
+    with capturing_sentry_client() as captured_events:
+        # The precondition this test is named for lives in the shared client helper, so pin it here:
+        # a change there must not quietly turn this into a test of nothing.
+        assert sentry_sdk.get_client().options["send_default_pii"] is False
+        sentry_sdk.set_user({"id": "0123456789abcdef0123456789abcdef"})
         sentry_sdk.capture_event({"message": "boom"})
-        client.flush()
 
     assert len(captured_events) == 1
     user = cast(dict, captured_events[0]["user"])
@@ -326,34 +305,18 @@ def test_scope_user_id_is_attached_to_events_even_with_send_default_pii_off() ->
 def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disabled() -> None:
     # A manual bug report is an explicit user action: it must reach Sentry even when the automatic
     # reporting gate is set to drop events, and it must carry the manual tag and the report payload.
-    captured_events: list[Event] = []
-
-    class _CapturingTransport(Transport):
-        def capture_envelope(self, envelope: Envelope) -> None:
-            event = envelope.get_event()
-            if event is not None:
-                captured_events.append(event)
-
     gate = _make_automatic_reporting_gate(lambda: False)
 
     def before_send(event: Event, hint: Hint) -> Event | None:
         return _before_send_wrapper(event, hint, [gate])
 
-    client = Client(
-        dsn="https://public@example.com/1",
-        before_send=before_send,
-        transport=_CapturingTransport(),
-        default_integrations=False,
-        auto_enabling_integrations=False,
-    )
-    with isolation_scope() as scope:
-        scope.set_client(client)
+    with capturing_sentry_client(before_send=before_send) as captured_events:
         event_id = submit_manual_bug_report(
             title="[bug report] boom",
+            description="boom",
             report={"description": "boom", "remote_access_requested": False},
             logs_folder=None,
         )
-        client.flush()
 
     # The event id is returned so the user can quote it; capture_event yields a 32-char hex string.
     assert isinstance(event_id, str) and len(event_id) == 32
@@ -364,6 +327,148 @@ def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disable
     assert tags["manually_submitted"] == "true"
     extra = cast(dict, event["extra"])
     assert extra["bug_report"]["description"] == "boom"
+
+
+_FAKE_DESCRIPTION_URI = "s3://test-bucket/bug_report_description_2024-01-01T00-00-00_deadbeef.txt"
+# Ordinary prose that trips Sentry's built-in password pattern (it is a set of plain substrings, so
+# "secrets" and "authored" both match), which is what destroys the inline copy of a report body.
+_SCRUBBER_TRIPPING_DESCRIPTION = "restic secrets were not authored correctly"
+
+
+class _RecordingUploader(ErrorAttachmentsS3Uploader):
+    """Stands in for a configured S3 bucket: records what was handed to it and yields a canned URI."""
+
+    prepared_descriptions: list[str] = Field(default_factory=list)
+    uploaded_descriptions: list[str] = Field(default_factory=list)
+    uploaded_file_paths: list[Path] = Field(default_factory=list)
+
+    def prepare_description_upload(self, description: str) -> tuple[str | None, Callable[[], None]]:
+        self.prepared_descriptions.append(description)
+        return _FAKE_DESCRIPTION_URI, partial(self.uploaded_descriptions.append, description)
+
+    def _upload_file_cb(self, key: str, file_path: Path, compress: bool = False, immutable: bool = False) -> None:
+        self.uploaded_file_paths.append(file_path)
+
+
+def test_submit_manual_bug_report_copies_the_description_out_of_band_without_a_logs_folder() -> None:
+    # The whole point of the out-of-band copy is that it survives the scrubber, so it has to be made
+    # for *every* report -- not only for the reports that happen to carry log attachments. Pin that by
+    # submitting with no logs folder at all and requiring the copy to still be prepared, uploaded, and
+    # referenced from the event. (Sentry is what scrubs, so the inline copy here is untouched; what
+    # this guards is that the second copy exists to fall back on.)
+    uploader = _RecordingUploader()
+    with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+        submit_manual_bug_report(
+            title="[bug report] boom",
+            description=_SCRUBBER_TRIPPING_DESCRIPTION,
+            report={"description": _SCRUBBER_TRIPPING_DESCRIPTION},
+            logs_folder=None,
+        )
+
+    # Verbatim: the out-of-band copy is worthless if it is trimmed or rewritten on the way out.
+    assert uploader.prepared_descriptions == [_SCRUBBER_TRIPPING_DESCRIPTION]
+    # No loguru handler is registered under test, so submit_manual_bug_report runs the upload inline
+    # -- meaning a scheduled-but-never-run callback would show up here as an empty list.
+    assert uploader.uploaded_descriptions == [_SCRUBBER_TRIPPING_DESCRIPTION]
+    assert len(captured_events) == 1
+    extra = cast(dict, captured_events[0]["extra"])
+    assert extra[BUG_REPORT_DESCRIPTION_EXTRA_KEY] == [_FAKE_DESCRIPTION_URI]
+    # The inline copy is still sent alongside it: it survives the scrubber for most reports and is
+    # the convenient one to read.
+    assert extra["bug_report"]["description"] == _SCRUBBER_TRIPPING_DESCRIPTION
+
+
+def test_submit_manual_bug_report_copies_the_description_alongside_the_log_attachments(tmp_path: Path) -> None:
+    # Description copy and log attachments are prepared from the same uploader and uploaded through the
+    # same set of callbacks, so the report that carries both is the one where they can displace each
+    # other. Require every piece of evidence to survive: both uploads run, and the event references
+    # both the description and the log group.
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    live_log = logs_folder / "events.jsonl"
+    live_log.write_text("live\n")
+
+    uploader = _RecordingUploader(log_attachment_groups=(_LIVE_LOG_GROUP,))
+    with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+        submit_manual_bug_report(
+            title="[bug report] boom",
+            description=_SCRUBBER_TRIPPING_DESCRIPTION,
+            report={"description": _SCRUBBER_TRIPPING_DESCRIPTION},
+            logs_folder=logs_folder,
+        )
+
+    assert uploader.uploaded_descriptions == [_SCRUBBER_TRIPPING_DESCRIPTION]
+    assert uploader.uploaded_file_paths == [live_log]
+    assert len(captured_events) == 1
+    extra = cast(dict, captured_events[0]["extra"])
+    assert extra[BUG_REPORT_DESCRIPTION_EXTRA_KEY] == [_FAKE_DESCRIPTION_URI]
+    # No bucket is configured under test, so the log group's uri is None; what matters here is that the
+    # group still reaches the event (its uris resolve wherever a bucket exists).
+    assert f"{EXTRAS_UPLOADED_FILES_KEY}_{_LIVE_LOG_GROUP.group_name}" in extra
+
+
+def test_submit_manual_bug_report_gives_every_report_its_own_issue() -> None:
+    # Sentry groups these by stack trace, which is the submitting code path and so identical for every
+    # report -- collapsing all of them into one catch-all issue where assign/resolve/comment cannot
+    # address a single report. Two reports sharing a title (the likely near-duplicate case) must still
+    # land in separate issues, so fingerprint on identical input and require the fingerprints to differ.
+    with capturing_sentry_client() as captured_events:
+        for _ in range(2):
+            submit_manual_bug_report(
+                title="[bug report] boom", description="boom", report={"description": "boom"}, logs_folder=None
+            )
+
+    fingerprints = [cast(list, event["fingerprint"]) for event in captured_events]
+    assert len(fingerprints) == 2
+    assert fingerprints[0] != fingerprints[1]
+
+
+def test_bug_report_description_bytes_survives_a_lone_surrogate() -> None:
+    # A lone surrogate reaches here from JSON (json.loads accepts "\ud800"), and plain utf-8 refuses
+    # to encode one. The encode runs inside the upload callback, so raising costs exactly the copy the
+    # upload exists to make: swallowed on the handler's executor, or -- with no handler registered --
+    # aborting the submit before the event is captured. It must escape, not raise, and not flatten to
+    # "?" (which is indistinguishable from a "?" the user actually typed).
+    assert _bug_report_description_bytes("before \ud800 after") == b"before \\ud800 after"
+
+
+def test_prepare_description_upload_uploads_to_the_object_its_uri_names() -> None:
+    # The URI is what goes on the event and the key is what the callback writes to, and the two are
+    # only useful together: a URI derived from a different key than the upload uses points at an
+    # object nobody ever wrote, with nothing to notice it -- the event still looks complete, and the
+    # copy is only ever read once the inline one has already come back "[Filtered]". So run the real
+    # method against a configured bucket and require the URI to name the object that was written.
+    with recording_s3_bucket() as uploads:
+        uri, upload_description = ErrorAttachmentsS3Uploader().prepare_description_upload(
+            _SCRUBBER_TRIPPING_DESCRIPTION
+        )
+        upload_description()
+
+    assert len(uploads) == 1
+    key, contents = uploads[0]
+    assert uri == f"s3://{TEST_S3_BUCKET}/{key}"
+    # And the callback is what applies the encoding, so it cannot be dropped from this path unnoticed.
+    assert contents == _bug_report_description_bytes(_SCRUBBER_TRIPPING_DESCRIPTION)
+
+
+def test_prepare_description_upload_is_a_no_op_without_a_configured_bucket() -> None:
+    # Environments with no S3 bucket (minds' `development`) must degrade quietly: no URI to put on the
+    # event, and a callback that is safe to invoke rather than one that raises.
+    uri, upload_description = ErrorAttachmentsS3Uploader().prepare_description_upload("boom")
+    assert uri is None
+    upload_description()
+
+
+def test_submit_manual_bug_report_uploads_nothing_for_an_empty_description() -> None:
+    # A zero-byte object referenced from the event would be pure noise on every such report, and the
+    # caller already rejects empty descriptions -- so the event still goes, with no URI to follow.
+    uploader = _RecordingUploader()
+    with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+        submit_manual_bug_report(title="[bug report] boom", description="", report={}, logs_folder=None)
+
+    assert uploader.prepared_descriptions == []
+    assert len(captured_events) == 1
+    assert BUG_REPORT_DESCRIPTION_EXTRA_KEY not in cast(dict, captured_events[0]["extra"])
 
 
 @pytest.fixture
@@ -394,4 +499,4 @@ def test_register_ignored_loggers_makes_matching_loggers_ignored(_cleanup_ignore
 def test_submit_manual_bug_report_returns_none_when_sentry_inactive() -> None:
     # With no active Sentry client (the default in tests), the submit is a no-op that returns None
     # (no event id) rather than raising.
-    assert submit_manual_bug_report(title="t", report={"description": "d"}, logs_folder=None) is None
+    assert submit_manual_bug_report(title="t", description="d", report={"description": "d"}, logs_folder=None) is None
