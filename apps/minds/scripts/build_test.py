@@ -32,6 +32,8 @@ from typing import Final
 
 import pytest
 
+from imbue.mngr_latchkey.remote_gateway import DATALIB_CURL_VERSION as GATEWAY_DATALIB_CURL_VERSION
+
 # The full set of workspace packages bundled into the standalone app. This
 # same set is hand-maintained in three other places:
 #   - apps/minds/scripts/build.js          (WORKSPACE_PACKAGES object)
@@ -63,6 +65,8 @@ WORKSPACE_PACKAGES = [
 APP_ROOT = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_PATTERN = re.compile(r"(^|/)(test_[^/]*\.py|[^/]+_test\.py|conftest\.py)$")
+_DOWNLOAD_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "download-binaries.js"
+_ENSURE_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "ensure-binaries.js"
 
 
 @pytest.fixture(scope="module")
@@ -519,7 +523,7 @@ def _parse_git_manifest_target_by_platform_arch() -> set[str]:
     -- we slice out that block and pull every quoted map value (the manifest
     target key on the right-hand side of each ``:``).
     """
-    text = (APP_ROOT / "scripts" / "download-binaries.js").read_text()
+    text = _DOWNLOAD_BINARIES_PATH.read_text()
     match = re.search(r"const GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH\s*=\s*\{(.*?)\};", text, re.DOTALL)
     assert match is not None, "Could not locate GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH object in download-binaries.js"
     return set(re.findall(r""":\s*['"]([^'"]+)['"]""", match.group(1)))
@@ -568,7 +572,7 @@ def test_ensure_binaries_guards_stale_git_payload() -> None:
     missing binary, forcing a re-download. This cheap textual check trips if
     someone deletes that staleness logic. See specs/minds-managed-git/concise.md.
     """
-    text = (APP_ROOT / "scripts" / "ensure-binaries.js").read_text()
+    text = _ENSURE_BINARIES_PATH.read_text()
     assert ".dugite-tag" in text, (
         "ensure-binaries.js must reference the '.dugite-tag' marker so a stale "
         "bundled git payload is re-downloaded (spec: minds-managed-git)."
@@ -579,7 +583,55 @@ def test_ensure_binaries_guards_stale_git_payload() -> None:
     )
 
 
-_DOWNLOAD_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "download-binaries.js"
+def test_ensure_binaries_guards_stale_curl_bundle() -> None:
+    """Guard: ensure-binaries.js must keep its datalib curl staleness check.
+
+    The bundled dispatch curl and impersonator have version-less filenames, so a
+    dev machine holding an older datalib release passes the plain existence
+    check. ensure-binaries.js therefore compares the marker written into
+    ``resources/curl/`` against the downloader's pinned release, and
+    ``downloadLatchkeyCurl`` writes that marker only once both binaries are
+    verified -- otherwise a curl bump would never reach the dev machine.
+    """
+    ensure_text = _ENSURE_BINARIES_PATH.read_text()
+    assert "DATALIB_CURL_VERSION_MARKER" in ensure_text, (
+        "ensure-binaries.js must read the bundled curl's DATALIB_CURL_VERSION_MARKER "
+        "file so a stale bundle can be spotted."
+    )
+    assert "!== DATALIB_CURL_VERSION" in ensure_text, (
+        "ensure-binaries.js must compare that marker's contents against the pinned "
+        "DATALIB_CURL_VERSION so a stale bundle is re-downloaded."
+    )
+    download_text = _DOWNLOAD_BINARIES_PATH.read_text()
+    verify_loop_index = download_text.find("'latchkey-curl-dispatch', 'latchkey-curl-impersonate'")
+    marker_write_index = download_text.find("path.join(curlDir, DATALIB_CURL_VERSION_MARKER)")
+    assert verify_loop_index != -1, "downloadLatchkeyCurl must verify both extracted binaries"
+    assert marker_write_index != -1, "downloadLatchkeyCurl must write the curl version marker"
+    assert verify_loop_index < marker_write_index, (
+        "downloadLatchkeyCurl must verify both binaries BEFORE writing the version "
+        "marker, so an incomplete bundle is never marked as the current release"
+    )
+
+
+def test_datalib_curl_pin_agrees_with_the_latchkey_gateway() -> None:
+    """Drift guard: the two datalib curl pins must name the same release.
+
+    The dispatch curl is fetched from two independent places -- minds bundles
+    it for the desktop app (``download-binaries.js``) and the latchkey gateway
+    installs it on the VPS (``mngr_latchkey.remote_gateway``) -- and the pin is
+    duplicated because the mngr wheel must not read files outside the ``imbue``
+    package, so a shared manifest is not available across the two projects.
+    Bumping one and not the other would leave a desktop client impersonating
+    with a different curl than the gateway it talks to.
+    """
+    download_text = _DOWNLOAD_BINARIES_PATH.read_text()
+    match = re.search(r"^const DATALIB_CURL_VERSION = '([^']+)';", download_text, re.MULTILINE)
+    assert match is not None, "Could not find DATALIB_CURL_VERSION in download-binaries.js"
+    assert match.group(1) == GATEWAY_DATALIB_CURL_VERSION, (
+        f"download-binaries.js pins datalib curl {match.group(1)} but "
+        f"mngr_latchkey.remote_gateway pins {GATEWAY_DATALIB_CURL_VERSION}; "
+        "bump both together."
+    )
 
 
 def _run_download_binaries_function(expression: str, *arguments: str) -> subprocess.CompletedProcess[str]:

@@ -38,14 +38,19 @@ const DESYNC_VERSION = '1.0.3';
 // curl it fronts (see the `curl-<triple>.tar.gz` release asset).
 // The latchkey gateway runs the dispatch curl as its LATCHKEY_CURL so marked
 // requests get Chrome TLS impersonation. Only macOS arm64 and Linux x86_64
-// (glibc) are bundled -- datalib publishes no x86_64-apple-darwin, and there
-// is no impersonation on Windows.
+// are bundled; there is no impersonation on Windows. The Linux build is the
+// statically linked musl one, so it runs on any glibc version (and on musl
+// distros) rather than requiring one at least as new as the build host's.
 //
 // When bumping DATALIB_CURL_VERSION, update the `curl-*` hashes in
 // EXPECTED_SHA256 to match (the tarball filename is version-less, so the
 // old hash would otherwise be checked against the new bytes and fail).
 const DATALIB_REPO = 'imbue-ai/datalib';
-const DATALIB_CURL_VERSION = 'v0.25.0';
+const DATALIB_CURL_VERSION = 'v0.26.0';
+// Marker file (inside the bundled `curl/` dir) naming the release its binaries
+// came from, so ensure-binaries.js can spot a dev machine still carrying an
+// older bundle. Same role `.dugite-tag` plays for the git payload.
+const DATALIB_CURL_VERSION_MARKER = '.datalib-curl-version';
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -77,8 +82,8 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
   // From the datalib release named by DATALIB_CURL_VERSION
   // (`curl-<triple>.tar.gz.sha256`).
-  'curl-aarch64-apple-darwin.tar.gz':      '36cc5f91fc1e2401e161520b1cc97c8b7d31a54048d85f04a7bc7c3dacaf6931',
-  'curl-x86_64-unknown-linux-gnu.tar.gz':  '76f65f6c7843b95e1a05ebad572074bf6d25deb4059f1435593299884c4f627a',
+  'curl-aarch64-apple-darwin.tar.gz':      '38db8dca3aa4106c653808fce5e2f0d2cf79345f18980ffb89c14b91b642c037',
+  'curl-x86_64-unknown-linux-musl.tar.gz': '7d1cd95bc90869b722aa4cb60181ca71e73186a50ba15002f1848b6266873b72',
 };
 
 const MAX_REDIRECTS = 5;
@@ -129,7 +134,7 @@ function getDesyncDownloadUrl({ platform, arch }) {
 
 /**
  * Map the current platform/arch to the datalib "curl" release tarball, or
- * null when datalib publishes no build for it (macOS x86_64, Windows). The
+ * null for the platforms we don't bundle it on (macOS x86_64, Windows). The
  * tarball filename is version-less (stable `releases/download/<tag>/<file>`
  * URLs); the inner dir carries the version.
  */
@@ -138,7 +143,7 @@ function getLatchkeyCurlDownloadInfo({ platform, arch }) {
   if (platform === 'darwin' && arch === 'aarch64') {
     triple = 'aarch64-apple-darwin';
   } else if (platform === 'linux' && arch === 'x86_64') {
-    triple = 'x86_64-unknown-linux-gnu';
+    triple = 'x86_64-unknown-linux-musl';
   }
   if (triple === null) {
     return null;
@@ -374,15 +379,15 @@ const GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH = {
  * `<resourcesDir>/curl/`. The latchkey gateway runs the dispatch curl as
  * its LATCHKEY_CURL (wired in electron/backend.js).
  *
- * No-op with a warning -- rather than a hard failure -- when the platform
- * has no datalib build (macOS x86_64, Windows); in that case latchkey keeps
- * using the system curl. On a supported platform this behaves like the
+ * No-op with a warning -- rather than a hard failure -- on the platforms we
+ * don't bundle it on (macOS x86_64, Windows); in that case latchkey keeps
+ * using the system curl. On a bundled platform this behaves like the
  * other bundled binaries: hard-fail on a download error or SHA mismatch.
  */
 async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
   const info = getLatchkeyCurlDownloadInfo({ platform, arch });
   if (info === null) {
-    console.log(`[download-binaries] No datalib curl build for ${platform}/${arch}; skipping (latchkey uses system curl).`);
+    console.log(`[download-binaries] datalib curl is not bundled on ${platform}/${arch}; skipping (latchkey uses system curl).`);
     return;
   }
 
@@ -408,6 +413,11 @@ async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
     }
     fs.chmodSync(binPath, 0o755);
   }
+  // Record the release the binaries came from -- their names carry no version,
+  // so this marker is the only way ensure-binaries.js can tell a stale dev
+  // bundle from a current one. Written last: a failed download or SHA
+  // mismatch must never leave a marker claiming this version.
+  fs.writeFileSync(path.join(curlDir, DATALIB_CURL_VERSION_MARKER), DATALIB_CURL_VERSION + '\n');
   console.log(`[download-binaries] latchkey curl (dispatch + impersonator) installed in ${curlDir}`);
 }
 
@@ -821,6 +831,8 @@ beforeInstall.downloadUv = downloadUv;
 beforeInstall.downloadRestic = downloadRestic;
 beforeInstall.downloadDesync = downloadDesync;
 beforeInstall.downloadLatchkeyCurl = downloadLatchkeyCurl;
+beforeInstall.DATALIB_CURL_VERSION = DATALIB_CURL_VERSION;
+beforeInstall.DATALIB_CURL_VERSION_MARKER = DATALIB_CURL_VERSION_MARKER;
 beforeInstall.download = download;
 beforeInstall.convertGitPayloadSymlinksToShims = convertGitPayloadSymlinksToShims;
 beforeInstall.measureTreeAsArchived = measureTreeAsArchived;
