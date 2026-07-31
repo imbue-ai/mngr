@@ -26,6 +26,8 @@ import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 from loguru import logger
 from pydantic import SecretStr
@@ -52,6 +54,34 @@ _SCHEMA_MIGRATIONS_DDL: Final[str] = (
 
 class MigrationRunnerError(NeonProviderError):
     """Raised when the schema_migrations runner fails to apply a file."""
+
+
+# Neon serves PgBouncer (transaction pooling) on hostnames whose first label
+# ends with this suffix; the same hostname without it is the direct compute.
+_POOLER_LABEL_SUFFIX: Final[str] = "-pooler"
+
+
+def _direct_migration_dsn(dsn: SecretStr) -> SecretStr:
+    """Return ``dsn`` with Neon's ``-pooler`` suffix stripped from the hostname.
+
+    Schema migrations must run over a direct connection: they can rely on
+    session-scoped behavior (advisory locks, ``CREATE INDEX CONCURRENTLY``'s
+    multi-transaction protocol) that is unsafe through PgBouncer's
+    transaction-mode pooling (Neon's ``-pooler`` endpoints). Non-Neon and
+    already-direct DSNs are returned unchanged. Twin of
+    ``_direct_database_url`` in ``apps/modal_litellm/app.py`` (duplicated
+    because that file must stay monorepo-import-free).
+    """
+    database_url = dsn.get_secret_value()
+    parsed = urlsplit(database_url)
+    userinfo, at_sign, host_and_port = parsed.netloc.rpartition("@")
+    host, colon, port = host_and_port.partition(":")
+    first_label, dot, remaining_labels = host.partition(".")
+    if not dot or not first_label.endswith(_POOLER_LABEL_SUFFIX):
+        return dsn
+    direct_host = first_label[: -len(_POOLER_LABEL_SUFFIX)] + dot + remaining_labels
+    direct_netloc = f"{userinfo}{at_sign}{direct_host}{colon}{port}"
+    return SecretStr(urlunsplit(parsed._replace(netloc=direct_netloc)))
 
 
 def _psql_path() -> str:
@@ -169,8 +199,9 @@ def list_pending_pool_hosts_migrations(
     migration" (any non-empty return) and as the input to
     :func:`apply_pool_hosts_migrations`.
     """
-    ensure_schema_migrations_table(dsn, parent_cg=parent_cg)
-    applied = _list_applied_versions(dsn, parent_cg=parent_cg)
+    direct_dsn = _direct_migration_dsn(dsn)
+    ensure_schema_migrations_table(direct_dsn, parent_cg=parent_cg)
+    applied = _list_applied_versions(direct_dsn, parent_cg=parent_cg)
     on_disk = _list_migration_files(migrations_dir)
     return [path for path in on_disk if path.name not in applied]
 
@@ -191,7 +222,15 @@ def apply_pool_hosts_migrations(
     re-applying them is a no-op (and we record the row).
     """
     psql = _psql_path()
-    pending = list_pending_pool_hosts_migrations(dsn, migrations_dir=migrations_dir, parent_cg=parent_cg)
+    # Schema changes go over the direct (non-pooled) host -- see
+    # _direct_migration_dsn for why. The DML seeding helpers below
+    # (write_plan_defaults, seed_paid_list_defaults) stay on the pooled DSN.
+    direct_dsn = _direct_migration_dsn(dsn)
+    logger.info(
+        "Applying pool-hosts schema migrations via database host {}",
+        urlsplit(direct_dsn.get_secret_value()).hostname,
+    )
+    pending = list_pending_pool_hosts_migrations(direct_dsn, migrations_dir=migrations_dir, parent_cg=parent_cg)
     if not pending:
         logger.info("schema_migrations: no pending migrations to apply.")
         return ()
@@ -201,7 +240,7 @@ def apply_pool_hosts_migrations(
         with info_span("Applying pool-hosts migration {!r}", migration.name):
             command = [
                 psql,
-                dsn.get_secret_value(),
+                direct_dsn.get_secret_value(),
                 "-v",
                 "ON_ERROR_STOP=1",
                 "-f",
@@ -219,7 +258,7 @@ def apply_pool_hosts_migrations(
                 raise MigrationRunnerError(
                     f"`psql` exited {result.returncode} while applying {migration.name}: {stderr}"
                 )
-            _record_applied_version(dsn, migration.name, parent_cg=parent_cg)
+            _record_applied_version(direct_dsn, migration.name, parent_cg=parent_cg)
             applied.append(migration)
     return tuple(applied)
 
