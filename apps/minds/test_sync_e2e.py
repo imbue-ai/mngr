@@ -14,7 +14,7 @@ never to mutate.
 Isolation model: every test gets its own minds root name
 (``minds-ci-e2e<rand>``), so the app derives a private data root + mngr host
 dir + docker container prefix under the pytest-faked ``$HOME`` -- tests never
-touch the snapshot's baked ``minds-staging`` workspace and can destroy their
+touch the snapshot's baked ``minds-ci-snapshot`` workspace and can destroy their
 own installs freely. Accounts are per-test (``sync_e2e_account``) under the
 env's seeded paid domain, so imbue-cloud backups (R2 provisioning) work.
 """

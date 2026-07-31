@@ -1,0 +1,8 @@
+# Client config for the `ci-snapshot` tier: the identity the e2e Modal-snapshot
+# workflow bakes and resumes under (see scripts/snapshot_minds_e2e_state.py).
+#
+# The URLs are deliberately non-resolving placeholders (`.invalid`, RFC 6761):
+# the snapshot path never contacts a live minds backend, so keep this tier inert
+# rather than pointing it at a real (e.g. staging) environment.
+connector_url = "https://rsc.minds-ci-snapshot.invalid"
+litellm_proxy_url = "https://llm.minds-ci-snapshot.invalid"

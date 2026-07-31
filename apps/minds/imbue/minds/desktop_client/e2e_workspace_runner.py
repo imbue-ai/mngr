@@ -76,11 +76,13 @@ _INBOX_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+
 # plain ``http`` -- see ``_BACKEND_ORIGIN_PATTERN``.)
 _AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^https?://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
 
-# Default env tier when nothing is activated. Staging's ``client.toml`` is
-# committed under apps/minds/imbue/minds/config/envs/staging/ so callers
-# can boot the backend without an explicit ``minds env activate`` step.
-_DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds-staging"
-_DEFAULT_MINDS_TIER: Final[str] = "staging"
+# Default env identity when nothing is activated: a dedicated, inert
+# ``ci-snapshot`` tier (committed under
+# apps/minds/imbue/minds/config/envs/ci-snapshot/) so callers can boot the
+# backend without an explicit ``minds env activate`` step and without pointing
+# at any real environment.
+_DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds-ci-snapshot"
+_DEFAULT_MINDS_TIER: Final[str] = "ci-snapshot"
 
 _ELECTRON_BINARY: Final[Path] = _REPO_ROOT / "apps" / "minds" / "node_modules" / ".bin" / "electron"
 _ELECTRON_MAIN_JS: Final[Path] = _REPO_ROOT / "apps" / "minds" / "electron" / "main.js"

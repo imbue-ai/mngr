@@ -60,6 +60,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_
 from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
+from imbue.minds.desktop_client.e2e_workspace_runner import _DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import _send_message_and_await_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
@@ -80,7 +81,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import get_short_random_string
 
 # The minds workspace container name prefix (mngr names docker hosts
-# ``{mngr_prefix}-{host_name}`` and minds defaults to the ``minds-staging``
+# ``{mngr_prefix}-{host_name}`` and minds defaults to the ``minds-ci-snapshot``
 # prefix at snapshot time). The docker provider also keeps a singleton
 # ``*docker-state*`` sidecar container per workspace; the workspace agent
 # container is the one that is NOT the docker-state sidecar.
@@ -368,7 +369,7 @@ def test_workspace_docker_container_is_present_and_stopped() -> None:
     - at least one of those is a minds workspace container (name prefix
       ``minds-`` -- mngr_modal names workspace containers
       ``{mngr_prefix}-{host_name}`` and minds defaults to the
-      ``minds-staging`` prefix at snapshot time)
+      ``minds-ci-snapshot`` prefix at snapshot time)
     - every minds workspace container is in the ``exited`` state (the
       snapshot script's clean-shutdown step ``docker stop``ped them
       before ``snapshot_filesystem``)
@@ -610,7 +611,7 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     configure_logging()
     # Route env-var defaults through monkeypatch so injected MINDS_ROOT_NAME /
     # MINDS_CLIENT_CONFIG_PATH revert between tests; defaults to the committed
-    # minds-staging tier.
+    # ci-snapshot tier.
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
@@ -1017,7 +1018,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # and the project config is an isolated pytest-opted-in copy (the repo's
     # own .mngr would fail the config guard). Use a neutral cwd and silence
     # providers that would need cloud credentials during discovery.
-    root_name = os.environ.get("MINDS_ROOT_NAME", "minds-staging")
+    root_name = os.environ.get("MINDS_ROOT_NAME", _DEFAULT_MINDS_ROOT_NAME)
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     baked_mngr_host_dir = real_home / f".{root_name}" / "mngr"
     assert baked_mngr_host_dir.is_dir(), f"No baked desktop-side mngr host dir at {baked_mngr_host_dir}"
@@ -1181,7 +1182,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     _ensure_restic_on_sandbox_host(tmp_path, monkeypatch)
     # Same desktop-side mngr wiring as the enable/repair test above: the baked
     # host dir + prefix so `mngr exec` can reach the resumed container.
-    root_name = os.environ.get("MINDS_ROOT_NAME", "minds-staging")
+    root_name = os.environ.get("MINDS_ROOT_NAME", _DEFAULT_MINDS_ROOT_NAME)
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     baked_mngr_host_dir = real_home / f".{root_name}" / "mngr"
     assert baked_mngr_host_dir.is_dir(), f"No baked desktop-side mngr host dir at {baked_mngr_host_dir}"
