@@ -70,6 +70,7 @@ SECONDARY_COMMANDS = {
     "ask",
     "aws",
     "azure",
+    "behaviors",
     "capture",
     "chat",
     "cleanup",
