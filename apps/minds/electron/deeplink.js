@@ -7,12 +7,14 @@
 // these helpers and acts on the result.
 //
 // URL shape: the host names the action.
-//   minds://create?git_url=<repo>&branch=<ref>  -> open the Create from
-//     Inspiration page for the repo (choose between a new workspace and
-//     adding it to an existing one); `branch` accepts anything the create
-//     form's Branch input accepts and stays blank when absent (create then
-//     resolves the repo's latest version). Without a git_url the plain
-//     create page is the target.
+//   minds://create?git_url=<repo>&branch=<ref>  -> an Inspiration link. When the
+//     app is already INSIDE a machine, main.js pops the Create from Inspiration
+//     MODAL over it (a small chooser: create a new machine, or add the
+//     Inspiration to the current machine). Otherwise it navigates to the full
+//     Create from Inspiration PAGE. `branch` accepts anything the create form's
+//     Branch input accepts and stays blank when absent (create then resolves the
+//     repo's latest version). Without a git_url the plain create page is the
+//     target.
 //   minds:// (or any unrecognized/malformed URL) -> just focus the app.
 
 // Generous for a git URL plus ref, tight enough to bound log spam and
@@ -54,13 +56,15 @@ function parseDeeplink(rawUrl) {
 }
 
 /**
- * Map a raw deeplink URL to the backend path it should load, or null for
- * focus-only. This is the allowlist boundary: the only possible outputs are
- * null or a string built from the fixed '/create' / '/create/inspiration'
- * literals plus URLSearchParams re-encoding -- raw deeplink text never
- * reaches loadURL. A repo-carrying link is an Inspiration link and lands on
- * the Create from Inspiration page; without a repo the plain create page is
- * the target (a branch alone is not an Inspiration).
+ * Map a raw deeplink URL to the backend path the CONTENT VIEW should navigate
+ * to, or null for focus-only. This is the allowlist boundary: the only possible
+ * outputs are null or a string built from the fixed '/create' /
+ * '/create/inspiration' literals plus URLSearchParams re-encoding -- raw
+ * deeplink text never reaches loadURL. A repo-carrying link is an Inspiration
+ * link and targets the Create from Inspiration page; without a repo the plain
+ * create page is the target (a branch alone is not an Inspiration). When the app
+ * is already inside a machine, main.js opens the modal (``deeplinkModalPath``)
+ * instead of navigating to this page.
  */
 function deeplinkTargetPath(rawUrl) {
   const parsed = parseDeeplink(rawUrl);
@@ -71,6 +75,24 @@ function deeplinkTargetPath(rawUrl) {
   const query = params.toString();
   if (parsed.gitUrl) return `/create/inspiration?${query}`;
   return query ? `/create?${query}` : '/create';
+}
+
+/**
+ * Map a raw deeplink URL to the backend path of the Create from Inspiration
+ * MODAL, or null when the link is not an Inspiration link (no repo). Same
+ * allowlist discipline as ``deeplinkTargetPath``: the only non-null output is
+ * the fixed '/create/inspiration/modal' literal plus re-encoded params. main.js
+ * opens this via ``openModal`` (rather than navigating the content view) and
+ * appends the window's current machine so the modal can offer "Add to current
+ * machine" without a picker.
+ */
+function deeplinkModalPath(rawUrl) {
+  const parsed = parseDeeplink(rawUrl);
+  if (parsed.action !== 'create' || !parsed.gitUrl) return null;
+  const params = new URLSearchParams();
+  params.set('git_url', parsed.gitUrl);
+  if (parsed.branch) params.set('branch', parsed.branch);
+  return `/create/inspiration/modal?${params.toString()}`;
 }
 
 /**
@@ -86,4 +108,4 @@ function extractDeeplinkUrlFromArgv(argv) {
   return null;
 }
 
-module.exports = { parseDeeplink, deeplinkTargetPath, extractDeeplinkUrlFromArgv, MAX_DEEPLINK_LENGTH };
+module.exports = { parseDeeplink, deeplinkTargetPath, deeplinkModalPath, extractDeeplinkUrlFromArgv, MAX_DEEPLINK_LENGTH };

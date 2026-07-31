@@ -797,6 +797,101 @@ def test_inspiration_page_rejects_unauthenticated(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
+def test_inspiration_modal_shows_choices(tmp_path: Path) -> None:
+    """GET /create/inspiration/modal renders the stepper inside the overlay card.
+
+    It is the same flow the page serves (clicked through in place), not a
+    hand-off chooser.
+    """
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/create/inspiration/modal?git_url=https://github.com/acme/inspiration")
+    assert response.status_code == 200
+    assert "You've opened an Inspiration" in response.text
+    assert "github.com/acme/inspiration" in response.text
+    assert 'id="inspiration-modal-backdrop"' in response.text
+    assert 'id="inspiration-step-1"' in response.text
+    # The add flow is walked through in the popup; creating hands off to the page.
+    assert 'id="inspiration-step-add-2"' in response.text
+    assert "function openCreateOnFullPage()" in response.text
+
+
+def test_inspiration_page_start_create_preselects_the_create_branch(tmp_path: Path) -> None:
+    """?start=create (how the modal hands off) pre-answers the step-1 chooser."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/create/inspiration?git_url=https://github.com/acme/inspiration&start=create")
+    assert response.status_code == 200
+    assert 'var START_BRANCH = "create"' in response.text
+    # Without it the page opens on the chooser.
+    plain = client.get("/create/inspiration?git_url=https://github.com/acme/inspiration")
+    assert 'var START_BRANCH = ""' in plain.text
+
+
+def test_inspiration_modal_without_git_url_redirects_to_create(tmp_path: Path) -> None:
+    """Without a repo there is nothing to show; degrade to /create."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/create/inspiration/modal", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/create"
+
+
+def test_inspiration_modal_targets_current_machine(tmp_path: Path) -> None:
+    """When ``current_workspace`` names an active workspace, the add branch targets
+    it: the label names it and the last step is the paste hand-off, not a picker."""
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"web": "http://test:9100"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(
+        f"/create/inspiration/modal?git_url=https://github.com/acme/inspiration&current_machine={agent_id}"
+    )
+    assert response.status_code == 200
+    assert "Paste it into the chat" in response.text
+    # The picker step is gone in this variant (the generic label survives only
+    # as the JS fallback string, so check the rendered picker heading instead).
+    assert "Select a machine" not in response.text
+
+
+def test_inspiration_modal_rejects_unauthenticated(tmp_path: Path) -> None:
+    """GET /create/inspiration/modal returns 403 without authentication."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, _ = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.get("/create/inspiration/modal?git_url=https://github.com/acme/inspiration")
+    assert response.status_code == 403
+
+
 def test_inspiration_page_lists_workspaces(tmp_path: Path) -> None:
     """The add-to-existing step offers the known machines as pickable rows."""
     agent_id_1 = AgentId()

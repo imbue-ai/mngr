@@ -1,4 +1,4 @@
-{#def git_url, branch="", accounts=[], default_account_id="", color="#0b292b", mngr_forward_origin="", workspace_rows=[], launch_modes=[], backup_providers=[], region_options_by_launch_mode={}, region_selected_by_launch_mode={} #}
+{#def git_url, branch="", accounts=[], default_account_id="", color="#0b292b", mngr_forward_origin="", machine_rows=[], launch_modes=[], backup_providers=[], region_options_by_launch_mode={}, region_selected_by_launch_mode={}, is_modal=False, current_machine_id="", current_machine_name="", start="" #}
 {#
   Create from Inspiration page (GET /create/inspiration?git_url=...).
 
@@ -8,7 +8,7 @@
   plus a one-line summary of the choice (click to reopen and change it); steps
   not yet reached stay hidden. The user is walked (1) -> (2) -> (3) in order.
 
-  - Step 1: create a new workspace from the Inspiration, or add it to an
+  - Step 1: create a new machine from the Inspiration, or add it to an
     existing one.
   - Create branch: (2) local vs. remote via the shared preset cards -- no
     default selection, an explicit click advances; then (3) confirm --
@@ -21,7 +21,7 @@
   - Add branch: (2) copy the "/use-inspiration <git-url>" message (the whole
     box is clickable; the skill accepts only a URL -- a deeplink branch is
     deliberately dropped); the copy advances, forcing it before (3) the
-    workspace picker. Rows mirror the landing page's gating: STOPPED minds
+    machine picker. Rows mirror the landing page's gating: STOPPED minds
     detour through recovery with intent=restart.
 
   Interactability is kept explicit: the repo is plain text (never an
@@ -36,6 +36,33 @@
 <script>
   (function () {
     var HAS_ANY_ACCOUNT = {{ 'true' if accounts else 'false' }};
+
+    // The same stepper serves the full page and the deeplink modal. In the
+    // modal the user is already inside a machine, so the add branch targets
+    // THAT machine: its last step drops the picker and just says to paste the
+    // copied message into the chat, then closes. Everything else -- the whole
+    // create flow -- behaves identically in both.
+    var IS_MODAL = {{ 'true' if is_modal else 'false' }};
+    var START_BRANCH = {{ (start or '') | tojson }};
+    var CURRENT_MACHINE_NAME = {{ (current_machine_name or '') | tojson }};
+    var IS_ADD_TO_CURRENT = IS_MODAL && {{ 'true' if current_machine_id else 'false' }};
+
+    function closeModalIfAny() {
+      if (IS_MODAL && window.minds && window.minds.closeModal) window.minds.closeModal();
+    }
+    window.dismissInspirationModal = closeModalIfAny;
+
+    // Navigate the MAIN content view and dismiss the modal. Never plain
+    // ``window.location`` in modal mode: that would load the destination inside
+    // the overlay iframe (a window inside a window).
+    function leaveTo(url) {
+      if (window.minds && window.minds.navigateContent) {
+        window.minds.navigateContent(url);
+        closeModalIfAny();
+        return;
+      }
+      window.location = url;
+    }
 
     // Same preset -> provider mapping as the create form (see Create.jinja).
     var PRESETS = {
@@ -215,7 +242,7 @@
     function render() {
       var branchSummary =
         branch === 'create' ? 'Create a new machine'
-        : branch === 'add' ? 'Add to an existing workspace'
+        : branch === 'add' ? (IS_ADD_TO_CURRENT ? 'Add to ' + CURRENT_MACHINE_NAME : 'Add to an existing machine')
         : '';
       setStep(el.s1, {present: true, active: activeStep === 1, done: activeStep > 1, summary: branchSummary});
 
@@ -321,6 +348,8 @@
       return anchor ? anchor.parentElement : null;
     }
     function pinPageColumn() {
+      // Only the full page is vertically centered; the modal card scrolls itself.
+      if (IS_MODAL) return;
       var col = pageColumn();
       if (!col || col.getAttribute('data-pinned') === '1') return;
       var before = col.getBoundingClientRect().top;
@@ -330,6 +359,7 @@
       col.setAttribute('data-pinned', '1');
     }
     function unpinPageColumn() {
+      if (IS_MODAL) return;
       var col = pageColumn();
       if (!col || col.getAttribute('data-pinned') !== '1') return;
       col.style.marginTop = '';
@@ -367,6 +397,12 @@
         if (!isAdvanced) return;   // closed again before the scroll started
         var submit = byId('inspiration-submit');
         if (!submit) return;
+        if (IS_MODAL) {
+          // The modal card is its own scroll container, so let the browser
+          // bring Create into view within it rather than scrolling the window.
+          submit.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+          return;
+        }
         var margin = 16;
         var bottom = submit.getBoundingClientRect().bottom;
         var targetY = window.scrollY;
@@ -450,7 +486,21 @@
     wireGoBack(el.c2, 2);
     wireGoBack(el.a2, 2);
 
-    byId('choose-new-workspace').addEventListener('click', function () { chooseBranch('create'); });
+    // Creating a new machine is a bigger job than a popup should host, so from
+    // the modal it hands off to the full page (already past the chooser); on the
+    // page it just advances to the next step.
+    function openCreateOnFullPage() {
+      var params = new URLSearchParams();
+      params.set('git_url', byId('inspiration-git-url').value);
+      var b = byId('inspiration-branch').value;
+      if (b) params.set('branch', b);
+      params.set('start', 'create');
+      leaveTo('/create/inspiration?' + params.toString());
+    }
+    byId('choose-new-machine').addEventListener('click', function () {
+      if (IS_MODAL) openCreateOnFullPage();
+      else chooseBranch('create');
+    });
     byId('choose-add-existing').addEventListener('click', function () { chooseBranch('add'); });
     var emptyToNew = byId('inspiration-empty-to-new');
     if (emptyToNew) emptyToNew.addEventListener('click', function (e) { e.preventDefault(); chooseBranch('create'); });
@@ -486,9 +536,12 @@
       copyBtn.style.backgroundColor = 'var(--c-success)';
       copyBtn.style.color = '#ffffff';
       // Copying is what advances to the picker, so the user cannot enter a
-      // workspace without the message in hand. Hold long enough that the green
+      // machine without the message in hand. Hold long enough that the green
       // confirmation clearly registers before the next step slides up.
       isMessageCopied = true;
+      // The final step for "add to the machine you are already in" is just the
+      // paste instruction; it stays up until the user acknowledges it with Done,
+      // so the modal never vanishes before they have read what to do.
       setTimeout(function () { activeStep = 3; render(); }, 1000);
       // Reset after it has collapsed away, so reopening step 2 shows a fresh
       // "Copy" box rather than a stale green state.
@@ -518,8 +571,7 @@
       } else {
         target = ret;
       }
-      if (window.minds && window.minds.navigateContent) window.minds.navigateContent(target);
-      else window.location = target;
+      leaveTo(target);
     };
 
     function markPresetSelected(name) {
@@ -621,12 +673,14 @@
         return r.json().then(function (data) { return { status: r.status, data: data || {} }; });
       }).then(function (res) {
         if (res.status === 202 && res.data.operation_id) {
-          window.location = '/creating/' + res.data.operation_id;
+          // Creation started: hand the main window the progress screen (and
+          // dismiss the modal, when that is where we are).
+          leaveTo('/creating/' + res.data.operation_id);
           return;
         }
         var err = normalizeApiError(res.data);
         if (err.redirect_url) {
-          window.location = err.redirect_url;
+          leaveTo(err.redirect_url);
           return;
         }
         showCreateError(err.message);
@@ -636,10 +690,27 @@
     });
 
     render();
+
+    // Modal only: clicking the dimmed area outside the card dismisses it.
+    var modalBackdrop = byId('inspiration-modal-backdrop');
+    if (modalBackdrop) {
+      modalBackdrop.addEventListener('click', function (e) {
+        if (e.target === modalBackdrop) closeModalIfAny();
+      });
+    }
+
+    // ``start`` pre-selects a branch and skips the step-1 chooser (the modal
+    // hands off that way when the user picks "Create a new machine"). It is
+    // rendered in server-side rather than read from window.location: the hub's
+    // in-place swap runs this script before it updates the address, so the
+    // query string here would still be the PREVIOUS page's.
+    if (START_BRANCH === 'create') chooseBranch('create');
+    else if (START_BRANCH === 'add') chooseBranch('add');
   })();
 </script>
 {% endset %}
-<PageNarrowContainer title="Create from Inspiration" page_label="New workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+{# One stepper, two shells: the full page, or the deeplink modal's card. #}
+{% set _body %}
 
   <style>
     /* Step circles carry no border. The CURRENT step is a solid black bubble
@@ -731,8 +802,9 @@
             </span>
           </div>
           <div data-step-body class="flex flex-col gap-3 mt-4">
-            <Button variant="secondary" block id="choose-new-workspace">Create a new machine</Button>
-            <Button variant="secondary" block id="choose-add-existing">Add to an existing machine</Button>
+            <Button variant="secondary" block id="choose-new-machine">Create a new machine</Button>
+            {# In the modal the user is already in a machine, so "add" names it. #}
+            <Button variant="secondary" block id="choose-add-existing">{% if is_modal and current_machine_id %}Add to {{ current_machine_name or "this machine" }}{% else %}Add to an existing machine{% endif %}</Button>
           </div>
         </div>
       </div>
@@ -919,7 +991,7 @@
       </div>
     </div>
 
-    {# ---- Add branch, step 3: pick the workspace ---- #}
+    {# ---- Add branch, step 3: pick the machine ---- #}
     <div id="inspiration-step-add-3" class="inspiration-step hidden">
       <div class="flex gap-3">
         <div class="relative flex flex-col items-center self-stretch">
@@ -927,7 +999,7 @@
           <span data-step-connector class="absolute hidden"></span>
         </div>
         <div class="flex-1 pb-6 min-w-0">
-          <h2 data-step-title class="type-heading text-primary flex items-center min-h-8">Select a machine</h2>
+          <h2 data-step-title class="type-heading text-primary flex items-center min-h-8">{% if is_modal and current_machine_id %}Paste it into the chat{% else %}Select a machine{% endif %}</h2>
           {# Collapsed answer: a check + the chosen option, tucked close under
              its question with extra room below so it clearly groups with the
              question it answers (hidden toggle on this block; flex on inner to
@@ -939,12 +1011,23 @@
             </span>
           </div>
           <div data-step-body class="mt-4">
+            {% if is_modal and current_machine_id %}
+              {# Already inside the target machine: nothing left to pick, so the
+                 last step is just the hand-off. The modal dismisses itself a
+                 moment later, leaving the user in the chat, message in hand. #}
+              <p class="type-body text-secondary">
+                The message is on your clipboard &mdash; paste it into {{ current_machine_name or "this machine" }}'s chat to get started.
+              </p>
+              <div class="mt-4">
+                <Button variant="secondary" block onclick="dismissInspirationModal()">Done</Button>
+              </div>
+            {% else %}
             <p class="type-body text-secondary mb-4">
               It will open so you can paste the copied message into its chat.
             </p>
-            {% if workspace_rows %}
+            {% if machine_rows %}
               <div class="flex flex-col gap-1.5">
-                {% for row in workspace_rows %}
+                {% for row in machine_rows %}
                   {% set accent_style = "--workspace-accent: " ~ row.accent ~ ";" %}
                   {% set goto_href = mngr_forward_origin ~ "/goto/" ~ row.agent_id ~ "/" %}
                   <Card layout="row" interactive
@@ -958,7 +1041,7 @@
                     {% if row.liveness == "STOPPED" %}
                       <StatusBadge>Stopped</StatusBadge>
                     {% endif %}
-                    {# Right-pointing arrow: selecting this workspace opens it. #}
+                    {# Right-pointing arrow: selecting this machine opens it. #}
                     <span class="text-tertiary shrink-0"><Icon16 name="chevron-right" /></span>
                   </Card>
                 {% endfor %}
@@ -969,9 +1052,28 @@
                 <a href="#" id="inspiration-empty-to-new" class="text-accent hover:underline">Create a new one from this Inspiration</a> instead.
               </p>
             {% endif %}
+            {% endif %}
           </div>
         </div>
       </div>
     </div>
   </div>
-</PageNarrowContainer>
+{% endset %}
+{% if is_modal %}
+  {# Deeplink modal: the same stepper inside the shared overlay's centered card
+     (its own scroll container, so a tall step scrolls in place). #}
+  <OverlaySurface title="Create from Inspiration"
+                  body_style="-webkit-app-region: no-drag;"
+                  scripts={{ _scripts }}>
+    <div id="inspiration-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
+      <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-lg w-full p-6 max-h-[85vh] overflow-y-auto text-left">
+        <DialogCloseButton onclick="dismissInspirationModal()" />
+        {{ _body }}
+      </div>
+    </div>
+  </OverlaySurface>
+{% else %}
+  <PageNarrowContainer title="Create from Inspiration" page_label="New machine" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+    {{ _body }}
+  </PageNarrowContainer>
+{% endif %}

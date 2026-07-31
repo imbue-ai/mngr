@@ -122,7 +122,7 @@ from imbue.minds.desktop_client.supertokens_routes import wake_chrome_event_stre
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.templates import InspirationWorkspaceRow
+from imbue.minds.desktop_client.templates import InspirationMachineRow
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
 from imbue.minds.desktop_client.templates import render_account_plan_modal_page
 from imbue.minds.desktop_client.templates import render_account_plan_section
@@ -144,6 +144,7 @@ from imbue.minds.desktop_client.templates import render_inbox_list_fragment
 from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_inspiration_create_page
+from imbue.minds.desktop_client.templates import render_inspiration_modal_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -1320,13 +1321,67 @@ def _handle_create_page() -> Response:
     return make_html_response(content=html)
 
 
+def _build_inspiration_context() -> dict[str, Any]:
+    """Collect the render context the Create from Inspiration stepper needs.
+
+    Shared by the page and the modal, which render the same stepper: the
+    accounts + default, the per-provider region context the create form builds,
+    the suggested workspace color, and the pickable rows for the add flow.
+
+    The rows mirror the landing page's list (which also collects
+    providers/shutdown-capability, hence the deliberate small duplication).
+    Destroying machines are excluded -- there is nothing to paste a message
+    into.
+    """
+    backend_resolver = get_state().backend_resolver
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    minds_config: MindsConfig | None = get_state().minds_config
+    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
+
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(
+        paths, backend_resolver, session_store, get_state().imbue_cloud_cli
+    )
+    liveness_by_agent_id = {
+        aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
+    }
+    machine_rows = []
+    for aid in backend_resolver.list_active_workspace_ids():
+        if str(aid) in destroying_status_by_agent_id:
+            continue
+        info = backend_resolver.get_agent_display_info(aid)
+        ws_name = backend_resolver.get_workspace_name(aid)
+        name = ws_name if ws_name else (info.agent_name if info else str(aid))
+        machine_rows.append(
+            InspirationMachineRow(
+                agent_id=str(aid),
+                name=name,
+                accent=_resolved_workspace_color(backend_resolver, aid),
+                liveness=liveness_by_agent_id.get(str(aid), "UNKNOWN"),
+            )
+        )
+
+    return {
+        "accounts": accounts,
+        "default_account_id": default_account_id or "",
+        "color": _suggested_create_color(backend_resolver),
+        "mngr_forward_origin": _get_mngr_forward_origin(),
+        "machine_rows": machine_rows,
+        "region_options_by_launch_mode": region_options,
+        "region_selected_by_launch_mode": region_selected,
+    }
+
+
 def _handle_inspiration_create_page() -> Response:
     """Show the Create from Inspiration page (GET /create/inspiration).
 
     The deeplink landing page for an Inspiration link: a chooser between
-    creating a new workspace from the linked repo and adding the Inspiration
-    to an existing workspace (via a copyable ``/use-inspiration`` message and
-    a workspace picker). Without a ``git_url`` there is nothing to show, so
+    creating a new machine from the linked repo and adding the Inspiration
+    to an existing machine (via a copyable ``/use-inspiration`` message and
+    a machine picker). Without a ``git_url`` there is nothing to show, so
     the request degrades to the plain create page.
     """
     if not _is_request_authenticated():
@@ -1337,53 +1392,52 @@ def _handle_inspiration_create_page() -> Response:
         return make_redirect_response("/create", status_code=302)
     branch = request.args.get("branch", "")
 
+    # ``start=create|add`` pre-selects a branch (the modal hands off that way).
+    # It is honored server-side because the hub's in-place swap runs the page's
+    # script before it updates the address bar.
+    start = request.args.get("start", "").strip()
+    html = render_inspiration_create_page(git_url=git_url, branch=branch, start=start, **_build_inspiration_context())
+    return make_html_response(content=html)
+
+
+def _handle_inspiration_modal_page() -> Response:
+    """Show the Create from Inspiration stepper as a modal (GET /create/inspiration/modal).
+
+    The deeplink entry point when the app is already inside a machine (opened
+    via ``openModal``, not a content navigation). It renders the SAME stepper the
+    page does, so the create flow is identical; main.js appends
+    ``current_machine`` (the window's active machine id) so the add branch
+    can target that machine -- its last step drops the picker and just says to
+    paste the copied message into that chat. Without a ``git_url`` there is
+    nothing to show, so it degrades to the plain create page.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+
+    git_url = request.args.get("git_url", "").strip()
+    if not git_url:
+        return make_redirect_response("/create", status_code=302)
+    branch = request.args.get("branch", "")
+
     backend_resolver = get_state().backend_resolver
-    session_store: MultiAccountSessionStore | None = get_state().session_store
-    minds_config: MindsConfig | None = get_state().minds_config
-    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
-    accounts = session_store.list_accounts() if session_store else []
-    default_account_id = minds_config.get_default_account_id() if minds_config else None
-    # The advanced settings step's region select uses the same per-provider
-    # region context the create form builds.
-    region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
+    # Resolve the active machine's display name for the "Add to {name}" label
+    # (matched by id against the active list, so no id parsing / broad catch).
+    current_machine_id = request.args.get("current_machine", "").strip()
+    current_machine_name = ""
+    if current_machine_id:
+        for aid in backend_resolver.list_active_workspace_ids():
+            if str(aid) == current_machine_id:
+                info = backend_resolver.get_agent_display_info(aid)
+                ws_name = backend_resolver.get_workspace_name(aid)
+                current_machine_name = ws_name or (info.agent_name if info else "")
+                break
 
-    # The pickable rows for the add-to-existing flow, mirroring the landing
-    # page's list (which also collects providers/shutdown-capability, hence
-    # the deliberate small duplication). Destroying workspaces are excluded --
-    # there is nothing to paste a message into.
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    destroying_status_by_agent_id = _resolve_destroying_for_landing(
-        paths, backend_resolver, session_store, get_state().imbue_cloud_cli
-    )
-    liveness_by_agent_id = {
-        aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
-    }
-    workspace_rows = []
-    for aid in backend_resolver.list_active_workspace_ids():
-        if str(aid) in destroying_status_by_agent_id:
-            continue
-        info = backend_resolver.get_agent_display_info(aid)
-        ws_name = backend_resolver.get_workspace_name(aid)
-        name = ws_name if ws_name else (info.agent_name if info else str(aid))
-        workspace_rows.append(
-            InspirationWorkspaceRow(
-                agent_id=str(aid),
-                name=name,
-                accent=_resolved_workspace_color(backend_resolver, aid),
-                liveness=liveness_by_agent_id.get(str(aid), "UNKNOWN"),
-            )
-        )
-
-    html = render_inspiration_create_page(
+    html = render_inspiration_modal_page(
         git_url=git_url,
         branch=branch,
-        accounts=accounts,
-        default_account_id=default_account_id or "",
-        color=_suggested_create_color(backend_resolver),
-        mngr_forward_origin=_get_mngr_forward_origin(),
-        workspace_rows=workspace_rows,
-        region_options_by_launch_mode=region_options,
-        region_selected_by_launch_mode=region_selected,
+        current_machine_id=current_machine_id,
+        current_machine_name=current_machine_name,
+        **_build_inspiration_context(),
     )
     return make_html_response(content=html)
 
@@ -2582,7 +2636,7 @@ def _destroyed_workspace_retention_days_cached() -> int:
     return max(1, round(retention_seconds / 86400.0))
 
 
-def _collect_destroyed_workspace_rows() -> list[dict[str, Any]]:
+def _collect_destroyed_machine_rows() -> list[dict[str, Any]]:
     """Rows for the recently-destroyed page: tombstoned records (newest first), then orphan envs.
 
     A row can download when its env is materialized locally (the sync pass
@@ -2692,7 +2746,7 @@ def _handle_destroyed_workspaces_rows() -> Response:
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
-    html = render_destroyed_workspaces_rows_fragment(rows=_collect_destroyed_workspace_rows())
+    html = render_destroyed_workspaces_rows_fragment(rows=_collect_destroyed_machine_rows())
     return make_html_response(content=html)
 
 
@@ -2711,7 +2765,7 @@ def _handle_destroyed_workspace_delete_backup(agent_id: str) -> Response:
         return _handle_destroyed_workspaces_page(error="Backup management is not configured on this install.")
     accounts = _signed_in_accounts_by_user_id()
     row = next(
-        (entry for entry in _collect_destroyed_workspace_rows() if entry["agent_id"] == agent_id),
+        (entry for entry in _collect_destroyed_machine_rows() if entry["agent_id"] == agent_id),
         None,
     )
     if row is None:
@@ -4115,6 +4169,7 @@ def create_desktop_client(
     # here; status/logs and the form POST moved to the versioned surface.
     app.add_url_rule("/create", view_func=_handle_create_page)
     app.add_url_rule("/create/inspiration", view_func=_handle_inspiration_create_page)
+    app.add_url_rule("/create/inspiration/modal", view_func=_handle_inspiration_modal_page)
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
     # Agent destruction routes. Destroy, status/log streaming, and dismiss

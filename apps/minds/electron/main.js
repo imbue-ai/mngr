@@ -9,7 +9,7 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { computeBundleViewBounds } = require('./view-layout');
-const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
+const { deeplinkTargetPath, deeplinkModalPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
 // URL classification for the two content surfaces lives in ./surface-routing so
 // it can be unit-tested under plain node (main.js can't be required outside
 // Electron). navigateBundle uses selectSurfaceForUrl / SURFACE_CONTENT to send
@@ -1892,6 +1892,7 @@ function overlayIdForUrl(url) {
   if (pathname === '/settings/modal') return 'settings';
   if (pathname === '/settings/ai-keys') return 'ai-keys';
   if (pathname === '/accounts/modal') return 'accounts';
+  if (pathname === '/create/inspiration/modal') return 'inspiration';
   if (/^\/accounts\/[A-Za-z0-9._-]+\/plan-modal$/.test(pathname)) return 'account-plan';
   if (/^\/sharing\/agent-[a-f0-9]+\/[^/]+\/modal$/i.test(pathname)) return 'sharing';
   if (/^\/workspace\/agent-[a-f0-9]+\/options\/modal$/i.test(pathname)) return 'ws-options';
@@ -4373,6 +4374,16 @@ function handleDeeplink(rawUrl) {
   }
   if (!mru) return; // only reachable mid-quit; nothing to focus or navigate
   focusBundle(mru);
+  // An Inspiration link (repo-carrying) pops the Create from Inspiration modal
+  // over the machine ONLY when the app is already inside one -- a modal is
+  // less disruptive there than a full-page takeover, and it can offer "Add to
+  // {this machine}". Outside a machine (home/general screens) it falls
+  // through to navigate to the full Create from Inspiration page instead.
+  const modalPath = deeplinkModalPath(rawUrl);
+  if (modalPath && mru.currentWorkspaceId) {
+    openModal(mru, backendBaseUrl + modalPath + '&current_machine=' + encodeURIComponent(mru.currentWorkspaceId));
+    return;
+  }
   const targetPath = deeplinkTargetPath(rawUrl);
   if (!targetPath) return; // bare/unknown/malformed minds:// -> focus only
   navigateBundle(mru, targetPath);

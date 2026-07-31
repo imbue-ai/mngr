@@ -16,7 +16,7 @@ from imbue.minds.desktop_client.templates import ADD_ACCOUNT_OPTION_VALUE
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
-from imbue.minds.desktop_client.templates import InspirationWorkspaceRow
+from imbue.minds.desktop_client.templates import InspirationMachineRow
 from imbue.minds.desktop_client.templates import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_account_plan_modal_page
@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_inspiration_create_page
+from imbue.minds.desktop_client.templates import render_inspiration_modal_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -916,6 +917,84 @@ def _render_inspiration(**kwargs: Any) -> str:
     return render_inspiration_create_page(git_url=_INSPIRATION_URL, **kwargs)
 
 
+def _render_inspiration_modal(**kwargs: Any) -> str:
+    return render_inspiration_modal_page(git_url=_INSPIRATION_URL, **kwargs)
+
+
+def test_render_inspiration_modal_hosts_the_add_flow_in_place() -> None:
+    # The modal is the same stepper the page renders, in the overlay's card, so
+    # the add flow is clicked through in place rather than handing off.
+    html = _render_inspiration_modal()
+    assert "You've opened an Inspiration" in html
+    assert _INSPIRATION_URL in html
+    # Modal shell: backdrop + dismiss affordance, and the modal-mode flag.
+    assert 'id="inspiration-modal-backdrop"' in html
+    assert "dismissInspirationModal()" in html
+    assert "var IS_MODAL = true" in html
+    assert 'id="inspiration-step-1"' in html
+    assert 'id="inspiration-step-add-2"' in html
+
+
+def test_render_inspiration_modal_create_hands_off_to_the_full_page() -> None:
+    # Creating a new machine is too big a job for a popup: from the modal it
+    # opens the full page, already past the chooser (?start=create).
+    html = _render_inspiration_modal(current_machine_id="agent-abc")
+    assert "function openCreateOnFullPage()" in html
+    assert "params.set('start', 'create')" in html
+    assert "leaveTo('/create/inspiration?' + params.toString())" in html
+    assert "if (IS_MODAL) openCreateOnFullPage();" in html
+    # The page itself still advances in place rather than navigating.
+    page = _render_inspiration()
+    assert "else chooseBranch('create');" in page
+
+
+def test_render_inspiration_modal_in_workspace_ends_at_paste_into_chat() -> None:
+    # Adding to the workspace the user is already in: the add branch's last step
+    # drops the picker and just says to paste the copied message into that chat.
+    html = _render_inspiration_modal(
+        current_machine_id="agent-abc",
+        current_machine_name="My Machine",
+        mngr_forward_origin="https://localhost:8421",
+    )
+    # Scope the label check to the button itself: the generic wording also
+    # appears as a JS string (the fallback used when no machine is current).
+    add_button = re.search(r"<button[^>]*choose-add-existing[^>]*>(.*?)</button>", html, re.S)
+    assert add_button is not None
+    assert "Add to My Machine" in add_button.group(1)
+    assert "Add to an existing machine" not in add_button.group(1)
+    assert "Paste it into the chat" in html
+    assert "paste it into My Machine's chat" in html
+    # No workspace picker in this variant.
+    assert "Select a machine" not in html
+    # The modal waits for an explicit Done -- it must not vanish on its own
+    # before the user has read the paste instruction.
+    assert re.search(r"<button[^>]*dismissInspirationModal\(\)[^>]*>Done</button>", html)
+    assert "setTimeout(closeModalIfAny" not in html
+
+
+def test_render_inspiration_modal_navigations_use_the_shell_bridge() -> None:
+    # Inside the overlay iframe a plain window.location would load the target
+    # INSIDE the modal (a window in a window), so navigation goes through the
+    # bridge and dismisses the modal.
+    html = _render_inspiration_modal(current_machine_id="agent-abc")
+    assert "function leaveTo(url)" in html
+    assert "window.minds.navigateContent(url)" in html
+    assert "leaveTo('/creating/' + res.data.operation_id)" in html
+
+
+def test_render_inspiration_page_honors_start_param_to_skip_chooser() -> None:
+    # The modal hands off with ?start=create so the page skips its step-1
+    # chooser. The value is rendered in server-side rather than read from
+    # window.location: the hub swaps pages in place and runs the new page's
+    # script BEFORE updating the address, so the query string would be stale.
+    html = _render_inspiration(start="create")
+    assert 'var START_BRANCH = "create"' in html
+    assert "if (START_BRANCH === 'create') chooseBranch('create');" in html
+    assert "else if (START_BRANCH === 'add') chooseBranch('add');" in html
+    # Without it the page opens on the chooser as usual.
+    assert 'var START_BRANCH = ""' in _render_inspiration()
+
+
 def test_render_inspiration_page_shows_chooser_options() -> None:
     html = _render_inspiration()
     assert "You've opened an Inspiration" in html
@@ -1000,10 +1079,10 @@ def test_render_inspiration_page_connector_solid_with_dotted_more_stub() -> None
 
 def test_render_inspiration_page_lists_workspaces_with_liveness_gating() -> None:
     rows = [
-        InspirationWorkspaceRow(agent_id="agent-aa", name="alpha", accent="#112233", liveness="RUNNING"),
-        InspirationWorkspaceRow(agent_id="agent-bb", name="beta", accent="#445566", liveness="STOPPED"),
+        InspirationMachineRow(agent_id="agent-aa", name="alpha", accent="#112233", liveness="RUNNING"),
+        InspirationMachineRow(agent_id="agent-bb", name="beta", accent="#445566", liveness="STOPPED"),
     ]
-    html = _render_inspiration(mngr_forward_origin="https://localhost:8421", workspace_rows=rows)
+    html = _render_inspiration(mngr_forward_origin="https://localhost:8421", machine_rows=rows)
     assert 'data-agent-id="agent-aa"' in html
     assert 'data-liveness="STOPPED"' in html
     assert 'data-default-href="https://localhost:8421/goto/agent-aa/"' in html
@@ -1015,7 +1094,7 @@ def test_render_inspiration_page_lists_workspaces_with_liveness_gating() -> None
 
 
 def test_render_inspiration_page_empty_workspace_list_links_to_new_flow() -> None:
-    html = _render_inspiration(workspace_rows=[])
+    html = _render_inspiration(machine_rows=[])
     assert "You don't have any machines yet." in html
     assert 'id="inspiration-empty-to-new"' in html
 
