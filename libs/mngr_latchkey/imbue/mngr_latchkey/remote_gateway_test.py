@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from packaging.version import Version
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
@@ -13,6 +14,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
+from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
@@ -131,6 +133,18 @@ def _outer(result: CommandResult, name: str = "vps-test") -> OuterHostInterface:
 
 def _stub(outer: OuterHostInterface) -> _StubOuter:
     return cast(_StubOuter, outer)
+
+
+def test_minimum_version_is_not_newer_than_the_version_we_install() -> None:
+    """A floor newer than the version we install means a half-finished bump.
+
+    See the comment above :data:`LATCHKEY_MIN_VERSION` for why the pins move
+    together.
+    """
+    assert Version(LATCHKEY_MIN_VERSION) <= Version(LATCHKEY_VERSION), (
+        f"LATCHKEY_MIN_VERSION={LATCHKEY_MIN_VERSION} is newer than the installed "
+        f"LATCHKEY_VERSION={LATCHKEY_VERSION}; raise the install pin to at least the minimum."
+    )
 
 
 def test_ensure_latchkey_installed_issues_single_idempotent_command() -> None:

@@ -123,12 +123,18 @@ UPSTREAM_DATA_FORMAT_VERSION_FILENAME: Final[str] = "data-format-version"
 CREDENTIALS_STORE_FILENAME: Final[str] = "credentials.json.enc"
 
 # Minimum version of the upstream ``latchkey`` CLI this package will operate
-# against. Kept in lockstep with the version we install/bundle (see
-# ``LATCHKEY_VERSION``). 3.2.0 was the first release that reports the account
-# whose credentials it injects to detent as ``customMetadata.account``, which
-# the per-account permission grants (:mod:`imbue.mngr_latchkey.account_scopes`)
-# depend on.
-LATCHKEY_MIN_VERSION: Final[str] = "3.2.0"
+# against. :meth:`Latchkey._check_minimum_version` enforces it against the
+# binary this process runs locally -- the copy bundled with the minds app, or
+# a CLI-only user's own install -- so the floor must never exceed the version
+# in ``apps/minds/package.json``, or the app rejects the very binary it ships.
+# Move it in lockstep with the versions we install
+# (:data:`imbue.mngr_latchkey.remote_gateway.LATCHKEY_VERSION` and the
+# in-workspace pin in default-workspace-template) rather than to track what the
+# code strictly needs: the newest release with a hard dependency here is 3.2.0,
+# the first to report the account whose credentials it injects to detent as
+# ``customMetadata.account`` -- what the per-account permission grants
+# (:mod:`imbue.mngr_latchkey.account_scopes`) read.
+LATCHKEY_MIN_VERSION: Final[str] = "3.3.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
