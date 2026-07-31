@@ -134,7 +134,11 @@ def test_prevent_async_await() -> None:
     # hypercorn serving-path tests (a minimal lifespan-only ASGI app and a
     # shutdown trigger), which necessarily run inside the asyncio loop under
     # test.
-    rc.check_async_await(_DIR, snapshot(48))
+    # 50: two more awaits in server.py's WebSocket forwarder, which is
+    # inherently async (FastAPI WS handler): racing the two relay legs with
+    # asyncio.wait and explicitly closing the client leg when the backend
+    # dies, so a send-quiet client cannot be left half-open forever.
+    rc.check_async_await(_DIR, snapshot(50))
 
 
 # --- Hardcoded paths ---
@@ -259,7 +263,7 @@ def test_prevent_bare_tmux_targets() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(1))
+    rc.check_if_elif_without_else(_DIR, snapshot(0))
 
 
 def test_prevent_inline_functions() -> None:

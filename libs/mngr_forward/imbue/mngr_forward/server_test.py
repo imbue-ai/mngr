@@ -8,6 +8,7 @@ surfaces using ``starlette.testclient.TestClient``.
 
 import io
 import json
+import threading
 from pathlib import Path
 
 import httpx
@@ -15,6 +16,8 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from websockets.sync.server import ServerConnection
+from websockets.sync.server import serve as ws_serve
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.auth import FileAuthStore
@@ -1244,3 +1247,69 @@ def test_select_ws_receive_payload_selects_by_value_not_key() -> None:
     # The regression case: a binary frame carries text=None alongside its bytes.
     assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": b"world", "text": None}) == b"world"
     assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": None, "text": None}) is None
+
+
+def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> None:
+    """When the backend WS closes, the client leg must be closed too.
+
+    Regression test for the half-open wedge behind the chat-desync incidents:
+    the forwarder used to ``gather`` both relay tasks, so after a backend death
+    the client->backend task kept blocking on a send-quiet client (the system
+    interface's ``/api/ws`` sends nothing after registration) and the client
+    socket stayed open forever. The browser never observed a close, never
+    reconnected, and silently stopped receiving all real-time updates while
+    the server saw zero clients (agent layout ops failed with 412).
+    """
+
+    def backend_handler(connection: ServerConnection) -> None:
+        connection.send("hello-from-backend")
+        # Returning closes the backend side of the connection.
+
+    backend_server = ws_serve(backend_handler, "127.0.0.1", 0)
+    backend_port = backend_server.socket.getsockname()[1]
+    server_thread = threading.Thread(target=backend_server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        auth_store = FileAuthStore(data_directory=tmp_path)
+        resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+        agent_id = AgentId()
+        resolver.add_known_agent(agent_id)
+        resolver.update_services(agent_id, {"system_interface": f"http://127.0.0.1:{backend_port}"})
+        preauth = "preauth-cookie-ws-backend-close"
+        app = create_forward_app(
+            auth_store=auth_store,
+            resolver=resolver,
+            tunnel_manager=SSHTunnelManager(),
+            envelope_writer=EnvelopeWriter(output=io.StringIO()),
+            listen_host="127.0.0.1",
+            listen_port=18421,
+            preauth_cookie_value=preauth,
+            allow_host_loopback=True,
+        )
+
+        with TestClient(app, base_url=f"http://{agent_id}.localhost:18421") as client:
+            with client.websocket_connect(
+                f"ws://{agent_id}.localhost:18421/api/ws",
+                headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            ) as websocket_session:
+                assert websocket_session.receive_text() == "hello-from-backend"
+                # The client never sends: the close must reach it anyway. Run
+                # the receive on a bounded thread so a regression (client leg
+                # left half-open) fails fast instead of hanging the suite.
+                outcomes: list[str] = []
+
+                def _receive_until_close() -> None:
+                    try:
+                        websocket_session.receive_text()
+                        outcomes.append("unexpected-message")
+                    except WebSocketDisconnect:
+                        outcomes.append("disconnect")
+
+                receiver = threading.Thread(target=_receive_until_close, daemon=True)
+                receiver.start()
+                receiver.join(timeout=10)
+                assert outcomes == ["disconnect"], (
+                    f"client leg did not observe the backend close (outcomes={outcomes})"
+                )
+    finally:
+        backend_server.shutdown()

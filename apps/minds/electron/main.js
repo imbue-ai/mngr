@@ -39,6 +39,17 @@ initElectronLogging();
 // time, long after ``bundles`` is populated).
 initSentry({ getRendererName: rendererNameForWebContents });
 
+// Expose Chromium's DevTools protocol (CDP) when MINDS_REMOTE_DEBUGGING_PORT
+// is set, for driving the real client with Playwright/CDP during development
+// (`just minds-start`/`just minds-start-cloud` take an optional debug-port
+// argument that sets this). An env var rather than a CLI flag because `pnpm
+// start` hardcodes `electron .` with no argument passthrough, and Chromium
+// switches must be appended before the app's 'ready' event. The port binds to
+// 127.0.0.1 only.
+if (process.env.MINDS_REMOTE_DEBUGGING_PORT) {
+  app.commandLine.appendSwitch('remote-debugging-port', process.env.MINDS_REMOTE_DEBUGGING_PORT);
+}
+
 // Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
 // is undefined on macOS, so todesktop's constructor throws.
 if (app.isPackaged) {

@@ -37,6 +37,7 @@ from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
+from fastapi.websockets import WebSocketState
 from jinja2 import Environment
 from jinja2 import PackageLoader
 from jinja2 import select_autoescape
@@ -730,10 +731,55 @@ async def _handle_workspace_forward_websocket(
         )
         async with backend_ws_conn as backend_ws:
             await websocket.accept(subprotocol=backend_ws.subprotocol)
-            await asyncio.gather(
-                _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws),
-                _forward_backend_to_client(client_websocket=websocket, backend_ws=backend_ws, agent_id=agent_id),
+            logger.info("WS forward established for {} path={}", agent_id, websocket.url.path)
+            client_to_backend = asyncio.create_task(
+                _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws)
             )
+            backend_to_client = asyncio.create_task(
+                _forward_backend_to_client(client_websocket=websocket, backend_ws=backend_ws, agent_id=agent_id)
+            )
+            # Race the two legs instead of awaiting both: when the backend leg
+            # dies, the client->backend task would otherwise keep blocking on a
+            # send-quiet client (the system interface's /api/ws sends nothing
+            # after registration), leaving the client's socket half-open
+            # forever -- the browser never learns the backend is gone and
+            # silently stops receiving all real-time updates.
+            try:
+                done, pending = await asyncio.wait(
+                    {client_to_backend, backend_to_client},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                # asyncio.wait, unlike gather, does not cancel the awaited
+                # tasks if this coroutine is itself cancelled (e.g. at server
+                # shutdown), so cancel both here; the relay tasks must not
+                # outlive the handler. A no-op on tasks that already finished.
+                client_to_backend.cancel()
+                backend_to_client.cancel()
+            # return_exceptions captures the pending task's expected
+            # CancelledError while still re-raising a cancellation of this
+            # handler itself; anything else the task raised during teardown is
+            # unexpected and must at least be logged.
+            pending_results = await asyncio.gather(*pending, return_exceptions=True)
+            for pending_result in pending_results:
+                if isinstance(pending_result, BaseException) and not isinstance(
+                    pending_result, asyncio.CancelledError
+                ):
+                    logger.warning("WS relay task for {} raised during teardown: {!r}", agent_id, pending_result)
+            first_ended = "client" if client_to_backend in done else "backend"
+            for task in done:
+                # The relay helpers swallow all expected disconnect errors
+                # themselves, so anything raised here is an unexpected bug and
+                # must propagate instead of being dropped with the task object.
+                task.result()
+        # Close the client leg explicitly so the browser observes the close and
+        # reconnects. A no-op if the client already disconnected.
+        if websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                await websocket.close(code=1011, reason="Backend WebSocket closed")
+            except RuntimeError:
+                pass
+        logger.info("WS forward ended for {} path={} ({} leg ended first)", agent_id, websocket.url.path, first_ended)
     except (
         ConnectionRefusedError,
         OSError,
