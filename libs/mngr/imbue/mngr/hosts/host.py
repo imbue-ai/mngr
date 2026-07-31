@@ -500,6 +500,10 @@ _SIGWINCH_PANES_SCRIPT_NAME: Final[str] = "sigwinch_panes.sh"
 _SIGWINCH_MODE_FIT: Final[str] = "fit"
 _SIGWINCH_MODE_NUDGE: Final[str] = "nudge"
 
+# Script (at the root of the agent's state dir) holding the agent's launch command, which the
+# agent window sources rather than having it typed in. See _build_agent_launch_steps.
+_AGENT_LAUNCH_SCRIPT_NAME: Final[str] = "launch_agent.sh"
+
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
@@ -3237,9 +3241,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def start_agents(self, agent_ids: Sequence[AgentId]) -> None:
         """Start agents by creating their tmux sessions.
 
-        Creates a tmux session and uses send-keys to type and execute the command.
-        This allows the user to hit ctrl-c and then up arrow to see and restart
-        the command.
+        Creates a tmux session, writes the agent's command to a launch script, and uses
+        send-keys to source it (see _build_agent_launch_steps for why it is not typed in
+        directly). This allows the user to hit ctrl-c and then up arrow to restart the
+        command, and leaves the exact command that ran readable on disk. Commands for
+        additional windows are still typed in directly.
 
         If additional_commands are configured, creates new tmux windows in the
         same session for each additional command.
@@ -3857,6 +3863,50 @@ def _parse_porcelain_line(line: str) -> list[str]:
 
 
 @pure
+def _build_pane_send_keys_steps(quoted_exact_window: str, typed_command: str) -> list[str]:
+    return [
+        f"tmux send-keys -t {quoted_exact_window} -l -- {shlex.quote(typed_command)}",
+        f"tmux send-keys -t {quoted_exact_window} Enter",
+    ]
+
+
+@pure
+def _build_agent_launch_steps(
+    launch_script_path: Path,
+    command: str,
+    quoted_exact_window: str,
+) -> list[str]:
+    """Steps that write the agent's command to a launch script and source it in its window.
+
+    The command cannot simply be typed. ``send-keys`` writes into the pane's pty, and a pty in
+    canonical mode -- where a just-started shell sits until its line editor takes over -- silently
+    discards input past its buffer (1KB on macOS) while both the write and tmux still report
+    success. Because the keys are sent in the same tmux batch that creates the session, they
+    routinely land inside that startup window, so a long command arrives truncated mid-token and
+    the shell blocks on an unterminated construct with nothing logged anywhere. Sourcing keeps
+    what crosses the pty to a short fixed-length line however long the command grows, and records
+    on disk exactly what ran.
+
+    This makes the POSIX ``.`` a requirement on the agent window's shell (the user's login shell).
+    That is not a new constraint in practice: mngr's generated launch chains are already POSIX
+    shell -- they use ``$(...)``, ``export``, and ``{ ... } || { ... }`` -- so a shell that cannot
+    handle ``.`` could not have run them typed either. Commands for *additional* windows are still
+    typed directly, because those windows inherit the user's tmux ``default-command``, which need
+    not be a POSIX shell at all.
+    """
+    quoted_script_path = shlex.quote(str(launch_script_path))
+    # printf '%s' rather than a heredoc so each step stays a single && chain link, and
+    # rather than echo because %s (unlike %b) never interprets escapes in the payload.
+    write_steps = [
+        f"mkdir -p {shlex.quote(str(launch_script_path.parent))}",
+        f"printf '%s\\n' {shlex.quote(command)} > {quoted_script_path}",
+    ]
+    return write_steps + _build_pane_send_keys_steps(
+        quoted_exact_window=quoted_exact_window, typed_command=f". {quoted_script_path}"
+    )
+
+
+@pure
 def _build_start_agent_shell_command(
     agent: AgentInterface,
     session_name: str,
@@ -4031,19 +4081,30 @@ def _build_start_agent_shell_command(
             f" -c {shlex.quote(str(agent.work_dir))}"
             f" {shlex.quote(env_shell_cmd)}"
         )
-        steps.append(f"tmux send-keys -t {quoted_exact_named_window} -l -- {shlex.quote(str(named_cmd.command))}")
-        steps.append(f"tmux send-keys -t {quoted_exact_named_window} Enter")
+        # Typed rather than sourced: these windows inherit the user's tmux default-command,
+        # which need not be a POSIX shell (see _build_agent_launch_steps).
+        steps.extend(
+            _build_pane_send_keys_steps(
+                quoted_exact_window=quoted_exact_named_window,
+                typed_command=str(named_cmd.command),
+            )
+        )
 
     # If we created additional windows, select the first window (the main agent)
     # before sending the agent command
     if additional_commands:
         steps.append(f"tmux select-window -t {quoted_exact_agent_window}")
 
-    # Send the agent command as literal keys, then Enter to execute.
+    # Run the agent command from its launch script, then Enter to execute.
     # Target the agent's primary window by name explicitly so this works even
     # after additional windows have been created (which changes the active window).
-    steps.append(f"tmux send-keys -t {quoted_exact_agent_window} -l -- {shlex.quote(command)}")
-    steps.append(f"tmux send-keys -t {quoted_exact_agent_window} Enter")
+    steps.extend(
+        _build_agent_launch_steps(
+            launch_script_path=get_agent_state_dir_path(host_dir, agent.id) / _AGENT_LAUNCH_SCRIPT_NAME,
+            command=command,
+            quoted_exact_window=quoted_exact_agent_window,
+        )
+    )
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content

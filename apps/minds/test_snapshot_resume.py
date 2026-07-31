@@ -1152,6 +1152,11 @@ def _restic_env_prefix() -> str:
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(900)
+# Restarting the workspace's services at the end of the restore intermittently fails with
+# `xvfb: ERROR (spawn error)`, which fails the whole operation and so the test. The restore
+# itself completes; only bringing one service back races. Retried while the underlying spawn
+# race is investigated -- the marker is what routes this into the retrying offload group.
+@pytest.mark.flaky
 def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     running_workspace: _ResumedWorkspace,
     tmp_path: Path,

@@ -11,7 +11,10 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Messages at or above this length use load-buffer/paste-buffer instead of send-keys
-# to avoid tmux "command too long" errors. Used by both base_agent.py and host.py.
+# to avoid tmux "command too long" errors. Used by base_agent.py, for messages sent to an
+# already-running agent. The launch path does not use this: it faces a different limit
+# (a pty's canonical-mode input buffer, not tmux's argv limit) and sources a script
+# unconditionally instead -- see _build_agent_launch_steps in host.py.
 LONG_MESSAGE_THRESHOLD: Final[int] = 1024
 
 

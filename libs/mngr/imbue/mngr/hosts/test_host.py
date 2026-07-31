@@ -31,8 +31,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import InvalidActivityTypeError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.host import _AGENT_LAUNCH_SCRIPT_NAME
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
@@ -782,13 +784,16 @@ def test_unset_vars_applied_during_agent_start(
     window_target = TmuxWindowTarget(session_name=session_name, window=0)
     quoted_window_target = window_target.as_shell_arg()
 
-    # Wait for the tmux session to exist
+    # Wait for the tmux session to exist and the agent's command to have actually run. The
+    # command is sourced from its launch script rather than typed, so the pane never shows the
+    # command text; waiting on the backgrounded sleep instead proves the command really
+    # executed, which a pane-text match would not (the script's path shows up in the pane even
+    # in a "no such file or directory" failure line).
     def session_ready() -> bool:
         result = host.execute_idempotent_command(f"tmux has-session -t {quoted_session_target}")
         if not result.success:
             return False
-        pane_content = capture_tmux_pane_content(host, window_target)
-        return pane_content is not None and "sleep 736249" in pane_content
+        return host.execute_idempotent_command("pgrep -f 'sleep 736249'").success
 
     wait_for(session_ready, timeout=30.0, poll_interval=0.5, error_message="tmux session not ready")
 
@@ -827,6 +832,62 @@ def test_unset_vars_applied_during_agent_start(
     )
 
     host.stop_agents([agent.id])
+
+
+@pytest.mark.tmux
+def test_start_agent_runs_command_too_long_to_type_into_the_pane(
+    temp_host_dir: Path,
+    per_host_dir: Path,
+    temp_work_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
+    tmp_path: Path,
+) -> None:
+    """An agent command far longer than the pane's pty input buffer must still run in full.
+
+    send-keys writes into the pane's pty, and a pty in canonical mode -- where a just-started
+    shell sits until its line editor takes over -- silently discards input past its buffer (1KB
+    on macOS) while still reporting success. A command of this length used to arrive truncated
+    mid-token, leaving the pane shell blocked forever on an unterminated construct. The marker
+    is written by the last statement of the command, so it appears only if every byte survived.
+    """
+    config = MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix)
+    mngr_ctx = MngrContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
+    provider = LocalProviderInstance(name=ProviderInstanceName("local"), host_dir=per_host_dir, mngr_ctx=mngr_ctx)
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    marker_file = tmp_path / "long_command_marker"
+    padding = "".join(f'export PAD_{idx}="padding value {idx}" && ' for idx in range(40))
+    agent_command = f"{padding}printf survived > {marker_file}"
+    assert len(agent_command) > 1024, "command must exceed the pty input buffer to exercise the regression"
+
+    agent = host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("long-command-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString(agent_command),
+        ),
+    )
+    session_name = f"{mngr_test_prefix}{agent.name}"
+
+    with tmux_session_cleanup(session_name):
+        host.start_agents([agent.id])
+
+        wait_for(
+            lambda: marker_file.exists() and marker_file.read_text() == "survived",
+            timeout=15.0,
+            error_message="Long agent command did not run to completion (truncated on the way to the pane?)",
+        )
+
+        # The launch script the pane sourced must hold the command byte-for-byte.
+        script_path = get_agent_state_dir_path(host.host_dir, agent.id) / _AGENT_LAUNCH_SCRIPT_NAME
+        assert host.read_text_file(script_path) == agent_command + "\n"
 
 
 # =============================================================================

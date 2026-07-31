@@ -42,6 +42,7 @@ from imbue.mngr.errors import InvalidActivityTypeError
 from imbue.mngr.errors import LockLostError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
@@ -49,6 +50,7 @@ from imbue.mngr.hosts.host import _LOCK_ACQUIRED_MARKER
 from imbue.mngr.hosts.host import _LOCK_TIMED_OUT_MARKER
 from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
 from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
+from imbue.mngr.hosts.host import _build_agent_launch_steps
 from imbue.mngr.hosts.host import _build_generation_increment_fragment
 from imbue.mngr.hosts.host import _build_remote_lock_command
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
@@ -703,12 +705,13 @@ def _build_command_with_defaults(
     onboarding_text: str | None = None,
     primary_window_name: str = "agent",
     tmux_options: AgentTmuxOptions | None = None,
+    command: str = "sleep 1000",
 ) -> str:
     """Call _build_start_agent_shell_command with standard test defaults."""
     return _build_start_agent_shell_command(
         agent=agent,
         session_name=f"mngr-{agent.name}",
-        command="sleep 1000",
+        command=command,
         additional_commands=additional_commands if additional_commands is not None else [],
         env_shell_cmd="bash -c 'exec \"${MNGR_SAVED_DEFAULT_TMUX_COMMAND:-${SHELL:-bash}}\"'",
         tmux_config_path=Path("/tmp/tmux.conf"),
@@ -1149,6 +1152,114 @@ def test_build_start_agent_shell_command_includes_onboarding_hook_tmux_user(
     assert "set-hook" in result
     assert "display-popup" in result
     assert "client-attached[99]" in result
+
+
+def _get_send_keys_literal_payloads(built_command: str) -> list[str]:
+    """The literal strings every `tmux send-keys -l -- <payload>` in a built command types."""
+    payloads: list[str] = []
+    for step in built_command.split(" && "):
+        if "send-keys" not in step or " -l -- " not in step:
+            continue
+        payloads.append(shlex.split(step.split(" -l -- ", 1)[1])[0])
+    return payloads
+
+
+def _get_expected_launch_script_path(temp_host_dir: Path, agent: BaseAgent) -> Path:
+    return get_agent_state_dir_path(temp_host_dir, agent.id) / "launch_agent.sh"
+
+
+def test_build_start_agent_shell_command_typed_payload_does_not_scale_with_command_length(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """What send-keys types must not grow with the agent command, at any command length.
+
+    A pane's shell is still in canonical mode when the launch keys arrive, and a pty silently
+    discards input past its buffer (1KB on macOS) while still reporting success. If the typed
+    payload tracked the command's length, a long command would land truncated mid-token and the
+    shell would hang on an unterminated construct with no error anywhere.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    short_result = _build_command_with_defaults(agent, temp_host_dir, command="sleep 1000")
+    long_command = "echo " + "x" * 4000
+    long_result = _build_command_with_defaults(agent, temp_host_dir, command=long_command)
+
+    expected_payloads = [f". {_get_expected_launch_script_path(temp_host_dir, agent)}"]
+    assert _get_send_keys_literal_payloads(short_result) == expected_payloads
+    assert _get_send_keys_literal_payloads(long_result) == expected_payloads
+
+    # The command still has to reach the host intact -- just via the script, not the pty.
+    assert long_command in long_result
+
+
+def test_build_start_agent_shell_command_writes_agent_command_to_launch_script(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The agent's command is written to a launch script at the root of its state dir."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, command="sleep 1000")
+
+    expected_script_path = _get_expected_launch_script_path(temp_host_dir, agent)
+    assert f"printf '%s\\n' 'sleep 1000' > {expected_script_path}" in result
+    assert f"mkdir -p {expected_script_path.parent}" in result
+
+
+def test_build_start_agent_shell_command_types_additional_window_commands_directly(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Additional windows keep having their commands typed, never sourced from a script.
+
+    Those windows inherit the user's tmux default-command, which need not be a POSIX shell --
+    elvish, for instance, has no `.` builtin, so a sourced line would be a syntax error there.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    additional_commands = [
+        NamedCommand(command=CommandString("tail -f /var/log/syslog"), window_name="logs"),
+        NamedCommand(command=CommandString("htop"), window_name=None),
+    ]
+    result = _build_command_with_defaults(
+        agent, temp_host_dir, command="sleep 1000", additional_commands=additional_commands
+    )
+
+    assert _get_send_keys_literal_payloads(result) == [
+        "tail -f /var/log/syslog",
+        "htop",
+        f". {_get_expected_launch_script_path(temp_host_dir, agent)}",
+    ]
+    # Only the agent's command is ever written to a script.
+    assert result.count("printf '%s\\n'") == 1
+
+
+def test_build_agent_launch_steps_writes_command_verbatim(tmp_path: Path) -> None:
+    """Running the generated write steps must reproduce the command byte-for-byte.
+
+    Launch commands carry shell metacharacters, quotes, and backslashes that a careless
+    write step would mangle (`echo` interpreting escapes, quoting collapsing a `$(...)`),
+    which would corrupt the command silently rather than fail loudly.
+    """
+    launch_script_path = tmp_path / "state" / "launch_agent.sh"
+    command = (
+        '( $DIR/tasks.sh a b ) & S=$(cat "$DIR/id" 2>/dev/null || true);'
+        ' export X="${S:-fallback}" && { test -s "$D/f.jsonl" || find "$D" -name \'*.jsonl\' | grep -q . ; }'
+        r" && printf 'literal \n not newline' && claude --resume \"$X\""
+    )
+    steps = _build_agent_launch_steps(
+        launch_script_path=launch_script_path,
+        command=command,
+        quoted_exact_window=shlex.quote("=mngr-test:=agent"),
+    )
+
+    # Run only the mkdir and printf steps; the two tmux send-keys steps need a live server.
+    write_steps = [step for step in steps if "send-keys" not in step]
+    assert len(write_steps) == 2
+    subprocess.run(" && ".join(write_steps), shell=True, check=True)
+
+    assert launch_script_path.read_text() == command + "\n"
 
 
 # =========================================================================

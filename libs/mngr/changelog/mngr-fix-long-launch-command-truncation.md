@@ -1,0 +1,7 @@
+Fixed agent creation hanging with a truncated, half-typed command in the tmux pane.
+
+The agent's command was typed into its window's shell with `tmux send-keys`, which writes into the pane's pty. A pty in canonical mode -- where a just-started shell sits until its line editor takes over -- silently discards input past its buffer (1KB on macOS) while both the write and tmux still report success. Because the keys are sent in the same tmux batch that creates the session, they routinely land inside that startup window, so any command longer than ~1KB arrived truncated mid-token and left the shell blocked on an unterminated construct with nothing logged anywhere. Claude agents were the visible casualty: their launch command recently grew past 1KB, so `mngr create` reliably produced a dead session showing a partial command.
+
+The agent's command is now written to a `launch_agent.sh` script in the agent's state dir and sourced, so what crosses the pty is a short fixed-length line however long the command grows, and the script records on disk exactly what ran. Up-arrow in the pane still re-runs the launch, and the script is removed along with the rest of the agent's state when the agent is destroyed.
+
+This means the agent window's shell must understand the POSIX `.` builtin. In practice that is not a new requirement, since mngr's generated launch commands are already POSIX shell. Commands configured for *additional* windows are still typed in directly, because those windows inherit the user's tmux `default-command`, which need not be a POSIX shell.
