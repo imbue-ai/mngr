@@ -1,5 +1,6 @@
 """Shared non-fixture test helpers for desktop_client tests."""
 
+import hashlib
 import os
 import re
 import subprocess
@@ -10,6 +11,12 @@ from pathlib import Path
 from loguru import logger as loguru_logger
 
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
+from imbue.mngr.primitives import HostId
+
+
+def device_id_for_test(name: str) -> HostId:
+    """Deterministic ``HostId``-shaped device id for a named fake device in tests."""
+    return HostId(f"host-{hashlib.sha256(name.encode()).hexdigest()[:32]}")
 
 
 def is_workspace_options_pane_hidden(html: str, pane: str) -> bool:

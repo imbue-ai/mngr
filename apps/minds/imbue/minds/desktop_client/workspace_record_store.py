@@ -57,6 +57,7 @@ from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 
 _RECORDS_DIRNAME = "workspace_records"
@@ -185,18 +186,6 @@ def replica_record_from_wire(wire: dict[str, object]) -> ReplicaRecord:
         revision=int(str(wire.get("revision", 0))),
         is_dirty=False,
     )
-
-
-def read_device_id(mngr_host_dir: Path) -> str:
-    """Return this install's device id (the minds env's mngr host_id file), or '' when absent."""
-    path = mngr_host_dir / "host_id"
-    if not path.is_file():
-        return ""
-    try:
-        return path.read_text().strip()
-    except OSError as e:
-        logger.warning("Could not read the mngr host_id file at {}: {}", path, e)
-        return ""
 
 
 def read_device_label() -> str:
@@ -368,12 +357,14 @@ class WorkspaceRecordStore(MutableModel):
         default=None,
         frozen=True,
         description=(
-            "The minds env's mngr host dir (SSH key material + device id live under it). "
+            "The minds env's mngr host dir (SSH key material lives under it). "
             "None falls back to paths.mngr_host_dir (the default-env convention)."
         ),
     )
     cli: ImbueCloudCli | None = Field(default=None, frozen=True, description="Transport; None disables pushes/pulls")
-    device_id: str = Field(frozen=True, description="This install's mngr host_id (record provenance)")
+    device_id: HostId = Field(
+        frozen=True, description="This install's stable device id (record provenance; see device_identity)"
+    )
     device_label: str = Field(frozen=True, description="This device's human-readable name")
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _records_by_user_id: dict[str, dict[str, ReplicaRecord]] = PrivateAttr(default_factory=dict)
@@ -1240,8 +1231,6 @@ class WorkspaceRecordStore(MutableModel):
         """
         if not resolver.has_completed_initial_discovery():
             return
-        if not self.device_id:
-            return
         active_ids = {str(aid) for aid in resolver.list_active_workspace_ids()}
         for record in self.list_records(user_id):
             if record.state != RECORD_STATE_DESTROYED or record.hosting_device_id != self.device_id:
@@ -1283,12 +1272,6 @@ class WorkspaceRecordStore(MutableModel):
         the next poll hasn't seen it yet).
         """
         if not resolver.has_completed_initial_discovery():
-            return
-        if not self.device_id:
-            # Without a real device id (missing/unreadable mngr host_id file)
-            # this install cannot attribute hosted rows to itself: another
-            # id-less install's rows would match an empty id and get destroyed.
-            logger.warning("Skipping absent-host tombstoning: this install has no device id")
             return
         known_ids = {str(aid) for aid in resolver.list_known_workspace_ids()}
         errored_providers = {str(name) for name in resolver.get_provider_errors()}

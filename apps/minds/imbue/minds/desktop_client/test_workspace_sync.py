@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.primitives import AgentId
@@ -50,7 +51,7 @@ def _make_device(
     record_store = WorkspaceRecordStore(
         paths=paths,
         cli=cli,
-        device_id=f"device-{name}",
+        device_id=device_id_for_test(name),
         device_label=name,
     )
     session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)
@@ -94,7 +95,7 @@ def test_two_device_sync_round_trip_with_unlock_and_env_materialization(tmp_path
     assert len(records_b) == 1
     assert records_b[0].display_name == "my-workspace"
     assert records_b[0].device_label == "laptop"
-    assert records_b[0].hosting_device_id == "device-laptop"
+    assert records_b[0].hosting_device_id == device_id_for_test("laptop")
 
     # Metadata is readable without any password; secrets are not (locked).
     assert not is_account_unlocked(paths_b, _USER_ID)
@@ -250,7 +251,7 @@ def _make_profiled_device(
         paths=paths,
         mngr_host_dir=mngr_host_dir,
         cli=cli,
-        device_id=f"device-{name}",
+        device_id=device_id_for_test(name),
         device_label=name,
     )
     session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)

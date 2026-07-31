@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.dek_store import ensure_dek
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
@@ -36,7 +37,7 @@ def _make_profiled_store(tmp_path: Path, cli: FakeImbueCloudCli) -> WorkspaceRec
         paths=paths,
         mngr_host_dir=mngr_host_dir,
         cli=cli,
-        device_id="device-tilestate",
+        device_id=device_id_for_test("tilestate"),
         device_label="tilestate",
     )
 

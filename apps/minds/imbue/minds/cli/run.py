@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
+from imbue.minds.desktop_client.device_identity import get_or_create_device_id
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import SupervisorProducerRemediator
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
@@ -95,7 +96,6 @@ from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_TEMPLATE_GIT_
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import is_local_workspace_defaults_opt_in
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
-from imbue.minds.desktop_client.workspace_record_store import read_device_id
 from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import start_active_env_state_container
@@ -411,7 +411,9 @@ def run(
         paths=paths,
         mngr_host_dir=mngr_host_dir,
         cli=imbue_cloud_cli,
-        device_id=read_device_id(mngr_host_dir),
+        # Read-or-create eagerly so this install always has a real identity
+        # from its very first session (a failure aborts startup).
+        device_id=get_or_create_device_id(data_directory, mngr_host_dir),
         device_label=read_device_label(),
     )
     session_store = MultiAccountSessionStore(

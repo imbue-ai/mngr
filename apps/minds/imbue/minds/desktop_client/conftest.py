@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import ServiceName
 from imbue.minds.utils.mngr_caller import MngrCaller
@@ -268,7 +269,7 @@ def make_session_store_for_test(data_dir: Path, cli: ImbueCloudCli | None = None
     record_store = WorkspaceRecordStore(
         paths=WorkspacePaths(data_dir=data_dir),
         cli=effective_cli,
-        device_id="device-test",
+        device_id=device_id_for_test("session-store"),
         device_label="test-device",
     )
     return MultiAccountSessionStore(data_dir=data_dir, cli=effective_cli, record_store=record_store)

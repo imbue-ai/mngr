@@ -122,6 +122,12 @@ class SyncCryptoError(MindError):
     ...
 
 
+class DeviceIdError(MindError):
+    """Raised when this install's device id file cannot be read, created, or validated."""
+
+    ...
+
+
 class WorkspaceSyncError(MindError):
     """Raised when a workspace-record sync (push/pull/reconcile) operation fails."""
 

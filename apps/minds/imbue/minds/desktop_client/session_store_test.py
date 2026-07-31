@@ -10,6 +10,7 @@ from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import derive_user_id_prefix
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -172,7 +173,7 @@ def test_associate_created_workspace_seeds_a_queued_record(tmp_path: Path) -> No
     pushed = cli.sync_records_by_email["a@b.com"]["host-new"]
     assert pushed["display_name"] == "my new machine"
     assert pushed["color"] == "#112233"
-    assert pushed["hosting_device_id"] == "device-test"
+    assert pushed["hosting_device_id"] == device_id_for_test("session-store")
 
 
 def test_associate_created_workspace_queues_offline(tmp_path: Path) -> None:

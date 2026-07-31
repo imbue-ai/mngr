@@ -26,6 +26,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
@@ -45,7 +46,7 @@ def _make_record_store(tmp_path: Path) -> WorkspaceRecordStore:
     return WorkspaceRecordStore(
         paths=WorkspacePaths(data_dir=tmp_path),
         cli=None,
-        device_id="device-test",
+        device_id=device_id_for_test("ai-keys"),
         device_label="test-device",
     )
 

@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import InitialSyncState
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -33,7 +34,7 @@ def _make_device(
     record_store = WorkspaceRecordStore(
         paths=paths,
         cli=cli,
-        device_id=f"device-{name}",
+        device_id=device_id_for_test(name),
         device_label=name,
     )
     session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)
