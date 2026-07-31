@@ -21,6 +21,17 @@ EXTRAS_UPLOADED_FILES_KEY = "uploaded_files"
 DEFAULT_REGION = "us-west-2"
 # rather arbitrary but better to err on the side of caution when going from the current unbounded
 MAXIMUM_QUEUED_S3_UPLOADS = 50
+# How many uploads may be in flight at once. A report's attachment sweep is on the order of ten
+# files, so this clears one in a round or two rather than serializing it. Pinned rather than left
+# to the pool default (min(32, cpu_count + 4)) because each worker holds its own client and, once it
+# has connected, its own copy of the CA bundle -- about 1MB of resident memory per worker.
+S3_UPLOAD_THREAD_COUNT = 8
+
+
+class _ThreadS3Client(threading.local):
+    """Holds the calling thread's S3 client, defaulting to none until that thread creates one."""
+
+    client: Any = None
 
 
 class _S3Uploader(FrozenModel):
@@ -28,28 +39,52 @@ class _S3Uploader(FrozenModel):
     region: str
     maximum_concurrency: int = MAXIMUM_QUEUED_S3_UPLOADS
 
-    _s3_client: Any = PrivateAttr()
+    # One S3 client per upload thread, never shared. A boto3 client owns a single urllib3
+    # PoolManager and therefore a single SSLContext, and urllib3 calls load_verify_locations()
+    # on that context for every new connection it opens -- which mutates the context's OpenSSL
+    # X509_STORE. OpenSSL walks that same store's lookup list *without* holding the store lock
+    # while verifying a peer certificate, so a shared client segfaults the whole process when
+    # several uploads open their connections at once (openssl/openssl#24480, closed as caller
+    # error). A client per thread gives each handshake its own store, with no concurrent writer.
+    _thread_client: _ThreadS3Client = PrivateAttr(default_factory=_ThreadS3Client)
+    # This uploader's own session, rather than the process-global default one that plain
+    # boto3.client() resolves: other modules create clients off that default without any lock, so a
+    # lock here could not make it safe. Building a client mutates its session's service-model cache,
+    # which is why only client *creation* is serialized; the clients themselves are then used
+    # without holding the lock. Sharing one session also keeps that cache warm, so only the first
+    # client is expensive to build.
+    _session: boto3.Session = PrivateAttr()
+    _client_creation_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     # protects access to the thread collections
     _thread_pool: ThreadPoolExecutor = PrivateAttr()
     _thread_limiter: threading.Semaphore = PrivateAttr()
 
     def model_post_init(self, context) -> None:
-        # NOTE: we use an unsigned client to avoid the need to provide AWS credentials.
-        self._s3_client = boto3.client("s3", region_name=self.region, config=Config(signature_version=UNSIGNED))
-        self._thread_pool = ThreadPoolExecutor(max_workers=None, thread_name_prefix="s3_upload")
+        self._session = boto3.Session()
+        self._thread_pool = ThreadPoolExecutor(max_workers=S3_UPLOAD_THREAD_COUNT, thread_name_prefix="s3_upload")
         # Unfortunately, there's no safe access to the queue size of the thread pool so calculating that number precisely
         # using a semaphore. Each queued up uploads acquires a single value and returns it only after its thread is done
         # interacting with S3. The value of the semaphore at any given time is the number of available work slots, and
         # it cannot go negative. The semaphore is bounded purely to track that there are no more releases than acquisitions.
         self._thread_limiter = threading.BoundedSemaphore(self.maximum_concurrency)
 
+    def _client_for_current_thread(self) -> Any:
+        """Return the calling thread's S3 client, creating it on first use."""
+        if self._thread_client.client is None:
+            with self._client_creation_lock:
+                # NOTE: we use an unsigned client to avoid the need to provide AWS credentials.
+                self._thread_client.client = self._session.client(
+                    "s3", region_name=self.region, config=Config(signature_version=UNSIGNED)
+                )
+        return self._thread_client.client
+
     def _upload_thread(self, key: str, contents: bytes) -> None:
         try:
             logger.debug("Uploading to s3://{}/{}", self.bucket, key)
             # NOTE: we use put_object instead of upload_file because we don't want multipart uploads
             # multipart uploads are not allowed for unsigned clients
-            self._s3_client.put_object(
+            self._client_for_current_thread().put_object(
                 Bucket=self.bucket,
                 Key=key,
                 Body=contents,
