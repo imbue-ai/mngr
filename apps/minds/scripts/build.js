@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, downloadRestic, downloadDesync, download, assertTreeFitsUploadBudget, assertUploadFitsToDesktopLimit } = require('./download-binaries.js');
+const { downloadGit, downloadUv, downloadRestic, downloadDesync, downloadLatchkeyCurl, download, assertTreeFitsUploadBudget, assertUploadFitsToDesktopLimit } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -606,6 +606,7 @@ async function main() {
     downloadGit(RESOURCES_DIR, { platform, arch }),
     downloadRestic(RESOURCES_DIR, { platform, arch }),
     downloadDesync(RESOURCES_DIR, { platform, arch }),
+    downloadLatchkeyCurl(RESOURCES_DIR, { platform, arch }),
   ]);
 
   buildCss();

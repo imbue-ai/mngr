@@ -295,6 +295,7 @@ def test_build_js_stages_every_runtime_binary() -> None:
         "downloadGit",
         "downloadRestic",
         "downloadDesync",
+        "downloadLatchkeyCurl",
     ):
         assert f"{downloader}(" in body, (
             f"build.js main() must call {downloader}(). build.js is the only stage "
