@@ -12,6 +12,7 @@ from typing import Any
 
 import click
 
+from imbue.mngr.cli.output_helpers import write_stderr_line
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import handle_imbue_cloud_errors
@@ -20,6 +21,7 @@ from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import parse_account
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import force_refresh
+from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.connector.client import AuthRawResponse
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
@@ -47,6 +49,11 @@ def _persist_auth_response(
     email returned by the auth backend is accepted as-is. When it is set
     (signin / signup with explicit ``--account``), we validate that the
     backend returned the same account and fail otherwise.
+
+    An account whose email is not yet verified is saved as a *pending*
+    session: its tokens are kept (they drive the verification poll) but it
+    is excluded from ``auth list`` and never becomes the active account.
+    ``auth is-verified`` promotes it once the verification link is clicked.
     """
     if response.status != "OK":
         fail_with_json(
@@ -79,14 +86,21 @@ def _persist_auth_response(
         display_name=display_name,
         access_token=access_token,
         refresh_token=refresh_token if isinstance(refresh_token, str) else None,
+        is_pending_verification=response.needs_email_verification,
     )
     store.save(session)
-    # Make the most-recently-touched account the active one. This is what
-    # users expect when they swap between accounts: ``auth signin --account
-    # bob`` then ``mngr create`` should default to bob without an extra
-    # ``auth use`` step. Power users who prefer pinning still have
-    # ``auth use --account <other>`` to override.
-    store.set_active_account(account_from_response)
+    if response.needs_email_verification:
+        write_stderr_line(
+            f"Email verification required for {account_from_response}: click the link in your inbox, "
+            f"then run `mngr imbue_cloud auth is-verified --account {account_from_response}` to finish signing in."
+        )
+    else:
+        # Make the most-recently-touched account the active one. This is what
+        # users expect when they swap between accounts: ``auth signin --account
+        # bob`` then ``mngr create`` should default to bob without an extra
+        # ``auth use`` step. Power users who prefer pinning still have
+        # ``auth use --account <other>`` to override.
+        store.set_active_account(account_from_response)
     return {
         "user_id": str(session.user_id),
         "email": str(session.email),
@@ -204,14 +218,16 @@ def list_accounts() -> None:
 
     Accounts whose session file is missing or unreadable are skipped
     silently -- callers should treat the output as the authoritative
-    list of "currently signed in".
+    list of "currently signed in". Sessions still pending email
+    verification are likewise excluded: an unverified account does not
+    count as signed in.
     """
     store = make_session_store()
     active = store.get_active_account()
     accounts: list[dict[str, Any]] = []
     for email in store.list_accounts():
         session = store.load_by_account(email)
-        if session is None:
+        if session is None or session.is_pending_verification:
             continue
         accounts.append(
             {
@@ -256,6 +272,7 @@ def status(account: str | None) -> None:
             "near_expiry": near_expiry,
             "has_refresh_token": session.refresh_token is not None,
             "is_active": active == session.email,
+            "pending_verification": session.is_pending_verification,
         }
     )
 
@@ -558,7 +575,11 @@ def forgot_password(account: str | None, connector_url: str | None) -> None:
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def resend_verification(account: str | None, connector_url: str | None) -> None:
-    """Re-send the email verification message for the given account."""
+    """Re-send the email verification message for the given account.
+
+    ``sent`` is False when the connector suppressed the send because one
+    went out moments ago (its per-user cooldown).
+    """
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     session = store.load_by_account(parsed_account)
@@ -569,5 +590,41 @@ def resend_verification(account: str | None, connector_url: str | None) -> None:
         )
     # `session` is now narrowed to AuthSession (fail_with_json is NoReturn).
     client = make_connector_client(connector_url)
-    client.auth_send_verification_email(str(session.user_id), str(session.email))
-    emit_json({"sent": True, "email": str(session.email)})
+    access_token = get_active_token(store, client, parsed_account)
+    is_sent = client.auth_send_verification_email(access_token, str(session.email))
+    emit_json({"sent": is_sent, "email": str(session.email)})
+
+
+@auth.command(name="is-verified")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def is_verified(account: str | None, connector_url: str | None) -> None:
+    """Check whether the account's email is verified; promote a pending session when it is.
+
+    Promotion clears the session's pending-verification flag (making the
+    account appear in ``auth list``) and marks it active -- the same
+    activation a fully-verified signin performs. Safe to poll repeatedly.
+    """
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    session = store.load_by_account(parsed_account)
+    if session is None:
+        fail_with_json(
+            f"No session for {parsed_account}; sign in first.",
+            error_class="NotSignedIn",
+        )
+    client = make_connector_client(connector_url)
+    access_token = get_active_token(store, client, parsed_account)
+    is_email_verified = client.auth_is_email_verified(access_token, str(session.email))
+    if is_email_verified and session.is_pending_verification:
+        store.promote_pending_session(parsed_account)
+        store.set_active_account(parsed_account)
+    emit_json(
+        {
+            "verified": is_email_verified,
+            "user_id": str(session.user_id),
+            "email": str(session.email),
+            "display_name": session.display_name,
+        }
+    )

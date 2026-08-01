@@ -1,59 +1,81 @@
 {#def email #}
 {#
-  Verify-your-email page. Polls /auth/api/email-verified every 3s; when
-  the user has clicked the verification link the page flips into the success
-  state and redirects through /post-login. An optional ``?return_to=`` query
-  param (e.g. ``/create`` when the user signed up from the create screen's
-  sign-in modal) is forwarded to /post-login so they land back where they were
-  instead of on the accounts page; /post-login re-validates it as a safe path.
-  Without it, first-time users with no workspaces go to the create screen and
-  returning users to the accounts page. A "Resend verification email" button
-  triggers a backend resend (rate-limited server-side).
+  Verify-your-email page for one specific pending account (``email``, from the
+  ``?email=`` query param the auth page's JS forwards). Polls
+  /auth/api/email-verified?email=... every 3s; the account being verified is
+  deliberately absent from the signed-in account list until it verifies, so
+  the address must be named explicitly. When the user has clicked the
+  verification link, the server completes the deferred signin, the page flips
+  into the success state, and redirects through /post-login. An optional
+  ``?return_to=`` query param (e.g. ``/create`` when the user signed up from
+  the create screen's sign-in modal) is forwarded to /post-login so they land
+  back where they were instead of on the accounts page; /post-login
+  re-validates it as a safe path. A "Resend verification email" button
+  triggers a backend resend (rate-limited server-side; the button reports
+  when the cooldown suppressed the send).
+
+  Rendered without an email (the page was reached outside the sign-up flow),
+  there is nothing to poll: the page says so and links back to sign-in.
 #}
 {% set _scripts %}
 <script>
-  var pollInterval = setInterval(async function () {
-    try {
-      var res = await fetch('/auth/api/email-verified');
-      var data = await res.json();
-      if (data.verified) {
-        clearInterval(pollInterval);
-        document.getElementById('status-msg').classList.add('hidden');
-        document.getElementById('success-msg').classList.remove('hidden');
-        var returnTo = new URLSearchParams(window.location.search).get('return_to');
-        var dest = returnTo ? '/post-login?return_to=' + encodeURIComponent(returnTo) : '/post-login';
-        setTimeout(function () { window.location.href = dest; }, 1500);
-      }
-    } catch (e) {}
-  }, 3000);
+  var accountEmail = {{ email | tojson }};
 
-  document.getElementById('resend-btn').addEventListener('click', async function () {
-    var btn = this;
-    btn.disabled = true;
-    btn.textContent = 'Sending...';
-    try {
-      await fetch('/auth/api/resend-verification', { method: 'POST' });
-      btn.textContent = 'Sent. Check your inbox';
+  if (!accountEmail) {
+    document.getElementById('status-msg').classList.add('hidden');
+    document.getElementById('resend-btn').classList.add('hidden');
+    document.getElementById('no-account-msg').classList.remove('hidden');
+  } else {
+    var pollInterval = setInterval(async function () {
+      try {
+        var res = await fetch('/auth/api/email-verified?email=' + encodeURIComponent(accountEmail));
+        var data = await res.json();
+        if (data.verified) {
+          clearInterval(pollInterval);
+          document.getElementById('status-msg').classList.add('hidden');
+          document.getElementById('success-msg').classList.remove('hidden');
+          var returnTo = new URLSearchParams(window.location.search).get('return_to');
+          var dest = returnTo ? '/post-login?return_to=' + encodeURIComponent(returnTo) : '/post-login';
+          setTimeout(function () { window.location.href = dest; }, 1500);
+        }
+      } catch (e) {}
+    }, 3000);
+
+    document.getElementById('resend-btn').addEventListener('click', async function () {
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+      var label = 'Sent. Check your inbox';
+      try {
+        var res = await fetch('/auth/api/resend-verification', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: accountEmail }),
+        });
+        var data = await res.json();
+        if (data.status !== 'OK') label = 'Could not send. Try again shortly';
+        else if (!data.sent) label = 'Sent recently. Check your spam folder';
+      } catch (e) {
+        label = 'Could not send. Try again shortly';
+      }
+      btn.textContent = label;
       setTimeout(function () {
         btn.disabled = false;
         btn.textContent = 'Resend verification email';
       }, 5000);
-    } catch (e) {
-      btn.disabled = false;
-      btn.textContent = 'Resend verification email';
-    }
-  });
+    });
+  }
 </script>
 {% endset %}
 <PageNarrowContainer title="Check your email" scripts={{ _scripts }}>
   <div class="text-center">
-    <h1 class="type-heading-lg text-primary mb-2">Check your email</h1>
-    <p class="text-secondary mb-3">We sent a verification link to <strong>{{ email }}</strong></p>
-    <p class="type-body text-secondary mb-4">
-      Click the link in the email to verify your account, then come back here.
-    </p>
+    <h1 class="type-heading-lg text-primary mb-2">Click the link sent to <strong>{{ email or "your email" }}</strong></h1>
+    <p class="text-secondary mb-4">Check your spam folder (if necessary)</p>
     <Notice variant="info" id="status-msg">Waiting for verification...</Notice>
     <Notice variant="success" id="success-msg" class="hidden">Email verified. Redirecting...</Notice>
+    <Notice variant="error" id="no-account-msg" class="hidden">
+      No sign-up in progress. <Link href="/auth/signup">Return to sign-up</Link> to start again.
+    </Notice>
     <Button variant="primary" size="lg" block id="resend-btn" extra="mt-4">Resend verification email</Button>
     <div class="text-center mt-3 type-body text-secondary">
       <Link href="/">Go to home</Link>

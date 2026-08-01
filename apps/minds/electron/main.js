@@ -685,6 +685,12 @@ function createBundle() {
     modalView: null,
     modalVisible: false,
     modalUrl: null,
+    // Set when the whole-window sign-in modal must stay up until the chrome
+    // view commits the navigation it just dispatched (closing on dispatch
+    // flashes the outgoing page). Cleared on commit, by the fallback timer,
+    // and by closeModal itself.
+    pendingModalCloseOnCommit: false,
+    modalCloseOnCommitTimer: null,
     // The latest 'show-modal' overlay command, replayed on the overlay host's
     // did-finish-load if it was issued before the host page finished loading.
     pendingOverlayCommand: null,
@@ -847,6 +853,15 @@ function createBundle() {
     bundle.chromeLoadRetryPendingUrl = null;
     bundle.chromeLoadFailedUrl = null;
     console.log(`[nav] chrome view committed (${inPage ? 'in-place' : 'full load'}) ${url}`);
+    // A held sign-in modal comes down now that its destination is on screen.
+    if (bundle.pendingModalCloseOnCommit) {
+      bundle.pendingModalCloseOnCommit = false;
+      if (bundle.modalCloseOnCommitTimer) {
+        clearTimeout(bundle.modalCloseOnCommitTimer);
+        bundle.modalCloseOnCommitTimer = null;
+      }
+      closeModal(bundle);
+    }
     // Confirm a dispatched in-place swap (its pushState lands here as
     // did-navigate-in-page) so the lost-swap fallback timer stands down.
     if (bundle.pendingSwapUrl) {
@@ -1817,7 +1832,36 @@ function navigateBundle(bundle, url) {
     // will-redirect guard.
     loadLocalIntoChrome(bundle, absolute);
   }
-  closeModal(bundle);
+  closeModalNowOrAfterChromeCommit(bundle);
+}
+
+// How long a held modal may wait for the chrome view to commit before closing
+// anyway -- a stalled or failed load must not leave the modal stuck (the
+// did-fail-load recovery machinery owns the window underneath).
+const MODAL_CLOSE_ON_COMMIT_FALLBACK_MS = 3000;
+
+// Close the modal now -- unless it is the whole-window sign-in modal, which
+// stays up until the chrome view commits the destination this navigation just
+// dispatched. Closing it on dispatch reveals the outgoing page for the whole
+// load (e.g. the welcome screen flashing back right after a completed
+// sign-up). Sidebar / inbox / panel dismissals keep closing instantly:
+// responsiveness on click is the point there.
+function closeModalNowOrAfterChromeCommit(bundle) {
+  let modalPathname = null;
+  try { modalPathname = bundle.modalUrl ? new URL(bundle.modalUrl).pathname : null; } catch { modalPathname = null; }
+  if (!bundle.modalVisible || modalPathname !== '/auth/signin-modal') {
+    closeModal(bundle);
+    return;
+  }
+  if (bundle.modalCloseOnCommitTimer) clearTimeout(bundle.modalCloseOnCommitTimer);
+  bundle.pendingModalCloseOnCommit = true;
+  bundle.modalCloseOnCommitTimer = setTimeout(() => {
+    bundle.modalCloseOnCommitTimer = null;
+    if (bundle.pendingModalCloseOnCommit && !bundle.window.isDestroyed()) {
+      bundle.pendingModalCloseOnCommit = false;
+      closeModal(bundle);
+    }
+  }, MODAL_CLOSE_ON_COMMIT_FALLBACK_MS);
 }
 
 // -- Sidebar helpers (per-bundle) --
@@ -2156,6 +2200,12 @@ function closeModal(bundle) {
     clearTimeout(bundle.modalStallTimer);
     bundle.modalStallTimer = null;
   }
+  // An explicit close (Escape, backdrop click) supersedes a hold-until-commit.
+  if (bundle.modalCloseOnCommitTimer) {
+    clearTimeout(bundle.modalCloseOnCommitTimer);
+    bundle.modalCloseOnCommitTimer = null;
+  }
+  bundle.pendingModalCloseOnCommit = false;
   bundle.modalOpenedAt = null;
   bundle.modalAwaitingLoad = false;
   // Closing outright abandons the detour: whatever it displaced is not coming

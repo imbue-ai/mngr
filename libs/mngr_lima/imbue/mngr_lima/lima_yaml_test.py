@@ -373,3 +373,17 @@ def test_provision_script_labels_data_disk_for_lima(tmp_path: Path) -> None:
 
 def test_lima_host_data_disk_label_matches_lima_expectation() -> None:
     assert lima_host_data_disk_label("mngr-abc-data") == "lima-mngr-abc-data"
+
+
+def test_provision_script_disables_per_source_penalties_only_when_supported() -> None:
+    """The provision script must turn off sshd's per-source penalties on guests that support them.
+
+    Under qemu user-mode networking every host connection shares one NAT source
+    address, so OpenSSH >= 9.8's default penalties lock out the whole host after
+    a single grace-timeout. The keyword is fatal to older sshds, so the write
+    must be gated on the running sshd actually understanding it.
+    """
+    config = generate_default_lima_yaml(volume_host_path=None, host_dir="/mngr")
+    script = config["provision"][0]["script"]
+    assert "PerSourcePenalties no" in script
+    assert "sshd -T 2>/dev/null | grep -qi '^persourcepenalties'" in script

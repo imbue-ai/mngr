@@ -57,6 +57,10 @@ class AccountSession(FrozenModel):
     email: str = Field(description="User email address")
     display_name: str | None = Field(default=None, description="Display name from OAuth provider")
     workspace_ids: list[str] = Field(default_factory=list, description="Agent IDs associated with this account")
+    is_active: bool = Field(
+        default=False,
+        description="Whether the plugin marks this account active (most recent signin / `auth use` pin)",
+    )
 
 
 class UserInfo(FrozenModel):
@@ -287,4 +291,5 @@ def _build_session(account: ImbueCloudAuthAccount, workspace_ids: list[str]) -> 
         email=account.email,
         display_name=account.display_name,
         workspace_ids=list(workspace_ids),
+        is_active=account.is_active,
     )

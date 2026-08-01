@@ -104,6 +104,9 @@ def _refresh_locked(
         access_token=SecretStr(new_access),
         refresh_token=SecretStr(new_refresh),
         access_token_expires_at=_decode_jwt_exp(new_access),
+        # A refresh rotates tokens only; it must not promote a pending session
+        # (verification is observed and promoted solely by `auth is-verified`).
+        is_pending_verification=session.is_pending_verification,
     )
     store.save(refreshed_session)
     return refreshed_session

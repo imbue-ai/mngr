@@ -210,3 +210,46 @@ def test_enable_sharing_malformed_output_error_omits_the_tunnel_token() -> None:
     # The shape (keys) stays in the message so the failure is still debuggable.
     assert "service" in message
     assert "tunnel" in message
+
+
+def test_auth_is_email_verified_parses_promotion_result() -> None:
+    """``auth_is_email_verified`` wraps ``auth is-verified`` and parses the typed status."""
+    body = {"verified": True, "user_id": "user-1", "email": "a@b.com", "display_name": "A"}
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(body)))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    status = cli.auth_is_email_verified("a@b.com")
+
+    assert status.verified is True
+    assert status.user_id == "user-1"
+    assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "is-verified", "--account", "a@b.com")
+
+
+def test_auth_resend_verification_reports_cooldown_suppression() -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=json.dumps({"sent": False, "email": "a@b.com"}))
+    )
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    assert cli.auth_resend_verification("a@b.com") is False
+    assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "resend-verification", "--account", "a@b.com")
+
+
+def test_auth_resend_verification_raises_on_malformed_output() -> None:
+    """A body without a 'sent' bool is a broken plugin contract, not a cooldown suppression."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps({"email": "a@b.com"})))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    with pytest.raises(ImbueCloudCliError, match="Malformed auth resend-verification output"):
+        cli.auth_resend_verification("a@b.com")
+
+
+def test_auth_forgot_password_invokes_plugin_subcommand() -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=json.dumps({"sent": True, "email": "a@b.com"}))
+    )
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    cli.auth_forgot_password("a@b.com")
+
+    assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "forgot-password", "--account", "a@b.com")

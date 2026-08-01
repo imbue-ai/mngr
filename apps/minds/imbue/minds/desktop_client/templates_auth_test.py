@@ -187,7 +187,17 @@ def test_render_check_email_page() -> None:
     html = render_check_email_page(email="user@example.com")
     assert "user@example.com" in html
     assert "Check your email" in html
+    assert "Click the link sent to" in html
     assert "Resend verification email" in html
+    # The poll and resend are pinned to this address (the pending account is
+    # invisible to the signed-in account list until verified).
+    assert "/auth/api/email-verified?email=" in html
+
+
+def test_render_check_email_page_without_email_shows_way_back() -> None:
+    html = render_check_email_page(email="")
+    assert "your email" in html
+    assert "/auth/signup" in html
 
 
 def test_render_oauth_close_page_with_display_name() -> None:

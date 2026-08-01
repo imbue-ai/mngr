@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliEr
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudVerificationStatus
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_redirect_response
@@ -166,37 +167,19 @@ class _AuthBackendShim(MutableModel):
         except ImbueCloudCliError as exc:
             logger.warning("`mngr imbue_cloud auth signout` failed for {}: {}", account_email, exc)
 
-    def is_email_verified(self, _user_id: str, _email: str) -> bool:
-        # The plugin doesn't currently expose this. Treat as verified to
-        # avoid spurious "please verify" prompts; the real check happens
-        # connector-side at next signin.
-        return True
+    def check_email_verified(self, email: str) -> ImbueCloudVerificationStatus:
+        """Ask the connector whether ``email`` is verified (promoting the pending session when it is)."""
+        return self._cli.auth_is_email_verified(email)
 
-    def send_verification_email(self, _user_id: str, email: str) -> bool:
-        try:
-            # Touch the session as a smoke check.
-            self._cli.auth_status(email)
-            return True
-        except ImbueCloudCliError as exc:
-            logger.warning("Could not invoke auth status for {}: {}", email, exc)
-            return False
+    def resend_verification_email(self, email: str) -> bool:
+        """Re-send the verification email; False when the server cooldown suppressed it."""
+        return self._cli.auth_resend_verification(email)
 
     def forgot_password(self, email: str) -> None:
-        try:
-            # Plugin doesn't currently expose forgot-password.
-            self._cli.auth_status(email)
-        except ImbueCloudCliError as exc:
-            logger.warning("Forgot-password (placeholder) call failed for {}: {}", email, exc)
+        self._cli.auth_forgot_password(email)
 
     def get_user_provider(self, _user_id: str) -> str:
         return "email"
-
-    @property
-    def base_url(self) -> str:
-        # No external base URL anymore -- the desktop UI's reset link
-        # redirect should be reworked to point at a fixed connector URL via
-        # MindsConfig instead.
-        return ""
 
 
 def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
@@ -221,11 +204,19 @@ def _get_auth_backend() -> _AuthBackendShim:
     return _AuthBackendShim(cli=cli)
 
 
-def _get_latest_user_info(session_store: MultiAccountSessionStore) -> UserInfo | None:
+def _get_primary_user_info(session_store: MultiAccountSessionStore) -> UserInfo | None:
+    """Return the active account's identity, or an arbitrary signed-in account's as a fallback.
+
+    The plugin's ``auth list`` marks exactly one account active (the most
+    recently signed-in / ``auth use``-pinned one); ``list_accounts`` is
+    otherwise sorted by email, so "last entry" would just be the
+    alphabetically-last account.
+    """
     accounts = session_store.list_accounts()
     if not accounts:
         return None
-    return session_store.get_user_info(str(accounts[-1].user_id))
+    active = next((account for account in accounts if account.is_active), accounts[-1])
+    return session_store.get_user_info(str(active.user_id))
 
 
 def _get_output_format() -> OutputFormat:
@@ -385,10 +376,21 @@ def _handle_signup_api() -> Response:
     if result.status != "OK":
         return _json_response({"status": result.status, "message": result.message or ""})
 
-    _store_session_from_auth_result(session_store, result)
     assert result.user is not None
+    # An unverified account is not signed in yet: the plugin holds its session
+    # as pending (invisible to `auth list`), and none of the local signin
+    # bookkeeping (default account, provider registration, observer bounce)
+    # runs until the check-email page's verification poll observes the
+    # verification and completes it.
+    if not result.needs_email_verification:
+        _store_session_from_auth_result(session_store, result)
     return _json_response(
-        {"status": "OK", "userId": result.user.user_id, "needsEmailVerification": result.needs_email_verification}
+        {
+            "status": "OK",
+            "userId": result.user.user_id,
+            "email": result.user.email,
+            "needsEmailVerification": result.needs_email_verification,
+        }
     )
 
 
@@ -411,12 +413,16 @@ def _handle_signin_api() -> Response:
     if result.status != "OK":
         return _json_response({"status": result.status, "message": result.message or ""})
 
-    _store_session_from_auth_result(session_store, result)
     assert result.user is not None
+    # Same deferral as signup: an unverified account stays pending until the
+    # verification poll completes the signin.
+    if not result.needs_email_verification:
+        _store_session_from_auth_result(session_store, result)
     return _json_response(
         {
             "status": "OK",
             "userId": result.user.user_id,
+            "email": result.user.email,
             "needsEmailVerification": result.needs_email_verification,
         }
     )
@@ -479,7 +485,7 @@ def _handle_signout_api() -> Response:
 def _handle_status_api() -> Response:
     """Return current auth status and user info."""
     session_store = _get_session_store()
-    user_info = _get_latest_user_info(session_store)
+    user_info = _get_primary_user_info(session_store)
     if user_info is None:
         return _json_response({"signedIn": False})
     return _json_response(
@@ -493,36 +499,61 @@ def _handle_status_api() -> Response:
     )
 
 
+def _complete_verified_signin(session_store: MultiAccountSessionStore, status: ImbueCloudVerificationStatus) -> None:
+    """Finish the signin that signup deferred until the email was verified.
+
+    The plugin has already promoted the pending session (it now shows up in
+    ``auth list`` as the active account); this runs the same local bookkeeping
+    a verified signin performs -- identity-cache invalidation, default-account
+    selection, provider registration, observer bounce. Idempotent, so the poll
+    observing ``verified`` more than once is harmless.
+    """
+    result = AuthResult(
+        status="OK",
+        user=AuthUser(
+            user_id=status.user_id,
+            email=status.email,
+            display_name=status.display_name,
+        ),
+    )
+    _store_session_from_auth_result(session_store, result)
+
+
 def _handle_email_verified_api() -> Response:
-    """Check if the current user's email is verified."""
+    """Check whether ``?email=``'s address is verified, completing its signin when it is.
+
+    This is the check-email page's poll. The account being verified is
+    *pending* -- deliberately invisible to ``auth list`` -- so the address
+    must be named explicitly rather than resolved from the signed-in accounts.
+    """
     session_store = _get_session_store()
     backend = _get_auth_backend()
-    user_info = _get_latest_user_info(session_store)
-    if user_info is None:
-        return _json_response({"verified": False, "signedIn": False})
+    email = (request.args.get("email") or "").strip()
+    if not email:
+        return _json_response({"status": "FIELD_ERROR", "message": "email query parameter is required"}, 400)
     try:
-        verified = backend.is_email_verified(str(user_info.user_id), user_info.email)
+        status = backend.check_email_verified(email)
     except ImbueCloudCliError as exc:
         logger.warning("Auth backend unreachable during is-email-verified: {}", exc)
-        return _json_response({"verified": False, "signedIn": True, "error": "backend_unavailable"}, 502)
-    return _json_response({"verified": verified, "signedIn": True})
+        return _json_response({"verified": False, "error": "backend_unavailable"}, 502)
+    if status.verified:
+        _complete_verified_signin(session_store, status)
+    return _json_response({"verified": status.verified})
 
 
 def _handle_resend_verification_api() -> Response:
-    """Resend the email verification email."""
-    session_store = _get_session_store()
+    """Resend the verification email for the pending account named in the JSON body."""
     backend = _get_auth_backend()
-    user_info = _get_latest_user_info(session_store)
-    if user_info is None:
-        return _json_response({"status": "ERROR", "message": "Not signed in"}, 401)
+    body = request.get_json(silent=True, force=True) or {}
+    email = str(body.get("email", "")).strip()
+    if not email:
+        return _json_response({"status": "FIELD_ERROR", "message": "email is required"}, 400)
     try:
-        ok = backend.send_verification_email(str(user_info.user_id), user_info.email)
+        is_sent = backend.resend_verification_email(email)
     except ImbueCloudCliError as exc:
         logger.warning("Auth backend unreachable during resend-verification: {}", exc)
         return _json_response({"status": "ERROR", "message": "Authentication service is unavailable"}, 502)
-    if not ok:
-        return _json_response({"status": "ERROR", "message": "Failed to send verification email"}, 502)
-    return _json_response({"status": "OK"})
+    return _json_response({"status": "OK", "sent": is_sent})
 
 
 def _handle_signin_modal_page() -> Response:
@@ -555,10 +586,14 @@ def _handle_signin_modal_page() -> Response:
 
 
 def _handle_check_email_page() -> Response:
-    """Render the 'check your email' page."""
-    session_store = _get_session_store()
-    user_info = _get_latest_user_info(session_store)
-    email = user_info.email if user_info else "your email"
+    """Render the 'check your email' page for the pending account in ``?email=``.
+
+    The pending account is not in ``auth list`` (it doesn't count as signed in
+    until verified), so the address comes from the query parameter the auth
+    page's JS forwards. Without one the page renders in a signed-out state
+    that links back to sign-in instead of polling.
+    """
+    email = (request.args.get("email") or "").strip()
     return make_html_response(render_check_email_page(email=email))
 
 
@@ -656,6 +691,26 @@ def _run_oauth_subprocess(
                 # box, so it gets the same treatment as an email/password
                 # failure rather than the raw CLI failure string.
                 error=_user_facing_auth_message(exc),
+                deadline=time.monotonic() + _OAUTH_FLOW_TTL_SECONDS,
+            ),
+        )
+        return
+
+    # Supported OAuth providers return verified emails, so this should be
+    # unreachable; if a provider ever hands back an unverified address, the
+    # plugin keeps the session pending and mirroring it here would activate an
+    # account the connector will reject on every call. Fail the flow with an
+    # actionable message instead.
+    if result.needs_email_verification:
+        logger.warning("OAuth signin for {} returned an unverified email; refusing to activate it", result.email)
+        _record_oauth_status(
+            flow_id,
+            _OAuthFlowStatus(
+                state="error",
+                error=(
+                    f"The email {result.email} is not verified with its sign-in provider. "
+                    "Verify it there, or sign up with email and password instead."
+                ),
                 deadline=time.monotonic() + _OAUTH_FLOW_TTL_SECONDS,
             ),
         )
@@ -864,14 +919,14 @@ def _handle_forgot_password_api() -> Response:
 
 
 def _handle_reset_password_redirect() -> Response:
-    """Redirect legacy in-app reset links to the auth backend's reset page.
+    """Redirect legacy in-app reset links to the connector's reset page.
 
-    The reset link embedded in the reset email now points at the backend
-    directly; this redirect keeps any older links working.
+    The reset link embedded in the reset email points at the connector
+    directly (its ``/auth/reset-password`` page); this redirect keeps any
+    older in-app links working.
     """
-    backend = _get_auth_backend()
     token = request.args.get("token", "")
-    target = str(backend.base_url).rstrip("/") + "/auth/reset-password"
+    target = _get_connector_url() + "/auth/reset-password"
     if token:
         target = f"{target}?{urlencode({'token': token})}"
     return make_redirect_response(target, status_code=302)
@@ -881,7 +936,7 @@ def _handle_settings_page() -> Response:
     """Render the account settings page."""
     session_store = _get_session_store()
     backend = _get_auth_backend()
-    user_info = _get_latest_user_info(session_store)
+    user_info = _get_primary_user_info(session_store)
     if user_info is None:
         return make_redirect_response("/auth/login", status_code=302)
 

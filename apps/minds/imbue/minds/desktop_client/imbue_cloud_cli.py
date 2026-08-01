@@ -134,6 +134,21 @@ class ImbueCloudAuthAccount(FrozenModel):
     is_active: bool = False
 
 
+class ImbueCloudVerificationStatus(FrozenModel):
+    """Result of `mngr imbue_cloud auth is-verified`.
+
+    When ``verified`` is True the plugin has already promoted the pending
+    session (it now appears in ``auth list`` and is the active account), so
+    the identity fields let the caller finish its own signin bookkeeping
+    without another subprocess round trip.
+    """
+
+    verified: bool
+    user_id: str
+    email: str
+    display_name: str | None = None
+
+
 class LeasedHost(FrozenModel):
     """One row of `mngr imbue_cloud hosts list`."""
 
@@ -411,6 +426,45 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-auth-refresh",
         )
         return self._expect_success(result, "auth refresh")
+
+    def auth_is_email_verified(self, account: str) -> ImbueCloudVerificationStatus:
+        """Ask the connector whether ``account``'s email is verified.
+
+        When it is, the plugin promotes the pending session as a side effect
+        (the account starts appearing in ``auth list`` and becomes active), so
+        this is the desktop client's verification poll AND the step that
+        completes a deferred signup.
+        """
+        result = self._run(
+            ["auth", "is-verified", "--account", account],
+            cg_name="imbue-cloud-auth-is-verified",
+        )
+        body = self._expect_success(result, "auth is-verified")
+        return ImbueCloudVerificationStatus.model_validate(body)
+
+    def auth_resend_verification(self, account: str) -> bool:
+        """Re-send ``account``'s verification email; False when the server cooldown suppressed it."""
+        result = self._run(
+            ["auth", "resend-verification", "--account", account],
+            cg_name="imbue-cloud-auth-resend-verification",
+        )
+        body = self._expect_success(result, "auth resend-verification")
+        sent = body.get("sent") if isinstance(body, dict) else None
+        if not isinstance(sent, bool):
+            # A missing/non-bool ``sent`` is a broken plugin contract; raising
+            # (rather than defaulting to False) keeps the UI from claiming an
+            # email "was sent recently" when nothing of the sort is known.
+            shape = f"dict with keys {sorted(body)}" if isinstance(body, dict) else type(body).__name__
+            raise ImbueCloudCliError(f"Malformed auth resend-verification output: expected a 'sent' bool, got {shape}")
+        return sent
+
+    def auth_forgot_password(self, account: str) -> None:
+        """Ask the connector to send a password-reset email for ``account``."""
+        result = self._run(
+            ["auth", "forgot-password", "--account", account],
+            cg_name="imbue-cloud-auth-forgot-password",
+        )
+        self._expect_success(result, "auth forgot-password")
 
     # ------------------------------------------------------------------
     # Hosts (list / release)

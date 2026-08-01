@@ -230,6 +230,19 @@ SSHD_EOF
     SSHD_CONFIG_CHANGED=1
 fi
 
+# OpenSSH >= 9.8 (e.g. Debian 13 guests) enables per-source penalties by
+# default. Under qemu user-mode networking every host-side connection reaches
+# the guest from the single NAT gateway address, so one authentication timeout
+# during a CPU-starved boot penalizes ALL of mngr's connections at once -- and
+# the resulting reconnect attempts keep the penalty window alive indefinitely,
+# leaving the VM permanently unreachable while perfectly healthy inside. The
+# keyword is fatal to older sshds (unknown options abort startup), so only set
+# it where this sshd already understands it.
+if sshd -T 2>/dev/null | grep -qi '^persourcepenalties' && ! grep -q '^PerSourcePenalties' /etc/ssh/sshd_config 2>/dev/null; then
+    echo 'PerSourcePenalties no' >> /etc/ssh/sshd_config
+    SSHD_CONFIG_CHANGED=1
+fi
+
 # Authorize mngr's client key for root when the agent runs as root, so mngr can
 # ssh in as root. No-op (inert comment) in the default non-root path.
 {root_authorized_keys_block}

@@ -26,6 +26,7 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_imbue_cloud.data_types import AuthSession
@@ -166,31 +167,54 @@ class ImbueCloudSessionStore(MutableModel):
         permissions are 0600 so this is no worse than other secret files.
         """
         with self._lock:
-            self._ensure_dir()
-            session_path = self._session_path(session.user_id)
-            payload = {
-                "user_id": str(session.user_id),
-                "email": str(session.email),
-                "display_name": session.display_name,
-                "access_token": session.access_token.get_secret_value(),
-                "refresh_token": (
-                    session.refresh_token.get_secret_value() if session.refresh_token is not None else None
-                ),
-                "access_token_expires_at": (
-                    session.access_token_expires_at.isoformat()
-                    if session.access_token_expires_at is not None
-                    else None
-                ),
-            }
-            atomic_write(session_path, json.dumps(payload, indent=2))
-            try:
-                session_path.chmod(0o600)
-            except OSError:
-                # Best-effort; on systems where chmod isn't supported we still wrote the file.
-                pass
+            self._save_unlocked(session)
+
+    def _save_unlocked(self, session: AuthSession) -> None:
+        self._ensure_dir()
+        session_path = self._session_path(session.user_id)
+        payload = {
+            "user_id": str(session.user_id),
+            "email": str(session.email),
+            "display_name": session.display_name,
+            "access_token": session.access_token.get_secret_value(),
+            "refresh_token": (session.refresh_token.get_secret_value() if session.refresh_token is not None else None),
+            "access_token_expires_at": (
+                session.access_token_expires_at.isoformat() if session.access_token_expires_at is not None else None
+            ),
+            "is_pending_verification": session.is_pending_verification,
+        }
+        atomic_write(session_path, json.dumps(payload, indent=2))
+        try:
+            session_path.chmod(0o600)
+        except OSError:
+            # Best-effort; on systems where chmod isn't supported we still wrote the file.
+            pass
+        index = self._load_index()
+        index[session.email] = session.user_id
+        self._save_index(index)
+
+    def promote_pending_session(self, account: ImbueCloudAccount) -> AuthSession | None:
+        """Clear the pending-verification flag on ``account``'s session.
+
+        Returns the (now non-pending) session, or None when no session exists.
+        Idempotent: promoting an already-promoted (non-pending) session
+        returns it unchanged.
+        """
+        with self._lock:
             index = self._load_index()
-            index[session.email] = session.user_id
-            self._save_index(index)
+            user_id = index.get(account)
+            if user_id is None:
+                return None
+            session = self._load_by_user_id_unlocked(user_id)
+            if session is None:
+                return None
+            if not session.is_pending_verification:
+                return session
+            promoted = session.model_copy_update(
+                to_update(session.field_ref().is_pending_verification, False),
+            )
+            self._save_unlocked(promoted)
+            return promoted
 
     def delete_by_account(self, account: ImbueCloudAccount) -> None:
         """Remove the session and email index entry for an account.
@@ -269,13 +293,25 @@ class ImbueCloudSessionStore(MutableModel):
 
         Raises ``ImbueCloudAuthError`` if the account has no session on
         disk -- callers should sign in before pinning, so the on-disk
-        invariant ``active_account names a valid session`` holds.
+        invariant ``active_account names a valid session`` holds. A session
+        still pending email verification is likewise refused: a pending
+        account does not count as signed in, so it must never become the
+        account other commands implicitly resolve to.
         """
         with self._lock:
-            if account not in self._load_index():
+            index = self._load_index()
+            user_id = index.get(account)
+            if user_id is None:
                 raise ImbueCloudAuthError(
                     f"Cannot mark {account!s} active: no session on disk. "
                     f"Run `mngr imbue_cloud auth signin --account {account}` first."
+                )
+            session = self._load_by_user_id_unlocked(user_id)
+            if session is not None and session.is_pending_verification:
+                raise ImbueCloudAuthError(
+                    f"Cannot mark {account!s} active: its email is not verified yet. "
+                    f"Click the verification link in your inbox, then run "
+                    f"`mngr imbue_cloud auth is-verified --account {account}`."
                 )
             self._ensure_dir()
             atomic_write(self._active_account_path(), str(account) + "\n")
@@ -307,6 +343,7 @@ def make_session_from_tokens(
     display_name: str | None,
     access_token: str,
     refresh_token: str | None,
+    is_pending_verification: bool,
 ) -> AuthSession:
     """Build an AuthSession from raw signin/oauth response tokens."""
     return AuthSession(
@@ -316,6 +353,7 @@ def make_session_from_tokens(
         access_token=SecretStr(access_token),
         refresh_token=SecretStr(refresh_token) if refresh_token else None,
         access_token_expires_at=_decode_jwt_exp(access_token),
+        is_pending_verification=is_pending_verification,
     )
 
 

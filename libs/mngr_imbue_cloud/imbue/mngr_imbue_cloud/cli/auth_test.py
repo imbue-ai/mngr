@@ -8,12 +8,21 @@ Covers the OAuth localhost callback listener's handler. The handler must:
   captured params and the CLI then hung until the 300s OAuth timeout.
 
 The ``running_callback_server`` fixture lives in ``cli/conftest.py``.
+
+Also covers ``_persist_auth_response``'s pending-verification deferral: a
+signup/signin whose email is not yet verified must be saved as a pending
+session that never becomes the active account.
 """
 
 import urllib.request
+from pathlib import Path
 
 from imbue.mngr_imbue_cloud.cli.auth import _OAuthCaptureBox
 from imbue.mngr_imbue_cloud.cli.auth import _oauth_success_page
+from imbue.mngr_imbue_cloud.cli.auth import _persist_auth_response
+from imbue.mngr_imbue_cloud.connector.client import AuthRawResponse
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 
 
 def _get(port: int, path: str) -> int:
@@ -86,3 +95,43 @@ def test_success_page_escapes_redirect_url_markup() -> None:
     page = _oauth_success_page('minds://x?a=<b>&q="hi"').decode("utf-8")
     assert "<b>" not in page
     assert 'href="minds://x?a=&lt;b&gt;&amp;q=&quot;hi&quot;"' in page
+
+
+def _make_auth_response(needs_email_verification: bool) -> AuthRawResponse:
+    return AuthRawResponse(
+        status="OK",
+        user={"user_id": "user-abc", "email": "alice@imbue.com", "display_name": "Alice"},
+        # The payload segment is base64url for {"foo":"bar"} -- a decodable JWT
+        # body without an exp claim, so expiry decoding yields None.
+        tokens={"access_token": "header.eyJmb28iOiJiYXIifQ.sig", "refresh_token": "refresh-tok"},
+        needs_email_verification=needs_email_verification,
+    )
+
+
+def test_persist_auth_response_pending_defers_activation(tmp_path: Path) -> None:
+    """An unverified signup/signin is saved as a pending session and never becomes active."""
+    store = ImbueCloudSessionStore(sessions_dir=tmp_path)
+    account = ImbueCloudAccount("alice@imbue.com")
+
+    payload = _persist_auth_response(_make_auth_response(needs_email_verification=True), account, store)
+
+    assert payload["needs_email_verification"] is True
+    session = store.load_by_account(account)
+    assert session is not None
+    assert session.is_pending_verification is True
+    # The deferred half: the pending account was NOT marked active.
+    assert store.get_active_account() is None
+
+
+def test_persist_auth_response_verified_marks_account_active(tmp_path: Path) -> None:
+    """A verified signin keeps the pre-existing behavior: saved non-pending and made active."""
+    store = ImbueCloudSessionStore(sessions_dir=tmp_path)
+    account = ImbueCloudAccount("alice@imbue.com")
+
+    payload = _persist_auth_response(_make_auth_response(needs_email_verification=False), account, store)
+
+    assert payload["needs_email_verification"] is False
+    session = store.load_by_account(account)
+    assert session is not None
+    assert session.is_pending_verification is False
+    assert store.get_active_account() == account

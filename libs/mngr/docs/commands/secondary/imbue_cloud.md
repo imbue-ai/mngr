@@ -177,6 +177,22 @@ mngr imbue_cloud auth resend-verification [OPTIONS]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud auth is-verified
+
+**Usage:**
+
+```text
+mngr imbue_cloud auth is-verified [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud account
 
 **Usage:**

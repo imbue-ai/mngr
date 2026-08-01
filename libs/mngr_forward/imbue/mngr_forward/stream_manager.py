@@ -24,10 +24,12 @@ line is parsed.
 
 import json
 import threading
+import time
 from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
@@ -62,6 +64,14 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _SERVICES_SOURCE = "services"
 _REQUESTS_SOURCE = "requests"
+
+# Respawn pacing for per-agent events streams: exponential backoff between
+# respawns of a stream that keeps dying, reset once a stream survives long
+# enough to count as healthy (its later death is a fresh incident, not a
+# continuation of a crash loop).
+_EVENTS_RESPAWN_INITIAL_BACKOFF_SECONDS: Final[float] = 2.0
+_EVENTS_RESPAWN_MAX_BACKOFF_SECONDS: Final[float] = 60.0
+_EVENTS_STREAM_HEALTHY_AGE_SECONDS: Final[float] = 60.0
 
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
@@ -125,6 +135,14 @@ class ForwardStreamManager(MutableModel):
     _tail_stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _events_services: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    # Per-agent respawn pacing for the events streams. A stream that dies
+    # instantly (unreachable host) must not be respawned at the discovery
+    # snapshot cadence: against an SSH server with per-source penalties, a
+    # tight reconnect loop turns one transient failure into a permanent
+    # lockout of every connection from this machine.
+    _events_respawn_backoff_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
+    _events_next_respawn_at_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
+    _events_spawned_at_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
     _compiled_includes: list[Any] = PrivateAttr(default_factory=list)
@@ -458,13 +476,35 @@ class ForwardStreamManager(MutableModel):
                 # non-zero. Nothing respawns it on its own, so the resolver's
                 # per-agent service map would stay empty forever and
                 # ``resolve`` would keep returning None (a permanent 503).
-                # Drop the dead entry and respawn below; the periodic discovery
-                # snapshot drives this retry, rate-limiting respawns to the
-                # snapshot cadence.
+                # Drop the dead entry and respawn below -- but paced by an
+                # exponential backoff, not the raw discovery snapshot cadence:
+                # a stream that dies instantly (unreachable host) respawned
+                # every snapshot is a reconnect storm, and against an sshd
+                # with per-source penalties that storm sustains the penalty
+                # window forever, locking this machine out of a healthy VM.
+                now = time.monotonic()
+                # Judge healthiness once, at the first snapshot that notices
+                # the death (popping spawned_at makes later snapshots skip
+                # this check). Re-evaluating on every snapshot would let a
+                # corpse waiting out a 60s window "age into" healthiness and
+                # reset the ladder even though the stream died instantly.
+                spawned_at = self._events_spawned_at_by_agent.pop(aid_str, None)
+                if spawned_at is not None and now - spawned_at >= _EVENTS_STREAM_HEALTHY_AGE_SECONDS:
+                    # The dead stream had lived long enough to count as
+                    # healthy; treat this exit as a fresh incident.
+                    self._events_respawn_backoff_by_agent.pop(aid_str, None)
+                if now < self._events_next_respawn_at_by_agent.get(aid_str, 0.0):
+                    # Still inside the backoff window: keep the dead entry so a
+                    # later snapshot retries once the window has passed.
+                    return
+                backoff = self._events_respawn_backoff_by_agent.get(aid_str, _EVENTS_RESPAWN_INITIAL_BACKOFF_SECONDS)
+                self._events_next_respawn_at_by_agent[aid_str] = now + backoff
+                self._events_respawn_backoff_by_agent[aid_str] = min(backoff * 2, _EVENTS_RESPAWN_MAX_BACKOFF_SECONDS)
                 logger.info(
-                    "Per-agent events stream for {} exited (returncode={}); respawning",
+                    "Per-agent events stream for {} exited (returncode={}); respawning (next retry no sooner than {:.0f}s)",
                     agent_id,
                     existing.returncode,
+                    backoff,
                 )
                 self._events_processes.pop(aid_str, None)
             # Preserve any already-known services across a respawn (the new
@@ -492,6 +532,7 @@ class ForwardStreamManager(MutableModel):
             )
             with self._lock:
                 self._events_processes[aid_str] = process
+                self._events_spawned_at_by_agent[aid_str] = time.monotonic()
         except InvalidConcurrencyGroupStateError:
             logger.debug("Skipping events stream for {} -- concurrency group inactive", agent_id)
 
@@ -499,6 +540,9 @@ class ForwardStreamManager(MutableModel):
         aid_str = str(agent_id)
         with self._lock:
             process = self._events_processes.pop(aid_str, None)
+            self._events_respawn_backoff_by_agent.pop(aid_str, None)
+            self._events_next_respawn_at_by_agent.pop(aid_str, None)
+            self._events_spawned_at_by_agent.pop(aid_str, None)
         if process is None:
             return
         try:

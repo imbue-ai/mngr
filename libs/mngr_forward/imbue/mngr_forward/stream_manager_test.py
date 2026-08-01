@@ -16,6 +16,7 @@ hooks directly with canned JSONL strings to exercise:
 import io
 import json
 import threading
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -237,11 +238,11 @@ def test_agent_destroyed_clears_resolver_and_fires_callback(
     manager.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
 
     discover_line = _agent_discovered_line(_agent(TEST_AGENT_ID_1), counter)
-    manager._on_observe_output(discover_line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, discover_line)
     assert TEST_AGENT_ID_1 in resolver.list_known_agent_ids()
 
     destroyed_line = _agent_destroyed_line(TEST_AGENT_ID_1, _HOST_ID, counter)
-    manager._on_observe_output(destroyed_line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, destroyed_line)
     assert TEST_AGENT_ID_1 not in resolver.list_known_agent_ids()
     assert destroyed == [TEST_AGENT_ID_1]
 
@@ -251,11 +252,11 @@ def test_host_ssh_info_propagates_to_resolver(
 ) -> None:
     manager, resolver, _buf, counter = setup
     discover_line = _agent_discovered_line(_agent(TEST_AGENT_ID_1), counter)
-    manager._on_observe_output(discover_line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, discover_line)
     assert resolver.get_ssh_info(TEST_AGENT_ID_1) is None
 
     ssh_info_line = _host_ssh_info_line(_HOST_ID, counter)
-    manager._on_observe_output(ssh_info_line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, ssh_info_line)
     ssh = resolver.get_ssh_info(TEST_AGENT_ID_1)
     assert ssh is not None
     assert ssh.host == "1.2.3.4"
@@ -266,7 +267,7 @@ def test_event_services_updates_resolver(
 ) -> None:
     manager, resolver, buf, counter = setup
     discover_line = _agent_discovered_line(_agent(TEST_AGENT_ID_1), counter)
-    manager._on_observe_output(discover_line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, discover_line)
 
     services_line = json.dumps({"source": "services", "service": "system_interface", "url": "http://127.0.0.1:9100"})
     manager._on_event_output(services_line + "\n", is_stdout=True, agent_id=TEST_AGENT_ID_1)  # noqa: SLF001
@@ -288,7 +289,7 @@ def test_event_non_services_passthrough_only(
     """`requests` and `refresh` source lines pass through but don't update the resolver's services."""
     manager, resolver, buf, counter = setup
     discover_line = _agent_discovered_line(_agent(TEST_AGENT_ID_1), counter)
-    manager._on_observe_output(discover_line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, discover_line)
 
     requests_line = json.dumps({"source": "requests", "type": "request_received"})
     manager._on_event_output(requests_line + "\n", is_stdout=True, agent_id=TEST_AGENT_ID_1)  # noqa: SLF001
@@ -306,7 +307,7 @@ def test_invalid_observe_line_is_passthrough_but_not_fatal(
     setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
 ) -> None:
     manager, resolver, buf, _counter = setup
-    manager._on_observe_output("not actually json\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, "not actually json")
     # Resolver state is untouched.
     assert resolver.list_known_agent_ids() == ()
     # Envelope passthrough wraps the raw line under {"raw": ...}.
@@ -318,8 +319,8 @@ def test_blank_observe_line_is_dropped(
     setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
 ) -> None:
     manager, _resolver, buf, _counter = setup
-    manager._on_observe_output("\n", is_stdout=True)  # noqa: SLF001
-    manager._on_observe_output("   \n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, "")
+    _feed_observe(manager, "   ")
     assert buf.getvalue() == ""
 
 
@@ -356,7 +357,7 @@ def test_callbacks_isolated_per_failure(
     manager.add_on_agent_discovered_callback(boom)
     manager.add_on_agent_discovered_callback(ok)
     discover_line = _agent_discovered_line(_agent(TEST_AGENT_ID_1), counter)
-    manager._on_observe_output(discover_line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, discover_line)
     assert fired == [TEST_AGENT_ID_1]
 
 
@@ -469,6 +470,16 @@ def _start_events(manager: ForwardStreamManager, agent_id: AgentId) -> None:
     manager._start_events_stream(agent_id)  # noqa: SLF001
 
 
+def _pacing_state(
+    manager: ForwardStreamManager,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Expose the manager's private respawn-pacing dicts: (backoff, next_respawn_at, spawned_at) (test hook)."""
+    backoff = manager._events_respawn_backoff_by_agent  # noqa: SLF001
+    next_respawn_at = manager._events_next_respawn_at_by_agent  # noqa: SLF001
+    spawned_at = manager._events_spawned_at_by_agent  # noqa: SLF001
+    return backoff, next_respawn_at, spawned_at
+
+
 def _install_recording_cg(manager: ForwardStreamManager, fake_cg: "_RecordingConcurrencyGroup") -> None:
     """Swap in a recording ConcurrencyGroup double so spawns are observable (test hook)."""
     manager._cg = fake_cg  # ty: ignore[invalid-assignment] # noqa: SLF001
@@ -529,3 +540,104 @@ def test_observe_via_file_tails_discovery_log_without_spawning_observe(tmp_path:
         assert manager._observe_process is None  # noqa: SLF001 - asserts internal state
     finally:
         manager.stop()
+
+
+def test_crash_looping_events_stream_respawn_is_backed_off(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A stream that dies immediately after a respawn is not respawned again within the backoff window.
+
+    Regression for the per-source-penalty lockout: respawning an
+    instantly-dying stream at the discovery snapshot cadence is a reconnect
+    storm, and against an sshd with per-source penalties (OpenSSH >= 9.8
+    defaults) that storm keeps the whole machine locked out of the host.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+
+    _start_events(manager, TEST_AGENT_ID_1)
+    fake_cg.spawned[0].mark_dead(1)
+    # First death respawns immediately (the backoff window opens now).
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 2
+
+    # The respawn dies instantly too; snapshot-cadence retries inside the
+    # window must NOT spawn again.
+    fake_cg.spawned[1].mark_dead(1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 2
+
+
+def test_events_stream_backoff_resets_after_a_healthy_stream(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A stream that lived past the healthy age resets the crash-loop backoff.
+
+    Its eventual death is a fresh incident (e.g. a host reboot weeks later),
+    not a continuation of the earlier crash loop, so the next respawn should
+    start from the initial backoff again.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    aid = str(TEST_AGENT_ID_1)
+
+    _start_events(manager, TEST_AGENT_ID_1)
+    fake_cg.spawned[0].mark_dead(1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 2
+
+    # Simulate the respawned stream living past the healthy age, then dying,
+    # with the previous backoff window already elapsed (test hooks on the
+    # manager's private pacing state).
+    now = time.monotonic()
+    backoff_by_agent, next_respawn_at_by_agent, spawned_at_by_agent = _pacing_state(manager)
+    spawned_at_by_agent[aid] = now - 3600.0
+    next_respawn_at_by_agent[aid] = now - 1.0
+    fake_cg.spawned[1].mark_dead(1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 3
+    # The stored next-step backoff is initial*2 -- proof the healthy stream
+    # reset the ladder rather than continuing to escalate from the crash loop.
+    assert backoff_by_agent[aid] == 4.0
+
+
+def test_crash_loop_backoff_is_not_reset_by_time_spent_waiting_in_the_window(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """Waiting out a backoff window must not count toward the healthy age.
+
+    Healthiness is judged from the stream's actual lifetime, at the moment its
+    death is first noticed. If it were re-judged on every snapshot, a corpse
+    sitting through a 60s window would "age into" healthiness and reset the
+    ladder to the initial backoff -- so a permanently dying stream would cycle
+    2..60s,reset forever and the 60s cap could never hold.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    aid = str(TEST_AGENT_ID_1)
+
+    _start_events(manager, TEST_AGENT_ID_1)
+    fake_cg.spawned[0].mark_dead(1)
+    # First death respawns immediately and stores the escalated next-step
+    # backoff (4.0); the respawn dies instantly and its death is noticed by a
+    # snapshot inside the window, which keeps the corpse.
+    _start_events(manager, TEST_AGENT_ID_1)
+    fake_cg.spawned[1].mark_dead(1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 2
+
+    # Simulate 61 seconds passing while the corpse waits (shift every stored
+    # monotonic timestamp into the past), then let the next snapshot retry.
+    backoff_by_agent, next_respawn_at_by_agent, spawned_at_by_agent = _pacing_state(manager)
+    for pacing in (next_respawn_at_by_agent, spawned_at_by_agent):
+        for key in pacing:
+            pacing[key] -= 61.0
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 3
+    # The ladder kept escalating (4 -> stored 8): the instantly-dead stream was
+    # not misclassified as healthy just because its corpse sat for 61s.
+    assert backoff_by_agent[aid] == 8.0

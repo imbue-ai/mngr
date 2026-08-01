@@ -66,12 +66,14 @@ def on_load_config(config_dict: dict[str, Any]) -> None:
 
 
 def _has_signed_in_accounts(default_host_dir: Any) -> bool:
-    """Return True if any imbue_cloud session is on disk under ``default_host_dir``.
+    """Return True if any non-pending imbue_cloud session is on disk under ``default_host_dir``.
 
     Resolves the active profile dir from ``<host_dir>/config.toml`` and probes
-    its sessions directory. Any failure to locate or read the directory is
-    treated as "no accounts" -- the caller will then suppress the default
-    provider, which is the safe behavior in fresh / test environments.
+    its sessions directory. Sessions still pending email verification do not
+    count: a pending account is not signed in, so it must not keep the default
+    provider enabled. Any failure to locate or read the directory is treated
+    as "no accounts" -- the caller will then suppress the default provider,
+    which is the safe behavior in fresh / test environments.
     """
     if default_host_dir is None:
         return False
@@ -80,7 +82,8 @@ def _has_signed_in_accounts(default_host_dir: Any) -> bool:
         return False
     try:
         session_store = ImbueCloudSessionStore(sessions_dir=get_sessions_dir(profile_dir))
-        return bool(session_store.list_accounts())
+        sessions = (session_store.load_by_account(account) for account in session_store.list_accounts())
+        return any(session is not None and not session.is_pending_verification for session in sessions)
     except OSError as exc:
         logger.debug("imbue_cloud on_load_config skipped session probe: {}", exc)
         return False

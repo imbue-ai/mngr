@@ -23,6 +23,14 @@ mngr imbue_cloud auth signin --account alice@imbue.com
 mngr imbue_cloud auth oauth google --account alice@imbue.com
 ```
 
+New email/password accounts must verify their email before they count as signed in. Until the verification link is clicked, the session is held as *pending*: it does not appear in `mngr imbue_cloud auth list`, cannot become the active account, and the connector rejects all other authenticated calls for it (only the verification-status check, verification-email resend, and sign-out are accepted). After clicking the link, run:
+
+```bash
+mngr imbue_cloud auth is-verified --account alice@imbue.com
+```
+
+which checks verification status and, on success, promotes the pending session (it becomes the active, listed account). `mngr imbue_cloud auth resend-verification --account alice@imbue.com` re-sends the verification email (rate-limited server-side).
+
 ## Account plans and quotas
 
 Every account has a plan ("explorer" by default; "ally" grants higher limits and requires a paid-listed email) whose quotas cap resource use: remote workspaces, tunnels, services per tunnel, buckets, total bucket storage, monthly LLM spend, and synced workspaces. The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit.

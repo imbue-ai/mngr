@@ -18,6 +18,7 @@ from urllib.parse import quote
 import httpx
 from loguru import logger
 from pydantic import AnyUrl
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -107,8 +108,17 @@ class AuthRawResponse(FrozenModel):
 class ImbueCloudConnectorClient(MutableModel):
     """Thin synchronous HTTP wrapper over the connector endpoints."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     base_url: AnyUrl = Field(description="Base URL of the remote_service_connector")
     timeout_seconds: float = Field(default=DEFAULT_TIMEOUT_SECONDS, description="Default per-request timeout")
+    transport: httpx.BaseTransport | None = Field(
+        default=None,
+        description=(
+            "Optional httpx transport override. Tests inject an httpx.MockTransport here so "
+            "requests never leave the process; production leaves it None (module-level httpx calls)."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # URL + header helpers
@@ -181,8 +191,12 @@ class ImbueCloudConnectorClient(MutableModel):
 
         Calls ``httpx.get``/``post``/``put``/``delete`` by name at call time (not a
         cached reference) so tests that monkeypatch those functions still
-        intercept the request.
+        intercept the request. When an explicit ``transport`` is injected
+        (the preferred test seam), the call goes through it instead.
         """
+        if self.transport is not None:
+            with httpx.Client(transport=self.transport) as injected_client:
+                return injected_client.request(method, url, **kwargs)
         if method == "GET":
             return httpx.get(url, **kwargs)
         if method == "POST":
@@ -303,22 +317,54 @@ class ImbueCloudConnectorClient(MutableModel):
             return
         raise ImbueCloudAuthError(f"Revoke failed ({response.status_code}): {response.text[:200]}")
 
-    def auth_send_verification_email(self, user_id: str, email: str) -> None:
-        response = httpx.post(
-            self._url("/auth/email/send-verification"),
-            json={"user_id": user_id, "email": email},
-            timeout=self.timeout_seconds,
-        )
-        self._check(response, ImbueCloudAuthError)
+    def auth_send_verification_email(self, access_token: SecretStr, email: str) -> bool:
+        """(Re)send the caller's verification email; returns False when suppressed by the server cooldown.
 
-    def auth_is_email_verified(self, user_id: str, email: str) -> bool:
-        response = httpx.post(
-            self._url("/auth/email/is-verified"),
-            json={"user_id": user_id, "email": email},
+        Authenticated by the caller's own access token (unverified sessions are
+        deliberately accepted server-side -- resending is exactly what an
+        unverified user needs to do). Not idempotent (a retried send could
+        deliver twice), so only connect-phase transport errors are retried.
+        """
+        response = self._send(
+            "POST",
+            self._url("/auth/email/send-verification"),
+            exc_cls=ImbueCloudAuthError,
+            idempotent=False,
+            headers=self._bearer(access_token),
+            json={"email": email},
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudAuthError)
-        return bool(body.get("verified", False))
+        sent = body.get("sent")
+        if not isinstance(sent, bool):
+            # A missing/non-bool ``sent`` is a broken contract; raising (rather
+            # than defaulting to False) keeps callers from claiming the send
+            # was "suppressed by the cooldown" when nothing of the sort is known.
+            raise ImbueCloudAuthError(
+                f"Malformed send-verification response: expected a 'sent' bool, got keys {sorted(body)}"
+            )
+        return sent
+
+    def auth_is_email_verified(self, access_token: SecretStr, email: str) -> bool:
+        """Return whether the caller's ``email`` is verified, authenticated by their access token."""
+        response = self._send(
+            "POST",
+            self._url("/auth/email/is-verified"),
+            exc_cls=ImbueCloudAuthError,
+            headers=self._bearer(access_token),
+            json={"email": email},
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudAuthError)
+        verified = body.get("verified")
+        if not isinstance(verified, bool):
+            # A missing/non-bool ``verified`` is a broken contract; raising
+            # (rather than defaulting to False) keeps the verification poll
+            # from spinning forever on a "not verified" that was never known.
+            raise ImbueCloudAuthError(
+                f"Malformed is-verified response: expected a 'verified' bool, got keys {sorted(body)}"
+            )
+        return verified
 
     def auth_forgot_password(self, email: str) -> None:
         response = httpx.post(

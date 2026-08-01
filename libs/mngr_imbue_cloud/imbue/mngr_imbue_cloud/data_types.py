@@ -303,6 +303,15 @@ class AuthSession(FrozenModel):
         default=None,
         description="UTC datetime at which the access token expires (decoded from JWT exp)",
     )
+    is_pending_verification: bool = Field(
+        default=False,
+        description=(
+            "True while the account's email is not yet verified. Pending sessions hold "
+            "tokens (needed to poll verification status) but are excluded from `auth list` "
+            "and never become the active account -- the account does not count as signed "
+            "in until `auth is-verified` observes the verification and promotes it."
+        ),
+    )
 
 
 class LiteLLMKeyMaterial(FrozenModel):
